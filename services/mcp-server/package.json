@@ -13,7 +13,7 @@
     "butterbase-mcp": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -b",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run"

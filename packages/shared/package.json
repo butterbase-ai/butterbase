@@ -38,8 +38,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "tsc -b",
+    "dev": "tsc -b --watch"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

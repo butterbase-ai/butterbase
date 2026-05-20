@@ -5,5 +5,9 @@
     "rootDir": "./src"
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"],
+  "references": [
+    { "path": "../mcp-server" },
+    { "path": "../../packages/shared" }
+  ]
 }
