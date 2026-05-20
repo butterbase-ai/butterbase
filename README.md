@@ -22,11 +22,30 @@ When you self-host this repo, the AI gateway runs with no upstream router adapte
 
 Requirements: Docker, Node 22+, npm.
 
+> **Always clone with `--recurse-submodules`.** The Claude Code plugin
+> (`packages/plugin`) lives in its own repo,
+> [butterbase-plugin](https://github.com/NetGPT-Inc/butterbase-plugin), and is
+> wired in here as a git submodule. A plain `git clone` will leave
+> `packages/plugin/` empty and `npm install` will silently skip that workspace.
+
 ```bash
-git clone https://github.com/NetGPT-Inc/butterbase-oss.git
+git clone --recurse-submodules https://github.com/NetGPT-Inc/butterbase-oss.git
 cd butterbase-oss
 cp .env.example .env
 docker compose -f docker-compose.local.yml up -d
+```
+
+If you forgot `--recurse-submodules`, run this from inside the repo to fix it:
+
+```bash
+git submodule update --init --recursive
+```
+
+To keep the plugin submodule current when pulling later, either run
+`git pull --recurse-submodules` each time, or set it as the default once:
+
+```bash
+git config --global submodule.recurse true
 ```
 
 The control-api will be available at `http://localhost:4000`. See `SETUP.md` for full setup including auth provider configuration.
