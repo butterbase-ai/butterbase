@@ -1,5 +1,6 @@
 // Encryption utilities for decrypting environment variables
 import { createDecipheriv } from "node:crypto";
+import { Buffer } from "node:buffer";
 
 /**
  * Decrypt AES-256-GCM encrypted data
