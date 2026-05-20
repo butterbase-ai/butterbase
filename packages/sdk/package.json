@@ -1,0 +1,41 @@
+{
+  "name": "@butterbase/sdk",
+  "version": "2.3.0",
+  "description": "Universal TypeScript SDK for Butterbase",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "butterbase",
+    "backend",
+    "baas",
+    "database",
+    "auth",
+    "storage"
+  ],
+  "dependencies": {
+    "@butterbase/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
+    "vitest": "^3.1.1"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0.0"
+  }
+}

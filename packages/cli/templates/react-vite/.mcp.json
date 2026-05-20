@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "butterbase": {
+      "url": "{{API_URL}}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${BUTTERBASE_API_KEY}"
+      }
+    }
+  }
+}

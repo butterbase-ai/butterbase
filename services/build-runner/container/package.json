@@ -1,0 +1,11 @@
+{
+  "name": "@butterbase/build-runner-container",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1021.0",
+    "adm-zip": "^0.5.16",
+    "tar": "^7.4.3"
+  }
+}

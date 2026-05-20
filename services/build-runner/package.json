@@ -1,0 +1,23 @@
+{
+  "name": "@butterbase/build-runner",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.0.30"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "@types/adm-zip": "^0.5.7",
+    "adm-zip": "^0.5.16",
+    "typescript": "^5.6.0",
+    "vitest": "^3.1.1",
+    "wrangler": "^4.84.1"
+  }
+}

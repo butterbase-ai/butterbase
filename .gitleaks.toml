@@ -1,0 +1,27 @@
+# Gitleaks config for butterbase-oss.
+# Extends the default ruleset and adds an allowlist for known false positives
+# (test fixtures, documentation examples).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-safe matches: fake test keys and documentation placeholders"
+regexes = [
+  # Repeated-hex test fixture used as AUTH_ENCRYPTION_KEY across tests + compose
+  '''0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
+  '''0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab''',
+  # Docs/MCP placeholder API key
+  '''bb_sk_a1b2c3d4e5f6''',
+  # Docs placeholder curl Authorization header
+  '''YOUR_API_KEY''',
+]
+paths = [
+  # In-cluster service URL referenced by lease-client tests (not a credential)
+  '''services/control-api/src/services/lease-client\.test\.ts''',
+  # Docs page describing platform features (no real secrets, but gitleaks
+  # generic-api-key heuristic triggers on the prose around "bb_sk_..." example)
+  '''services/docs/src/content/docs/getting-started/before-you-start\.md''',
+  # Subdomain implementation doc with curl placeholder
+  '''SUBDOMAIN_IMPLEMENTATION\.md''',
+]

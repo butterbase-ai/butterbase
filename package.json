@@ -1,0 +1,36 @@
+{
+  "name": "butterbase",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-Native Backend-as-a-Service",
+  "workspaces": [
+    "packages/*",
+    "packages/shared/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "clean": "rm -rf packages/*/dist services/*/dist",
+    "verify:cascade": "tsx scripts/verify-account-deletion-cascade.ts",
+    "migrate:control": "tsx db/control-plane/migrate.ts",
+    "migrate:runtime": "tsx db/runtime-plane/migrate.ts",
+    "migrate:all": "npm run migrate:control && npm run migrate:runtime",
+    "e2e:bootstrap": "docker compose -f docker-compose.local.yml up -d control-plane-db data-plane-db data-plane-db-eu runtime-plane-db runtime-plane-db-eu localstack && tsx scripts/e2e/bootstrap-regions.ts",
+    "e2e:run": "vitest run --config vitest.e2e.config.ts",
+    "e2e:teardown": "docker compose -f docker-compose.local.yml down -v",
+    "e2e:all": "npm run e2e:bootstrap && npm run e2e:run"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@butterbase/cli": "^0.3.0",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.21.0",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.84.1"
+  }
+}

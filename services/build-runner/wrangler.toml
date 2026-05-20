@@ -1,0 +1,38 @@
+name = "butterbase-build-runner"
+main = "src/worker.ts"
+compatibility_date = "2025-01-24"
+
+[[containers]]
+class_name = "BuildContainer"
+image = "./container/Dockerfile"
+max_instances = 100
+instance_type = "standard"
+# Container HTTP server listens on :8080 (see container/entry.mjs +
+# container/Dockerfile EXPOSE). The Worker reaches it at request time via
+# `container.getTcpPort(8080).fetch(...)` — no wrangler-side port config in
+# this @cloudflare/workers-types version.
+
+[[durable_objects.bindings]]
+name = "BUILD_CONTAINER"
+class_name = "BuildContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BuildContainer"]
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+
+# Secrets injected via `wrangler secret put`:
+#   BUILD_RUNNER_SHARED_SECRET — bearer token required from control-api
+#   R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY — long-lived bucket
+#                                                        creds forwarded to the
+#                                                        container env. v2 TODO:
+#                                                        mint per-build session
+#                                                        tokens scoped to the
+#                                                        deployment's R2 keys.

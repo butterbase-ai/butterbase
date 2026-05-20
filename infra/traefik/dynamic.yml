@@ -1,0 +1,41 @@
+http:
+  routers:
+    control-api:
+      rule: "Host(`api.butterbase.local`)"
+      entryPoints:
+        - web
+      service: control-api
+
+    # Route /v1/ prefix for Auto-API and schema endpoints
+    control-api-v1:
+      rule: "PathPrefix(`/v1/`)"
+      entryPoints:
+        - web
+      service: control-api
+
+    # End-user auth (signup, login, OAuth, JWKS, etc.)
+    control-api-auth:
+      rule: "PathPrefix(`/auth`)"
+      entryPoints:
+        - web
+      service: control-api
+
+    # Route MCP Streamable HTTP endpoint
+    control-api-mcp:
+      rule: "PathPrefix(`/mcp`)"
+      entryPoints:
+        - web
+      service: control-api
+
+    # Route /storage/ prefix to control-api (storage routes)
+    control-api-storage:
+      rule: "PathPrefix(`/storage/`)"
+      entryPoints:
+        - web
+      service: control-api
+
+  services:
+    control-api:
+      loadBalancer:
+        servers:
+          - url: "http://control-api:4000"

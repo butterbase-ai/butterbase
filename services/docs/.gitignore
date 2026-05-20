@@ -1,0 +1,4 @@
+public/llms.txt
+public/llms-full.txt
+dist/
+node_modules/

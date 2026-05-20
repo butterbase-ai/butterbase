@@ -1,0 +1,448 @@
+---
+// services/docs/src/pages/changelog.astro
+import { changelog } from '../data/changelog';
+import { categories, categoryOrder } from '../data/changelog-categories';
+
+// Defensive sort: newest first by ISO date.
+const items = [...changelog].sort((a, b) => (a.date < b.date ? 1 : -1));
+
+function formatDate(iso: string): string {
+  const [year, month, day] = iso.split('-');
+  const monthNames = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const m = monthNames[parseInt(month, 10) - 1];
+  return `${m} ${parseInt(day, 10)}`;
+}
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Changelog — Butterbase</title>
+    <meta name="description" content="Every Butterbase feature we've shipped, in order. Built for AI-assisted development." />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" />
+  </head>
+  <body>
+    <header class="page-nav">
+      <a href="/" class="brand">Butterbase</a>
+      <nav>
+        <a href="/getting-started/introduction">Docs</a>
+        <a href="/changelog" aria-current="page">Changelog</a>
+        <a href="https://dashboard.butterbase.ai" class="login">Log In</a>
+      </nav>
+    </header>
+
+    <main class="roadmap">
+      <section class="hero">
+        <div class="eyebrow">CHANGELOG</div>
+        <h1>Built in the open.<br />Shipped in weeks.</h1>
+        <p class="tagline">Every feature we've released, in order. Built for AI-assisted development.</p>
+
+        <div class="filters" role="group" aria-label="Filter timeline by category">
+          <button type="button" class="chip" data-filter="all" aria-pressed="true">All</button>
+          {categoryOrder.map((key) => (
+            <button
+              type="button"
+              class="chip"
+              data-filter={key}
+              aria-pressed="false"
+              style={`--chip-text: ${categories[key].textColor}; --chip-border: ${categories[key].chipBorder};`}
+            >
+              {categories[key].label}
+            </button>
+          ))}
+        </div>
+
+        <div class="filter-status" aria-live="polite" aria-atomic="true"></div>
+      </section>
+
+      <ol class="timeline" data-active-filter="all">
+        {items.map((item) => {
+          const meta = categories[item.category];
+          return (
+            <li
+              class="timeline-item"
+              data-category={item.category}
+              style={`--badge-text: ${meta.textColor}; --badge-bg: ${meta.badgeBg};`}
+            >
+              <div class="date">{formatDate(item.date)}</div>
+              <div class="dot" aria-hidden="true">{item.icon ?? ''}</div>
+              <article class="card" data-mobile-date={formatDate(item.date)}>
+                <span class="badge">{meta.label}</span>
+                <h2 class="card-title">{item.title}</h2>
+                <p class="card-desc">{item.description}</p>
+                {item.href && (
+                  <a class="card-link" href={item.href} aria-label={`Learn more about ${item.title}`}>
+                    Learn more →
+                  </a>
+                )}
+              </article>
+            </li>
+          );
+        })}
+      </ol>
+
+      <section class="suggest">
+        <p>
+          Want to see something here?{' '}
+          <a href="https://dashboard.butterbase.ai/suggestions/new">Suggest a feature</a>
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
+
+<style>
+  :root {
+    --bg: hsl(35 45% 6%);
+    --bg-elev: hsl(35 35% 10%);
+    --bg-elev-2: hsl(35 35% 12%);
+    --text: hsl(42 55% 90%);
+    --text-muted: hsl(30 15% 55%);
+    --hairline: hsl(35 25% 18%);
+    --accent: hsl(43 82% 46%);
+    --accent-high: hsl(43 82% 56%);
+    --shadow: 0 8px 24px hsl(35 48% 3% / 0.4);
+    --font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; }
+
+  /* ── Page nav ──────────────────────────────────────────────── */
+  .page-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--hairline);
+    background: hsl(35 45% 7%);
+  }
+  .page-nav .brand {
+    font-weight: 700;
+    text-decoration: none;
+    color: var(--text);
+    font-size: 1rem;
+  }
+  .page-nav nav { display: flex; gap: 1.25rem; align-items: center; }
+  .page-nav nav a {
+    text-decoration: none;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    transition: color 0.15s ease;
+  }
+  .page-nav nav a:hover { color: var(--text); }
+  .page-nav nav a[aria-current='page'] { color: var(--accent); }
+  .page-nav .login {
+    background: var(--accent);
+    color: hsl(35 48% 8%);
+    padding: 0.4rem 0.9rem;
+    border-radius: 0.375rem;
+    font-weight: 600;
+    transition: background 0.15s ease;
+  }
+  .page-nav .login:hover { background: var(--accent-high); color: hsl(35 48% 8%); }
+
+  /* ── Layout ────────────────────────────────────────────────── */
+  main.roadmap {
+    max-width: 56rem;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 6rem;
+  }
+
+  /* ── Hero ──────────────────────────────────────────────────── */
+  .hero {
+    background: linear-gradient(180deg, hsl(35 40% 9%) 0%, hsl(35 45% 6%) 100%);
+    padding: 2.5rem 2rem;
+    border-radius: 1rem;
+    border: 1px solid var(--hairline);
+    margin-bottom: 3rem;
+  }
+  .eyebrow {
+    font-size: 0.75rem;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .hero h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    margin: 0.5rem 0 0.75rem;
+    line-height: 1.15;
+    color: hsl(42 55% 95%);
+  }
+  .tagline {
+    color: var(--text-muted);
+    font-size: 1rem;
+    margin: 0 0 1.5rem;
+    line-height: 1.5;
+    max-width: 36rem;
+  }
+
+  /* ── Filter chips ──────────────────────────────────────────── */
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .chip {
+    font: inherit;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.4rem 0.85rem;
+    border-radius: 9999px;
+    background: var(--bg-elev);
+    color: var(--chip-text, var(--text-muted));
+    border: 1px solid var(--chip-border, var(--hairline));
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .chip[data-filter='all'] {
+    color: var(--text);
+    border-color: var(--hairline);
+  }
+  .chip:hover { background: var(--bg-elev-2); }
+  .chip[aria-pressed='true'] {
+    background: var(--accent);
+    color: hsl(35 48% 8%);
+    border-color: var(--accent);
+  }
+  .filter-status {
+    margin-top: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    min-height: 1.25rem;
+  }
+
+  /* ── Timeline ──────────────────────────────────────────────── */
+  .timeline {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    position: relative;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 4.25rem;
+    top: 0.5rem;
+    bottom: 0.5rem;
+    width: 1px;
+    background: var(--hairline);
+  }
+  .timeline-item {
+    position: relative;
+    display: grid;
+    grid-template-columns: 4rem 1.5rem 1fr;
+    gap: 0.5rem;
+    align-items: start;
+    margin-bottom: 1.5rem;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .timeline-item[data-visible] {
+    opacity: 1;
+    transform: none;
+  }
+  .timeline-item[hidden] { display: none; }
+
+  .date {
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-align: right;
+    padding-top: 0.85rem;
+  }
+  .dot {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: var(--bg-elev);
+    border: 2px solid var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.875rem;
+    margin-top: 0.5rem;
+    z-index: 1;
+  }
+
+  .card {
+    background: var(--bg-elev);
+    border: 1px solid var(--hairline);
+    border-radius: 0.75rem;
+    padding: 1rem 1.25rem;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .card:hover {
+    transform: translateY(-2px);
+    border-color: hsl(43 82% 46% / 0.3);
+    box-shadow: var(--shadow);
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--badge-text, var(--text));
+    background: var(--badge-bg, var(--bg-elev-2));
+    padding: 0.2rem 0.55rem;
+    border-radius: 0.25rem;
+  }
+  .card-title {
+    margin: 0.5rem 0 0.35rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: hsl(42 55% 95%);
+  }
+  .card-desc {
+    margin: 0 0 0.75rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .card-link {
+    font-size: 0.8125rem;
+    color: var(--accent);
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .card-link:hover { color: var(--accent-high); }
+
+  /* ── Suggest CTA ───────────────────────────────────────────── */
+  .suggest {
+    margin-top: 4rem;
+    padding: 1.5rem;
+    text-align: center;
+    border: 1px dashed var(--hairline);
+    border-radius: 0.75rem;
+    background: hsl(35 35% 8%);
+  }
+  .suggest p { margin: 0; color: var(--text-muted); font-size: 0.9rem; }
+  .suggest a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .suggest a:hover { color: var(--accent-high); }
+
+  /* ── Responsive ────────────────────────────────────────────── */
+  @media (max-width: 48rem) {
+    main.roadmap { padding: 2rem 1rem 4rem; }
+    .hero { padding: 1.75rem 1.25rem; }
+    .hero h1 { font-size: 1.75rem; }
+
+    .timeline::before { left: 0.75rem; }
+    .timeline-item {
+      grid-template-columns: 1.5rem 1fr;
+      grid-template-areas:
+        'dot card';
+      column-gap: 1rem;
+    }
+    .date {
+      grid-area: unset;
+      display: none; /* hide standalone date column on mobile */
+    }
+    .dot { grid-area: dot; margin-top: 0.5rem; }
+    .card { grid-area: card; }
+    /* Inject the date back into each card on mobile via a generated label */
+    .card::before {
+      content: attr(data-mobile-date);
+      display: block;
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 0.4rem;
+    }
+  }
+
+  /* ── Reduced motion ────────────────────────────────────────── */
+  @media (prefers-reduced-motion: reduce) {
+    .timeline-item {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+    .card:hover { transform: none; box-shadow: none; }
+  }
+</style>
+
+<script>
+  // Roadmap page interactivity: filter chips + on-scroll fade-in.
+  // Plain DOM API. No framework. No client island.
+
+  type ChipFilter = string;
+
+  const root = document.querySelector<HTMLElement>('main.roadmap');
+  if (root) {
+    const chips = Array.from(root.querySelectorAll<HTMLButtonElement>('.chip'));
+    const items = Array.from(root.querySelectorAll<HTMLElement>('.timeline-item'));
+    const status = root.querySelector<HTMLElement>('.filter-status');
+
+    const applyFilter = (filter: ChipFilter) => {
+      let visibleCount = 0;
+      for (const item of items) {
+        const matches = filter === 'all' || item.dataset.category === filter;
+        if (matches) {
+          item.removeAttribute('hidden');
+          visibleCount++;
+        } else {
+          item.setAttribute('hidden', '');
+        }
+      }
+      for (const chip of chips) {
+        chip.setAttribute('aria-pressed', chip.dataset.filter === filter ? 'true' : 'false');
+      }
+      if (status) {
+        const labelEl = chips.find((c) => c.dataset.filter === filter);
+        const label = labelEl?.textContent?.trim() ?? 'All';
+        status.textContent =
+          filter === 'all'
+            ? `Showing all ${visibleCount} items`
+            : `Showing ${visibleCount} item${visibleCount === 1 ? '' : 's'} in ${label}`;
+      }
+    };
+
+    for (const chip of chips) {
+      chip.addEventListener('click', () => {
+        const filter = chip.dataset.filter ?? 'all';
+        applyFilter(filter);
+      });
+    }
+
+    // Fade-in-on-scroll, staggered. Skip when reduced motion is requested.
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) {
+      for (const item of items) item.setAttribute('data-visible', '');
+    } else {
+      let revealed = 0;
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              const el = entry.target as HTMLElement;
+              const delay = (revealed % 6) * 60; // stagger up to 360ms within a batch
+              setTimeout(() => el.setAttribute('data-visible', ''), delay);
+              revealed++;
+              observer.unobserve(el);
+            }
+          }
+        },
+        { rootMargin: '0px 0px -10% 0px', threshold: 0.05 },
+      );
+      for (const item of items) observer.observe(item);
+    }
+  }
+</script>

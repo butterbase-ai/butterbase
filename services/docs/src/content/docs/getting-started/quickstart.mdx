@@ -1,0 +1,142 @@
+---
+title: Quickstart
+description: Get your first Butterbase app running in 5 minutes.
+---
+
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide walks you through creating an app, defining a schema, inserting data, and setting up authentication. You can do all of this through the MCP tools (if using an AI assistant), the CLI, or the REST API.
+
+<Steps>
+
+1. **Create an app**
+
+   <Tabs>
+     <TabItem label="MCP">
+     ```
+     Use the init_app tool with name: "my-app"
+     ```
+     </TabItem>
+     <TabItem label="CLI">
+     ```bash
+     butterbase apps create my-app
+     butterbase apps use <app_id>
+     ```
+     </TabItem>
+     <TabItem label="REST API">
+     ```bash
+     curl -X POST https://api.butterbase.ai/init \
+       -H "Authorization: Bearer bb_sk_..." \
+       -H "Content-Type: application/json" \
+       -d '{"name": "my-app"}'
+     ```
+     </TabItem>
+   </Tabs>
+
+   You'll receive an `app_id` and API base URL. Save these — you'll need them for all subsequent operations.
+
+   To create the app in a specific region, pass `region: "us-west-2"` (MCP) or `"region": "us-west-2"` in the JSON body (REST). See [Regions](/core-concepts/regions/) for the available list.
+
+2. **Define your schema**
+
+   Describe your tables in a declarative JSON format:
+
+   ```json
+   {
+     "schema": {
+       "tables": {
+         "posts": {
+           "columns": {
+             "id": { "type": "uuid", "primary": true, "default": "gen_random_uuid()" },
+             "title": { "type": "text", "nullable": false },
+             "body": { "type": "text" },
+             "user_id": { "type": "uuid", "nullable": false },
+             "published": { "type": "boolean", "default": "false" },
+             "created_at": { "type": "timestamptz", "default": "now()" }
+           }
+         }
+       }
+     },
+     "name": "create posts table"
+   }
+   ```
+
+   Preview the changes first with `dry_run: true`, then apply.
+
+3. **Enable row-level security**
+
+   Restrict data so each user only sees their own posts:
+
+   <Tabs>
+     <TabItem label="MCP">
+     ```
+     Use create_user_isolation_policy with table_name: "posts", user_column: "user_id"
+     ```
+     </TabItem>
+     <TabItem label="REST API">
+     ```bash
+     curl -X POST https://api.butterbase.ai/v1/{app_id}/rls \
+       -H "Authorization: Bearer bb_sk_..." \
+       -H "Content-Type: application/json" \
+       -d '{"table_name": "posts", "user_column": "user_id"}'
+     ```
+     </TabItem>
+   </Tabs>
+
+4. **Insert and query data**
+
+   <Tabs>
+     <TabItem label="SDK">
+     ```typescript
+     import { createClient } from '@butterbase/sdk';
+
+     const butterbase = createClient({
+       appId: 'app_abc123',
+       apiUrl: 'https://api.butterbase.ai',
+     });
+
+     // Insert a row
+     const { data } = await butterbase
+       .from('posts')
+       .insert({ title: 'Hello World', body: 'My first post' });
+
+     // Query rows
+     const { data: posts } = await butterbase
+       .from('posts')
+       .select('*')
+       .eq('published', true)
+       .order('created_at', { ascending: false });
+     ```
+     </TabItem>
+     <TabItem label="REST API">
+     ```bash
+     # Insert
+     curl -X POST https://api.butterbase.ai/v1/{app_id}/posts \
+       -H "Authorization: Bearer {user_jwt}" \
+       -H "Content-Type: application/json" \
+       -d '{"title": "Hello World", "body": "My first post"}'
+
+     # Query
+     curl "https://api.butterbase.ai/v1/{app_id}/posts?published=eq.true&order=created_at.desc"
+     ```
+     </TabItem>
+   </Tabs>
+
+5. **Deploy your frontend**
+
+   Build your frontend, zip the output, and deploy:
+
+   ```bash
+   npm run build
+   # Zip the dist/ folder (use archiver or Git Bash zip)
+   ```
+
+   Then use the `create_frontend_deployment` and `start_frontend_deployment` MCP tools, or the REST API.
+
+</Steps>
+
+## Next steps
+
+- [Database & Schema](/core-concepts/database) — Learn the full schema DSL
+- [Authentication](/core-concepts/authentication) — Set up sign-in for your users
+- [TypeScript SDK](/sdks-and-tools/typescript-sdk) — Use the SDK in your frontend

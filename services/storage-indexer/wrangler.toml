@@ -1,0 +1,22 @@
+name = "butterbase-storage-indexer"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[[r2_buckets]]
+binding = "STORAGE_BUCKET"
+bucket_name = "butterbase-storage"
+
+[[queues.consumers]]
+queue = "butterbase-storage-events"
+
+[vars]
+# Comma-separated list of configured regions. The indexer iterates these to
+# validate that each app's home region has a matching runtime DB URL secret.
+BUTTERBASE_REGIONS = "us-east-1,us-west-2"
+
+# Secrets (set via `wrangler secret put`):
+#   CONTROL_DB_URL                    — platform/control DB URL; the indexer
+#                                       reads user_app_index here to find each
+#                                       app's home region
+#   NEON_RUNTIME_PROJECT_ID_US_EAST_1 — runtime DB URL for us-east-1
+#   NEON_RUNTIME_PROJECT_ID_US_WEST_2 — runtime DB URL for us-west-2

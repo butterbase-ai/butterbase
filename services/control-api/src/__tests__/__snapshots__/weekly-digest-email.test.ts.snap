@@ -1,0 +1,134 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`weekly_digest body (HTML) > renders a quiet-week card when empty 1`] = `
+"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Butterbase</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0a0a0a;">
+<div style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;overflow:hidden;opacity:0;color:transparent;">Nothing failed across your apps this week.</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;">
+<tr><td align="center" style="padding:32px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;">
+<tr><td style="padding:20px 32px;background:#0a0a0a;line-height:0;">
+<img src="https://dashboard.butterbase.ai/logo-white.png" alt="Butterbase" height="24" style="height:24px;width:auto;display:inline-block;border:0;outline:none;text-decoration:none;color:#ffffff;font-weight:600;font-size:14px;letter-spacing:-0.01em;line-height:24px;">
+</td></tr>
+<tr><td style="padding:32px;">
+<h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">Quiet week 🌱</h1>
+<p style="margin:0 0 24px 0;font-size:14px;color:#525252;line-height:1.5;">Nothing failed across your apps in the last 7 days.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0;"><tr><td style="border-radius:8px;background:#0a0a0a;">
+<a href="https://dashboard.butterbase.ai" style="display:inline-block;padding:12px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Open dashboard</a>
+</td></tr></table></td></tr>
+<tr><td style="padding:20px 32px;background:#fafafa;border-top:1px solid #f0f0f0;font-size:12px;color:#737373;line-height:1.5;">
+You're receiving this because you own a Butterbase app. <a href="https://dashboard.butterbase.ai/settings/notifications" style="color:#737373;text-decoration:underline;">Manage notifications</a>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>"
+`;
+
+exports[`weekly_digest body (HTML) > renders a styled list with logs links 1`] = `
+"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Butterbase</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0a0a0a;">
+<div style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;overflow:hidden;opacity:0;color:transparent;">3 things need attention. Top: &quot;capture-lead&quot; (47×).</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;">
+<tr><td align="center" style="padding:32px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;">
+<tr><td style="padding:20px 32px;background:#0a0a0a;line-height:0;">
+<img src="https://dashboard.butterbase.ai/logo-white.png" alt="Butterbase" height="24" style="height:24px;width:auto;display:inline-block;border:0;outline:none;text-decoration:none;color:#ffffff;font-weight:600;font-size:14px;letter-spacing:-0.01em;line-height:24px;">
+</td></tr>
+<tr><td style="padding:32px;">
+<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;color:#0a0a0a;">3 things need attention</h1>
+<p style="margin:0 0 8px 0;font-size:14px;color:#737373;">From the last 7 days, ranked by failure count.</p>
+
+<h2 style="margin:24px 0 0 0;font-size:13px;font-weight:600;color:#737373;text-transform:uppercase;letter-spacing:0.05em;">Functions</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;"><tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
+<div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
+<a href="https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs" style="color:#0a0a0a;text-decoration:none;">&ldquo;capture-lead&rdquo;</a>
+<span style="color:#737373;font-weight:400;"> in pantry</span>
+</div>
+<div style="font-size:13px;color:#737373;margin-bottom:6px;">
+47 failures
+</div>
+<div style="font-size:12px;color:#737373;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;background:#fafafa;padding:8px 10px;border-radius:6px;border:1px solid #f0f0f0;word-break:break-word;">TypeError: Cannot read properties of undefined (reading &#39;rows&#39;)</div>
+</td></tr><tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
+<div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
+<a href="https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs/logs" style="color:#0a0a0a;text-decoration:none;">&ldquo;index-docs&rdquo;</a>
+<span style="color:#737373;font-weight:400;"> in recipes</span>
+</div>
+<div style="font-size:13px;color:#737373;margin-bottom:6px;">
+12 failures
+</div>
+<div style="font-size:12px;color:#737373;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;background:#fafafa;padding:8px 10px;border-radius:6px;border:1px solid #f0f0f0;word-break:break-word;">fetch failed: ECONNREFUSED</div>
+</td></tr><tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
+<div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
+<a href="https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe/logs" style="color:#0a0a0a;text-decoration:none;">&ldquo;transcribe&rdquo;</a>
+<span style="color:#737373;font-weight:400;"> in voyp-personal</span>
+</div>
+<div style="font-size:13px;color:#737373;margin-bottom:0;">
+3 failures
+</div>
+
+</td></tr></table>
+
+<p style="margin:32px 0 0 0;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0;"><tr><td style="border-radius:8px;background:#0a0a0a;">
+<a href="https://dashboard.butterbase.ai" style="display:inline-block;padding:12px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Open dashboard</a>
+</td></tr></table></p></td></tr>
+<tr><td style="padding:20px 32px;background:#fafafa;border-top:1px solid #f0f0f0;font-size:12px;color:#737373;line-height:1.5;">
+You're receiving this because you own a Butterbase app. <a href="https://dashboard.butterbase.ai/settings/notifications" style="color:#737373;text-decoration:underline;">Manage notifications</a>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>"
+`;
+
+exports[`weekly_digest body (text) > renders a list with logs URL per item 1`] = `
+"Functions (3):
+
+• [pantry] "capture-lead" — 47 failures
+    TypeError: Cannot read properties of undefined (reading 'rows')
+    https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs
+
+• [recipes] "index-docs" — 12 failures
+    fetch failed: ECONNREFUSED
+    https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs/logs
+
+• [voyp-personal] "transcribe" — 3 failures
+    https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe/logs
+
+Open dashboard: https://dashboard.butterbase.ai"
+`;
+
+exports[`weekly_digest body (text) > renders both Functions and Deployments sections when both present 1`] = `
+"Functions (3):
+
+• [pantry] "capture-lead" — 47 failures
+    TypeError: Cannot read properties of undefined (reading 'rows')
+    https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs
+
+• [recipes] "index-docs" — 12 failures
+    fetch failed: ECONNREFUSED
+    https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs/logs
+
+• [voyp-personal] "transcribe" — 3 failures
+    https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe/logs
+
+Deployments (2):
+
+• [recipes] frontend — 5 failed deploys
+    Build failed: TS error in src/index.tsx:12
+    https://dashboard.butterbase.ai/apps/app_recipes
+
+• [pantry] edge-ssr — 2 failed deploys
+    Worker size exceeded 10MB
+    https://dashboard.butterbase.ai/apps/app_pantry
+
+Open dashboard: https://dashboard.butterbase.ai"
+`;
+
+exports[`weekly_digest body (text) > renders quiet-week message when both sections empty 1`] = `
+"Nothing failed across your apps this week. Quiet weeks count.
+
+Open dashboard: https://dashboard.butterbase.ai"
+`;

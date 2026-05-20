@@ -1,0 +1,1117 @@
+#!/usr/bin/env node
+import { Command } from 'commander';
+import chalk from 'chalk';
+import { renderError } from '../src/lib/errors.js';
+import { initCommand } from '../src/commands/init.js';
+import { loginCommand, logoutCommand, configGetCommand, configSetCommand } from '../src/commands/config.js';
+import { appsListCommand, appsCreateCommand, appsUseCommand, appsDeleteCommand, appsPauseCommand, appsResumeCommand } from '../src/commands/apps.js';
+import { schemaGetCommand, schemaApplyCommand } from '../src/commands/schema.js';
+import { functionsListCommand, functionsDeployCommand, functionsLogsCommand, functionsDeleteCommand, functionsInvokeCommand, functionsEnvSetCommand, functionsEnvListCommand } from '../src/commands/functions.js';
+import { storageListCommand, storageUploadCommand, storageDeleteCommand, storageConfigCommand } from '../src/commands/storage.js';
+import { realtimeEnableCommand, realtimeConfigCommand, realtimeDisableCommand } from '../src/commands/realtime.js';
+import { deployCommand } from '../src/commands/deploy.js';
+import { deployFromSource } from '../src/commands/deploy-from-source.js';
+import { deployEdgeSsrCommand } from '../src/commands/deploy-edge-ssr.js';
+import { deployEdgeSsrFromSource } from '../src/commands/deploy-edge-ssr-from-source.js';
+import { dataQueryCommand, dataInsertCommand } from '../src/commands/data.js';
+import { envSetCommand, envListCommand, envSetFileCommand } from '../src/commands/env.js';
+import { keysGenerateCommand, keysListCommand, keysRevokeCommand } from '../src/commands/keys.js';
+import { statusCommand } from '../src/commands/status.js';
+import { openCommand } from '../src/commands/open.js';
+import { pluginSetupCommand } from '../src/commands/plugin.js';
+import {
+  integrationsListCommand,
+  integrationsConfigCommand,
+  integrationsConfigureCommand,
+  integrationsDisableCommand,
+  integrationsConnectCommand,
+  integrationsConnectionsCommand,
+  integrationsDisconnectCommand,
+  integrationsToolsCommand,
+  integrationsExecuteCommand,
+} from '../src/commands/integrations.js';
+import {
+  domainsListCommand,
+  domainsAddCommand,
+  domainsStatusCommand,
+  domainsVerifyCommand,
+  domainsDeleteCommand,
+} from '../src/commands/domains.js';
+import { partnersListCommand, partnersCurlCommand } from '../src/commands/partners.js';
+import { rlsListCommand, rlsCreateCommand, rlsEnableCommand, rlsDeleteCommand } from '../src/commands/rls.js';
+import {
+  billingStatusCommand,
+  billingPortalCommand,
+  billingTopupCommand,
+  billingCapGetCommand,
+  billingCapRaiseCommand,
+  billingPlansCommand,
+  billingUsageCommand,
+} from '../src/commands/billing.js';
+import {
+  ragCollectionsListCommand,
+  ragCollectionsCreateCommand,
+  ragCollectionsGetCommand,
+  ragCollectionsDeleteCommand,
+  ragIngestCommand,
+  ragDocsListCommand,
+  ragDocsDeleteCommand,
+  ragQueryCommand,
+} from '../src/commands/rag.js';
+import {
+  doDeployCommand,
+  doListCommand,
+  doGetCommand,
+  doDeleteCommand,
+  doUsageCommand,
+  doEnvListCommand,
+  doEnvSetCommand,
+  doEnvUnsetCommand,
+} from '../src/commands/do.js';
+import {
+  aiChatCommand,
+  aiEmbedCommand,
+  aiModelsCommand,
+  aiConfigGetCommand,
+  aiConfigSetCommand,
+  aiUsageCommand,
+} from '../src/commands/ai.js';
+import {
+  oauthConfigureCommand, oauthListCommand, oauthGetCommand, oauthUpdateCommand, oauthDeleteCommand,
+} from '../src/commands/oauth.js';
+import { auditQueryCommand } from '../src/commands/audit.js';
+import {
+  appConfigGetCommand, appCorsCommand, appJwtCommand, appStorageCommand,
+  appAccessModeCommand, appSecureCommand,
+} from '../src/commands/app-config.js';
+import { regionsListCommand } from '../src/commands/regions.js';
+import {
+  moveCommand, migrationStatusCommand, migrationActiveCommand,
+  migrationAbortCommand, migrationReverseCommand,
+  replicasListCommand, replicaTeardownCommand,
+} from '../src/commands/move.js';
+import {
+  plansListCommand, plansCreateCommand, plansUpdateCommand,
+  productsListCommand, productsCreateCommand, productsUpdateCommand,
+  subscribeCommand, subscriptionCommand, cancelCommand,
+  purchaseCommand, ordersListCommand, ordersGetCommand,
+} from '../src/commands/app-billing.js';
+
+const program = new Command();
+
+program
+  .name('butterbase')
+  .description('Butterbase CLI - Backend as a Service')
+  .version('0.1.1');
+
+// Init
+program
+  .command('init [template]')
+  .description('Initialize a new Butterbase project')
+  .action(initCommand);
+
+// Login/Logout
+program
+  .command('login')
+  .description('Authenticate with Butterbase')
+  .action(loginCommand);
+
+program
+  .command('logout')
+  .description('Clear authentication credentials')
+  .action(logoutCommand);
+
+// Config
+const config = program.command('config').description('Manage configuration');
+
+config
+  .command('get')
+  .description('Show current configuration')
+  .action(configGetCommand);
+
+config
+  .command('set <key> <value>')
+  .description('Set a configuration value')
+  .action(configSetCommand);
+
+// Apps
+const apps = program.command('apps').description('Manage apps');
+
+apps
+  .command('list')
+  .description('List all apps')
+  .action(appsListCommand);
+
+apps
+  .command('create [name]')
+  .description('Create a new app')
+  .action(appsCreateCommand);
+
+apps
+  .command('use <app-id>')
+  .description('Set the current app')
+  .action(appsUseCommand);
+
+apps
+  .command('delete <app-id>')
+  .description('Delete an app')
+  .action(appsDeleteCommand);
+
+apps
+  .command('pause [app-id]')
+  .description('Pause an app — kill-switch that returns 503 for all data-plane traffic')
+  .option('--reason <text>', 'Human-readable reason, surfaced in 503 responses')
+  .action(appsPauseCommand);
+
+apps
+  .command('resume [app-id]')
+  .description('Resume a paused app — restore data-plane traffic')
+  .action(appsResumeCommand);
+
+const appsConfig = apps.command('config').description('Read or update the app\'s server-side config');
+
+appsConfig
+  .command('get')
+  .description('Show the app\'s full config')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => appConfigGetCommand(opts));
+
+appsConfig
+  .command('cors')
+  .description('Update CORS config')
+  .option('--app <appId>', 'Override current app')
+  .option('--allowed-origin <origin>', 'Allowed origin (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--allowed-method <method>', 'Allowed method (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--allowed-header <header>', 'Allowed header (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--allow-credentials <bool>', '(true|false)', (v) => v === 'true')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => appCorsCommand(opts));
+
+appsConfig
+  .command('jwt')
+  .description('Update JWT TTLs')
+  .option('--app <appId>', 'Override current app')
+  .option('--access-token-ttl <duration>', 'e.g. "15m", "1h"')
+  .option('--refresh-token-ttl-days <n>', 'Refresh token lifetime in days', parseInt)
+  .option('--json', 'Output raw JSON')
+  .action((opts) => appJwtCommand(opts));
+
+appsConfig
+  .command('storage')
+  .description('Update storage config')
+  .option('--app <appId>', 'Override current app')
+  .option('--public-read <bool>', 'Public-read default (true|false)', (v) => v === 'true')
+  .option('--max-file-size-mb <n>', 'Per-file size cap in MB', parseInt)
+  .option('--allowed-content-type <ct>', 'Allowed content-type (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--json', 'Output raw JSON')
+  .action((opts) => appStorageCommand(opts));
+
+appsConfig
+  .command('access-mode <mode>')
+  .description('Set access mode: public | authenticated')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((mode, opts) => appAccessModeCommand(mode, opts));
+
+appsConfig
+  .command('secure')
+  .description('Enable RLS + access-mode in one shot')
+  .option('--app <appId>', 'Override current app')
+  .option('--table <name>', 'Table to secure (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--user-column <col>', 'User-id column name (default: user_id)')
+  .option('--access-mode <mode>', 'public | authenticated')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => appSecureCommand(opts));
+
+apps
+  .command('move <appId> <destRegion>')
+  .description('Migrate an app to another region')
+  .option('--follow', 'Poll status until terminal')
+  .option('--json', 'Output raw JSON')
+  .action((appId, destRegion, opts) => moveCommand(appId, destRegion, opts));
+
+const appsMigrations = apps.command('migrations').description('Read or control in-flight migrations');
+
+appsMigrations
+  .command('status <appId> <migrationId>')
+  .description('Get status of a specific migration')
+  .option('--json', 'Output raw JSON')
+  .action((appId, migrationId, opts) => migrationStatusCommand(appId, migrationId, opts));
+
+appsMigrations
+  .command('active [appId]')
+  .description('Show the currently-active migration for an app')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((appId, opts) => migrationActiveCommand(appId, opts));
+
+appsMigrations
+  .command('abort <appId> <migrationId>')
+  .description('Cancel a migration that has not yet reached cutover')
+  .option('--json', 'Output raw JSON')
+  .action((appId, migrationId, opts) => migrationAbortCommand(appId, migrationId, opts));
+
+appsMigrations
+  .command('reverse <appId> <migrationId>')
+  .description('Roll a completed migration back to source')
+  .option('--json', 'Output raw JSON')
+  .action((appId, migrationId, opts) => migrationReverseCommand(appId, migrationId, opts));
+
+const appsReplicas = apps.command('replicas').description('Manage retained source replicas after a move');
+
+appsReplicas
+  .command('list')
+  .description('List active retained source replicas')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => replicasListCommand(opts));
+
+appsReplicas
+  .command('teardown <migrationId>')
+  .description('Decommission a retained source replica')
+  .option('--json', 'Output raw JSON')
+  .action((migrationId, opts) => replicaTeardownCommand(migrationId, opts));
+
+// Schema
+const schema = program.command('schema').description('Manage database schema');
+
+schema
+  .command('get')
+  .description('Get current schema')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--output <file>', 'Save schema to file')
+  .action(schemaGetCommand);
+
+schema
+  .command('apply <file>')
+  .description('Apply schema from file')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--dry-run', 'Preview changes without applying')
+  .option('--name <name>', 'Migration name')
+  .action(schemaApplyCommand);
+
+// Functions
+const functions = program.command('functions').description('Manage serverless functions');
+
+functions
+  .command('list')
+  .description('List deployed functions')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(functionsListCommand);
+
+functions
+  .command('deploy <file>')
+  .description('Deploy a function')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--name <name>', 'Function name (defaults to filename)')
+  .option('--trigger <type>', 'Trigger type (http, cron, s3_upload, webhook, websocket)', 'http')
+  .option('--trigger-config <json>', 'Trigger config as JSON (e.g. \'{"schedule":"*/5 * * * *"}\')')
+  .option('--description <desc>', 'Function description')
+  .option('--env <kv>', 'Env var as KEY=value (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--timeout-ms <n>', 'Per-invocation timeout (ms)', parseInt)
+  .option('--memory-mb <n>', 'Memory limit (MB)', parseInt)
+  .action(functionsDeployCommand);
+
+functions
+  .command('logs <function-name>')
+  .description('View function logs')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--level <level>', 'Filter by log level (error, all)')
+  .option('--limit <number>', 'Number of logs to fetch', '100')
+  .option('--include-deleted', 'Include logs for soft-deleted functions (post-incident forensics)')
+  .action(functionsLogsCommand);
+
+functions
+  .command('delete <function-name>')
+  .description('Delete a function')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(functionsDeleteCommand);
+
+functions
+  .command('invoke <function-name>')
+  .description('Invoke a deployed function')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--data <json>', 'Request body as JSON string')
+  .option('--json', 'Output as JSON')
+  .action(functionsInvokeCommand);
+
+const functionsEnvCmd = functions.command('env').description('Manage function environment variables');
+
+functionsEnvCmd
+  .command('set <function-name> <vars...>')
+  .description('Set env vars (KEY=VALUE pairs)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(functionsEnvSetCommand);
+
+functionsEnvCmd
+  .command('list <function-name>')
+  .description('List env var keys (values are write-only)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output as JSON')
+  .action(functionsEnvListCommand);
+
+// Storage
+const storage = program.command('storage').description('Manage file storage');
+
+storage
+  .command('list')
+  .description('List storage objects')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(storageListCommand);
+
+storage
+  .command('upload <file>')
+  .description('Upload a file')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--public', 'Mark file as publicly downloadable by any authenticated user')
+  .action(storageUploadCommand);
+
+storage
+  .command('delete <object-id>')
+  .description('Delete a storage object')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(storageDeleteCommand);
+
+storage
+  .command('config')
+  .description('View or update storage configuration')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--public-read <boolean>', 'Enable/disable public read access (true/false)')
+  .action(storageConfigCommand);
+
+// Realtime
+const realtime = program.command('realtime').description('Manage realtime subscriptions');
+
+realtime
+  .command('enable <tables...>')
+  .description('Enable realtime on tables')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(realtimeEnableCommand);
+
+realtime
+  .command('config')
+  .description('Show realtime configuration')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output as JSON')
+  .action(realtimeConfigCommand);
+
+realtime
+  .command('disable <table>')
+  .description('Disable realtime on a table')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(realtimeDisableCommand);
+
+// Deploy (top-level — most common command)
+program
+  .command('deploy [directory]')
+  .description('Deploy frontend to Butterbase')
+  .option('--app <app-id>', 'App ID')
+  .option('--framework <type>', 'Framework type (react-vite, nextjs-static, static, other)')
+  .option('--json', 'Output as JSON')
+  .option('--from-source', 'Build from source (zip + remote build) instead of uploading a prebuilt directory')
+  .option('--build-command <cmd>', 'Build command (only with --from-source, default: npm run build)')
+  .option('--output-dir <path>', 'Build output directory (only with --from-source, default: dist)')
+  .option('--from <path>', 'Project root to zip (only with --from-source, default: cwd)')
+  .action((directory, options) => {
+    if (options.fromSource) {
+      return deployFromSource({
+        app: options.app,
+        fromPath: options.from,
+        buildCommand: options.buildCommand,
+        outputDir: options.outputDir,
+      });
+    }
+    return deployCommand(directory, options);
+  });
+
+// Deploy Edge SSR
+program
+  .command('deploy:edge-ssr [directory]')
+  .description('Deploy a Cloudflare Workers Edge SSR build (e.g. Next.js via @cloudflare/next-on-pages)')
+  .option('--app <app-id>', 'App ID')
+  .option('--framework <type>', 'Framework type (nextjs-edge, remix-edge, other-edge)', 'nextjs-edge')
+  .option('--from <path>', 'Override source directory (default: .vercel/output/static/ or cwd)')
+  .option('--json', 'Output as JSON')
+  .option('--from-source', 'Build from source (zip + remote build) instead of uploading a prebuilt directory')
+  .option('--build-command <cmd>', 'Build command (only with --from-source, default: npx @cloudflare/next-on-pages)')
+  .option('--output-dir <path>', 'Build output directory (only with --from-source, default: .vercel/output/static)')
+  .action((directory, options) => {
+    if (options.fromSource) {
+      return deployEdgeSsrFromSource({
+        app: options.app,
+        fromPath: options.from,
+        buildCommand: options.buildCommand,
+        outputDir: options.outputDir,
+        framework: options.framework,
+      });
+    }
+    return deployEdgeSsrCommand(directory, options);
+  });
+
+// Status (top-level)
+program
+  .command('status')
+  .description('Show app overview')
+  .option('--app <app-id>', 'App ID')
+  .option('--json', 'Output as JSON')
+  .action(statusCommand);
+
+// Open (top-level)
+program
+  .command('open')
+  .description('Open app in browser')
+  .option('--app <app-id>', 'App ID')
+  .option('--api', 'Open API URL instead of frontend')
+  .action(openCommand);
+
+// Data
+const data = program.command('data').description('Query and manage table data');
+
+data
+  .command('query <table>')
+  .description('Query rows from a table')
+  .option('--app <app-id>', 'App ID')
+  .option('--filter <filter...>', 'Filter (e.g. status=eq.active)')
+  .option('--select <columns>', 'Columns to return')
+  .option('--order <order>', 'Sort order (e.g. created_at.desc)')
+  .option('--limit <n>', 'Max rows', '20')
+  .option('--offset <n>', 'Skip rows')
+  .option('--json', 'Output as JSON')
+  .action(dataQueryCommand);
+
+data
+  .command('insert <table>')
+  .description('Insert a row into a table')
+  .option('--app <app-id>', 'App ID')
+  .option('--data <json>', 'Row data as JSON string')
+  .option('--file <path>', 'Read row data from JSON file')
+  .option('--json', 'Output as JSON')
+  .action(dataInsertCommand);
+
+// Env
+const env = program.command('env').description('Manage frontend environment variables');
+
+env
+  .command('set <vars...>')
+  .description('Set env vars (KEY=VALUE pairs)')
+  .option('--app <app-id>', 'App ID')
+  .action(envSetCommand);
+
+env
+  .command('list')
+  .description('List env var keys')
+  .option('--app <app-id>', 'App ID')
+  .option('--json', 'Output as JSON')
+  .action(envListCommand);
+
+env
+  .command('set-file <path>')
+  .description('Set env vars from a .env file')
+  .option('--app <app-id>', 'App ID')
+  .action(envSetFileCommand);
+
+// Keys
+const keys = program.command('keys').description('Manage API keys');
+
+keys
+  .command('generate [name]')
+  .description('Generate a new API key')
+  .option('--scope <scope>', 'Add a scope (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--json', 'Output as JSON')
+  .action(keysGenerateCommand);
+
+keys
+  .command('list')
+  .description('List API keys')
+  .option('--json', 'Output as JSON')
+  .action(keysListCommand);
+
+keys
+  .command('revoke <key-id>')
+  .description('Revoke an API key')
+  .action(keysRevokeCommand);
+
+// Plugin
+const plugin = program.command('plugin').description('Manage AI agent integration');
+
+plugin
+  .command('setup')
+  .description('Set up Claude Code / MCP integration')
+  .action(pluginSetupCommand);
+
+// Integrations
+const integrations = program.command('integrations').description('Manage third-party integrations');
+
+integrations
+  .command('list')
+  .description('List available integrations')
+  .option('--app <app-id>', 'App ID')
+  .option('--search <query>', 'Search by name')
+  .action(integrationsListCommand);
+
+integrations
+  .command('config')
+  .description('Show configured integrations')
+  .option('--app <app-id>', 'App ID')
+  .action(integrationsConfigCommand);
+
+integrations
+  .command('configure <toolkit>')
+  .description('Enable a toolkit for the app')
+  .option('--app <app-id>', 'App ID')
+  .option('--display-name <name>', 'Human-readable display name')
+  .option('--scope <scope>', 'Add a scope (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .action(integrationsConfigureCommand);
+
+integrations
+  .command('disable <toolkit>')
+  .description('Disable a toolkit')
+  .option('--app <app-id>', 'App ID')
+  .action(integrationsDisableCommand);
+
+integrations
+  .command('connect <toolkit>')
+  .description('Generate OAuth URL for an end-user')
+  .option('--app <app-id>', 'App ID')
+  .option('--redirect-url <url>', 'URL to redirect after OAuth')
+  .option('--user-id <uuid>', 'User ID (for API key auth)')
+  .option('--scope <scope>', 'Add a scope (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .action(integrationsConnectCommand);
+
+integrations
+  .command('connections')
+  .description('List connected accounts')
+  .option('--app <app-id>', 'App ID')
+  .action(integrationsConnectionsCommand);
+
+integrations
+  .command('disconnect <connection-id>')
+  .description('Disconnect a user account')
+  .option('--app <app-id>', 'App ID')
+  .action(integrationsDisconnectCommand);
+
+integrations
+  .command('tools [toolkit]')
+  .description('List available tools for a toolkit')
+  .option('--app <app-id>', 'App ID')
+  .action(integrationsToolsCommand);
+
+integrations
+  .command('execute <tool-name>')
+  .description('Execute an integration tool')
+  .option('--app <app-id>', 'App ID')
+  .option('--data <json>', 'Tool parameters as JSON string')
+  .option('--user-id <uuid>', 'User ID (for API key auth)')
+  .action(integrationsExecuteCommand);
+
+// Custom Domains
+const domains = program.command('domains').description('Manage custom domains');
+
+domains
+  .command('list')
+  .description('List custom domains')
+  .option('--app <app-id>', 'App ID')
+  .action(domainsListCommand);
+
+domains
+  .command('add <hostname>')
+  .description('Add a custom domain')
+  .option('--app <app-id>', 'App ID')
+  .action(domainsAddCommand);
+
+domains
+  .command('status <domain-id>')
+  .description('Check domain verification status')
+  .option('--app <app-id>', 'App ID')
+  .action(domainsStatusCommand);
+
+domains
+  .command('verify <domain-id>')
+  .description('Re-verify a pending domain')
+  .option('--app <app-id>', 'App ID')
+  .action(domainsVerifyCommand);
+
+domains
+  .command('delete <domain-id>')
+  .description('Remove a custom domain')
+  .option('--app <app-id>', 'App ID')
+  .option('-y, --yes', 'Skip confirmation')
+  .action(domainsDeleteCommand);
+
+// Durable Objects
+const doCmd = program.command('do').description('Manage Durable Objects');
+
+doCmd
+  .command('deploy <file>')
+  .description('Deploy a Durable Object class')
+  .option('--app <appId>', 'App ID')
+  .option('--name <name>', 'URL name (defaults to file basename)')
+  .option('--access-mode <mode>', 'public | authenticated | service_key', 'authenticated')
+  .option('--json', 'Output as JSON')
+  .action(doDeployCommand);
+
+doCmd
+  .command('list')
+  .description('List Durable Objects')
+  .option('--app <appId>', 'App ID')
+  .option('--json', 'Output as JSON')
+  .action(doListCommand);
+
+doCmd
+  .command('get <name>')
+  .description('Get a Durable Object class')
+  .option('--app <appId>', 'App ID')
+  .option('--code', 'Print only the source code')
+  .option('--json', 'Output as JSON')
+  .action(doGetCommand);
+
+doCmd
+  .command('delete <name>')
+  .description('Delete a Durable Object class')
+  .option('--app <appId>', 'App ID')
+  .action(doDeleteCommand);
+
+doCmd
+  .command('usage <name>')
+  .description('Show current-month DO usage')
+  .option('--app <appId>', 'App ID')
+  .option('--json', 'Output as JSON')
+  .action(doUsageCommand);
+
+const doEnvCmd = doCmd.command('env').description('Manage env vars exposed to DO scripts as `env.KEY`');
+
+doEnvCmd
+  .command('list')
+  .description('List configured DO env var keys (values are write-only)')
+  .option('--app <appId>', 'App ID')
+  .option('--json', 'Output as JSON')
+  .action(doEnvListCommand);
+
+doEnvCmd
+  .command('set <key> <value>')
+  .description('Set or update one DO env var (triggers Worker redeploy if classes are active)')
+  .option('--app <appId>', 'App ID')
+  .action(doEnvSetCommand);
+
+doEnvCmd
+  .command('unset <key>')
+  .description('Remove one DO env var (triggers Worker redeploy if classes are active)')
+  .option('--app <appId>', 'App ID')
+  .action(doEnvUnsetCommand);
+
+// Partners
+const partners = program.command('partners').description('Hackathon partner APIs (Seedance, Z.AI, etc.)');
+partners
+  .command('list')
+  .description('List partner APIs configured for a hackathon')
+  .requiredOption('--hackathon <slug>', 'Hackathon slug')
+  .option('--app <id>', 'App id (defaults to current)')
+  .action(partnersListCommand);
+partners
+  .command('curl <slug> <path>')
+  .description('Print or run a curl command against a partner via the Butterbase proxy')
+  .requiredOption('--hackathon <slug>', 'Hackathon slug')
+  .option('--app <id>', 'App id (defaults to current)')
+  .option('-X, --method <method>', 'HTTP method', 'GET')
+  .option('-d, --data <body>', 'Request JSON body')
+  .option('-x, --execute', 'Execute the curl instead of just printing it')
+  .action((slug, path, opts) => partnersCurlCommand(slug, path, opts));
+
+// RLS
+const rls = program.command('rls').description('Manage Row-Level Security policies');
+
+rls
+  .command('list')
+  .description('List RLS policies')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output as JSON')
+  .action(rlsListCommand);
+
+rls
+  .command('create')
+  .description('Create an RLS policy (user-isolation or custom)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--table <table>', 'Target table name')
+  .option('--user-isolation', 'Enable user-isolation mode (uses --table, --user-column, --public-read-column)')
+  .option('--user-column <col>', 'Column containing the user ID')
+  .option('--public-read-column <col>', 'Boolean column enabling public read override')
+  .option('--policy-name <name>', 'Policy name (custom mode)')
+  .option('--command <cmd>', 'SQL command (SELECT, INSERT, UPDATE, DELETE, ALL)')
+  .option('--using <expr>', 'USING expression')
+  .option('--with-check <expr>', 'WITH CHECK expression')
+  .option('--restrictive', 'Create as RESTRICTIVE policy')
+  .option('--role <role>', 'Restrict to a Postgres role (anon | user)')
+  .option('--json', 'Output as JSON')
+  .action(rlsCreateCommand);
+
+rls
+  .command('enable <table>')
+  .description('Enable RLS on a table')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(rlsEnableCommand);
+
+rls
+  .command('delete <table>')
+  .description('Delete RLS policies on a table (all by default, or named with --policy)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--policy <name>', 'Delete only this named policy')
+  .action(rlsDeleteCommand);
+
+// Billing
+const billing = program.command('billing').description('Manage billing, plans, and spending');
+
+billing
+  .command('status')
+  .description('Show current plan and billing status')
+  .option('--json', 'Output as JSON')
+  .action(billingStatusCommand);
+
+billing
+  .command('portal')
+  .description('Print the billing portal URL')
+  .option('--json', 'Output as JSON')
+  .action(billingPortalCommand);
+
+billing
+  .command('topup <amount>')
+  .description('Add credit balance (amount in USD)')
+  .option('--json', 'Output as JSON')
+  .action(billingTopupCommand);
+
+billing
+  .command('cap')
+  .description('Show current spending cap')
+  .option('--json', 'Output as JSON')
+  .action(billingCapGetCommand);
+
+billing
+  .command('cap:raise')
+  .description('Raise the spending cap')
+  .option('--raise-by <amount>', 'Amount in USD to raise the cap by')
+  .option('--json', 'Output as JSON')
+  .action(billingCapRaiseCommand);
+
+billing
+  .command('plans')
+  .description('List available plans')
+  .option('--json', 'Output as JSON')
+  .action(billingPlansCommand);
+
+billing
+  .command('usage')
+  .description('Show usage metrics')
+  .option('--start <date>', 'Start date (ISO 8601)')
+  .option('--end <date>', 'End date (ISO 8601)')
+  .option('--meter <type>', 'Filter by meter type')
+  .option('--json', 'Output as JSON')
+  .action(billingUsageCommand);
+
+// RAG
+const rag = program.command('rag').description('Manage RAG collections and documents');
+
+const ragCollections = rag.command('collections').description('Manage RAG collections');
+
+ragCollections
+  .command('list')
+  .description('List RAG collections')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output as JSON')
+  .action(ragCollectionsListCommand);
+
+ragCollections
+  .command('create <name>')
+  .description('Create a RAG collection')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--description <text>', 'Collection description')
+  .option('--access-mode <mode>', 'Access mode (public, authenticated, service_key)')
+  .option('--chunk-size <n>', 'Chunk size in tokens')
+  .option('--chunk-overlap <n>', 'Chunk overlap in tokens')
+  .option('--json', 'Output as JSON')
+  .action(ragCollectionsCreateCommand);
+
+ragCollections
+  .command('get <name>')
+  .description('Get a RAG collection')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output as JSON')
+  .action(ragCollectionsGetCommand);
+
+ragCollections
+  .command('delete <name>')
+  .description('Delete a RAG collection')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(ragCollectionsDeleteCommand);
+
+rag
+  .command('ingest <file-or-text>')
+  .description('Ingest a document or text into a RAG collection')
+  .requiredOption('--collection <name>', 'Target collection name')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--text', 'Treat the argument as raw text instead of a file path')
+  .option('--filename <name>', 'Override the filename stored with the document')
+  .option('--metadata <json>', 'Document metadata as JSON string')
+  .option('--json', 'Output as JSON')
+  .action(ragIngestCommand);
+
+const ragDocs = rag.command('docs').description('Manage RAG documents');
+
+ragDocs
+  .command('list <collection>')
+  .description('List documents in a RAG collection')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output as JSON')
+  .action(ragDocsListCommand);
+
+ragDocs
+  .command('delete <collection> <doc-id>')
+  .description('Delete a document from a RAG collection')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .action(ragDocsDeleteCommand);
+
+rag
+  .command('query <collection>')
+  .description('Query a RAG collection')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .requiredOption('-q, --query <text>', 'Query string')
+  .option('--top-k <n>', 'Number of results to return')
+  .option('--threshold <n>', 'Minimum similarity threshold')
+  .option('--synthesize', 'Synthesize an answer from retrieved chunks')
+  .option('--model <model>', 'LLM model to use for synthesis')
+  .option('--json', 'Output as JSON')
+  .action(ragQueryCommand);
+
+// AI Gateway
+const ai = program.command('ai').description('Use the app\'s AI gateway (chat, embeddings, models, BYOK, usage)');
+
+ai
+  .command('chat <prompt>')
+  .description('Send a single-turn chat completion')
+  .option('--app <appId>', 'Override current app')
+  .option('--model <model>', 'Model id (default: app default)')
+  .option('--temperature <n>', 'Sampling temperature', parseFloat)
+  .option('--max-tokens <n>', 'Max output tokens', parseInt)
+  .option('--system <message>', 'Prepend a system message')
+  .option('--json', 'Output raw JSON')
+  .action((prompt, opts) => aiChatCommand(prompt, opts));
+
+ai
+  .command('embed <input...>')
+  .description('Embed text(s) into vectors')
+  .option('--app <appId>', 'Override current app')
+  .option('--model <model>', 'Embedding model')
+  .option('--json', 'Output raw JSON')
+  .action((input, opts) => aiEmbedCommand(input, opts));
+
+ai
+  .command('models')
+  .description('List available AI models')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => aiModelsCommand(opts));
+
+const aiConfig = ai.command('config').description('Read or update AI config');
+aiConfig
+  .command('get')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => aiConfigGetCommand(opts));
+aiConfig
+  .command('set')
+  .option('--app <appId>', 'Override current app')
+  .option('--default-model <model>')
+  .option('--allowed-models <models...>')
+  .option('--max-tokens-per-request <n>', 'Cap on tokens per request', parseInt)
+  .option('--byok-key <key>', 'Set or clear BYOK key (empty string clears)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => aiConfigSetCommand(opts));
+
+ai
+  .command('usage')
+  .description('AI token + cost usage over a window')
+  .option('--app <appId>', 'Override current app')
+  .option('--start-date <date>', 'ISO date')
+  .option('--end-date <date>', 'ISO date')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => aiUsageCommand({
+    app: opts.app, startDate: opts.startDate, endDate: opts.endDate, json: opts.json,
+  }));
+
+// OAuth
+const oauth = program.command('oauth').description('Manage OAuth providers for end-user auth');
+
+oauth
+  .command('configure <provider>')
+  .description('Configure an OAuth provider (e.g. google, github, apple)')
+  .requiredOption('--client-id <id>')
+  .requiredOption('--client-secret <secret>')
+  .option('--app <appId>', 'Override current app')
+  .option('--redirect-uri <uri>', 'Add a redirect URI (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--scope <scope>', 'Add a scope (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--authorization-url <url>')
+  .option('--token-url <url>')
+  .option('--userinfo-url <url>')
+  .option('--json', 'Output raw JSON')
+  .action((provider, opts) => oauthConfigureCommand(provider, opts));
+
+oauth
+  .command('list')
+  .description('List configured OAuth providers')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => oauthListCommand(opts));
+
+oauth
+  .command('get <provider>')
+  .description('Show config for a provider')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((provider, opts) => oauthGetCommand(provider, opts));
+
+oauth
+  .command('update <provider>')
+  .description('Update provider config (any field optional)')
+  .option('--app <appId>', 'Override current app')
+  .option('--client-id <id>')
+  .option('--client-secret <secret>')
+  .option('--redirect-uri <uri>', 'Replace redirect URIs', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--scope <scope>', 'Replace scopes', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--enabled <bool>', 'Enable/disable (true|false)', (v) => v === 'true')
+  .option('--json', 'Output raw JSON')
+  .action((provider, opts) => oauthUpdateCommand(provider, opts));
+
+oauth
+  .command('delete <provider>')
+  .description('Delete an OAuth provider configuration')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((provider, opts) => oauthDeleteCommand(provider, opts));
+
+// Audit
+const audit = program.command('audit').description('Query the app\'s audit log');
+
+audit
+  .command('query')
+  .description('Query audit log entries with optional filters')
+  .option('--app <appId>', 'Override current app')
+  .option('--category <c>')
+  .option('--event-type <e>')
+  .option('--action <a>')
+  .option('--resource-type <t>')
+  .option('--resource-id <id>')
+  .option('--actor-id <id>')
+  .option('--from <iso>', 'Start of window (ISO date)')
+  .option('--to <iso>', 'End of window (ISO date)')
+  .option('--limit <n>', 'Max rows', parseInt)
+  .option('--offset <n>', 'Pagination offset', parseInt)
+  .option('--json', 'Output raw JSON')
+  .action((opts) => auditQueryCommand(opts));
+
+// Regions
+const regions = program.command('regions').description('Multi-region operations');
+
+regions
+  .command('list')
+  .description('List supported regions')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => regionsListCommand(opts));
+
+// App Billing (Stripe Connect — plans/products/subscriptions/orders)
+const appBilling = program.command('app-billing').description('Manage app-level Stripe Connect billing (plans/products/subscriptions/orders)');
+
+const abPlans = appBilling.command('plans').description('Subscription plans');
+abPlans
+  .command('list')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => plansListCommand(opts));
+abPlans
+  .command('create')
+  .requiredOption('--name <name>')
+  .requiredOption('--price-cents <n>', 'Price in cents', parseInt)
+  .requiredOption('--interval <month|year>')
+  .option('--description <desc>')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => plansCreateCommand(opts));
+abPlans
+  .command('update <planId>')
+  .option('--name <name>')
+  .option('--price-cents <n>', 'Price in cents', parseInt)
+  .option('--description <desc>')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((planId, opts) => plansUpdateCommand(planId, opts));
+
+const abProducts = appBilling.command('products').description('One-time products');
+abProducts
+  .command('list')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => productsListCommand(opts));
+abProducts
+  .command('create')
+  .requiredOption('--name <name>')
+  .requiredOption('--price-cents <n>', 'Price in cents', parseInt)
+  .option('--description <desc>')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => productsCreateCommand(opts));
+abProducts
+  .command('update <productId>')
+  .option('--name <name>')
+  .option('--price-cents <n>', 'Price in cents', parseInt)
+  .option('--description <desc>')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((productId, opts) => productsUpdateCommand(productId, opts));
+
+appBilling
+  .command('subscribe <planId>')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((planId, opts) => subscribeCommand(planId, opts));
+
+appBilling
+  .command('subscription')
+  .description('Show the current subscription')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => subscriptionCommand(opts));
+
+appBilling
+  .command('cancel')
+  .description('Cancel the current subscription')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => cancelCommand(opts));
+
+appBilling
+  .command('purchase <productId>')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((productId, opts) => purchaseCommand(productId, opts));
+
+const abOrders = appBilling.command('orders').description('Order history');
+abOrders
+  .command('list')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => ordersListCommand(opts));
+abOrders
+  .command('get <orderId>')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((orderId, opts) => ordersGetCommand(orderId, opts));
+
+// Top-level error handlers for unhandled exceptions / rejections
+process.on('uncaughtException', (err) => {
+  console.error(renderError(err));
+  process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  console.error(renderError(err));
+  process.exit(1);
+});
+
+// Parse arguments
+program.parse();

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+coverage/
+__pycache__/
+*.pyc
+.venv/
+Example Code/
+stress_test_results*
+*.superpowers

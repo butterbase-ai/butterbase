@@ -1,0 +1,30 @@
+{
+  "name": "bb-dispatch",
+  "main": "index.js",
+  "compatibility_date": "2025-01-24",
+  "dispatch_namespaces": [
+    {
+      "binding": "DISPATCHER",
+      "namespace": "bb-frontends"
+    }
+  ],
+  "vars": {
+    "BUTTERBASE_REGION": "us-east-1"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SUBDOMAINS",
+      "id": "4345ab864e694f3393148a8231942345"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "*.butterbase.dev/*",
+      "zone_name": "butterbase.dev"
+    },
+    {
+      "pattern": "*/*",
+      "zone_name": "butterbase.dev"
+    }
+  ]
+}

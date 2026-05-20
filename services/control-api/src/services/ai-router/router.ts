@@ -1,0 +1,392 @@
+import type pg from 'pg';
+import type { Redis } from 'ioredis';
+import { readCatalogEntry, readEnabledRouters } from './catalog.js';
+import { rankRoutersForModel, rankRoutersPresenceMode, estimateWorstCaseUsd } from './select.js';
+import { config } from '../../config.js';
+import { estimatePromptTokens } from './tokenizer.js';
+import { applyMarkup } from './markup.js';
+import { acquireForEstimatedCost, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
+import { writeAiUsageRow } from './usage-log.js';
+import { logAuditEvent } from '../audit/audit-events-service.js';
+import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
+import { maybeSendCreditsEmail } from '../credits-email.js';
+import { sendBillingEmail } from '../auth/email-service.js';
+import { AdapterError, type RouterAdapter, type AdapterResult, type ChatCompletionRequest, type EmbeddingRequest } from './adapters/types.js';
+import type { RouterName } from './normalize.js';
+
+const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 'model_not_available', 'unknown']);
+
+/**
+ * Non-fatal post-settle hook: reads the user's current credits balance
+ * (monthly allowance + topup) and lets credits-email decide whether to
+ * fire credits_low / credits_exhausted. Dedup-guarded inside
+ * maybeSendCreditsEmail via columns on platform_users.
+ */
+/**
+ * Wraps acquireForEstimatedCost so that an InsufficientCreditsError also
+ * emits a billing/denied audit event. The audit_events.app_id column is
+ * NOT NULL, so we only record when the router was invoked from an app
+ * context (gateway-level user calls without an app are skipped).
+ */
+async function acquireWithAudit(
+  ctx: RouteContext,
+  reservedUsd: number,
+  ttlSeconds: number,
+): Promise<ReturnType<typeof acquireForEstimatedCost>> {
+  try {
+    return await acquireForEstimatedCost(
+      ctx.platformPool, ctx.userId, ctx.region, reservedUsd, ttlSeconds,
+    );
+  } catch (err) {
+    if (err instanceof InsufficientCreditsError && ctx.appId) {
+      try {
+        await logAuditEvent(ctx.runtimePool, {
+          appId: ctx.appId,
+          category: 'billing',
+          eventType: 'ai_insufficient_credits',
+          action: 'denied',
+          resourceType: 'ai_request',
+          actorType: 'platform_user',
+          actorId: ctx.userId,
+          success: false,
+          errorMessage: err.message,
+          eventData: {
+            required_usd: err.requiredUsd,
+            available_usd: err.availableUsd,
+            region: ctx.region,
+            // auto_refill state is not in scope here; omitted to avoid
+            // extra SELECTs in the hot reject path.
+            auto_refill: { enabled: null, amount_usd: null },
+          },
+        });
+      } catch (auditErr) {
+        console.warn('audit: ai_insufficient_credits write failed', auditErr);
+      }
+    }
+    throw err;
+  }
+}
+
+async function maybeFireCreditsEmail(pool: pg.Pool, userId: string): Promise<void> {
+  try {
+    const r = await pool.query<{ monthly_allowance_usd: string; credits_usd: string }>(
+      `SELECT monthly_allowance_usd::text, credits_usd::text
+         FROM platform_users WHERE id = $1`,
+      [userId],
+    );
+    if (r.rows.length === 0) return;
+    const postBalance = parseFloat(r.rows[0].monthly_allowance_usd ?? '0')
+      + parseFloat(r.rows[0].credits_usd ?? '0');
+    await maybeSendCreditsEmail({
+      db: pool,
+      userId,
+      postBalance,
+      sendBillingEmail: (to, template, data) =>
+        sendBillingEmail(to, template as any, data),
+      resetDate: null,
+    });
+  } catch (err) {
+    console.warn('[router] credits-email: maybeSendCreditsEmail failed (non-fatal):', err);
+  }
+}
+
+export interface RouteContext {
+  platformPool: pg.Pool;
+  runtimePool: pg.Pool;
+  redis: Redis;
+  adapters: Map<RouterName, RouterAdapter>;
+  markupPct: number;
+  appId: string | null;
+  userId: string;
+  region: string;
+}
+
+export interface RouteChatResult {
+  status: number;
+  stream?: ReadableStream<Uint8Array>;
+  body?: unknown;
+}
+
+export class RouterError extends Error {
+  constructor(
+    public readonly code: 'MODEL_NOT_FOUND' | 'NO_ROUTERS_AVAILABLE' | 'ROUTER_FALLBACK_EXHAUSTED',
+    public readonly statusCode: number,
+    message: string,
+    // Internal-only — router names and failure kinds. Never surface to clients;
+    // used for logs/Sentry/metrics. Public responses must scrub this field.
+    public readonly attempted?: string[]
+  ) {
+    super(message);
+    this.name = 'RouterError';
+  }
+}
+
+export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletionRequest): Promise<RouteChatResult> {
+  const t0 = Date.now();
+  const canonicalId = req.model;
+  const entry = await readCatalogEntry(ctx.redis, canonicalId);
+  if (!entry) {
+    throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  }
+  const enabledStatuses = await readEnabledRouters(ctx.redis);
+  const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
+  const ranker = config.aiRouter.presenceModeEnabled ? rankRoutersPresenceMode : rankRoutersForModel;
+  const ranked = ranker(entry, enabled);
+  if (ranked.length === 0) {
+    throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
+  }
+
+  const promptTokens = estimatePromptTokens(req.messages as any, canonicalId);
+  const maxTokens = req.max_tokens ?? 4096;
+  const worstUsd = estimateWorstCaseUsd(ranked[0], promptTokens, maxTokens);
+  const reservedUsd = worstUsd * (1 + ctx.markupPct / 100);
+
+  const lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+
+  const fallbackChain: string[] = [];
+  let result: AdapterResult | null = null;
+  let chosenRouter: RouterName | null = null;
+  let lastError: unknown = null;
+
+  for (const candidate of ranked) {
+    const adapter = ctx.adapters.get(candidate.name);
+    if (!adapter) {
+      fallbackChain.push(`${candidate.name}:no_adapter`);
+      continue;
+    }
+    try {
+      const upstreamId = adapter.toUpstreamId(canonicalId);
+      result = await adapter.chatCompletion(req, upstreamId);
+      chosenRouter = candidate.name;
+      break;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        fallbackChain.push(`${candidate.name}:${err.kind}`);
+        continue;
+      }
+      // Non-fallback error (auth, bad_request) — release lease + rethrow.
+      await settleAfterCall(ctx.platformPool, lease, 0);
+      throw err;
+    }
+  }
+
+  if (!result || !chosenRouter) {
+    await settleAfterCall(ctx.platformPool, lease, 0);
+    const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
+    (err as any).cause = lastError;
+    throw err;
+  }
+
+  // Streaming: wrap so we can parse usage after [DONE] and settle.
+  if (result.stream) {
+    const wrapped = wrapStreamForSettlement(result.stream, async (usage, providerCost) => {
+      const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens);
+      const chargedCredits = applyMarkup(cost, ctx.markupPct);
+      await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+      maybeTriggerAutoRefill(
+        { pool: ctx.platformPool, redis: ctx.redis },
+        ctx.userId,
+      ).catch((err) => console.error('[router] auto-refill check failed:', err));
+      maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+      writeAiUsageRow(ctx.runtimePool, {
+        appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
+        promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+        totalTokens: usage.promptTokens + usage.completionTokens,
+        providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
+        markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+        keyType: 'platform', chargedToUser: true,
+      }).catch(err => console.error('[router] usage-log write failed:', err));
+      const t1 = Date.now();
+      console.log(JSON.stringify({
+        level: 'info',
+        type: 'ai_router.call',
+        app_id: ctx.appId,
+        user_id: ctx.userId,
+        canonical_model: canonicalId,
+        chosen_router: chosenRouter,
+        fallback_chain: fallbackChain,
+        provider_cost_usd: cost,
+        charged_credits_usd: chargedCredits,
+        markup_pct: ctx.markupPct,
+        latency_ms: t1 - t0,
+        status: result.status,
+      }));
+    });
+    return { status: result.status, stream: wrapped };
+  }
+
+  // Non-streaming.
+  const usage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
+  const providerCost = result.providerCostUsd
+    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens);
+  const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
+
+  await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+  maybeTriggerAutoRefill(
+    { pool: ctx.platformPool, redis: ctx.redis },
+    ctx.userId,
+  ).catch((err) => console.error('[router] auto-refill check failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+  writeAiUsageRow(ctx.runtimePool, {
+    appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+    promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+    totalTokens: usage.promptTokens + usage.completionTokens,
+    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+    keyType: 'platform', chargedToUser: true,
+  }).catch(err => console.error('[router] usage-log write failed:', err));
+  const t1 = Date.now();
+  console.log(JSON.stringify({
+    level: 'info',
+    type: 'ai_router.call',
+    app_id: ctx.appId,
+    user_id: ctx.userId,
+    canonical_model: canonicalId,
+    chosen_router: chosenRouter,
+    fallback_chain: fallbackChain,
+    provider_cost_usd: providerCost,
+    charged_credits_usd: chargedCredits,
+    markup_pct: ctx.markupPct,
+    latency_ms: t1 - t0,
+    status: result.status,
+  }));
+
+  return { status: result.status, body: result.body };
+}
+
+interface StreamUsage { promptTokens: number; completionTokens: number; }
+
+function wrapStreamForSettlement(
+  upstream: ReadableStream<Uint8Array>,
+  onComplete: (usage: StreamUsage, providerCostUsd: number | null) => Promise<void>,
+): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  let promptTokens = 0, completionTokens = 0, providerCost: number | null = null;
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const reader = upstream.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            try { await onComplete({ promptTokens, completionTokens }, providerCost); } catch (e) { console.error('[router] stream settle:', e); }
+            controller.close();
+            return;
+          }
+          const text = decoder.decode(value, { stream: true });
+          for (const line of text.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const parsed = JSON.parse(data) as any;
+              if (parsed.usage) {
+                promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
+                completionTokens = parsed.usage.completion_tokens ?? completionTokens;
+                if (typeof parsed.usage.total_cost === 'number') providerCost = parsed.usage.total_cost;
+              }
+            } catch { /* ignore non-JSON */ }
+          }
+          controller.enqueue(value);
+        }
+      } catch (err) {
+        controller.error(err);
+        try { await onComplete({ promptTokens, completionTokens }, providerCost); } catch {}
+      }
+    },
+  });
+}
+
+export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): Promise<{ status: number; body: unknown }> {
+  const t0 = Date.now();
+  const canonicalId = req.model;
+  const entry = await readCatalogEntry(ctx.redis, canonicalId);
+  if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+
+  const enabledStatuses = await readEnabledRouters(ctx.redis);
+  const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
+  const ranker = config.aiRouter.presenceModeEnabled ? rankRoutersPresenceMode : rankRoutersForModel;
+  const ranked = ranker(entry, enabled);
+  if (ranked.length === 0) throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
+
+  const inputText = Array.isArray(req.input) ? req.input.join(' ') : req.input;
+  const promptTokens = estimatePromptTokens([{ role: 'user', content: inputText }], canonicalId);
+  const worstUsd = (promptTokens / 1_000_000) * ranked[0].promptPricePerMtok;
+  const reservedUsd = worstUsd * (1 + ctx.markupPct / 100);
+
+  const lease = await acquireWithAudit(ctx, reservedUsd, 60);
+
+  const fallbackChain: string[] = [];
+  let result: AdapterResult | null = null;
+  let chosenRouter: RouterName | null = null;
+  let lastError: unknown = null;
+
+  for (const candidate of ranked) {
+    const adapter = ctx.adapters.get(candidate.name);
+    if (!adapter || !adapter.embedding) {
+      fallbackChain.push(`${candidate.name}:no_embedding`);
+      continue;
+    }
+    try {
+      result = await adapter.embedding(req, adapter.toUpstreamId(canonicalId));
+      chosenRouter = candidate.name;
+      break;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        fallbackChain.push(`${candidate.name}:${err.kind}`);
+        continue;
+      }
+      await settleAfterCall(ctx.platformPool, lease, 0);
+      throw err;
+    }
+  }
+
+  if (!result || !chosenRouter) {
+    await settleAfterCall(ctx.platformPool, lease, 0);
+    const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
+    (err as any).cause = lastError;
+    throw err;
+  }
+
+  const usage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
+  const providerCost = result.providerCostUsd
+    ?? (usage.promptTokens / 1_000_000) * ranked[0].promptPricePerMtok;
+  const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
+
+  await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+  maybeTriggerAutoRefill(
+    { pool: ctx.platformPool, redis: ctx.redis },
+    ctx.userId,
+  ).catch((err) => console.error('[router] auto-refill check failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+  writeAiUsageRow(ctx.runtimePool, {
+    appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+    promptTokens: usage.promptTokens, completionTokens: 0,
+    totalTokens: usage.promptTokens,
+    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+    keyType: 'platform', chargedToUser: true,
+  }).catch(err => console.error('[router] usage-log write failed:', err));
+  const t1 = Date.now();
+  console.log(JSON.stringify({
+    level: 'info',
+    type: 'ai_router.call',
+    app_id: ctx.appId,
+    user_id: ctx.userId,
+    canonical_model: canonicalId,
+    chosen_router: chosenRouter,
+    fallback_chain: fallbackChain,
+    provider_cost_usd: providerCost,
+    charged_credits_usd: chargedCredits,
+    markup_pct: ctx.markupPct,
+    latency_ms: t1 - t0,
+    status: result.status,
+  }));
+
+  return { status: result.status, body: result.body };
+}
+
+export { InsufficientCreditsError } from './billing-gate.js';

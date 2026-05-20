@@ -1,0 +1,65 @@
+/* Butterbase warm amber theme — dark mode only */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --sl-font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Force dark theme on all selectors */
+:root,
+:root[data-theme='dark'],
+:root[data-theme='light'] {
+  --sl-color-bg: hsl(35 45% 6%);
+  --sl-color-bg-nav: hsl(35 45% 7%);
+  --sl-color-bg-sidebar: hsl(35 45% 7%);
+  --sl-color-bg-inline-code: hsl(35 30% 12%);
+
+  --sl-color-hairline: hsl(35 25% 18%);
+  --sl-color-hairline-light: hsl(35 25% 15%);
+
+  --sl-color-text: hsl(42 55% 90%);
+  --sl-color-text-accent: hsl(43 82% 46%);
+
+  --sl-color-accent: hsl(43 82% 46%);
+  --sl-color-accent-high: hsl(43 82% 56%);
+  --sl-color-accent-low: hsl(35 40% 14%);
+
+  --sl-color-white: hsl(42 55% 92%);
+  --sl-color-gray-1: hsl(42 40% 80%);
+  --sl-color-gray-2: hsl(30 15% 55%);
+  --sl-color-gray-3: hsl(35 25% 25%);
+  --sl-color-gray-4: hsl(35 35% 12%);
+  --sl-color-gray-5: hsl(35 45% 8%);
+  --sl-color-gray-6: hsl(35 45% 6%);
+  --sl-color-gray-7: hsl(35 48% 4%);
+  --sl-color-black: hsl(35 48% 3%);
+
+  --sl-color-green-high: hsl(142 70% 45%);
+  --sl-color-green-low: hsl(142 30% 15%);
+  --sl-color-orange-high: hsl(43 82% 46%);
+  --sl-color-orange-low: hsl(35 40% 14%);
+}
+
+/* Logo */
+.site-title img {
+  height: 1.5rem;
+  width: auto;
+}
+
+/* Links */
+a {
+  transition: color 0.15s ease;
+}
+
+/* Code blocks */
+.expressive-code {
+  --ec-codeBg: hsl(35 40% 9%);
+  --ec-codeBrdCol: hsl(35 25% 18%);
+}
+
+/* Sidebar active item */
+nav .sl-sidebar a[aria-current='page'] {
+  background: hsl(35 30% 12%);
+  color: hsl(43 82% 46%);
+}

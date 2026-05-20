@@ -1,0 +1,263 @@
+services:
+  control-plane-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: butterbase
+      POSTGRES_PASSWORD: butterbase_dev
+      POSTGRES_DB: butterbase_control
+    ports:
+      - "5433:5432"
+    volumes:
+      - control-plane-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U butterbase -d butterbase_control"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - butterbase
+
+  data-plane-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: butterbase
+      POSTGRES_PASSWORD: butterbase_dev
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: md5
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
+    ports:
+      - "5435:5432"
+    volumes:
+      - data-plane-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U butterbase -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - butterbase
+
+  runtime-plane-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: butterbase
+      POSTGRES_PASSWORD: butterbase_dev
+      POSTGRES_DB: butterbase_runtime_us
+    ports:
+      - "5437:5432"
+    volumes:
+      - runtime_plane_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U butterbase -d butterbase_runtime_us"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - butterbase
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    ports:
+      - "6432:6432"
+    volumes:
+      - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./infra/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      data-plane-db:
+        condition: service_healthy
+    networks:
+      - butterbase
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - butterbase
+
+  # Pinned to a community-edition release; 2026.03+ `:latest` images require a
+  # paid LOCALSTACK_AUTH_TOKEN. Self-hosters can override via the LOCALSTACK_IMAGE env.
+  localstack:
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:4.14.0}
+    ports:
+      - "4566:4566"
+      - "4571:4571"
+    environment:
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN:-}
+      - SERVICES=s3,lambda
+      - DEBUG=1
+      - PERSISTENCE=1
+      - LAMBDA_EXECUTOR=docker
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "./localstack-init:/etc/localstack/init/ready.d"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - butterbase
+
+  control-api:
+    build:
+      context: .
+      dockerfile: services/control-api/Dockerfile
+    ports:
+      - "4000:4000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Override the Dockerfile's NODE_ENV=production so the prod-only env checks
+      # (BUILD_RUNNER_SHARED_SECRET, BUILD_RUNNER_URL, AUTH_ENCRYPTION_KEY...) skip.
+      NODE_ENV: development
+      CONTROL_DB_URL: "postgresql://butterbase:butterbase_dev@control-plane-db:5432/butterbase_control"
+      DATA_PLANE_DB_HOST: data-plane-db
+      DATA_PLANE_DB_PORT: "5432"
+      DATA_PLANE_DB_USER: butterbase
+      DATA_PLANE_DB_PASSWORD: butterbase_dev
+      PGBOUNCER_HOST: pgbouncer
+      PGBOUNCER_PORT: "6432"
+      CONTROL_API_PORT: "4000"
+      AUTH_ENABLED: "false"
+      AUTH_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      BUTTERBASE_REGIONS: us-east-1
+      BUTTERBASE_REGION: us-east-1
+      BUTTERBASE_PLATFORM_REGION: us-east-1
+      BUTTERBASE_INTERNAL_SECRET: dev-internal-secret-change-me
+      BUTTERBASE_LEASE_SIZE_USD: "1.00"
+      BUTTERBASE_LEASE_REFILL_THRESHOLD_USD: "0.20"
+      BUTTERBASE_LEASE_TTL_SECONDS: "300"
+      NEON_RUNTIME_PROJECT_ID_US_EAST_1: "postgresql://butterbase:butterbase_dev@runtime-plane-db:5432/butterbase_runtime_us"
+      NEON_DATA_PROJECT_ID_US_EAST_1: local-dev-data-project
+      NEON_DATA_PROJECT_ID: local-dev-data-project
+      NEON_PLATFORM_PRIMARY_URL: "postgresql://butterbase:butterbase_dev@control-plane-db:5432/butterbase_control"
+      CONTROL_PLANE_URL_PLATFORM_REGION: "http://control-api:4000"
+      DEV_OWNER_ID: "11111111-1111-1111-1111-111111111111"
+      DEV_ADMIN_USER_ID: "22222222-2222-2222-2222-222222222222"
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
+      S3_BUCKET_NAME: butterbase-app-storage
+      AWS_REGION: us-east-1
+      S3_ENDPOINT: http://localstack:4566
+      S3_PUBLIC_ENDPOINT: http://localhost:4566
+      S3_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      REDIS_URL: redis://redis:6379
+      REALTIME_MAX_LISTEN_CONNECTIONS: "100"
+    depends_on:
+      control-plane-db:
+        condition: service_healthy
+      data-plane-db:
+        condition: service_healthy
+      runtime-plane-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - butterbase
+
+  docs:
+    build:
+      context: .
+      dockerfile: services/docs/Dockerfile
+    ports:
+      - "4321:80"
+    networks:
+      - butterbase
+
+  traefik:
+    image: traefik:v3.4
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - butterbase
+
+  deno-runtime:
+    image: denoland/deno:alpine-2.0.6
+    working_dir: /app
+    depends_on:
+      pgbouncer:
+        condition: service_started
+      control-plane-db:
+        condition: service_healthy
+      runtime-plane-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "7133:7133"
+    environment:
+      - PORT=7133
+      - DENO_DIR=/deno-dir
+      - PGBOUNCER_HOST=pgbouncer
+      - PGBOUNCER_PORT=6432
+      - PGBOUNCER_USER=butterbase
+      - PGBOUNCER_PASSWORD=butterbase_dev
+      - BUTTERBASE_REGION=us-east-1
+      - NEON_RUNTIME_PROJECT_ID_US_EAST_1=postgresql://butterbase:butterbase_dev@runtime-plane-db:5432/butterbase_runtime_us
+      - CONTROL_PLANE_URL=postgresql://butterbase:butterbase_dev@control-plane-db:5432/butterbase_control
+      - AUTH_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      - WORKER_TIMEOUT_MS=30000
+      - MAX_CONCURRENT_WORKERS=100
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./services/deno-runtime:/app:ro
+      - deno_cache:/deno-dir
+    command:
+      - sh
+      - -c
+      - |
+        rm -rf /deno-dir/gen &&
+        deno cache server.ts &&
+        deno run \
+          --allow-net \
+          --allow-env \
+          --allow-read=/app,/deno-dir \
+          --unstable-worker-options \
+          server.ts
+    networks:
+      - butterbase
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7133/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  control-plane-data:
+  data-plane-data:
+  runtime_plane_db_data:
+  deno_cache:
+  localstack-data:
+  redis-data:
+
+networks:
+  butterbase:
+    driver: bridge

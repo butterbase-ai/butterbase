@@ -1,0 +1,179 @@
+// packages/shared/src/error-types.ts
+
+/**
+ * Error codes for agent-friendly error responses
+ */
+
+// Validation errors
+export const VALIDATION_INVALID_SCHEMA = 'VALIDATION_INVALID_SCHEMA' as const;
+export const VALIDATION_MISSING_FIELD = 'VALIDATION_MISSING_FIELD' as const;
+export const VALIDATION_INVALID_TYPE = 'VALIDATION_INVALID_TYPE' as const;
+export const VALIDATION_COLUMN_NOT_FOUND = 'VALIDATION_COLUMN_NOT_FOUND' as const;
+export const VALIDATION_TABLE_NOT_FOUND = 'VALIDATION_TABLE_NOT_FOUND' as const;
+export const VALIDATION_INVALID_NAME = 'VALIDATION_INVALID_NAME' as const;
+export const VALIDATION_UNIQUE_CONSTRAINT_VIOLATION = 'VALIDATION_UNIQUE_CONSTRAINT_VIOLATION' as const;
+export const VALIDATION_FOREIGN_KEY_VIOLATION = 'VALIDATION_FOREIGN_KEY_VIOLATION' as const;
+export const VALIDATION_CHECK_CONSTRAINT_VIOLATION = 'VALIDATION_CHECK_CONSTRAINT_VIOLATION' as const;
+export const VALIDATION_NOT_NULL_VIOLATION = 'VALIDATION_NOT_NULL_VIOLATION' as const;
+
+// Authorization errors
+export const AUTH_INVALID_TOKEN = 'AUTH_INVALID_TOKEN' as const;
+export const AUTH_INSUFFICIENT_PERMISSIONS = 'AUTH_INSUFFICIENT_PERMISSIONS' as const;
+export const AUTH_INVALID_API_KEY = 'AUTH_INVALID_API_KEY' as const;
+
+// Resource errors
+export const RESOURCE_NOT_FOUND = 'RESOURCE_NOT_FOUND' as const;
+export const RESOURCE_ALREADY_EXISTS = 'RESOURCE_ALREADY_EXISTS' as const;
+export const RESOURCE_CONFLICT = 'RESOURCE_CONFLICT' as const;
+
+// Quota errors
+export const QUOTA_STORAGE_EXCEEDED = 'QUOTA_STORAGE_EXCEEDED' as const;
+export const QUOTA_RATE_LIMIT = 'QUOTA_RATE_LIMIT' as const;
+export const QUOTA_TABLE_LIMIT = 'QUOTA_TABLE_LIMIT' as const;
+export const QUOTA_FILE_SIZE_EXCEEDED = 'QUOTA_FILE_SIZE_EXCEEDED' as const;
+export const QUOTA_DEPLOYMENT_LIMIT = 'QUOTA_DEPLOYMENT_LIMIT' as const;
+
+// State errors
+export const STATE_INVALID_TRANSITION = 'STATE_INVALID_TRANSITION' as const;
+export const STATE_PREREQUISITE_MISSING = 'STATE_PREREQUISITE_MISSING' as const;
+export const APP_PAUSED = 'APP_PAUSED' as const;
+
+// Realtime errors
+export const REALTIME_NOT_CONFIGURED = 'REALTIME_NOT_CONFIGURED' as const;
+export const REALTIME_CONNECTION_LIMIT = 'REALTIME_CONNECTION_LIMIT' as const;
+
+// External errors
+export const EXTERNAL_S3_ERROR = 'EXTERNAL_S3_ERROR' as const;
+export const EXTERNAL_DB_ERROR = 'EXTERNAL_DB_ERROR' as const;
+export const EXTERNAL_NETWORK_ERROR = 'EXTERNAL_NETWORK_ERROR' as const;
+export const EXTERNAL_CLOUDFLARE_ERROR = 'EXTERNAL_CLOUDFLARE_ERROR' as const;
+
+// Integration errors
+export const INTEGRATIONS_NOT_CONFIGURED = 'INTEGRATIONS_NOT_CONFIGURED' as const;
+export const INTEGRATIONS_TOOLKIT_NOT_ENABLED = 'INTEGRATIONS_TOOLKIT_NOT_ENABLED' as const;
+export const INTEGRATIONS_NOT_CONNECTED = 'INTEGRATIONS_NOT_CONNECTED' as const;
+export const INTEGRATIONS_CONNECTION_EXPIRED = 'INTEGRATIONS_CONNECTION_EXPIRED' as const;
+export const INTEGRATIONS_EXECUTION_FAILED = 'INTEGRATIONS_EXECUTION_FAILED' as const;
+export const INTEGRATIONS_QUOTA_EXCEEDED = 'INTEGRATIONS_QUOTA_EXCEEDED' as const;
+
+/**
+ * Union type of all error codes
+ */
+export type ErrorCode =
+  | typeof VALIDATION_INVALID_SCHEMA
+  | typeof VALIDATION_MISSING_FIELD
+  | typeof VALIDATION_INVALID_TYPE
+  | typeof VALIDATION_COLUMN_NOT_FOUND
+  | typeof VALIDATION_TABLE_NOT_FOUND
+  | typeof VALIDATION_INVALID_NAME
+  | typeof VALIDATION_UNIQUE_CONSTRAINT_VIOLATION
+  | typeof VALIDATION_FOREIGN_KEY_VIOLATION
+  | typeof VALIDATION_CHECK_CONSTRAINT_VIOLATION
+  | typeof VALIDATION_NOT_NULL_VIOLATION
+  | typeof AUTH_INVALID_TOKEN
+  | typeof AUTH_INSUFFICIENT_PERMISSIONS
+  | typeof AUTH_INVALID_API_KEY
+  | typeof RESOURCE_NOT_FOUND
+  | typeof RESOURCE_ALREADY_EXISTS
+  | typeof RESOURCE_CONFLICT
+  | typeof QUOTA_STORAGE_EXCEEDED
+  | typeof QUOTA_RATE_LIMIT
+  | typeof QUOTA_TABLE_LIMIT
+  | typeof QUOTA_FILE_SIZE_EXCEEDED
+  | typeof QUOTA_DEPLOYMENT_LIMIT
+  | typeof STATE_INVALID_TRANSITION
+  | typeof STATE_PREREQUISITE_MISSING
+  | typeof APP_PAUSED
+  | typeof REALTIME_NOT_CONFIGURED
+  | typeof REALTIME_CONNECTION_LIMIT
+  | typeof EXTERNAL_S3_ERROR
+  | typeof EXTERNAL_DB_ERROR
+  | typeof EXTERNAL_NETWORK_ERROR
+  | typeof EXTERNAL_CLOUDFLARE_ERROR
+  | typeof INTEGRATIONS_NOT_CONFIGURED
+  | typeof INTEGRATIONS_TOOLKIT_NOT_ENABLED
+  | typeof INTEGRATIONS_NOT_CONNECTED
+  | typeof INTEGRATIONS_CONNECTION_EXPIRED
+  | typeof INTEGRATIONS_EXECUTION_FAILED
+  | typeof INTEGRATIONS_QUOTA_EXCEEDED;
+
+/**
+ * Agent-friendly error response structure
+ */
+export interface AgentFriendlyError {
+  error: {
+    code: string;
+    message: string;
+    remediation: string;
+    documentation_url?: string;
+    details?: unknown;
+  };
+}
+
+/**
+ * Type guard for AgentFriendlyError
+ */
+export function isAgentFriendlyError(obj: unknown): obj is AgentFriendlyError {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'error' in obj &&
+    typeof (obj as any).error === 'object' &&
+    'code' in (obj as any).error &&
+    'message' in (obj as any).error &&
+    'remediation' in (obj as any).error
+  );
+}
+
+/**
+ * Convenience namespace object grouping every error code constant.
+ *
+ * Use `ErrorCodes.RESOURCE_NOT_FOUND` instead of importing the constant
+ * by name when you want IDE auto-complete on the full set.
+ */
+export const ErrorCodes = {
+  // Validation
+  VALIDATION_INVALID_SCHEMA,
+  VALIDATION_MISSING_FIELD,
+  VALIDATION_INVALID_TYPE,
+  VALIDATION_COLUMN_NOT_FOUND,
+  VALIDATION_TABLE_NOT_FOUND,
+  VALIDATION_INVALID_NAME,
+  VALIDATION_UNIQUE_CONSTRAINT_VIOLATION,
+  VALIDATION_FOREIGN_KEY_VIOLATION,
+  VALIDATION_CHECK_CONSTRAINT_VIOLATION,
+  VALIDATION_NOT_NULL_VIOLATION,
+  // Authorization
+  AUTH_INVALID_TOKEN,
+  AUTH_INSUFFICIENT_PERMISSIONS,
+  AUTH_INVALID_API_KEY,
+  // Resource
+  RESOURCE_NOT_FOUND,
+  RESOURCE_ALREADY_EXISTS,
+  RESOURCE_CONFLICT,
+  // Quota
+  QUOTA_STORAGE_EXCEEDED,
+  QUOTA_RATE_LIMIT,
+  QUOTA_TABLE_LIMIT,
+  QUOTA_FILE_SIZE_EXCEEDED,
+  QUOTA_DEPLOYMENT_LIMIT,
+  // State
+  STATE_INVALID_TRANSITION,
+  STATE_PREREQUISITE_MISSING,
+  APP_PAUSED,
+  // Realtime
+  REALTIME_NOT_CONFIGURED,
+  REALTIME_CONNECTION_LIMIT,
+  // External
+  EXTERNAL_S3_ERROR,
+  EXTERNAL_DB_ERROR,
+  EXTERNAL_NETWORK_ERROR,
+  EXTERNAL_CLOUDFLARE_ERROR,
+  // Integration
+  INTEGRATIONS_NOT_CONFIGURED,
+  INTEGRATIONS_TOOLKIT_NOT_ENABLED,
+  INTEGRATIONS_NOT_CONNECTED,
+  INTEGRATIONS_CONNECTION_EXPIRED,
+  INTEGRATIONS_EXECUTION_FAILED,
+  INTEGRATIONS_QUOTA_EXCEEDED,
+} as const;

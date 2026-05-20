@@ -1,0 +1,13 @@
+{
+  "name": "butterbase",
+  "description": "Build full-stack apps with Butterbase — AI-Native Backend-as-a-Service. Skills for app creation, schema design, frontend deployment, RLS debugging, serverless functions, and contributing.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Butterbase",
+    "email": "team@butterbase.ai"
+  },
+  "homepage": "https://butterbase.ai",
+  "repository": "https://github.com/NetGPT-Inc/butterbase",
+  "license": "MIT",
+  "keywords": ["butterbase", "baas", "backend", "mcp", "database", "auth", "storage"]
+}

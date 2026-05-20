@@ -1,0 +1,43 @@
+{
+  "name": "@butterbase/cli",
+  "version": "0.3.1",
+  "description": "Command-line tool for Butterbase project scaffolding and backend management",
+  "type": "module",
+  "bin": {
+    "butterbase": "dist/bin/butterbase.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "butterbase",
+    "cli",
+    "backend",
+    "baas"
+  ],
+  "dependencies": {
+    "@butterbase/sdk": "*",
+    "adm-zip": "^0.5.17",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "dotenv": "^16.4.0",
+    "fs-extra": "^11.2.0",
+    "ora": "^8.0.0",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^22.0.0",
+    "@types/prompts": "^2.4.9",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.1"
+  }
+}

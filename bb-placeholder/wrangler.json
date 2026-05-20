@@ -1,0 +1,6 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "__placeholder__",
+  "main": "index.js",
+  "compatibility_date": "2025-01-24"
+}

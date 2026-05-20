@@ -1,0 +1,32 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`credits_exhausted email > renders CTAs for top-up and auto-refill 1`] = `
+"Your AI credit balance has reached $0. AI requests from your apps will fail until you add more credits.
+
+Buy credits: https://dashboard.butterbase.ai/billing?topup=open
+Enable auto-refill: https://dashboard.butterbase.ai/billing?autoRefill=focus
+
+Enabling auto-refill prevents this in the future — we'll charge your card automatically when your balance gets low."
+`;
+
+exports[`credits_low email > omits reset date when empty 1`] = `
+"Your AI credit balance is running low.
+
+Available: $0.50 ($0.00 monthly + $0.50 top-up)
+
+AI requests will start failing once you reach $0. You can:
+
+  - Buy credits: https://dashboard.butterbase.ai/billing?topup=open
+  - Enable auto-refill: https://dashboard.butterbase.ai/billing?autoRefill=focus"
+`;
+
+exports[`credits_low email > renders with monthly + topup breakdown 1`] = `
+"Your AI credit balance is running low.
+
+Available: $0.75 ($0.50 monthly — resets May 31 + $0.25 top-up)
+
+AI requests will start failing once you reach $0. You can:
+
+  - Buy credits: https://dashboard.butterbase.ai/billing?topup=open
+  - Enable auto-refill: https://dashboard.butterbase.ai/billing?autoRefill=focus"
+`;
