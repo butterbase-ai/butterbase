@@ -2,6 +2,16 @@
   "name": "@butterbase/sdk",
   "version": "2.3.0",
   "description": "Universal TypeScript SDK for Butterbase",
+  "license": "Apache-2.0",
+  "homepage": "https://butterbase.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NetGPT-Inc/butterbase-oss",
+    "directory": "packages/sdk"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -28,7 +38,7 @@
     "storage"
   ],
   "dependencies": {
-    "@butterbase/shared": "*"
+    "@butterbase/shared": "^0.2.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

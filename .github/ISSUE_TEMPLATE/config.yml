@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/NetGPT-Inc/butterbase-oss/discussions
+    about: Ask questions, share what you're building, or propose ideas.
+  - name: Security report
+    url: https://github.com/NetGPT-Inc/butterbase-oss/security/advisories/new
+    about: Report a vulnerability privately. See SECURITY.md for details.
