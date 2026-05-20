@@ -2,6 +2,10 @@ node_modules
 **/node_modules
 dist
 **/dist
+# Exception: docs ships its astro dist/ into the nginx image; the docs
+# Dockerfile expects it to be present at COPY time.
+!services/docs/dist
+!services/docs/dist/**
 .git
 .env
 *.log
