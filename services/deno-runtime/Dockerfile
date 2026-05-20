@@ -1,5 +1,7 @@
 FROM denoland/deno:alpine
 
+RUN apk add --no-cache curl
+
 WORKDIR /app
 
 # Copy all runtime source files
