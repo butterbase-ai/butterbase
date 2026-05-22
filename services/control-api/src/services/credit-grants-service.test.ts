@@ -15,7 +15,6 @@ describeDb('credit-grants-service', () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: PLATFORM_URL });
-    // Ensure the 'free' plan has known grant values for these tests.
     await pool.query(
       `UPDATE plans SET signup_credit_grant_usd = 2.00, monthly_credit_grant_usd = 0
        WHERE id = $1`,
@@ -35,13 +34,13 @@ describeDb('credit-grants-service', () => {
   });
 
   describe('grantSignupCredits', () => {
-    it('SETs monthly_allowance_usd to the plan signup amount', async () => {
+    it('adds the plan signup amount to credits_usd (topup pool)', async () => {
       const r = await grantSignupCredits(pool, { userId, planId });
       expect(r.granted).toBeCloseTo(2.00, 2);
 
       const u = await pool.query(`SELECT monthly_allowance_usd, credits_usd FROM platform_users WHERE id = $1`, [userId]);
-      expect(parseFloat(u.rows[0].monthly_allowance_usd)).toBeCloseTo(2.00, 2);
-      expect(parseFloat(u.rows[0].credits_usd)).toBeCloseTo(0, 2); // topup pool untouched
+      expect(parseFloat(u.rows[0].credits_usd)).toBeCloseTo(2.00, 2);
+      expect(parseFloat(u.rows[0].monthly_allowance_usd)).toBeCloseTo(0, 2); // monthly pool untouched
 
       const g = await pool.query(`SELECT amount_usd, reason FROM credit_grants WHERE user_id = $1`, [userId]);
       expect(g.rows).toHaveLength(1);
@@ -54,8 +53,8 @@ describeDb('credit-grants-service', () => {
       const second = await grantSignupCredits(pool, { userId, planId });
 
       expect(second.granted).toBe(0);
-      const u = await pool.query(`SELECT monthly_allowance_usd FROM platform_users WHERE id = $1`, [userId]);
-      expect(parseFloat(u.rows[0].monthly_allowance_usd)).toBeCloseTo(2.00, 2);
+      const u = await pool.query(`SELECT credits_usd FROM platform_users WHERE id = $1`, [userId]);
+      expect(parseFloat(u.rows[0].credits_usd)).toBeCloseTo(2.00, 2);
       const g = await pool.query(
         `SELECT count(*)::int AS c FROM credit_grants WHERE user_id = $1 AND reason = 'signup'`,
         [userId]

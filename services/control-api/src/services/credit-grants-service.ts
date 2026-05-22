@@ -21,9 +21,10 @@ export interface CreditGrantRow {
 }
 
 /**
- * SET the user's monthly_allowance_usd to the plan's signup_credit_grant_usd.
- * Idempotent: the partial unique index on credit_grants (user_id) WHERE reason='signup'
- * guarantees at most one signup grant per user.
+ * Add the plan's signup_credit_grant_usd to the user's credits_usd (topup) pool.
+ * The topup pool survives plan upgrades and monthly resets, giving the grant true
+ * lifetime semantics. Idempotent: the partial unique index on credit_grants
+ * (user_id) WHERE reason='signup' guarantees at most one signup grant per user.
  */
 export async function grantSignupCredits(
   pool: pg.Pool,
@@ -60,7 +61,7 @@ export async function grantSignupCredits(
     }
 
     await client.query(
-      `UPDATE platform_users SET monthly_allowance_usd = $1 WHERE id = $2`,
+      `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
       [amount, args.userId]
     );
 
