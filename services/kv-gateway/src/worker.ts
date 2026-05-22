@@ -92,8 +92,8 @@ function resolveTtl(rawTtl: unknown): { ok: true; ttl: number | null } | { ok: f
     // Explicit null → no expiry (persist forever).
     return { ok: true, ttl: null };
   }
-  if (typeof rawTtl !== 'number' || !Number.isInteger(rawTtl) || rawTtl < 0) {
-    return { ok: false, response: err('bad_request', 400, 'ttl must be a non-negative integer or null') };
+  if (typeof rawTtl !== 'number' || !Number.isInteger(rawTtl) || rawTtl <= 0) {
+    return { ok: false, response: err('bad_request', 400, 'ttl must be a positive integer or null') };
   }
   return { ok: true, ttl: rawTtl };
 }
