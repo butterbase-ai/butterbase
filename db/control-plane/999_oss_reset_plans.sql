@@ -30,7 +30,7 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM information_schema.columns
              WHERE table_name='plans' AND column_name='signup_credit_grant_usd') THEN
-    EXECUTE 'UPDATE plans SET signup_credit_grant_usd = 0';
+    EXECUTE 'UPDATE plans SET signup_credit_grant_usd = 1';
   END IF;
   IF EXISTS (SELECT 1 FROM information_schema.columns
              WHERE table_name='plans' AND column_name='monthly_credit_grant_usd') THEN
