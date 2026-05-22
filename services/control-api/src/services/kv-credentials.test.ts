@@ -140,4 +140,19 @@ describeDb('KvCredentialsService', () => {
     expect(after.redis_password).not.toBe(before.redis_password);
     expect(after.rotated_at.getTime()).toBeGreaterThan(before.rotated_at.getTime());
   });
+
+  it('provisions also mints a kv_function_key (48+ hex chars, distinct from redis_password)', async () => {
+    const app = await createTestApp('us');
+    const cred = await svc.provision(app.id, 'us');
+    expect(cred.kv_function_key).toMatch(/^[a-f0-9]{48,}$/);
+    expect(cred.kv_function_key).not.toBe(cred.redis_password);
+  });
+
+  it('rotate preserves kv_function_key by default', async () => {
+    const app = await createTestApp('us');
+    const before = await svc.provision(app.id, 'us');
+    const after = await svc.rotate(app.id);
+    expect(after.kv_function_key).toBe(before.kv_function_key);
+    expect(after.redis_password).not.toBe(before.redis_password);
+  });
 });

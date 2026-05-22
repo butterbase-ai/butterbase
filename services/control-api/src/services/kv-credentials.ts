@@ -7,6 +7,7 @@ export interface KvCredential {
   app_id: string;
   region: string;
   redis_password: string;
+  kv_function_key: string;
   created_at: Date;
   rotated_at: Date;
 }
@@ -18,17 +19,18 @@ export class KvCredentialsService {
 
   async provision(appId: string, region: string): Promise<KvCredential> {
     const password = randomBytes(KV_PASSWORD_BYTES).toString('hex');
+    const functionKey = randomBytes(KV_PASSWORD_BYTES).toString('hex');
     const ins = await this.db.query<KvCredential>(
-      `INSERT INTO app_kv_credentials (app_id, region, redis_password)
-       VALUES ($1, $2, $3)
+      `INSERT INTO app_kv_credentials (app_id, region, redis_password, kv_function_key)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (app_id) DO NOTHING
        RETURNING *`,
-      [appId, region, password],
+      [appId, region, password, functionKey],
     );
     if (ins.rows.length > 0) return ins.rows[0];
     // Conflict — credential already exists; return the existing row unchanged.
-    // The newly-generated `password` is intentionally discarded so the Redis password
-    // stays stable across retried provisioning attempts. To change the password, use `rotate()`.
+    // The newly-generated `password` and `functionKey` are intentionally discarded so the credentials
+    // stay stable across retried provisioning attempts. To change the password, use `rotate()`.
     const sel = await this.db.query<KvCredential>(
       `SELECT * FROM app_kv_credentials WHERE app_id = $1`,
       [appId],
