@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import internalAuthPlugin from '../../plugins/internal-auth.js';
 import kvCredentialsRoutes from './kv-credentials.js';
 import { KvCredentialsService } from '../../services/kv-credentials.js';
+import { ApiKeyService } from '../../services/api-key-service.js';
 
 const PLATFORM_URL =
   process.env.NEON_PLATFORM_PRIMARY_URL ??
@@ -145,5 +146,56 @@ describeDb('POST /v1/internal/kv/credentials/:app_id/rotate', () => {
     expect(body.redis_password).not.toBe(before.redis_password);
     expect(typeof body.rotated_at).toBe('string');
     expect(new Date(body.rotated_at).getTime()).toBeGreaterThan(before.rotated_at.getTime());
+  });
+});
+
+describeDb('POST /v1/internal/kv/resolve-key', () => {
+  it('returns app_id + region + redis_password for a valid API key', async () => {
+    // Provision a KV credential for the test app
+    await svc.provision(testAppId, 'us');
+
+    // Generate an API key for the test user (plaintext returned once)
+    const { key: plainKey } = await ApiKeyService.generateApiKey(
+      pool,
+      testUserId,
+      'kv-resolve-test-key',
+    );
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/internal/kv/resolve-key',
+      headers: {
+        'x-butterbase-internal-secret': 'test-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: plainKey }),
+    });
+
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.app_id).toBe(testAppId);
+    expect(body.region).toBe('us');
+    expect(typeof body.redis_password).toBe('string');
+    expect(body.redis_password.length).toBeGreaterThan(0);
+
+    // Clean up the generated key
+    await pool.query(`DELETE FROM api_keys WHERE name = 'kv-resolve-test-key' AND user_id = $1`, [
+      testUserId,
+    ]);
+  });
+
+  it('returns 404 for an unknown API key', async () => {
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/internal/kv/resolve-key',
+      headers: {
+        'x-butterbase-internal-secret': 'test-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: 'bb_live_does_not_exist' }),
+    });
+
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error).toBe('invalid_key');
   });
 });
