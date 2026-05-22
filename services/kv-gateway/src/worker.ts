@@ -81,6 +81,13 @@ async function withRedis<T>(
   }
 }
 
+// Sidecar key for touch-on-read TTL capture. Uses the same hash-tag scheme as userKey
+// ({appId}) so both keys land in the same hash slot. The _ttl: namespace is reserved
+// (isValidUserKey rejects keys starting with '_'), so no user key can collide.
+function sidecarTtlKey(appId: string, userKeyValue: string): string {
+  return `{${appId}}:_ttl:${userKeyValue}`;
+}
+
 // Resolve and validate the ttl field from a PUT/setnx body.
 // Returns { ok: true, ttl: number | null } or { ok: false, response: Response }.
 function resolveTtl(rawTtl: unknown): { ok: true; ttl: number | null } | { ok: false; response: Response } {
@@ -266,13 +273,47 @@ export default {
     // ── base CRUD ──────────────────────────────────────────────────────────────
 
     if (req.method === 'GET') {
+      const touch = url.searchParams.get('touch') === 'true';
+
       // Durable-first fanout: try DB 0, then DB 1 on miss.
-      // Two connections are opened only on a miss; the common path (key in DB 0) is single-connection.
-      let v: string | null = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fullKey));
+      // Track which DB the value came from so touch can gate on durable-only.
+      let foundIn: number | null = null;
+      let v: string | null = null;
+      await withRedis(baseOpts, DURABLE_DB, async (c) => {
+        v = await c.get(fullKey);
+        if (v !== null) foundIn = DURABLE_DB;
+      });
       if (v === null) {
-        v = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.get(fullKey));
+        await withRedis(baseOpts, EPHEMERAL_DB, async (c) => {
+          v = await c.get(fullKey);
+          if (v !== null) foundIn = EPHEMERAL_DB;
+        });
       }
       if (v === null) return err('not_found', 404);
+
+      // Touch-on-read: only for durable hits. Ephemeral keys are allowed to expire.
+      if (touch && foundIn === DURABLE_DB) {
+        try {
+          await withRedis(baseOpts, DURABLE_DB, async (c) => {
+            const sidecarKey = sidecarTtlKey(resolved.appId, key!);
+            const stored = await c.get(sidecarKey);
+            let originalTtl: number | null = stored !== null ? Number(stored) : null;
+            if (originalTtl === null) {
+              const cur = await c.ttl(fullKey);
+              if (cur > 0) {
+                originalTtl = cur;
+                await c.setex(sidecarKey, cur * 2, String(cur));
+              }
+            }
+            if (originalTtl !== null && originalTtl > 0) {
+              await c.expire(fullKey, originalTtl);
+            }
+          });
+        } catch (e) {
+          console.warn('[kv-gateway] touch failed (swallowed):', (e as any)?.message ?? e);
+        }
+      }
+
       return json({ value: JSON.parse(v) });
     }
 

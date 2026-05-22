@@ -48,6 +48,29 @@ describe('ctx.kv (shim)', () => {
     expect(await kv.del('missing')).toBe(0);
   });
 
+  it('get with touch:true appends ?touch=true to the URL', async () => {
+    let capturedUrl: string | undefined;
+    const f = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      capturedUrl = String(url);
+      return new Response(JSON.stringify({ value: 'hit' }), { status: 200 });
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: 'https://kv.butterbase.dev', fetch: f as any });
+    const result = await kv.get('mykey', { touch: true });
+    expect(result).toBe('hit');
+    expect(capturedUrl).toBe('https://kv.butterbase.dev/v1/app_a/kv/mykey?touch=true');
+  });
+
+  it('get without touch option does not append ?touch=true', async () => {
+    let capturedUrl: string | undefined;
+    const f = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      capturedUrl = String(url);
+      return new Response(JSON.stringify({ value: 'hit' }), { status: 200 });
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: 'https://kv.butterbase.dev', fetch: f as any });
+    await kv.get('mykey');
+    expect(capturedUrl).toBe('https://kv.butterbase.dev/v1/app_a/kv/mykey');
+  });
+
   it('throws KvKeyInvalidError on 400', async () => {
     const f = mkFetch({ 'GET https://kv.butterbase.dev/v1/app_a/kv/bad': { status: 400, body: JSON.stringify({ error: 'KV_KEY_INVALID', message: 'bad' }) } });
     const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: 'https://kv.butterbase.dev', fetch: f as any });

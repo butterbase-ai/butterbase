@@ -472,6 +472,170 @@ describe('kv-gateway worker', () => {
     });
   });
 
+  // ── touch-on-read (Task 9) ──────────────────────────────────────────────────
+
+  describe('touch-on-read (?touch=true)', () => {
+    function touchReq(key: string) {
+      return new Request(`http://gw/v1/app_touch/kv/${key}?touch=true`, {
+        method: 'GET',
+        headers: { authorization: 'Bearer bb_live_x' },
+      });
+    }
+
+    const touchOpts = { host: 'localhost', port: 6390, password: 'butterbase_dev_kv' };
+
+    // Helper: flush both DBs between sub-tests to avoid cross-contamination.
+    async function flushBoth() {
+      const c0 = await RedisClient.connect({ ...touchOpts, db: 0 });
+      await c0.flushTestDb();
+      await c0.close();
+      const c1 = await RedisClient.connect({ ...touchOpts, db: 1 });
+      await c1.flushTestDb();
+      await c1.close();
+    }
+
+    it('touch extends a near-expired TTL (durable key)', async () => {
+      await flushBoth();
+      mockResolveOk('app_touch');
+      // PUT with a 60s TTL.
+      await worker.fetch(req('PUT', '/v1/app_touch/kv/near-expired', { value: 'v', ttl: 60 }), env);
+
+      // Plant the sidecar manually (simulating a prior touch that captured originalTtl=60).
+      const c0pre = await RedisClient.connect({ ...touchOpts, db: 0 });
+      await c0pre.setex('{app_touch}:_ttl:near-expired', 120, '60');
+
+      // Now lower the live key TTL to 2s to simulate near-expiry.
+      await c0pre.expire('{app_touch}:u:near-expired', 2);
+      const ttlBefore = await c0pre.ttl('{app_touch}:u:near-expired');
+      await c0pre.close();
+      expect(ttlBefore).toBeGreaterThan(0);
+      expect(ttlBefore).toBeLessThanOrEqual(2);
+
+      // Touch via GET — should restore TTL from sidecar (60s).
+      mockResolveOk('app_touch');
+      const res = await worker.fetch(touchReq('near-expired'), env);
+      expect(res.status).toBe(200);
+
+      // TTL should now be restored to ~60s (much higher than the 2s before touch).
+      const c0After = await RedisClient.connect({ ...touchOpts, db: 0 });
+      const ttlAfter = await c0After.ttl('{app_touch}:u:near-expired');
+      await c0After.close();
+      expect(ttlAfter).toBeGreaterThan(ttlBefore); // definitely extended
+      expect(ttlAfter).toBeGreaterThanOrEqual(55); // close to original 60s
+      expect(ttlAfter).toBeLessThanOrEqual(60);
+    });
+
+    it('touch creates the sidecar on first touch', async () => {
+      await flushBoth();
+      mockResolveOk('app_touch');
+      await worker.fetch(req('PUT', '/v1/app_touch/kv/sidecar-first', { value: 'v', ttl: 60 }), env);
+
+      // Confirm no sidecar yet.
+      const c0pre = await RedisClient.connect({ ...touchOpts, db: 0 });
+      const preSidecar = await c0pre.get('{app_touch}:_ttl:sidecar-first');
+      await c0pre.close();
+      expect(preSidecar).toBeNull();
+
+      // Touch.
+      mockResolveOk('app_touch');
+      await worker.fetch(touchReq('sidecar-first'), env);
+
+      // Sidecar should now exist and hold the original TTL as a stringified number.
+      const c0post = await RedisClient.connect({ ...touchOpts, db: 0 });
+      const postSidecar = await c0post.get('{app_touch}:_ttl:sidecar-first');
+      await c0post.close();
+      expect(postSidecar).not.toBeNull();
+      const storedTtl = Number(postSidecar!);
+      expect(Number.isFinite(storedTtl)).toBe(true);
+      expect(storedTtl).toBeGreaterThan(0);
+      expect(storedTtl).toBeLessThanOrEqual(60);
+    });
+
+    it('touch reuses the sidecar on subsequent touches (does not overwrite)', async () => {
+      await flushBoth();
+      mockResolveOk('app_touch');
+      await worker.fetch(req('PUT', '/v1/app_touch/kv/sidecar-reuse', { value: 'v', ttl: 60 }), env);
+
+      // Manually plant a sentinel sidecar to verify it isn't overwritten.
+      const sentinelTtl = '9999';
+      const c0 = await RedisClient.connect({ ...touchOpts, db: 0 });
+      await c0.setex('{app_touch}:_ttl:sidecar-reuse', 120, sentinelTtl);
+      await c0.close();
+
+      // Touch — should reuse the sentinel.
+      mockResolveOk('app_touch');
+      await worker.fetch(touchReq('sidecar-reuse'), env);
+
+      const c0post = await RedisClient.connect({ ...touchOpts, db: 0 });
+      const postSidecar = await c0post.get('{app_touch}:_ttl:sidecar-reuse');
+      await c0post.close();
+      expect(postSidecar).toBe(sentinelTtl);
+    });
+
+    it('touch on a ttl:null key is a no-op (no sidecar, TTL stays -1)', async () => {
+      await flushBoth();
+      mockResolveOk('app_touch');
+      await worker.fetch(req('PUT', '/v1/app_touch/kv/no-expiry', { value: 'v', ttl: null }), env);
+
+      mockResolveOk('app_touch');
+      const res = await worker.fetch(touchReq('no-expiry'), env);
+      expect(res.status).toBe(200);
+
+      const c0 = await RedisClient.connect({ ...touchOpts, db: 0 });
+      const ttl = await c0.ttl('{app_touch}:u:no-expiry');
+      const sidecar = await c0.get('{app_touch}:_ttl:no-expiry');
+      await c0.close();
+      expect(ttl).toBe(-1); // still no expiry
+      expect(sidecar).toBeNull(); // no sidecar created
+    });
+
+    it('touch on a missing key returns 404 and creates no sidecar', async () => {
+      await flushBoth();
+      mockResolveOk('app_touch');
+      const res = await worker.fetch(touchReq('totally-missing'), env);
+      expect(res.status).toBe(404);
+
+      const c0 = await RedisClient.connect({ ...touchOpts, db: 0 });
+      const sidecar = await c0.get('{app_touch}:_ttl:totally-missing');
+      await c0.close();
+      expect(sidecar).toBeNull();
+    });
+
+    it('touch on an ephemeral-only key: value returned 200, no sidecar, ephemeral TTL unchanged', async () => {
+      await flushBoth();
+      mockResolveOk('app_touch');
+      await worker.fetch(
+        req('PUT', '/v1/app_touch/kv/eph-touch', { value: 'ev', ephemeral: true, ttl: 60 }),
+        env,
+      );
+
+      // Record the ephemeral TTL before touch.
+      const c1pre = await RedisClient.connect({ ...touchOpts, db: 1 });
+      const ttlBefore = await c1pre.ttl('{app_touch}:u:eph-touch');
+      await c1pre.close();
+      expect(ttlBefore).toBeGreaterThan(0);
+
+      // Touch — fanout will find it in db 1.
+      mockResolveOk('app_touch');
+      const res = await worker.fetch(touchReq('eph-touch'), env);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ value: 'ev' });
+
+      // No sidecar in db 0.
+      const c0 = await RedisClient.connect({ ...touchOpts, db: 0 });
+      const sidecar = await c0.get('{app_touch}:_ttl:eph-touch');
+      await c0.close();
+      expect(sidecar).toBeNull();
+
+      // Ephemeral key TTL in db 1 has NOT been refreshed beyond original.
+      const c1post = await RedisClient.connect({ ...touchOpts, db: 1 });
+      const ttlAfter = await c1post.ttl('{app_touch}:u:eph-touch');
+      await c1post.close();
+      expect(ttlAfter).toBeGreaterThan(0);
+      expect(ttlAfter).toBeLessThanOrEqual(60); // never extended past original
+    });
+  });
+
   // ── _batch ───────────────────────────────────────────────────────────────────
 
   describe('_batch', () => {
@@ -634,6 +798,21 @@ describe('kv-gateway worker', () => {
       const res = await worker.fetch(req('GET', '/v1/app_test/kv/durable-regression'), env);
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ value: 'durable' });
+    });
+
+    it('GET fanout still works when touch=false (regression)', async () => {
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/touch-regression', { value: 'rval' }), env);
+      mockResolveOk('app_test');
+      const res = await worker.fetch(
+        new Request('http://gw/v1/app_test/kv/touch-regression?touch=false', {
+          method: 'GET',
+          headers: { authorization: 'Bearer bb_live_x' },
+        }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ value: 'rval' });
     });
 
     it('DELETE removes key from both DBs', async () => {

@@ -4,7 +4,7 @@ import {
 } from './errors/kv.js';
 
 export interface KvShim {
-  get<T = unknown>(key: string): Promise<T | null>;
+  get<T = unknown>(key: string, opts?: { touch?: boolean }): Promise<T | null>;
   set(key: string, value: unknown): Promise<void>;
   del(key: string): Promise<number>;
 }
@@ -42,8 +42,9 @@ export function makeKv(opts: MakeKvOptions): KvShim {
   }
 
   return {
-    async get<T>(key: string): Promise<T | null> {
-      const res = await call('GET', key);
+    async get<T>(key: string, opts?: { touch?: boolean }): Promise<T | null> {
+      const path = opts?.touch === true ? `${key}?touch=true` : key;
+      const res = await call('GET', path);
       if (res.status === 404) return null;
       if (!res.ok) throwForStatus(res, await res.json().catch(() => null));
       return (await res.json() as { value: T }).value;
