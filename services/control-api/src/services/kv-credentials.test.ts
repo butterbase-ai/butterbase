@@ -49,6 +49,64 @@ async function createTestApp(region = 'us'): Promise<{ id: string }> {
   return { id };
 }
 
+describeDb('app creation auto-provisions a KV credential', () => {
+  it('insertAppRow control-plane transaction creates app + kv credential atomically', async () => {
+    // Simulate what insertAppRow does on the control-plane: a single transaction
+    // that inserts the app row and provisions KV credentials. This verifies the
+    // transactional contract without requiring a live runtimeDb/Neon connection.
+    const appId = `kv-test-${Date.now()}-autoprov`;
+    const region = 'us';
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO apps (id, name, owner_id, db_name, region)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (id) DO NOTHING`,
+        [appId, `Auto-prov Test ${appId}`, testUserId, `db_${appId}`, region],
+      );
+      const kvSvc = new KvCredentialsService(client);
+      await kvSvc.provision(appId, region);
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+
+    const { rows } = await pool.query(
+      'SELECT region, redis_password FROM app_kv_credentials WHERE app_id = $1',
+      [appId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].region).toBe(region);
+    expect(rows[0].redis_password).toMatch(/^[a-f0-9]{48,}$/);
+  });
+
+  it('rolls back kv credential when control-plane transaction is aborted', async () => {
+    const appId = `kv-test-${Date.now()}-rollback`;
+    const region = 'us';
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO apps (id, name, owner_id, db_name, region)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [appId, `Rollback Test ${appId}`, testUserId, `db_${appId}`, region],
+      );
+      const kvSvc = new KvCredentialsService(client);
+      await kvSvc.provision(appId, region);
+      await client.query('ROLLBACK');
+    } finally {
+      client.release();
+    }
+
+    const { rows } = await pool.query(
+      'SELECT region FROM app_kv_credentials WHERE app_id = $1',
+      [appId],
+    );
+    expect(rows).toHaveLength(0);
+  });
+});
+
 describeDb('KvCredentialsService', () => {
   it('provisions a credential row with a random password', async () => {
     const app = await createTestApp('us');

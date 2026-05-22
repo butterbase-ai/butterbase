@@ -12,6 +12,7 @@ import {
 } from '@butterbase/shared';
 import type { App, InitResponse } from '@butterbase/shared';
 import { notifyProvisioningFailed } from './failure-notifications.service.js';
+import { KvCredentialsService } from './kv-credentials.js';
 
 const generateId = customAlphabet(APP_ID_ALPHABET, APP_ID_LENGTH);
 
@@ -52,8 +53,10 @@ export async function runMigrationsWithRetry(connectionString: string, maxAttemp
 }
 
 /**
- * Insert the app row into the runtime DB. Returns immediately.
- * If an app with the same name+owner already exists, returns it (idempotency).
+ * Insert the app row into the runtime DB and atomically register the app
+ * in the control-plane (for cross-region lookups and KV credential FK).
+ * Returns immediately. If an app with the same name+owner already exists,
+ * returns it (idempotency).
  */
 export async function insertAppRow(
   region: string,
@@ -88,6 +91,30 @@ export async function insertAppRow(
      VALUES ($1, $2, $3, $4, false, 'provisioning', $5, $6)`,
     [appId, name, ownerId, dbName, region, config.deployment.defaultBackend]
   );
+
+  // Atomically register the app in the control-plane and provision KV credentials.
+  // Both writes are in a single controlDb transaction so they succeed or fail together.
+  // The control-plane apps row satisfies the FK required by app_kv_credentials.
+  const client = await controlDb.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO apps (id, name, owner_id, db_name, region)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO NOTHING`,
+      [appId, name, ownerId, dbName, region],
+    );
+    const kvSvc = new KvCredentialsService(client);
+    await kvSvc.provision(appId, region);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    // Roll back the runtime DB insert as well to keep both DBs consistent
+    await runtimeDb.query('DELETE FROM apps WHERE id = $1', [appId]).catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 
   const { rows } = await runtimeDb.query<App>('SELECT * FROM apps WHERE id = $1', [appId]);
   return { app: rows[0], isExisting: false };
