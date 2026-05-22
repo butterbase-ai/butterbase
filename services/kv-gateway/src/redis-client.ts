@@ -174,6 +174,7 @@ export class RedisClient {
   }
 
   async del(keys: string[]): Promise<number> {
+    if (keys.length === 0) return 0;
     const r = await this.send(['DEL', ...keys]);
     if (r instanceof Error) throw r;
     return Number(r);
@@ -229,6 +230,7 @@ export class RedisClient {
   }
 
   async mget(keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) return [];
     const r = await this.send(['MGET', ...keys]);
     if (r instanceof Error) throw r;
     if (!Array.isArray(r)) throw new Error('unexpected MGET reply');
@@ -240,6 +242,7 @@ export class RedisClient {
   }
 
   async mset(pairs: Array<[string, string]>): Promise<void> {
+    if (pairs.length === 0) return;
     const flat: string[] = ['MSET'];
     for (const [k, v] of pairs) {
       flat.push(k, v);
@@ -260,6 +263,7 @@ export class RedisClient {
     value: string,
     opts: { ex?: number; nx?: boolean; xx?: boolean },
   ): Promise<boolean> {
+    if (opts.nx && opts.xx) throw new Error('setWithOptions: nx and xx are mutually exclusive');
     const cmd = ['SET', key, value];
     if (opts.ex !== undefined) cmd.push('EX', String(opts.ex));
     if (opts.nx) cmd.push('NX');
