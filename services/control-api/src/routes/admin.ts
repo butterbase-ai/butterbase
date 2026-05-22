@@ -138,7 +138,7 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!(await checkAdmin(request, reply))) return;
 
     const q = request.query as {
-      search?: string; plan?: string; status?: string; has_apps?: string;
+      search?: string; plan?: string; status?: string; sub_status?: string; has_apps?: string;
       joined_after?: string; joined_before?: string; has_stripe?: string;
       min_spend?: string; max_spend?: string; min_apps?: string; max_apps?: string;
       sort_by?: string; sort_dir?: string; limit?: string; offset?: string;
@@ -175,6 +175,21 @@ export async function adminRoutes(app: FastifyInstance) {
     if (q.status) {
       controlConditions.push(`pu.account_status = $${cidx++}`);
       controlParams.push(q.status);
+    }
+    if (q.sub_status) {
+      // Subscription status (Stripe-side: active / past_due / canceled / trialing / unpaid /
+      // incomplete). EXISTS-filter on the most recent row per user — Stripe can leave behind
+      // multiple sub rows after upgrades/downgrades, so we filter on the latest.
+      controlConditions.push(
+        `EXISTS (
+           SELECT 1 FROM subscriptions s
+           WHERE s.user_id = pu.id
+             AND s.status = $${cidx}
+             AND s.created_at = (SELECT max(s2.created_at) FROM subscriptions s2 WHERE s2.user_id = pu.id)
+         )`
+      );
+      controlParams.push(q.sub_status);
+      cidx++;
     }
 
     const isValidDate = (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(new Date(v).getTime());
