@@ -112,6 +112,10 @@ export default {
             const v = await client.get(fk);
             results.push({ value: v === null ? null : JSON.parse(v) });
           } else if (op.op === 'set') {
+            if (!('value' in op)) {
+              results.push({ error: 'missing value' });
+              continue;
+            }
             await client.set(fk, JSON.stringify(op.value));
             results.push({ ok: true });
           } else if (op.op === 'del') {

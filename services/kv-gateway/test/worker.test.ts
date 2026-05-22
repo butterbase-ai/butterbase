@@ -433,5 +433,25 @@ describe('kv-gateway worker', () => {
       const res = await worker.fetch(req('GET', '/v1/app_test/kv/_batch'), env);
       expect(res.status).toBe(405);
     });
+
+    it('set without value returns error and does not write to Redis', async () => {
+      mockResolveOk('app_test');
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/_batch', {
+          ops: [
+            { op: 'set', key: 'batch-no-value' },  // missing value
+          ],
+        }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json() as { results: unknown[] };
+      expect(body.results[0]).toEqual({ error: 'missing value' });
+
+      // Verify the key was not written to Redis
+      mockResolveOk('app_test');
+      const get = await worker.fetch(req('GET', '/v1/app_test/kv/batch-no-value'), env);
+      expect(get.status).toBe(404);
+    });
   });
 });
