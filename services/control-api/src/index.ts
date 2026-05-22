@@ -617,6 +617,39 @@ Promise.resolve(app.ready())
             ).catch((err) => {
               app.log.error({ err }, 'Failed to clean up old webhook events');
             });
+
+            // Retention pruning. Tables live in control-plane (legacy/admin writes)
+            // and per-region runtime DBs (auth + per-app writes), so prune both.
+            const retentionDeletes: Array<{ sql: string; label: string }> = [
+              { sql: `DELETE FROM function_invocations WHERE started_at < now() - interval '7 days'`, label: 'function_invocations' },
+              { sql: `DELETE FROM audit_events WHERE created_at < now() - interval '180 days'`, label: 'audit_events' },
+            ];
+            for (const { sql, label } of retentionDeletes) {
+              await app.controlDb.query(sql).catch((err) => {
+                app.log.error({ err, table: label, scope: 'control-plane' }, 'Retention prune failed');
+              });
+            }
+
+            const runtimeDeletes: Array<{ sql: string; label: string }> = [
+              ...retentionDeletes,
+              { sql: `DELETE FROM agent_run_events WHERE created_at < now() - interval '30 days'`, label: 'agent_run_events' },
+              { sql: `DELETE FROM agent_tool_audits WHERE created_at < now() - interval '30 days'`, label: 'agent_tool_audits' },
+            ];
+            for (const region of listRuntimeRegions()) {
+              const pool = (() => {
+                try { return runtimePoolFor(region); }
+                catch (err) {
+                  app.log.error({ err, region }, 'Retention prune: missing runtime pool for region');
+                  return null;
+                }
+              })();
+              if (!pool) continue;
+              for (const { sql, label } of runtimeDeletes) {
+                await pool.query(sql).catch((err) => {
+                  app.log.error({ err, table: label, region, scope: 'runtime-plane' }, 'Retention prune failed');
+                });
+              }
+            }
           } finally {
             await redis.del('lock:nightly-billing').catch(() => {});
           }
