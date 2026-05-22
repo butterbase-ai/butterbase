@@ -87,6 +87,7 @@ import { partnerPoolsAdminRoutes } from './routes/partner-pools-admin.js';
 import stateOutboxRoutes from './routes/admin/state-outbox.js';
 import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
+import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
 import quotaStateRoutes from './routes/admin/quota-state.js';
 import regionStateRoutes from './routes/admin/region-state.js';
 import activeMigrationsRoutes from './routes/admin/active-migrations.js';
@@ -420,6 +421,7 @@ try {
 }
 
 app.register(internalLeaseRoutes);
+app.register(kvCredentialsRoutes);
 app.register(stateOutboxRoutes);
 app.register(appIndexReaperRoutes);
 app.register(quotaStateRoutes);
