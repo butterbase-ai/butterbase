@@ -159,7 +159,12 @@ export async function adminRoutes(app: FastifyInstance) {
     let cidx = 1;
 
     if (q.search) {
-      controlConditions.push(`(pu.email ILIKE $${cidx} OR pu.display_name ILIKE $${cidx})`);
+      // Match against email, display_name, OR user id (UUID-as-text). The
+      // admin UI uses one search box for all three so operators can paste
+      // a user id from logs/Stripe metadata without switching context.
+      controlConditions.push(
+        `(pu.email ILIKE $${cidx} OR pu.display_name ILIKE $${cidx} OR pu.id::text ILIKE $${cidx})`
+      );
       controlParams.push(`%${q.search}%`);
       cidx++;
     }
