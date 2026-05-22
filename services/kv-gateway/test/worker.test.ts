@@ -126,6 +126,13 @@ describe('kv-gateway worker', () => {
       const res = await worker.fetch(req('GET', '/v1/app_test/kv/counter-incr/incr'), env);
       expect(res.status).toBe(405);
     });
+
+    it('rejects non-integer by with 400 bad_request', async () => {
+      mockResolveOk('app_test');
+      const res = await worker.fetch(req('POST', '/v1/app_test/kv/counter-incr/incr', { by: 1.5 }), env);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: 'bad_request', message: 'by must be an integer' });
+    });
   });
 
   // ── decr ────────────────────────────────────────────────────────────────────
@@ -151,6 +158,13 @@ describe('kv-gateway worker', () => {
       mockResolveOk('app_test');
       const res = await worker.fetch(req('GET', '/v1/app_test/kv/counter-decr/decr'), env);
       expect(res.status).toBe(405);
+    });
+
+    it('rejects non-integer by with 400 bad_request', async () => {
+      mockResolveOk('app_test');
+      const res = await worker.fetch(req('POST', '/v1/app_test/kv/counter-decr/decr', { by: 1.5 }), env);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: 'bad_request', message: 'by must be an integer' });
     });
   });
 
@@ -298,6 +312,26 @@ describe('kv-gateway worker', () => {
       mockResolveOk('app_test');
       const res = await worker.fetch(req('GET', '/v1/app_test/kv/expire-key/expire'), env);
       expect(res.status).toBe(405);
+    });
+
+    it('rejects negative ttl with 400 bad_request', async () => {
+      mockResolveOk('app_test');
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/expire-key/expire', { ttl: -1 }),
+        env,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: 'bad_request', message: 'ttl must be a non-negative integer or null' });
+    });
+
+    it('rejects non-integer ttl with 400 bad_request', async () => {
+      mockResolveOk('app_test');
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/expire-key/expire', { ttl: 60.5 }),
+        env,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: 'bad_request', message: 'ttl must be a non-negative integer or null' });
     });
   });
 

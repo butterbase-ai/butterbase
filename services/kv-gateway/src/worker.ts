@@ -108,19 +108,23 @@ export default {
             continue;
           }
           const fk = userKey(resolved.appId, op.key);
-          if (op.op === 'get') {
-            const v = await client.get(fk);
-            results.push({ value: v === null ? null : JSON.parse(v) });
-          } else if (op.op === 'set') {
-            if (!('value' in op)) {
-              results.push({ error: 'missing value' });
-              continue;
+          try {
+            if (op.op === 'get') {
+              const v = await client.get(fk);
+              results.push({ value: v === null ? null : JSON.parse(v) });
+            } else if (op.op === 'set') {
+              if (!('value' in op)) {
+                results.push({ error: 'missing value' });
+                continue;
+              }
+              await client.set(fk, JSON.stringify(op.value));
+              results.push({ ok: true });
+            } else if (op.op === 'del') {
+              const count = await client.del([fk]);
+              results.push({ deleted: count });
             }
-            await client.set(fk, JSON.stringify(op.value));
-            results.push({ ok: true });
-          } else if (op.op === 'del') {
-            const count = await client.del([fk]);
-            results.push({ deleted: count });
+          } catch (e) {
+            results.push({ error: 'redis_error', message: (e as any)?.message ?? 'unknown error' });
           }
         }
         return json({ results });
@@ -134,6 +138,7 @@ export default {
         if (req.method !== 'POST') return err('method_not_allowed', 405);
         const body = (await req.json().catch(() => ({}))) as { by?: number };
         const by = typeof body.by === 'number' ? body.by : 1;
+        if (!Number.isInteger(by)) return err('bad_request', 400, 'by must be an integer');
         const value = await client.incrBy(fullKey, by);
         return json({ value });
       }
@@ -142,6 +147,7 @@ export default {
         if (req.method !== 'POST') return err('method_not_allowed', 405);
         const body = (await req.json().catch(() => ({}))) as { by?: number };
         const by = typeof body.by === 'number' ? body.by : 1;
+        if (!Number.isInteger(by)) return err('bad_request', 400, 'by must be an integer');
         const value = await client.decrBy(fullKey, by);
         return json({ value });
       }
@@ -169,7 +175,11 @@ export default {
         if (req.method !== 'POST') return err('method_not_allowed', 405);
         const body = (await req.json()) as { ttl: number | null };
         if (!('ttl' in body)) return err('bad_request', 400, 'missing ttl');
-        const ok = await client.expire(fullKey, body.ttl);
+        const ttl = body.ttl;
+        if (ttl !== null && (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 0)) {
+          return err('bad_request', 400, 'ttl must be a non-negative integer or null');
+        }
+        const ok = await client.expire(fullKey, ttl);
         return json({ ok });
       }
 
