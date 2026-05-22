@@ -499,20 +499,19 @@ function buildWorkerCode(
       // If it is not set, ctx.kv is undefined and function code that tries to use it will receive
       // a clear TypeError ("Cannot read properties of undefined") rather than a silent failure.
       // The gateway address for local development is http://kv-gateway:8787 (Task 14 wires that up).
-      ${Deno.env.get("KV_GATEWAY_URL") ? `
+      ${(() => {
+        const __fnKey = metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY
+          ?? metadata.env_vars?.BUTTERBASE_SERVICE_KEY
+          ?? Deno.env.get('BUTTERBASE_FUNCTION_SERVICE_KEY')
+          ?? '';
+        if (!__fnKey && Deno.env.get('KV_GATEWAY_URL')) {
+          console.warn(`[kv] no BUTTERBASE_FUNCTION_SERVICE_KEY for app=${metadata.app_id}; ctx.kv calls will fail with auth error`);
+        }
+        return '';
+      })()}${Deno.env.get("KV_GATEWAY_URL") ? `
       kv: (() => {
         const __kvBase = ${JSON.stringify(Deno.env.get("KV_GATEWAY_URL"))};
         const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
-        ${(() => {
-          const __fnKey = metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY
-            ?? metadata.env_vars?.BUTTERBASE_SERVICE_KEY
-            ?? Deno.env.get('BUTTERBASE_FUNCTION_SERVICE_KEY')
-            ?? '';
-          if (!__fnKey && Deno.env.get('KV_GATEWAY_URL')) {
-            console.warn(`[kv] no BUTTERBASE_FUNCTION_SERVICE_KEY for app=${metadata.app_id}; ctx.kv calls will fail with auth error`);
-          }
-          return '';
-        })()}
         const __kvHeaders = {
           authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
           "content-type": "application/json",

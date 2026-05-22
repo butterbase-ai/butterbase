@@ -52,7 +52,7 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
       );
 
       if (rows.length === 0) {
-        // Fallback: per-app function key (auto-injected into deno-runtime).
+        // Fallback: per-app function key (auto-injected into deno-runtime), stored unhashed (internal credential, not user-supplied API key).
         const fk = await fastify.controlDb.query<{
           app_id: string;
           region: string;
