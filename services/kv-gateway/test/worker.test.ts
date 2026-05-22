@@ -27,11 +27,17 @@ function mockResolveOk(appId: string, region: 'us' | 'eu' = 'us') {
   }) as any;
 }
 
+// Direct Redis connection helpers for test verification.
+const redisBaseOpts = { host: 'localhost', port: 6390, password: 'butterbase_dev_kv' };
+
 beforeAll(async () => {
-  // Clear test keys before suite to keep tests reproducible.
-  const c = await RedisClient.connect({ host: 'localhost', port: 6390, password: 'butterbase_dev_kv' });
-  await c.flushTestDb();   // FLUSHDB on db 0 — be aware this clears the WHOLE db; OK for local dev.
-  await c.close();
+  // Clear BOTH DBs before suite to keep tests reproducible.
+  const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+  await c0.flushTestDb();
+  await c0.close();
+  const c1 = await RedisClient.connect({ ...redisBaseOpts, db: 1 });
+  await c1.flushTestDb();
+  await c1.close();
 });
 
 afterAll(() => { globalThis.fetch = origFetch; });
@@ -201,6 +207,44 @@ describe('kv-gateway worker', () => {
       const res = await worker.fetch(req('GET', '/v1/app_test/kv/setnx-key/setnx'), env);
       expect(res.status).toBe(405);
     });
+
+    it('setnx with ephemeral:true lands in db 1', async () => {
+      mockResolveOk('app_test');
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/setnx-ephemeral/setnx', { value: 'eph', ephemeral: true }),
+        env,
+      );
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ wrote: true });
+
+      // Verify it is in db 1, not in db 0.
+      const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const inDb0 = await c0.get('{app_test}:u:setnx-ephemeral');
+      await c0.close();
+      expect(inDb0).toBeNull();
+
+      const c1 = await RedisClient.connect({ ...redisBaseOpts, db: 1 });
+      const inDb1 = await c1.get('{app_test}:u:setnx-ephemeral');
+      await c1.close();
+      expect(inDb1).not.toBeNull();
+      expect(JSON.parse(inDb1!)).toBe('eph');
+    });
+
+    it('setnx with explicit ttl applies TTL', async () => {
+      mockResolveOk('app_test');
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/setnx-ttl/setnx', { value: 'x', ttl: 30 }),
+        env,
+      );
+      expect(res.status).toBe(201);
+
+      // Verify TTL is approximately 30s (allow a few seconds for execution).
+      const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const t = await c0.ttl('{app_test}:u:setnx-ttl');
+      await c0.close();
+      expect(t).toBeGreaterThan(0);
+      expect(t).toBeLessThanOrEqual(30);
+    });
   });
 
   // ── cas ─────────────────────────────────────────────────────────────────────
@@ -340,7 +384,7 @@ describe('kv-gateway worker', () => {
   describe('ttl', () => {
     it('returns { ttl: null } for a key with no expiry', async () => {
       mockResolveOk('app_test');
-      await worker.fetch(req('PUT', '/v1/app_test/kv/ttl-perm', { value: 1 }), env);
+      await worker.fetch(req('PUT', '/v1/app_test/kv/ttl-perm', { value: 1, ttl: null }), env);
 
       mockResolveOk('app_test');
       const res = await worker.fetch(req('GET', '/v1/app_test/kv/ttl-perm/ttl'), env);
@@ -373,6 +417,20 @@ describe('kv-gateway worker', () => {
       const res = await worker.fetch(req('POST', '/v1/app_test/kv/ttl-perm/ttl', {}), env);
       expect(res.status).toBe(405);
     });
+
+    it('returns TTL of an ephemeral-only key', async () => {
+      // Write an ephemeral key with a specific TTL.
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/ttl-eph-only', { value: 'x', ttl: 120, ephemeral: true }), env);
+
+      // ttl route should fan out to db 1 and return the TTL.
+      mockResolveOk('app_test');
+      const res = await worker.fetch(req('GET', '/v1/app_test/kv/ttl-eph-only/ttl'), env);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ttl: number };
+      expect(body.ttl).toBeGreaterThan(0);
+      expect(body.ttl).toBeLessThanOrEqual(120);
+    });
   });
 
   // ── exists ───────────────────────────────────────────────────────────────────
@@ -399,6 +457,18 @@ describe('kv-gateway worker', () => {
       mockResolveOk('app_test');
       const res = await worker.fetch(req('POST', '/v1/app_test/kv/exists-key/exists', {}), env);
       expect(res.status).toBe(405);
+    });
+
+    it('returns { exists: true } for an ephemeral-only key', async () => {
+      // Write only to db 1.
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/exists-eph-only', { value: 'z', ephemeral: true }), env);
+
+      // exists route fans out to db 1.
+      mockResolveOk('app_test');
+      const res = await worker.fetch(req('GET', '/v1/app_test/kv/exists-eph-only/exists'), env);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ exists: true });
     });
   });
 
@@ -486,6 +556,116 @@ describe('kv-gateway worker', () => {
       mockResolveOk('app_test');
       const get = await worker.fetch(req('GET', '/v1/app_test/kv/batch-no-value'), env);
       expect(get.status).toBe(404);
+    });
+  });
+
+  // ── TTL + ephemeral routing (Task 8) ────────────────────────────────────────
+
+  describe('TTL defaults and ephemeral routing', () => {
+    it('PUT default TTL: key gets ~30d expiry in db 0', async () => {
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/put-default-ttl', { value: 1 }), env);
+
+      const c = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const t = await c.ttl('{app_test}:u:put-default-ttl');
+      await c.close();
+
+      const THIRTY_DAYS = 30 * 24 * 3600;
+      const TWENTY_NINE_DAYS = 29 * 24 * 3600;
+      // Range assertion — not equality — to avoid flakiness.
+      expect(t).toBeGreaterThan(TWENTY_NINE_DAYS);
+      expect(t).toBeLessThanOrEqual(THIRTY_DAYS);
+    });
+
+    it('PUT ttl:null — key has no expiry (persists forever)', async () => {
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/put-no-expiry', { value: 1, ttl: null }), env);
+
+      const c = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const t = await c.ttl('{app_test}:u:put-no-expiry');
+      await c.close();
+
+      expect(t).toBe(-1); // -1 means no TTL set
+    });
+
+    it('PUT ttl:60 — key has ~60s expiry', async () => {
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/put-60s', { value: 1, ttl: 60 }), env);
+
+      const c = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const t = await c.ttl('{app_test}:u:put-60s');
+      await c.close();
+
+      expect(t).toBeGreaterThan(0);
+      expect(t).toBeLessThanOrEqual(60);
+    });
+
+    it('PUT ephemeral:true — key lands in db 1, not db 0', async () => {
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/put-ephemeral', { value: 'eph', ephemeral: true }), env);
+
+      const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const inDb0 = await c0.get('{app_test}:u:put-ephemeral');
+      await c0.close();
+      expect(inDb0).toBeNull();
+
+      const c1 = await RedisClient.connect({ ...redisBaseOpts, db: 1 });
+      const inDb1 = await c1.get('{app_test}:u:put-ephemeral');
+      await c1.close();
+      expect(inDb1).not.toBeNull();
+      expect(JSON.parse(inDb1!)).toBe('eph');
+    });
+
+    it('GET fanout: PUT ephemeral:true, then GET returns the value', async () => {
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/get-fanout', { value: 'fanout-val', ephemeral: true }), env);
+
+      mockResolveOk('app_test');
+      const res = await worker.fetch(req('GET', '/v1/app_test/kv/get-fanout'), env);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ value: 'fanout-val' });
+    });
+
+    it('GET still works for durable keys (regression)', async () => {
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/durable-regression', { value: 'durable' }), env);
+
+      mockResolveOk('app_test');
+      const res = await worker.fetch(req('GET', '/v1/app_test/kv/durable-regression'), env);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ value: 'durable' });
+    });
+
+    it('DELETE removes key from both DBs', async () => {
+      // Write to db 0 (durable) and db 1 (ephemeral) with the same key path.
+      const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      await c0.set('{app_test}:u:del-both', JSON.stringify('durable-side'));
+      await c0.close();
+
+      const c1 = await RedisClient.connect({ ...redisBaseOpts, db: 1 });
+      await c1.set('{app_test}:u:del-both', JSON.stringify('ephemeral-side'));
+      await c1.close();
+
+      // DELETE via worker.
+      mockResolveOk('app_test');
+      const del = await worker.fetch(req('DELETE', '/v1/app_test/kv/del-both'), env);
+      expect(del.status).toBe(204);
+
+      // Verify both DBs are clear.
+      const v0 = await (async () => {
+        const c = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+        const v = await c.get('{app_test}:u:del-both');
+        await c.close();
+        return v;
+      })();
+      const v1 = await (async () => {
+        const c = await RedisClient.connect({ ...redisBaseOpts, db: 1 });
+        const v = await c.get('{app_test}:u:del-both');
+        await c.close();
+        return v;
+      })();
+      expect(v0).toBeNull();
+      expect(v1).toBeNull();
     });
   });
 });

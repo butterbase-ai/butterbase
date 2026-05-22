@@ -1,5 +1,5 @@
 import { resolveApp } from './auth.js';
-import { RedisClient } from './redis-client.js';
+import { RedisClient, RedisClientOptions } from './redis-client.js';
 import { userKey, isValidUserKey } from './keys.js';
 
 export interface Env {
@@ -11,6 +11,15 @@ export interface Env {
   REDIS_PORT_EU?: string;
   INTERNAL_SECRET: string;
 }
+
+// Default TTL for all writes unless overridden.
+const DEFAULT_TTL_SECONDS = 30 * 24 * 3600; // 30 days
+
+// Logical DB indices. DB 0 is durable (persisted), DB 1 is ephemeral (shorter-lived).
+// Reads use durable-first fanout: DB 0 → DB 1 on miss. This avoids the complexity of
+// marker keys while keeping ephemeral routing transparent to callers.
+const DURABLE_DB = 0;
+const EPHEMERAL_DB = 1;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -58,6 +67,37 @@ return 0
 // Maximum batch size — keeps latency bounded and prevents runaway memory use.
 const BATCH_MAX_OPS = 100;
 
+// Helper: open a RedisClient connection to the given DB, run fn, and close on all paths.
+async function withRedis<T>(
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  db: number,
+  fn: (c: RedisClient) => Promise<T>,
+): Promise<T> {
+  const c = await RedisClient.connect({ ...baseOpts, db });
+  try {
+    return await fn(c);
+  } finally {
+    await c.close();
+  }
+}
+
+// Resolve and validate the ttl field from a PUT/setnx body.
+// Returns { ok: true, ttl: number | null } or { ok: false, response: Response }.
+function resolveTtl(rawTtl: unknown): { ok: true; ttl: number | null } | { ok: false; response: Response } {
+  if (rawTtl === undefined) {
+    // Not specified → use default TTL.
+    return { ok: true, ttl: DEFAULT_TTL_SECONDS };
+  }
+  if (rawTtl === null) {
+    // Explicit null → no expiry (persist forever).
+    return { ok: true, ttl: null };
+  }
+  if (typeof rawTtl !== 'number' || !Number.isInteger(rawTtl) || rawTtl < 0) {
+    return { ok: false, response: err('bad_request', 400, 'ttl must be a non-negative integer or null') };
+  }
+  return { ok: true, ttl: rawTtl };
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -82,21 +122,23 @@ export default {
     }
 
     const endpoint = pickRedisEndpoint(env, resolved.region);
-    const client = await RedisClient.connect({
+    const baseOpts: Omit<RedisClientOptions, 'db'> = {
       host: endpoint.host,
       port: endpoint.port,
       password: resolved.redisPassword,
-    });
+    };
 
-    try {
-      // ── batch ──────────────────────────────────────────────────────────────
-      if (action === '_batch') {
-        if (req.method !== 'POST') return err('method_not_allowed', 405);
-        const body = (await req.json()) as { ops?: unknown[] };
-        if (!Array.isArray(body.ops)) return err('bad_request', 400, 'ops must be an array');
-        if (body.ops.length > BATCH_MAX_OPS) {
-          return err('bad_request', 400, `batch limited to ${BATCH_MAX_OPS} ops`);
-        }
+    // ── batch ──────────────────────────────────────────────────────────────────
+    // _batch ops run on DURABLE_DB (DB 0) only. Ephemeral routing for individual
+    // batch ops is not supported — batches are inherently durable-store operations.
+    if (action === '_batch') {
+      if (req.method !== 'POST') return err('method_not_allowed', 405);
+      const body = (await req.json()) as { ops?: unknown[] };
+      if (!Array.isArray(body.ops)) return err('bad_request', 400, 'ops must be an array');
+      if (body.ops.length > BATCH_MAX_OPS) {
+        return err('bad_request', 400, `batch limited to ${BATCH_MAX_OPS} ops`);
+      }
+      return withRedis(baseOpts, DURABLE_DB, async (client) => {
         const results: unknown[] = [];
         for (const op of body.ops as Array<{ op?: unknown; key?: unknown; value?: unknown }>) {
           if (typeof op.op !== 'string' || !['get', 'set', 'del'].includes(op.op)) {
@@ -128,93 +170,136 @@ export default {
           }
         }
         return json({ results });
-      }
-
-      // All remaining routes have a validated `key`; build the full Redis key.
-      const fullKey = userKey(resolved.appId, key!);
-
-      // ── action routes ──────────────────────────────────────────────────────
-      if (action === 'incr') {
-        if (req.method !== 'POST') return err('method_not_allowed', 405);
-        const body = (await req.json().catch(() => ({}))) as { by?: number };
-        const by = typeof body.by === 'number' ? body.by : 1;
-        if (!Number.isInteger(by)) return err('bad_request', 400, 'by must be an integer');
-        const value = await client.incrBy(fullKey, by);
-        return json({ value });
-      }
-
-      if (action === 'decr') {
-        if (req.method !== 'POST') return err('method_not_allowed', 405);
-        const body = (await req.json().catch(() => ({}))) as { by?: number };
-        const by = typeof body.by === 'number' ? body.by : 1;
-        if (!Number.isInteger(by)) return err('bad_request', 400, 'by must be an integer');
-        const value = await client.decrBy(fullKey, by);
-        return json({ value });
-      }
-
-      if (action === 'setnx') {
-        if (req.method !== 'POST') return err('method_not_allowed', 405);
-        const body = (await req.json()) as { value: unknown };
-        if (!('value' in body)) return err('bad_request', 400, 'missing value');
-        const wrote = await client.setnx(fullKey, JSON.stringify(body.value));
-        return json({ wrote }, wrote ? 201 : 200);
-      }
-
-      if (action === 'cas') {
-        if (req.method !== 'POST') return err('method_not_allowed', 405);
-        const body = (await req.json()) as { expected: unknown; next: unknown };
-        if (!('expected' in body) || !('next' in body)) {
-          return err('bad_request', 400, 'missing expected or next');
-        }
-        const expectedArg = body.expected === null ? '__NULL__' : JSON.stringify(body.expected);
-        const r = await client.eval(CAS_SCRIPT, [fullKey], [expectedArg, JSON.stringify(body.next)]);
-        return json({ swapped: r === 1 });
-      }
-
-      if (action === 'expire') {
-        if (req.method !== 'POST') return err('method_not_allowed', 405);
-        const body = (await req.json()) as { ttl: number | null };
-        if (!('ttl' in body)) return err('bad_request', 400, 'missing ttl');
-        const ttl = body.ttl;
-        if (ttl !== null && (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 0)) {
-          return err('bad_request', 400, 'ttl must be a non-negative integer or null');
-        }
-        const ok = await client.expire(fullKey, ttl);
-        return json({ ok });
-      }
-
-      if (action === 'ttl') {
-        if (req.method !== 'GET') return err('method_not_allowed', 405);
-        const t = await client.ttl(fullKey);
-        if (t === -2) return err('not_found', 404); // key does not exist
-        return json({ ttl: t === -1 ? null : t });
-      }
-
-      if (action === 'exists') {
-        if (req.method !== 'GET') return err('method_not_allowed', 405);
-        const exists = await client.exists(fullKey);
-        return json({ exists });
-      }
-
-      // ── base CRUD ──────────────────────────────────────────────────────────
-      if (req.method === 'GET') {
-        const v = await client.get(fullKey);
-        if (v === null) return err('not_found', 404);
-        return json({ value: JSON.parse(v) });
-      }
-      if (req.method === 'PUT') {
-        const body = (await req.json()) as { value: unknown };
-        if (!('value' in body)) return err('bad_request', 400, 'missing value');
-        await client.set(fullKey, JSON.stringify(body.value));
-        return new Response(null, { status: 204 });
-      }
-      if (req.method === 'DELETE') {
-        await client.del([fullKey]);
-        return new Response(null, { status: 204 });
-      }
-      return err('method_not_allowed', 405);
-    } finally {
-      await client.close();
+      });
     }
+
+    // All remaining routes have a validated `key`; build the full Redis key.
+    const fullKey = userKey(resolved.appId, key!);
+
+    // ── action routes ──────────────────────────────────────────────────────────
+
+    // incr/decr: always durable (atomic counters only make sense on DB 0)
+    if (action === 'incr') {
+      if (req.method !== 'POST') return err('method_not_allowed', 405);
+      const body = (await req.json().catch(() => ({}))) as { by?: number };
+      const by = typeof body.by === 'number' ? body.by : 1;
+      if (!Number.isInteger(by)) return err('bad_request', 400, 'by must be an integer');
+      return withRedis(baseOpts, DURABLE_DB, (c) => c.incrBy(fullKey, by).then((value) => json({ value })));
+    }
+
+    if (action === 'decr') {
+      if (req.method !== 'POST') return err('method_not_allowed', 405);
+      const body = (await req.json().catch(() => ({}))) as { by?: number };
+      const by = typeof body.by === 'number' ? body.by : 1;
+      if (!Number.isInteger(by)) return err('bad_request', 400, 'by must be an integer');
+      return withRedis(baseOpts, DURABLE_DB, (c) => c.decrBy(fullKey, by).then((value) => json({ value })));
+    }
+
+    // setnx: honors ephemeral:true and ttl like PUT.
+    if (action === 'setnx') {
+      if (req.method !== 'POST') return err('method_not_allowed', 405);
+      const body = (await req.json()) as { value: unknown; ttl?: number | null; ephemeral?: boolean };
+      if (!('value' in body)) return err('bad_request', 400, 'missing value');
+      const ttlResult = resolveTtl(body.ttl);
+      if (!ttlResult.ok) return ttlResult.response;
+      const resolvedTtl = ttlResult.ttl;
+      const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
+      return withRedis(baseOpts, db, async (c) => {
+        // Use setWithOptions to combine NX + EX in one round trip.
+        const wrote = await c.setWithOptions(fullKey, JSON.stringify(body.value), {
+          ex: resolvedTtl !== null ? resolvedTtl : undefined,
+          nx: true,
+        });
+        return json({ wrote }, wrote ? 201 : 200);
+      });
+    }
+
+    // cas: always durable (atomic CAS only makes sense on DB 0)
+    if (action === 'cas') {
+      if (req.method !== 'POST') return err('method_not_allowed', 405);
+      const body = (await req.json()) as { expected: unknown; next: unknown };
+      if (!('expected' in body) || !('next' in body)) {
+        return err('bad_request', 400, 'missing expected or next');
+      }
+      const expectedArg = body.expected === null ? '__NULL__' : JSON.stringify(body.expected);
+      return withRedis(baseOpts, DURABLE_DB, async (c) => {
+        const r = await c.eval(CAS_SCRIPT, [fullKey], [expectedArg, JSON.stringify(body.next)]);
+        return json({ swapped: r === 1 });
+      });
+    }
+
+    // expire: always durable (TTL management for durable keys only)
+    if (action === 'expire') {
+      if (req.method !== 'POST') return err('method_not_allowed', 405);
+      const body = (await req.json()) as { ttl: number | null };
+      if (!('ttl' in body)) return err('bad_request', 400, 'missing ttl');
+      const ttl = body.ttl;
+      if (ttl !== null && (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 0)) {
+        return err('bad_request', 400, 'ttl must be a non-negative integer or null');
+      }
+      return withRedis(baseOpts, DURABLE_DB, async (c) => {
+        const ok = await c.expire(fullKey, ttl);
+        return json({ ok });
+      });
+    }
+
+    // ttl: durable-first fanout — try DB 0; if missing (-2), try DB 1.
+    if (action === 'ttl') {
+      if (req.method !== 'GET') return err('method_not_allowed', 405);
+      let t = await withRedis(baseOpts, DURABLE_DB, (c) => c.ttl(fullKey));
+      if (t === -2) {
+        t = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.ttl(fullKey));
+      }
+      if (t === -2) return err('not_found', 404); // key does not exist in either DB
+      return json({ ttl: t === -1 ? null : t });
+    }
+
+    // exists: durable-first — return true if either DB has the key.
+    if (action === 'exists') {
+      if (req.method !== 'GET') return err('method_not_allowed', 405);
+      const existsDurable = await withRedis(baseOpts, DURABLE_DB, (c) => c.exists(fullKey));
+      if (existsDurable) return json({ exists: true });
+      const existsEphemeral = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.exists(fullKey));
+      return json({ exists: existsEphemeral });
+    }
+
+    // ── base CRUD ──────────────────────────────────────────────────────────────
+
+    if (req.method === 'GET') {
+      // Durable-first fanout: try DB 0, then DB 1 on miss.
+      // Two connections are opened only on a miss; the common path (key in DB 0) is single-connection.
+      let v: string | null = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fullKey));
+      if (v === null) {
+        v = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.get(fullKey));
+      }
+      if (v === null) return err('not_found', 404);
+      return json({ value: JSON.parse(v) });
+    }
+
+    if (req.method === 'PUT') {
+      const body = (await req.json()) as { value: unknown; ttl?: number | null; ephemeral?: boolean };
+      if (!('value' in body)) return err('bad_request', 400, 'missing value');
+      const ttlResult = resolveTtl(body.ttl);
+      if (!ttlResult.ok) return ttlResult.response;
+      const resolvedTtl = ttlResult.ttl;
+      const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
+      await withRedis(baseOpts, db, async (c) => {
+        if (resolvedTtl === null) {
+          await c.set(fullKey, JSON.stringify(body.value));
+        } else {
+          await c.setex(fullKey, resolvedTtl, JSON.stringify(body.value));
+        }
+      });
+      return new Response(null, { status: 204 });
+    }
+
+    if (req.method === 'DELETE') {
+      // Delete from BOTH DBs — best-effort; either miss is harmless.
+      await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fullKey]));
+      await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fullKey]));
+      return new Response(null, { status: 204 });
+    }
+
+    return err('method_not_allowed', 405);
   },
 };
