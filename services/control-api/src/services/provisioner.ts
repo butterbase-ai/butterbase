@@ -110,7 +110,11 @@ export async function insertAppRow(
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     // Roll back the runtime DB insert as well to keep both DBs consistent
-    await runtimeDb.query('DELETE FROM apps WHERE id = $1', [appId]).catch(() => {});
+    await runtimeDb.query('DELETE FROM apps WHERE id = $1', [appId]).catch((deleteErr) => {
+      // Compensating DELETE failed after a control-plane transaction rollback. The runtimeDb apps row is now orphaned.
+      // The orphan-cleanup service will not pick this up because user_app_index is written after insertAppRow returns.
+      console.error({ err: deleteErr, appId }, '[insertAppRow] compensating runtimeDb DELETE failed; row may be orphaned');
+    });
     throw err;
   } finally {
     client.release();

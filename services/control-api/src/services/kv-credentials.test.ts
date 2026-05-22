@@ -49,6 +49,10 @@ async function createTestApp(region = 'us'): Promise<{ id: string }> {
   return { id };
 }
 
+// These tests simulate insertAppRow's control-plane transaction directly.
+// insertAppRow itself requires a live runtimeDb (Neon) connection that the local
+// test setup doesn't provide. The tests below validate that the same SQL +
+// service-call pattern the production code uses works transactionally.
 describeDb('app creation auto-provisions a KV credential', () => {
   it('insertAppRow control-plane transaction creates app + kv credential atomically', async () => {
     // Simulate what insertAppRow does on the control-plane: a single transaction
