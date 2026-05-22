@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import type { Pool } from 'pg';
 
+const KV_PASSWORD_BYTES = 24;
+
 export interface KvCredential {
   app_id: string;
   region: string;
@@ -13,7 +15,7 @@ export class KvCredentialsService {
   constructor(private readonly pool: Pool) {}
 
   async provision(appId: string, region: string): Promise<KvCredential> {
-    const password = randomBytes(24).toString('hex');
+    const password = randomBytes(KV_PASSWORD_BYTES).toString('hex');
     const { rows } = await this.pool.query<KvCredential>(
       `INSERT INTO app_kv_credentials (app_id, region, redis_password)
        VALUES ($1, $2, $3)
@@ -33,7 +35,7 @@ export class KvCredentialsService {
   }
 
   async rotate(appId: string): Promise<KvCredential> {
-    const password = randomBytes(24).toString('hex');
+    const password = randomBytes(KV_PASSWORD_BYTES).toString('hex');
     const { rows } = await this.pool.query<KvCredential>(
       `UPDATE app_kv_credentials
        SET redis_password = $2, rotated_at = now()

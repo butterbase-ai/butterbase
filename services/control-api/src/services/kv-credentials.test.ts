@@ -7,6 +7,9 @@ const PLATFORM_URL =
   process.env.NEON_PLATFORM_PRIMARY_URL ??
   'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
 
+const RUN_DB_TESTS = process.env.RUN_DB_TESTS === '1';
+const describeDb = RUN_DB_TESTS ? describe : describe.skip;
+
 let pool: pg.Pool;
 let svc: KvCredentialsService;
 let testUserId: string;
@@ -46,7 +49,7 @@ async function createTestApp(region = 'us'): Promise<{ id: string }> {
   return { id };
 }
 
-describe('KvCredentialsService', () => {
+describeDb('KvCredentialsService', () => {
   it('provisions a credential row with a random password', async () => {
     const app = await createTestApp('us');
     const cred = await svc.provision(app.id, 'us');
