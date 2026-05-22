@@ -351,8 +351,9 @@ export async function enforceExpiredGracePeriods(db: Pool): Promise<void> {
     );
 
     for (const row of result.rows) {
-      await suspendAccount(db, row.user_id, 'Payment failure - grace period expired');
-
+      // Grace expiry should *downgrade*, not suspend. Suspending blocks login/API
+      // entirely, which is too harsh for a card decline — the user should still
+      // be able to sign in, update payment, and resubscribe.
       await db.query(
         `UPDATE subscriptions SET status = 'canceled', updated_at = now()
          WHERE stripe_subscription_id = $1`,
@@ -362,6 +363,21 @@ export async function enforceExpiredGracePeriods(db: Pool): Promise<void> {
       // Downgrade to playground plan (platform_users is platform-tier)
       await writeUserStateChange(db, row.user_id, { plan_id: 'playground', spending_cap_usd: null });
       await invalidateUserAppLimits(db, row.user_id);
+
+      // Best-effort: notify the user the payment failed and they were downgraded.
+      try {
+        const emailResult = await db.query(
+          'SELECT email FROM platform_users WHERE id = $1',
+          [row.user_id]
+        );
+        if (emailResult.rows.length > 0) {
+          await sendBillingEmail(emailResult.rows[0].email, 'payment_failed', {}).catch((err) =>
+            console.error('Failed to send downgrade email:', err),
+          );
+        }
+      } catch (err) {
+        console.error('Failed to look up email for grace-expiry notification:', err);
+      }
     }
 
     if (result.rows.length > 0) {

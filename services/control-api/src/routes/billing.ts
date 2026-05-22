@@ -109,15 +109,36 @@ export async function billingRoutes(app: FastifyInstance) {
         [userId]
       );
 
-      const subscription = subscriptionResult.rows.length > 0 ? subscriptionResult.rows[0] : null;
+      let subscription = subscriptionResult.rows.length > 0 ? subscriptionResult.rows[0] : null;
+
+      // If the user is on a paid plan but has no live subscription, surface the
+      // most-recent canceled subscription so the dashboard can show "Plan ends
+      // on …" instead of hiding the subscription card entirely. This makes
+      // payment-failure / orphan-sub states visible to the user.
+      if (!subscription && user.plan_id && user.plan_id !== 'playground') {
+        const lastCanceled = await app.controlDb.query(
+          `SELECT stripe_subscription_id, status, current_period_start, current_period_end, cancel_at_period_end
+           FROM subscriptions
+           WHERE user_id = $1 AND status = 'canceled'
+           ORDER BY current_period_end DESC NULLS LAST, updated_at DESC
+           LIMIT 1`,
+          [userId],
+        );
+        if (lastCanceled.rows.length > 0) {
+          subscription = lastCanceled.rows[0];
+        }
+      }
 
       // Get current usage for all meters — these helpers query runtime tables
       // (ai_usage_logs, apps, storage_objects, app_users, app_db_connections)
       const isLifetime = user.ai_credits_lifetime;
       const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), userId, isLifetime);
-      // Cross-tier: apps is a runtime table; project count must come from runtimeDb
-      const projectCountResult = await app.runtimeDb(region).query(
-        'SELECT COUNT(*)::int as count FROM apps WHERE owner_id = $1',
+      // Project count must aggregate across ALL regions. user_app_index is the
+      // authoritative cross-region index on controlDb — counting `apps` on the
+      // local runtimeDb undercounts users with apps in other regions (and shows
+      // 0 when the local region has no apps for the user).
+      const projectCountResult = await app.controlDb.query(
+        'SELECT COUNT(*)::int as count FROM user_app_index WHERE user_id = $1',
         [userId]
       );
 
