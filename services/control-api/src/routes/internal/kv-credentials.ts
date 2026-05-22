@@ -18,33 +18,43 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  fastify.post<{ Body: { api_key: string } }>(
+  fastify.post<{ Body: { api_key: string; app_id: string } }>(
     '/v1/internal/kv/resolve-key',
     async (req, reply) => {
-      const rawKey = req.body?.api_key;
-      if (!rawKey) return reply.code(400).send({ error: 'api_key required' });
+      const { api_key: rawKey, app_id: appId } = req.body ?? {};
+      if (!rawKey || !appId) return reply.code(400).send({ error: 'missing_fields' });
 
-      // Hash the key and join to apps + kv credentials in one query.
-      // api_keys is user-scoped (user_id), so we join through apps.owner_id.
+      // Hash the key and look up the specific app in one query.
+      // We join api_keys → apps (filtered by the requested app_id AND owner_id match) → kv credentials.
+      // This validates: key is valid, key's user owns the requested app, and a KV credential exists.
       const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
       const { rows } = await fastify.controlDb.query<{
         app_id: string;
         region: string;
         redis_password: string;
+        key_valid: boolean;
+        owns_app: boolean;
       }>(
-        `SELECT kv.app_id, kv.region, kv.redis_password
+        `SELECT
+           ak.user_id IS NOT NULL AS key_valid,
+           a.id IS NOT NULL AS owns_app,
+           kv.app_id,
+           kv.region,
+           kv.redis_password
          FROM api_keys ak
-         JOIN apps a ON a.owner_id = ak.user_id
-         JOIN app_kv_credentials kv ON kv.app_id = a.id
+         LEFT JOIN apps a ON a.id = $2 AND a.owner_id = ak.user_id
+         LEFT JOIN app_kv_credentials kv ON kv.app_id = a.id
          WHERE ak.key_hash = $1
            AND ak.revoked_at IS NULL
            AND (ak.expires_at IS NULL OR ak.expires_at > now())
          LIMIT 1`,
-        [keyHash],
+        [keyHash, appId],
       );
 
       if (rows.length === 0) return reply.code(404).send({ error: 'invalid_key' });
       const row = rows[0];
+      if (!row.owns_app) return reply.code(403).send({ error: 'forbidden' });
+      if (!row.app_id) return reply.code(404).send({ error: 'no_kv_credential' });
       return { app_id: row.app_id, region: row.region, redis_password: row.redis_password };
     },
   );

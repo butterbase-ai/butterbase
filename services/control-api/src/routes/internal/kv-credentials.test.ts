@@ -150,7 +150,7 @@ describeDb('POST /v1/internal/kv/credentials/:app_id/rotate', () => {
 });
 
 describeDb('POST /v1/internal/kv/resolve-key', () => {
-  it('returns app_id + region + redis_password for a valid API key', async () => {
+  it('returns app_id + region + redis_password for a valid API key and owned app', async () => {
     // Provision a KV credential for the test app
     await svc.provision(testAppId, 'us');
 
@@ -168,7 +168,7 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
         'x-butterbase-internal-secret': 'test-secret',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ api_key: plainKey }),
+      body: JSON.stringify({ api_key: plainKey, app_id: testAppId }),
     });
 
     expect(r.statusCode).toBe(200);
@@ -192,10 +192,69 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
         'x-butterbase-internal-secret': 'test-secret',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ api_key: 'bb_live_does_not_exist' }),
+      body: JSON.stringify({ api_key: 'bb_live_does_not_exist', app_id: testAppId }),
     });
 
     expect(r.statusCode).toBe(404);
     expect(r.json().error).toBe('invalid_key');
+  });
+
+  it('returns 403 when a valid key is used for an app the key user does not own', async () => {
+    // Create a second user and a second app owned by that second user
+    const r2 = await pool.query(
+      `INSERT INTO platform_users (id, email, account_status, plan_id)
+       VALUES ($1, 'kv-route-other-user@example.com', 'active', 'playground')
+       ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id`,
+      [randomUUID()],
+    );
+    const otherUserId = r2.rows[0].id;
+    const otherId = `kv-route-test-other-${Date.now()}`;
+    await pool.query(
+      `INSERT INTO apps (id, name, owner_id, db_name, region) VALUES ($1, $2, $3, $4, $5)`,
+      [otherId, `KV Other App ${otherId}`, otherUserId, `db_${otherId}`, 'us'],
+    );
+    await svc.provision(otherId, 'us');
+
+    // Generate a key for the FIRST (test) user
+    const { key: plainKey } = await ApiKeyService.generateApiKey(
+      pool,
+      testUserId,
+      'kv-resolve-forbidden-key',
+    );
+
+    // Try to use testUser's key to access the other user's app
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/internal/kv/resolve-key',
+      headers: {
+        'x-butterbase-internal-secret': 'test-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: plainKey, app_id: otherId }),
+    });
+
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe('forbidden');
+
+    // Clean up
+    await pool.query(`DELETE FROM api_keys WHERE name = 'kv-resolve-forbidden-key' AND user_id = $1`, [testUserId]);
+    await pool.query(`DELETE FROM app_kv_credentials WHERE app_id = $1`, [otherId]);
+    await pool.query(`DELETE FROM apps WHERE id = $1`, [otherId]);
+    await pool.query(`DELETE FROM platform_users WHERE id = $1`, [otherUserId]);
+  });
+
+  it('returns 400 when app_id is missing from the request body', async () => {
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/internal/kv/resolve-key',
+      headers: {
+        'x-butterbase-internal-secret': 'test-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: 'bb_live_some_key' }),
+    });
+
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toBe('missing_fields');
   });
 });

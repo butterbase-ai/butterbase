@@ -8,6 +8,7 @@ export interface ResolvedApp {
 
 export interface ResolveDeps {
   apiKey: string;
+  appId: string;
   env: Env;
   fetch?: typeof fetch;
 }
@@ -18,9 +19,9 @@ export async function resolveApp(deps: ResolveDeps): Promise<ResolvedApp | null>
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-internal-secret': deps.env.INTERNAL_SECRET,
+      'x-butterbase-internal-secret': deps.env.INTERNAL_SECRET,
     },
-    body: JSON.stringify({ api_key: deps.apiKey }),
+    body: JSON.stringify({ api_key: deps.apiKey, app_id: deps.appId }),
   });
   if (res.status !== 200) return null;
   const j = (await res.json()) as { app_id: string; region: string; redis_password: string };
