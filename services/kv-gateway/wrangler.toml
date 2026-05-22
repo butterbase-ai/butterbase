@@ -1,0 +1,13 @@
+name = "kv-gateway"
+main = "src/worker.ts"
+compatibility_date = "2025-01-24"
+
+[vars]
+CONTROL_API_URL = "http://control-api:4000"
+# region → host mapping (region values from app_kv_credentials.region)
+REDIS_HOST_US = "kv-redis-1"
+REDIS_HOST_EU = "kv-redis-2"
+REDIS_PORT = "6379"   # internal port inside the docker network; ports 6390/6391 are host-side
+
+# Secrets (set via `wrangler secret put`):
+#   INTERNAL_SECRET  — for calling control-api credentials endpoint
