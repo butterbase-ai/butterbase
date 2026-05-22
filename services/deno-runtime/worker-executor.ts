@@ -516,8 +516,8 @@ function buildWorkerCode(
           authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
           "content-type": "application/json",
         };
-        async function __kvCall(method, key, body) {
-          return fetch(__kvRoot + "/" + key, {
+        async function __kvCall(method, pathSuffix, body) {
+          return fetch(__kvRoot + "/" + pathSuffix, {
             method,
             headers: __kvHeaders,
             body: body === undefined ? undefined : JSON.stringify(body),
@@ -530,6 +530,8 @@ function buildWorkerCode(
           err.name = res.status === 400 ? "KvKeyInvalidError"
                    : res.status === 401 ? "KvAuthError"
                    : res.status === 403 ? "KvForbiddenError"
+                   : res.status === 409 ? "KvCasMismatchError"
+                   : res.status === 413 ? "KvValueTooLargeError"
                    : res.status === 503 ? "KvConnectionError"
                    : "KvError";
           err.code = code;
@@ -537,14 +539,18 @@ function buildWorkerCode(
           throw err;
         }
         return {
-          async get(key) {
-            const res = await __kvCall("GET", key);
+          async get(key, opts) {
+            const path = (opts && opts.touch === true) ? key + "?touch=true" : key;
+            const res = await __kvCall("GET", path);
             if (res.status === 404) return null;
             if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
             return (await res.json()).value;
           },
-          async set(key, value) {
-            const res = await __kvCall("PUT", key, { value });
+          async set(key, value, opts) {
+            const body = { value };
+            if (opts && opts.ttl !== undefined) body.ttl = opts.ttl;
+            if (opts && opts.ephemeral !== undefined) body.ephemeral = opts.ephemeral;
+            const res = await __kvCall("PUT", key, body);
             if (!res.ok && res.status !== 204) __kvThrow(res, await res.json().catch(() => null));
           },
           async del(key) {
@@ -552,6 +558,63 @@ function buildWorkerCode(
             if (res.status === 204) return 1;
             if (res.status === 404) return 0;
             __kvThrow(res, await res.json().catch(() => null));
+          },
+          async incr(key, by) {
+            const body = by !== undefined ? { by } : {};
+            const res = await __kvCall("POST", key + "/incr", body);
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).value;
+          },
+          async decr(key, by) {
+            const body = by !== undefined ? { by } : {};
+            const res = await __kvCall("POST", key + "/decr", body);
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).value;
+          },
+          async setnx(key, value, opts) {
+            const body = { value };
+            if (opts && opts.ttl !== undefined) body.ttl = opts.ttl;
+            if (opts && opts.ephemeral !== undefined) body.ephemeral = opts.ephemeral;
+            const res = await __kvCall("POST", key + "/setnx", body);
+            if (res.status === 201) return true;
+            if (res.status === 200) return false;
+            __kvThrow(res, await res.json().catch(() => null));
+          },
+          async setex(key, value, ttl, opts) {
+            return this.set(key, value, { ttl, ephemeral: opts && opts.ephemeral });
+          },
+          async cas(key, expected, next) {
+            const res = await __kvCall("POST", key + "/cas", { expected, next });
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).swapped;
+          },
+          async exists(key) {
+            const res = await __kvCall("GET", key + "/exists");
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).exists;
+          },
+          async ttl(key) {
+            const res = await __kvCall("GET", key + "/ttl");
+            if (res.status === 404) return null;
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).ttl;
+          },
+          async expire(key, ttl) {
+            const res = await __kvCall("POST", key + "/expire", { ttl });
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).ok;
+          },
+          async mget(keys) {
+            const ops = keys.map((k) => ({ op: "get", key: k }));
+            const res = await __kvCall("POST", "_batch", { ops });
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            const { results } = await res.json();
+            return results.map((r) => ("error" in r ? null : r.value));
+          },
+          async mset(entries, opts) {
+            await Promise.all(
+              Object.entries(entries).map(([k, v]) => this.set(k, v, opts))
+            );
           },
         };
       })(),
