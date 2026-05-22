@@ -1,26 +1,19 @@
 import { ErrorCodes, isAgentFriendlyError, type ErrorCode } from '@butterbase/shared';
+import { ButterbaseError } from './base.js';
+import {
+  KvError, KvAuthError, KvForbiddenError, KvNotFoundError, KvKeyInvalidError, KvConnectionError,
+} from './kv.js';
 
-export class ButterbaseError extends Error {
-  readonly code: string;
-  readonly status: number;
-  readonly remediation?: string;
-  readonly details?: unknown;
-
-  constructor(message: string, code: string, status: number, remediation?: string, details?: unknown) {
-    super(message);
-    this.name = 'ButterbaseError';
-    this.code = code;
-    this.status = status;
-    this.remediation = remediation;
-    this.details = details;
-  }
-}
+export { ButterbaseError };
 
 export class AuthError       extends ButterbaseError { constructor(m: string, c: string, s: number, r?: string, d?: unknown) { super(m, c, s, r, d); this.name = 'AuthError'; } }
 export class ValidationError extends ButterbaseError { constructor(m: string, c: string, s: number, r?: string, d?: unknown) { super(m, c, s, r, d); this.name = 'ValidationError'; } }
 export class NotFoundError   extends ButterbaseError { constructor(m: string, c: string, s: number, r?: string, d?: unknown) { super(m, c, s, r, d); this.name = 'NotFoundError'; } }
 export class QuotaError      extends ButterbaseError { constructor(m: string, c: string, s: number, r?: string, d?: unknown) { super(m, c, s, r, d); this.name = 'QuotaError'; } }
 export class NetworkError    extends ButterbaseError { constructor(m: string, c: string = 'NETWORK_ERROR', s: number = 0, r?: string, d?: unknown) { super(m, c, s, r, d); this.name = 'NetworkError'; } }
+
+// Re-export KV error classes
+export { KvError, KvAuthError, KvForbiddenError, KvNotFoundError, KvKeyInvalidError, KvConnectionError };
 
 type ErrCls = new (m: string, c: string, s: number, r?: string, d?: unknown) => ButterbaseError;
 
@@ -32,8 +25,18 @@ const EXACT: Record<string, ErrCls> = {
   [ErrorCodes.RESOURCE_NOT_FOUND]:   NotFoundError,
 };
 
-function classifyByCode(code: string): ErrCls | null {
+// KV code → class
+const KV_CODE_TO_CLASS: Record<string, ErrCls> = {
+  KV_UNAUTHORIZED: KvAuthError,
+  KV_FORBIDDEN:    KvForbiddenError,
+  KV_NOT_FOUND:    KvNotFoundError,
+  KV_KEY_INVALID:  KvKeyInvalidError,
+  KV_CONNECTION:   KvConnectionError,
+};
+
+export function classifyByCode(code: string): ErrCls | null {
   if (EXACT[code]) return EXACT[code];
+  if (code.startsWith('KV_'))        return KV_CODE_TO_CLASS[code] ?? KvError;
   if (code.startsWith('AUTH_'))       return AuthError;
   if (code.startsWith('VALIDATION_')) return ValidationError;
   if (code.startsWith('RESOURCE_'))   return NotFoundError;
