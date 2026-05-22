@@ -1,6 +1,8 @@
 // src/redis-client.ts
 // Minimal RESP2 client. Uses cloudflare:sockets in Worker runtime, node:net in tests.
-// Implements only: AUTH, SELECT, GET, SET, DEL, FLUSHDB.
+// Implements: AUTH, SELECT, GET, SET, DEL, FLUSHDB, SETEX, SETNX (via SET NX),
+//             INCRBY, DECRBY, EXISTS, TTL, EXPIRE, PERSIST, MGET, MSET, EVAL,
+//             and a generic SET-with-options helper.
 
 interface Socket {
   write(data: Uint8Array): Promise<void> | void;
@@ -71,6 +73,9 @@ function encodeCommand(parts: string[]): Uint8Array {
   return enc.encode(s);
 }
 
+// Top-level alias for any value that can come back from RESP2.
+type RespValue = string | number | null | Error | RespValue[];
+
 class Reader {
   private buf = new Uint8Array(0);
   constructor(private readonly socket: Socket) {}
@@ -95,7 +100,7 @@ class Reader {
       await this.fill(this.buf.length + 1);
     }
   }
-  async readReply(): Promise<string | number | null | Error> {
+  async readReply(): Promise<RespValue> {
     const line = await this.readLine();
     const type = line[0];
     const rest = line.slice(1);
@@ -108,6 +113,15 @@ class Reader {
       await this.fill(len + 2);
       const out = dec.decode(this.buf.subarray(0, len));
       this.buf = this.buf.subarray(len + 2);
+      return out;
+    }
+    if (type === '*') {
+      const n = Number(rest);
+      if (n === -1) return null;
+      const out: RespValue[] = [];
+      for (let i = 0; i < n; i++) {
+        out.push(await this.readReply());
+      }
       return out;
     }
     throw new Error(`unexpected RESP type: ${type}`);
@@ -143,7 +157,7 @@ export class RedisClient {
     return client;
   }
 
-  private async send(cmd: string[]): Promise<string | number | null | Error> {
+  private async send(cmd: string[]): Promise<RespValue> {
     await this.socket.write(encodeCommand(cmd));
     return this.reader.readReply();
   }
@@ -168,6 +182,91 @@ export class RedisClient {
   async flushTestDb(): Promise<void> {
     const r = await this.send(['FLUSHDB']);
     if (r instanceof Error) throw r;
+  }
+
+  async setex(key: string, ttlSeconds: number, value: string): Promise<void> {
+    const r = await this.send(['SETEX', key, String(ttlSeconds), value]);
+    if (r instanceof Error) throw r;
+  }
+
+  async setnx(key: string, value: string): Promise<boolean> {
+    // Use SET key value NX for consistency with setWithOptions
+    const r = await this.send(['SET', key, value, 'NX']);
+    if (r instanceof Error) throw r;
+    return r !== null; // +OK → true; nil → false
+  }
+
+  async incrBy(key: string, by: number): Promise<number> {
+    const r = await this.send(['INCRBY', key, String(by)]);
+    if (r instanceof Error) throw r;
+    return Number(r);
+  }
+
+  async decrBy(key: string, by: number): Promise<number> {
+    const r = await this.send(['DECRBY', key, String(by)]);
+    if (r instanceof Error) throw r;
+    return Number(r);
+  }
+
+  async exists(key: string): Promise<boolean> {
+    const r = await this.send(['EXISTS', key]);
+    if (r instanceof Error) throw r;
+    return Number(r) === 1;
+  }
+
+  async ttl(key: string): Promise<number> {
+    const r = await this.send(['TTL', key]);
+    if (r instanceof Error) throw r;
+    return Number(r);
+  }
+
+  async expire(key: string, ttlSeconds: number | null): Promise<boolean> {
+    const r = ttlSeconds === null
+      ? await this.send(['PERSIST', key])
+      : await this.send(['EXPIRE', key, String(ttlSeconds)]);
+    if (r instanceof Error) throw r;
+    return Number(r) === 1;
+  }
+
+  async mget(keys: string[]): Promise<(string | null)[]> {
+    const r = await this.send(['MGET', ...keys]);
+    if (r instanceof Error) throw r;
+    if (!Array.isArray(r)) throw new Error('unexpected MGET reply');
+    return r.map((v) => {
+      if (v === null) return null;
+      if (v instanceof Error) throw v;
+      return String(v);
+    });
+  }
+
+  async mset(pairs: Array<[string, string]>): Promise<void> {
+    const flat: string[] = ['MSET'];
+    for (const [k, v] of pairs) {
+      flat.push(k, v);
+    }
+    const r = await this.send(flat);
+    if (r instanceof Error) throw r;
+  }
+
+  async eval(script: string, keys: string[], args: string[]): Promise<unknown> {
+    const cmd = ['EVAL', script, String(keys.length), ...keys, ...args];
+    const r = await this.send(cmd);
+    if (r instanceof Error) throw r;
+    return r;
+  }
+
+  async setWithOptions(
+    key: string,
+    value: string,
+    opts: { ex?: number; nx?: boolean; xx?: boolean },
+  ): Promise<boolean> {
+    const cmd = ['SET', key, value];
+    if (opts.ex !== undefined) cmd.push('EX', String(opts.ex));
+    if (opts.nx) cmd.push('NX');
+    else if (opts.xx) cmd.push('XX');
+    const r = await this.send(cmd);
+    if (r instanceof Error) throw r;
+    return r !== null; // +OK → true; nil → false (NX/XX condition failed)
   }
 
   async close(): Promise<void> {
