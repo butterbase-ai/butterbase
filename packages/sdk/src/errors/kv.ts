@@ -41,3 +41,17 @@ export class KvConnectionError extends KvError {
     this.name = 'KvConnectionError';
   }
 }
+
+export class KvCasMismatchError extends KvError {
+  constructor(m = 'cas mismatch', c = 'KV_CAS_MISMATCH', s = 409, r?: string, d?: unknown) {
+    super(m, c, s, r, d);
+    this.name = 'KvCasMismatchError';
+  }
+}
+
+export class KvValueTooLargeError extends KvError {
+  constructor(m = 'value too large', c = 'KV_VALUE_TOO_LARGE', s = 413, r?: string, d?: unknown) {
+    super(m, c, s, r, d);
+    this.name = 'KvValueTooLargeError';
+  }
+}
