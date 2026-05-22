@@ -503,8 +503,18 @@ function buildWorkerCode(
       kv: (() => {
         const __kvBase = ${JSON.stringify(Deno.env.get("KV_GATEWAY_URL"))};
         const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
+        ${(() => {
+          const __fnKey = metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY
+            ?? metadata.env_vars?.BUTTERBASE_SERVICE_KEY
+            ?? Deno.env.get('BUTTERBASE_FUNCTION_SERVICE_KEY')
+            ?? '';
+          if (!__fnKey && Deno.env.get('KV_GATEWAY_URL')) {
+            console.warn(`[kv] no BUTTERBASE_FUNCTION_SERVICE_KEY for app=${metadata.app_id}; ctx.kv calls will fail with auth error`);
+          }
+          return '';
+        })()}
         const __kvHeaders = {
-          authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
+          authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
           "content-type": "application/json",
         };
         async function __kvCall(method, key, body) {
@@ -550,7 +560,7 @@ function buildWorkerCode(
       integrations: {
         execute: async (toolName, params) => {
           const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
-          const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
+          const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
           const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
             method: "POST",
             headers: {
@@ -568,7 +578,7 @@ function buildWorkerCode(
         asUser: (userId) => ({
           execute: async (toolName, params) => {
             const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
-            const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
+            const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
             const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
               method: "POST",
               headers: {

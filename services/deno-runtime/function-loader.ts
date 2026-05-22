@@ -46,6 +46,23 @@ function getRuntimeDbUrl(): string {
 }
 
 const ENCRYPTION_KEY = Deno.env.get("AUTH_ENCRYPTION_KEY")!;
+
+async function fetchKvFunctionKey(appId: string): Promise<string | null> {
+  const base = Deno.env.get('CONTROL_API_URL');
+  const secret = Deno.env.get('BUTTERBASE_INTERNAL_SECRET');
+  if (!base || !secret) return null;
+  try {
+    const res = await fetch(`${base}/v1/internal/kv/function-credentials/${appId}`, {
+      headers: { 'x-butterbase-internal-secret': secret },
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    return j.kv_function_key ?? null;
+  } catch (err) {
+    console.warn('[function-loader] failed to fetch kv_function_key', err);
+    return null;
+  }
+}
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_CACHE_SIZE = 1000;
 
@@ -166,6 +183,11 @@ export async function loadFunction(
 
     // Decrypt environment variables
     const envVars = decryptEnvVars(row.encrypted_env_vars, ENCRYPTION_KEY);
+
+    // Inject per-app KV function key so ctx.kv calls authenticate via the gateway.
+    // Failure is non-fatal: only ctx.kv calls will fail later with an auth error.
+    const kvKey = await fetchKvFunctionKey(appId);
+    if (kvKey) envVars.BUTTERBASE_FUNCTION_SERVICE_KEY = kvKey;
 
     // Fetch database connection string for this app
     const connResult = await client.queryObject<{ connection_string: string }>(

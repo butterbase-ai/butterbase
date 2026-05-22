@@ -149,6 +149,53 @@ describeDb('POST /v1/internal/kv/credentials/:app_id/rotate', () => {
   });
 });
 
+describeDb('GET /v1/internal/kv/function-credentials/:app_id', () => {
+  it('returns 401 without the internal secret header', async () => {
+    const r = await app.inject({
+      method: 'GET',
+      url: `/v1/internal/kv/function-credentials/${testAppId}`,
+    });
+    expect(r.statusCode).toBe(401);
+  });
+
+  it('returns 404 when no kv credential exists for the app', async () => {
+    const r = await app.inject({
+      method: 'GET',
+      url: `/v1/internal/kv/function-credentials/${testAppId}`,
+      headers: { 'x-butterbase-internal-secret': 'test-secret' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error).toBe('no_kv_credential');
+  });
+
+  it('returns 404 for an unknown app id', async () => {
+    const r = await app.inject({
+      method: 'GET',
+      url: '/v1/internal/kv/function-credentials/app_does_not_exist',
+      headers: { 'x-butterbase-internal-secret': 'test-secret' },
+    });
+    expect(r.statusCode).toBe(404);
+  });
+
+  it('returns 200 with app_id and kv_function_key after provisioning', async () => {
+    const cred = await svc.provision(testAppId, 'us');
+    const r = await app.inject({
+      method: 'GET',
+      url: `/v1/internal/kv/function-credentials/${testAppId}`,
+      headers: { 'x-butterbase-internal-secret': 'test-secret' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.app_id).toBe(testAppId);
+    expect(typeof body.kv_function_key).toBe('string');
+    expect(body.kv_function_key.length).toBeGreaterThan(0);
+    expect(body.kv_function_key).toBe(cred.kv_function_key);
+    // Must NOT expose redis_password or region
+    expect(body.redis_password).toBeUndefined();
+    expect(body.region).toBeUndefined();
+  });
+});
+
 describeDb('POST /v1/internal/kv/resolve-key', () => {
   it('returns app_id + region + redis_password for a valid API key and owned app', async () => {
     // Provision a KV credential for the test app
@@ -256,5 +303,57 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
 
     expect(r.statusCode).toBe(400);
     expect(r.json().error).toBe('missing_fields');
+  });
+
+  it('accepts kv_function_key for the correct app and returns credentials', async () => {
+    const cred = await svc.provision(testAppId, 'us');
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/internal/kv/resolve-key',
+      headers: {
+        'x-butterbase-internal-secret': 'test-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: cred.kv_function_key, app_id: testAppId }),
+    });
+
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.app_id).toBe(testAppId);
+    expect(body.region).toBe('us');
+    expect(typeof body.redis_password).toBe('string');
+    expect(body.redis_password.length).toBeGreaterThan(0);
+  });
+
+  it('rejects kv_function_key when used with a different app_id (404 invalid_key)', async () => {
+    // Provision creds for the test app
+    const cred = await svc.provision(testAppId, 'us');
+
+    // Create a second app owned by testUser
+    const otherId = `kv-route-test-fnkey-other-${Date.now()}`;
+    await pool.query(
+      `INSERT INTO apps (id, name, owner_id, db_name, region) VALUES ($1, $2, $3, $4, $5)`,
+      [otherId, `KV FnKey Other App ${otherId}`, testUserId, `db_${otherId}`, 'us'],
+    );
+    await svc.provision(otherId, 'us');
+
+    // Use testApp's kv_function_key but claim app_id = otherId
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/internal/kv/resolve-key',
+      headers: {
+        'x-butterbase-internal-secret': 'test-secret',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: cred.kv_function_key, app_id: otherId }),
+    });
+
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error).toBe('invalid_key');
+
+    // Clean up
+    await pool.query(`DELETE FROM app_kv_credentials WHERE app_id = $1`, [otherId]);
+    await pool.query(`DELETE FROM apps WHERE id = $1`, [otherId]);
   });
 });

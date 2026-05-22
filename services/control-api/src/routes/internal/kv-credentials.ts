@@ -51,11 +51,40 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
         [keyHash, appId],
       );
 
-      if (rows.length === 0) return reply.code(404).send({ error: 'invalid_key' });
+      if (rows.length === 0) {
+        // Fallback: per-app function key (auto-injected into deno-runtime).
+        const fk = await fastify.controlDb.query<{
+          app_id: string;
+          region: string;
+          redis_password: string;
+        }>(
+          `SELECT app_id, region, redis_password
+           FROM app_kv_credentials
+           WHERE kv_function_key = $1 AND app_id = $2`,
+          [rawKey, appId],
+        );
+        if (fk.rows.length === 1) {
+          const r = fk.rows[0];
+          return { app_id: r.app_id, region: r.region, redis_password: r.redis_password };
+        }
+        return reply.code(404).send({ error: 'invalid_key' });
+      }
       const row = rows[0];
       if (!row.owns_app) return reply.code(403).send({ error: 'forbidden' });
       if (!row.app_id) return reply.code(404).send({ error: 'no_kv_credential' });
       return { app_id: row.app_id, region: row.region, redis_password: row.redis_password };
+    },
+  );
+
+  fastify.get<{ Params: { app_id: string } }>(
+    '/v1/internal/kv/function-credentials/:app_id',
+    async (req, reply) => {
+      const cred = await svc.lookup(req.params.app_id);
+      if (!cred) return reply.code(404).send({ error: 'no_kv_credential' });
+      return {
+        app_id: cred.app_id,
+        kv_function_key: cred.kv_function_key,
+      };
     },
   );
 
