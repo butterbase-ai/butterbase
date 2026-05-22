@@ -12,7 +12,6 @@ async function openSocket(host: string, port: number): Promise<Socket> {
   // In Workers runtime, the `cloudflare:sockets` import resolves; in Node tests we fall back.
   // Heuristic: WebSocketPair is a Workers-only global.
   if (typeof (globalThis as any).WebSocketPair !== 'undefined') {
-    // @ts-expect-error cloudflare:sockets only available in Workers runtime
     const { connect } = await import('cloudflare:sockets' as any);
     const s = connect({ hostname: host, port });
     const reader = s.readable.getReader();
@@ -26,21 +25,28 @@ async function openSocket(host: string, port: number): Promise<Socket> {
       close: async () => { await writer.close(); },
     };
   } else {
-    const { createConnection } = await import('node:net');
+    // Node.js fallback for test environment.
+    // Types are suppressed: the Workers tsconfig has no @types/node, so node:net
+    // and Node Buffer are unknown to TypeScript here. The code is correct at runtime.
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const netMod: any = await import('node:net' as any);
     return await new Promise<Socket>((resolve, reject) => {
-      const sock = createConnection(port, host);
+      const sock: any = netMod.createConnection(port, host);
       const queue: Uint8Array[] = [];
       const waiters: Array<(v: Uint8Array | null) => void> = [];
-      sock.on('data', (buf: Buffer) => {
-        const chunk = new Uint8Array(buf);
+      sock.on('data', (buf: any) => {
+        // buf is a Node Buffer; Uint8Array constructor accepts it
+        const chunk = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
         if (waiters.length) waiters.shift()!(chunk);
         else queue.push(chunk);
       });
       sock.on('error', reject);
       sock.on('connect', () => {
         resolve({
-          write: (d) =>
-            new Promise<void>((res, rej) => sock.write(Buffer.from(d), (e) => (e ? rej(e) : res()))),
+          write: (d: Uint8Array) =>
+            new Promise<void>((res, rej) =>
+              sock.write(d, (e: any) => (e ? rej(e) : res()))
+            ),
           readChunk: () =>
             queue.length
               ? Promise.resolve(queue.shift()!)
@@ -49,6 +55,7 @@ async function openSocket(host: string, port: number): Promise<Socket> {
         });
       });
     });
+    /* eslint-enable @typescript-eslint/no-explicit-any */
   }
 }
 
