@@ -636,6 +636,80 @@ describe('kv-gateway worker', () => {
     });
   });
 
+  // ── value size cap (Task 12) ───────────────────────────────────────────────
+
+  describe('256 KB value size cap', () => {
+    const MAX_VALUE_BYTES = 256 * 1024;
+
+    it('PUT with oversized value returns 413 KV_VALUE_TOO_LARGE', async () => {
+      mockResolveOk('app_test');
+      const oversized = 'x'.repeat(MAX_VALUE_BYTES + 100);
+      const res = await worker.fetch(
+        req('PUT', '/v1/app_test/kv/oversized', { value: oversized }),
+        env,
+      );
+      expect(res.status).toBe(413);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('KV_VALUE_TOO_LARGE');
+    });
+
+    it('PUT with value just under the limit succeeds (204)', async () => {
+      mockResolveOk('app_test');
+      // Create a string that, when JSON-stringified, is under the limit.
+      const underLimit = 'x'.repeat(MAX_VALUE_BYTES - 100);
+      const res = await worker.fetch(
+        req('PUT', '/v1/app_test/kv/under-limit', { value: underLimit }),
+        env,
+      );
+      expect(res.status).toBe(204);
+    });
+
+    it('setnx with oversized value returns 413 KV_VALUE_TOO_LARGE', async () => {
+      mockResolveOk('app_test');
+      const oversized = 'y'.repeat(MAX_VALUE_BYTES + 1);
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/setnx-oversized/setnx', { value: oversized }),
+        env,
+      );
+      expect(res.status).toBe(413);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('KV_VALUE_TOO_LARGE');
+    });
+
+    it('cas with oversized next value returns 413 KV_VALUE_TOO_LARGE', async () => {
+      mockResolveOk('app_test');
+      const oversized = 'z'.repeat(MAX_VALUE_BYTES + 1);
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/cas-oversized/cas', { expected: null, next: oversized }),
+        env,
+      );
+      expect(res.status).toBe(413);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('KV_VALUE_TOO_LARGE');
+    });
+
+    it('_batch set with oversized value returns per-op error', async () => {
+      mockResolveOk('app_test');
+      const oversized = 'w'.repeat(MAX_VALUE_BYTES + 1);
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/_batch', {
+          ops: [
+            { op: 'set', key: 'batch-normal', value: 'ok' },
+            { op: 'set', key: 'batch-oversized', value: oversized },
+            { op: 'get', key: 'batch-normal' },
+          ],
+        }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json() as { results: unknown[] };
+      expect(body.results).toHaveLength(3);
+      expect(body.results[0]).toEqual({ ok: true });
+      expect(body.results[1]).toMatchObject({ error: 'KV_VALUE_TOO_LARGE' });
+      expect(body.results[2]).toEqual({ value: 'ok' });
+    });
+  });
+
   // ── _batch ───────────────────────────────────────────────────────────────────
 
   describe('_batch', () => {

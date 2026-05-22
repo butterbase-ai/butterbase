@@ -67,6 +67,19 @@ return 0
 // Maximum batch size — keeps latency bounded and prevents runaway memory use.
 const BATCH_MAX_OPS = 100;
 
+// Maximum value size in bytes (256 KB hard cap at the gateway).
+const MAX_VALUE_BYTES = 256 * 1024;
+
+// Check if a JSON-encoded value exceeds the maximum size.
+// Returns an error Response if oversized, null otherwise.
+function checkValueSize(encoded: string): Response | null {
+  const bytes = new TextEncoder().encode(encoded).byteLength;
+  if (bytes > MAX_VALUE_BYTES) {
+    return err('KV_VALUE_TOO_LARGE', 413, `value exceeds ${MAX_VALUE_BYTES} bytes`);
+  }
+  return null;
+}
+
 // Helper: open a RedisClient connection to the given DB, run fn, and close on all paths.
 async function withRedis<T>(
   baseOpts: Omit<RedisClientOptions, 'db'>,
@@ -166,7 +179,13 @@ export default {
                 results.push({ error: 'missing value' });
                 continue;
               }
-              await client.set(fk, JSON.stringify(op.value));
+              const encoded = JSON.stringify(op.value);
+              const sizeErr = checkValueSize(encoded);
+              if (sizeErr) {
+                results.push({ error: 'KV_VALUE_TOO_LARGE' });
+                continue;
+              }
+              await client.set(fk, encoded);
               results.push({ ok: true });
             } else if (op.op === 'del') {
               const count = await client.del([fk]);
@@ -211,9 +230,12 @@ export default {
       if (!ttlResult.ok) return ttlResult.response;
       const resolvedTtl = ttlResult.ttl;
       const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
+      const encoded = JSON.stringify(body.value);
+      const sizeErr = checkValueSize(encoded);
+      if (sizeErr) return sizeErr;
       return withRedis(baseOpts, db, async (c) => {
         // Use setWithOptions to combine NX + EX in one round trip.
-        const wrote = await c.setWithOptions(fullKey, JSON.stringify(body.value), {
+        const wrote = await c.setWithOptions(fullKey, encoded, {
           ex: resolvedTtl !== null ? resolvedTtl : undefined,
           nx: true,
         });
@@ -229,8 +251,11 @@ export default {
         return err('bad_request', 400, 'missing expected or next');
       }
       const expectedArg = body.expected === null ? '__NULL__' : JSON.stringify(body.expected);
+      const nextArg = JSON.stringify(body.next);
+      const sizeErr = checkValueSize(nextArg);
+      if (sizeErr) return sizeErr;
       return withRedis(baseOpts, DURABLE_DB, async (c) => {
-        const r = await c.eval(CAS_SCRIPT, [fullKey], [expectedArg, JSON.stringify(body.next)]);
+        const r = await c.eval(CAS_SCRIPT, [fullKey], [expectedArg, nextArg]);
         return json({ swapped: r === 1 });
       });
     }
@@ -324,11 +349,14 @@ export default {
       if (!ttlResult.ok) return ttlResult.response;
       const resolvedTtl = ttlResult.ttl;
       const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
+      const encoded = JSON.stringify(body.value);
+      const sizeErr = checkValueSize(encoded);
+      if (sizeErr) return sizeErr;
       await withRedis(baseOpts, db, async (c) => {
         if (resolvedTtl === null) {
-          await c.set(fullKey, JSON.stringify(body.value));
+          await c.set(fullKey, encoded);
         } else {
-          await c.setex(fullKey, resolvedTtl, JSON.stringify(body.value));
+          await c.setex(fullKey, resolvedTtl, encoded);
         }
       });
       return new Response(null, { status: 204 });
