@@ -494,6 +494,59 @@ function buildWorkerCode(
           }
         },
       } : null,
+      // ctx.kv — key/value store backed by the kv-gateway Worker.
+      // KV_GATEWAY_URL must be set in the deno-runtime environment for ctx.kv to be available.
+      // If it is not set, ctx.kv is undefined and function code that tries to use it will receive
+      // a clear TypeError ("Cannot read properties of undefined") rather than a silent failure.
+      // The gateway address for local development is http://kv-gateway:8787 (Task 14 wires that up).
+      ${Deno.env.get("KV_GATEWAY_URL") ? `
+      kv: (() => {
+        const __kvBase = ${JSON.stringify(Deno.env.get("KV_GATEWAY_URL"))};
+        const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
+        const __kvHeaders = {
+          authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
+          "content-type": "application/json",
+        };
+        async function __kvCall(method, key, body) {
+          return fetch(__kvRoot + "/" + key, {
+            method,
+            headers: __kvHeaders,
+            body: body === undefined ? undefined : JSON.stringify(body),
+          });
+        }
+        function __kvThrow(res, body) {
+          const msg = (body && body.message) ? body.message : ("kv error (status " + res.status + ")");
+          const code = (body && body.error) ? body.error : "KV_ERROR";
+          const err = new Error(msg);
+          err.name = res.status === 400 ? "KvKeyInvalidError"
+                   : res.status === 401 ? "KvAuthError"
+                   : res.status === 403 ? "KvForbiddenError"
+                   : res.status === 503 ? "KvConnectionError"
+                   : "KvError";
+          err.code = code;
+          err.status = res.status;
+          throw err;
+        }
+        return {
+          async get(key) {
+            const res = await __kvCall("GET", key);
+            if (res.status === 404) return null;
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).value;
+          },
+          async set(key, value) {
+            const res = await __kvCall("PUT", key, { value });
+            if (!res.ok && res.status !== 204) __kvThrow(res, await res.json().catch(() => null));
+          },
+          async del(key) {
+            const res = await __kvCall("DELETE", key);
+            if (res.status === 204) return 1;
+            if (res.status === 404) return 0;
+            __kvThrow(res, await res.json().catch(() => null));
+          },
+        };
+      })(),
+      ` : '/* ctx.kv: KV_GATEWAY_URL not set — kv omitted from ctx */'}
       integrations: {
         execute: async (toolName, params) => {
           const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
