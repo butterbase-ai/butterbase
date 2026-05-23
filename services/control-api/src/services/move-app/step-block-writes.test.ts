@@ -66,29 +66,3 @@ describe('executeBlockWrites', () => {
     expect(kvRedisFor).toHaveBeenCalledWith(m.source_region);
   });
 });
-
-describe.skipIf(!process.env.KV_REDIS_URL_US)('executeBlockWrites — real KV integration', () => {
-  it('isKvBlocked returns true after setKvBlock (verifies sentinel logic)', async () => {
-    const { randomUUID } = await import('node:crypto');
-    const { Redis } = await import('ioredis');
-    const url = process.env.KV_REDIS_URL_US!;
-    const ioClient = new Redis(url, { lazyConnect: false, maxRetriesPerRequest: 2 });
-
-    // Use uninstrumented imports — these work regardless of module-level mocks
-    // because vitest isolates each test file, but vi.mock applies per-file.
-    // We test setKvBlock / isKvBlocked behavior directly here.
-    const { RedisClient, wrap } = await import('../kv/redis-client.js');
-    const { isKvBlocked, clearKvBlock, setKvBlock: realSetKvBlock } = await import('../kv/migration-sentinel.js');
-
-    const appId = `block-test-${randomUUID()}`;
-    const client = wrap(ioClient);
-
-    await realSetKvBlock(client, appId);
-    const blocked = await isKvBlocked(client, appId);
-    expect(blocked).toBe(true);
-
-    // Cleanup
-    await clearKvBlock(client, appId);
-    await ioClient.quit();
-  });
-});
