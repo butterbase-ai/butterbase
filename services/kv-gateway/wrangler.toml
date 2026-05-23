@@ -8,6 +8,6 @@ CONTROL_API_URL = "http://control-api:4000"
 REDIS_HOST_US = "kv-redis-1"
 REDIS_HOST_EU = "kv-redis-2"
 REDIS_PORT = "6379"   # internal port inside the docker network; ports 6390/6391 are host-side
-
-# Secrets (set via `wrangler secret put`):
-#   INTERNAL_SECRET  — for calling control-api credentials endpoint
+# Local-dev default for INTERNAL_SECRET. In production this is overridden by
+# `wrangler secret put INTERNAL_SECRET` and the value here is ignored.
+INTERNAL_SECRET = "butterbase_dev_internal_secret"
