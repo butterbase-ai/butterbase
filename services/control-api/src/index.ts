@@ -89,6 +89,7 @@ import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
 import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
 import kvResolveJwtRoutes from './routes/internal/kv-resolve-jwt.js';
+import kvQuotaPlugin from './plugins/kv-quota.js';
 import kvDataRoutes from './routes/v1/kv-data.js';
 import kvExposeRoutes from './routes/v1/kv-expose.js';
 import kvAdminRoutes from './routes/v1/kv-admin.js';
@@ -427,6 +428,9 @@ try {
 app.register(internalLeaseRoutes);
 app.register(kvCredentialsRoutes);
 app.register(kvResolveJwtRoutes);
+// kv-quota MUST be registered before kv-data/expose/admin routes so the
+// preHandler hook and kvAccount decoration are available when those routes mount.
+app.register(kvQuotaPlugin);
 app.register(kvDataRoutes);
 app.register(kvExposeRoutes);
 app.register(kvAdminRoutes);

@@ -17,7 +17,9 @@ export type MeterType =
   | 'mau'
   | 'do_requests'
   | 'do_cpu_ms'
-  | 'do_storage_gb_seconds';
+  | 'do_storage_gb_seconds'
+  | 'kv_ops'
+  | 'kv_storage_bytes';
 
 
 export class UsageMeteringError extends Error {
