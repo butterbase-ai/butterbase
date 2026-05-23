@@ -81,7 +81,7 @@ export async function resetKvScope(appId: string): Promise<void> {
     const patterns = [
       `{${appId}}:u:*`,
       `{${appId}}:_ttl:*`,
-      `{${appId}}:_meta:expose`,
+      `{${appId}}:_meta:*`,
     ];
     for (const db of [0, 1]) {
       await redis.select(db);

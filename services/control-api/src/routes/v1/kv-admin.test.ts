@@ -158,16 +158,23 @@ describeDb('GET /v1/:app_id/kv/_scan', () => {
 // ── _stats ──────────────────────────────────────────────────────────────────────
 
 describeDb('GET /v1/:app_id/kv/_stats', () => {
-  it('returns stats shape with expected fields', async () => {
-    await seedKey('stats-key', 'value');
+  it('_stats returns keys_total from the counter (no scan) and includes plan limits', async () => {
+    const c = await RedisClient.connect({ ...baseRedisOpts, db: 0 });
+    await c.set(`{${appId}}:_meta:keys`, '42');
+    await c.set(`{${appId}}:_meta:bytes`, '1024');
+    await c.close();
 
     const res = await req('GET', `/v1/${appId}/kv/_stats`);
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(typeof body.keys_total).toBe('number');
-    expect(body.keys_total).toBeGreaterThanOrEqual(1);
-    expect(typeof body.bytes_used).toBe('number');
-    expect(typeof body.ops_per_sec).toBe('number');
+    expect(body).toMatchObject({
+      keys_total: 42,
+      bytes_used: 1024,
+      max_keys: expect.any(Number),
+      max_storage_bytes: expect.any(Number),
+      max_ops_per_sec: expect.any(Number),
+      max_value_bytes: expect.any(Number),
+    });
   });
 
   it('returns zeros for empty app', async () => {

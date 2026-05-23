@@ -15,6 +15,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { resolveKvAuth } from '../../services/kv/auth.js';
 import { type RedisClientOptions } from '../../services/kv/redis-client.js';
 import { scanKeys, appStats, flushApp } from '../../services/kv/admin.js';
+import { getKvLimitsForApp } from '../../services/kv/limits.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -76,7 +77,8 @@ const kvAdminRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-    const result = await appStats(baseOpts, auth.appId);
+    const limits = await getKvLimitsForApp(fastify.controlDb, appId);
+    const result = await appStats(baseOpts, auth.appId, limits);
     return reply.code(200).send(result);
   });
 

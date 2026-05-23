@@ -5,6 +5,8 @@
 
 import { RedisClient, RedisClientOptions } from './redis-client.js';
 import { getStorageBytes, resetCounter } from './storage-counter.js';
+import { getKeys } from './keys-counter.js';
+import type { KvLimits } from './limits.js';
 
 const SCAN_DEFAULT_LIMIT = 100;
 const SCAN_MAX_LIMIT = 1000;
@@ -96,59 +98,46 @@ export interface StatsResult {
   keys_total: number;
   bytes_used: number;
   ops_per_sec: number | null;
-}
-
-/**
- * Count user keys across both DBs via full scan. O(n) in key count.
- */
-async function countKeysFromScan(
-  baseOpts: Omit<RedisClientOptions, 'db'>,
-  appId: string,
-): Promise<number> {
-  const pattern = `{${appId}}:u:*`;
-  let keysTotal = 0;
-
-  async function collectDb(db: number) {
-    await withDb(baseOpts, db, async (c) => {
-      let cursor = '0';
-      do {
-        const [next, keys] = await c.scan(cursor, pattern, SCAN_DEFAULT_LIMIT);
-        keysTotal += keys.length;
-        cursor = next;
-      } while (cursor !== '0');
-    });
-  }
-
-  await collectDb(0);
-  await collectDb(1);
-  return keysTotal;
+  max_keys: number;
+  max_storage_bytes: number;
+  max_ops_per_sec: number;
+  max_value_bytes: number;
 }
 
 /**
  * Returns real stats for an app:
  *   bytes_used  — O(1) read from the running counter at `{appId}:_meta:bytes`.
  *   ops_per_sec — current-second rate-limit bucket (maintained by Task 3).
- *   keys_total  — full scan across DB 0 + DB 1 (O(n)).
+ *   keys_total  — O(1) read from the keys counter at `{appId}:_meta:keys`.
+ *   max_*       — plan limits for the app.
  */
 export async function appStats(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   appId: string,
+  limits: KvLimits,
 ): Promise<StatsResult> {
-  // Bytes and ops_per_sec are read from DB 0 (meta keys live there).
   const metaClient = await RedisClient.connect({ ...baseOpts, db: 0 });
   let bytesUsed = 0;
+  let keysTotal = 0;
   let opsPerSec = 0;
   try {
     bytesUsed = await getStorageBytes(metaClient, appId);
+    keysTotal = await getKeys(metaClient, appId);
     const bucket = Math.floor(Date.now() / 1000);
     const opsRaw = await metaClient.get(`{${appId}}:_meta:rate:${bucket}`);
     opsPerSec = opsRaw ? parseInt(opsRaw, 10) : 0;
   } finally {
     await metaClient.close();
   }
-
-  const keysTotal = await countKeysFromScan(baseOpts, appId);
-  return { keys_total: keysTotal, bytes_used: bytesUsed, ops_per_sec: opsPerSec };
+  return {
+    keys_total: keysTotal,
+    bytes_used: bytesUsed,
+    ops_per_sec: opsPerSec,
+    max_keys: limits.maxKeysTotal,
+    max_storage_bytes: limits.maxStorageBytes,
+    max_ops_per_sec: limits.maxOpsPerSec,
+    max_value_bytes: limits.maxValueBytes,
+  };
 }
 
 // ── _flush ────────────────────────────────────────────────────────────────────

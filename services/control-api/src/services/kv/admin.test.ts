@@ -10,6 +10,14 @@ import { randomUUID } from 'node:crypto';
 import { RedisClient } from './redis-client.js';
 import { incBytes, resetCounter } from './storage-counter.js';
 import { appStats } from './admin.js';
+import type { KvLimits } from './limits.js';
+
+const MOCK_LIMITS: KvLimits = {
+  maxKeysTotal: 10000,
+  maxStorageBytes: 104857600,
+  maxOpsPerSec: 100,
+  maxValueBytes: 102400,
+};
 
 const KV_REDIS_URL_US = process.env.KV_REDIS_URL_US ?? 'redis://:butterbase_dev_kv@localhost:6390';
 const RUN_KV_TESTS = !!process.env.KV_REDIS_URL_US;
@@ -50,7 +58,7 @@ describeKv('appStats', () => {
     // Set counter to a known value without writing any actual user keys.
     await incBytes(metaClient, testAppId, 12345);
 
-    const stats = await appStats(baseOpts, testAppId);
+    const stats = await appStats(baseOpts, testAppId, MOCK_LIMITS);
 
     expect(stats.bytes_used).toBe(12345);
     // No user keys were written so keys_total should be 0.
@@ -58,19 +66,17 @@ describeKv('appStats', () => {
   });
 
   it('bytes_used is 0 for a fresh app with no counter', async () => {
-    const stats = await appStats(baseOpts, testAppId);
+    const stats = await appStats(baseOpts, testAppId, MOCK_LIMITS);
     expect(stats.bytes_used).toBe(0);
   });
 
-  it('keys_total counts actual user keys from scan', async () => {
-    // Write 3 user keys directly.
-    await metaClient.set(`{${testAppId}}:u:k1`, 'v1');
-    await metaClient.set(`{${testAppId}}:u:k2`, 'v2');
-    await metaClient.set(`{${testAppId}}:u:k3`, 'v3');
+  it('keys_total reads from the keys counter (O(1)) — not a scan', async () => {
+    // Set the keys counter directly to a known value.
+    await metaClient.set(`{${testAppId}}:_meta:keys`, '5');
 
-    const stats = await appStats(baseOpts, testAppId);
+    const stats = await appStats(baseOpts, testAppId, MOCK_LIMITS);
 
-    expect(stats.keys_total).toBe(3);
+    expect(stats.keys_total).toBe(5);
   });
 
   it('ops_per_sec reflects the current rate-limit bucket after a write', async () => {
@@ -79,7 +85,7 @@ describeKv('appStats', () => {
     const rateKey = `{${testAppId}}:_meta:rate:${bucket}`;
     await metaClient.set(rateKey, '7');
 
-    const stats = await appStats(baseOpts, testAppId);
+    const stats = await appStats(baseOpts, testAppId, MOCK_LIMITS);
 
     expect(stats.ops_per_sec).toBe(7);
 
@@ -88,7 +94,7 @@ describeKv('appStats', () => {
   });
 
   it('ops_per_sec is 0 when no rate bucket exists', async () => {
-    const stats = await appStats(baseOpts, testAppId);
+    const stats = await appStats(baseOpts, testAppId, MOCK_LIMITS);
     expect(stats.ops_per_sec).toBe(0);
   });
 });

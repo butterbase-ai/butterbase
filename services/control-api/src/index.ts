@@ -80,6 +80,7 @@ import { startDigestNotifier } from './services/digest-notifier.js';
 import { startRagWorker } from './services/rag-worker.js';
 import { startAnalyticsPullerCron } from './services/cf-analytics-puller.js';
 import { startKvReconcileWorker } from './services/kv/reconcile-worker.js';
+import { startKeysExpiryWorker } from './services/kv/keys-expiry-worker.js';
 import { ragRoutes } from './routes/rag.js';
 import { integrationRoutes } from './routes/integrations.js';
 import { customDomainRoutes } from './routes/custom-domains.js';
@@ -582,6 +583,26 @@ Promise.resolve(app.ready())
     const kvReconcileInterval = startKvReconcileWorker(app.controlDb);
     (app as any).kvReconcileInterval = kvReconcileInterval;
     app.log.info('KV reconcile worker started (24h interval)');
+
+    // Start KV keys-expiry subscriber (per-region keyspace notifications)
+    const regionsRaw = process.env.BUTTERBASE_REGIONS ?? '';
+    const kvRegions = regionsRaw.split(',').map((r) => r.trim()).filter(Boolean);
+    if (kvRegions.length === 0) {
+      app.log.warn('BUTTERBASE_REGIONS empty — KV expiry-subscriber not started');
+    } else {
+      const keysExpiry = startKeysExpiryWorker({
+        regions: kvRegions,
+        urlForRegion: (region) => {
+          const envKey = `KV_REDIS_URL_${region.toUpperCase().replace(/-/g, '_')}`;
+          const url = process.env[envKey];
+          if (!url) throw new Error(`Missing ${envKey}`);
+          return url;
+        },
+        log: app.log,
+      });
+      app.log.info({ regions: kvRegions }, 'KV expiry-subscriber started');
+      app.addHook('onClose', async () => { await keysExpiry.stop(); });
+    }
 
     // Schedule nightly soft-lock auto-restore check (runs at 2 AM)
     const scheduleNightlyRestore = () => {
