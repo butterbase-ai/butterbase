@@ -55,14 +55,26 @@ describe('ctx.kv (shim)', () => {
     expect(last().body).toEqual({ value: { x: 1 } });
   });
 
-  it('del returns 1 for 204, 0 for 404', async () => {
+  it('del returns deleted count from 200 {deleted}', async () => {
     const f = mkFetch({
-      [`DELETE ${ROOT}/foo`]: { status: 204 },
-      [`DELETE ${ROOT}/missing`]: { status: 404 },
+      [`DELETE ${ROOT}/foo`]: { status: 200, body: JSON.stringify({ deleted: 1 }) },
+      [`DELETE ${ROOT}/missing`]: { status: 200, body: JSON.stringify({ deleted: 0 }) },
     });
     const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
     expect(await kv.del('foo')).toBe(1);
     expect(await kv.del('missing')).toBe(0);
+  });
+
+  it('del returns 0 when gateway reports {deleted: 0}', async () => {
+    const { f } = makeSpy(200, { deleted: 0 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.del('gone')).toBe(0);
+  });
+
+  it('del returns 1 when gateway reports {deleted: 1}', async () => {
+    const { f } = makeSpy(200, { deleted: 1 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.del('present')).toBe(1);
   });
 
   it('get with touch:true appends ?touch=true to the URL', async () => {

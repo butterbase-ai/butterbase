@@ -42,6 +42,9 @@ export class KvConnectionError extends KvError {
   }
 }
 
+// Reserved for a future stricter-CAS endpoint that returns 409 on mismatch.
+// Today the kv-gateway returns 200 {swapped:false} for normal CAS, so callers
+// should use the boolean return from KvShim.cas(); this error is not thrown yet.
 export class KvCasMismatchError extends KvError {
   constructor(m = 'cas mismatch', c = 'KV_CAS_MISMATCH', s = 409, r?: string, d?: unknown) {
     super(m, c, s, r, d);

@@ -499,6 +499,14 @@ function buildWorkerCode(
       // If it is not set, ctx.kv is undefined and function code that tries to use it will receive
       // a clear TypeError ("Cannot read properties of undefined") rather than a silent failure.
       // The gateway address for local development is http://kv-gateway:8787 (Task 14 wires that up).
+      //
+      // SECURITY NOTE: The per-app BUTTERBASE_FUNCTION_SERVICE_KEY is interpolated
+      // into the worker source string below (and at lines ~625 and ~643 for the
+      // integrations bridge). This is consistent with the pre-existing pattern but
+      // means the key value appears in the Blob URL the Deno Worker executes.
+      // V8 stack traces don't include source content, so accidental leak via crash
+      // logs is unlikely. Follow-up: move to a postMessage handshake or worker-startup
+      // fetch from control-api so the key never appears in the worker source.
       ${(() => {
         const __fnKey = metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY
           ?? metadata.env_vars?.BUTTERBASE_SERVICE_KEY
@@ -555,9 +563,8 @@ function buildWorkerCode(
           },
           async del(key) {
             const res = await __kvCall("DELETE", key);
-            if (res.status === 204) return 1;
-            if (res.status === 404) return 0;
-            __kvThrow(res, await res.json().catch(() => null));
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).deleted;
           },
           async incr(key, by) {
             const body = by !== undefined ? { by } : {};

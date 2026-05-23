@@ -80,6 +80,19 @@ function checkValueSize(encoded: string): Response | null {
   return null;
 }
 
+// After writing a key to one DB, remove any stale copy from the other DB.
+// This prevents durable-first GET fanout from returning a stale value when the
+// caller switches a key between ephemeral and durable (or vice versa).
+// Best-effort: errors are swallowed so the original write is never reported as failed.
+async function deleteFromOtherDb(baseOpts: Omit<RedisClientOptions, 'db'>, writtenDb: number, fullKey: string): Promise<void> {
+  const otherDb = writtenDb === DURABLE_DB ? EPHEMERAL_DB : DURABLE_DB;
+  try {
+    await withRedis(baseOpts, otherDb, (c) => c.del([fullKey]));
+  } catch (e) {
+    console.warn('[kv-gateway] cross-db cleanup failed (swallowed):', (e as any)?.message ?? e);
+  }
+}
+
 // Helper: open a RedisClient connection to the given DB, run fn, and close on all paths.
 async function withRedis<T>(
   baseOpts: Omit<RedisClientOptions, 'db'>,
@@ -233,14 +246,17 @@ export default {
       const encoded = JSON.stringify(body.value);
       const sizeErr = checkValueSize(encoded);
       if (sizeErr) return sizeErr;
-      return withRedis(baseOpts, db, async (c) => {
+      const wrote = await withRedis(baseOpts, db, async (c) => {
         // Use setWithOptions to combine NX + EX in one round trip.
-        const wrote = await c.setWithOptions(fullKey, encoded, {
+        return c.setWithOptions(fullKey, encoded, {
           ex: resolvedTtl !== null ? resolvedTtl : undefined,
           nx: true,
         });
-        return json({ wrote }, wrote ? 201 : 200);
       });
+      // Only clean up the other DB if we actually wrote — if setnx didn't write
+      // (key already exists in chosen DB), we leave the existing value untouched.
+      if (wrote) await deleteFromOtherDb(baseOpts, db, fullKey);
+      return json({ wrote }, wrote ? 201 : 200);
     }
 
     // cas: always durable (atomic CAS only makes sense on DB 0)
@@ -359,14 +375,16 @@ export default {
           await c.setex(fullKey, resolvedTtl, encoded);
         }
       });
+      await deleteFromOtherDb(baseOpts, db, fullKey);
       return new Response(null, { status: 204 });
     }
 
     if (req.method === 'DELETE') {
-      // Delete from BOTH DBs — best-effort; either miss is harmless.
-      await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fullKey]));
-      await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fullKey]));
-      return new Response(null, { status: 204 });
+      // Delete from BOTH DBs and return the actual total count so callers can
+      // distinguish "key existed" from "key was already gone".
+      const delDur = await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fullKey]));
+      const delEph = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fullKey]));
+      return json({ deleted: delDur + delEph });
     }
 
     return err('method_not_allowed', 405);

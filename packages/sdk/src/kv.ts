@@ -49,7 +49,7 @@ export function makeKv(opts: MakeKvOptions): KvShim {
     if (res.status === 400) throw new KvKeyInvalidError(msg);
     if (res.status === 401) throw new KvAuthError(msg);
     if (res.status === 403) throw new KvForbiddenError(msg);
-    if (res.status === 409) throw new KvCasMismatchError(msg);
+    if (res.status === 409) throw new KvCasMismatchError(msg); // not exercised today; kept for forward-compat (see KvCasMismatchError)
     if (res.status === 413) throw new KvValueTooLargeError(msg);
     if (res.status === 503) throw new KvConnectionError(msg);
     throw new KvError(msg, body?.error ?? 'KV_ERROR', res.status);
@@ -74,9 +74,8 @@ export function makeKv(opts: MakeKvOptions): KvShim {
 
     async del(key: string): Promise<number> {
       const res = await call('DELETE', key);
-      if (res.status === 204) return 1;
-      if (res.status === 404) return 0;
-      throwForStatus(res, await res.json().catch(() => null));
+      if (!res.ok) throwForStatus(res, await res.json().catch(() => null));
+      return (await res.json() as { deleted: number }).deleted;
     },
 
     async incr(key: string, by?: number): Promise<number> {

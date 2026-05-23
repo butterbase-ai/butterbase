@@ -66,13 +66,23 @@ describe('kv-gateway worker', () => {
     expect(get.status).toBe(404);
   });
 
-  it('DELETE removes', async () => {
+  it('DELETE removes and returns {deleted: 1}', async () => {
     mockResolveOk('app_test');
     await worker.fetch(req('PUT', '/v1/app_test/kv/tmp', { value: 'x' }), env);
+    mockResolveOk('app_test');
     const del = await worker.fetch(req('DELETE', '/v1/app_test/kv/tmp'), env);
-    expect(del.status).toBe(204);
+    expect(del.status).toBe(200);
+    expect(await del.json()).toEqual({ deleted: 1 });
+    mockResolveOk('app_test');
     const get = await worker.fetch(req('GET', '/v1/app_test/kv/tmp'), env);
     expect(get.status).toBe(404);
+  });
+
+  it('DELETE on missing key returns {deleted: 0}', async () => {
+    mockResolveOk('app_test');
+    const del = await worker.fetch(req('DELETE', '/v1/app_test/kv/totally-absent-key'), env);
+    expect(del.status).toBe(200);
+    expect(await del.json()).toEqual({ deleted: 0 });
   });
 
   it('rejects with 401 when no Authorization', async () => {
@@ -889,6 +899,86 @@ describe('kv-gateway worker', () => {
       expect(await res.json()).toEqual({ value: 'rval' });
     });
 
+    it('PUT durable then PUT ephemeral: GET returns ephemeral value, DB0 cleared', async () => {
+      // Write durable first, then overwrite with ephemeral.
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/cross-db-dur-then-eph', { value: 'durable-val' }), env);
+
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/cross-db-dur-then-eph', { value: 'ephemeral-val', ephemeral: true }), env);
+
+      // GET must return the ephemeral value, not the stale durable one.
+      mockResolveOk('app_test');
+      const get = await worker.fetch(req('GET', '/v1/app_test/kv/cross-db-dur-then-eph'), env);
+      expect(get.status).toBe(200);
+      expect(await get.json()).toEqual({ value: 'ephemeral-val' });
+
+      // Direct check: DB0 must have been cleared.
+      const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const inDb0 = await c0.get('{app_test}:u:cross-db-dur-then-eph');
+      await c0.close();
+      expect(inDb0).toBeNull();
+    });
+
+    it('PUT ephemeral then PUT durable: GET returns durable value, DB1 cleared', async () => {
+      // Write ephemeral first, then overwrite with durable.
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/cross-db-eph-then-dur', { value: 'eph-val', ephemeral: true }), env);
+
+      mockResolveOk('app_test');
+      await worker.fetch(req('PUT', '/v1/app_test/kv/cross-db-eph-then-dur', { value: 'dur-val' }), env);
+
+      // GET must return the durable value.
+      mockResolveOk('app_test');
+      const get = await worker.fetch(req('GET', '/v1/app_test/kv/cross-db-eph-then-dur'), env);
+      expect(get.status).toBe(200);
+      expect(await get.json()).toEqual({ value: 'dur-val' });
+
+      // Direct check: DB1 must have been cleared.
+      const c1 = await RedisClient.connect({ ...redisBaseOpts, db: 1 });
+      const inDb1 = await c1.get('{app_test}:u:cross-db-eph-then-dur');
+      await c1.close();
+      expect(inDb1).toBeNull();
+    });
+
+    it('setnx ephemeral on absent key writes DB1 and clears any stale DB0 copy', async () => {
+      // Plant a durable copy directly so we can verify cross-db cleanup.
+      const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      await c0.set('{app_test}:u:setnx-cross-db', JSON.stringify('old-durable'));
+      await c0.close();
+
+      // setnx with ephemeral:true — key doesn't exist in DB1 so it should write.
+      mockResolveOk('app_test');
+      const res = await worker.fetch(
+        req('POST', '/v1/app_test/kv/setnx-cross-db/setnx', { value: 'new-eph', ephemeral: true }),
+        env,
+      );
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ wrote: true });
+
+      // DB0 stale copy must have been cleared.
+      const c0after = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      const inDb0 = await c0after.get('{app_test}:u:setnx-cross-db');
+      await c0after.close();
+      expect(inDb0).toBeNull();
+    });
+
+    it('DELETE with key in both DBs (raw writes) returns {deleted: 2}', async () => {
+      // Bypass the gateway to plant a copy in both DBs simultaneously.
+      const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
+      await c0.set('{app_test}:u:del-sum-both', JSON.stringify('dur'));
+      await c0.close();
+
+      const c1 = await RedisClient.connect({ ...redisBaseOpts, db: 1 });
+      await c1.set('{app_test}:u:del-sum-both', JSON.stringify('eph'));
+      await c1.close();
+
+      mockResolveOk('app_test');
+      const del = await worker.fetch(req('DELETE', '/v1/app_test/kv/del-sum-both'), env);
+      expect(del.status).toBe(200);
+      expect(await del.json()).toEqual({ deleted: 2 });
+    });
+
     it('DELETE removes key from both DBs', async () => {
       // Write to db 0 (durable) and db 1 (ephemeral) with the same key path.
       const c0 = await RedisClient.connect({ ...redisBaseOpts, db: 0 });
@@ -899,10 +989,11 @@ describe('kv-gateway worker', () => {
       await c1.set('{app_test}:u:del-both', JSON.stringify('ephemeral-side'));
       await c1.close();
 
-      // DELETE via worker.
+      // DELETE via worker — sum from both DBs should be 2 since both had the key.
       mockResolveOk('app_test');
       const del = await worker.fetch(req('DELETE', '/v1/app_test/kv/del-both'), env);
-      expect(del.status).toBe(204);
+      expect(del.status).toBe(200);
+      expect(await del.json()).toEqual({ deleted: 2 });
 
       // Verify both DBs are clear.
       const v0 = await (async () => {
