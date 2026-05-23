@@ -95,6 +95,35 @@ export class RedisClient {
     return r === 1;
   }
 
+  /**
+   * DUMP key — returns the binary serialized value for use with RESTORE.
+   * Returns null if the key does not exist. Used by move-app KV dump (Plan 6).
+   */
+  async dump(key: string): Promise<Buffer | null> {
+    const v = await this.io.dumpBuffer(key);
+    return v ?? null;
+  }
+
+  /**
+   * RESTORE key ttl payload [REPLACE].
+   * ttlMs: 0 means "no TTL" (key is persistent on dest); negative values are rejected.
+   * opts.replace=true sets the REPLACE flag (overwrites an existing key).
+   * Used by move-app KV restore (Plan 6).
+   */
+  async restore(
+    key: string,
+    ttlMs: number,
+    payload: Buffer,
+    opts?: { replace?: boolean },
+  ): Promise<void> {
+    if (ttlMs < 0) throw new Error(`restore: negative ttlMs not allowed: ${ttlMs}`);
+    if (opts?.replace) {
+      await this.io.restore(key, ttlMs, payload, 'REPLACE');
+    } else {
+      await this.io.restore(key, ttlMs, payload);
+    }
+  }
+
   async mget(keys: string[]): Promise<(string | null)[]> {
     if (keys.length === 0) return [];
     return this.io.mget(...keys);
