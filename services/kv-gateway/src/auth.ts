@@ -1,10 +1,15 @@
 import type { Env } from './worker.js';
 
-export interface ResolvedApp {
+export interface ResolvedAuth {
   appId: string;
   region: string;
   redisPassword: string;
+  userId?: string;
+  role?: string | null;
 }
+
+/** @deprecated use ResolvedAuth */
+export type ResolvedApp = ResolvedAuth;
 
 export interface ResolveDeps {
   apiKey: string;
@@ -13,7 +18,7 @@ export interface ResolveDeps {
   fetch?: typeof fetch;
 }
 
-export async function resolveApp(deps: ResolveDeps): Promise<ResolvedApp | null> {
+export async function resolveApp(deps: ResolveDeps): Promise<ResolvedAuth | null> {
   const f = deps.fetch ?? fetch;
   const res = await f(`${deps.env.CONTROL_API_URL}/v1/internal/kv/resolve-key`, {
     method: 'POST',
@@ -31,4 +36,34 @@ export async function resolveApp(deps: ResolveDeps): Promise<ResolvedApp | null>
   if (res.status !== 200) return null;
   const j = (await res.json()) as { app_id: string; region: string; redis_password: string };
   return { appId: j.app_id, region: j.region, redisPassword: j.redis_password };
+}
+
+export async function resolveJwt(deps: ResolveDeps): Promise<ResolvedAuth | null> {
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.env.CONTROL_API_URL}/v1/internal/kv/resolve-jwt`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-butterbase-internal-secret': deps.env.INTERNAL_SECRET,
+    },
+    body: JSON.stringify({ jwt: deps.apiKey, app_id: deps.appId }),
+  });
+  if (res.status !== 200) return null;
+  const j = (await res.json()) as {
+    app_id: string; region: string; redis_password: string;
+    user_id: string; role: string | null;
+  };
+  return {
+    appId: j.app_id, region: j.region, redisPassword: j.redis_password,
+    userId: j.user_id, role: j.role,
+  };
+}
+
+/**
+ * Dispatch by token shape: dotted (xxx.yyy.zzz) → JWT; flat hex → API key or function key.
+ * The kv-gateway accepts both on the same routes; distinction matters for expose enforcement.
+ */
+export async function resolveBearer(deps: ResolveDeps): Promise<ResolvedAuth | null> {
+  if (deps.apiKey.includes('.')) return resolveJwt(deps);
+  return resolveApp(deps);
 }
