@@ -84,6 +84,54 @@ describe('runReverseMove', () => {
     expect(unarchiveCall).toBeTruthy();
   });
 
+  it('fast path: emits a warn log noting the KV split-region gap', async () => {
+    (getMigration as any).mockResolvedValue({
+      id: 'fwd-1',
+      app_id: 'app-x',
+      user_id: 'u-1',
+      source_region: 'us-east-1',
+      dest_region: 'eu-west-1',
+      current_step: 'completed',
+      source_replica_state: 'replicating',
+    });
+    (createMigration as any).mockResolvedValue('rev-warn-1');
+    (markCompleted as any).mockResolvedValue(undefined);
+
+    const sourcePool = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes('SELECT subdomain')) return { rows: [{ subdomain: 'demo' }] };
+        return { rows: [] };
+      }),
+    };
+    const destPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    const logWarn = vi.fn();
+
+    const ctx: any = {
+      controlPool: { query: vi.fn().mockResolvedValue({ rows: [] }) },
+      runtimePoolFor: (r: string) => (r === 'us-east-1' ? sourcePool : destPool),
+      writeSubdomainMapping: vi.fn().mockResolvedValue(undefined),
+      writeDomainMapping: vi.fn().mockResolvedValue(undefined),
+      listCustomDomains: vi.fn().mockResolvedValue([]),
+      invalidateCacheAllRegions: vi.fn().mockResolvedValue(undefined),
+      updateUserAppIndexRegion: vi.fn().mockResolvedValue(undefined),
+      waitForReplicationCaughtUp: vi.fn().mockResolvedValue(undefined),
+      promoteSourceToPrimary: vi.fn().mockResolvedValue(undefined),
+      log: { warn: logWarn },
+    };
+
+    await runReverseMove(ctx, { forwardMigrationId: 'fwd-1', userId: 'u-1' });
+
+    expect(logWarn).toHaveBeenCalledOnce();
+    const [obj, msg] = logWarn.mock.calls[0];
+    expect(obj).toMatchObject({
+      forwardMigrationId: 'fwd-1',
+      appId: 'app-x',
+      kvRegion: 'eu-west-1',
+      pgRegion: 'us-east-1',
+    });
+    expect(msg).toContain('[reverse-move fast-path]');
+  });
+
   it('rejects when forward migration is not completed', async () => {
     (getMigration as any).mockResolvedValueOnce({
       id: 'fwd-3',

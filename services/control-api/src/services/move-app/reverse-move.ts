@@ -12,6 +12,8 @@ export interface ReverseMoveCtx {
   updateUserAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
   waitForReplicationCaughtUp: (region: string, appId: string, migrationId: string) => Promise<void>;
   promoteSourceToPrimary: (region: string, appId: string, migrationId: string) => Promise<void>;
+  /** Optional structured logger (e.g. pino). Used for the KV-gap warning on fast-path. */
+  log?: { warn?: (obj: Record<string, unknown>, msg: string) => void };
 }
 
 export async function runReverseMove(
@@ -26,6 +28,9 @@ export async function runReverseMove(
 
   if (forward.source_replica_state !== 'replicating') {
     // Slow path: enqueue a swapped-direction migration and let the saga driver handle it.
+    // The saga's HAPPY_PATH_ORDER includes dumping_kv + restoring_kv, so KV is automatically
+    // migrated in the reverse direction (dest_region → source_region) by the saga steps.
+    // No additional KV handling is needed here. ✅
     const slowCtx = { controlPool: ctx.controlPool, runtimePoolFor: ctx.runtimePoolFor };
     const { migrationId } = await runReverseMoveSlowPath(slowCtx, { forward, userId: args.userId });
     return { migrationId, path: 'slow' as const };
@@ -44,6 +49,18 @@ export async function runReverseMove(
 
   await ctx.waitForReplicationCaughtUp(forward.source_region, forward.app_id, forward.id);
   await ctx.promoteSourceToPrimary(forward.source_region, forward.app_id, forward.id);
+
+  // KV reverse-migration is NOT handled by the fast path. The app's KV data remains
+  // in forward.dest_region while Postgres routes back to forward.source_region.
+  // This is a known split-region state — apps that rely on the KV layer should
+  // trigger a manual reconcile via a forward move_app (dest → source).
+  // See: docs/superpowers/notes/2026-05-24-kv-reverse-move-gap.md
+  ctx.log?.warn?.({
+    forwardMigrationId: forward.id,
+    appId: forward.app_id,
+    kvRegion: forward.dest_region,
+    pgRegion: forward.source_region,
+  }, '[reverse-move fast-path] KV not migrated; split-region state until next forward move');
 
   await ctx.updateUserAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
   const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string }>(
