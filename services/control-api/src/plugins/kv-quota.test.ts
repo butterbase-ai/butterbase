@@ -30,6 +30,7 @@ import {
 } from '../services/kv/__test-utils__/kv-test-harness.js';
 import { RedisClient, wrap } from '../services/kv/redis-client.js';
 import { getStorageBytes, incBytes } from '../services/kv/storage-counter.js';
+import { setKvBlock, clearKvBlock } from '../services/kv/migration-sentinel.js';
 import kvQuotaPlugin from './kv-quota.js';
 import kvDataRoutes from '../routes/v1/kv-data.js';
 import { databasePlugin } from './database.js';
@@ -350,6 +351,77 @@ describeDb('kv-quota plugin', () => {
     }
   });
 
+});
+
+// ── Migration sentinel tests ────────────────────────────────────────────────────
+
+describeDb('kv-quota migration sentinel', () => {
+  it('returns 503 kv_migrating on writes when the sentinel is set', async () => {
+    const app = await buildTestApp(pool);
+    try {
+      const kvR = wrap(redis);
+      await setKvBlock(kvR, appId);
+      try {
+        const r = await req(app, 'PUT', `/v1/${appId}/kv/sentinel-write-test`, {
+          payload: { value: 'blocked' },
+        });
+        expect(r.statusCode).toBe(503);
+        expect(r.json()).toMatchObject({ error: 'kv_migrating', app_id: appId });
+        expect(r.headers['retry-after']).toBe('5');
+      } finally {
+        await clearKvBlock(kvR, appId);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('reads still pass while the sentinel is set', async () => {
+    const app = await buildTestApp(pool);
+    try {
+      // Seed a value to read back
+      await req(app, 'PUT', `/v1/${appId}/kv/sentinel-read-test`, {
+        payload: { value: 'present' },
+      });
+
+      const kvR = wrap(redis);
+      await setKvBlock(kvR, appId);
+      try {
+        const r = await req(app, 'GET', `/v1/${appId}/kv/sentinel-read-test`);
+        expect(r.statusCode).toBe(200);
+      } finally {
+        await clearKvBlock(kvR, appId);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('sentinel check runs before rate-limit (503 wins over 429)', async () => {
+    const app = await buildTestApp(pool);
+    try {
+      // Exhaust the rate budget
+      const bucket = Math.floor(Date.now() / 1000);
+      const rateKey = `{${appId}}:_meta:rate:${bucket}`;
+      await redis.set(rateKey, '50');
+      await redis.expire(rateKey, 2);
+
+      const kvR = wrap(redis);
+      await setKvBlock(kvR, appId);
+      try {
+        const r = await req(app, 'PUT', `/v1/${appId}/kv/sentinel-vs-rl`, {
+          payload: { value: 'x' },
+        });
+        // Sentinel fires first, so we get 503 not 429
+        expect(r.statusCode).toBe(503);
+        expect(r.json()).toMatchObject({ error: 'kv_migrating' });
+      } finally {
+        await clearKvBlock(kvR, appId);
+      }
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 // ── Unit tests for pure helpers ────────────────────────────────────────────────

@@ -28,6 +28,7 @@ import { getCreditsBalance, incrementUsage } from '../services/usage-metering.js
 import { kvRedisFor } from '../services/kv/redis-registry.js';
 import { wrap } from '../services/kv/redis-client.js';
 import { getRedisClient } from '../services/redis.js';
+import { isKvBlocked } from '../services/kv/migration-sentinel.js';
 
 // ---------------------------------------------------------------------------
 // Fastify module augmentation — add kvAccount to FastifyInstance
@@ -191,6 +192,19 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
 
     // KV Redis handle for this app's region (shared long-lived ioredis connection)
     const kvR = wrap(kvRedisFor(auth.region));
+
+    // Migration sentinel — block WRITES during a move-app run.
+    // Reads still pass (stale reads from the source are acceptable; once the
+    // move flips app_kv_credentials.region, future requests resolve to the dest).
+    // Checked before rate-limit so blocked writes don't consume the rate budget.
+    if (op.kind === 'write' || op.kind === 'atomic_write' || op.kind === 'mset') {
+      if (await isKvBlocked(kvR, appId)) {
+        return reply
+          .code(503)
+          .header('retry-after', '5')
+          .send({ error: 'kv_migrating', app_id: appId });
+      }
+    }
 
     // ── (1) Rate limit ────────────────────────────────────────────────────
     const opsCount = opsCountForOp(op);
