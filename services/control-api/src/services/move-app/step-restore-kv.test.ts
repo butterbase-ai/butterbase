@@ -1,9 +1,10 @@
 import { PassThrough, Readable } from 'node:stream';
-import { createGzip } from 'node:zlib';
+import { createGzip, createGunzip } from 'node:zlib';
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
-import { executeRestoreKv, toKvRegion } from './step-restore-kv.js';
+import { executeRestoreKv, toKvRegion, restoreKvIntoRegion } from './step-restore-kv.js';
 import { serializeRecord, type KvDumpRecord } from './kv-dump-format.js';
 import { RedisClient } from '../kv/redis-client.js';
+import { randomUUID } from 'node:crypto';
 
 const makeCtx = (extra: Record<string, any> = {}): any => ({
   controlPool: { query: vi.fn().mockResolvedValue({ rowCount: 1 }) },
@@ -228,3 +229,85 @@ describe.skipIf(!hasFullIntegration)(
     );
   },
 );
+
+// ---------------------------------------------------------------------------
+// restoreKvIntoRegion (exported helper)
+// ---------------------------------------------------------------------------
+
+describe('restoreKvIntoRegion (exported helper)', () => {
+  it('flips app_kv_credentials.region to toKvRegion(flipTo), not destRegion', async () => {
+    if (!process.env.KV_REDIS_URL_US) return; // gated integration
+
+    const url = new URL(process.env.KV_REDIS_URL_US);
+    const base = {
+      host: url.hostname,
+      port: Number(url.port) || 6379,
+      password: url.password ? decodeURIComponent(url.password) : '',
+    };
+
+    const controlPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    // Return a properly gzipped empty stream (compressed empty file)
+    const downloadKvDump = async () => {
+      const pt = new PassThrough();
+      const gz = createGzip();
+      pt.pipe(gz);
+      pt.end(); // empty source → empty gzip
+      return gz;
+    };
+
+    await restoreKvIntoRegion({
+      destRegion: 'us-east-1',
+      sourceRegionForBucket: 'eu-west-1',
+      appId: `flip-test-${randomUUID()}`,
+      key: 'mock-key',
+      controlPool,
+      flipTo: 'eu-west-1', // distinct from destRegion to prove flipTo is used
+      log: { info: vi.fn() },
+      downloadFn: downloadKvDump,
+      kvBaseOptsForRegion: () => base,
+    });
+
+    const updateCall = controlPool.query.mock.calls.find((c: any[]) =>
+      typeof c[0] === 'string' && c[0].includes('UPDATE app_kv_credentials'),
+    );
+    expect(updateCall).toBeTruthy();
+    expect(updateCall[1][0]).toBe('eu'); // toKvRegion('eu-west-1') → 'eu'
+  });
+
+  it('non-empty dest guard still fires (rejects with non_empty_dest)', async () => {
+    if (!process.env.KV_REDIS_URL_US) return; // gated integration
+
+    const url = new URL(process.env.KV_REDIS_URL_US);
+    const base = {
+      host: url.hostname,
+      port: Number(url.port) || 6379,
+      password: url.password ? decodeURIComponent(url.password) : '',
+    };
+    const appId = `nonempty-test-${randomUUID()}`;
+
+    // Seed a non-_meta:bytes key to trip the guard.
+    const c = await RedisClient.connect({ ...base, db: 0 });
+    try {
+      await c.set(`{${appId}}:u:stale`, 'x');
+    } finally {
+      await c.close();
+    }
+
+    const controlPool = { query: vi.fn() };
+    await expect(restoreKvIntoRegion({
+      destRegion: 'us-east-1',
+      sourceRegionForBucket: 'eu-west-1',
+      appId,
+      key: 'mock',
+      controlPool,
+      flipTo: 'us-east-1',
+      log: { info: vi.fn() },
+      downloadFn: async () => Readable.from([]),
+      kvBaseOptsForRegion: () => base,
+    })).rejects.toThrow(/non_empty_dest/);
+
+    // Cleanup
+    const c2 = await RedisClient.connect({ ...base, db: 0 });
+    try { await c2.del([`{${appId}}:u:stale`]); } finally { await c2.close(); }
+  });
+});

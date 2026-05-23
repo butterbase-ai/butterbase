@@ -3,6 +3,7 @@ import { createGunzip } from 'node:zlib';
 import { Readable } from 'node:stream';
 import { createInterface } from 'node:readline';
 import type { StepHandler } from './saga-executor.js';
+import type pg from 'pg';
 import { RedisClient, type RedisClientOptions } from '../kv/redis-client.js';
 import { parseRecord, payloadToBuffer } from './kv-dump-format.js';
 
@@ -18,6 +19,19 @@ export function toKvRegion(region: string): string {
 
 export interface RestoreKvCtx {
   downloadKvDump?: (key: string) => Promise<Readable>;
+  kvBaseOptsForRegion?: (region: string) => Omit<RedisClientOptions, 'db'>;
+}
+
+export interface RestoreKvOpts {
+  destRegion: string;
+  sourceRegionForBucket: string;
+  appId: string;
+  key: string;
+  controlPool: pg.Pool;
+  /** Long-form region whose toKvRegion() value is written to app_kv_credentials.region. */
+  flipTo: string;
+  log: { info: (...args: any[]) => void };
+  downloadFn?: (key: string) => Promise<Readable>;
   kvBaseOptsForRegion?: (region: string) => Omit<RedisClientOptions, 'db'>;
 }
 
@@ -82,31 +96,28 @@ async function assertDestEmpty(
   }
 }
 
-export const executeRestoreKv: StepHandler = async (ctx, m) => {
-  if (m.dest_resources.kv_restored_at) {
-    return { next: 'copying_blobs', patch: {} };
-  }
+/**
+ * Pure helper: downloads the KV dump at `key` from `sourceRegionForBucket`,
+ * restores into `destRegion`'s Redis (asserts dest scope empty first), then
+ * flips `app_kv_credentials.region` to `toKvRegion(flipTo)`.
+ *
+ * Used by:
+ *   - `executeRestoreKv` (saga StepHandler wrapper)
+ *   - `runReverseMove` fast path
+ */
+export async function restoreKvIntoRegion(opts: RestoreKvOpts): Promise<{ records: number }> {
+  const baseOptsFn = opts.kvBaseOptsForRegion ?? defaultBaseOpts;
+  const destBase = baseOptsFn(opts.destRegion);
 
-  const cx = ctx as unknown as RestoreKvCtx & typeof ctx;
+  await assertDestEmpty(destBase, opts.appId);
 
-  const key = m.dest_resources.kv_dump_object_key as string | undefined;
-  if (!key) {
-    throw new Error(`restore_kv: missing kv_dump_object_key on migration ${m.id}`);
-  }
-
-  const baseOptsFn = cx.kvBaseOptsForRegion ?? defaultBaseOpts;
-  const destBase = baseOptsFn(m.dest_region);
-
-  await assertDestEmpty(destBase, m.app_id);
-
-  const body = cx.downloadKvDump
-    ? await cx.downloadKvDump(key)
-    : await defaultDownload(m.source_region, key);
+  const body = opts.downloadFn
+    ? await opts.downloadFn(opts.key)
+    : await defaultDownload(opts.sourceRegionForBucket, opts.key);
 
   const gunzipped = body.pipe(createGunzip());
   const rl = createInterface({ input: gunzipped, crlfDelay: Infinity });
 
-  // Cache one RedisClient per DB; reuse for all records of that DB.
   const clients = new Map<0 | 1, RedisClient>();
   async function clientForDb(db: 0 | 1): Promise<RedisClient> {
     let c = clients.get(db);
@@ -131,17 +142,44 @@ export const executeRestoreKv: StepHandler = async (ctx, m) => {
     for (const c of clients.values()) await c.close();
   }
 
-  await ctx.controlPool.query(
+  await opts.controlPool.query(
     'UPDATE app_kv_credentials SET region = $1, rotated_at = now() WHERE app_id = $2',
-    [toKvRegion(m.dest_region), m.app_id],
+    [toKvRegion(opts.flipTo), opts.appId],
   );
 
-  ctx.log.info({ migrationId: m.id, restored }, 'kv restored + routing flipped');
+  opts.log.info({ appId: opts.appId, restored }, 'kv restored + routing flipped');
+  return { records: restored };
+}
+
+export const executeRestoreKv: StepHandler = async (ctx, m) => {
+  if (m.dest_resources.kv_restored_at) {
+    return { next: 'copying_blobs', patch: {} };
+  }
+
+  const cx = ctx as unknown as RestoreKvCtx & typeof ctx;
+
+  const key = m.dest_resources.kv_dump_object_key as string | undefined;
+  if (!key) {
+    throw new Error(`restore_kv: missing kv_dump_object_key on migration ${m.id}`);
+  }
+
+  const { records } = await restoreKvIntoRegion({
+    destRegion: m.dest_region,
+    sourceRegionForBucket: m.source_region,
+    appId: m.app_id,
+    key,
+    controlPool: ctx.controlPool,
+    flipTo: m.dest_region,
+    log: { info: ctx.log.info.bind(ctx.log) },
+    downloadFn: cx.downloadKvDump,
+    kvBaseOptsForRegion: cx.kvBaseOptsForRegion,
+  });
+
   return {
     next: 'copying_blobs',
     patch: {
       kv_restored_at: new Date().toISOString(),
-      kv_restored_records: restored,
+      kv_restored_records: records,
     },
   };
 };
