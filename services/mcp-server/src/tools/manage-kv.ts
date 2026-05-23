@@ -145,7 +145,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
           if (args.raw) params.set('raw', '1');
           if (args.touch) params.set('touch', '1');
           const qs = params.size ? `?${params.toString()}` : '';
-          const result = await apiGet(`${base}/${encodeURIComponent(args.key!)}${qs}`);
+          const result = await apiGet(`${base}/${encodeURI(args.key!)}${qs}`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'set': {
@@ -155,13 +155,13 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
           if (args.ttl !== undefined) body.ttl = args.ttl;
           if (args.ephemeral !== undefined) body.ephemeral = args.ephemeral;
           if (args.raw !== undefined) body.raw = args.raw;
-          const result = await apiPut(`${base}/${encodeURIComponent(args.key!)}`, body);
+          const result = await apiPut(`${base}/${encodeURI(args.key!)}`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'del': {
           const err = need(args.key, '"key" is required for del.');
           if (err) return err;
-          const result = await apiDelete(`${base}/${encodeURIComponent(args.key!)}`);
+          const result = await apiDelete(`${base}/${encodeURI(args.key!)}`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'incr': {
@@ -169,7 +169,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
           if (err) return err;
           const body: Record<string, unknown> = {};
           if (args.by !== undefined) body.by = args.by;
-          const result = await apiPost(`${base}/${encodeURIComponent(args.key!)}/incr`, body);
+          const result = await apiPost(`${base}/${encodeURI(args.key!)}/incr`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'decr': {
@@ -177,7 +177,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
           if (err) return err;
           const body: Record<string, unknown> = {};
           if (args.by !== undefined) body.by = args.by;
-          const result = await apiPost(`${base}/${encodeURIComponent(args.key!)}/decr`, body);
+          const result = await apiPost(`${base}/${encodeURI(args.key!)}/decr`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'setnx': {
@@ -185,7 +185,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
           if (err) return err;
           const body: Record<string, unknown> = { value: args.value };
           if (args.ttl !== undefined) body.ttl = args.ttl;
-          const result = await apiPost(`${base}/${encodeURIComponent(args.key!)}/setnx`, body);
+          const result = await apiPost(`${base}/${encodeURI(args.key!)}/setnx`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'setex': {
@@ -194,7 +194,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
             need(args.value !== undefined, '"value" is required for setex.') ??
             need(args.ttl, '"ttl" is required for setex.');
           if (err) return err;
-          const result = await apiPut(`${base}/${encodeURIComponent(args.key!)}`, { value: args.value, ttl: args.ttl });
+          const result = await apiPut(`${base}/${encodeURI(args.key!)}`, { value: args.value, ttl: args.ttl });
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'cas': {
@@ -203,7 +203,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
             need(args.expected !== undefined, '"expected" is required for cas.') ??
             need(args.next !== undefined, '"next" is required for cas.');
           if (err) return err;
-          const result = await apiPost(`${base}/${encodeURIComponent(args.key!)}/cas`, {
+          const result = await apiPost(`${base}/${encodeURI(args.key!)}/cas`, {
             expected: args.expected,
             next: args.next,
           });
@@ -212,19 +212,19 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
         case 'exists': {
           const err = need(args.key, '"key" is required for exists.');
           if (err) return err;
-          const result = await apiGet(`${base}/${encodeURIComponent(args.key!)}/exists`);
+          const result = await apiGet(`${base}/${encodeURI(args.key!)}/exists`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'ttl': {
           const err = need(args.key, '"key" is required for ttl.');
           if (err) return err;
-          const result = await apiGet(`${base}/${encodeURIComponent(args.key!)}/ttl`);
+          const result = await apiGet(`${base}/${encodeURI(args.key!)}/ttl`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'expire': {
           const err = need(args.key, '"key" is required for expire.') ?? need(args.ttl !== undefined, '"ttl" is required for expire.');
           if (err) return err;
-          const result = await apiPost(`${base}/${encodeURIComponent(args.key!)}/expire`, { ttl: args.ttl });
+          const result = await apiPost(`${base}/${encodeURI(args.key!)}/expire`, { ttl: args.ttl });
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'mget': {

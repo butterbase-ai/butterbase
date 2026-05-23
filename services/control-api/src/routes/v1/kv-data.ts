@@ -5,17 +5,20 @@
  * primitives with Fastify route handlers. Behavior is identical.
  *
  * Routes handled:
- *   GET    /v1/:app_id/kv/:key           → {value, ttl?} or 404
- *   PUT    /v1/:app_id/kv/:key           → 204
- *   DELETE /v1/:app_id/kv/:key           → {deleted: N}
- *   POST   /v1/:app_id/kv/_batch         → {results: [...]}
- *   POST   /v1/:app_id/kv/:key/incr      → {value}
- *   POST   /v1/:app_id/kv/:key/decr      → {value}
- *   POST   /v1/:app_id/kv/:key/setnx     → {wrote: bool}
- *   POST   /v1/:app_id/kv/:key/cas       → {swapped: bool}
- *   POST   /v1/:app_id/kv/:key/expire    → {applied: bool}
- *   GET    /v1/:app_id/kv/:key/ttl       → {ttl: number|null}
- *   GET    /v1/:app_id/kv/:key/exists    → {exists: bool}
+ *   GET    /v1/:app_id/kv/*           → {value, ttl?} or 404  (key = wildcard, or key/ttl, key/exists)
+ *   PUT    /v1/:app_id/kv/*           → 204                    (key = wildcard)
+ *   DELETE /v1/:app_id/kv/*           → {deleted: N}           (key = wildcard)
+ *   POST   /v1/:app_id/kv/_batch      → {results: [...]}       (literal, registered first)
+ *   POST   /v1/:app_id/kv/*           → action dispatch        (key/incr, key/decr, key/setnx, key/cas, key/expire)
+ *
+ * Wildcard routes allow slashes in keys (e.g. session/abc-123). Fastify's radix tree
+ * gives the literal `kv` segment precedence over the `:table` param in auto-api.ts,
+ * so wildcard wins for all URLs under /v1/<app>/kv/...
+ *
+ * Action-suffix ambiguity: a key ending in /incr (e.g. key="session/incr") is
+ * indistinguishable from key="session" + action="incr" — the last segment wins as
+ * action. This matches the kv-gateway regex behavior exactly. Users wanting a
+ * literal key ending in an action word must encode it (%2Fincr).
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -47,6 +50,9 @@ if (current == false and ARGV[1] == '__NULL__') or current == ARGV[1] then
 end
 return 0
 `.trim();
+
+// Set of action suffixes recognized in the wildcard URL tail.
+const ACTIONS = new Set(['incr', 'decr', 'setnx', 'cas', 'expire', 'ttl', 'exists']);
 
 // ── Connection helpers ─────────────────────────────────────────────────────────
 
@@ -173,12 +179,323 @@ function claimsFromAuth(
   return out;
 }
 
+// ── Wildcard key/action parser ────────────────────────────────────────────────
+
+/**
+ * Parse the wildcard suffix from a URL like /v1/:app_id/kv/*.
+ *
+ * Rules (matching kv-gateway regex behavior exactly):
+ * - Split on the last `/`
+ * - If the tail segment is a known action word, key = everything before the last `/`
+ * - Otherwise key = the full wildcard, action = null
+ *
+ * Ambiguity: a key "session/incr" is parsed as key="session", action="incr".
+ * This is the same ambiguity the gateway had. Users needing a literal key
+ * ending in an action word must URL-encode the slash (%2F).
+ */
+function parseWildcard(wildcard: string): { key: string; action: string | null } {
+  const slash = wildcard.lastIndexOf('/');
+  const tail = slash >= 0 ? wildcard.slice(slash + 1) : wildcard;
+  const isAction = ACTIONS.has(tail);
+  const key = isAction ? wildcard.slice(0, slash) : wildcard;
+  const action = isAction ? tail : null;
+  return { key, action };
+}
+
+// ── Handler helpers (extracted to keep wildcard handlers small) ───────────────
+
+type AuthOk = import('../../services/kv/auth.js').KvAuthSuccess;
+
+async function handleGet(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  touch: boolean,
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  const fk = userKey(auth.appId, key);
+
+  let foundIn: number | null = null;
+  let v: string | null = null;
+
+  await withRedis(baseOpts, DURABLE_DB, async (c) => {
+    v = await c.get(fk);
+    if (v !== null) foundIn = DURABLE_DB;
+  });
+  if (v === null) {
+    await withRedis(baseOpts, EPHEMERAL_DB, async (c) => {
+      v = await c.get(fk);
+      if (v !== null) foundIn = EPHEMERAL_DB;
+    });
+  }
+  if (v === null) return reply.code(404).send(errBody('not_found'));
+
+  // Touch-on-read: only for durable hits. Ephemeral keys are allowed to expire.
+  if (touch && foundIn === DURABLE_DB) {
+    try {
+      await withRedis(baseOpts, DURABLE_DB, async (c) => {
+        const sidecarKey = sidecarTtlKey(auth.appId, key);
+        const stored = await c.get(sidecarKey);
+        let originalTtl: number | null = stored !== null ? Number(stored) : null;
+        if (originalTtl === null) {
+          const cur = await c.ttl(fk);
+          if (cur > 0) {
+            originalTtl = cur;
+            await c.setex(sidecarKey, cur * 2, String(cur));
+          }
+        }
+        if (originalTtl !== null && originalTtl > 0) {
+          await c.expire(fk, originalTtl);
+        }
+      });
+    } catch (e) {
+      console.warn('[kv-data] touch failed (swallowed):', (e as any)?.message ?? e);
+    }
+  }
+
+  return reply.code(200).send({ value: JSON.parse(v!) });
+}
+
+async function handleGetTtl(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  const fk = userKey(auth.appId, key);
+  let t = await withRedis(baseOpts, DURABLE_DB, (c) => c.ttl(fk));
+  if (t === -2) t = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.ttl(fk));
+  if (t === -2) return reply.code(404).send(errBody('not_found'));
+  return reply.code(200).send({ ttl: t === -1 ? null : t });
+}
+
+async function handleGetExists(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  const fk = userKey(auth.appId, key);
+  const existsDurable = await withRedis(baseOpts, DURABLE_DB, (c) => c.exists(fk));
+  if (existsDurable) return reply.code(200).send({ exists: true });
+  const existsEphemeral = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.exists(fk));
+  return reply.code(200).send({ exists: existsEphemeral });
+}
+
+async function handlePut(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  body: { value?: unknown; ttl?: unknown; ephemeral?: boolean },
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  if (!('value' in body)) return reply.code(400).send(errBody('bad_request', 'missing value'));
+
+  const ttlResult = resolveTtl(body.ttl);
+  if (!ttlResult.ok) return reply.code(400).send(errBody(ttlResult.error, ttlResult.message));
+  const resolvedTtl = ttlResult.ttl;
+
+  const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
+  const encoded = JSON.stringify(body.value);
+  const sizeErr = checkValueSize(encoded);
+  if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
+
+  const fk = userKey(auth.appId, key);
+  await withRedis(baseOpts, db, async (c) => {
+    if (resolvedTtl === null) {
+      await c.set(fk, encoded);
+    } else {
+      await c.setex(fk, resolvedTtl, encoded);
+    }
+  });
+  await deleteFromOtherDb(baseOpts, db, fk);
+  return reply.code(204).send();
+}
+
+async function handleDelete(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  const fk = userKey(auth.appId, key);
+  const delDur = await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fk]));
+  const delEph = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fk]));
+  return reply.code(200).send({ deleted: delDur + delEph });
+}
+
+async function handleIncr(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  body: { by?: unknown },
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  const by = typeof body.by === 'number' ? body.by : 1;
+  if (!Number.isInteger(by)) {
+    return reply.code(400).send(errBody('bad_request', 'by must be an integer'));
+  }
+  const fk = userKey(auth.appId, key);
+  const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.incrBy(fk, by));
+  return reply.code(200).send({ value });
+}
+
+async function handleDecr(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  body: { by?: unknown },
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  const by = typeof body.by === 'number' ? body.by : 1;
+  if (!Number.isInteger(by)) {
+    return reply.code(400).send(errBody('bad_request', 'by must be an integer'));
+  }
+  const fk = userKey(auth.appId, key);
+  const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.decrBy(fk, by));
+  return reply.code(200).send({ value });
+}
+
+async function handleSetnx(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  body: { value?: unknown; ttl?: unknown; ephemeral?: boolean },
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  if (!('value' in body)) return reply.code(400).send(errBody('bad_request', 'missing value'));
+
+  const ttlResult = resolveTtl(body.ttl);
+  if (!ttlResult.ok) return reply.code(400).send(errBody(ttlResult.error, ttlResult.message));
+  const resolvedTtl = ttlResult.ttl;
+
+  const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
+  const encoded = JSON.stringify(body.value);
+  const sizeErr = checkValueSize(encoded);
+  if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
+
+  const fk = userKey(auth.appId, key);
+  const wrote = await withRedis(baseOpts, db, (c) =>
+    c.setWithOptions(fk, encoded, {
+      ex: resolvedTtl !== null ? resolvedTtl : undefined,
+      nx: true,
+    }),
+  );
+  if (wrote) await deleteFromOtherDb(baseOpts, db, fk);
+  return reply.code(wrote ? 201 : 200).send({ wrote });
+}
+
+async function handleCas(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  body: { expected?: unknown; next?: unknown },
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  if (!('expected' in body) || !('next' in body)) {
+    return reply.code(400).send(errBody('bad_request', 'missing expected or next'));
+  }
+
+  const expectedArg =
+    body.expected === null ? '__NULL__' : JSON.stringify(body.expected);
+  const nextArg = JSON.stringify(body.next);
+  const sizeErr = checkValueSize(nextArg);
+  if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
+
+  const fk = userKey(auth.appId, key);
+  const r = await withRedis(baseOpts, DURABLE_DB, (c) =>
+    c.eval(CAS_SCRIPT, [fk], [expectedArg, nextArg]),
+  );
+  return reply.code(200).send({ swapped: r === 1 });
+}
+
+async function handleExpire(
+  key: string,
+  auth: AuthOk,
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  body: { ttl?: unknown },
+  reply: import('fastify').FastifyReply,
+) {
+  if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
+    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
+    if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  }
+
+  if (!('ttl' in body)) return reply.code(400).send(errBody('bad_request', 'missing ttl'));
+
+  const ttl = body.ttl as number | null;
+  if (ttl !== null && (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 0)) {
+    return reply
+      .code(400)
+      .send(errBody('bad_request', 'ttl must be a non-negative integer or null'));
+  }
+
+  const fk = userKey(auth.appId, key);
+  const applied = await withRedis(baseOpts, DURABLE_DB, (c) => c.expire(fk, ttl));
+  return reply.code(200).send({ applied });
+}
+
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
 const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
 
   // ── _batch ─────────────────────────────────────────────────────────────────
-  // Must be registered before /:key routes so Fastify doesn't confuse _batch with a key name.
+  // Registered as a literal route BEFORE the wildcard, so Fastify routes it first.
   fastify.post<{
     Params: { app_id: string };
     Body: { ops?: unknown[] };
@@ -265,359 +582,133 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.code(200).send({ results });
   });
 
-  // ── Per-key action routes ──────────────────────────────────────────────────
-
-  // POST /:key/incr
-  fastify.post<{
-    Params: { app_id: string; key: string };
-    Body: { by?: number };
-  }>('/v1/:app_id/kv/:key/incr', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
-    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
-
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
-    if ('error' in auth) return reply.code(auth.status).send(auth.body);
-
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
-    const body = (req.body ?? {}) as { by?: unknown };
-    const by = typeof body.by === 'number' ? body.by : 1;
-    if (!Number.isInteger(by)) {
-      return reply.code(400).send(errBody('bad_request', 'by must be an integer'));
-    }
-    const fk = userKey(auth.appId, key);
-    const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.incrBy(fk, by));
-    return reply.code(200).send({ value });
-  });
-
-  // POST /:key/decr
-  fastify.post<{
-    Params: { app_id: string; key: string };
-    Body: { by?: number };
-  }>('/v1/:app_id/kv/:key/decr', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
-    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
-
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
-    if ('error' in auth) return reply.code(auth.status).send(auth.body);
-
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
-    const body = (req.body ?? {}) as { by?: unknown };
-    const by = typeof body.by === 'number' ? body.by : 1;
-    if (!Number.isInteger(by)) {
-      return reply.code(400).send(errBody('bad_request', 'by must be an integer'));
-    }
-    const fk = userKey(auth.appId, key);
-    const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.decrBy(fk, by));
-    return reply.code(200).send({ value });
-  });
-
-  // POST /:key/setnx
-  fastify.post<{
-    Params: { app_id: string; key: string };
-    Body: { value: unknown; ttl?: number | null; ephemeral?: boolean };
-  }>('/v1/:app_id/kv/:key/setnx', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
-    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
-
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
-    if ('error' in auth) return reply.code(auth.status).send(auth.body);
-
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
-    const body = req.body as { value?: unknown; ttl?: unknown; ephemeral?: boolean };
-    if (!('value' in body)) return reply.code(400).send(errBody('bad_request', 'missing value'));
-
-    const ttlResult = resolveTtl(body.ttl);
-    if (!ttlResult.ok) return reply.code(400).send(errBody(ttlResult.error, ttlResult.message));
-    const resolvedTtl = ttlResult.ttl;
-
-    const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
-    const encoded = JSON.stringify(body.value);
-    const sizeErr = checkValueSize(encoded);
-    if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
-
-    const fk = userKey(auth.appId, key);
-    const wrote = await withRedis(baseOpts, db, (c) =>
-      c.setWithOptions(fk, encoded, {
-        ex: resolvedTtl !== null ? resolvedTtl : undefined,
-        nx: true,
-      }),
-    );
-    if (wrote) await deleteFromOtherDb(baseOpts, db, fk);
-    return reply.code(wrote ? 201 : 200).send({ wrote });
-  });
-
-  // POST /:key/cas
-  fastify.post<{
-    Params: { app_id: string; key: string };
-    Body: { expected: unknown; next: unknown };
-  }>('/v1/:app_id/kv/:key/cas', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
-    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
-
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
-    if ('error' in auth) return reply.code(auth.status).send(auth.body);
-
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
-    const body = req.body as { expected?: unknown; next?: unknown };
-    if (!('expected' in body) || !('next' in body)) {
-      return reply.code(400).send(errBody('bad_request', 'missing expected or next'));
-    }
-
-    const expectedArg =
-      body.expected === null ? '__NULL__' : JSON.stringify(body.expected);
-    const nextArg = JSON.stringify(body.next);
-    const sizeErr = checkValueSize(nextArg);
-    if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
-
-    const fk = userKey(auth.appId, key);
-    const r = await withRedis(baseOpts, DURABLE_DB, (c) =>
-      c.eval(CAS_SCRIPT, [fk], [expectedArg, nextArg]),
-    );
-    return reply.code(200).send({ swapped: r === 1 });
-  });
-
-  // POST /:key/expire
-  fastify.post<{
-    Params: { app_id: string; key: string };
-    Body: { ttl: number | null };
-  }>('/v1/:app_id/kv/:key/expire', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
-    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
-
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
-    if ('error' in auth) return reply.code(auth.status).send(auth.body);
-
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
-    const body = req.body as { ttl?: unknown };
-    if (!('ttl' in body)) return reply.code(400).send(errBody('bad_request', 'missing ttl'));
-
-    const ttl = body.ttl as number | null;
-    if (ttl !== null && (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 0)) {
-      return reply
-        .code(400)
-        .send(errBody('bad_request', 'ttl must be a non-negative integer or null'));
-    }
-
-    const fk = userKey(auth.appId, key);
-    const applied = await withRedis(baseOpts, DURABLE_DB, (c) => c.expire(fk, ttl));
-    return reply.code(200).send({ applied });
-  });
-
-  // GET /:key/ttl
+  // ── Wildcard GET /v1/:app_id/kv/* ─────────────────────────────────────────
+  // Handles: GET key, GET key/ttl, GET key/exists
   fastify.get<{
-    Params: { app_id: string; key: string };
-  }>('/v1/:app_id/kv/:key/ttl', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
-    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
-
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
-    if ('error' in auth) return reply.code(auth.status).send(auth.body);
-
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
-    const fk = userKey(auth.appId, key);
-    let t = await withRedis(baseOpts, DURABLE_DB, (c) => c.ttl(fk));
-    if (t === -2) t = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.ttl(fk));
-    if (t === -2) return reply.code(404).send(errBody('not_found'));
-    return reply.code(200).send({ ttl: t === -1 ? null : t });
-  });
-
-  // GET /:key/exists
-  fastify.get<{
-    Params: { app_id: string; key: string };
-  }>('/v1/:app_id/kv/:key/exists', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
-    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
-
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
-    if ('error' in auth) return reply.code(auth.status).send(auth.body);
-
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
-    const fk = userKey(auth.appId, key);
-    const existsDurable = await withRedis(baseOpts, DURABLE_DB, (c) => c.exists(fk));
-    if (existsDurable) return reply.code(200).send({ exists: true });
-    const existsEphemeral = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.exists(fk));
-    return reply.code(200).send({ exists: existsEphemeral });
-  });
-
-  // ── Base CRUD ──────────────────────────────────────────────────────────────
-
-  // GET /:key
-  fastify.get<{
-    Params: { app_id: string; key: string };
+    Params: { app_id: string; '*': string };
     Querystring: { touch?: string };
-  }>('/v1/:app_id/kv/:key', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
+  }>('/v1/:app_id/kv/*', async (req, reply) => {
+    const { app_id: appId } = req.params;
+    const wildcard = (req.params as Record<string, string>)['*'] ?? '';
+    const { key, action } = parseWildcard(wildcard);
+
+    if (!key) return reply.code(400).send(errBody('invalid_key'));
     if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
+    const authOk = auth as AuthOk;
+    const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
 
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
+    if (action === 'ttl') {
+      return handleGetTtl(key, authOk, baseOpts, reply);
+    }
+    if (action === 'exists') {
+      return handleGetExists(key, authOk, baseOpts, reply);
+    }
+    if (action !== null) {
+      // No other GET actions defined
+      return reply.code(404).send(errBody('not_found'));
     }
 
     const touch = req.query.touch === 'true';
-    const fk = userKey(auth.appId, key);
-
-    let foundIn: number | null = null;
-    let v: string | null = null;
-
-    await withRedis(baseOpts, DURABLE_DB, async (c) => {
-      v = await c.get(fk);
-      if (v !== null) foundIn = DURABLE_DB;
-    });
-    if (v === null) {
-      await withRedis(baseOpts, EPHEMERAL_DB, async (c) => {
-        v = await c.get(fk);
-        if (v !== null) foundIn = EPHEMERAL_DB;
-      });
-    }
-    if (v === null) return reply.code(404).send(errBody('not_found'));
-
-    // Touch-on-read: only for durable hits. Ephemeral keys are allowed to expire.
-    if (touch && foundIn === DURABLE_DB) {
-      try {
-        await withRedis(baseOpts, DURABLE_DB, async (c) => {
-          const sidecarKey = sidecarTtlKey(auth.appId, key);
-          const stored = await c.get(sidecarKey);
-          let originalTtl: number | null = stored !== null ? Number(stored) : null;
-          if (originalTtl === null) {
-            const cur = await c.ttl(fk);
-            if (cur > 0) {
-              originalTtl = cur;
-              await c.setex(sidecarKey, cur * 2, String(cur));
-            }
-          }
-          if (originalTtl !== null && originalTtl > 0) {
-            await c.expire(fk, originalTtl);
-          }
-        });
-      } catch (e) {
-        console.warn('[kv-data] touch failed (swallowed):', (e as any)?.message ?? e);
-      }
-    }
-
-    return reply.code(200).send({ value: JSON.parse(v!) });
+    return handleGet(key, authOk, baseOpts, touch, reply);
   });
 
-  // PUT /:key
+  // ── Wildcard PUT /v1/:app_id/kv/* ─────────────────────────────────────────
+  // Handles: PUT key (no PUT actions exist)
   fastify.put<{
-    Params: { app_id: string; key: string };
+    Params: { app_id: string; '*': string };
     Body: { value: unknown; ttl?: number | null; ephemeral?: boolean };
-  }>('/v1/:app_id/kv/:key', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
+  }>('/v1/:app_id/kv/*', async (req, reply) => {
+    const { app_id: appId } = req.params;
+    const wildcard = (req.params as Record<string, string>)['*'] ?? '';
+    const { key, action } = parseWildcard(wildcard);
+
+    if (!key) return reply.code(400).send(errBody('invalid_key'));
     if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
+
+    if (action !== null) {
+      // No PUT actions defined
+      return reply.code(404).send(errBody('not_found'));
+    }
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
-
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
-    }
-
+    const authOk = auth as AuthOk;
+    const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
     const body = req.body as { value?: unknown; ttl?: unknown; ephemeral?: boolean };
-    if (!('value' in body)) return reply.code(400).send(errBody('bad_request', 'missing value'));
-
-    const ttlResult = resolveTtl(body.ttl);
-    if (!ttlResult.ok) return reply.code(400).send(errBody(ttlResult.error, ttlResult.message));
-    const resolvedTtl = ttlResult.ttl;
-
-    const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
-    const encoded = JSON.stringify(body.value);
-    const sizeErr = checkValueSize(encoded);
-    if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
-
-    const fk = userKey(auth.appId, key);
-    await withRedis(baseOpts, db, async (c) => {
-      if (resolvedTtl === null) {
-        await c.set(fk, encoded);
-      } else {
-        await c.setex(fk, resolvedTtl, encoded);
-      }
-    });
-    await deleteFromOtherDb(baseOpts, db, fk);
-    return reply.code(204).send();
+    return handlePut(key, authOk, baseOpts, body, reply);
   });
 
-  // DELETE /:key
+  // ── Wildcard DELETE /v1/:app_id/kv/* ──────────────────────────────────────
+  // Handles: DELETE key (no DELETE actions exist)
   fastify.delete<{
-    Params: { app_id: string; key: string };
-  }>('/v1/:app_id/kv/:key', async (req, reply) => {
-    const { app_id: appId, key } = req.params;
+    Params: { app_id: string; '*': string };
+  }>('/v1/:app_id/kv/*', async (req, reply) => {
+    const { app_id: appId } = req.params;
+    const wildcard = (req.params as Record<string, string>)['*'] ?? '';
+    const { key, action } = parseWildcard(wildcard);
+
+    if (!key) return reply.code(400).send(errBody('invalid_key'));
     if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
+
+    if (action !== null) {
+      // No DELETE actions defined
+      return reply.code(404).send(errBody('not_found'));
+    }
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
-    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
+    const authOk = auth as AuthOk;
+    const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
+    return handleDelete(key, authOk, baseOpts, reply);
+  });
 
-    if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-      const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
-      const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
-      if (denial) return reply.code(denial.status).send(errBody(denial.error));
+  // ── Wildcard POST /v1/:app_id/kv/* ────────────────────────────────────────
+  // Handles: POST key/incr, key/decr, key/setnx, key/cas, key/expire
+  // Note: _batch is caught by its own literal route above.
+  fastify.post<{
+    Params: { app_id: string; '*': string };
+    Body: Record<string, unknown>;
+  }>('/v1/:app_id/kv/*', async (req, reply) => {
+    const { app_id: appId } = req.params;
+    const wildcard = (req.params as Record<string, string>)['*'] ?? '';
+    const { key, action } = parseWildcard(wildcard);
+
+    if (!key) return reply.code(400).send(errBody('invalid_key'));
+    if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
+
+    if (action === null) {
+      // No plain POST on a key without an action suffix
+      return reply.code(404).send(errBody('not_found'));
     }
 
-    const fk = userKey(auth.appId, key);
-    const delDur = await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fk]));
-    const delEph = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fk]));
-    return reply.code(200).send({ deleted: delDur + delEph });
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    if ('error' in auth) return reply.code(auth.status).send(auth.body);
+
+    const authOk = auth as AuthOk;
+    const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+
+    switch (action) {
+      case 'incr':
+        return handleIncr(key, authOk, baseOpts, body, reply);
+      case 'decr':
+        return handleDecr(key, authOk, baseOpts, body, reply);
+      case 'setnx':
+        return handleSetnx(key, authOk, baseOpts, body, reply);
+      case 'cas':
+        return handleCas(key, authOk, baseOpts, body, reply);
+      case 'expire':
+        return handleExpire(key, authOk, baseOpts, body, reply);
+      default:
+        // ttl/exists are GET-only actions; POST to them is not defined
+        return reply.code(404).send(errBody('not_found'));
+    }
   });
 };
 

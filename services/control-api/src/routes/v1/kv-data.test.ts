@@ -407,6 +407,28 @@ describeDb('ephemeral routing', () => {
   });
 });
 
+// ── Slash-in-key (wildcard route) ─────────────────────────────────────────────
+
+describeDb('slash-in-key (wildcard route)', () => {
+  it('GET /v1/:app/kv/session/abc-123 returns not_found (not route-not-found) when key missing', async () => {
+    const res = await req('GET', `/v1/${appId}/kv/session/abc-123`);
+    expect(res.statusCode).toBe(404);
+    // Must be our {error: 'not_found'} shape, NOT Fastify's route-not-found shape.
+    expect(res.json()).toMatchObject({ error: 'not_found' });
+  });
+
+  it('PUT then GET with literal slash in key round-trips correctly', async () => {
+    const put = await req('PUT', `/v1/${appId}/kv/session/abc-123`, {
+      payload: { value: { u: 'alice' } },
+    });
+    expect(put.statusCode).toBe(204);
+
+    const get = await req('GET', `/v1/${appId}/kv/session/abc-123`);
+    expect(get.statusCode).toBe(200);
+    expect(get.json()).toEqual({ value: { u: 'alice' } });
+  });
+});
+
 // ── _batch ─────────────────────────────────────────────────────────────────────
 
 describeDb('_batch', () => {
