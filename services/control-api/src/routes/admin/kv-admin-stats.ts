@@ -79,6 +79,105 @@ const kvAdminStatsRoutes: FastifyPluginAsync = async (fastify) => {
 
     return { regions: results };
   });
+
+  fastify.get<{ Querystring: { metric?: string; limit?: string } }>(
+    '/admin/kv/top-apps',
+    { config: { public: true } },
+    async (req, reply) => {
+      const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+      if (!user) return;
+
+      const metric = req.query.metric === 'ops' || req.query.metric === 'errors' ? req.query.metric : 'storage';
+      const limit = Math.max(1, Math.min(100, parseInt(req.query.limit ?? '20', 10) || 20));
+      const ctrl = (fastify as any).controlDb;
+
+      if (metric === 'storage') {
+        const r = await ctrl.query(
+          `SELECT s.app_id, a.owner_id, u.email AS owner_email, s.region, s.bytes_used, s.keys_total, s.snapshot_at
+             FROM kv_app_usage_snapshot s
+             JOIN apps a ON a.id = s.app_id
+             JOIN platform_users u ON u.id = a.owner_id
+            ORDER BY s.bytes_used DESC
+            LIMIT $1`, [limit]);
+        return { metric, apps: r.rows };
+      }
+
+      if (metric === 'ops') {
+        const r = await ctrl.query(
+          `SELECT m.app_id, a.owner_id, u.email AS owner_email, a.region, SUM(m.quantity)::bigint AS value
+             FROM usage_meters m
+             JOIN apps a ON a.id = m.app_id
+             JOIN platform_users u ON u.id = a.owner_id
+            WHERE m.meter_type = 'kv_ops' AND m.period_start >= CURRENT_DATE
+            GROUP BY m.app_id, a.owner_id, u.email, a.region
+            ORDER BY value DESC
+            LIMIT $1`, [limit]);
+        return { metric, apps: r.rows };
+      }
+
+      // errors
+      const r = await ctrl.query(
+        `SELECT al.app_id, a.owner_id, u.email AS owner_email, a.region, COUNT(*)::bigint AS value
+           FROM audit_logs al
+           JOIN apps a ON a.id = al.app_id
+           JOIN platform_users u ON u.id = a.owner_id
+          WHERE al.path LIKE '/v1/%/kv/%'
+            AND al.status_code >= 400
+            AND al.at > now() - interval '24 hours'
+          GROUP BY al.app_id, a.owner_id, u.email, a.region
+          ORDER BY value DESC
+          LIMIT $1`, [limit]);
+      return { metric, apps: r.rows };
+    },
+  );
+
+  fastify.get('/admin/kv/hotspots', { config: { public: true } }, async (req, reply) => {
+    const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+    if (!user) return;
+    const ctrl = (fastify as any).controlDb;
+
+    const storage = await ctrl.query(
+      `SELECT s.app_id, s.region, s.bytes_used, p.kv_max_storage_bytes AS max_storage_bytes, s.snapshot_at
+         FROM kv_app_usage_snapshot s
+         JOIN apps a ON a.id = s.app_id
+         JOIN platform_users u ON u.id = a.owner_id
+         LEFT JOIN plans p ON p.id = u.plan_id
+        WHERE p.kv_max_storage_bytes IS NOT NULL
+          AND s.bytes_used >= 0.9 * p.kv_max_storage_bytes`,
+    );
+
+    const rate = await ctrl.query(
+      `SELECT al.app_id, a.region,
+              COUNT(*) FILTER (WHERE al.status_code = 429) AS rate_limited,
+              COUNT(*) AS total_ops,
+              MIN(al.at) FILTER (WHERE al.status_code = 429) AS first_seen
+         FROM audit_logs al
+         JOIN apps a ON a.id = al.app_id
+        WHERE al.path LIKE '/v1/%/kv/%' AND al.at > now() - interval '24 hours'
+        GROUP BY al.app_id, a.region
+       HAVING COUNT(*) FILTER (WHERE al.status_code = 429)::float / NULLIF(COUNT(*), 0) >= 0.05`,
+    );
+
+    const hotspots: any[] = [];
+    for (const r of storage.rows) {
+      const pct = Math.round((Number(r.bytes_used) / Number(r.max_storage_bytes)) * 100);
+      hotspots.push({
+        app_id: r.app_id, region: r.region,
+        condition: `storage ${pct}% (${r.bytes_used} / ${r.max_storage_bytes} bytes)`,
+        first_seen: r.snapshot_at,
+      });
+    }
+    for (const r of rate.rows) {
+      const pct = Math.round((Number(r.rate_limited) / Math.max(1, Number(r.total_ops))) * 100);
+      hotspots.push({
+        app_id: r.app_id, region: r.region,
+        condition: `sustained 429s (${pct}% of ops, 24h)`,
+        first_seen: r.first_seen,
+      });
+    }
+
+    return { hotspots };
+  });
 };
 
 function deriveStatus(i: { mem_used: number; mem_max: number; evicted_keys: number; slowlog_len: number }): 'green' | 'amber' | 'red' {
