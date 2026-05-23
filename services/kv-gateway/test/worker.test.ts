@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import worker from '../src/worker.js';
 import { RedisClient } from '../src/redis-client.js';
 
@@ -717,6 +717,90 @@ describe('kv-gateway worker', () => {
       expect(body.results[0]).toEqual({ ok: true });
       expect(body.results[1]).toMatchObject({ error: 'KV_VALUE_TOO_LARGE' });
       expect(body.results[2]).toEqual({ value: 'ok' });
+    });
+  });
+
+  // ── _expose routes ───────────────────────────────────────────────────────────
+
+  describe('_expose routes', () => {
+    beforeEach(async () => {
+      mockResolveOk('app_expose_test');
+      // Clear expose hash to keep tests reproducible.
+      const c = await RedisClient.connect({ host: 'localhost', port: 6390, password: 'butterbase_dev_kv', db: 0 });
+      await c.del([`{app_expose_test}:_meta:expose`]);
+      await c.close();
+    });
+
+    it('PUT _expose/:pattern then GET _expose returns the rule', async () => {
+      const put = await worker.fetch(
+        req('PUT', '/v1/app_expose_test/kv/_expose/flags%3A%2A', { read: 'public', write: 'deny' }),
+        env,
+      );
+      expect(put.status).toBe(204);
+
+      mockResolveOk('app_expose_test');
+      const get = await worker.fetch(req('GET', '/v1/app_expose_test/kv/_expose'), env);
+      expect(get.status).toBe(200);
+      const body = await get.json() as any;
+      expect(body.rules).toHaveLength(1);
+      expect(body.rules[0].pattern).toBe('flags:*');
+      expect(body.rules[0].read).toBe('public');
+    });
+
+    it('PUT _expose with conflicting rule returns 409', async () => {
+      await worker.fetch(
+        req('PUT', '/v1/app_expose_test/kv/_expose/flags%3A%2A', { read: 'public', write: 'deny' }),
+        env,
+      );
+      mockResolveOk('app_expose_test');
+      const conflict = await worker.fetch(
+        req('PUT', '/v1/app_expose_test/kv/_expose/flags%3A%2A', { read: 'authed', write: 'authed' }),
+        env,
+      );
+      expect(conflict.status).toBe(409);
+      const body = await conflict.json() as any;
+      expect(body.error).toBe('KV_EXPOSE_CONFLICT');
+    });
+
+    it('PUT _expose with identical rule is idempotent (204)', async () => {
+      await worker.fetch(
+        req('PUT', '/v1/app_expose_test/kv/_expose/flags%3A%2A', { read: 'public', write: 'deny' }),
+        env,
+      );
+      mockResolveOk('app_expose_test');
+      const again = await worker.fetch(
+        req('PUT', '/v1/app_expose_test/kv/_expose/flags%3A%2A', { read: 'public', write: 'deny' }),
+        env,
+      );
+      expect(again.status).toBe(204);
+    });
+
+    it('DELETE _expose/:pattern removes the rule', async () => {
+      await worker.fetch(
+        req('PUT', '/v1/app_expose_test/kv/_expose/flags%3A%2A', { read: 'public', write: 'deny' }),
+        env,
+      );
+      mockResolveOk('app_expose_test');
+      const del = await worker.fetch(req('DELETE', '/v1/app_expose_test/kv/_expose/flags%3A%2A'), env);
+      expect(del.status).toBe(200);
+      expect(await del.json()).toEqual({ deleted: 1 });
+
+      mockResolveOk('app_expose_test');
+      const get = await worker.fetch(req('GET', '/v1/app_expose_test/kv/_expose'), env);
+      expect((await get.json() as any).rules).toEqual([]);
+    });
+
+    it('DELETE _expose on missing pattern returns {deleted:0}', async () => {
+      const del = await worker.fetch(req('DELETE', '/v1/app_expose_test/kv/_expose/nope%3A%2A'), env);
+      expect(await del.json()).toEqual({ deleted: 0 });
+    });
+
+    it('rejects invalid role with 400', async () => {
+      const res = await worker.fetch(
+        req('PUT', '/v1/app_expose_test/kv/_expose/flags%3A%2A', { read: 'bogus', write: 'deny' }),
+        env,
+      );
+      expect(res.status).toBe(400);
     });
   });
 

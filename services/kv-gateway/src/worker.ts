@@ -1,6 +1,11 @@
 import { resolveApp } from './auth.js';
 import { RedisClient, RedisClientOptions } from './redis-client.js';
 import { userKey, isValidUserKey } from './keys.js';
+import {
+  loadRules, saveRule, deleteRule, nextDeclarationOrder,
+  compileRule, detectConflict,
+  type Role, type RuleSource,
+} from './expose.js';
 
 export interface Env {
   CONTROL_API_URL: string;
@@ -39,10 +44,16 @@ function pickRedisEndpoint(env: Env, region: string): { host: string; port: numb
   throw new Error(`unknown region: ${region}`);
 }
 
-function parseRoute(pathname: string): { appId: string; key?: string; action?: string } | null {
+function parseRoute(pathname: string): { appId: string; key?: string; action?: string; pattern?: string } | null {
   // /v1/{app}/kv/_batch
   let m = /^\/v1\/([^/]+)\/kv\/_batch$/.exec(pathname);
   if (m) return { appId: m[1], action: '_batch' };
+  // /v1/{app}/kv/_expose
+  m = /^\/v1\/([^/]+)\/kv\/_expose$/.exec(pathname);
+  if (m) return { appId: m[1], action: '_expose' };
+  // /v1/{app}/kv/_expose/:pattern
+  m = /^\/v1\/([^/]+)\/kv\/_expose\/(.+)$/.exec(pathname);
+  if (m) return { appId: m[1], action: '_expose_one', pattern: decodeURIComponent(m[2]) };
   // /v1/{app}/kv/:key/:action
   m = /^\/v1\/([^/]+)\/kv\/(.+)\/(incr|decr|setnx|cas|expire|ttl|exists)$/.exec(pathname);
   if (m) return { appId: m[1], key: m[2], action: m[3] };
@@ -138,7 +149,7 @@ export default {
 
     const route = parseRoute(url.pathname);
     if (!route) return err('not_found', 404);
-    const { appId: pathAppId, key, action } = route;
+    const { appId: pathAppId, key, action, pattern } = route;
 
     const auth = req.headers.get('authorization');
     if (!auth?.startsWith('Bearer ')) return err('unauthorized', 401);
@@ -149,8 +160,8 @@ export default {
     // Defensive: the contract guarantees app_id match, but keep the check.
     if (resolved.appId !== pathAppId) return err('forbidden', 403, 'app_id mismatch');
 
-    // For non-batch routes, validate the key now.
-    if (action !== '_batch') {
+    // For non-batch and non-expose routes, validate the key now.
+    if (action !== '_batch' && action !== '_expose' && action !== '_expose_one') {
       if (!key || !isValidUserKey(key)) return err('key_invalid', 400);
     }
 
@@ -160,6 +171,64 @@ export default {
       port: endpoint.port,
       password: resolved.redisPassword,
     };
+
+    // ── expose rule management ─────────────────────────────────────────────────
+
+    const VALID_ROLES: Role[] = ['public', 'authed', 'owner', 'deny'];
+
+    if (action === '_expose' && req.method === 'GET') {
+      return withRedis(baseOpts, DURABLE_DB, async (c) => {
+        const rules = await loadRules(c, resolved.appId);
+        rules.sort((a, b) => a.declarationOrder - b.declarationOrder);
+        return json({
+          rules: rules.map((r) => ({
+            pattern: r.pattern, read: r.read, write: r.write, order: r.declarationOrder,
+          })),
+        });
+      });
+    }
+
+    if (action === '_expose_one' && req.method === 'PUT') {
+      const body = (await req.json()) as { read?: unknown; write?: unknown };
+      if (!VALID_ROLES.includes(body.read as Role) || !VALID_ROLES.includes(body.write as Role)) {
+        return err('bad_request', 400, 'read and write must be public|authed|owner|deny');
+      }
+      const newRule: RuleSource = {
+        pattern: pattern!,
+        read: body.read as Role,
+        write: body.write as Role,
+      };
+      return withRedis(baseOpts, DURABLE_DB, async (c) => {
+        const existing = await loadRules(c, resolved.appId);
+        const compiled = compileRule(newRule, 0);
+        const conflict = detectConflict(existing, compiled);
+        if (conflict) {
+          return json(
+            {
+              error: 'KV_EXPOSE_CONFLICT',
+              message: 'pattern conflicts with existing rule',
+              existing: { pattern: conflict.pattern, read: conflict.read, write: conflict.write },
+            },
+            409,
+          );
+        }
+        // Idempotent same-rule save: detectConflict returned null, but it may already exist.
+        // saveRule HSETs which overwrites — preserve declarationOrder if already present.
+        const existingIdx = existing.findIndex((r) => r.pattern === newRule.pattern);
+        const order = existingIdx >= 0
+          ? existing[existingIdx].declarationOrder
+          : await nextDeclarationOrder(c, resolved.appId);
+        await saveRule(c, resolved.appId, newRule, order);
+        return new Response(null, { status: 204 });
+      });
+    }
+
+    if (action === '_expose_one' && req.method === 'DELETE') {
+      return withRedis(baseOpts, DURABLE_DB, async (c) => {
+        const ok = await deleteRule(c, resolved.appId, pattern!);
+        return json({ deleted: ok ? 1 : 0 });
+      });
+    }
 
     // ── batch ──────────────────────────────────────────────────────────────────
     // _batch ops run on DURABLE_DB (DB 0) only. Ephemeral routing for individual
