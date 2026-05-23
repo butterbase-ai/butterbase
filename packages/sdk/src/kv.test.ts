@@ -335,4 +335,17 @@ describe('ctx.kv (shim)', () => {
       expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose`);
     });
   });
+
+  describe('REST client mode (JWT pass-through)', () => {
+    it('makeKv with a JWT passes it as-is in the Authorization header', async () => {
+      const captured: { headers?: HeadersInit } = {};
+      const f = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        captured.headers = init?.headers;
+        return new Response(JSON.stringify({ value: 'v' }), { status: 200 });
+      });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'xxx.yyy.zzz', baseUrl: BASE, fetch: f as any });
+      await kv.get('k');
+      expect(captured.headers).toMatchObject({ authorization: 'Bearer xxx.yyy.zzz' });
+    });
+  });
 });
