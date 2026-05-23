@@ -4,10 +4,10 @@ const base = (appId: string) => `/v1/${appId}/kv`;
 
 export const kvApi = {
   get: (appId: string, key: string, raw = false) =>
-    apiFetch('GET', `${base(appId)}/${encodeURI(key)}${raw ? '?raw=1' : ''}`),
+    apiFetch('GET', `${base(appId)}/${encodeURIComponent(key)}${raw ? '?raw=1' : ''}`),
   set: (appId: string, key: string, value: unknown, opts: { ttl?: number | null; ephemeral?: boolean } = {}) =>
-    apiFetch('PUT', `${base(appId)}/${encodeURI(key)}`, { value, ...opts }),
-  del: (appId: string, key: string) => apiFetch('DELETE', `${base(appId)}/${encodeURI(key)}`),
+    apiFetch('PUT', `${base(appId)}/${encodeURIComponent(key)}`, { value, ...opts }),
+  del: (appId: string, key: string) => apiFetch('DELETE', `${base(appId)}/${encodeURIComponent(key)}`),
   scan: (appId: string, prefix: string, limit: number, cursor = '0') =>
     apiFetch('GET', `${base(appId)}/_scan?prefix=${encodeURIComponent(prefix)}&limit=${limit}&cursor=${cursor}`),
   stats: (appId: string) => apiFetch('GET', `${base(appId)}/_stats`),
