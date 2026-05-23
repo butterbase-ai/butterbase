@@ -6,6 +6,8 @@ export const HAPPY_PATH_ORDER = [
   'blocking_writes',
   'dumping_data',
   'restoring_data',
+  'dumping_kv',
+  'restoring_kv',
   'copying_blobs',
   'copying_runtime',
   'flipping_routing',

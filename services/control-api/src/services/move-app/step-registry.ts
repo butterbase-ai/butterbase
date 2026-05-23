@@ -3,6 +3,8 @@ import { executeReserveDest } from './step-reserve-dest.js';
 import { executeBlockWrites } from './step-block-writes.js';
 import { executeDumpData } from './step-dump-data.js';
 import { executeRestoreData } from './step-restore-data.js';
+import { executeDumpKv } from './step-dump-kv.js';
+// restoring_kv: registered in Task 6
 import { executeCopyBlobs } from './step-copy-blobs.js';
 import { executeCopyRuntime } from './step-copy-runtime.js';
 import { executeFlipRouting } from './step-flip-routing.js';
@@ -17,6 +19,8 @@ export const stepHandlers: StepHandlerMap = {
   blocking_writes: executeBlockWrites,
   dumping_data: executeDumpData,
   restoring_data: executeRestoreData,
+  dumping_kv: executeDumpKv,
+  // restoring_kv: executeRestoreKv,  // TODO: Task 6
   copying_blobs: executeCopyBlobs,
   copying_runtime: executeCopyRuntime,
   flipping_routing: executeFlipRouting,
