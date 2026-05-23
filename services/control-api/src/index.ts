@@ -66,6 +66,9 @@ import { adminRoutes } from './routes/admin.js';
 import { apiKeyRoutes } from './routes/api-keys.js';
 import { realtimePlugin } from './plugins/realtime.js';
 import { realtimeRoutes } from './routes/realtime.js';
+import { CognitoAuthProvider } from './services/cognito-auth-provider.js';
+import { LocalAuthProvider } from './services/local-auth-provider.js';
+import type { AuthProvider } from './services/auth-provider.js';
 import { config, assertRegionConfig } from './config.js';
 import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
@@ -99,6 +102,7 @@ import kvAuditRecentRoutes from './routes/v1/kv-audit-recent.js';
 import quotaStateRoutes from './routes/admin/quota-state.js';
 import regionStateRoutes from './routes/admin/region-state.js';
 import activeMigrationsRoutes from './routes/admin/active-migrations.js';
+import kvAdminStatsRoutes from './routes/admin/kv-admin-stats.js';
 import moveAppRoutes from './routes/apps/move.js';
 import reverseMoveRoutes from './routes/apps/reverse-move.js';
 import sourceReplicaRoutes from './routes/apps/source-replicas.js';
@@ -207,6 +211,17 @@ const app = Fastify({
     },
   },
 });
+
+// Decorate authProvider so admin routes (e.g. /admin/kv/cluster-health) that
+// call requireAdmin() from lib/admin-guard can access the same provider as
+// the main auth plugin and admin-auth.ts module-level instance.
+app.decorate('authProvider', (config.cognito.userPoolId
+  ? new CognitoAuthProvider(
+      config.cognito.userPoolId,
+      config.cognito.clientId,
+      config.cognito.region,
+    )
+  : new LocalAuthProvider(config.auth.jwtSecret)) as AuthProvider);
 
 // Capture all non-JSON, non-text request bodies as raw Buffers so function
 // execution can forward them faithfully to the Deno runtime.
@@ -443,6 +458,7 @@ app.register(appIndexReaperRoutes);
 app.register(quotaStateRoutes);
 app.register(regionStateRoutes);
 app.register(activeMigrationsRoutes);
+app.register(kvAdminStatsRoutes);
 app.register(subdomainPlugin);
 app.register(authPlugin);
 app.register(quotaEnforcementPlugin);
