@@ -20,8 +20,12 @@ export async function loadKvConfig(filePath: string): Promise<KvConfig> {
   const unregister = register();
   try {
     // Dynamic import with tsx registered as hook — handles .ts files
-    const mod = await import(absPath) as { default?: KvConfig };
-    const config = mod.default;
+    const mod = await import(absPath);
+    // Handle CJS/ESM interop: tsx may double-wrap export default as mod.default.default
+    const rawDefault = mod.default;
+    const config = (rawDefault && !Array.isArray(rawDefault.expose) && rawDefault.default)
+      ? rawDefault.default
+      : rawDefault;
     if (!config || !Array.isArray(config.expose)) {
       throw new Error(
         `${filePath} must export a default value from defineKvConfig({ expose: [...] })`,

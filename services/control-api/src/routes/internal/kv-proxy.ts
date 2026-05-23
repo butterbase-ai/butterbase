@@ -39,9 +39,11 @@ const kvProxyRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(500).send({ error: 'no_gateway_for_region' });
       }
 
-      // Build upstream URL: <gateway>/v1/<app_id>/kv/<wildcard>?<qs>
+      // Build upstream URL: <gateway>/v1/<app_id>/<wildcard>?<qs>
+      // Note: the Fastify wildcard captures everything after /proxy/:app_id/, which
+      // already includes the leading "kv/" segment from the CLI's base path.
       const qs = request.url.includes('?') ? request.url.slice(request.url.indexOf('?')) : '';
-      const upstream = `${base.replace(/\/$/, '')}/v1/${appId}/kv/${wildcard}${qs}`;
+      const upstream = `${base.replace(/\/$/, '')}/v1/${appId}/${wildcard}${qs}`;
 
       // Forward original headers
       const headers = new Headers();

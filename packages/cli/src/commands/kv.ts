@@ -194,10 +194,14 @@ export async function kvApplyCommand(opts: {
     }
   }
 
-  // 7. Apply: removes first, then adds + changes
+  // 7. Apply: removes first, then changes (unexpose→expose), then pure adds
   const spinner = ora('Applying…').start();
   try {
     for (const r of diff.remove) {
+      await kvApi.unexpose(appId, r.pattern);
+    }
+    // For changed rules: delete first (gateway rejects PUT on existing pattern with different read/write)
+    for (const r of diff.change) {
       await kvApi.unexpose(appId, r.pattern);
     }
     for (const r of [...diff.add, ...diff.change]) {
