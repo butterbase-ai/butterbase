@@ -1,9 +1,26 @@
 import type { FastifyInstance } from 'fastify';
 import { resolveEligibility } from '../services/hackathons/eligibility.js';
 import { HACKATHON_OPEN_FOR_SUBMISSIONS_SQL_SUFFIX } from '../services/hackathons/open-for-submissions.js';
-import { validateSubmissionData, type FieldSchema } from '../services/hackathons/field-schema.js';
+import { validateSubmissionData, getUrlFieldKey, type FieldSchema } from '../services/hackathons/field-schema.js';
 import { verifyCode } from '../services/hackathons/codes.js';
 import { scoreSubmission } from '../services/hackathons/scoring.js';
+
+/**
+ * Extract the subdomain from a `<sub>.butterbase.dev` URL, or null if the URL
+ * isn't a (sub-of) butterbase.dev host. Used to auto-resolve app_id from the
+ * participant's deployed-project URL.
+ */
+function extractButterbaseSubdomain(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  let host: string;
+  try {
+    host = new URL(value).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (host === 'butterbase.dev' || !host.endsWith('.butterbase.dev')) return null;
+  return host.slice(0, -'.butterbase.dev'.length) || null;
+}
 
 export async function hackathonsMcpRoutes(app: FastifyInstance) {
   /**
@@ -422,7 +439,26 @@ export async function hackathonsMcpRoutes(app: FastifyInstance) {
       });
     }
 
-    const appId = body.app_id ?? null;
+    // Resolve app_id: prefer an explicit body.app_id, otherwise try to derive
+    // it from the participant's deployed-project URL. We look up
+    // user_app_index (the cross-region authoritative app catalog) by the
+    // URL's subdomain, scoped to the requesting user — so a participant can
+    // only auto-bind to an app they own.
+    let appId: string | null = body.app_id ?? null;
+    if (!appId) {
+      const urlKey = getUrlFieldKey(h.field_schema) ?? 'demo_url';
+      const subdomain = extractButterbaseSubdomain(data[urlKey]);
+      if (subdomain) {
+        const { rows: appRows } = await app.controlDb.query<{ app_id: string }>(
+          `SELECT app_id FROM user_app_index
+            WHERE subdomain = $1 AND user_id = $2
+            ORDER BY created_at DESC
+            LIMIT 1`,
+          [subdomain, userId]
+        );
+        if (appRows[0]) appId = appRows[0].app_id;
+      }
+    }
 
     const { rows } = await app.controlDb.query<{
       id: string; version: number; created_at: string; updated_at: string; data: Record<string, unknown>; app_id: string | null;
@@ -440,17 +476,27 @@ export async function hackathonsMcpRoutes(app: FastifyInstance) {
 
     const submissionRow = rows[0];
 
-    // Fire-and-forget async scoring
-    setImmediate(() => {
-      scoreSubmission(app.controlDb, {
-        id: submissionRow.id,
-        hackathon_id: h.id,
-        participant_id: participantId,
-        user_id: userId,
-        data,
-        app_id: submissionRow.app_id,
-        field_schema: h.field_schema,
-      }, request.log).catch(() => {});
+    // Fire-and-forget async scoring. Features live in the per-region runtime
+    // DB (control plane only mirrors a subset post OSS-split), so route the
+    // feature-count query to the app's home region. Fall back to controlDb
+    // when there's no app_id — scoring still scores the URL criterion.
+    setImmediate(async () => {
+      try {
+        const pool = submissionRow.app_id
+          ? await app.runtimeDbForApp(submissionRow.app_id).catch(() => app.controlDb)
+          : app.controlDb;
+        await scoreSubmission(pool, {
+          id: submissionRow.id,
+          hackathon_id: h.id,
+          participant_id: participantId,
+          user_id: userId,
+          data,
+          app_id: submissionRow.app_id,
+          field_schema: h.field_schema,
+        }, request.log);
+      } catch (err) {
+        request.log.error({ err, submissionId: submissionRow.id }, '[hackathons] scoring dispatch failed');
+      }
     });
 
     const isInsert = submissionRow.version === 1;
