@@ -53,6 +53,21 @@ export {
   QuotaError,
   NetworkError,
   parseApiError,
+  // KV error classes
+  KvError,
+  KvAuthError,
+  KvForbiddenError,
+  KvNotFoundError,
+  KvKeyInvalidError,
+  KvConnectionError,
+  KvCasMismatchError,
+  KvExposeConflictError,
+  KvValueTooLargeError,
+  KvQuotaExceededError,
+  KvRateLimitedError,
+  KvCreditsExhaustedError,
+  KvStorageFullError,
+  KvKeysExhaustedError,
 } from './errors/index.js';
 
 // Shared package re-exports

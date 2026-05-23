@@ -2,6 +2,8 @@ import { ErrorCodes, isAgentFriendlyError, type ErrorCode } from '@butterbase/sh
 import { ButterbaseError } from './base.js';
 import {
   KvError, KvAuthError, KvForbiddenError, KvNotFoundError, KvKeyInvalidError, KvConnectionError,
+  KvQuotaExceededError, KvRateLimitedError, KvCreditsExhaustedError, KvStorageFullError, KvKeysExhaustedError,
+  KvValueTooLargeError, KvCasMismatchError, KvExposeConflictError,
 } from './kv.js';
 
 export { ButterbaseError };
@@ -13,7 +15,11 @@ export class QuotaError      extends ButterbaseError { constructor(m: string, c:
 export class NetworkError    extends ButterbaseError { constructor(m: string, c: string = 'NETWORK_ERROR', s: number = 0, r?: string, d?: unknown) { super(m, c, s, r, d); this.name = 'NetworkError'; } }
 
 // Re-export KV error classes
-export { KvError, KvAuthError, KvForbiddenError, KvNotFoundError, KvKeyInvalidError, KvConnectionError };
+export {
+  KvError, KvAuthError, KvForbiddenError, KvNotFoundError, KvKeyInvalidError, KvConnectionError,
+  KvQuotaExceededError, KvRateLimitedError, KvCreditsExhaustedError, KvStorageFullError, KvKeysExhaustedError,
+  KvValueTooLargeError, KvCasMismatchError, KvExposeConflictError,
+};
 
 type ErrCls = new (m: string, c: string, s: number, r?: string, d?: unknown) => ButterbaseError;
 
@@ -27,16 +33,26 @@ const EXACT: Record<string, ErrCls> = {
 
 // KV code → class
 const KV_CODE_TO_CLASS: Record<string, ErrCls> = {
-  KV_UNAUTHORIZED: KvAuthError,
-  KV_FORBIDDEN:    KvForbiddenError,
-  KV_NOT_FOUND:    KvNotFoundError,
-  KV_KEY_INVALID:  KvKeyInvalidError,
-  KV_CONNECTION:   KvConnectionError,
+  KV_UNAUTHORIZED:  KvAuthError,
+  KV_FORBIDDEN:     KvForbiddenError,
+  KV_NOT_FOUND:     KvNotFoundError,
+  KV_KEY_INVALID:   KvKeyInvalidError,
+  KV_CONNECTION:    KvConnectionError,
+  KV_VALUE_TOO_LARGE: KvValueTooLargeError,
+  KV_CAS_MISMATCH:  KvCasMismatchError,
+  KV_EXPOSE_CONFLICT: KvExposeConflictError,
+  // lowercase quota codes from the control-api preHandler (Task 5)
+  kv_rate_limited:      KvQuotaExceededError,
+  kv_credits_exhausted: KvQuotaExceededError,
+  kv_storage_full:      KvQuotaExceededError,
+  kv_keys_exhausted:    KvQuotaExceededError,
+  value_too_large:      KvValueTooLargeError,
 };
 
 export function classifyByCode(code: string): ErrCls | null {
   if (EXACT[code]) return EXACT[code];
-  if (code.startsWith('KV_'))        return KV_CODE_TO_CLASS[code] ?? KvError;
+  if (KV_CODE_TO_CLASS[code]) return KV_CODE_TO_CLASS[code];
+  if (code.startsWith('KV_') || code.startsWith('kv_')) return KvError;
   if (code.startsWith('AUTH_'))       return AuthError;
   if (code.startsWith('VALIDATION_')) return ValidationError;
   if (code.startsWith('RESOURCE_'))   return NotFoundError;

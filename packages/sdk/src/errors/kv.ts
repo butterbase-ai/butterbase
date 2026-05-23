@@ -65,3 +65,77 @@ export class KvValueTooLargeError extends KvError {
     this.name = 'KvValueTooLargeError';
   }
 }
+
+/** Parent / legacy alias for quota-class KV errors. */
+export class KvQuotaExceededError extends KvError {
+  constructor(m = 'quota exceeded', c = 'KV_QUOTA_EXCEEDED', s = 429, r?: string, d?: unknown) {
+    super(m, c, s, r, d);
+    this.name = 'KvQuotaExceededError';
+  }
+}
+
+/** HTTP 429 – kv_rate_limited */
+export class KvRateLimitedError extends KvQuotaExceededError {
+  /** Seconds the caller should wait before retrying. */
+  readonly retryAfterSec: number;
+
+  constructor(retryAfterSec = 0, m?: string) {
+    super(
+      m ?? `rate limited; retry after ${retryAfterSec}s`,
+      'kv_rate_limited',
+      429,
+    );
+    this.name = 'KvRateLimitedError';
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
+/** HTTP 402 – kv_credits_exhausted */
+export class KvCreditsExhaustedError extends KvQuotaExceededError {
+  constructor(m?: string) {
+    super(
+      m ?? 'credits exhausted; please top up your account',
+      'kv_credits_exhausted',
+      402,
+    );
+    this.name = 'KvCreditsExhaustedError';
+  }
+}
+
+/** HTTP 507 – kv_storage_full */
+export class KvStorageFullError extends KvQuotaExceededError {
+  /** Bytes currently used. */
+  readonly usedBytes: number;
+  /** Storage cap in bytes. */
+  readonly capBytes: number;
+
+  constructor(usedBytes = 0, capBytes = 0, m?: string) {
+    super(
+      m ?? `storage full (${usedBytes} / ${capBytes} bytes used)`,
+      'kv_storage_full',
+      507,
+    );
+    this.name = 'KvStorageFullError';
+    this.usedBytes = usedBytes;
+    this.capBytes = capBytes;
+  }
+}
+
+/** HTTP 507 – kv_keys_exhausted */
+export class KvKeysExhaustedError extends KvQuotaExceededError {
+  /** Current key count. */
+  readonly keys: number;
+  /** Maximum allowed keys. */
+  readonly cap: number;
+
+  constructor(keys = 0, cap = 0, m?: string) {
+    super(
+      m ?? `key limit reached (${keys} / ${cap} keys)`,
+      'kv_keys_exhausted',
+      507,
+    );
+    this.name = 'KvKeysExhaustedError';
+    this.keys = keys;
+    this.cap = cap;
+  }
+}

@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { makeKv } from './kv.js';
-import { KvKeyInvalidError, KvCasMismatchError, KvValueTooLargeError, KvExposeConflictError } from './errors/kv.js';
+import {
+  KvKeyInvalidError, KvCasMismatchError, KvValueTooLargeError, KvExposeConflictError,
+  KvRateLimitedError, KvCreditsExhaustedError, KvStorageFullError, KvKeysExhaustedError,
+  KvQuotaExceededError, KvError,
+} from './errors/kv.js';
 
 const BASE = 'https://kv.butterbase.dev';
 const ROOT = `${BASE}/v1/app_a/kv`;
@@ -334,6 +338,79 @@ describe('ctx.kv (shim)', () => {
       expect(last().method).toBe('GET');
       expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose`);
     });
+  });
+
+  // ─── quota / rate-limit error mapping ────────────────────────────────────
+
+  it('throws KvRateLimitedError on 429 with retry_after', async () => {
+    const body = { error: 'kv_rate_limited', message: 'rate limited', retry_after: 42 };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 429, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvRateLimitedError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvRateLimitedError).retryAfterSec).toBe(42);
+    expect((err as KvRateLimitedError).code).toBe('kv_rate_limited');
+    expect((err as KvRateLimitedError).status).toBe(429);
+  });
+
+  it('throws KvRateLimitedError on 429 with retryAfterSec=0 when retry_after absent', async () => {
+    const body = { error: 'kv_rate_limited', message: 'rate limited' };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 429, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvRateLimitedError);
+    expect((err as KvRateLimitedError).retryAfterSec).toBe(0);
+  });
+
+  it('throws KvCreditsExhaustedError on 402', async () => {
+    const body = { error: 'kv_credits_exhausted', message: 'credits exhausted' };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 402, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvCreditsExhaustedError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvCreditsExhaustedError).code).toBe('kv_credits_exhausted');
+    expect((err as KvCreditsExhaustedError).status).toBe(402);
+  });
+
+  it('throws KvStorageFullError on 507 kv_storage_full', async () => {
+    const body = { error: 'kv_storage_full', message: 'storage full', used_bytes: 5000, cap_bytes: 10000 };
+    const f = mkFetch({ [`PUT ${ROOT}/k`]: { status: 507, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.set('k', 'v').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvStorageFullError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvStorageFullError).usedBytes).toBe(5000);
+    expect((err as KvStorageFullError).capBytes).toBe(10000);
+    expect((err as KvStorageFullError).code).toBe('kv_storage_full');
+    expect((err as KvStorageFullError).status).toBe(507);
+  });
+
+  it('throws KvKeysExhaustedError on 507 kv_keys_exhausted', async () => {
+    const body = { error: 'kv_keys_exhausted', message: 'keys exhausted', keys: 999, cap: 1000 };
+    const f = mkFetch({ [`PUT ${ROOT}/k`]: { status: 507, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.set('k', 'v').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvKeysExhaustedError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvKeysExhaustedError).keys).toBe(999);
+    expect((err as KvKeysExhaustedError).cap).toBe(1000);
+    expect((err as KvKeysExhaustedError).code).toBe('kv_keys_exhausted');
+    expect((err as KvKeysExhaustedError).status).toBe(507);
+  });
+
+  it('throws KvError (generic) on 507 with unknown error code', async () => {
+    const body = { error: 'kv_unknown_507', message: 'something full' };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 507, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvError).status).toBe(507);
   });
 
   describe('REST client mode (JWT pass-through)', () => {

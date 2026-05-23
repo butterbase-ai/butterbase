@@ -6,6 +6,12 @@ import {
   KvNotFoundError,
   KvKeyInvalidError,
   KvConnectionError,
+  KvQuotaExceededError,
+  KvRateLimitedError,
+  KvCreditsExhaustedError,
+  KvStorageFullError,
+  KvKeysExhaustedError,
+  KvValueTooLargeError,
   classifyByCode,
 } from './index';
 
@@ -88,6 +94,137 @@ describe('KvError hierarchy', () => {
       const e = new Cls('not found', 'KV_NOT_FOUND', 404, 'check the key', { key: 'xyz' });
       expect(e.remediation).toBe('check the key');
       expect(e.details).toEqual({ key: 'xyz' });
+    }
+  });
+});
+
+describe('KvQuotaExceededError hierarchy', () => {
+  it('KvQuotaExceededError is instanceof KvError and Error', () => {
+    const e = new KvQuotaExceededError();
+    expect(e).toBeInstanceOf(KvQuotaExceededError);
+    expect(e).toBeInstanceOf(KvError);
+    expect(e).toBeInstanceOf(Error);
+    expect(e.code).toBe('KV_QUOTA_EXCEEDED');
+    expect(e.status).toBe(429);
+    expect(e.name).toBe('KvQuotaExceededError');
+  });
+
+  it('KvRateLimitedError has retryAfterSec and correct code/status', () => {
+    const e = new KvRateLimitedError(30);
+    expect(e).toBeInstanceOf(KvRateLimitedError);
+    expect(e).toBeInstanceOf(KvQuotaExceededError);
+    expect(e).toBeInstanceOf(KvError);
+    expect(e).toBeInstanceOf(Error);
+    expect(e.code).toBe('kv_rate_limited');
+    expect(e.status).toBe(429);
+    expect(e.retryAfterSec).toBe(30);
+    expect(e.name).toBe('KvRateLimitedError');
+    expect(e.message).toContain('30');
+  });
+
+  it('KvRateLimitedError defaults retryAfterSec to 0', () => {
+    const e = new KvRateLimitedError();
+    expect(e.retryAfterSec).toBe(0);
+  });
+
+  it('KvCreditsExhaustedError has correct code/status', () => {
+    const e = new KvCreditsExhaustedError();
+    expect(e).toBeInstanceOf(KvCreditsExhaustedError);
+    expect(e).toBeInstanceOf(KvQuotaExceededError);
+    expect(e).toBeInstanceOf(KvError);
+    expect(e).toBeInstanceOf(Error);
+    expect(e.code).toBe('kv_credits_exhausted');
+    expect(e.status).toBe(402);
+    expect(e.name).toBe('KvCreditsExhaustedError');
+  });
+
+  it('KvStorageFullError has usedBytes and capBytes', () => {
+    const e = new KvStorageFullError(1024, 2048);
+    expect(e).toBeInstanceOf(KvStorageFullError);
+    expect(e).toBeInstanceOf(KvQuotaExceededError);
+    expect(e).toBeInstanceOf(KvError);
+    expect(e).toBeInstanceOf(Error);
+    expect(e.code).toBe('kv_storage_full');
+    expect(e.status).toBe(507);
+    expect(e.usedBytes).toBe(1024);
+    expect(e.capBytes).toBe(2048);
+    expect(e.name).toBe('KvStorageFullError');
+    expect(e.message).toContain('1024');
+    expect(e.message).toContain('2048');
+  });
+
+  it('KvStorageFullError defaults to 0/0', () => {
+    const e = new KvStorageFullError();
+    expect(e.usedBytes).toBe(0);
+    expect(e.capBytes).toBe(0);
+  });
+
+  it('KvKeysExhaustedError has keys and cap', () => {
+    const e = new KvKeysExhaustedError(500, 1000);
+    expect(e).toBeInstanceOf(KvKeysExhaustedError);
+    expect(e).toBeInstanceOf(KvQuotaExceededError);
+    expect(e).toBeInstanceOf(KvError);
+    expect(e).toBeInstanceOf(Error);
+    expect(e.code).toBe('kv_keys_exhausted');
+    expect(e.status).toBe(507);
+    expect(e.keys).toBe(500);
+    expect(e.cap).toBe(1000);
+    expect(e.name).toBe('KvKeysExhaustedError');
+    expect(e.message).toContain('500');
+    expect(e.message).toContain('1000');
+  });
+
+  it('KvValueTooLargeError is instanceof KvError and has correct defaults', () => {
+    const e = new KvValueTooLargeError();
+    expect(e).toBeInstanceOf(KvValueTooLargeError);
+    expect(e).toBeInstanceOf(KvError);
+    expect(e.code).toBe('KV_VALUE_TOO_LARGE');
+    expect(e.status).toBe(413);
+  });
+
+  it('classifyByCode maps kv_rate_limited to KvQuotaExceededError', () => {
+    const Cls = classifyByCode('kv_rate_limited');
+    expect(Cls).not.toBeNull();
+    if (Cls) {
+      const e = new Cls('rate limited', 'kv_rate_limited', 429);
+      expect(e).toBeInstanceOf(KvQuotaExceededError);
+      expect(e).toBeInstanceOf(KvError);
+    }
+  });
+
+  it('classifyByCode maps kv_credits_exhausted to KvQuotaExceededError', () => {
+    const Cls = classifyByCode('kv_credits_exhausted');
+    expect(Cls).not.toBeNull();
+    if (Cls) {
+      const e = new Cls('credits exhausted', 'kv_credits_exhausted', 402);
+      expect(e).toBeInstanceOf(KvQuotaExceededError);
+    }
+  });
+
+  it('classifyByCode maps kv_storage_full to KvQuotaExceededError', () => {
+    const Cls = classifyByCode('kv_storage_full');
+    expect(Cls).not.toBeNull();
+    if (Cls) {
+      const e = new Cls('storage full', 'kv_storage_full', 507);
+      expect(e).toBeInstanceOf(KvQuotaExceededError);
+    }
+  });
+
+  it('classifyByCode maps kv_keys_exhausted to KvQuotaExceededError', () => {
+    const Cls = classifyByCode('kv_keys_exhausted');
+    expect(Cls).not.toBeNull();
+    if (Cls) {
+      const e = new Cls('keys exhausted', 'kv_keys_exhausted', 507);
+      expect(e).toBeInstanceOf(KvQuotaExceededError);
+    }
+  });
+
+  it('classifyByCode maps value_too_large to KvValueTooLargeError', () => {
+    const Cls = classifyByCode('value_too_large');
+    expect(Cls).not.toBeNull();
+    if (Cls) {
+      const e = new Cls('value too large', 'value_too_large', 413);
+      expect(e).toBeInstanceOf(KvValueTooLargeError);
     }
   });
 });

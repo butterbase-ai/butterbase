@@ -2,6 +2,7 @@
 import {
   KvError, KvNotFoundError, KvKeyInvalidError, KvAuthError, KvForbiddenError, KvConnectionError,
   KvCasMismatchError, KvExposeConflictError, KvValueTooLargeError,
+  KvRateLimitedError, KvCreditsExhaustedError, KvStorageFullError, KvKeysExhaustedError,
 } from './errors/kv.js';
 
 export type Role = 'public' | 'authed' | 'owner' | 'deny';
@@ -49,17 +50,39 @@ export function makeKv(opts: MakeKvOptions): KvShim {
     });
   }
 
-  function throwForStatus(res: Response, body: { error?: string; message?: string } | null): never {
+  function throwForStatus(
+    res: Response,
+    body: {
+      error?: string;
+      message?: string;
+      retry_after?: number;
+      used_bytes?: number;
+      cap_bytes?: number;
+      keys?: number;
+      cap?: number;
+    } | null,
+  ): never {
     const msg = body?.message ?? `kv error (status ${res.status})`;
     if (res.status === 400) throw new KvKeyInvalidError(msg);
     if (res.status === 401) throw new KvAuthError(msg);
+    if (res.status === 402) throw new KvCreditsExhaustedError(msg);
     if (res.status === 403) throw new KvForbiddenError(msg);
     if (res.status === 409) {
       if (body?.error === 'KV_EXPOSE_CONFLICT') throw new KvExposeConflictError(msg);
       throw new KvCasMismatchError(msg); // reserved for future strict-CAS mode
     }
     if (res.status === 413) throw new KvValueTooLargeError(msg);
+    if (res.status === 429) throw new KvRateLimitedError(body?.retry_after ?? 0, msg);
     if (res.status === 503) throw new KvConnectionError(msg);
+    if (res.status === 507) {
+      if (body?.error === 'kv_storage_full') {
+        throw new KvStorageFullError(body?.used_bytes ?? 0, body?.cap_bytes ?? 0, msg);
+      }
+      if (body?.error === 'kv_keys_exhausted') {
+        throw new KvKeysExhaustedError(body?.keys ?? 0, body?.cap ?? 0, msg);
+      }
+      // Unknown 507 — fall through to generic KvError
+    }
     throw new KvError(msg, body?.error ?? 'KV_ERROR', res.status);
   }
 
