@@ -139,4 +139,52 @@ describeDb('ALL /v1/internal/kv/proxy/:app_id/*', () => {
       await pool.query(`DELETE FROM platform_users WHERE id = $1`, [otherUserId]);
     }
   });
+
+  it('PUT forwards body to upstream', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const requestBody = { key: 'mykey', value: 'myvalue', ttl: 120 };
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/v1/internal/kv/proxy/${testAppId}/mykey`,
+      headers: { authorization: `Bearer ${devApiKeyPlain}`, 'content-type': 'application/json' },
+      payload: JSON.stringify(requestBody),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect((init as RequestInit).method).toBe('PUT');
+    expect(init.body).toBeDefined();
+    const sentBody = JSON.parse(String(init.body));
+    expect(sentBody).toEqual(requestBody);
+  });
+
+  it('returns non-2xx status and body from upstream verbatim', async () => {
+    const upstreamError = { error: 'missing' };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify(upstreamError), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/internal/kv/proxy/${testAppId}/nonexistent`,
+      headers: { authorization: `Bearer ${devApiKeyPlain}` },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual(upstreamError);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
 });

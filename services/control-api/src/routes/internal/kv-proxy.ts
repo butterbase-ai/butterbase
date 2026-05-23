@@ -68,8 +68,15 @@ const kvProxyRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      const upstreamRes = await fetch(upstream, init);
-      const buf = await upstreamRes.arrayBuffer();
+      let upstreamRes: Response;
+      let buf: ArrayBuffer;
+      try {
+        upstreamRes = await fetch(upstream, init);
+        buf = await upstreamRes.arrayBuffer();
+      } catch (e) {
+        request.log.error({ err: e, upstream }, 'kv_proxy_upstream_fetch_failed');
+        return reply.code(502).send({ error: 'upstream_unreachable' });
+      }
 
       reply.code(upstreamRes.status);
       const upstreamCt = upstreamRes.headers.get('content-type');
