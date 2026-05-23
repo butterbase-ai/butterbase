@@ -30,7 +30,7 @@ describe('butterbase kv', () => {
 
   it('get prints the value', async () => {
     await kvGetCommand('foo', { app: 'app_x' });
-    expect(String(fetchSpy.mock.calls[0][0])).toMatch(/proxy\/app_x\/kv\/foo/);
+    expect(String(fetchSpy.mock.calls[0][0])).toMatch(/\/v1\/app_x\/kv\/foo/);
     expect(logSpy).toHaveBeenCalled();
   });
 

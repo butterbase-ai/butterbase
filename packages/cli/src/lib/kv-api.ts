@@ -1,6 +1,6 @@
 import { apiFetch } from './api-client.js';
 
-const base = (appId: string) => `/v1/internal/kv/proxy/${appId}/kv`;
+const base = (appId: string) => `/v1/${appId}/kv`;
 
 export const kvApi = {
   get: (appId: string, key: string, raw = false) =>

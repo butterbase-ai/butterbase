@@ -88,7 +88,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
     },
     async (args) => {
       const { app_id, action } = args;
-      const base = `/v1/internal/kv/proxy/${app_id}/kv`;
+      const base = `/v1/${app_id}/kv`;
       const need = (cond: unknown, msg: string) =>
         cond
           ? null

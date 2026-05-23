@@ -38,8 +38,8 @@ describe('manage_kv tool', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
-    // Must be /v1/internal/kv/proxy/<app>/kv/<key> — NOT /kv/data/<key>
-    expect(url).toMatch(/\/v1\/internal\/kv\/proxy\/app_test123\/kv\/mykey$/);
+    // Must be /v1/<app>/kv/<key> — NOT /kv/data/<key>
+    expect(url).toMatch(/\/v1\/app_test123\/kv\/mykey$/);
     expect(url).not.toContain('/kv/data/');
     expect(opts.method).toBe('PUT');
     const body = JSON.parse(opts.body as string);
@@ -66,8 +66,8 @@ describe('manage_kv tool', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
-    // Must be /v1/internal/kv/proxy/<app>/kv/<key> — NOT /kv/data/<key>
-    expect(url).toMatch(/\/v1\/internal\/kv\/proxy\/app_test123\/kv\/mykey$/);
+    // Must be /v1/<app>/kv/<key> — NOT /kv/data/<key>
+    expect(url).toMatch(/\/v1\/app_test123\/kv\/mykey$/);
     expect(url).not.toContain('/kv/data/');
     expect(opts.method).toBeUndefined(); // GET is the default (no method set)
 
