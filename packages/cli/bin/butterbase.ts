@@ -96,6 +96,11 @@ import {
   subscribeCommand, subscriptionCommand, cancelCommand,
   purchaseCommand, ordersListCommand, ordersGetCommand,
 } from '../src/commands/app-billing.js';
+import {
+  kvGetCommand, kvSetCommand, kvDelCommand, kvLsCommand,
+  kvStatsCommand, kvFlushCommand, kvRulesCommand,
+  kvExposeCommand, kvUnexposeCommand,
+} from '../src/commands/kv.js';
 
 const program = new Command();
 
@@ -1102,6 +1107,63 @@ abOrders
   .option('--app <appId>', 'Override current app')
   .option('--json', 'Output raw JSON')
   .action((orderId, opts) => ordersGetCommand(orderId, opts));
+
+// KV
+const kv = program.command('kv').description('Manage app KV store');
+
+kv.command('get <key>')
+  .description('Get a value by key')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .option('--raw', 'Return raw value without JSON decoding')
+  .action(kvGetCommand);
+
+kv.command('set <key> <value>')
+  .description('Set a value')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .option('--ttl <ttl>', 'TTL: 30d, 1h, 60s, "null"/"forever" for no expiry')
+  .option('--ephemeral', 'Mark as ephemeral (not persisted)')
+  .action(kvSetCommand);
+
+kv.command('del <key>')
+  .description('Delete a key')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .action(kvDelCommand);
+
+kv.command('ls')
+  .description('List / scan keys')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .option('--prefix <p>', 'Key prefix filter')
+  .option('--limit <n>', 'Maximum keys to return (default 100)')
+  .action(kvLsCommand);
+
+kv.command('stats')
+  .description('Show KV store statistics')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .action(kvStatsCommand);
+
+kv.command('flush')
+  .description('Flush all keys (requires --confirm)')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .option('--confirm', 'Required: confirm destructive flush')
+  .option('--include-config', 'Also flush expose rules')
+  .action(kvFlushCommand);
+
+kv.command('rules')
+  .description('List expose rules')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .action(kvRulesCommand);
+
+kv.command('expose <pattern>')
+  .description('Create or update an expose rule')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .requiredOption('--read <role>', 'Read role (public|authed|owner|deny)')
+  .requiredOption('--write <role>', 'Write role (public|authed|owner|deny)')
+  .action(kvExposeCommand);
+
+kv.command('unexpose <pattern>')
+  .description('Remove an expose rule')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .action(kvUnexposeCommand);
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {

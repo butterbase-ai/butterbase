@@ -201,6 +201,37 @@ export async function deleteStorageObject(appId: string, objectId: string) {
 }
 
 /**
+ * Generic fetch helper — method + optional body
+ */
+export async function apiFetch<T = unknown>(method: string, path: string, data?: unknown): Promise<T> {
+  const baseUrl = await getBaseUrl();
+  const headers = await getHeaders();
+
+  const init: RequestInit = { method, headers };
+  if (data !== undefined) {
+    init.body = JSON.stringify(data);
+  } else {
+    // No body — remove Content-Type to avoid parsers rejecting empty body
+    delete (headers as Record<string, string>)['Content-Type'];
+  }
+
+  const res = await fetch(`${baseUrl}${path}`, init);
+
+  // Handle 204 No Content
+  if (res.status === 204) {
+    return {} as T;
+  }
+
+  const body: any = await res.json();
+
+  if (!res.ok) {
+    throw parseApiError(res.status, body);
+  }
+
+  return body as T;
+}
+
+/**
  * Make a PUT request
  */
 export async function apiPut<T>(path: string, data: unknown): Promise<T> {
