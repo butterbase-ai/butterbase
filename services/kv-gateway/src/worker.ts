@@ -6,7 +6,7 @@ import {
   compileRule, detectConflict, substituteAndTest,
   type Role, type RuleSource,
 } from './expose.js';
-import { scanKeys } from './admin.js';
+import { scanKeys, appStats } from './admin.js';
 
 export interface Env {
   CONTROL_API_URL: string;
@@ -52,6 +52,9 @@ function parseRoute(pathname: string): { appId: string; key?: string; action?: s
   // /v1/{app}/kv/_scan
   m = /^\/v1\/([^/]+)\/kv\/_scan$/.exec(pathname);
   if (m) return { appId: m[1], action: '_scan' };
+  // /v1/{app}/kv/_stats
+  m = /^\/v1\/([^/]+)\/kv\/_stats$/.exec(pathname);
+  if (m) return { appId: m[1], action: '_stats' };
   // /v1/{app}/kv/_expose
   m = /^\/v1\/([^/]+)\/kv\/_expose$/.exec(pathname);
   if (m) return { appId: m[1], action: '_expose' };
@@ -213,7 +216,7 @@ export default {
       // Anonymous: only allowed if a public-read rule matches the requested key.
       // _expose*, _batch, and admin (_scan/_stats/_flush) are NEVER allowed anonymously.
       if (action === '_expose' || action === '_expose_one' || action === '_batch' ||
-          action === '_scan') {
+          action === '_scan' || action === '_stats') {
         return err('unauthorized', 401);
       }
       isAnon = true;
@@ -226,12 +229,12 @@ export default {
     if (isJwt && (action === '_expose' || action === '_expose_one')) {
       return err('forbidden', 403);
     }
-    if (isJwt && action === '_scan') {
+    if (isJwt && (action === '_scan' || action === '_stats')) {
       return err('forbidden', 403);
     }
 
     // For non-batch, non-expose, and non-admin routes, validate the key now.
-    const isAdminAction = action === '_scan';
+    const isAdminAction = action === '_scan' || action === '_stats';
     if (action !== '_batch' && action !== '_expose' && action !== '_expose_one' && !isAdminAction) {
       if (!key || !isValidUserKey(key)) return err('key_invalid', 400);
     }
@@ -267,6 +270,12 @@ export default {
       const limitParam = url.searchParams.get('limit');
       const limit = limitParam !== null ? Number(limitParam) : undefined;
       const result = await scanKeys(baseOpts, resolved.appId, { prefix, limit });
+      return json(result);
+    }
+
+    if (action === '_stats') {
+      if (req.method !== 'GET') return err('method_not_allowed', 405);
+      const result = await appStats(baseOpts, resolved.appId);
       return json(result);
     }
 

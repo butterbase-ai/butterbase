@@ -88,3 +88,60 @@ export async function scanKeys(
 
   return { keys: result, cursor: '0' };
 }
+
+// ── _stats ────────────────────────────────────────────────────────────────────
+
+const STATS_SAMPLE_MAX_KEYS = 200;
+
+export interface StatsResult {
+  keys_total: number;
+  bytes_used: number;
+  ops_per_sec: null;
+}
+
+/**
+ * Best-effort stats: count user keys across both DBs, sample MEMORY USAGE on up
+ * to STATS_SAMPLE_MAX_KEYS keys per DB page and scale up. ops_per_sec is null
+ * (deferred to Plan 5).
+ */
+export async function appStats(
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  appId: string,
+): Promise<StatsResult> {
+  const pattern = `{${appId}}:u:*`;
+  let keysTotal = 0;
+  let bytesUsed = 0;
+
+  async function collectDb(db: number) {
+    await withDb(baseOpts, db, async (c) => {
+      let cursor = '0';
+      do {
+        const [next, keys] = await c.scan(cursor, pattern, SCAN_DEFAULT_LIMIT);
+        keysTotal += keys.length;
+
+        // Sample up to STATS_SAMPLE_MAX_KEYS per page for bytes estimate.
+        const sample = keys.slice(0, STATS_SAMPLE_MAX_KEYS);
+        let pageBytes = 0;
+        let sampled = 0;
+        for (const k of sample) {
+          const mu = await c.memoryUsage(k);
+          if (mu !== null) {
+            pageBytes += mu;
+            sampled++;
+          }
+        }
+        // Scale up: if we sampled fewer than all keys on the page, extrapolate.
+        if (sampled > 0 && keys.length > 0) {
+          bytesUsed += Math.round((pageBytes / sampled) * keys.length);
+        }
+
+        cursor = next;
+      } while (cursor !== '0');
+    });
+  }
+
+  await collectDb(0);
+  await collectDb(1);
+
+  return { keys_total: keysTotal, bytes_used: bytesUsed, ops_per_sec: null };
+}

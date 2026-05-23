@@ -1351,3 +1351,63 @@ describe('_scan', () => {
     expect(res.status).toBe(405);
   });
 });
+
+// ── _stats ────────────────────────────────────────────────────────────────────
+
+describe('_stats', () => {
+  const statsOpts = { host: 'localhost', port: 6390, password: 'butterbase_dev_kv' };
+
+  beforeEach(async () => {
+    const c0 = await RedisClient.connect({ ...statsOpts, db: 0 });
+    await c0.flushTestDb();
+    await c0.close();
+    const c1 = await RedisClient.connect({ ...statsOpts, db: 1 });
+    await c1.flushTestDb();
+    await c1.close();
+  });
+
+  it('returns shape { keys_total, bytes_used, ops_per_sec: null }', async () => {
+    mockResolveOk('app_stats');
+    const res = await worker.fetch(req('GET', '/v1/app_stats/kv/_stats'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(typeof body.keys_total).toBe('number');
+    expect(typeof body.bytes_used).toBe('number');
+    expect(body.ops_per_sec).toBeNull();
+  });
+
+  it('counts keys across both DBs', async () => {
+    const c0 = await RedisClient.connect({ ...statsOpts, db: 0 });
+    await c0.set('{app_stats}:u:k1', '"a"');
+    await c0.set('{app_stats}:u:k2', '"b"');
+    await c0.close();
+
+    const c1 = await RedisClient.connect({ ...statsOpts, db: 1 });
+    await c1.set('{app_stats}:u:k3', '"c"');
+    await c1.close();
+
+    mockResolveOk('app_stats');
+    const res = await worker.fetch(req('GET', '/v1/app_stats/kv/_stats'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.keys_total).toBeGreaterThanOrEqual(3);
+  });
+
+  it('bytes_used is non-negative', async () => {
+    const c0 = await RedisClient.connect({ ...statsOpts, db: 0 });
+    await c0.set('{app_stats}:u:bkey', '"hello world"');
+    await c0.close();
+
+    mockResolveOk('app_stats');
+    const res = await worker.fetch(req('GET', '/v1/app_stats/kv/_stats'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.bytes_used).toBeGreaterThanOrEqual(0);
+  });
+
+  it('returns 405 for non-GET method', async () => {
+    mockResolveOk('app_stats');
+    const res = await worker.fetch(req('POST', '/v1/app_stats/kv/_stats', {}), env);
+    expect(res.status).toBe(405);
+  });
+});
