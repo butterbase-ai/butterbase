@@ -65,6 +65,10 @@ export interface PlanLimits {
   maxRequestsPerMin: number;
   maxRealtimeListenersPerApp: number;
   statementTimeoutMs: number;
+  kvMaxOpsPerSec: number;
+  kvMaxStorageBytes: number;
+  kvMaxKeysTotal: number;
+  kvMaxValueBytes: number;
 }
 
 declare module 'fastify' {
@@ -275,6 +279,10 @@ export const FREE_PLAN_DEFAULTS: PlanLimits = {
   maxRequestsPerMin: 300,
   maxRealtimeListenersPerApp: 20,
   statementTimeoutMs: 15000,
+  kvMaxOpsPerSec: 50,
+  kvMaxStorageBytes: 10 * 1024 * 1024,
+  kvMaxKeysTotal: 100_000,
+  kvMaxValueBytes: 256 * 1024,
 };
 
 export async function getPlanLimits(db: Pool, planId: string): Promise<PlanLimits> {
@@ -293,7 +301,8 @@ export async function getPlanLimits(db: Pool, planId: string): Promise<PlanLimit
               max_lambda_invocations, max_bandwidth_gb, max_db_size_gb, max_mau,
               default_spending_cap_usd, ai_overage_rate_usd,
               max_requests_per_min, max_realtime_listeners_per_app,
-              statement_timeout_ms
+              statement_timeout_ms, kv_max_ops_per_sec, kv_max_storage_bytes,
+              kv_max_keys_total, kv_max_value_bytes
        FROM plans WHERE id = $1`,
       [planId]
     );
@@ -316,6 +325,10 @@ export async function getPlanLimits(db: Pool, planId: string): Promise<PlanLimit
       maxRequestsPerMin: row.max_requests_per_min,
       maxRealtimeListenersPerApp: row.max_realtime_listeners_per_app,
       statementTimeoutMs: row.statement_timeout_ms,
+      kvMaxOpsPerSec: row.kv_max_ops_per_sec,
+      kvMaxStorageBytes: row.kv_max_storage_bytes,
+      kvMaxKeysTotal: row.kv_max_keys_total,
+      kvMaxValueBytes: row.kv_max_value_bytes,
     };
 
     // Cache for 5 minutes
