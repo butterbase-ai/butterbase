@@ -33,6 +33,7 @@ import { registerApiKeys } from './tools/api-keys.js';
 import { registerMoveApp } from './tools/move-app.js';
 import { registerListRegions } from './tools/list-regions.js';
 import { registerManageMigrations } from './tools/manage-migrations.js';
+import { registerManageKv } from './tools/manage-kv.js';
 import { startActiveWindowListener } from './eligibility-listener.js';
 import { isActiveWindowCached, startActiveWindowPoller } from './active-window-cache.js';
 export { runWithRequestAuthorizationHeader, getRequestAuthorizationHeader } from './request-auth-context.js';
@@ -74,6 +75,7 @@ export function createButterbaseMcpServer() {
   registerManageOAuth(server);
   registerDocs(server);
   registerManageStorage(server);
+  registerManageKv(server);
   registerQueryAuditLogs(server);
   registerDeployFunction(server);
   registerInvokeFunction(server);

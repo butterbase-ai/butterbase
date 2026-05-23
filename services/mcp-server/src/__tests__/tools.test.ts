@@ -40,6 +40,7 @@ describe('MCP Server Tools', () => {
       'manage_frontend',
       'manage_function',
       'manage_integrations',
+      'manage_kv',
       'manage_oauth',
       'manage_rag_content',
       'manage_realtime',
