@@ -538,7 +538,7 @@ function buildWorkerCode(
           err.name = res.status === 400 ? "KvKeyInvalidError"
                    : res.status === 401 ? "KvAuthError"
                    : res.status === 403 ? "KvForbiddenError"
-                   : res.status === 409 ? "KvCasMismatchError"
+                   : res.status === 409 ? (code === "KV_EXPOSE_CONFLICT" ? "KvExposeConflictError" : "KvCasMismatchError")
                    : res.status === 413 ? "KvValueTooLargeError"
                    : res.status === 503 ? "KvConnectionError"
                    : "KvError";
@@ -622,6 +622,21 @@ function buildWorkerCode(
             await Promise.all(
               Object.entries(entries).map(([k, v]) => this.set(k, v, opts))
             );
+          },
+          async expose(pattern, opts) {
+            const res = await __kvCall("PUT", "_expose/" + encodeURIComponent(pattern), opts);
+            if (res.status === 204) return;
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+          },
+          async unexpose(pattern) {
+            const res = await __kvCall("DELETE", "_expose/" + encodeURIComponent(pattern));
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).deleted;
+          },
+          async listRules() {
+            const res = await __kvCall("GET", "_expose");
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).rules;
           },
         };
       })(),
