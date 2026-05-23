@@ -4,6 +4,7 @@
 // caller (worker.ts) owns connection lifecycle via withRedis.
 
 import { RedisClient, RedisClientOptions } from './redis-client.js';
+import { getStorageBytes, resetCounter } from './storage-counter.js';
 
 const SCAN_DEFAULT_LIMIT = 100;
 const SCAN_MAX_LIMIT = 1000;
@@ -91,26 +92,21 @@ export async function scanKeys(
 
 // ── _stats ────────────────────────────────────────────────────────────────────
 
-const STATS_SAMPLE_MAX_KEYS = 200;
-
 export interface StatsResult {
   keys_total: number;
   bytes_used: number;
-  ops_per_sec: null;
+  ops_per_sec: number | null;
 }
 
 /**
- * Best-effort stats: count user keys across both DBs, sample MEMORY USAGE on up
- * to STATS_SAMPLE_MAX_KEYS keys per DB page and scale up. ops_per_sec is null
- * (deferred to Plan 5).
+ * Count user keys across both DBs via full scan. O(n) in key count.
  */
-export async function appStats(
+async function countKeysFromScan(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   appId: string,
-): Promise<StatsResult> {
+): Promise<number> {
   const pattern = `{${appId}}:u:*`;
   let keysTotal = 0;
-  let bytesUsed = 0;
 
   async function collectDb(db: number) {
     await withDb(baseOpts, db, async (c) => {
@@ -118,23 +114,6 @@ export async function appStats(
       do {
         const [next, keys] = await c.scan(cursor, pattern, SCAN_DEFAULT_LIMIT);
         keysTotal += keys.length;
-
-        // Sample up to STATS_SAMPLE_MAX_KEYS per page for bytes estimate.
-        const sample = keys.slice(0, STATS_SAMPLE_MAX_KEYS);
-        let pageBytes = 0;
-        let sampled = 0;
-        for (const k of sample) {
-          const mu = await c.memoryUsage(k);
-          if (mu !== null) {
-            pageBytes += mu;
-            sampled++;
-          }
-        }
-        // Scale up: if we sampled fewer than all keys on the page, extrapolate.
-        if (sampled > 0 && keys.length > 0) {
-          bytesUsed += Math.round((pageBytes / sampled) * keys.length);
-        }
-
         cursor = next;
       } while (cursor !== '0');
     });
@@ -142,8 +121,34 @@ export async function appStats(
 
   await collectDb(0);
   await collectDb(1);
+  return keysTotal;
+}
 
-  return { keys_total: keysTotal, bytes_used: bytesUsed, ops_per_sec: null };
+/**
+ * Returns real stats for an app:
+ *   bytes_used  — O(1) read from the running counter at `{appId}:_meta:bytes`.
+ *   ops_per_sec — current-second rate-limit bucket (maintained by Task 3).
+ *   keys_total  — full scan across DB 0 + DB 1 (O(n)).
+ */
+export async function appStats(
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  appId: string,
+): Promise<StatsResult> {
+  // Bytes and ops_per_sec are read from DB 0 (meta keys live there).
+  const metaClient = await RedisClient.connect({ ...baseOpts, db: 0 });
+  let bytesUsed = 0;
+  let opsPerSec = 0;
+  try {
+    bytesUsed = await getStorageBytes(metaClient, appId);
+    const bucket = Math.floor(Date.now() / 1000);
+    const opsRaw = await metaClient.get(`{${appId}}:_meta:rate:${bucket}`);
+    opsPerSec = opsRaw ? parseInt(opsRaw, 10) : 0;
+  } finally {
+    await metaClient.close();
+  }
+
+  const keysTotal = await countKeysFromScan(baseOpts, appId);
+  return { keys_total: keysTotal, bytes_used: bytesUsed, ops_per_sec: opsPerSec };
 }
 
 // ── _flush ────────────────────────────────────────────────────────────────────
@@ -192,6 +197,14 @@ export async function flushApp(
   // Sequential to avoid shared-state races on the `deleted` accumulator.
   await flushDb(0);
   await flushDb(1);
+
+  // Reset the running storage-byte counter so it doesn't drift after a flush.
+  const metaClient = await RedisClient.connect({ ...baseOpts, db: 0 });
+  try {
+    await resetCounter(metaClient, appId);
+  } finally {
+    await metaClient.close();
+  }
 
   return { deleted };
 }

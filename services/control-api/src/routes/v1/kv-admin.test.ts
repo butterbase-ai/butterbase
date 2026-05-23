@@ -19,6 +19,7 @@ import {
   cleanupFixture,
 } from '../../services/kv/__test-utils__/kv-test-harness.js';
 import { RedisClient } from '../../services/kv/redis-client.js';
+import { incBytes, getStorageBytes } from '../../services/kv/storage-counter.js';
 import kvAdminRoutes from './kv-admin.js';
 
 const describeDb = RUN_DB_TESTS ? describe : describe.skip;
@@ -166,7 +167,7 @@ describeDb('GET /v1/:app_id/kv/_stats', () => {
     expect(typeof body.keys_total).toBe('number');
     expect(body.keys_total).toBeGreaterThanOrEqual(1);
     expect(typeof body.bytes_used).toBe('number');
-    expect(body.ops_per_sec).toBeNull();
+    expect(typeof body.ops_per_sec).toBe('number');
   });
 
   it('returns zeros for empty app', async () => {
@@ -241,6 +242,34 @@ describeDb('POST /v1/:app_id/kv/_flush', () => {
     const raw = await c2.hgetall(`{${appId}}:_meta:expose`);
     await c2.close();
     expect(Object.keys(raw).length).toBe(0);
+  });
+
+  it('resets the storage-byte counter to 0 after flush', async () => {
+    // Seed a user key and set the counter to a non-zero value.
+    await seedKey('counter-key', 'data');
+    const metaClient = await RedisClient.connect({ ...baseRedisOpts, db: 0 });
+    try {
+      await incBytes(metaClient, appId, 9999);
+      let before = await getStorageBytes(metaClient, appId);
+      expect(before).toBe(9999);
+    } finally {
+      await metaClient.close();
+    }
+
+    // Flush — this should also reset the counter.
+    const res = await req('POST', `/v1/${appId}/kv/_flush`, {
+      payload: { confirm: true },
+    });
+    expect(res.statusCode).toBe(200);
+
+    // Counter should now be 0.
+    const metaClient2 = await RedisClient.connect({ ...baseRedisOpts, db: 0 });
+    try {
+      const after = await getStorageBytes(metaClient2, appId);
+      expect(after).toBe(0);
+    } finally {
+      await metaClient2.close();
+    }
   });
 
   it('rejects JWT callers (invalid JWT → 401; valid JWT → 403)', async () => {

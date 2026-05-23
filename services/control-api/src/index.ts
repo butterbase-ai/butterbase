@@ -79,6 +79,7 @@ import { startFailureNotifier } from './services/failure-notifier.js';
 import { startDigestNotifier } from './services/digest-notifier.js';
 import { startRagWorker } from './services/rag-worker.js';
 import { startAnalyticsPullerCron } from './services/cf-analytics-puller.js';
+import { startKvReconcileWorker } from './services/kv/reconcile-worker.js';
 import { ragRoutes } from './routes/rag.js';
 import { integrationRoutes } from './routes/integrations.js';
 import { customDomainRoutes } from './routes/custom-domains.js';
@@ -577,6 +578,11 @@ Promise.resolve(app.ready())
     const analyticsPullerInterval = startAnalyticsPullerCron(app.controlDb);
     (app as any).analyticsPullerInterval = analyticsPullerInterval;
 
+    // Start KV storage-counter reconcile worker (every 24 hours)
+    const kvReconcileInterval = startKvReconcileWorker(app.controlDb);
+    (app as any).kvReconcileInterval = kvReconcileInterval;
+    app.log.info('KV reconcile worker started (24h interval)');
+
     // Schedule nightly soft-lock auto-restore check (runs at 2 AM)
     const scheduleNightlyRestore = () => {
       const now = new Date();
@@ -740,6 +746,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).neonWorkerInterval) clearInterval((app as any).neonWorkerInterval);
       if ((app as any).failureNotifierInterval) clearInterval((app as any).failureNotifierInterval);
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
+      if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
 
       // Timeout: force exit if shutdown hangs
       const shutdownTimeout = setTimeout(() => {
