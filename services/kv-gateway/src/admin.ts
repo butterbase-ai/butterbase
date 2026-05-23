@@ -145,3 +145,53 @@ export async function appStats(
 
   return { keys_total: keysTotal, bytes_used: bytesUsed, ops_per_sec: null };
 }
+
+// ── _flush ────────────────────────────────────────────────────────────────────
+
+export interface FlushResult {
+  deleted: number;
+}
+
+/**
+ * Flush all user data for an app from both DBs.
+ * Deletes `{appId}:u:*` and `{appId}:_ttl:*` in both DBs.
+ * If include_config is true, also deletes `{appId}:_meta:expose`.
+ * Expose rules are preserved by default.
+ */
+export async function flushApp(
+  baseOpts: Omit<RedisClientOptions, 'db'>,
+  appId: string,
+  opts: { include_config?: boolean },
+): Promise<FlushResult> {
+  const patterns = [
+    `{${appId}}:u:*`,
+    `{${appId}}:_ttl:*`,
+  ];
+  if (opts.include_config) {
+    patterns.push(`{${appId}}:_meta:expose`);
+  }
+
+  let deleted = 0;
+
+  async function flushDb(db: number) {
+    await withDb(baseOpts, db, async (c) => {
+      for (const pattern of patterns) {
+        // Use SCAN to find keys; UNLINK for non-blocking deletion.
+        let cursor = '0';
+        do {
+          const [next, keys] = await c.scan(cursor, pattern, SCAN_DEFAULT_LIMIT);
+          if (keys.length > 0) {
+            deleted += await c.unlink(keys);
+          }
+          cursor = next;
+        } while (cursor !== '0');
+      }
+    });
+  }
+
+  // Sequential to avoid shared-state races on the `deleted` accumulator.
+  await flushDb(0);
+  await flushDb(1);
+
+  return { deleted };
+}

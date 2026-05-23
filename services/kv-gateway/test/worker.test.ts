@@ -1411,3 +1411,85 @@ describe('_stats', () => {
     expect(res.status).toBe(405);
   });
 });
+
+// ── _flush ────────────────────────────────────────────────────────────────────
+
+describe('_flush', () => {
+  const flushOpts = { host: 'localhost', port: 6390, password: 'butterbase_dev_kv' };
+
+  async function seedFlushApp() {
+    const c0 = await RedisClient.connect({ ...flushOpts, db: 0 });
+    await c0.flushTestDb();
+    await c0.set('{app_flush}:u:key1', '"v1"');
+    await c0.set('{app_flush}:u:key2', '"v2"');
+    await c0.set('{app_flush}:_ttl:key1', '60');
+    await c0.set('{app_flush}:_meta:expose', '{"rules":[]}');
+    await c0.close();
+
+    const c1 = await RedisClient.connect({ ...flushOpts, db: 1 });
+    await c1.flushTestDb();
+    await c1.set('{app_flush}:u:eph-key', '"ev"');
+    await c1.close();
+  }
+
+  beforeEach(async () => {
+    await seedFlushApp();
+  });
+
+  it('requires confirm:true — missing body returns 400 confirm_required', async () => {
+    mockResolveOk('app_flush');
+    const res = await worker.fetch(req('POST', '/v1/app_flush/kv/_flush', {}), env);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'confirm_required' });
+  });
+
+  it('confirm:false returns 400 confirm_required', async () => {
+    mockResolveOk('app_flush');
+    const res = await worker.fetch(req('POST', '/v1/app_flush/kv/_flush', { confirm: false }), env);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'confirm_required' });
+  });
+
+  it('confirm:true deletes user keys and ttl sidecar keys, returns { deleted }', async () => {
+    mockResolveOk('app_flush');
+    const res = await worker.fetch(req('POST', '/v1/app_flush/kv/_flush', { confirm: true }), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(typeof body.deleted).toBe('number');
+    expect(body.deleted).toBeGreaterThanOrEqual(3); // key1, key2, _ttl:key1, eph-key
+
+    // Verify user keys are gone
+    const c0 = await RedisClient.connect({ ...flushOpts, db: 0 });
+    expect(await c0.get('{app_flush}:u:key1')).toBeNull();
+    expect(await c0.get('{app_flush}:u:key2')).toBeNull();
+    expect(await c0.get('{app_flush}:_ttl:key1')).toBeNull();
+    // expose rules must be preserved
+    const expose = await c0.get('{app_flush}:_meta:expose');
+    await c0.close();
+    expect(expose).not.toBeNull();
+
+    const c1 = await RedisClient.connect({ ...flushOpts, db: 1 });
+    expect(await c1.get('{app_flush}:u:eph-key')).toBeNull();
+    await c1.close();
+  });
+
+  it('include_config:true also deletes _meta:expose', async () => {
+    mockResolveOk('app_flush');
+    const res = await worker.fetch(
+      req('POST', '/v1/app_flush/kv/_flush', { confirm: true, include_config: true }),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    const c0 = await RedisClient.connect({ ...flushOpts, db: 0 });
+    const expose = await c0.get('{app_flush}:_meta:expose');
+    await c0.close();
+    expect(expose).toBeNull();
+  });
+
+  it('returns 405 for non-POST method', async () => {
+    mockResolveOk('app_flush');
+    const res = await worker.fetch(req('GET', '/v1/app_flush/kv/_flush'), env);
+    expect(res.status).toBe(405);
+  });
+});
