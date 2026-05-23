@@ -21,6 +21,7 @@ import type { Pool } from 'pg';
 import { resolveKvAuth } from '../services/kv/auth.js';
 import { getKvLimitsForApp } from '../services/kv/limits.js';
 import { getStorageBytes, incBytes, decBytes } from '../services/kv/storage-counter.js';
+import { incKeys, decKeys } from '../services/kv/keys-counter.js';
 import { checkRateLimit } from '../services/kv/rate-limit.js';
 import { classifyRequest, creditCostForOp, opsCountForOp, type KvOp } from '../services/kv/credits.js';
 import { kvRateLimited, kvCreditsExhausted, kvStorageFull } from '../utils/quota-errors.js';
@@ -36,7 +37,7 @@ import { isKvBlocked } from '../services/kv/migration-sentinel.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
-    kvAccount(request: FastifyRequest, sizeDelta?: number): void;
+    kvAccount(request: FastifyRequest, sizeDelta?: number, keyDelta?: number): void;
   }
 }
 
@@ -261,10 +262,12 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
   // Called by kv-data.ts route handlers after a successful op to record:
   //   - kv_ops credit cost (via incrementUsage, fire-and-forget Redis counter)
   //   - kv_storage_bytes delta (via incBytes/decBytes on KV Redis)
+  //   - kv_keys count delta (via incKeys/decKeys on KV Redis)
   //
   // sizeDelta > 0 → bytes added; < 0 → bytes freed; 0 → no storage change.
+  // keyDelta > 0 → keys added; < 0 → keys deleted; 0 → no key count change.
 
-  fastify.decorate('kvAccount', (request: FastifyRequest, sizeDelta = 0) => {
+  fastify.decorate('kvAccount', (request: FastifyRequest, sizeDelta = 0, keyDelta = 0) => {
     const op = (request as any).kvOp as KvOp | undefined;
     const ownerId = (request as any).kvOwnerId as string | undefined;
     const region = (request as any).kvRegion as string | undefined;
@@ -286,6 +289,16 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
         } else {
           void decBytes(kvR, appId, -sizeDelta);
         }
+      }
+    }
+
+    // Key count maintenance. Swallow errors; the reconcile catches drift.
+    if (keyDelta !== 0 && region) {
+      const kvR = wrap(kvRedisFor(region));
+      if (keyDelta > 0) {
+        void incKeys(kvR, appId, keyDelta).catch(() => { /* reconcile catches drift */ });
+      } else {
+        void decKeys(kvR, appId, -keyDelta).catch(() => { /* reconcile catches drift */ });
       }
     }
   });

@@ -30,6 +30,7 @@ import {
 } from '../services/kv/__test-utils__/kv-test-harness.js';
 import { RedisClient, wrap } from '../services/kv/redis-client.js';
 import { getStorageBytes, incBytes } from '../services/kv/storage-counter.js';
+import { getKeys, resetKeysCounter } from '../services/kv/keys-counter.js';
 import { setKvBlock, clearKvBlock } from '../services/kv/migration-sentinel.js';
 import kvQuotaPlugin from './kv-quota.js';
 import kvDataRoutes from '../routes/v1/kv-data.js';
@@ -136,6 +137,9 @@ beforeEach(async () => {
   if (!RUN_DB_TESTS) return;
   await resetKvScope(appId);
   await resetKvMeta(appId);
+  // Reset keys counter
+  const kvR = wrap(redis);
+  await resetKeysCounter(kvR, appId);
   // Restore credits balance to a positive value (in case a test zeroed it)
   await pool.query(
     `UPDATE platform_users SET monthly_allowance_usd = 10, credits_usd = 0 WHERE id = $1`,
@@ -346,6 +350,115 @@ describeDb('kv-quota plugin', () => {
       const afterDel = await getStorageBytes(kvR, appId);
 
       expect(beforeDel - afterDel).toBe(Buffer.byteLength(encoded));
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Key count: increments on new key ────────────────────────────────────
+
+  it('increments the key counter when creating a new key', async () => {
+    const app = await buildTestApp(pool);
+    try {
+      const kvR = wrap(redis);
+      const beforeKeys = await getKeys(kvR, appId);
+
+      const put = await req(app, 'PUT', `/v1/${appId}/kv/key-count-test`, {
+        payload: { value: 'hello' },
+      });
+      expect(put.statusCode).toBe(204);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const afterKeys = await getKeys(kvR, appId);
+      expect(afterKeys - beforeKeys).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Key count: decrements on delete ────────────────────────────────────
+
+  it('decrements the key counter when deleting a key', async () => {
+    const app = await buildTestApp(pool);
+    try {
+      const kvR = wrap(redis);
+
+      // Create a key first
+      await req(app, 'PUT', `/v1/${appId}/kv/key-del-test`, {
+        payload: { value: 'present' },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const beforeDelete = await getKeys(kvR, appId);
+
+      // Delete it
+      const del = await req(app, 'DELETE', `/v1/${appId}/kv/key-del-test`);
+      expect(del.statusCode).toBe(200);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const afterDelete = await getKeys(kvR, appId);
+      expect(beforeDelete - afterDelete).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Key count: unchanged on overwrite ────────────────────────────────────
+
+  it('does not change the key counter on overwrite', async () => {
+    const app = await buildTestApp(pool);
+    try {
+      const kvR = wrap(redis);
+
+      // Create a key
+      await req(app, 'PUT', `/v1/${appId}/kv/key-overwrite-test`, {
+        payload: { value: 'first' },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const afterCreate = await getKeys(kvR, appId);
+
+      // Overwrite it
+      await req(app, 'PUT', `/v1/${appId}/kv/key-overwrite-test`, {
+        payload: { value: 'second' },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const afterOverwrite = await getKeys(kvR, appId);
+
+      expect(afterOverwrite).toBe(afterCreate);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Key count: batch operations ────────────────────────────────────────
+
+  it('handles batch operations that mix creates, deletes, and updates', async () => {
+    const app = await buildTestApp(pool);
+    try {
+      const kvR = wrap(redis);
+
+      // Seed one key to delete
+      await req(app, 'PUT', `/v1/${appId}/kv/batch-del-key`, {
+        payload: { value: 'will-delete' },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const beforeBatch = await getKeys(kvR, appId);
+
+      // Batch: create 2 new keys, delete 1 existing
+      const batch = await req(app, 'POST', `/v1/${appId}/kv/_batch`, {
+        payload: {
+          ops: [
+            { op: 'set', key: 'batch-new-1', value: 'val1' },
+            { op: 'set', key: 'batch-new-2', value: 'val2' },
+            { op: 'del', key: 'batch-del-key' },
+          ],
+        },
+      });
+      expect(batch.statusCode).toBe(200);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const afterBatch = await getKeys(kvR, appId);
+      // Net: +2 (new) -1 (deleted) = +1
+      expect(afterBatch - beforeBatch).toBe(1);
     } finally {
       await app.close();
     }
