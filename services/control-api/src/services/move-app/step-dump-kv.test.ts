@@ -1,7 +1,8 @@
 import { createGunzip } from 'node:zlib';
+import { gunzipSync } from 'node:zlib';
 import { PassThrough, type Readable } from 'node:stream';
 import { describe, it, expect, vi } from 'vitest';
-import { executeDumpKv } from './step-dump-kv.js';
+import { executeDumpKv, dumpKvFromRegion } from './step-dump-kv.js';
 import { parseRecord, payloadToBuffer, type KvDumpRecord } from './kv-dump-format.js';
 import { RedisClient } from '../kv/redis-client.js';
 
@@ -230,5 +231,52 @@ describe.skipIf(!process.env.KV_REDIS_URL_US)('executeDumpKv — real Redis inte
     const cleanup1 = await RedisClient.connect({ ...baseOpts, db: 1 });
     await cleanup1.del([`{${appId}}:u:ephem`]);
     await cleanup1.close();
+  });
+});
+
+describe('dumpKvFromRegion (exported helper)', () => {
+  it('returns { key, records } and uploads to move-app/<migrationId>/dump.kv.jsonl.gz', async () => {
+    const chunks: Buffer[] = [];
+    const uploadFn = async (k: string, body: Readable) => {
+      for await (const c of body) chunks.push(c as Buffer);
+      return { key: k, bytes: chunks.reduce((s, c) => s + c.length, 0) };
+    };
+    const records = (async function* () {
+      yield { db: 0 as const, key: '{a}:u:x', ttl_ms: -1, payload_b64: 'AAA=' };
+      yield { db: 0 as const, key: '{a}:u:y', ttl_ms: 5000, payload_b64: 'BAA=' };
+    })();
+
+    const res = await dumpKvFromRegion({
+      sourceRegion: 'us-east-1',
+      appId: 'a',
+      migrationId: 'mig-extracted-1',
+      log: { info: vi.fn() },
+      uploadFn,
+      kvBaseOptsForRegion: () => ({ host: 'unused', port: 0, password: '' }),
+      kvDumpRecords: () => records,
+    });
+
+    expect(res).toEqual({ key: 'move-app/mig-extracted-1/dump.kv.jsonl.gz', records: 2 });
+    const lines = gunzipSync(Buffer.concat(chunks)).toString('utf8').trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]).key).toBe('{a}:u:x');
+  });
+
+  it('migrationId param is interpolated into the R2 key (not a literal string)', async () => {
+    const seen: string[] = [];
+    await dumpKvFromRegion({
+      sourceRegion: 'us-east-1',
+      appId: 'a',
+      migrationId: 'CUSTOM-ID-XYZ',
+      log: { info: vi.fn() },
+      uploadFn: async (k, body) => {
+        seen.push(k);
+        for await (const _ of body) { /* drain */ }
+        return { key: k, bytes: 0 };
+      },
+      kvBaseOptsForRegion: () => ({ host: 'x', port: 0, password: '' }),
+      kvDumpRecords: () => (async function* () { /* empty */ })(),
+    });
+    expect(seen[0]).toBe('move-app/CUSTOM-ID-XYZ/dump.kv.jsonl.gz');
   });
 });

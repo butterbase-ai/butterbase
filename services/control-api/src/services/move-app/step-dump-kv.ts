@@ -6,6 +6,19 @@ import type { StepHandler } from './saga-executor.js';
 import { RedisClient, type RedisClientOptions } from '../kv/redis-client.js';
 import { serializeRecord, payloadFromBuffer, type KvDumpRecord } from './kv-dump-format.js';
 
+export interface DumpKvOpts {
+  sourceRegion: string;
+  appId: string;
+  migrationId: string;
+  log: { info: any };
+  /** Test seam — overrides the default S3 upload. */
+  uploadFn?: (key: string, body: Readable) => Promise<{ key: string; bytes: number }>;
+  /** Test seam — provides a custom record iterator (skips Redis entirely). */
+  kvDumpRecords?: (region: string, appId: string) => AsyncIterable<KvDumpRecord>;
+  /** Test seam — overrides KV connection opts for the default iterator. */
+  kvBaseOptsForRegion?: (region: string) => Omit<RedisClientOptions, 'db'>;
+}
+
 export interface DumpKvCtx {
   uploadKvDump?: (key: string, body: Readable) => Promise<{ key: string; bytes: number }>;
   /** Test hook — yields records directly, skipping Redis. */
@@ -89,22 +102,26 @@ async function* defaultIterateRecords(
   }
 }
 
-export const executeDumpKv: StepHandler = async (ctx, m) => {
-  if (m.dest_resources.kv_dump_object_key) {
-    return { next: 'restoring_kv', patch: {} };
-  }
-  const cx = ctx as unknown as DumpKvCtx & typeof ctx;
-  const uploadFn = cx.uploadKvDump
-    ? cx.uploadKvDump
-    : (k: string, body: Readable) => defaultUpload(m.source_region, k, body);
-  const iter = cx.kvDumpRecords
-    ? cx.kvDumpRecords(m.source_region, m.app_id)
+/**
+ * Pure helper: dumps an app's KV scope from `sourceRegion` to R2 as a gzipped
+ * JSON-lines file and returns the object key + record count.
+ *
+ * Used by:
+ *   - `executeDumpKv` (saga StepHandler wrapper)
+ *   - `runReverseMove` fast path (KV reverse-migration)
+ */
+export async function dumpKvFromRegion(opts: DumpKvOpts): Promise<{ key: string; records: number }> {
+  const uploadFn = opts.uploadFn
+    ? opts.uploadFn
+    : (k: string, body: Readable) => defaultUpload(opts.sourceRegion, k, body);
+  const iter = opts.kvDumpRecords
+    ? opts.kvDumpRecords(opts.sourceRegion, opts.appId)
     : defaultIterateRecords(
-        (cx.kvBaseOptsForRegion ?? kvBaseOptsForRegion)(m.source_region),
-        m.app_id,
+        (opts.kvBaseOptsForRegion ?? kvBaseOptsForRegion)(opts.sourceRegion),
+        opts.appId,
       );
 
-  const key = `move-app/${m.id}/dump.kv.jsonl.gz`;
+  const key = `move-app/${opts.migrationId}/dump.kv.jsonl.gz`;
   const lines = new PassThrough();
   const gz = createGzip();
   lines.pipe(gz);
@@ -123,12 +140,29 @@ export const executeDumpKv: StepHandler = async (ctx, m) => {
   }
 
   const upResult = await uploadPromise;
-  ctx.log.info(
-    { migrationId: m.id, key: upResult.key, records: recordCount },
+  opts.log.info(
+    { migrationId: opts.migrationId, key: upResult.key, records: recordCount },
     'kv dump uploaded',
   );
+  return { key: upResult.key, records: recordCount };
+}
+
+export const executeDumpKv: StepHandler = async (ctx, m) => {
+  if (m.dest_resources.kv_dump_object_key) {
+    return { next: 'restoring_kv', patch: {} };
+  }
+  const cx = ctx as unknown as DumpKvCtx & typeof ctx;
+  const { key, records } = await dumpKvFromRegion({
+    sourceRegion: m.source_region,
+    appId: m.app_id,
+    migrationId: m.id,
+    log: ctx.log,
+    uploadFn: cx.uploadKvDump,
+    kvDumpRecords: cx.kvDumpRecords,
+    kvBaseOptsForRegion: cx.kvBaseOptsForRegion,
+  });
   return {
     next: 'restoring_kv',
-    patch: { kv_dump_object_key: upResult.key, kv_dump_records: recordCount },
+    patch: { kv_dump_object_key: key, kv_dump_records: records },
   };
 };
