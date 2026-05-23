@@ -296,6 +296,31 @@ export class RedisClient {
     return r !== null; // +OK → true; nil → false (NX/XX condition failed)
   }
 
+  // SCAN cursor match count → [nextCursor, keys[]]
+  async scan(cursor: string, match: string, count: number): Promise<[string, string[]]> {
+    const r = await this.send(['SCAN', cursor, 'MATCH', match, 'COUNT', String(count)]);
+    if (r instanceof Error) throw r;
+    if (!Array.isArray(r) || r.length !== 2) throw new Error('unexpected SCAN reply');
+    const nextCursor = String(r[0]);
+    const raw = r[1];
+    if (!Array.isArray(raw)) throw new Error('unexpected SCAN keys reply');
+    return [nextCursor, raw.map((k) => String(k))];
+  }
+
+  async unlink(keys: string[]): Promise<number> {
+    if (keys.length === 0) return 0;
+    const r = await this.send(['UNLINK', ...keys]);
+    if (r instanceof Error) throw r;
+    return Number(r);
+  }
+
+  async memoryUsage(key: string): Promise<number | null> {
+    const r = await this.send(['MEMORY', 'USAGE', key]);
+    if (r instanceof Error) return null; // best-effort
+    if (r === null) return null;
+    return Number(r);
+  }
+
   async close(): Promise<void> {
     await this.socket.close();
   }

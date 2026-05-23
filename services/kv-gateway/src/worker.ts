@@ -6,6 +6,7 @@ import {
   compileRule, detectConflict, substituteAndTest,
   type Role, type RuleSource,
 } from './expose.js';
+import { scanKeys } from './admin.js';
 
 export interface Env {
   CONTROL_API_URL: string;
@@ -48,6 +49,9 @@ function parseRoute(pathname: string): { appId: string; key?: string; action?: s
   // /v1/{app}/kv/_batch
   let m = /^\/v1\/([^/]+)\/kv\/_batch$/.exec(pathname);
   if (m) return { appId: m[1], action: '_batch' };
+  // /v1/{app}/kv/_scan
+  m = /^\/v1\/([^/]+)\/kv\/_scan$/.exec(pathname);
+  if (m) return { appId: m[1], action: '_scan' };
   // /v1/{app}/kv/_expose
   m = /^\/v1\/([^/]+)\/kv\/_expose$/.exec(pathname);
   if (m) return { appId: m[1], action: '_expose' };
@@ -207,8 +211,9 @@ export default {
       if (resolved.appId !== pathAppId) return err('forbidden', 403, 'app_id mismatch');
     } else {
       // Anonymous: only allowed if a public-read rule matches the requested key.
-      // _expose* and _batch are NEVER allowed anonymously (no JWT can mean no role to enforce per-op safely).
-      if (action === '_expose' || action === '_expose_one' || action === '_batch') {
+      // _expose*, _batch, and admin (_scan/_stats/_flush) are NEVER allowed anonymously.
+      if (action === '_expose' || action === '_expose_one' || action === '_batch' ||
+          action === '_scan') {
         return err('unauthorized', 401);
       }
       isAnon = true;
@@ -216,14 +221,18 @@ export default {
       if (!resolved) return err('unauthorized', 401);   // hide app-existence from anon callers
     }
 
-    // JWT requests CANNOT manage expose rules
+    // JWT requests CANNOT manage expose rules or use admin endpoints.
     const isJwt = resolved.userId !== undefined;
     if (isJwt && (action === '_expose' || action === '_expose_one')) {
       return err('forbidden', 403);
     }
+    if (isJwt && action === '_scan') {
+      return err('forbidden', 403);
+    }
 
-    // For non-batch and non-expose routes, validate the key now.
-    if (action !== '_batch' && action !== '_expose' && action !== '_expose_one') {
+    // For non-batch, non-expose, and non-admin routes, validate the key now.
+    const isAdminAction = action === '_scan';
+    if (action !== '_batch' && action !== '_expose' && action !== '_expose_one' && !isAdminAction) {
       if (!key || !isValidUserKey(key)) return err('key_invalid', 400);
     }
 
@@ -243,11 +252,22 @@ export default {
       return exposeRules;
     }
 
-    if ((isJwt || isAnon) && action !== '_batch' && action !== '_expose' && action !== '_expose_one') {
+    if ((isJwt || isAnon) && action !== '_batch' && action !== '_expose' && action !== '_expose_one' && !isAdminAction) {
       const rules = await ensureExposeRulesLoaded(baseOpts);
       const claims = claimsFromResolved(resolved);
       const denial = enforceExposeAccess(rules, key!, methodRequires(req.method), claims);
       if (denial) return denial;
+    }
+
+    // ── admin routes (_scan / _stats / _flush) ─────────────────────────────────
+
+    if (action === '_scan') {
+      if (req.method !== 'GET') return err('method_not_allowed', 405);
+      const prefix = url.searchParams.get('prefix') ?? undefined;
+      const limitParam = url.searchParams.get('limit');
+      const limit = limitParam !== null ? Number(limitParam) : undefined;
+      const result = await scanKeys(baseOpts, resolved.appId, { prefix, limit });
+      return json(result);
     }
 
     // ── expose rule management ─────────────────────────────────────────────────

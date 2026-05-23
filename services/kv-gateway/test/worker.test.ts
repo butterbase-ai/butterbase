@@ -1235,3 +1235,119 @@ describe('JWT REST + expose enforcement', () => {
     expect(body.results[1]).toEqual({ error: 'KV_FORBIDDEN' });
   });
 });
+
+// ── _scan ─────────────────────────────────────────────────────────────────────
+
+describe('_scan', () => {
+  const scanOpts = { host: 'localhost', port: 6390, password: 'butterbase_dev_kv' };
+
+  async function flushScanApp() {
+    const c0 = await RedisClient.connect({ ...scanOpts, db: 0 });
+    await c0.flushTestDb();
+    await c0.close();
+    const c1 = await RedisClient.connect({ ...scanOpts, db: 1 });
+    await c1.flushTestDb();
+    await c1.close();
+  }
+
+  beforeEach(async () => {
+    await flushScanApp();
+  });
+
+  it('returns empty keys and cursor "0" when no keys exist', async () => {
+    mockResolveOk('app_scan');
+    const res = await worker.fetch(req('GET', '/v1/app_scan/kv/_scan'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.keys).toEqual([]);
+    expect(body.cursor).toBe('0');
+  });
+
+  it('returns user-facing keys (strips prefix) from durable DB', async () => {
+    const c0 = await RedisClient.connect({ ...scanOpts, db: 0 });
+    await c0.set('{app_scan}:u:alpha', '"v1"');
+    await c0.set('{app_scan}:u:beta', '"v2"');
+    await c0.close();
+
+    mockResolveOk('app_scan');
+    const res = await worker.fetch(req('GET', '/v1/app_scan/kv/_scan'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.keys).toContain('alpha');
+    expect(body.keys).toContain('beta');
+    // internal keys must NOT appear
+    expect(body.keys.every((k: string) => !k.startsWith('{'))).toBe(true);
+  });
+
+  it('unions keys from durable (DB0) and ephemeral (DB1)', async () => {
+    const c0 = await RedisClient.connect({ ...scanOpts, db: 0 });
+    await c0.set('{app_scan}:u:durable-key', '"d"');
+    await c0.close();
+
+    const c1 = await RedisClient.connect({ ...scanOpts, db: 1 });
+    await c1.set('{app_scan}:u:ephemeral-key', '"e"');
+    await c1.close();
+
+    mockResolveOk('app_scan');
+    const res = await worker.fetch(req('GET', '/v1/app_scan/kv/_scan'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.keys).toContain('durable-key');
+    expect(body.keys).toContain('ephemeral-key');
+  });
+
+  it('deduplicates keys present in both DBs', async () => {
+    const c0 = await RedisClient.connect({ ...scanOpts, db: 0 });
+    await c0.set('{app_scan}:u:shared-key', '"a"');
+    await c0.close();
+
+    const c1 = await RedisClient.connect({ ...scanOpts, db: 1 });
+    await c1.set('{app_scan}:u:shared-key', '"b"');
+    await c1.close();
+
+    mockResolveOk('app_scan');
+    const res = await worker.fetch(req('GET', '/v1/app_scan/kv/_scan'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.keys.filter((k: string) => k === 'shared-key')).toHaveLength(1);
+  });
+
+  it('respects prefix filter', async () => {
+    const c0 = await RedisClient.connect({ ...scanOpts, db: 0 });
+    await c0.set('{app_scan}:u:flags:a', '"1"');
+    await c0.set('{app_scan}:u:flags:b', '"2"');
+    await c0.set('{app_scan}:u:other', '"3"');
+    await c0.close();
+
+    mockResolveOk('app_scan');
+    const res = await worker.fetch(req('GET', '/v1/app_scan/kv/_scan?prefix=flags:'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.keys).toContain('flags:a');
+    expect(body.keys).toContain('flags:b');
+    expect(body.keys).not.toContain('other');
+  });
+
+  it('does not expose internal keys (_ttl, _meta namespaces)', async () => {
+    const c0 = await RedisClient.connect({ ...scanOpts, db: 0 });
+    await c0.set('{app_scan}:u:real-key', '"x"');
+    await c0.set('{app_scan}:_ttl:real-key', '60');
+    await c0.set('{app_scan}:_meta:expose', '{}');
+    await c0.close();
+
+    mockResolveOk('app_scan');
+    const res = await worker.fetch(req('GET', '/v1/app_scan/kv/_scan'), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.keys).toContain('real-key');
+    expect(body.keys).not.toContain('_ttl:real-key');
+    expect(body.keys).not.toContain('_meta:expose');
+    expect(body.keys.every((k: string) => !k.startsWith('_'))).toBe(true);
+  });
+
+  it('returns 405 for non-GET method', async () => {
+    mockResolveOk('app_scan');
+    const res = await worker.fetch(req('POST', '/v1/app_scan/kv/_scan', {}), env);
+    expect(res.status).toBe(405);
+  });
+});
