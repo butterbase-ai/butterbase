@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 
 const KV_PASSWORD_BYTES = 24;
@@ -44,6 +44,44 @@ export class KvCredentialsService {
       [appId],
     );
     return rows[0] ?? null;
+  }
+
+  /**
+   * Validates that `apiKey` is an active dev API key whose owner also owns `appId`.
+   * Returns `{ app_id, region }` (and `redis_password` if a KV credential exists) on success,
+   * or `null` if the key is invalid/expired, or the key owner does not own the app.
+   */
+  async resolveDevApiKeyForApp(
+    apiKey: string,
+    appId: string,
+  ): Promise<{ app_id: string; region: string; redis_password: string | null } | null> {
+    const keyHash = createHash('sha256').update(apiKey).digest('hex');
+    const { rows } = await this.db.query<{
+      app_id: string;
+      region: string;
+      redis_password: string | null;
+      key_valid: boolean;
+      owns_app: boolean;
+    }>(
+      `SELECT
+         ak.user_id IS NOT NULL AS key_valid,
+         a.id IS NOT NULL      AS owns_app,
+         a.id                  AS app_id,
+         a.region              AS region,
+         kv.redis_password
+       FROM api_keys ak
+       LEFT JOIN apps a ON a.id = $2 AND a.owner_id = ak.user_id
+       LEFT JOIN app_kv_credentials kv ON kv.app_id = a.id
+       WHERE ak.key_hash = $1
+         AND ak.revoked_at IS NULL
+         AND (ak.expires_at IS NULL OR ak.expires_at > now())
+       LIMIT 1`,
+      [keyHash, appId],
+    );
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    if (!row.owns_app) return null;
+    return { app_id: row.app_id, region: row.region, redis_password: row.redis_password };
   }
 
   async rotate(appId: string): Promise<KvCredential> {

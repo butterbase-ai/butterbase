@@ -89,6 +89,7 @@ import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
 import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
 import kvResolveJwtRoutes from './routes/internal/kv-resolve-jwt.js';
+import kvProxyRoutes from './routes/internal/kv-proxy.js';
 import quotaStateRoutes from './routes/admin/quota-state.js';
 import regionStateRoutes from './routes/admin/region-state.js';
 import activeMigrationsRoutes from './routes/admin/active-migrations.js';
@@ -424,6 +425,7 @@ try {
 app.register(internalLeaseRoutes);
 app.register(kvCredentialsRoutes);
 app.register(kvResolveJwtRoutes);
+app.register(kvProxyRoutes);
 app.register(stateOutboxRoutes);
 app.register(appIndexReaperRoutes);
 app.register(quotaStateRoutes);
