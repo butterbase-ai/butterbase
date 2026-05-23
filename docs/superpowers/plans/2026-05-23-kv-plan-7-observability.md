@@ -17,6 +17,142 @@
 
 ---
 
+## Handoff Notes for the Next Agent (read this FIRST)
+
+The previous agent (this one) executed Plans 6 + Plan 6's reverse-move fix end-to-end and then wrote this plan in the same session. Things they learned the hard way that you won't see in the code:
+
+### Branch state at start of Plan 7 execution
+
+- Branch is `feat/kv-plan-6-move-app-kv` (NOT `main`). Plan 5, Plan 6, and the reverse-move fix all live here unmerged.
+- HEAD at plan-write time: `ecd72af` (this plan itself). The commit before that, `bea8af4`, is the Plan 7 spec.
+- Recent commits worth knowing about, newest first:
+  - `ecd72af` plan: KV plan 7 — observability + dashboards
+  - `bea8af4` spec: KV plan 7 — observability + dashboards
+  - `c50f78b` fix(move-app): fast-path reverse-move migrates KV back to source
+  - `0fe8140` feat(kv): clearKvScope helper — SCAN+UNLINK
+  - `1006936` refactor(move-app): extract restoreKvIntoRegion helper
+  - `9dfa584` refactor(move-app): extract dumpKvFromRegion helper
+  - `a00dce1` plan: reverse-move KV fix
+  - `bea8af4` (above)
+  - `503cc21` test(move-app): step-restore-data hands off to dumping_kv
+  - `1d21f2a` fix(move-app): app_kv_credentials.region must be short-form
+  - `8136c89` fix(move-app): step-restore-data must hand off to dumping_kv
+- All KV-slice tests pass: 310 passing / 7 skipped / 0 failures.
+- ~96 PRE-EXISTING test failures in non-KV files (billing-gate, partner-pools, auto-api, etc.). Plan 6 baseline. **Do not chase these.**
+
+### "STOP using us/eu in design language"
+
+The user explicitly pushed back when I (the previous agent) used `us` / `eu` / `us-east-1` / `eu-west-1` as region names in design discussion. The codebase happens to use those today in local docker-compose and as test fixtures, but **the design language must stay neutral** (`region-1` / `region-2`, "per-region", "each KV region"). The plan and spec are scrubbed; do NOT regress this when explaining your work to the user or writing new docs.
+
+### Project memory (non-negotiable; same as Plan 6)
+
+- **No `Co-Authored-By: Claude` trailer in commits.** Every commit in this plan must omit it.
+- **Use `uv` for any Python.** No bare `python3`.
+- **Use Exa for any web search/fetch.** `mcp__exa__web_search_exa` / `mcp__exa__web_fetch_exa` over built-in WebSearch/WebFetch.
+- **No internal architecture/pricing in customer-facing docs.** Plan 7's customer dashboard surfaces (UsageStrip, RecentErrors copy) MUST NOT leak lease/markup math, internal env flags, or internal error fields.
+- **Branch isolation.** Do not push or merge outside `feat/kv-plan-6-move-app-kv` without explicit user approval. Wrapper-repo edits stay on the wrapper-repo's existing branch (`feat/kv-plan-3-rest-expose`).
+- **Verify with full build, not just typecheck.** Run `pnpm --filter @butterbase/control-api build` AND the dashboard builds before claiming a task done.
+
+### Local stack — already running
+
+`cd /Users/kenneth/Documents/butterbase_backup/butterbase && docker compose -f docker-compose.local.yml ps` to confirm. Key containers (port host→container):
+
+| Container | Port | Notes |
+|---|---|---|
+| `butterbase-control-api-1` | `:4000` | Rebuild + restart after every commit touching `services/control-api/` |
+| `butterbase-control-plane-db-1` | `:5433` | Hosts `app_migrations`, `app_kv_credentials`, `apps`, `platform_users`, `audit_logs`, `plans`, `usage_meters`, `kv_app_usage_snapshot` (after Task 1) |
+| `butterbase-runtime-plane-db-1` | `:5437` (region-1 runtime) | |
+| `butterbase-runtime-plane-db-eu-1` | `:5438` (region-2 runtime) | |
+| `butterbase-kv-redis-1-1` | `:6390` (region-1 KV substrate) | password `butterbase_dev_kv` |
+| `butterbase-kv-redis-2-1` | `:6391` (region-2 KV substrate) | password `butterbase_dev_kv` |
+| `butterbase-redis` | `:6379` | Control-plane Redis |
+| `butterbase-localstack` | `:4566` | S3 emulator |
+| `butterbase-dashboard-1` | `:3000` | Customer dashboard dev/prod server |
+| `butterbase-dashboard-api-1` | `:4100` | Dashboard API (proxies to control-api) |
+| `butterbase-cron-scheduler` | — | Runs background workers (move-app saga driver, KV reconcile, etc.) |
+
+Db creds: `butterbase:butterbase_dev`. Dev owner: `'11111111-1111-1111-1111-111111111111'`. Smoke app: `kv-smoke-1` (kv-credentials region `us` after Plan 6 fixes).
+
+### Rebuild + restart cycle (do this after EVERY runtime code change)
+
+```
+cd /Users/kenneth/Documents/butterbase_backup/butterbase
+docker compose -f docker-compose.local.yml build control-api
+docker compose -f docker-compose.local.yml up -d control-api
+sleep 6
+docker compose -f docker-compose.local.yml logs --tail=15 control-api
+```
+
+For dashboard changes, the dashboard container hot-reloads via dev server in most local setups; if not, rebuild it the same way (`build dashboard` → `up -d dashboard`).
+
+### Wrapper repo `docker-compose.local.yml` — UNCOMMITTED Plan 6 edit
+
+The wrapper repo (`/Users/kenneth/Documents/butterbase_backup/butterbase/`) has uncommitted changes from Plan 6's live smoke:
+
+```
+?? packages/cli/kv-smoke.config.ts
+?? packages/sdk/pnpm-lock.yaml
+?? services/mcp-server/pnpm-lock.yaml
+ M docker-compose.local.yml   ← env vars for cron-scheduler
+```
+
+The `docker-compose.local.yml` modification added env vars to the cron-scheduler service so the saga driver can talk to KV / S3 (`MOVE_APP_DRIVER_ENABLED`, `BUTTERBASE_INTERNAL_SECRET`, `KV_REDIS_URL_US_EAST_1`, `KV_REDIS_URL_EU_WEST_1`, `MOVE_APP_DUMP_BUCKET`, `MOVE_APP_DUMP_BUCKET_REGION`, `R2_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`). The wrapper repo is on `feat/kv-plan-3-rest-expose` (not Plan 6's branch). Per project memory, do NOT commit cross-branch without user approval.
+
+**For Plan 7 Task 3:** you will need to ADD `--notify-keyspace-events Ex` to both `kv-redis-1` and `kv-redis-2` services in this same file. Same constraint applies: surface the diff in your task report and let the user decide whether to commit.
+
+### Pre-existing test failures — do not chase
+
+Running the full control-api suite ends with:
+```
+Test Files  27 failed | <N> passed (139)
+      Tests  96 failed | <N> passed (988)
+```
+
+The 96 failures are pre-existing across 27 files (billing-gate FK errors, partner-pools missing `BUTTERBASE_REGIONS`, schema, auto-api, etc.). The KV slice is clean — verify Plan 7 work against `pnpm --filter @butterbase/control-api test kv keys move-app` and confirm 0 failures in that filter. Plan 6 + reverse-move-fix ended with **310 passing / 0 failing** on the KV slice; Plan 7 should leave both higher (new tests added) and not regress the rest.
+
+### Cron-scheduler image is a separate container with its own build
+
+The cron-scheduler runs in a SEPARATE container from control-api but shares the same `services/control-api/` source. Rebuilding `control-api` does NOT automatically rebuild `cron-scheduler`. When you change worker code (e.g., adding the new keys-expiry-worker in Task 3), rebuild BOTH:
+
+```
+docker compose -f docker-compose.local.yml build control-api cron-scheduler
+docker compose -f docker-compose.local.yml up -d control-api cron-scheduler
+```
+
+The cron-scheduler's logger renders structured log args as `[object Object]` (cosmetic, not a functional bug — Plan 6 smoke flagged this). Read the message field for content.
+
+### API shape gotchas (carried over from Plan 5 + 6 smoke)
+
+- **`platform_users` column is `credits_usd`, not `topup_usd`.** `topup_usd` is an API response field name; the DB column is `credits_usd`. SQL like `UPDATE platform_users SET topup_usd=0` will fail.
+- **`_batch` body shape is `{ops: [{op: 'set'|'del'|'get', key, value?}]}`** — NOT `{type: 'put'|'delete'}`. See `services/control-api/src/routes/v1/kv-data.ts` `_batch` handler.
+- **DELETE returns 200 with `{deleted: N}`**, not 204. By design — don't "fix" it.
+- **Region naming inconsistency is real.** `apps.region` and `app_kv_credentials.region` store short form (`us`, `eu`); `app_migrations.source_region`/`dest_region` and `user_app_index.region` store long form (`us-east-1`, `eu-west-1`); `kvRedisFor()` builds env keys by `region.toUpperCase().replace(/-/g, '_')`. Plan 6's `toKvRegion()` helper (in `step-restore-kv.ts`) is the canonical long→short mapper. **For Plan 7's customer dashboard and admin endpoints**: when displaying region to users, show whatever `apps.region` has. For `kvRedisFor()` calls in admin endpoints, derive from `BUTTERBASE_REGIONS` env (long form), iterate that list, build env keys with the existing transform.
+
+### Subagent quirks (observed across Plans 5–6)
+
+- Implementer subagents (especially sonnet) sometimes run a test in the background and return BEFORE committing. Always `git status` after a subagent returns DONE — if there are uncommitted files, either commit them yourself or re-dispatch with explicit instructions.
+- The `RedisClient.del` API takes an ARRAY: `del([key1, key2])`, not varargs. Plan 5 / 6 / reverse-move-fix all use this form. Match it.
+- Implementer agents sometimes assert "build clean" without running the build. Re-verify with `pnpm --filter @butterbase/control-api build` before approving a task.
+- When a `vi.mock(...)` at module scope conflicts with a same-file integration test that needs the real module, the previous agent's standard fix is to SPLIT the integration test into a separate file (e.g., `*-integration.test.ts`). See `step-block-writes-integration.test.ts` for the pattern.
+
+### Model selection per task (recommendation, not gospel)
+
+- Tasks 1, 2, 5, 6, 8, 9, 10, 11 (mechanical, well-specified backend / well-specified component): **haiku**.
+- Tasks 3, 4, 12, 13, 14 (multi-file integration, subscriber wiring, snapshot+counter coupling, admin endpoints with several SQL aggregations): **sonnet**.
+- Tasks 7, 15 (dashboard route wiring — needs codebase exploration to find the routes file): **sonnet**.
+- Task 16 (admin tables — once Task 15 located the routes file, mechanical): **haiku**.
+- Task 17 (verification + smoke — coordination): **sonnet**.
+
+### Use TaskCreate / TaskUpdate from the start
+
+The harness has `TaskCreate` / `TaskUpdate` / `TaskList` tools (deferred — load via `ToolSearch` with `query "select:TaskCreate,TaskUpdate,TaskList"`). Create one task per task in this plan up front; mark in_progress when dispatching, completed when the subagent returns DONE. The system nags otherwise.
+
+### Spec for this plan
+
+`docs/superpowers/specs/2026-05-23-kv-plan-7-design.md` (commit `bea8af4`). Read it once before starting.
+
+---
+
 ## Pre-Execution Context
 
 **Repo layout:**
