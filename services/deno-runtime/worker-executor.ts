@@ -494,11 +494,11 @@ function buildWorkerCode(
           }
         },
       } : null,
-      // ctx.kv — key/value store backed by the kv-gateway Worker.
-      // KV_GATEWAY_URL must be set in the deno-runtime environment for ctx.kv to be available.
+      // ctx.kv — key/value store backed by the KV routes on control-api.
+      // CONTROL_API_URL must be set in the deno-runtime environment for ctx.kv to be available.
       // If it is not set, ctx.kv is undefined and function code that tries to use it will receive
       // a clear TypeError ("Cannot read properties of undefined") rather than a silent failure.
-      // The gateway address for local development is http://kv-gateway:8787 (Task 14 wires that up).
+      // The control-api address for local development is http://control-api:4000 (set via CONTROL_API_URL).
       //
       // SECURITY NOTE: The per-app BUTTERBASE_FUNCTION_SERVICE_KEY is interpolated
       // into the worker source string below (and at lines ~625 and ~643 for the
@@ -512,13 +512,14 @@ function buildWorkerCode(
           ?? metadata.env_vars?.BUTTERBASE_SERVICE_KEY
           ?? Deno.env.get('BUTTERBASE_FUNCTION_SERVICE_KEY')
           ?? '';
-        if (!__fnKey && Deno.env.get('KV_GATEWAY_URL')) {
+        const __kvUrl = Deno.env.get('CONTROL_API_URL') || Deno.env.get('API_BASE_URL');
+        if (!__fnKey && __kvUrl) {
           console.warn(`[kv] no BUTTERBASE_FUNCTION_SERVICE_KEY for app=${metadata.app_id}; ctx.kv calls will fail with auth error`);
         }
         return '';
-      })()}${Deno.env.get("KV_GATEWAY_URL") ? `
+      })()}${(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL")) ? `
       kv: (() => {
-        const __kvBase = ${JSON.stringify(Deno.env.get("KV_GATEWAY_URL"))};
+        const __kvBase = ${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL"))};
         const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
         const __kvHeaders = {
           authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
@@ -640,7 +641,8 @@ function buildWorkerCode(
           },
         };
       })(),
-      ` : '/* ctx.kv: KV_GATEWAY_URL not set — kv omitted from ctx */'}
+      ` : '/* ctx.kv: CONTROL_API_URL not set — kv omitted from ctx */'}
+
       integrations: {
         execute: async (toolName, params) => {
           const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
