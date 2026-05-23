@@ -99,7 +99,7 @@ import {
 import {
   kvGetCommand, kvSetCommand, kvDelCommand, kvLsCommand,
   kvStatsCommand, kvFlushCommand, kvRulesCommand,
-  kvExposeCommand, kvUnexposeCommand,
+  kvExposeCommand, kvUnexposeCommand, kvApplyCommand,
 } from '../src/commands/kv.js';
 
 const program = new Command();
@@ -1164,6 +1164,13 @@ kv.command('unexpose <pattern>')
   .description('Remove an expose rule')
   .option('--app <id>', 'App ID (uses current app if not specified)')
   .action(kvUnexposeCommand);
+
+kv.command('apply <file>')
+  .description('Apply KV expose rules from a config file (kv.config.ts)')
+  .option('--app <id>', 'App ID (uses current app if not specified)')
+  .option('--dry-run', 'Preview changes without applying')
+  .option('--yes', 'Skip confirmation prompt')
+  .action((file, opts) => kvApplyCommand({ app: opts.app, file, dryRun: opts.dryRun, yes: opts.yes }));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {
