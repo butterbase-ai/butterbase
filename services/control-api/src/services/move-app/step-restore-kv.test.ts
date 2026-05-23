@@ -1,7 +1,7 @@
 import { PassThrough, Readable } from 'node:stream';
 import { createGzip } from 'node:zlib';
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
-import { executeRestoreKv } from './step-restore-kv.js';
+import { executeRestoreKv, toKvRegion } from './step-restore-kv.js';
 import { serializeRecord, type KvDumpRecord } from './kv-dump-format.js';
 import { RedisClient } from '../kv/redis-client.js';
 
@@ -40,6 +40,28 @@ function buildGzipStream(records: KvDumpRecord[]): Readable {
 // Unit tests (no real Redis / Postgres needed)
 // ---------------------------------------------------------------------------
 
+describe('toKvRegion', () => {
+  it('converts long-form saga region (us-east-1) to short form (us)', () => {
+    expect(toKvRegion('us-east-1')).toBe('us');
+  });
+
+  it('converts long-form saga region (eu-west-1) to short form (eu)', () => {
+    expect(toKvRegion('eu-west-1')).toBe('eu');
+  });
+
+  it('handles already short-form region (us) without change', () => {
+    expect(toKvRegion('us')).toBe('us');
+  });
+
+  it('handles already short-form region (eu) without change', () => {
+    expect(toKvRegion('eu')).toBe('eu');
+  });
+
+  it('converts ap-southeast-1 to ap', () => {
+    expect(toKvRegion('ap-southeast-1')).toBe('ap');
+  });
+});
+
 describe('executeRestoreKv', () => {
   it('idempotent — early-return when kv_restored_at already set, no download or DB call', async () => {
     const downloadKvDump = vi.fn();
@@ -61,6 +83,26 @@ describe('executeRestoreKv', () => {
     const m = makeMigration({ dest_resources: {} });
 
     await expect(executeRestoreKv(ctx, m)).rejects.toThrow(/missing kv_dump_object_key/);
+  });
+
+  it('updates app_kv_credentials with short-form region, converting from long-form saga region', async () => {
+    const downloadKvDump = vi.fn().mockResolvedValue(buildGzipStream([]));
+    const kvBaseOptsForRegion = (region: string) => {
+      return { host: 'localhost', port: 6379, password: '' };
+    };
+    const ctx = makeCtx({ downloadKvDump, kvBaseOptsForRegion });
+    const m = makeMigration({
+      dest_region: 'eu-west-1',
+      dest_resources: { kv_dump_object_key: 'some/key' },
+    });
+
+    await executeRestoreKv(ctx, m);
+
+    // Verify controlPool.query was called with short-form 'eu', not 'eu-west-1'
+    expect(ctx.controlPool.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE app_kv_credentials'),
+      ['eu', m.app_id],
+    );
   });
 });
 

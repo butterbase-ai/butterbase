@@ -6,6 +6,16 @@ import type { StepHandler } from './saga-executor.js';
 import { RedisClient, type RedisClientOptions } from '../kv/redis-client.js';
 import { parseRecord, payloadToBuffer } from './kv-dump-format.js';
 
+/**
+ * Convert long-form saga regions (`us-east-1`, `eu-west-1`) to the short
+ * form (`us`, `eu`) that `app_kv_credentials.region` stores by convention.
+ * The KV preHandler builds its env-var lookup from this column, so the
+ * short form must match `KV_REDIS_URL_<REGION>` env var naming.
+ */
+export function toKvRegion(region: string): string {
+  return region.replace(/-[a-z]+-\d+$/, '');
+}
+
 export interface RestoreKvCtx {
   downloadKvDump?: (key: string) => Promise<Readable>;
   kvBaseOptsForRegion?: (region: string) => Omit<RedisClientOptions, 'db'>;
@@ -123,7 +133,7 @@ export const executeRestoreKv: StepHandler = async (ctx, m) => {
 
   await ctx.controlPool.query(
     'UPDATE app_kv_credentials SET region = $1, rotated_at = now() WHERE app_id = $2',
-    [m.dest_region, m.app_id],
+    [toKvRegion(m.dest_region), m.app_id],
   );
 
   ctx.log.info({ migrationId: m.id, restored }, 'kv restored + routing flipped');
