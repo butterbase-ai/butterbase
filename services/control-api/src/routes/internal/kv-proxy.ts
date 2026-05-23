@@ -59,7 +59,7 @@ const kvProxyRoutes: FastifyPluginAsync = async (fastify) => {
         const body = request.body;
         if (body !== undefined && body !== null) {
           if (Buffer.isBuffer(body)) {
-            init.body = body;
+            init.body = new Uint8Array(body);
           } else if (typeof body === 'string') {
             init.body = body;
           } else {
