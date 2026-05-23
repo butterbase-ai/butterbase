@@ -38,7 +38,9 @@ describe('manage_kv tool', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('/v1/internal/kv/proxy/app_test123/kv/data/mykey');
+    // Must be /v1/internal/kv/proxy/<app>/kv/<key> — NOT /kv/data/<key>
+    expect(url).toMatch(/\/v1\/internal\/kv\/proxy\/app_test123\/kv\/mykey$/);
+    expect(url).not.toContain('/kv/data/');
     expect(opts.method).toBe('PUT');
     const body = JSON.parse(opts.body as string);
     expect(body.value).toBe('myval');
@@ -64,7 +66,9 @@ describe('manage_kv tool', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('/v1/internal/kv/proxy/app_test123/kv/data/mykey');
+    // Must be /v1/internal/kv/proxy/<app>/kv/<key> — NOT /kv/data/<key>
+    expect(url).toMatch(/\/v1\/internal\/kv\/proxy\/app_test123\/kv\/mykey$/);
+    expect(url).not.toContain('/kv/data/');
     expect(opts.method).toBeUndefined(); // GET is the default (no method set)
 
     const text = (out.content as Array<{ type: string; text?: string }>)
@@ -93,7 +97,65 @@ describe('manage_kv tool', () => {
     expect(text).toContain('confirm');
   });
 
-  it('expose URL-encodes the pattern when calling unexpose', async () => {
+  it('expose uses PUT to /_expose/<urlencoded-pattern> with read/write body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { client } = await createConnectedPair();
+    await client.callTool({
+      name: 'manage_kv',
+      arguments: {
+        app_id: 'app_test123',
+        action: 'expose',
+        pattern: 'user:*',
+        read: 'authed',
+        write: 'owner',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // Must use /_expose/<encoded-pattern>
+    expect(url).toContain('/_expose/');
+    expect(url).toContain('user%3A');
+    expect(opts.method).toBe('PUT');
+    const body = JSON.parse(opts.body as string);
+    expect(body.read).toBe('authed');
+    expect(body.write).toBe('owner');
+  });
+
+  it('scan uses GET /_scan with prefix and limit query params (NOT pattern/count)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ keys: [], cursor: null }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { client } = await createConnectedPair();
+    await client.callTool({
+      name: 'manage_kv',
+      arguments: {
+        app_id: 'app_test123',
+        action: 'scan',
+        prefix: 'user:',
+        limit: 50,
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/_scan');
+    expect(url).toContain('prefix=user%3A');
+    expect(url).toContain('limit=50');
+    // Must NOT use old wrong param names
+    expect(url).not.toContain('pattern=');
+    expect(url).not.toContain('count=');
+  });
+
+  it('unexpose URL-encodes the pattern when deleting the rule', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       text: async () => '',
@@ -108,7 +170,8 @@ describe('manage_kv tool', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
-    // 'user:*' should be URL-encoded as 'user%3A*' or similar
+    // Must use /_expose/<encoded-pattern>
+    expect(url).toContain('/_expose/');
     expect(url).toContain('user%3A');
   });
 });
