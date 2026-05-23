@@ -16,7 +16,7 @@ describe('executeRestoreData', () => {
       dest_resources: { dump_object_key: 'move-app/mig-1/dump.sql.gz' },
     };
     const res = await executeRestoreData(ctx, m);
-    expect(res.next).toBe('copying_blobs');
+    expect(res.next).toBe('dumping_kv');
     expect(ctx.runPsql).toHaveBeenCalledOnce();
   });
 
@@ -33,6 +33,6 @@ describe('executeRestoreData', () => {
     };
     const res = await executeRestoreData(ctx, m);
     expect(ctx.runPsql).not.toHaveBeenCalled();
-    expect(res.next).toBe('copying_blobs');
+    expect(res.next).toBe('dumping_kv');
   });
 });
