@@ -147,4 +147,27 @@ describe('RedisClient (integration)', () => {
     expect(existResult).toBe(true);
     expect(await c.get('xx-existing')).toBe('new');
   });
+
+  it('hset + hgetall round-trips hash fields', async () => {
+    c = await RedisClient.connect({ host: HOST, port: PORT, password: PASS, db: 15 });
+    await c.hset('myhash', 'field1', 'value1');
+    await c.hset('myhash', 'field2', 'value2');
+    const result = await c.hgetall('myhash');
+    expect(result).toEqual({ field1: 'value1', field2: 'value2' });
+  });
+
+  it('hdel removes hash fields and returns count', async () => {
+    c = await RedisClient.connect({ host: HOST, port: PORT, password: PASS, db: 15 });
+    await c.hset('delhash', 'f1', 'v1');
+    await c.hset('delhash', 'f2', 'v2');
+    const deleted = await c.hdel('delhash', ['f1', 'missing']);
+    expect(deleted).toBe(1);
+    const remaining = await c.hgetall('delhash');
+    expect(remaining).toEqual({ f2: 'v2' });
+  });
+
+  it('hgetall on missing hash returns empty object', async () => {
+    c = await RedisClient.connect({ host: HOST, port: PORT, password: PASS, db: 15 });
+    expect(await c.hgetall('nonexistent')).toEqual({});
+  });
 });

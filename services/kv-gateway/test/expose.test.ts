@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { compileRule, matchRules, detectConflict, type Role, type CompiledRule } from '../src/expose.js';
+import { RedisClient } from '../src/redis-client.js';
+import { loadRules, saveRule, deleteRule, nextDeclarationOrder } from '../src/expose.js';
 
 describe('compileRule', () => {
   it('compiles a literal pattern', () => {
@@ -80,5 +82,59 @@ describe('detectConflict', () => {
     const r1 = compileRule({ pattern: 'flags:*', read: 'public', write: 'deny' }, 0);
     const r2 = compileRule({ pattern: 'flags:home:*', read: 'authed', write: 'authed' }, 1);
     expect(detectConflict([r1], r2)).toBeNull();
+  });
+});
+
+describe('expose Redis helpers (integration)', () => {
+  let c: RedisClient;
+  const appId = 'expose-test';
+  const HOST = process.env.KV_REDIS_HOST ?? 'localhost';
+  const PORT = Number(process.env.KV_REDIS_PORT ?? 6390);
+  const PASS = process.env.KV_REDIS_PASS ?? 'butterbase_dev_kv';
+
+  beforeEach(async () => {
+    c = await RedisClient.connect({ host: HOST, port: PORT, password: PASS, db: 15 });
+    await c.flushTestDb();
+  });
+
+  afterEach(async () => {
+    if (c) await c.close();
+  });
+
+  it('loadRules returns [] when no rules exist', async () => {
+    expect(await loadRules(c, appId)).toEqual([]);
+  });
+
+  it('saveRule then loadRules returns the rule', async () => {
+    await saveRule(c, appId, { pattern: 'flags:*', read: 'public', write: 'deny' }, 0);
+    const rules = await loadRules(c, appId);
+    expect(rules).toHaveLength(1);
+    expect(rules[0].pattern).toBe('flags:*');
+    expect(rules[0].read).toBe('public');
+  });
+
+  it('saveRule preserves declaration order across loads', async () => {
+    await saveRule(c, appId, { pattern: 'a:*', read: 'public', write: 'deny' }, 0);
+    await saveRule(c, appId, { pattern: 'b:*', read: 'authed', write: 'authed' }, 1);
+    const rules = await loadRules(c, appId);
+    rules.sort((x, y) => x.declarationOrder - y.declarationOrder);
+    expect(rules.map((r) => r.pattern)).toEqual(['a:*', 'b:*']);
+  });
+
+  it('deleteRule removes the rule', async () => {
+    await saveRule(c, appId, { pattern: 'flags:*', read: 'public', write: 'deny' }, 0);
+    const removed = await deleteRule(c, appId, 'flags:*');
+    expect(removed).toBe(true);
+    expect(await loadRules(c, appId)).toEqual([]);
+  });
+
+  it('deleteRule on missing pattern returns false', async () => {
+    expect(await deleteRule(c, appId, 'nope:*')).toBe(false);
+  });
+
+  it('nextDeclarationOrder returns 0 when empty, max+1 otherwise', async () => {
+    expect(await nextDeclarationOrder(c, appId)).toBe(0);
+    await saveRule(c, appId, { pattern: 'x:*', read: 'public', write: 'deny' }, 5);
+    expect(await nextDeclarationOrder(c, appId)).toBe(6);
   });
 });

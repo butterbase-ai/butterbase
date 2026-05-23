@@ -91,3 +91,56 @@ export function detectConflict(existing: CompiledRule[], candidate: CompiledRule
   }
   return null;
 }
+
+// Redis I/O layer for rule storage.
+
+export interface RedisClientLike {
+  hset(key: string, field: string, value: string): Promise<void>;
+  hdel(key: string, fields: string[]): Promise<number>;
+  hgetall(key: string): Promise<Record<string, string>>;
+}
+
+function metaKey(appId: string): string {
+  return `{${appId}}:_meta:expose`;
+}
+
+interface StoredRule {
+  read: Role;
+  write: Role;
+  order: number;
+}
+
+export async function loadRules(c: RedisClientLike, appId: string): Promise<CompiledRule[]> {
+  const raw = await c.hgetall(metaKey(appId));
+  const rules: CompiledRule[] = [];
+  for (const [pattern, json] of Object.entries(raw)) {
+    const stored = JSON.parse(json) as StoredRule;
+    rules.push(compileRule({ pattern, read: stored.read, write: stored.write }, stored.order));
+  }
+  return rules;
+}
+
+export async function saveRule(
+  c: RedisClientLike,
+  appId: string,
+  rule: RuleSource,
+  declarationOrder: number,
+): Promise<void> {
+  const stored: StoredRule = { read: rule.read, write: rule.write, order: declarationOrder };
+  await c.hset(metaKey(appId), rule.pattern, JSON.stringify(stored));
+}
+
+export async function deleteRule(c: RedisClientLike, appId: string, pattern: string): Promise<boolean> {
+  const n = await c.hdel(metaKey(appId), [pattern]);
+  return n > 0;
+}
+
+export async function nextDeclarationOrder(c: RedisClientLike, appId: string): Promise<number> {
+  const raw = await c.hgetall(metaKey(appId));
+  let max = -1;
+  for (const json of Object.values(raw)) {
+    const stored = JSON.parse(json) as StoredRule;
+    if (stored.order > max) max = stored.order;
+  }
+  return max + 1;
+}

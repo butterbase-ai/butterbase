@@ -251,6 +251,29 @@ export class RedisClient {
     if (r instanceof Error) throw r;
   }
 
+  async hset(key: string, field: string, value: string): Promise<void> {
+    const r = await this.send(['HSET', key, field, value]);
+    if (r instanceof Error) throw r;
+  }
+
+  async hdel(key: string, fields: string[]): Promise<number> {
+    if (fields.length === 0) return 0;
+    const r = await this.send(['HDEL', key, ...fields]);
+    if (r instanceof Error) throw r;
+    return Number(r);
+  }
+
+  async hgetall(key: string): Promise<Record<string, string>> {
+    const r = await this.send(['HGETALL', key]);
+    if (r instanceof Error) throw r;
+    if (!Array.isArray(r)) throw new Error('hgetall: expected array reply');
+    const out: Record<string, string> = {};
+    for (let i = 0; i < r.length; i += 2) {
+      out[String(r[i])] = String(r[i + 1]);
+    }
+    return out;
+  }
+
   async eval(script: string, keys: string[], args: string[]): Promise<unknown> {
     const cmd = ['EVAL', script, String(keys.length), ...keys, ...args];
     const r = await this.send(cmd);
