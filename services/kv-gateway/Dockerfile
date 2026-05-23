@@ -3,7 +3,7 @@
 # is NOT used in production. It exists so docker-compose.local.yml can run the
 # Worker via wrangler dev --local (which runs workerd, the real Workers runtime).
 
-FROM node:20-alpine
+FROM node:22-slim
 
 WORKDIR /app
 
