@@ -44,7 +44,7 @@ async function defaultRunPsql(connUri: string, stdin: NodeJS.ReadableStream) {
 
 export const executeRestoreData: StepHandler = async (ctx, m) => {
   if (m.dest_resources.restore_completed_at) {
-    return { next: 'copying_blobs', patch: {} };
+    return { next: 'dumping_kv', patch: {} };
   }
   const cx = ctx as unknown as RestoreCtx & typeof ctx;
   const key = m.dest_resources.dump_object_key as string;
@@ -62,7 +62,7 @@ export const executeRestoreData: StepHandler = async (ctx, m) => {
   await run(uri, sqlStream);
   ctx.log.info({ migrationId: m.id, key }, 'dump restored to dest');
   return {
-    next: 'copying_blobs',
+    next: 'dumping_kv',
     patch: { restore_completed_at: new Date().toISOString() },
   };
 };
