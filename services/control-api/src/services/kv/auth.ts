@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import type { FastifyRequest } from 'fastify';
 import { KvCredentialsService } from '../kv-credentials.js';
 import { verifyEndUserJwt } from '../end-user-auth.js';
+import type { AuthProvider } from '../auth-provider.js';
 
 // ---------------------------------------------------------------------------
 // Identity shapes
@@ -77,6 +78,7 @@ export async function resolveKvAuth(
   controlDb: Pool,
   appId: string,
   req: Pick<FastifyRequest, 'headers'>,
+  authProvider?: AuthProvider,
 ): Promise<KvAuthResult> {
   const svc = new KvCredentialsService(controlDb);
 
@@ -111,6 +113,10 @@ export async function resolveKvAuth(
     try {
       claims = await verifyEndUserJwt(controlDb, appId, bearer);
     } catch {
+      if (authProvider) {
+        const platformResult = await tryPlatformOwnerJwt(controlDb, appId, bearer, authProvider);
+        if (platformResult) return platformResult;
+      }
       return { error: 'auth_failed', status: 401, body: { error: 'invalid_jwt' } };
     }
 
@@ -164,4 +170,48 @@ export async function resolveKvAuth(
   // 4. Nothing matched
   // ------------------------------------------------------------------
   return { error: 'auth_failed', status: 403, body: { error: 'forbidden' } };
+}
+
+// ---------------------------------------------------------------------------
+// Platform-owner JWT helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Tries to authenticate a bearer token as a platform-user (Cognito or local-auth)
+ * JWT that owns the requested app.  Returns a KvAuthSuccess with apiKey identity
+ * if all three checks pass:
+ *   1. authProvider.verifyJwt succeeds
+ *   2. platform_users.cognito_sub matches the JWT's sub
+ *   3. apps.owner_id = platform_users.id for the requested appId
+ * Returns null on any failure (caller should fall through to 401).
+ */
+async function tryPlatformOwnerJwt(
+  controlDb: Pool,
+  appId: string,
+  bearer: string,
+  authProvider: AuthProvider,
+): Promise<KvAuthSuccess | null> {
+  let claims: { sub: string };
+  try {
+    claims = await authProvider.verifyJwt(bearer);
+  } catch {
+    return null;
+  }
+  const r = await controlDb.query<{ region: string; redis_password: string }>(
+    `SELECT akc.region, akc.redis_password
+       FROM platform_users pu
+       JOIN apps a ON a.owner_id = pu.id AND a.id = $2
+       JOIN app_kv_credentials akc ON akc.app_id = a.id
+      WHERE pu.cognito_sub = $1
+      LIMIT 1`,
+    [claims.sub, appId],
+  );
+  if (r.rows.length === 0) return null;
+  return {
+    appId,
+    region: r.rows[0].region,
+    redisPassword: r.rows[0].redis_password,
+    identity: { kind: 'apiKey' },
+    allowExposeWrites: true,
+  };
 }

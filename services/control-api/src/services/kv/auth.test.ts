@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import { KvCredentialsService } from '../kv-credentials.js';
@@ -148,5 +148,71 @@ describeDb('resolveKvAuth', () => {
     expect(result.error).toBe('auth_failed');
     expect(result.status).toBe(403);
     expect(result.body.error).toBe('forbidden');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests for the platform-owner JWT branch (no real DB required)
+// ---------------------------------------------------------------------------
+
+function req(authorization?: string) {
+  return { headers: authorization ? { authorization } : {} } as any;
+}
+
+function mockPool(rows: Record<string, any[]>) {
+  return {
+    query: vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM platform_users')) return { rows: rows.platform_owner ?? [] };
+      return { rows: [] };
+    }),
+  } as any;
+}
+
+describe('resolveKvAuth — platform-owner JWT branch', () => {
+  const APP = 'app_x';
+  const SUB = 'cognito-sub-1';
+  const PLATFORM_JWT = 'aaa.bbb.ccc'; // JWT shape (3 segments)
+
+  it('treats a platform-owner JWT as apiKey identity', async () => {
+    const pool = mockPool({
+      platform_owner: [{ region: 'us-east-1', redis_password: 'pw' }],
+    });
+    const authProvider = { verifyJwt: vi.fn().mockResolvedValue({ sub: SUB, email: 'u@example.com', email_verified: true }) };
+
+    const res = await resolveKvAuth(pool, APP, req(`Bearer ${PLATFORM_JWT}`), authProvider);
+    expect('error' in res).toBe(false);
+    if ('error' in res) return;
+    expect(res.identity.kind).toBe('apiKey');
+    expect(res.allowExposeWrites).toBe(true);
+    expect(res.appId).toBe(APP);
+    expect(res.region).toBe('us-east-1');
+  });
+
+  it('returns 401 invalid_jwt when the platform user does not own the app', async () => {
+    const pool = mockPool({ platform_owner: [] }); // join returns no rows
+    const authProvider = { verifyJwt: vi.fn().mockResolvedValue({ sub: SUB, email: 'u@example.com', email_verified: true }) };
+
+    const res = await resolveKvAuth(pool, APP, req(`Bearer ${PLATFORM_JWT}`), authProvider);
+    expect('error' in res).toBe(true);
+    if (!('error' in res)) return;
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 invalid_jwt when authProvider rejects the token', async () => {
+    const pool = mockPool({});
+    const authProvider = { verifyJwt: vi.fn().mockRejectedValue(new Error('bad sig')) };
+
+    const res = await resolveKvAuth(pool, APP, req(`Bearer ${PLATFORM_JWT}`), authProvider);
+    expect('error' in res).toBe(true);
+    if (!('error' in res)) return;
+    expect(res.status).toBe(401);
+  });
+
+  it('omitting authProvider preserves prior behaviour (401 invalid_jwt on end-user failure)', async () => {
+    const pool = mockPool({});
+    const res = await resolveKvAuth(pool, APP, req(`Bearer ${PLATFORM_JWT}`));
+    expect('error' in res).toBe(true);
+    if (!('error' in res)) return;
+    expect(res.status).toBe(401);
   });
 });

@@ -46,7 +46,7 @@ const kvAdminRoutes: FastifyPluginAsync = async (fastify) => {
   }>('/v1/:app_id/kv/_scan', async (req, reply) => {
     const { app_id: appId } = req.params;
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     // JWT/anon → 403
@@ -68,7 +68,7 @@ const kvAdminRoutes: FastifyPluginAsync = async (fastify) => {
   }>('/v1/:app_id/kv/_stats', async (req, reply) => {
     const { app_id: appId } = req.params;
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     // JWT/anon → 403
@@ -89,7 +89,7 @@ const kvAdminRoutes: FastifyPluginAsync = async (fastify) => {
   }>('/v1/:app_id/kv/_flush', async (req, reply) => {
     const { app_id: appId } = req.params;
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     // JWT/anon → 403

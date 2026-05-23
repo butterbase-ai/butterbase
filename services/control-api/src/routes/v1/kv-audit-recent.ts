@@ -19,7 +19,7 @@ const kvAuditRecentRoutes: FastifyPluginAsync = async (fastify) => {
     Querystring: { limit?: string };
   }>('/v1/:app_id/kv/_audit_recent', async (req, reply) => {
     const { app_id: appId } = req.params;
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     const rawLimit = parseInt(req.query.limit ?? String(DEFAULT_LIMIT), 10);

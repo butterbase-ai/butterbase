@@ -621,7 +621,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   }>('/v1/:app_id/kv/_batch', async (req, reply) => {
     const { app_id: appId } = req.params;
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     const isJwt = auth.identity.kind === 'jwt';
@@ -731,7 +731,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     if (!key) return reply.code(400).send(errBody('invalid_key'));
     if (!isValidUserKey(key)) return reply.code(400).send(errBody('key_invalid'));
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     const authOk = auth as AuthOk;
@@ -774,7 +774,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send(errBody('not_found'));
     }
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     const authOk = auth as AuthOk;
@@ -803,7 +803,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send(errBody('not_found'));
     }
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     const authOk = auth as AuthOk;
@@ -833,7 +833,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send(errBody('not_found'));
     }
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     const authOk = auth as AuthOk;

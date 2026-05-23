@@ -72,7 +72,7 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const { app_id: appId } = req.params;
 
-      const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+      const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
       if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
       // JWT/anon → 403
@@ -104,7 +104,7 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
     const { app_id: appId } = req.params;
     const pattern = decodeURIComponent(req.params.pattern);
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     // JWT/anon → 403; require allowExposeWrites
@@ -162,7 +162,7 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
     const { app_id: appId } = req.params;
     const pattern = decodeURIComponent(req.params.pattern);
 
-    const auth = await resolveKvAuth(fastify.controlDb, appId, req);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);
 
     // JWT/anon → 403; require allowExposeWrites

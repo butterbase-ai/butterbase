@@ -175,7 +175,7 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
     // Resolve auth (already runs inside the route handler; we re-resolve here
     // to get region/ownerId for accounting). If auth fails we return early —
     // the route will send the 401/403.
-    const auth = await resolveKvAuth(fastify.controlDb, appId, request);
+    const auth = await resolveKvAuth(fastify.controlDb, appId, request, (fastify as any).authProvider);
     if ('error' in auth) return;
 
     // Parse action from URL (mirrors kv-data.ts parseWildcard logic)
