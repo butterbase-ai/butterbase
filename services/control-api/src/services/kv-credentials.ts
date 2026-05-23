@@ -84,6 +84,40 @@ export class KvCredentialsService {
     return { app_id: row.app_id, region: row.region, redis_password: row.redis_password };
   }
 
+  /**
+   * Returns the per-app KV connection info for anonymous/JWT callers.
+   * Mirrors the logic behind GET /v1/internal/kv/anon-credentials/:app_id.
+   */
+  async anonCredentialsFor(
+    appId: string,
+  ): Promise<{ app_id: string; region: string; redis_password: string } | null> {
+    const cred = await this.lookup(appId);
+    if (!cred) return null;
+    return { app_id: cred.app_id, region: cred.region, redis_password: cred.redis_password };
+  }
+
+  /**
+   * Validates that `plaintextKey` is the function key for `appId`.
+   * Returns connection info on match, null on mismatch.
+   * Mirrors the fallback in POST /v1/internal/kv/resolve-key.
+   */
+  async resolveFunctionKey(
+    plaintextKey: string,
+    appId: string,
+  ): Promise<{ app_id: string; region: string; redis_password: string } | null> {
+    const { rows } = await this.db.query<{
+      app_id: string;
+      region: string;
+      redis_password: string;
+    }>(
+      `SELECT app_id, region, redis_password
+       FROM app_kv_credentials
+       WHERE kv_function_key = $1 AND app_id = $2`,
+      [plaintextKey, appId],
+    );
+    return rows[0] ?? null;
+  }
+
   async rotate(appId: string): Promise<KvCredential> {
     const password = randomBytes(KV_PASSWORD_BYTES).toString('hex');
     const { rows } = await this.db.query<KvCredential>(
