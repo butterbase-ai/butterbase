@@ -74,7 +74,8 @@ describeKv('startKvReconcileWorker', () => {
     expect(updated).toBeGreaterThan(0);
     expect(updated).not.toBe(9999999);
 
-    // Also verify the controlDb was queried exactly once.
-    expect(mockControlDb.query).toHaveBeenCalledTimes(1);
+    // controlDb.query is called twice: once for the SELECT in runReconcileTick,
+    // and once for the snapshot INSERT inside reconcileFromScan.
+    expect(mockControlDb.query).toHaveBeenCalledTimes(2);
   });
 });
