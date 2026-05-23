@@ -64,7 +64,10 @@ export async function runReconcileTick(controlDb: Pool): Promise<void> {
           password: u.password || redis_password,
         };
 
-        const { actual, previous } = await reconcileFromScan(client, app_id, baseOpts);
+        const { actual, previous } = await reconcileFromScan(client, app_id, baseOpts, {
+          controlPool: controlDb,
+          region,
+        });
         const drift = actual > 0 ? Math.abs(actual - previous) / actual : 0;
         if (drift > 0.05) {
           console.warn(

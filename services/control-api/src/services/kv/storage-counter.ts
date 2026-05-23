@@ -12,10 +12,16 @@
  *   incBytes(client, appId, delta) → Promise<number>
  *   decBytes(client, appId, delta) → Promise<number>
  *   resetCounter(client, appId) → Promise<void>
- *   reconcileFromScan(client, appId, baseOpts) → Promise<{ actual: number; previous: number }>
+ *   reconcileFromScan(client, appId, baseOpts, opts?) → Promise<{ actual: number; previous: number; keysActual: number }>
  */
 
+import type { Pool } from 'pg';
 import { RedisClient, type RedisClientOptions } from './redis-client.js';
+
+export interface ReconcileOpts {
+  controlPool?: Pool;
+  region?: string;
+}
 
 const metaKey = (appId: string) => `{${appId}}:_meta:bytes`;
 
@@ -87,10 +93,12 @@ export async function reconcileFromScan(
   client: RedisClient,
   appId: string,
   baseOpts: Omit<RedisClientOptions, 'db'>,
-): Promise<{ actual: number; previous: number }> {
+  opts: ReconcileOpts = {},
+): Promise<{ actual: number; previous: number; keysActual: number }> {
   const previous = await getStorageBytes(client, appId);
   const match = `{${appId}}:u:*`;
   let actual = 0;
+  let keysActual = 0;
 
   // Scan both DB 0 (durable) and DB 1 (ephemeral) sequentially.
   async function collectDb(db: number) {
@@ -104,6 +112,7 @@ export async function reconcileFromScan(
           if (used !== null) {
             actual += used;
           }
+          keysActual++;
         }
       } while (cursor !== '0');
     });
@@ -112,8 +121,27 @@ export async function reconcileFromScan(
   await collectDb(0);
   await collectDb(1);
 
-  // Update the counter with the actual value.
+  // Update the byte counter and the key counter with actual values.
   await client.set(metaKey(appId), String(actual));
+  await client.set(`{${appId}}:_meta:keys`, String(keysActual));
 
-  return { actual, previous };
+  // Best-effort snapshot write to the control-plane DB.
+  if (opts.controlPool && opts.region) {
+    try {
+      await opts.controlPool.query(
+        `INSERT INTO kv_app_usage_snapshot (app_id, region, bytes_used, keys_total, snapshot_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (app_id) DO UPDATE
+           SET region = EXCLUDED.region,
+               bytes_used = EXCLUDED.bytes_used,
+               keys_total = EXCLUDED.keys_total,
+               snapshot_at = now()`,
+        [appId, opts.region, actual, keysActual],
+      );
+    } catch {
+      // Snapshot write is best-effort; counter writes already succeeded.
+    }
+  }
+
+  return { actual, previous, keysActual };
 }
