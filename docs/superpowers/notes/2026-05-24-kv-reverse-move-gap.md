@@ -1,3 +1,7 @@
+> **Resolved 2026-05-23** — `runReverseMove` fast path now performs the KV reverse-migration inline via `dumpKvFromRegion` → `clearKvScope` → `restoreKvIntoRegion`. See plan `docs/superpowers/plans/2026-05-23-reverse-move-kv-fix.md` and spec `docs/superpowers/specs/2026-05-23-reverse-move-kv-fix-design.md`. The original gap description is preserved below for audit.
+
+---
+
 # KV Reverse-Move Gap (Fast Path)
 
 **Date:** 2026-05-24

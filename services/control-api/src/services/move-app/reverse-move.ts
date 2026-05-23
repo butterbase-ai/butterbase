@@ -1,6 +1,9 @@
 import type pg from 'pg';
 import { getMigration, createMigration, markCompleted } from './migration-store.js';
 import { runReverseMoveSlowPath } from './reverse-move-slow-path.js';
+import { dumpKvFromRegion as defaultDumpKvFromRegion } from './step-dump-kv.js';
+import { restoreKvIntoRegion as defaultRestoreKvIntoRegion } from './step-restore-kv.js';
+import { clearKvScope as defaultClearKvScope } from '../kv/kv-scope.js';
 
 export interface ReverseMoveCtx {
   controlPool: pg.Pool;
@@ -12,8 +15,14 @@ export interface ReverseMoveCtx {
   updateUserAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
   waitForReplicationCaughtUp: (region: string, appId: string, migrationId: string) => Promise<void>;
   promoteSourceToPrimary: (region: string, appId: string, migrationId: string) => Promise<void>;
-  /** Optional structured logger (e.g. pino). Used for the KV-gap warning on fast-path. */
-  log?: { warn?: (obj: Record<string, unknown>, msg: string) => void };
+  /** Optional log surface — fast path emits info on success and error on failure. */
+  log?: { info?: (obj: any, msg: string) => void; warn?: (obj: any, msg: string) => void; error?: (obj: any, msg: string) => void };
+  /** Test seam — defaults to the saga's dumpKvFromRegion. */
+  dumpKvFromRegion?: typeof defaultDumpKvFromRegion;
+  /** Test seam — defaults to the kv-scope helper. */
+  clearKvScope?: typeof defaultClearKvScope;
+  /** Test seam — defaults to the saga's restoreKvIntoRegion. */
+  restoreKvIntoRegion?: typeof defaultRestoreKvIntoRegion;
 }
 
 export async function runReverseMove(
@@ -50,17 +59,42 @@ export async function runReverseMove(
   await ctx.waitForReplicationCaughtUp(forward.source_region, forward.app_id, forward.id);
   await ctx.promoteSourceToPrimary(forward.source_region, forward.app_id, forward.id);
 
-  // KV reverse-migration is NOT handled by the fast path. The app's KV data remains
-  // in forward.dest_region while Postgres routes back to forward.source_region.
-  // This is a known split-region state — apps that rely on the KV layer should
-  // trigger a manual reconcile via a forward move_app (dest → source).
-  // See: docs/superpowers/notes/2026-05-24-kv-reverse-move-gap.md
-  ctx.log?.warn?.({
-    forwardMigrationId: forward.id,
-    appId: forward.app_id,
-    kvRegion: forward.dest_region,
-    pgRegion: forward.source_region,
-  }, '[reverse-move fast-path] KV not migrated; split-region state until next forward move');
+  // ── KV reverse-migration (closes the Task 8 gap) ──────────────────────
+  // Dump from the (current) KV region, clear the original-source's scope
+  // so the restore guard passes, then restore + flip routing back.
+  // Best-effort (no write block) per spec: any KV writes during this
+  // window may land on the about-to-be-stale region.
+  const dumpKv = ctx.dumpKvFromRegion ?? defaultDumpKvFromRegion;
+  const clearKv = ctx.clearKvScope ?? defaultClearKvScope;
+  const restoreKv = ctx.restoreKvIntoRegion ?? defaultRestoreKvIntoRegion;
+  try {
+    const { key, records: dumped } = await dumpKv({
+      sourceRegion: forward.dest_region,
+      appId:        forward.app_id,
+      migrationId:  `${forward.id}-reverse`,
+      log:          { info: ctx.log?.info ?? (() => {}) },
+    });
+    const cleared = await clearKv(forward.source_region, forward.app_id);
+    const { records: restored } = await restoreKv({
+      destRegion:            forward.source_region,
+      sourceRegionForBucket: forward.dest_region,
+      appId:                 forward.app_id,
+      key,
+      controlPool:           ctx.controlPool,
+      flipTo:                forward.source_region,
+      log:                   { info: ctx.log?.info ?? (() => {}) },
+    });
+    ctx.log?.info?.(
+      { forwardMigrationId: forward.id, appId: forward.app_id, dumped, restored, cleared },
+      '[reverse-move] kv migrated back to source',
+    );
+  } catch (err) {
+    ctx.log?.error?.(
+      { forwardMigrationId: forward.id, err: (err as Error).message },
+      '[reverse-move] KV reverse-migration failed after PG promotion; manual reconcile required',
+    );
+    throw err;
+  }
 
   await ctx.updateUserAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
   const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string }>(
