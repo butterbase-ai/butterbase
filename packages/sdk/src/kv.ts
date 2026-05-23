@@ -4,6 +4,8 @@ import {
   KvCasMismatchError, KvExposeConflictError, KvValueTooLargeError,
 } from './errors/kv.js';
 
+export type Role = 'public' | 'authed' | 'owner' | 'deny';
+
 export interface KvShim {
   get<T = unknown>(key: string, opts?: { touch?: boolean }): Promise<T | null>;
   set(key: string, value: unknown, opts?: { ttl?: number | null; ephemeral?: boolean }): Promise<void>;
@@ -19,6 +21,9 @@ export interface KvShim {
   expire(key: string, ttl: number | null): Promise<boolean>;
   mget<T = unknown>(keys: string[]): Promise<(T | null)[]>;
   mset(entries: Record<string, unknown>, opts?: { ttl?: number | null }): Promise<void>;
+  expose(pattern: string, opts: { read: Role; write: Role }): Promise<void>;
+  unexpose(pattern: string): Promise<number>;
+  listRules(): Promise<Array<{ pattern: string; read: Role; write: Role; order: number }>>;
 }
 
 export interface MakeKvOptions {
@@ -151,6 +156,24 @@ export function makeKv(opts: MakeKvOptions): KvShim {
       await Promise.all(
         Object.entries(entries).map(([key, value]) => this.set(key, value, opts)),
       );
+    },
+
+    async expose(pattern: string, opts: { read: Role; write: Role }): Promise<void> {
+      const res = await call('PUT', `_expose/${encodeURIComponent(pattern)}`, opts);
+      if (res.status === 204) return;
+      if (!res.ok) throwForStatus(res, await res.json().catch(() => null));
+    },
+
+    async unexpose(pattern: string): Promise<number> {
+      const res = await call('DELETE', `_expose/${encodeURIComponent(pattern)}`);
+      if (!res.ok) throwForStatus(res, await res.json().catch(() => null));
+      return (await res.json() as { deleted: number }).deleted;
+    },
+
+    async listRules(): Promise<Array<{ pattern: string; read: Role; write: Role; order: number }>> {
+      const res = await call('GET', '_expose');
+      if (!res.ok) throwForStatus(res, await res.json().catch(() => null));
+      return (await res.json() as { rules: Array<{ pattern: string; read: Role; write: Role; order: number }> }).rules;
     },
   };
 }

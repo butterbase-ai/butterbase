@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { makeKv } from './kv.js';
-import { KvKeyInvalidError, KvCasMismatchError, KvValueTooLargeError } from './errors/kv.js';
+import { KvKeyInvalidError, KvCasMismatchError, KvValueTooLargeError, KvExposeConflictError } from './errors/kv.js';
 
 const BASE = 'https://kv.butterbase.dev';
 const ROOT = `${BASE}/v1/app_a/kv`;
@@ -293,5 +293,46 @@ describe('ctx.kv (shim)', () => {
     });
     const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
     await expect(kv.cas('k', 'a', 'b')).rejects.toBeInstanceOf(KvCasMismatchError);
+  });
+
+  describe('kv.expose', () => {
+    it('PUTs to _expose/:pattern with the body', async () => {
+      const { f, last } = makeSpy(204);
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      await kv.expose('flags:*', { read: 'public', write: 'deny' });
+      expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose/flags%3A*`);
+      expect(last().method).toBe('PUT');
+      expect(last().body).toEqual({ read: 'public', write: 'deny' });
+    });
+
+    it('throws KvExposeConflictError on 409 KV_EXPOSE_CONFLICT', async () => {
+      const { f } = makeSpy(409, { error: 'KV_EXPOSE_CONFLICT', message: 'conflict' });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      await expect(kv.expose('flags:*', { read: 'authed', write: 'authed' })).rejects.toMatchObject({
+        name: 'KvExposeConflictError',
+        code: 'KV_EXPOSE_CONFLICT',
+      });
+    });
+  });
+
+  describe('kv.unexpose', () => {
+    it('DELETEs _expose/:pattern and returns count', async () => {
+      const { f, last } = makeSpy(200, { deleted: 1 });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      expect(await kv.unexpose('flags:*')).toBe(1);
+      expect(last().method).toBe('DELETE');
+      expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose/flags%3A*`);
+    });
+  });
+
+  describe('kv.listRules', () => {
+    it('GETs _expose and returns the rules array', async () => {
+      const { f, last } = makeSpy(200, { rules: [{ pattern: 'flags:*', read: 'public', write: 'deny', order: 0 }] });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      const rules = await kv.listRules();
+      expect(rules).toEqual([{ pattern: 'flags:*', read: 'public', write: 'deny', order: 0 }]);
+      expect(last().method).toBe('GET');
+      expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose`);
+    });
   });
 });
