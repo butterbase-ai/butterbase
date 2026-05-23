@@ -59,6 +59,16 @@ export async function resolveJwt(deps: ResolveDeps): Promise<ResolvedAuth | null
   };
 }
 
+export async function resolveAnon(deps: { appId: string; env: Env; fetch?: typeof fetch }): Promise<ResolvedAuth | null> {
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.env.CONTROL_API_URL}/v1/internal/kv/anon-credentials/${deps.appId}`, {
+    headers: { 'x-butterbase-internal-secret': deps.env.INTERNAL_SECRET },
+  });
+  if (res.status !== 200) return null;
+  const j = (await res.json()) as { app_id: string; region: string; redis_password: string };
+  return { appId: j.app_id, region: j.region, redisPassword: j.redis_password };
+}
+
 /**
  * Dispatch by token shape: dotted (xxx.yyy.zzz) → JWT; flat hex → API key or function key.
  * The kv-gateway accepts both on the same routes; distinction matters for expose enforcement.

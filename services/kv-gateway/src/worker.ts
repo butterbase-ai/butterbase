@@ -1,9 +1,9 @@
-import { resolveApp } from './auth.js';
+import { resolveBearer, resolveAnon, type ResolvedAuth } from './auth.js';
 import { RedisClient, RedisClientOptions } from './redis-client.js';
 import { userKey, isValidUserKey } from './keys.js';
 import {
   loadRules, saveRule, deleteRule, nextDeclarationOrder,
-  compileRule, detectConflict,
+  compileRule, detectConflict, substituteAndTest,
   type Role, type RuleSource,
 } from './expose.js';
 
@@ -142,6 +142,50 @@ function resolveTtl(rawTtl: unknown): { ok: true; ttl: number | null } | { ok: f
   return { ok: true, ttl: rawTtl };
 }
 
+type RequiredAction = 'read' | 'write';
+
+function enforceExposeAccess(
+  rules: import('./expose.js').CompiledRule[],
+  userKey: string,
+  required: RequiredAction,
+  claims: { 'user.id'?: string; 'user.role'?: string } | null,   // null = anonymous
+): Response | null {
+  const matched: typeof rules = [];
+  for (const r of rules) {
+    if (claims && (r.read === 'owner' || r.write === 'owner')) {
+      if (substituteAndTest(r, userKey, claims as Record<string, string>)) matched.push(r);
+    } else {
+      if (r.regex.test(userKey)) matched.push(r);
+    }
+  }
+  if (matched.length === 0) {
+    return err(claims ? 'forbidden' : 'unauthorized', claims ? 403 : 401);
+  }
+  matched.sort((a, b) =>
+    b.literalPrefixLen - a.literalPrefixLen ||
+    a.declarationOrder - b.declarationOrder,
+  );
+  const winner = matched[0];
+  const role = required === 'read' ? winner.read : winner.write;
+
+  if (role === 'deny') return err(claims ? 'forbidden' : 'unauthorized', claims ? 403 : 401);
+  if (role === 'public') return null;
+  if (!claims) return err('unauthorized', 401);
+  if (role === 'authed' || role === 'owner') return null;   // owner already verified via substituteAndTest
+  return err('forbidden', 403);
+}
+
+function claimsFromResolved(r: ResolvedAuth): { 'user.id'?: string; 'user.role'?: string } | null {
+  if (r.userId === undefined) return null;
+  const out: Record<string, string> = { 'user.id': r.userId };
+  if (r.role) out['user.role'] = r.role;
+  return out;
+}
+
+function methodRequires(method: string): RequiredAction {
+  return method === 'GET' ? 'read' : 'write';
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -152,13 +196,31 @@ export default {
     const { appId: pathAppId, key, action, pattern } = route;
 
     const auth = req.headers.get('authorization');
-    if (!auth?.startsWith('Bearer ')) return err('unauthorized', 401);
-    const apiKey = auth.slice(7).trim();
+    let resolved: ResolvedAuth | null = null;
+    let isAnon = false;
 
-    const resolved = await resolveApp({ apiKey, appId: pathAppId, env });
-    if (!resolved) return err('unauthorized', 401);
-    // Defensive: the contract guarantees app_id match, but keep the check.
-    if (resolved.appId !== pathAppId) return err('forbidden', 403, 'app_id mismatch');
+    if (auth?.startsWith('Bearer ')) {
+      const apiKey = auth.slice(7).trim();
+      resolved = await resolveBearer({ apiKey, appId: pathAppId, env });
+      if (!resolved) return err('unauthorized', 401);
+      // Defensive: the contract guarantees app_id match, but keep the check.
+      if (resolved.appId !== pathAppId) return err('forbidden', 403, 'app_id mismatch');
+    } else {
+      // Anonymous: only allowed if a public-read rule matches the requested key.
+      // _expose* and _batch are NEVER allowed anonymously (no JWT can mean no role to enforce per-op safely).
+      if (action === '_expose' || action === '_expose_one' || action === '_batch') {
+        return err('unauthorized', 401);
+      }
+      isAnon = true;
+      resolved = await resolveAnon({ appId: pathAppId, env });
+      if (!resolved) return err('unauthorized', 401);   // hide app-existence from anon callers
+    }
+
+    // JWT requests CANNOT manage expose rules
+    const isJwt = resolved.userId !== undefined;
+    if (isJwt && (action === '_expose' || action === '_expose_one')) {
+      return err('forbidden', 403);
+    }
 
     // For non-batch and non-expose routes, validate the key now.
     if (action !== '_batch' && action !== '_expose' && action !== '_expose_one') {
@@ -171,6 +233,22 @@ export default {
       port: endpoint.port,
       password: resolved.redisPassword,
     };
+
+    // Load expose rules + enforce for JWT and anonymous requests on single-key routes.
+    // API-key requests bypass entirely (per spec).
+    let exposeRules: import('./expose.js').CompiledRule[] | null = null;
+    async function ensureExposeRulesLoaded(baseOpts2: typeof baseOpts) {
+      if (exposeRules) return exposeRules;
+      exposeRules = await withRedis(baseOpts2, DURABLE_DB, (c) => loadRules(c, resolved!.appId));
+      return exposeRules;
+    }
+
+    if ((isJwt || isAnon) && action !== '_batch' && action !== '_expose' && action !== '_expose_one') {
+      const rules = await ensureExposeRulesLoaded(baseOpts);
+      const claims = claimsFromResolved(resolved);
+      const denial = enforceExposeAccess(rules, key!, methodRequires(req.method), claims);
+      if (denial) return denial;
+    }
 
     // ── expose rule management ─────────────────────────────────────────────────
 
@@ -251,7 +329,17 @@ export default {
             results.push({ error: 'key_invalid' });
             continue;
           }
-          const fk = userKey(resolved.appId, op.key);
+          if (isJwt || isAnon) {
+            const rules = await ensureExposeRulesLoaded(baseOpts);
+            const claims = claimsFromResolved(resolved!);
+            const required: RequiredAction = op.op === 'get' ? 'read' : 'write';
+            const denial = enforceExposeAccess(rules, op.key, required, claims);
+            if (denial) {
+              results.push({ error: 'KV_FORBIDDEN' });
+              continue;
+            }
+          }
+          const fk = userKey(resolved!.appId, op.key);
           try {
             if (op.op === 'get') {
               const v = await client.get(fk);

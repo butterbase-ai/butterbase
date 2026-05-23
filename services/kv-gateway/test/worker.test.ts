@@ -23,8 +23,58 @@ function mockResolveOk(appId: string, region: 'us' | 'eu' = 'us') {
         { status: 200 },
       );
     }
+    // Default: anonymous lookup not stubbed by this helper → 404 (treated as 401 by worker).
+    if (u.includes('/v1/internal/kv/anon-credentials/')) {
+      return new Response(JSON.stringify({ error: 'no_kv_credential' }), { status: 404 });
+    }
     return origFetch(url as any, _init);
   }) as any;
+}
+
+function mockResolveJwtOk(appId: string, opts: { userId: string; role?: string | null } = { userId: 'u1' }) {
+  globalThis.fetch = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+    const u = String(url);
+    if (u.endsWith('/v1/internal/kv/resolve-jwt')) {
+      return new Response(JSON.stringify({
+        app_id: appId, region: 'us', redis_password: 'butterbase_dev_kv',
+        user_id: opts.userId, role: opts.role ?? null,
+      }), { status: 200 });
+    }
+    if (u.endsWith(`/v1/internal/kv/anon-credentials/${appId}`)) {
+      return new Response(JSON.stringify({
+        app_id: appId, region: 'us', redis_password: 'butterbase_dev_kv',
+      }), { status: 200 });
+    }
+    return origFetch(url as any, _init);
+  }) as any;
+}
+
+function mockResolveAnonOk(appId: string) {
+  globalThis.fetch = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+    const u = String(url);
+    if (u.endsWith(`/v1/internal/kv/anon-credentials/${appId}`)) {
+      return new Response(JSON.stringify({
+        app_id: appId, region: 'us', redis_password: 'butterbase_dev_kv',
+      }), { status: 200 });
+    }
+    return origFetch(url as any, _init);
+  }) as any;
+}
+
+function jwtReq(method: string, path: string, body?: any) {
+  return new Request(`http://gw${path}`, {
+    method,
+    headers: { authorization: 'Bearer xxx.yyy.zzz', 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+function anonReq(method: string, path: string, body?: any) {
+  return new Request(`http://gw${path}`, {
+    method,
+    headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
 }
 
 // Direct Redis connection helpers for test verification.
@@ -1095,5 +1145,93 @@ describe('kv-gateway worker', () => {
       expect(v0).toBeNull();
       expect(v1).toBeNull();
     });
+  });
+});
+
+describe('JWT REST + expose enforcement', () => {
+  beforeEach(async () => {
+    // Clean expose hash + seed keys
+    const c0 = await RedisClient.connect({ host: 'localhost', port: 6390, password: 'butterbase_dev_kv', db: 0 });
+    await c0.del(['{app_enforce_test}:_meta:expose']);
+    await c0.del(['{app_enforce_test}:u:flags:home', '{app_enforce_test}:u:session:u1:tab', '{app_enforce_test}:u:feed:newest']);
+    await c0.close();
+
+    mockResolveOk('app_enforce_test');
+    // Install rules via API-key path (bypasses expose):
+    await worker.fetch(req('PUT', '/v1/app_enforce_test/kv/_expose/flags%3A%2A', { read: 'public', write: 'deny' }), env);
+    await worker.fetch(req('PUT', '/v1/app_enforce_test/kv/_expose/session%3A%7Buser.id%7D%3A%2A', { read: 'owner', write: 'owner' }), env);
+    await worker.fetch(req('PUT', '/v1/app_enforce_test/kv/_expose/feed%3A%2A', { read: 'authed', write: 'deny' }), env);
+    // Seed values
+    await worker.fetch(req('PUT', '/v1/app_enforce_test/kv/flags:home', { value: 'on' }), env);
+    await worker.fetch(req('PUT', '/v1/app_enforce_test/kv/session:u1:tab', { value: 'tab1' }), env);
+    await worker.fetch(req('PUT', '/v1/app_enforce_test/kv/feed:newest', { value: 'fresh' }), env);
+  });
+
+  it('JWT user u1 can read flags:home (public)', async () => {
+    mockResolveJwtOk('app_enforce_test', { userId: 'u1' });
+    const res = await worker.fetch(jwtReq('GET', '/v1/app_enforce_test/kv/flags:home'), env);
+    expect(res.status).toBe(200);
+  });
+
+  it('JWT user u1 can read their own session:u1:tab (owner)', async () => {
+    mockResolveJwtOk('app_enforce_test', { userId: 'u1' });
+    const res = await worker.fetch(jwtReq('GET', '/v1/app_enforce_test/kv/session:u1:tab'), env);
+    expect(res.status).toBe(200);
+  });
+
+  it('JWT user u1 CANNOT read session:u2:tab (owner mismatch)', async () => {
+    mockResolveJwtOk('app_enforce_test', { userId: 'u1' });
+    const res = await worker.fetch(jwtReq('GET', '/v1/app_enforce_test/kv/session:u2:tab'), env);
+    expect(res.status).toBe(403);
+  });
+
+  it('JWT user u1 can read feed:newest (authed)', async () => {
+    mockResolveJwtOk('app_enforce_test', { userId: 'u1' });
+    const res = await worker.fetch(jwtReq('GET', '/v1/app_enforce_test/kv/feed:newest'), env);
+    expect(res.status).toBe(200);
+  });
+
+  it('JWT user u1 CANNOT write feed:newest (write=deny)', async () => {
+    mockResolveJwtOk('app_enforce_test', { userId: 'u1' });
+    const res = await worker.fetch(jwtReq('PUT', '/v1/app_enforce_test/kv/feed:newest', { value: 'x' }), env);
+    expect(res.status).toBe(403);
+  });
+
+  it('JWT user CANNOT touch _expose (always 403)', async () => {
+    mockResolveJwtOk('app_enforce_test', { userId: 'u1' });
+    const res = await worker.fetch(jwtReq('GET', '/v1/app_enforce_test/kv/_expose'), env);
+    expect(res.status).toBe(403);
+  });
+
+  it('Anonymous CAN read flags:home (public)', async () => {
+    mockResolveAnonOk('app_enforce_test');
+    const res = await worker.fetch(anonReq('GET', '/v1/app_enforce_test/kv/flags:home'), env);
+    expect(res.status).toBe(200);
+  });
+
+  it('Anonymous CANNOT read session:u1:tab (owner — not public)', async () => {
+    mockResolveAnonOk('app_enforce_test');
+    const res = await worker.fetch(anonReq('GET', '/v1/app_enforce_test/kv/session:u1:tab'), env);
+    expect(res.status).toBe(401);
+  });
+
+  it('Anonymous CANNOT write flags:home (public is read-only)', async () => {
+    mockResolveAnonOk('app_enforce_test');
+    const res = await worker.fetch(anonReq('PUT', '/v1/app_enforce_test/kv/flags:home', { value: 'off' }), env);
+    expect(res.status).toBe(401);
+  });
+
+  it('JWT user u1 _batch enforces per-op (1 allowed + 1 denied → KV_FORBIDDEN)', async () => {
+    mockResolveJwtOk('app_enforce_test', { userId: 'u1' });
+    const res = await worker.fetch(jwtReq('POST', '/v1/app_enforce_test/kv/_batch', {
+      ops: [
+        { op: 'get', key: 'flags:home' },         // public — ok
+        { op: 'set', key: 'feed:newest', value: 'no' },   // write=deny — KV_FORBIDDEN
+      ],
+    }), env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.results[0]).toEqual({ value: 'on' });
+    expect(body.results[1]).toEqual({ error: 'KV_FORBIDDEN' });
   });
 });

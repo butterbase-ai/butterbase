@@ -61,7 +61,9 @@ export function substituteAndTest(rule: CompiledRule, key: string, claims: Recor
   let src = rule.regex.source;
   for (const [name, value] of Object.entries(claims)) {
     const escaped = value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-    const tpl = `\\{${name.replace(/\./g, '\\.')}\\}`;
+    // compileRule emits the template as escaped regex source (e.g. `\{user\.id\}`),
+    // so the matcher here must match those literal backslashes too: `\\\{user\\.id\\\}`.
+    const tpl = `\\\\\\{${name.replace(/\./g, '\\\\\\.')}\\\\\\}`;
     src = src.replace(new RegExp(tpl, 'g'), escaped);
   }
   return new RegExp(src).test(key);

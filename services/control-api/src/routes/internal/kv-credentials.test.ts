@@ -196,6 +196,41 @@ describeDb('GET /v1/internal/kv/function-credentials/:app_id', () => {
   });
 });
 
+describeDb('GET /v1/internal/kv/anon-credentials/:app_id', () => {
+  it('returns 401 without the internal secret header', async () => {
+    const r = await app.inject({
+      method: 'GET',
+      url: `/v1/internal/kv/anon-credentials/${testAppId}`,
+    });
+    expect(r.statusCode).toBe(401);
+  });
+
+  it('returns 404 when no kv credential exists for the app', async () => {
+    const r = await app.inject({
+      method: 'GET',
+      url: `/v1/internal/kv/anon-credentials/${testAppId}`,
+      headers: { 'x-butterbase-internal-secret': 'test-secret' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error).toBe('no_kv_credential');
+  });
+
+  it('returns 200 with app_id, region, redis_password after provisioning', async () => {
+    await svc.provision(testAppId, 'us');
+    const r = await app.inject({
+      method: 'GET',
+      url: `/v1/internal/kv/anon-credentials/${testAppId}`,
+      headers: { 'x-butterbase-internal-secret': 'test-secret' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.app_id).toBe(testAppId);
+    expect(body.region).toBe('us');
+    expect(typeof body.redis_password).toBe('string');
+    expect(body.redis_password.length).toBeGreaterThan(0);
+  });
+});
+
 describeDb('POST /v1/internal/kv/resolve-key', () => {
   it('returns app_id + region + redis_password for a valid API key and owned app', async () => {
     // Provision a KV credential for the test app

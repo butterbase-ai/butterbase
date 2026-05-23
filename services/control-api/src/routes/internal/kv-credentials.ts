@@ -77,6 +77,15 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   fastify.get<{ Params: { app_id: string } }>(
+    '/v1/internal/kv/anon-credentials/:app_id',
+    async (req, reply) => {
+      const cred = await svc.lookup(req.params.app_id);
+      if (!cred) return reply.code(404).send({ error: 'no_kv_credential' });
+      return { app_id: cred.app_id, region: cred.region, redis_password: cred.redis_password };
+    },
+  );
+
+  fastify.get<{ Params: { app_id: string } }>(
     '/v1/internal/kv/function-credentials/:app_id',
     async (req, reply) => {
       const cred = await svc.lookup(req.params.app_id);
