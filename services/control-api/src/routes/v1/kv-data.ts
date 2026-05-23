@@ -31,6 +31,25 @@ import {
   type CompiledRule,
 } from '../../services/kv/expose.js';
 
+// ── Size-delta helper ─────────────────────────────────────────────────────────
+
+/**
+ * Compute the net storage byte delta for a write operation.
+ *
+ * oldRaw — the old JSON-encoded value retrieved from Redis before the write
+ *           (null when the key did not exist).
+ * newRaw — the new JSON-encoded value that was written to Redis
+ *           (null for deletes).
+ *
+ * A positive delta means bytes were added; negative means bytes were freed.
+ * The daily reconcile (Task 7) corrects any drift from missed read-before-write.
+ */
+function sizeDeltaBytes(oldRaw: string | null, newRaw: string | null): number {
+  const oldBytes = oldRaw !== null ? Buffer.byteLength(oldRaw) : 0;
+  const newBytes = newRaw !== null ? Buffer.byteLength(newRaw) : 0;
+  return newBytes - oldBytes;
+}
+
 // ── Constants (must match kv-gateway/src/worker.ts) ───────────────────────────
 
 const DEFAULT_TTL_SECONDS = 30 * 24 * 3600; // 30 days
@@ -205,6 +224,7 @@ function parseWildcard(wildcard: string): { key: string; action: string | null }
 // ── Handler helpers (extracted to keep wildcard handlers small) ───────────────
 
 type AuthOk = import('../../services/kv/auth.js').KvAuthSuccess;
+type AccountFn = (sizeDelta: number) => void;
 
 async function handleGet(
   key: string,
@@ -212,6 +232,7 @@ async function handleGet(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   touch: boolean,
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -259,6 +280,8 @@ async function handleGet(
     }
   }
 
+  // Reads don't change storage; pass sizeDelta=0
+  account(0);
   return reply.code(200).send({ value: JSON.parse(v!) });
 }
 
@@ -267,6 +290,7 @@ async function handleGetTtl(
   auth: AuthOk,
   baseOpts: Omit<RedisClientOptions, 'db'>,
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -278,6 +302,7 @@ async function handleGetTtl(
   let t = await withRedis(baseOpts, DURABLE_DB, (c) => c.ttl(fk));
   if (t === -2) t = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.ttl(fk));
   if (t === -2) return reply.code(404).send(errBody('not_found'));
+  account(0);
   return reply.code(200).send({ ttl: t === -1 ? null : t });
 }
 
@@ -286,6 +311,7 @@ async function handleGetExists(
   auth: AuthOk,
   baseOpts: Omit<RedisClientOptions, 'db'>,
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -295,6 +321,7 @@ async function handleGetExists(
 
   const fk = userKey(auth.appId, key);
   const existsDurable = await withRedis(baseOpts, DURABLE_DB, (c) => c.exists(fk));
+  account(0);
   if (existsDurable) return reply.code(200).send({ exists: true });
   const existsEphemeral = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.exists(fk));
   return reply.code(200).send({ exists: existsEphemeral });
@@ -306,6 +333,7 @@ async function handlePut(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   body: { value?: unknown; ttl?: unknown; ephemeral?: boolean },
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -325,6 +353,17 @@ async function handlePut(
   if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
 
   const fk = userKey(auth.appId, key);
+
+  // Read the old value to compute the accurate storage delta.
+  // The GET is cheap on the same shard. The daily reconcile (Task 7) corrects
+  // any drift in case this read races with a concurrent write.
+  let oldRaw: string | null = null;
+  try {
+    oldRaw = await withRedis(baseOpts, db, (c) => c.get(fk));
+  } catch {
+    // best-effort; delta will be slightly inaccurate, reconcile corrects it
+  }
+
   await withRedis(baseOpts, db, async (c) => {
     if (resolvedTtl === null) {
       await c.set(fk, encoded);
@@ -333,6 +372,7 @@ async function handlePut(
     }
   });
   await deleteFromOtherDb(baseOpts, db, fk);
+  account(sizeDeltaBytes(oldRaw, encoded));
   return reply.code(204).send();
 }
 
@@ -341,6 +381,7 @@ async function handleDelete(
   auth: AuthOk,
   baseOpts: Omit<RedisClientOptions, 'db'>,
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -349,8 +390,25 @@ async function handleDelete(
   }
 
   const fk = userKey(auth.appId, key);
+
+  // Read old value from both DBs before deletion to compute size delta.
+  let oldDurable: string | null = null;
+  let oldEphemeral: string | null = null;
+  try {
+    oldDurable = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
+    oldEphemeral = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.get(fk));
+  } catch {
+    // best-effort
+  }
+
   const delDur = await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fk]));
   const delEph = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fk]));
+
+  // Negative delta: bytes freed by the deletion
+  const freed = (oldDurable !== null ? Buffer.byteLength(oldDurable) : 0)
+    + (oldEphemeral !== null ? Buffer.byteLength(oldEphemeral) : 0);
+  account(-freed);
+
   return reply.code(200).send({ deleted: delDur + delEph });
 }
 
@@ -360,6 +418,7 @@ async function handleIncr(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   body: { by?: unknown },
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -372,7 +431,16 @@ async function handleIncr(
     return reply.code(400).send(errBody('bad_request', 'by must be an integer'));
   }
   const fk = userKey(auth.appId, key);
+
+  // Read old raw value to compute size delta (number length may change)
+  let oldRaw: string | null = null;
+  try {
+    oldRaw = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
+  } catch { /* best-effort */ }
+
   const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.incrBy(fk, by));
+  const newRaw = String(value);
+  account(sizeDeltaBytes(oldRaw, newRaw));
   return reply.code(200).send({ value });
 }
 
@@ -382,6 +450,7 @@ async function handleDecr(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   body: { by?: unknown },
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -394,7 +463,16 @@ async function handleDecr(
     return reply.code(400).send(errBody('bad_request', 'by must be an integer'));
   }
   const fk = userKey(auth.appId, key);
+
+  // Read old raw value to compute size delta (number length may change)
+  let oldRaw: string | null = null;
+  try {
+    oldRaw = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
+  } catch { /* best-effort */ }
+
   const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.decrBy(fk, by));
+  const newRaw = String(value);
+  account(sizeDeltaBytes(oldRaw, newRaw));
   return reply.code(200).send({ value });
 }
 
@@ -404,6 +482,7 @@ async function handleSetnx(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   body: { value?: unknown; ttl?: unknown; ephemeral?: boolean },
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -429,7 +508,14 @@ async function handleSetnx(
       nx: true,
     }),
   );
-  if (wrote) await deleteFromOtherDb(baseOpts, db, fk);
+  if (wrote) {
+    await deleteFromOtherDb(baseOpts, db, fk);
+    // setnx only writes if key didn't exist; delta is the full new value size
+    account(sizeDeltaBytes(null, encoded));
+  } else {
+    // Key already existed; no storage change
+    account(0);
+  }
   return reply.code(wrote ? 201 : 200).send({ wrote });
 }
 
@@ -439,6 +525,7 @@ async function handleCas(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   body: { expected?: unknown; next?: unknown },
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -457,10 +544,23 @@ async function handleCas(
   if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
 
   const fk = userKey(auth.appId, key);
+
+  // Read old value before CAS to compute delta on success
+  let oldRaw: string | null = null;
+  try {
+    oldRaw = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
+  } catch { /* best-effort */ }
+
   const r = await withRedis(baseOpts, DURABLE_DB, (c) =>
     c.eval(CAS_SCRIPT, [fk], [expectedArg, nextArg]),
   );
-  return reply.code(200).send({ swapped: r === 1 });
+  const swapped = r === 1;
+  if (swapped) {
+    account(sizeDeltaBytes(oldRaw, nextArg));
+  } else {
+    account(0);
+  }
+  return reply.code(200).send({ swapped });
 }
 
 async function handleExpire(
@@ -469,6 +569,7 @@ async function handleExpire(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   body: { ttl?: unknown },
   reply: import('fastify').FastifyReply,
+  account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
     const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
@@ -487,6 +588,8 @@ async function handleExpire(
 
   const fk = userKey(auth.appId, key);
   const applied = await withRedis(baseOpts, DURABLE_DB, (c) => c.expire(fk, ttl));
+  // expire doesn't change value bytes; no storage delta
+  account(0);
   return reply.code(200).send({ applied });
 }
 
@@ -531,6 +634,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const results: unknown[] = [];
+    let batchStorageDelta = 0;
     await withRedis(baseOpts, DURABLE_DB, async (client) => {
       for (const op of body.ops as Array<{ op?: unknown; key?: unknown; value?: unknown }>) {
         if (typeof op.op !== 'string' || !['get', 'set', 'del'].includes(op.op)) {
@@ -567,10 +671,18 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
               results.push({ error: 'KV_VALUE_TOO_LARGE' });
               continue;
             }
+            // Read old value before set for accurate storage delta
+            let oldRaw: string | null = null;
+            try { oldRaw = await client.get(fk); } catch { /* best-effort */ }
             await client.set(fk, encoded);
+            batchStorageDelta += sizeDeltaBytes(oldRaw, encoded);
             results.push({ ok: true });
           } else if (op.op === 'del') {
+            // Read old value before del for accurate storage delta
+            let oldRaw: string | null = null;
+            try { oldRaw = await client.get(fk); } catch { /* best-effort */ }
             const count = await client.del([fk]);
+            if (oldRaw !== null) batchStorageDelta -= Buffer.byteLength(oldRaw);
             results.push({ deleted: count });
           }
         } catch (e) {
@@ -578,6 +690,11 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
     });
+
+    // Account for the batch as a whole after all ops complete
+    if ((fastify as any).kvAccount) {
+      (fastify as any).kvAccount(req, batchStorageDelta);
+    }
 
     return reply.code(200).send({ results });
   });
@@ -601,11 +718,15 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     const authOk = auth as AuthOk;
     const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
 
+    const account: AccountFn = (sizeDelta) => {
+      if ((fastify as any).kvAccount) (fastify as any).kvAccount(req, sizeDelta);
+    };
+
     if (action === 'ttl') {
-      return handleGetTtl(key, authOk, baseOpts, reply);
+      return handleGetTtl(key, authOk, baseOpts, reply, account);
     }
     if (action === 'exists') {
-      return handleGetExists(key, authOk, baseOpts, reply);
+      return handleGetExists(key, authOk, baseOpts, reply, account);
     }
     if (action !== null) {
       // No other GET actions defined
@@ -613,7 +734,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const touch = req.query.touch === 'true';
-    return handleGet(key, authOk, baseOpts, touch, reply);
+    return handleGet(key, authOk, baseOpts, touch, reply, account);
   });
 
   // ── Wildcard PUT /v1/:app_id/kv/* ─────────────────────────────────────────
@@ -640,7 +761,10 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     const authOk = auth as AuthOk;
     const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
     const body = req.body as { value?: unknown; ttl?: unknown; ephemeral?: boolean };
-    return handlePut(key, authOk, baseOpts, body, reply);
+    const account: AccountFn = (sizeDelta) => {
+      if ((fastify as any).kvAccount) (fastify as any).kvAccount(req, sizeDelta);
+    };
+    return handlePut(key, authOk, baseOpts, body, reply, account);
   });
 
   // ── Wildcard DELETE /v1/:app_id/kv/* ──────────────────────────────────────
@@ -665,7 +789,10 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
 
     const authOk = auth as AuthOk;
     const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
-    return handleDelete(key, authOk, baseOpts, reply);
+    const account: AccountFn = (sizeDelta) => {
+      if ((fastify as any).kvAccount) (fastify as any).kvAccount(req, sizeDelta);
+    };
+    return handleDelete(key, authOk, baseOpts, reply, account);
   });
 
   // ── Wildcard POST /v1/:app_id/kv/* ────────────────────────────────────────
@@ -693,18 +820,21 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     const authOk = auth as AuthOk;
     const baseOpts = baseOptsForRegion(authOk.region, authOk.redisPassword);
     const body = (req.body ?? {}) as Record<string, unknown>;
+    const account: AccountFn = (sizeDelta) => {
+      if ((fastify as any).kvAccount) (fastify as any).kvAccount(req, sizeDelta);
+    };
 
     switch (action) {
       case 'incr':
-        return handleIncr(key, authOk, baseOpts, body, reply);
+        return handleIncr(key, authOk, baseOpts, body, reply, account);
       case 'decr':
-        return handleDecr(key, authOk, baseOpts, body, reply);
+        return handleDecr(key, authOk, baseOpts, body, reply, account);
       case 'setnx':
-        return handleSetnx(key, authOk, baseOpts, body, reply);
+        return handleSetnx(key, authOk, baseOpts, body, reply, account);
       case 'cas':
-        return handleCas(key, authOk, baseOpts, body, reply);
+        return handleCas(key, authOk, baseOpts, body, reply, account);
       case 'expire':
-        return handleExpire(key, authOk, baseOpts, body, reply);
+        return handleExpire(key, authOk, baseOpts, body, reply, account);
       default:
         // ttl/exists are GET-only actions; POST to them is not defined
         return reply.code(404).send(errBody('not_found'));
