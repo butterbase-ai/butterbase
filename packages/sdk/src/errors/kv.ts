@@ -52,6 +52,13 @@ export class KvCasMismatchError extends KvError {
   }
 }
 
+export class KvExposeConflictError extends KvError {
+  constructor(m = 'expose pattern conflicts with existing rule', c = 'KV_EXPOSE_CONFLICT', s = 409, r?: string, d?: unknown) {
+    super(m, c, s, r, d);
+    this.name = 'KvExposeConflictError';
+  }
+}
+
 export class KvValueTooLargeError extends KvError {
   constructor(m = 'value too large', c = 'KV_VALUE_TOO_LARGE', s = 413, r?: string, d?: unknown) {
     super(m, c, s, r, d);

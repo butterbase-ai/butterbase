@@ -1,7 +1,7 @@
 // packages/sdk/src/kv.ts
 import {
   KvError, KvNotFoundError, KvKeyInvalidError, KvAuthError, KvForbiddenError, KvConnectionError,
-  KvCasMismatchError, KvValueTooLargeError,
+  KvCasMismatchError, KvExposeConflictError, KvValueTooLargeError,
 } from './errors/kv.js';
 
 export interface KvShim {
@@ -49,7 +49,10 @@ export function makeKv(opts: MakeKvOptions): KvShim {
     if (res.status === 400) throw new KvKeyInvalidError(msg);
     if (res.status === 401) throw new KvAuthError(msg);
     if (res.status === 403) throw new KvForbiddenError(msg);
-    if (res.status === 409) throw new KvCasMismatchError(msg); // not exercised today; kept for forward-compat (see KvCasMismatchError)
+    if (res.status === 409) {
+      if (body?.error === 'KV_EXPOSE_CONFLICT') throw new KvExposeConflictError(msg);
+      throw new KvCasMismatchError(msg); // reserved for future strict-CAS mode
+    }
     if (res.status === 413) throw new KvValueTooLargeError(msg);
     if (res.status === 503) throw new KvConnectionError(msg);
     throw new KvError(msg, body?.error ?? 'KV_ERROR', res.status);
