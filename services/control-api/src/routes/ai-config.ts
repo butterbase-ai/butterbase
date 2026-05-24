@@ -48,8 +48,8 @@ async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promis
   };
 }
 
-async function getAppDefaultModel(controlPool: pg.Pool, appId: string): Promise<string | null> {
-  const r = await controlPool.query<{ ai_config: { defaultModel?: string } | null }>(
+async function getAppDefaultModel(runtimePool: pg.Pool, appId: string): Promise<string | null> {
+  const r = await runtimePool.query<{ ai_config: { defaultModel?: string } | null }>(
     `SELECT ai_config FROM apps WHERE id = $1`,
     [appId]
   );
@@ -240,8 +240,11 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {
+        const region = await resolveAppHomeRegion(app.controlDb, appId);
+        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+
         const modelResolved = body.model
-          || (await getAppDefaultModel(app.controlDb, appId))
+          || (await getAppDefaultModel(runtimePool, appId))
           || config.aiRouter.platformDefaultModel;
 
         if (!modelResolved) {
@@ -251,9 +254,6 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             message: 'No model specified and no default configured. Set apps.ai_config.defaultModel or pass a model in the request.',
           });
         }
-
-        const region = await resolveAppHomeRegion(app.controlDb, appId);
-        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
 
         const result = await routeChatCompletion(
           {
@@ -358,8 +358,11 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {
+        const region = await resolveAppHomeRegion(app.controlDb, appId);
+        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+
         const modelResolved = body.model
-          || (await getAppDefaultModel(app.controlDb, appId))
+          || (await getAppDefaultModel(runtimePool, appId))
           || config.aiRouter.platformDefaultModel;
 
         if (!modelResolved) {
@@ -369,9 +372,6 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             message: 'No model specified and no default configured. Set apps.ai_config.defaultModel or pass a model in the request.',
           });
         }
-
-        const region = await resolveAppHomeRegion(app.controlDb, appId);
-        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
 
         const result = await routeEmbedding(
           {
