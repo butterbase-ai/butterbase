@@ -363,6 +363,31 @@ export async function handler(req: Request, ctx: FunctionContext) {
 }
 ```
 
+**Read with sliding TTL refresh:**
+
+```ts
+// Each read refreshes the TTL back to the original window
+const session = await ctx.kv.get<Session>(`session:${id}`, { touch: true });
+```
+
+**Batch reads and writes:**
+
+```ts
+await ctx.kv.mset({
+  'feature:new-checkout': 'on',
+  'feature:new-pricing': 'off',
+});
+
+const flags = await ctx.kv.mget(['feature:new-checkout', 'feature:new-pricing']);
+// flags === ['on', 'off']  (null for any missing key)
+```
+
+**Ephemeral cache write (smaller, faster, not durable across regional restarts):**
+
+```ts
+await ctx.kv.set(`cache:user:${id}`, payload, { ttl: 60, ephemeral: true });
+```
+
 ## Migration from 0.x to 1.0
 
 The `authUrl` parameter has been removed. All auth endpoints now run on the same URL as the API — just use `apiUrl`.
