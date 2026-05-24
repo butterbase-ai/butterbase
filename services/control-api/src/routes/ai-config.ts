@@ -448,12 +448,22 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         const redis = getRedisClient();
         const ids = await listCatalogModels(redis);
         const entries = await Promise.all(ids.map(id => readCatalogEntry(redis, id)));
-        // Strip router-internal fields; surface canonical id, display name, context length only.
-        const models = entries.filter(Boolean).map(e => ({
-          id: e!.canonicalId,
-          name: e!.displayName,
-          context_length: e!.routers.length > 0 ? Math.max(...e!.routers.map(r => r.contextLength)) : 0,
-        }));
+        const models = entries.filter(Boolean).map(e => {
+          const firstRouter = e!.routers.length > 0 ? e!.routers[0] : null;
+          // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
+          const modality = firstRouter?.modality ?? 'chat';
+          // For token-priced modalities (chat, embedding), expose token pricing
+          const isTokenPriced = modality === 'chat' || modality === 'embedding';
+          return {
+            id: e!.canonicalId,
+            name: e!.displayName,
+            context_length: e!.routers.length > 0 ? Math.max(...e!.routers.map(r => r.contextLength)) : 0,
+            modality,
+            prompt_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.promptPricePerMtok : null,
+            completion_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.completionPricePerMtok : null,
+            raw_pricing: !isTokenPriced && firstRouter ? firstRouter.rawPricing ?? null : null,
+          };
+        });
         return { models };
       }
 
