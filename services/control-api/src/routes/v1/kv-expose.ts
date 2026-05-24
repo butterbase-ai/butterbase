@@ -71,6 +71,7 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /v1/:app_id/kv/_expose
   fastify.get<{ Params: { app_id: string } }>(
     '/v1/:app_id/kv/_expose',
+    { config: { public: true } },
     async (req, reply) => {
       const { app_id: appId } = req.params;
 
@@ -105,7 +106,7 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Params: { app_id: string };
     Body: { rules?: unknown };
-  }>('/v1/:app_id/kv/_expose', async (req, reply) => {
+  }>('/v1/:app_id/kv/_expose', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
@@ -154,7 +155,7 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Params: { app_id: string; pattern: string };
     Body: { read?: unknown; write?: unknown };
-  }>('/v1/:app_id/kv/_expose/:pattern', async (req, reply) => {
+  }>('/v1/:app_id/kv/_expose/:pattern', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const pattern = decodeURIComponent(req.params.pattern);
 
@@ -212,7 +213,7 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
   // DELETE /v1/:app_id/kv/_expose/:pattern
   fastify.delete<{
     Params: { app_id: string; pattern: string };
-  }>('/v1/:app_id/kv/_expose/:pattern', async (req, reply) => {
+  }>('/v1/:app_id/kv/_expose/:pattern', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const pattern = decodeURIComponent(req.params.pattern);
 

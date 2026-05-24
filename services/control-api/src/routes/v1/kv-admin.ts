@@ -43,7 +43,7 @@ const kvAdminRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{
     Params: { app_id: string };
     Querystring: { prefix?: string; limit?: string; cursor?: string };
-  }>('/v1/:app_id/kv/_scan', async (req, reply) => {
+  }>('/v1/:app_id/kv/_scan', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
@@ -65,7 +65,7 @@ const kvAdminRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /v1/:app_id/kv/_stats
   fastify.get<{
     Params: { app_id: string };
-  }>('/v1/:app_id/kv/_stats', async (req, reply) => {
+  }>('/v1/:app_id/kv/_stats', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
@@ -86,7 +86,7 @@ const kvAdminRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Params: { app_id: string };
     Body: { confirm?: unknown; include_config?: boolean };
-  }>('/v1/:app_id/kv/_flush', async (req, reply) => {
+  }>('/v1/:app_id/kv/_flush', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);

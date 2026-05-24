@@ -17,7 +17,7 @@ const kvAuditRecentRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{
     Params: { app_id: string };
     Querystring: { limit?: string };
-  }>('/v1/:app_id/kv/_audit_recent', async (req, reply) => {
+  }>('/v1/:app_id/kv/_audit_recent', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
     if ('error' in auth) return reply.code(auth.status).send(auth.body);

@@ -614,7 +614,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Params: { app_id: string };
     Body: { ops?: unknown[] };
-  }>('/v1/:app_id/kv/_batch', async (req, reply) => {
+  }>('/v1/:app_id/kv/_batch', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
 
     const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
@@ -724,7 +724,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{
     Params: { app_id: string; '*': string };
     Querystring: { touch?: string };
-  }>('/v1/:app_id/kv/*', async (req, reply) => {
+  }>('/v1/:app_id/kv/*', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const wildcard = (req.params as Record<string, string>)['*'] ?? '';
     const { key, action } = parseWildcard(wildcard);
@@ -762,7 +762,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Params: { app_id: string; '*': string };
     Body: { value: unknown; ttl?: number | null; ephemeral?: boolean };
-  }>('/v1/:app_id/kv/*', async (req, reply) => {
+  }>('/v1/:app_id/kv/*', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const wildcard = (req.params as Record<string, string>)['*'] ?? '';
     const { key, action } = parseWildcard(wildcard);
@@ -791,7 +791,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   // Handles: DELETE key (no DELETE actions exist)
   fastify.delete<{
     Params: { app_id: string; '*': string };
-  }>('/v1/:app_id/kv/*', async (req, reply) => {
+  }>('/v1/:app_id/kv/*', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const wildcard = (req.params as Record<string, string>)['*'] ?? '';
     const { key, action } = parseWildcard(wildcard);
@@ -821,7 +821,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Params: { app_id: string; '*': string };
     Body: Record<string, unknown>;
-  }>('/v1/:app_id/kv/*', async (req, reply) => {
+  }>('/v1/:app_id/kv/*', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const wildcard = (req.params as Record<string, string>)['*'] ?? '';
     const { key, action } = parseWildcard(wildcard);
