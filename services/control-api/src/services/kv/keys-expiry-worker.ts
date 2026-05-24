@@ -4,6 +4,7 @@
 
 import { Redis } from 'ioredis';
 import { decKeys } from './keys-counter.js';
+import { decBytes } from './storage-counter.js';
 import { RedisClient, type RedisClientOptions } from './redis-client.js';
 
 const USER_KEY_RE = /^\{([^}]+)\}:u:/;
@@ -66,9 +67,19 @@ export function startKeysExpiryWorker(opts: StartKeysExpiryWorkerOpts): KeysExpi
       const m = USER_KEY_RE.exec(key);
       if (!m) return;
       const appId = m[1];
+      const prefix = `{${appId}}:u:`;
+      const suffix = key.startsWith(prefix) ? key.slice(prefix.length) : null;
       try {
         const writer = await getWriter(region);
+        let size: number | null = null;
+        if (suffix !== null) {
+          const raw = await writer.hget(`{${appId}}:_meta:bytes_idx`, suffix);
+          const parsed = raw !== null ? parseInt(raw, 10) : NaN;
+          size = Number.isFinite(parsed) ? parsed : null;
+          await writer.hdel(`{${appId}}:_meta:bytes_idx`, [suffix]);
+        }
         await decKeys(writer, appId, 1);
+        if (size !== null && size > 0) await decBytes(writer, appId, size);
       } catch (err) {
         opts.log.warn({ region, key, err: (err as Error).message }, '[keys-expiry] decrement failed');
       }

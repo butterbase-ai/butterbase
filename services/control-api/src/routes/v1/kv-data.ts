@@ -386,6 +386,13 @@ async function handlePut(
     }
   });
   await deleteFromOtherDb(baseOpts, db, fk);
+
+  // Best-effort sidecar size index update (raw key suffix, no encoding).
+  const sizeBytes = Buffer.byteLength(encoded, 'utf8');
+  void withRedis(baseOpts, DURABLE_DB, (c) =>
+    c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
+  ).catch(() => {});
+
   account(sizeDeltaBytes(oldRaw, encoded), keyDeltaForWrite(oldRaw, encoded));
   return reply.code(204).send();
 }
@@ -417,6 +424,11 @@ async function handleDelete(
 
   const delDur = await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fk]));
   const delEph = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fk]));
+
+  // Best-effort sidecar size index cleanup (raw key suffix, no encoding).
+  void withRedis(baseOpts, DURABLE_DB, (c) =>
+    c.hdel(`{${auth.appId}}:_meta:bytes_idx`, [key])
+  ).catch(() => {});
 
   // Negative delta: bytes freed by the deletion
   const freed = (oldDurable !== null ? Buffer.byteLength(oldDurable) : 0)
@@ -456,6 +468,13 @@ async function handleIncr(
 
   const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.incrBy(fk, by));
   const newRaw = String(value);
+
+  // Best-effort sidecar size index update.
+  const sizeBytes = Buffer.byteLength(newRaw, 'utf8');
+  void withRedis(baseOpts, DURABLE_DB, (c) =>
+    c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
+  ).catch(() => {});
+
   account(sizeDeltaBytes(oldRaw, newRaw), keyDeltaForWrite(oldRaw, newRaw));
   return reply.code(200).send({ value });
 }
@@ -488,6 +507,13 @@ async function handleDecr(
 
   const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.decrBy(fk, by));
   const newRaw = String(value);
+
+  // Best-effort sidecar size index update.
+  const sizeBytes = Buffer.byteLength(newRaw, 'utf8');
+  void withRedis(baseOpts, DURABLE_DB, (c) =>
+    c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
+  ).catch(() => {});
+
   account(sizeDeltaBytes(oldRaw, newRaw), keyDeltaForWrite(oldRaw, newRaw));
   return reply.code(200).send({ value });
 }
@@ -527,6 +553,11 @@ async function handleSetnx(
   if (wrote) {
     await deleteFromOtherDb(baseOpts, db, fk);
     // setnx only writes if key didn't exist; delta is the full new value size + 1 key
+    // Best-effort sidecar size index update (raw key suffix, no encoding).
+    const sizeBytes = Buffer.byteLength(encoded, 'utf8');
+    void withRedis(baseOpts, DURABLE_DB, (c) =>
+      c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
+    ).catch(() => {});
     account(sizeDeltaBytes(null, encoded), keyDeltaForWrite(null, encoded));
   } else {
     // Key already existed; no storage change
@@ -572,6 +603,11 @@ async function handleCas(
   );
   const swapped = r === 1;
   if (swapped) {
+    // Best-effort sidecar size index update (raw key suffix, no encoding).
+    const sizeBytes = Buffer.byteLength(nextArg, 'utf8');
+    void withRedis(baseOpts, DURABLE_DB, (c) =>
+      c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
+    ).catch(() => {});
     account(sizeDeltaBytes(oldRaw, nextArg), keyDeltaForWrite(oldRaw, nextArg));
   } else {
     account(0, 0);
@@ -692,6 +728,9 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
             let oldRaw: string | null = null;
             try { oldRaw = await client.get(fk); } catch { /* best-effort */ }
             await client.set(fk, encoded);
+            // Best-effort sidecar size index update (raw key suffix, no encoding).
+            const sizeBytes = Buffer.byteLength(encoded, 'utf8');
+            void client.hset(`{${authOk.appId}}:_meta:bytes_idx`, op.key, String(sizeBytes)).catch(() => {});
             batchStorageDelta += sizeDeltaBytes(oldRaw, encoded);
             batchKeyDelta += keyDeltaForWrite(oldRaw, encoded);
             results.push({ ok: true });
@@ -700,6 +739,8 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
             let oldRaw: string | null = null;
             try { oldRaw = await client.get(fk); } catch { /* best-effort */ }
             const count = await client.del([fk]);
+            // Best-effort sidecar size index cleanup (raw key suffix, no encoding).
+            void client.hdel(`{${authOk.appId}}:_meta:bytes_idx`, [op.key]).catch(() => {});
             if (oldRaw !== null) batchStorageDelta -= Buffer.byteLength(oldRaw);
             batchKeyDelta += keyDeltaForWrite(oldRaw, null);
             results.push({ deleted: count });

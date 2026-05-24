@@ -563,6 +563,32 @@ app.decorate('moveAppCtx', {
 app.register(reverseMoveRoutes);
 app.register(sourceReplicaRoutes);
 
+// Register KV keys-expiry onClose hook NOW (before app.ready() is called), so
+// addHook does not throw FST_ERR_INSTANCE_ALREADY_LISTENING.  avvio fires the
+// 'start' event — and sets fastify.started = true — when ready() resolves, so
+// any addHook called after that point will throw. We start the subscriber here
+// and register the cleanup hook; the subscriber begins connecting immediately.
+if (process.env.NODE_ENV !== 'test') {
+  const regionsRaw = process.env.BUTTERBASE_REGIONS ?? '';
+  const kvRegions = regionsRaw.split(',').map((r) => r.trim()).filter(Boolean);
+  if (kvRegions.length > 0) {
+    const keysExpiry = startKeysExpiryWorker({
+      regions: kvRegions,
+      urlForRegion: (region) => {
+        const envKey = `KV_REDIS_URL_${region.toUpperCase().replace(/-/g, '_')}`;
+        const url = process.env[envKey];
+        if (!url) throw new Error(`Missing ${envKey}`);
+        return url;
+      },
+      log: app.log,
+    });
+    app.log.info({ regions: kvRegions }, 'KV expiry-subscriber started');
+    app.addHook('onClose', async () => { await keysExpiry.stop(); });
+  } else {
+    app.log.warn('BUTTERBASE_REGIONS empty — KV expiry-subscriber not started');
+  }
+}
+
 // Start background workers after server is ready
 Promise.resolve(app.ready())
   .then(() => {
@@ -603,26 +629,6 @@ Promise.resolve(app.ready())
     const kvReconcileInterval = startKvReconcileWorker(app.controlDb);
     (app as any).kvReconcileInterval = kvReconcileInterval;
     app.log.info('KV reconcile worker started (24h interval)');
-
-    // Start KV keys-expiry subscriber (per-region keyspace notifications)
-    const regionsRaw = process.env.BUTTERBASE_REGIONS ?? '';
-    const kvRegions = regionsRaw.split(',').map((r) => r.trim()).filter(Boolean);
-    if (kvRegions.length === 0) {
-      app.log.warn('BUTTERBASE_REGIONS empty — KV expiry-subscriber not started');
-    } else {
-      const keysExpiry = startKeysExpiryWorker({
-        regions: kvRegions,
-        urlForRegion: (region) => {
-          const envKey = `KV_REDIS_URL_${region.toUpperCase().replace(/-/g, '_')}`;
-          const url = process.env[envKey];
-          if (!url) throw new Error(`Missing ${envKey}`);
-          return url;
-        },
-        log: app.log,
-      });
-      app.log.info({ regions: kvRegions }, 'KV expiry-subscriber started');
-      app.addHook('onClose', async () => { await keysExpiry.stop(); });
-    }
 
     // Schedule nightly soft-lock auto-restore check (runs at 2 AM)
     const scheduleNightlyRestore = () => {

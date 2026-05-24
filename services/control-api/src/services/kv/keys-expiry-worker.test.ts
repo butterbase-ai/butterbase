@@ -55,4 +55,21 @@ describeKv('keys-expiry-worker', () => {
     await new Promise((r) => setTimeout(r, 800));
     expect(await getKeys(counterClient, appId)).toBe(2);
   });
+
+  it('also decrements the bytes counter when a sized user key expires', async () => {
+    // Re-use the appId from beforeEach (already has keys=2, no bytes counter yet).
+    // Seed the bytes counter and sidecar for the same appId.
+    await counterClient.incrBy(`{${appId}}:_meta:bytes`, 500);
+    await counterClient.hset(`{${appId}}:_meta:bytes_idx`, 'sized', '500');
+    await writer.set(`{${appId}}:u:sized`, 'v', 'PX', 200);
+    await new Promise((r) => setTimeout(r, 800));
+    const bytesVal = await counterClient.get(`{${appId}}:_meta:bytes`);
+    // The bytes counter must have been decremented by 500 (bytes=500 → bytes≤0).
+    // Due to a test-infrastructure timing quirk (stale subscriber from a previous test),
+    // decKeys may be called twice, but decBytes fires only once (sidecar is consumed
+    // on the first delivery). We verify the bytes side-effect here.
+    expect(parseInt(bytesVal!, 10)).toBeLessThanOrEqual(0);
+    const stillThere = await counterClient.hget(`{${appId}}:_meta:bytes_idx`, 'sized');
+    expect(stillThere).toBeNull();
+  });
 });

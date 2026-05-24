@@ -99,6 +99,9 @@ export async function reconcileFromScan(
   const match = `{${appId}}:u:*`;
   let actual = 0;
   let keysActual = 0;
+  // Accumulate (suffix, usedBytes) pairs for the sidecar rebuild.
+  const sizedPairs: Array<[string, number]> = [];
+  const userKeyPrefix = `{${appId}}:u:`;
 
   // Scan both DB 0 (durable) and DB 1 (ephemeral) sequentially.
   async function collectDb(db: number) {
@@ -111,6 +114,10 @@ export async function reconcileFromScan(
           const used = await c.memoryUsage(k);
           if (used !== null) {
             actual += used;
+            // Record suffix for sidecar rebuild (only durable DB keys get a sidecar entry,
+            // but include all for completeness — reconcile is the source of truth).
+            const suffix = k.startsWith(userKeyPrefix) ? k.slice(userKeyPrefix.length) : null;
+            if (suffix !== null) sizedPairs.push([suffix, used]);
           }
           keysActual++;
         }
@@ -124,6 +131,12 @@ export async function reconcileFromScan(
   // Update the byte counter and the key counter with actual values.
   await client.set(metaKey(appId), String(actual));
   await client.set(`{${appId}}:_meta:keys`, String(keysActual));
+
+  // Rebuild the sidecar size index from scratch.
+  await client.del([`{${appId}}:_meta:bytes_idx`]);
+  for (const [suffix, used] of sizedPairs) {
+    await client.hset(`{${appId}}:_meta:bytes_idx`, suffix, String(used));
+  }
 
   // Best-effort snapshot write to the control-plane DB.
   if (opts.controlPool && opts.region) {
