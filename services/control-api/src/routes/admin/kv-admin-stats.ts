@@ -152,14 +152,14 @@ const kvAdminStatsRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     const rate = await ctrl.query(
-      `SELECT al.app_id, akc.region,
+      `SELECT al.app_id, uai.region,
               COUNT(*) FILTER (WHERE al.status_code = 429) AS rate_limited,
               COUNT(*) AS total_ops,
               MIN(al.at) FILTER (WHERE al.status_code = 429) AS first_seen
          FROM audit_logs al
-         JOIN app_kv_credentials akc ON akc.app_id = al.app_id
+         JOIN user_app_index uai ON uai.app_id = al.app_id
         WHERE al.path LIKE '/v1/%/kv/%' AND al.at > now() - interval '24 hours'
-        GROUP BY al.app_id, akc.region
+        GROUP BY al.app_id, uai.region
        HAVING COUNT(*) FILTER (WHERE al.status_code = 429)::float / NULLIF(COUNT(*), 0) >= 0.05`,
     );
 
