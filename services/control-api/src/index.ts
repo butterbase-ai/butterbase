@@ -111,7 +111,7 @@ import regionsRoutes from './routes/regions.js';
 import { writeSubdomainMapping, writeDomainMapping } from './services/cloudflare-wfp.js';
 import { updateUserAppIndexRegion } from './services/user-app-index.js';
 import { enqueueDeprovision } from './services/move-app/source-retention.js';
-import { invalidateAppRegion } from './services/region-resolver.js';
+import { invalidateAppRegion, getRuntimeDbForApp } from './services/region-resolver.js';
 import { runtimePoolFor, listRuntimeRegions } from './services/runtime-pool-registry.js';
 import { redisFor } from './services/redis-registry.js';
 import { auditRuntimeTablesForPool } from './services/move-app/runtime-table-audit.js';
@@ -281,8 +281,15 @@ app.addHook('preHandler', async (request, reply) => {
   // Skip routes that only use the control DB
   if (url.includes('/fn/') || url.includes('/billing/')) return;
 
-  const region = assertRegionConfig().instanceRegion;
-  const result = await app.runtimeDb(region).query(
+  let runtimeDb;
+  try {
+    runtimeDb = await getRuntimeDbForApp(app.controlDb, appId);
+  } catch (err) {
+    // Unknown app — let the route handler return a 404 instead of a 409.
+    if (err instanceof AppNotFoundError) return;
+    throw err;
+  }
+  const result = await runtimeDb.query(
     'SELECT db_provisioned, provisioning_status FROM apps WHERE id = $1',
     [appId]
   );
