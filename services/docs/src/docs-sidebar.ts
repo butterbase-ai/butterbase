@@ -27,6 +27,7 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'Edge SSR Deployment', slug: 'core-concepts/edge-ssr-deployment' },
       { label: 'AI Integration', slug: 'core-concepts/ai-integration' },
       { label: 'RAG (Native)', slug: 'core-concepts/rag' },
+      { label: 'Key-Value Store', slug: 'core-concepts/kv' },
       { label: 'Realtime', slug: 'core-concepts/realtime' },
       { label: 'Billing & Plans', slug: 'core-concepts/billing' },
       { label: 'Integrations', slug: 'core-concepts/integrations' },
