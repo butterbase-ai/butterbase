@@ -11,6 +11,9 @@ export { InsertBuilder, UpdateBuilder, DeleteBuilder } from './lib/mutation-buil
 export { computeLockfileHash, type LockfileResult, type FileReader } from './lib/lockfile-hash.js';
 export { consumeSse, type SseEvent } from './lib/sse.js';
 
+// KV config helper
+export { defineKvConfig, type KvConfigInput, type KvExposeRule, type KvRole } from './kv-config.js';
+
 // Client modules
 export { AuthClient } from './auth/auth-client.js';
 export { StorageClient } from './storage/storage-client.js';
@@ -50,6 +53,21 @@ export {
   QuotaError,
   NetworkError,
   parseApiError,
+  // KV error classes
+  KvError,
+  KvAuthError,
+  KvForbiddenError,
+  KvNotFoundError,
+  KvKeyInvalidError,
+  KvConnectionError,
+  KvCasMismatchError,
+  KvExposeConflictError,
+  KvValueTooLargeError,
+  KvQuotaExceededError,
+  KvRateLimitedError,
+  KvCreditsExhaustedError,
+  KvStorageFullError,
+  KvKeysExhaustedError,
 } from './errors/index.js';
 
 // Shared package re-exports

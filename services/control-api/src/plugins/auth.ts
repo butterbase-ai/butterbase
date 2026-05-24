@@ -62,33 +62,18 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    // Development escape hatch
-    if (!config.auth.enabled) {
-      request.auth = {
-        userId: config.devOwnerId,
-        authMethod: 'api_key',
-        scopes: ['*'],
-      };
-      return;
-    }
-
     // Extract Authorization header
     const authHeader = request.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      // Allow anonymous access - set anonymous auth context
-      request.auth = {
-        userId: null,
-        authMethod: 'anonymous',
-        scopes: [],
-      };
-      return;
-    }
+    const token = authHeader?.startsWith('Bearer ')
+      ? authHeader.substring(7)
+      : null;
 
-    const token = authHeader.substring(7); // Remove "Bearer "
-
-    // Route to appropriate validator
-    if (token.startsWith('bb_sk_')) {
-      // API Key authentication
+    // Service-key (bb_sk_*) — validated even when auth is disabled, so MCP/CLI
+    // calls land on the real owner instead of the local devOwnerId default.
+    // Without this branch, the dev escape hatch below would attribute every
+    // service-key-bearing request to devOwnerId, and downstream owner checks
+    // (e.g. resolveKvAuth's api_keys lookup) would mismatch.
+    if (token && token.startsWith('bb_sk_')) {
       const authContext = await ApiKeyService.validateApiKey(
         fastify.controlDb,
         token
@@ -104,7 +89,30 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       }
 
       request.auth = authContext;
-    } else {
+      return;
+    }
+
+    // Development escape hatch (anonymous or non-service-key requests only)
+    if (!config.auth.enabled) {
+      request.auth = {
+        userId: config.devOwnerId,
+        authMethod: 'api_key',
+        scopes: ['*'],
+      };
+      return;
+    }
+
+    if (!token) {
+      // Allow anonymous access - set anonymous auth context
+      request.auth = {
+        userId: null,
+        authMethod: 'anonymous',
+        scopes: [],
+      };
+      return;
+    }
+
+    {
       // Try to decode JWT to check if it's an end-user JWT
       try {
         const decoded = JSON.parse(

@@ -125,7 +125,7 @@ describe('Auth Provider', () => {
       });
 
       expect(response.statusCode).toBe(401);
-      expect(response.json().error).toContain('Invalid JWT token');
+      expect(response.json().error.message).toContain('Invalid JWT token');
     });
 
     it('routes API keys correctly (not as JWT)', async () => {
@@ -140,7 +140,7 @@ describe('Auth Provider', () => {
 
       // Should fail as invalid API key, not as invalid JWT
       expect(response.statusCode).toBe(401);
-      expect(response.json().error).toContain('Invalid or revoked API key');
+      expect(response.json().error.message).toContain('Invalid or revoked API key');
     });
   });
 });

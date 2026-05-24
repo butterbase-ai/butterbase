@@ -310,6 +310,84 @@ const butterbase = createClient({
 });
 ```
 
+## KV (ctx.kv)
+
+Access the KV store from functions and client-side code. All methods are asynchronous.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `get` | `get<T>(key: string, opts?: { touch?: boolean }): Promise<T \| null>` | Retrieve a value by key; returns null if not found |
+| `set` | `set(key: string, value: unknown, opts?: { ttl?: number \| null; ephemeral?: boolean }): Promise<void>` | Set a key to a value with optional TTL (seconds) |
+| `del` | `del(key: string): Promise<number>` | Delete a key; returns number of keys deleted |
+| `incr` | `incr(key: string, by?: number): Promise<number>` | Increment a numeric value (default by 1) |
+| `decr` | `decr(key: string, by?: number): Promise<number>` | Decrement a numeric value (default by 1) |
+| `setnx` | `setnx(key: string, value: unknown, opts?: { ttl?: number \| null; ephemeral?: boolean }): Promise<boolean>` | Set only if key does not exist; returns true if set |
+| `setex` | `setex(key: string, value: unknown, ttl: number, opts?: { ephemeral?: boolean }): Promise<void>` | Set a value with explicit TTL (shorthand for set + ttl) |
+| `cas` | `cas(key: string, expected: unknown, next: unknown): Promise<boolean>` | Compare-and-swap: atomically set next only if current equals expected |
+| `exists` | `exists(key: string): Promise<boolean>` | Check if a key exists |
+| `ttl` | `ttl(key: string): Promise<number \| null>` | Get remaining TTL in seconds; null means no expiry, undefined means key not found |
+| `expire` | `expire(key: string, ttl: number \| null): Promise<boolean>` | Set or clear TTL on an existing key |
+| `mget` | `mget<T>(keys: string[]): Promise<(T \| null)[]>` | Get multiple keys at once; returns array with nulls for missing keys |
+| `mset` | `mset(entries: Record<string, unknown>, opts?: { ttl?: number \| null }): Promise<void>` | Set multiple key-value pairs (applies ttl to all) |
+| `expose` | `expose(pattern: string, opts: { read: Role; write: Role }): Promise<void>` | Configure role-based access to a key pattern |
+| `unexpose` | `unexpose(pattern: string): Promise<number>` | Remove an exposure rule; returns number of rules deleted |
+| `listRules` | `listRules(): Promise<Array<{ pattern: string; read: Role; write: Role; order: number }>>` | List all active exposure rules |
+
+### Client-side example
+
+```typescript
+const { data } = await butterbase.from('users').select('id').eq('id', userId);
+const userId = data?.[0]?.id;
+
+// Increment a counter in KV
+const count = await butterbase.kv.incr(`user_clicks:${userId}`);
+console.log(`User has clicked ${count} times`);
+
+// Set with TTL
+await butterbase.kv.set(`session:${sessionId}`, sessionData, { ttl: 3600 });
+```
+
+### Function example
+
+```typescript
+export async function handler(req: Request, ctx: FunctionContext) {
+  const key = 'request_count';
+  const count = await ctx.kv.incr(key);
+  
+  // Set up role-based access (admin only)
+  if (ctx.user?.role === 'admin') {
+    await ctx.kv.expose('secret:*', { read: 'owner', write: 'owner' });
+  }
+  
+  return new Response(JSON.stringify({ count }));
+}
+```
+
+**Read with sliding TTL refresh:**
+
+```ts
+// Each read refreshes the TTL back to the original window
+const session = await ctx.kv.get<Session>(`session:${id}`, { touch: true });
+```
+
+**Batch reads and writes:**
+
+```ts
+await ctx.kv.mset({
+  'feature:new-checkout': 'on',
+  'feature:new-pricing': 'off',
+});
+
+const flags = await ctx.kv.mget(['feature:new-checkout', 'feature:new-pricing']);
+// flags === ['on', 'off']  (null for any missing key)
+```
+
+**Ephemeral cache write (smaller, faster, not durable across regional restarts):**
+
+```ts
+await ctx.kv.set(`cache:user:${id}`, payload, { ttl: 60, ephemeral: true });
+```
+
 ## Migration from 0.x to 1.0
 
 The `authUrl` parameter has been removed. All auth endpoints now run on the same URL as the API — just use `apiUrl`.

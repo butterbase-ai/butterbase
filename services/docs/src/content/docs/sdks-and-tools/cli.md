@@ -302,6 +302,75 @@ butterbase storage list --app app_abc123
 
 If `--app` is not provided, the CLI uses the current app set with `butterbase apps use`.
 
+## KV
+
+```bash
+# Get a value
+butterbase kv get mykey
+
+# Set a value with optional TTL
+butterbase kv set mykey '{"a":1}' --ttl 3600
+
+# Delete a key
+butterbase kv del mykey
+
+# List keys by prefix
+butterbase kv ls --prefix user: --limit 50
+
+# Show KV store statistics
+butterbase kv stats
+
+# Flush all keys (requires confirmation)
+butterbase kv flush --confirm
+
+# List all exposure rules
+butterbase kv rules
+
+# Expose a key pattern with role-based access
+butterbase kv expose "user:*" --read authed --write owner
+
+# Unexpose a key pattern
+butterbase kv unexpose "user:*"
+
+# Apply exposure rules from a config file
+butterbase kv apply ./kv.config.ts --dry-run
+```
+
+### Common KV workflows
+
+**Deploy expose rules from a config file:**
+
+```bash
+# kv.config.ts in your project root, then:
+butterbase kv apply kv.config.ts
+```
+
+The config declares which key patterns are reachable from frontend code. The CLI diffs against the live rules and applies only the deltas — safe to re-run.
+
+**Browse keys in production:**
+
+```bash
+butterbase kv ls --prefix session:
+# 142 keys under session:*
+
+butterbase kv stats
+# {
+#   "keys_total": 1284,
+#   "bytes_used": 2202112,
+#   "max_keys": 100000,
+#   "max_storage_bytes": 104857600,
+#   "max_ops_per_sec": 500,
+#   "max_value_bytes": 65536
+# }
+```
+
+**Read/write a single key during an incident:**
+
+```bash
+butterbase kv get rate-limit:user_42        # peek a counter
+butterbase kv set feature:new-checkout off  # flip a flag without redeploying
+```
+
 ## Environment variables
 
 | Variable | Description |

@@ -494,10 +494,159 @@ function buildWorkerCode(
           }
         },
       } : null,
+      // ctx.kv — key/value store backed by the KV routes on control-api.
+      // CONTROL_API_URL must be set in the deno-runtime environment for ctx.kv to be available.
+      // If it is not set, ctx.kv is undefined and function code that tries to use it will receive
+      // a clear TypeError ("Cannot read properties of undefined") rather than a silent failure.
+      // The control-api address for local development is http://control-api:4000 (set via CONTROL_API_URL).
+      //
+      // SECURITY NOTE: The per-app BUTTERBASE_FUNCTION_SERVICE_KEY is interpolated
+      // into the worker source string below (and at lines ~625 and ~643 for the
+      // integrations bridge). This is consistent with the pre-existing pattern but
+      // means the key value appears in the Blob URL the Deno Worker executes.
+      // V8 stack traces don't include source content, so accidental leak via crash
+      // logs is unlikely. Follow-up: move to a postMessage handshake or worker-startup
+      // fetch from control-api so the key never appears in the worker source.
+      ${(() => {
+        const __fnKey = metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY
+          ?? metadata.env_vars?.BUTTERBASE_SERVICE_KEY
+          ?? Deno.env.get('BUTTERBASE_FUNCTION_SERVICE_KEY')
+          ?? '';
+        const __kvUrl = Deno.env.get('CONTROL_API_URL') || Deno.env.get('API_BASE_URL');
+        if (!__fnKey && __kvUrl) {
+          console.warn(`[kv] no BUTTERBASE_FUNCTION_SERVICE_KEY for app=${metadata.app_id}; ctx.kv calls will fail with auth error`);
+        }
+        return '';
+      })()}${(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL")) ? `
+      kv: (() => {
+        const __kvBase = ${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL"))};
+        const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
+        const __kvHeaders = {
+          authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
+          "content-type": "application/json",
+        };
+        async function __kvCall(method, pathSuffix, body) {
+          return fetch(__kvRoot + "/" + pathSuffix, {
+            method,
+            headers: __kvHeaders,
+            body: body === undefined ? undefined : JSON.stringify(body),
+          });
+        }
+        function __kvThrow(res, body) {
+          const msg = (body && body.message) ? body.message : ("kv error (status " + res.status + ")");
+          const code = (body && body.error) ? body.error : "KV_ERROR";
+          const err = new Error(msg);
+          err.name = res.status === 400 ? "KvKeyInvalidError"
+                   : res.status === 401 ? "KvAuthError"
+                   : res.status === 403 ? "KvForbiddenError"
+                   : res.status === 409 ? (code === "KV_EXPOSE_CONFLICT" ? "KvExposeConflictError" : "KvCasMismatchError")
+                   : res.status === 413 ? "KvValueTooLargeError"
+                   : res.status === 503 ? "KvConnectionError"
+                   : "KvError";
+          err.code = code;
+          err.status = res.status;
+          throw err;
+        }
+        return {
+          async get(key, opts) {
+            const path = (opts && opts.touch === true) ? key + "?touch=true" : key;
+            const res = await __kvCall("GET", path);
+            if (res.status === 404) return null;
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).value;
+          },
+          async set(key, value, opts) {
+            const body = { value };
+            if (opts && opts.ttl !== undefined) body.ttl = opts.ttl;
+            if (opts && opts.ephemeral !== undefined) body.ephemeral = opts.ephemeral;
+            const res = await __kvCall("PUT", key, body);
+            if (!res.ok && res.status !== 204) __kvThrow(res, await res.json().catch(() => null));
+          },
+          async del(key) {
+            const res = await __kvCall("DELETE", key);
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).deleted;
+          },
+          async incr(key, by) {
+            const body = by !== undefined ? { by } : {};
+            const res = await __kvCall("POST", key + "/incr", body);
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).value;
+          },
+          async decr(key, by) {
+            const body = by !== undefined ? { by } : {};
+            const res = await __kvCall("POST", key + "/decr", body);
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).value;
+          },
+          async setnx(key, value, opts) {
+            const body = { value };
+            if (opts && opts.ttl !== undefined) body.ttl = opts.ttl;
+            if (opts && opts.ephemeral !== undefined) body.ephemeral = opts.ephemeral;
+            const res = await __kvCall("POST", key + "/setnx", body);
+            if (res.status === 201) return true;
+            if (res.status === 200) return false;
+            __kvThrow(res, await res.json().catch(() => null));
+          },
+          async setex(key, value, ttl, opts) {
+            return this.set(key, value, { ttl, ephemeral: opts && opts.ephemeral });
+          },
+          async cas(key, expected, next) {
+            const res = await __kvCall("POST", key + "/cas", { expected, next });
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).swapped;
+          },
+          async exists(key) {
+            const res = await __kvCall("GET", key + "/exists");
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).exists;
+          },
+          async ttl(key) {
+            const res = await __kvCall("GET", key + "/ttl");
+            if (res.status === 404) return null;
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).ttl;
+          },
+          async expire(key, ttl) {
+            const res = await __kvCall("POST", key + "/expire", { ttl });
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).ok;
+          },
+          async mget(keys) {
+            const ops = keys.map((k) => ({ op: "get", key: k }));
+            const res = await __kvCall("POST", "_batch", { ops });
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            const { results } = await res.json();
+            return results.map((r) => ("error" in r ? null : r.value));
+          },
+          async mset(entries, opts) {
+            await Promise.all(
+              Object.entries(entries).map(([k, v]) => this.set(k, v, opts))
+            );
+          },
+          async expose(pattern, opts) {
+            const res = await __kvCall("PUT", "_expose/" + encodeURIComponent(pattern), opts);
+            if (res.status === 204) return;
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+          },
+          async unexpose(pattern) {
+            const res = await __kvCall("DELETE", "_expose/" + encodeURIComponent(pattern));
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).deleted;
+          },
+          async listRules() {
+            const res = await __kvCall("GET", "_expose");
+            if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
+            return (await res.json()).rules;
+          },
+        };
+      })(),
+      ` : '/* ctx.kv: CONTROL_API_URL not set — kv omitted from ctx */'}
+
       integrations: {
         execute: async (toolName, params) => {
           const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
-          const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
+          const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
           const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
             method: "POST",
             headers: {
@@ -515,7 +664,7 @@ function buildWorkerCode(
         asUser: (userId) => ({
           execute: async (toolName, params) => {
             const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
-            const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
+            const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
             const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
               method: "POST",
               headers: {

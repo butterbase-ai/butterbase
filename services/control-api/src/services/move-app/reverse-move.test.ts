@@ -54,6 +54,10 @@ describe('runReverseMove', () => {
       updateUserAppIndexRegion,
       waitForReplicationCaughtUp,
       promoteSourceToPrimary,
+      dumpKvFromRegion: vi.fn().mockResolvedValue({ key: 'move-app/fwd-1-reverse/dump.kv.jsonl.gz', records: 0 }),
+      clearKvScope: vi.fn().mockResolvedValue(0),
+      restoreKvIntoRegion: vi.fn().mockResolvedValue({ records: 0 }),
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     };
 
     const res = await runReverseMove(ctx, { forwardMigrationId: 'fwd-1', userId: 'u-1' });
@@ -82,6 +86,115 @@ describe('runReverseMove', () => {
       typeof c[0] === 'string' && c[0].includes('archived_after_move = NULL'),
     );
     expect(unarchiveCall).toBeTruthy();
+  });
+
+  it('fast path: dumps, clears, restores KV between promoteSourceToPrimary and updateUserAppIndexRegion', async () => {
+    (getMigration as any).mockResolvedValue({
+      id: 'fwd-kv-1',
+      app_id: 'app-x',
+      user_id: 'u-1',
+      source_region: 'us-east-1',
+      dest_region: 'eu-west-1',
+      current_step: 'completed',
+      source_replica_state: 'replicating',
+    });
+    (createMigration as any).mockResolvedValue('rev-kv-1');
+    (markCompleted as any).mockResolvedValue(undefined);
+
+    const sourcePool = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes('SELECT subdomain')) return { rows: [{ subdomain: 'demo' }] };
+        return { rows: [] };
+      }),
+    };
+    const destPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+
+    const order: string[] = [];
+    const promoteSourceToPrimary = vi.fn().mockImplementation(async () => { order.push('promote'); });
+    const dumpKvFromRegion = vi.fn().mockImplementation(async (opts: any) => {
+      order.push('dump');
+      expect(opts.sourceRegion).toBe('eu-west-1');           // dump from forward-dest
+      expect(opts.appId).toBe('app-x');
+      expect(opts.migrationId).toBe('fwd-kv-1-reverse');
+      return { key: 'move-app/fwd-kv-1-reverse/dump.kv.jsonl.gz', records: 3 };
+    });
+    const clearKvScope = vi.fn().mockImplementation(async (region: string, appId: string) => {
+      order.push('clear');
+      expect(region).toBe('us-east-1');                       // clear original-source
+      expect(appId).toBe('app-x');
+      return 2;
+    });
+    const restoreKvIntoRegion = vi.fn().mockImplementation(async (opts: any) => {
+      order.push('restore');
+      expect(opts.destRegion).toBe('us-east-1');              // restore to original-source
+      expect(opts.sourceRegionForBucket).toBe('eu-west-1');   // bucket lives at forward-dest
+      expect(opts.flipTo).toBe('us-east-1');
+      expect(opts.key).toBe('move-app/fwd-kv-1-reverse/dump.kv.jsonl.gz');
+      return { records: 3 };
+    });
+    const updateUserAppIndexRegion = vi.fn().mockImplementation(async () => { order.push('updateIndex'); });
+
+    const ctx: any = {
+      controlPool: { query: vi.fn().mockResolvedValue({ rows: [] }) },
+      runtimePoolFor: (r: string) => (r === 'us-east-1' ? sourcePool : destPool),
+      writeSubdomainMapping: vi.fn(),
+      writeDomainMapping: vi.fn(),
+      listCustomDomains: vi.fn().mockResolvedValue([]),
+      invalidateCacheAllRegions: vi.fn(),
+      updateUserAppIndexRegion,
+      waitForReplicationCaughtUp: vi.fn(),
+      promoteSourceToPrimary,
+      dumpKvFromRegion,
+      clearKvScope,
+      restoreKvIntoRegion,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+
+    const res = await runReverseMove(ctx, { forwardMigrationId: 'fwd-kv-1', userId: 'u-1' });
+    expect(res.path).toBe('fast');
+    // Ordering invariant: promote → dump → clear → restore → updateIndex
+    expect(order).toEqual(['promote', 'dump', 'clear', 'restore', 'updateIndex']);
+  });
+
+  it('fast path: KV failure bubbles up (does not swallow)', async () => {
+    (getMigration as any).mockResolvedValue({
+      id: 'fwd-err-1',
+      app_id: 'app-x',
+      user_id: 'u-1',
+      source_region: 'us-east-1',
+      dest_region: 'eu-west-1',
+      current_step: 'completed',
+      source_replica_state: 'replicating',
+    });
+    (createMigration as any).mockResolvedValue('rev-err-1');
+
+    const sourcePool = { query: vi.fn().mockResolvedValue({ rows: [{ subdomain: 'd' }] }) };
+    const destPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    const logError = vi.fn();
+
+    const ctx: any = {
+      controlPool: { query: vi.fn().mockResolvedValue({ rows: [] }) },
+      runtimePoolFor: (r: string) => (r === 'us-east-1' ? sourcePool : destPool),
+      writeSubdomainMapping: vi.fn(),
+      writeDomainMapping: vi.fn(),
+      listCustomDomains: vi.fn().mockResolvedValue([]),
+      invalidateCacheAllRegions: vi.fn(),
+      updateUserAppIndexRegion: vi.fn(),
+      waitForReplicationCaughtUp: vi.fn(),
+      promoteSourceToPrimary: vi.fn(),
+      dumpKvFromRegion: vi.fn().mockRejectedValue(new Error('s3 boom')),
+      clearKvScope: vi.fn(),
+      restoreKvIntoRegion: vi.fn(),
+      log: { info: vi.fn(), warn: vi.fn(), error: logError },
+    };
+
+    await expect(
+      runReverseMove(ctx, { forwardMigrationId: 'fwd-err-1', userId: 'u-1' }),
+    ).rejects.toThrow(/s3 boom/);
+    expect(logError).toHaveBeenCalledOnce();
+    const [obj, msg] = logError.mock.calls[0];
+    expect(obj).toMatchObject({ forwardMigrationId: 'fwd-err-1' });
+    expect(msg).toContain('KV reverse-migration failed');
   });
 
   it('rejects when forward migration is not completed', async () => {

@@ -2,6 +2,9 @@ import type { StepHandler } from './saga-executor.js';
 import { invalidateAppRegion } from '../region-resolver.js';
 import * as neonClient from '../neon-client.js';
 import { getDataProjectIdForRegion } from '../neon-projects.js';
+import { clearKvBlock } from '../kv/migration-sentinel.js';
+import { kvRedisFor } from '../kv/redis-registry.js';
+import { wrap } from '../kv/redis-client.js';
 
 /**
  * Compensation handler. Runs when a saga step exhausts retries and the
@@ -86,6 +89,19 @@ export const executeAbort: StepHandler = async (ctx, m) => {
   // 3) Bust region caches so anyone holding a stale pool picks up fresh state.
   for (const region of [m.source_region, m.dest_region]) {
     try { await invalidateAppRegion(ctx.redisFor(region), m.app_id); } catch {}
+  }
+
+  // 4) Clear KV migration sentinels on both regions (best-effort, idempotent).
+  //    Source had it set by block-writes; dest never did but clearing is safe.
+  for (const region of [m.source_region, m.dest_region]) {
+    try {
+      await clearKvBlock(wrap(kvRedisFor(region)), m.app_id);
+    } catch (err) {
+      ctx.log.warn(
+        { migrationId: m.id, region, err: (err as Error).message },
+        '[move-app abort] failed to clear KV migration sentinel; continuing',
+      );
+    }
   }
 
   return { next: 'aborted', patch: {} };

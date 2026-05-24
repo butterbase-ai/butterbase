@@ -1,0 +1,428 @@
+import { describe, it, expect, vi } from 'vitest';
+import { makeKv } from './kv.js';
+import {
+  KvKeyInvalidError, KvCasMismatchError, KvValueTooLargeError, KvExposeConflictError,
+  KvRateLimitedError, KvCreditsExhaustedError, KvStorageFullError, KvKeysExhaustedError,
+  KvQuotaExceededError, KvError,
+} from './errors/kv.js';
+
+const BASE = 'https://kv.butterbase.dev';
+const ROOT = `${BASE}/v1/app_a/kv`;
+
+function mkFetch(map: Record<string, { status: number; body?: string }>) {
+  return vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const key = `${method} ${String(url)}`;
+    const r = map[key];
+    if (!r) return new Response('', { status: 500 });
+    return new Response(r.body ?? null, { status: r.status });
+  });
+}
+
+/** Returns a fetch mock that always responds with (status, body) and captures the last call. */
+function makeSpy(status: number, body?: unknown) {
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const f = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const rawBody = init?.body;
+    calls.push({
+      url: String(url),
+      method: init?.method ?? 'GET',
+      body: typeof rawBody === 'string' ? JSON.parse(rawBody) : undefined,
+    });
+    return new Response(body !== undefined ? JSON.stringify(body) : null, { status });
+  });
+  const last = () => calls[calls.length - 1]!;
+  return { f, calls, last };
+}
+
+describe('ctx.kv (shim)', () => {
+  // ─── existing tests ────────────────────────────────────────────────────────
+
+  it('get returns parsed value', async () => {
+    const f = mkFetch({ [`GET ${ROOT}/foo`]: { status: 200, body: JSON.stringify({ value: { x: 1 } }) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.get('foo')).toEqual({ x: 1 });
+  });
+
+  it('get returns null on 404', async () => {
+    const f = mkFetch({ [`GET ${ROOT}/missing`]: { status: 404 } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.get('missing')).toBeNull();
+  });
+
+  it('set issues PUT with value body', async () => {
+    const { f, last } = makeSpy(204);
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await kv.set('foo', { x: 1 });
+    expect(last().url).toBe(`${ROOT}/foo`);
+    expect(last().method).toBe('PUT');
+    expect(last().body).toEqual({ value: { x: 1 } });
+  });
+
+  it('del returns deleted count from 200 {deleted}', async () => {
+    const f = mkFetch({
+      [`DELETE ${ROOT}/foo`]: { status: 200, body: JSON.stringify({ deleted: 1 }) },
+      [`DELETE ${ROOT}/missing`]: { status: 200, body: JSON.stringify({ deleted: 0 }) },
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.del('foo')).toBe(1);
+    expect(await kv.del('missing')).toBe(0);
+  });
+
+  it('del returns 0 when gateway reports {deleted: 0}', async () => {
+    const { f } = makeSpy(200, { deleted: 0 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.del('gone')).toBe(0);
+  });
+
+  it('del returns 1 when gateway reports {deleted: 1}', async () => {
+    const { f } = makeSpy(200, { deleted: 1 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.del('present')).toBe(1);
+  });
+
+  it('get with touch:true appends ?touch=true to the URL', async () => {
+    let capturedUrl: string | undefined;
+    const f = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      capturedUrl = String(url);
+      return new Response(JSON.stringify({ value: 'hit' }), { status: 200 });
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const result = await kv.get('mykey', { touch: true });
+    expect(result).toBe('hit');
+    expect(capturedUrl).toBe(`${ROOT}/mykey?touch=true`);
+  });
+
+  it('get without touch option does not append ?touch=true', async () => {
+    let capturedUrl: string | undefined;
+    const f = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      capturedUrl = String(url);
+      return new Response(JSON.stringify({ value: 'hit' }), { status: 200 });
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await kv.get('mykey');
+    expect(capturedUrl).toBe(`${ROOT}/mykey`);
+  });
+
+  it('throws KvKeyInvalidError on 400', async () => {
+    const f = mkFetch({ [`GET ${ROOT}/bad`]: { status: 400, body: JSON.stringify({ error: 'KV_KEY_INVALID', message: 'bad' }) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await expect(kv.get('bad')).rejects.toThrow(/bad/);
+    await expect(kv.get('bad')).rejects.toBeInstanceOf(KvKeyInvalidError);
+  });
+
+  // ─── set with options ──────────────────────────────────────────────────────
+
+  it('set with ttl forwards ttl in body', async () => {
+    const { f, last } = makeSpy(204);
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await kv.set('k', 1, { ttl: 60 });
+    expect(last().url).toBe(`${ROOT}/k`);
+    expect(last().method).toBe('PUT');
+    expect(last().body).toEqual({ value: 1, ttl: 60 });
+  });
+
+  it('set with ephemeral forwards ephemeral in body', async () => {
+    const { f, last } = makeSpy(204);
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await kv.set('k', 1, { ephemeral: true });
+    expect(last().body).toEqual({ value: 1, ephemeral: true });
+  });
+
+  // ─── setex ────────────────────────────────────────────────────────────────
+
+  it('setex issues PUT with value and ttl', async () => {
+    const { f, last } = makeSpy(204);
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await kv.setex('k', 1, 60);
+    expect(last().url).toBe(`${ROOT}/k`);
+    expect(last().method).toBe('PUT');
+    expect(last().body).toEqual({ value: 1, ttl: 60 });
+  });
+
+  // ─── incr / decr ──────────────────────────────────────────────────────────
+
+  it('incr without by sends empty body and returns value', async () => {
+    const { f, last } = makeSpy(200, { value: 1 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const result = await kv.incr('k');
+    expect(last().url).toBe(`${ROOT}/k/incr`);
+    expect(last().method).toBe('POST');
+    expect(last().body).toEqual({});
+    expect(result).toBe(1);
+  });
+
+  it('incr with by sends {by} in body', async () => {
+    const { f, last } = makeSpy(200, { value: 5 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const result = await kv.incr('k', 5);
+    expect(last().body).toEqual({ by: 5 });
+    expect(result).toBe(5);
+  });
+
+  it('decr with by sends {by} in body', async () => {
+    const { f, last } = makeSpy(200, { value: -3 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const result = await kv.decr('k', 3);
+    expect(last().url).toBe(`${ROOT}/k/decr`);
+    expect(last().body).toEqual({ by: 3 });
+    expect(result).toBe(-3);
+  });
+
+  // ─── setnx ────────────────────────────────────────────────────────────────
+
+  it('setnx returns true on 201', async () => {
+    const { f, last } = makeSpy(201, { wrote: true });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const wrote = await kv.setnx('k', 1);
+    expect(last().url).toBe(`${ROOT}/k/setnx`);
+    expect(last().method).toBe('POST');
+    expect(wrote).toBe(true);
+  });
+
+  it('setnx returns false on 200', async () => {
+    const { f } = makeSpy(200, { wrote: false });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.setnx('k', 1)).toBe(false);
+  });
+
+  // ─── cas ──────────────────────────────────────────────────────────────────
+
+  it('cas posts expected/next and returns swapped', async () => {
+    const { f, last } = makeSpy(200, { swapped: true });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const swapped = await kv.cas('k', 'a', 'b');
+    expect(last().url).toBe(`${ROOT}/k/cas`);
+    expect(last().method).toBe('POST');
+    expect(last().body).toEqual({ expected: 'a', next: 'b' });
+    expect(swapped).toBe(true);
+  });
+
+  it('cas returns false when swapped is false', async () => {
+    const { f } = makeSpy(200, { swapped: false });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.cas('k', 'a', 'b')).toBe(false);
+  });
+
+  // ─── exists ───────────────────────────────────────────────────────────────
+
+  it('exists returns boolean from {exists}', async () => {
+    const { f, last } = makeSpy(200, { exists: true });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const result = await kv.exists('k');
+    expect(last().url).toBe(`${ROOT}/k/exists`);
+    expect(result).toBe(true);
+  });
+
+  // ─── ttl ──────────────────────────────────────────────────────────────────
+
+  it('ttl returns number from {ttl}', async () => {
+    const { f, last } = makeSpy(200, { ttl: 120 });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const result = await kv.ttl('k');
+    expect(last().url).toBe(`${ROOT}/k/ttl`);
+    expect(result).toBe(120);
+  });
+
+  it('ttl returns null on 404', async () => {
+    const { f } = makeSpy(404);
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    expect(await kv.ttl('k')).toBeNull();
+  });
+
+  // ─── expire ───────────────────────────────────────────────────────────────
+
+  it('expire posts {ttl:null} and returns ok', async () => {
+    const { f, last } = makeSpy(200, { ok: true });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const result = await kv.expire('k', null);
+    expect(last().url).toBe(`${ROOT}/k/expire`);
+    expect(last().method).toBe('POST');
+    expect(last().body).toEqual({ ttl: null });
+    expect(result).toBe(true);
+  });
+
+  // ─── mget ─────────────────────────────────────────────────────────────────
+
+  it('mget sends one batch POST and maps results', async () => {
+    const batchResponse = {
+      results: [
+        { value: 'hello' },
+        { error: 'not_found' },
+      ],
+    };
+    const { f, last } = makeSpy(200, batchResponse);
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const results = await kv.mget(['a', 'b']);
+    expect(last().url).toBe(`${ROOT}/_batch`);
+    expect(last().method).toBe('POST');
+    expect(last().body).toEqual({
+      ops: [{ op: 'get', key: 'a' }, { op: 'get', key: 'b' }],
+    });
+    expect(results).toEqual(['hello', null]);
+    // Only one fetch call was made (not two)
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── mset ─────────────────────────────────────────────────────────────────
+
+  it('mset issues parallel PUTs for each entry', async () => {
+    const calls: { url: string; body: unknown }[] = [];
+    const f = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(init?.body as string) });
+      return new Response(null, { status: 204 });
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await kv.mset({ a: 1, b: 2 });
+    expect(f).toHaveBeenCalledTimes(2);
+    const urlA = calls.find((c) => c.url === `${ROOT}/a`);
+    const urlB = calls.find((c) => c.url === `${ROOT}/b`);
+    expect(urlA?.body).toEqual({ value: 1 });
+    expect(urlB?.body).toEqual({ value: 2 });
+  });
+
+  // ─── new error classes ────────────────────────────────────────────────────
+
+  it('throws KvValueTooLargeError on 413', async () => {
+    const f = mkFetch({
+      [`PUT ${ROOT}/big`]: { status: 413, body: JSON.stringify({ error: 'KV_VALUE_TOO_LARGE', message: 'value too large' }) },
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await expect(kv.set('big', 'x')).rejects.toBeInstanceOf(KvValueTooLargeError);
+  });
+
+  it('throws KvCasMismatchError on 409', async () => {
+    const f = mkFetch({
+      [`POST ${ROOT}/k/cas`]: { status: 409, body: JSON.stringify({ error: 'KV_CAS_MISMATCH', message: 'cas mismatch' }) },
+    });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    await expect(kv.cas('k', 'a', 'b')).rejects.toBeInstanceOf(KvCasMismatchError);
+  });
+
+  describe('kv.expose', () => {
+    it('PUTs to _expose/:pattern with the body', async () => {
+      const { f, last } = makeSpy(204);
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      await kv.expose('flags:*', { read: 'public', write: 'deny' });
+      expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose/flags%3A*`);
+      expect(last().method).toBe('PUT');
+      expect(last().body).toEqual({ read: 'public', write: 'deny' });
+    });
+
+    it('throws KvExposeConflictError on 409 KV_EXPOSE_CONFLICT', async () => {
+      const { f } = makeSpy(409, { error: 'KV_EXPOSE_CONFLICT', message: 'conflict' });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      await expect(kv.expose('flags:*', { read: 'authed', write: 'authed' })).rejects.toMatchObject({
+        name: 'KvExposeConflictError',
+        code: 'KV_EXPOSE_CONFLICT',
+      });
+    });
+  });
+
+  describe('kv.unexpose', () => {
+    it('DELETEs _expose/:pattern and returns count', async () => {
+      const { f, last } = makeSpy(200, { deleted: 1 });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      expect(await kv.unexpose('flags:*')).toBe(1);
+      expect(last().method).toBe('DELETE');
+      expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose/flags%3A*`);
+    });
+  });
+
+  describe('kv.listRules', () => {
+    it('GETs _expose and returns the rules array', async () => {
+      const { f, last } = makeSpy(200, { rules: [{ pattern: 'flags:*', read: 'public', write: 'deny', order: 0 }] });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+      const rules = await kv.listRules();
+      expect(rules).toEqual([{ pattern: 'flags:*', read: 'public', write: 'deny', order: 0 }]);
+      expect(last().method).toBe('GET');
+      expect(last().url).toBe(`${BASE}/v1/app_a/kv/_expose`);
+    });
+  });
+
+  // ─── quota / rate-limit error mapping ────────────────────────────────────
+
+  it('throws KvRateLimitedError on 429 with retry_after', async () => {
+    const body = { error: 'kv_rate_limited', message: 'rate limited', retry_after: 42 };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 429, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvRateLimitedError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvRateLimitedError).retryAfterSec).toBe(42);
+    expect((err as KvRateLimitedError).code).toBe('kv_rate_limited');
+    expect((err as KvRateLimitedError).status).toBe(429);
+  });
+
+  it('throws KvRateLimitedError on 429 with retryAfterSec=0 when retry_after absent', async () => {
+    const body = { error: 'kv_rate_limited', message: 'rate limited' };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 429, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvRateLimitedError);
+    expect((err as KvRateLimitedError).retryAfterSec).toBe(0);
+  });
+
+  it('throws KvCreditsExhaustedError on 402', async () => {
+    const body = { error: 'kv_credits_exhausted', message: 'credits exhausted' };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 402, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvCreditsExhaustedError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvCreditsExhaustedError).code).toBe('kv_credits_exhausted');
+    expect((err as KvCreditsExhaustedError).status).toBe(402);
+  });
+
+  it('throws KvStorageFullError on 507 kv_storage_full', async () => {
+    const body = { error: 'kv_storage_full', message: 'storage full', used_bytes: 5000, cap_bytes: 10000 };
+    const f = mkFetch({ [`PUT ${ROOT}/k`]: { status: 507, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.set('k', 'v').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvStorageFullError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvStorageFullError).usedBytes).toBe(5000);
+    expect((err as KvStorageFullError).capBytes).toBe(10000);
+    expect((err as KvStorageFullError).code).toBe('kv_storage_full');
+    expect((err as KvStorageFullError).status).toBe(507);
+  });
+
+  it('throws KvKeysExhaustedError on 507 kv_keys_exhausted', async () => {
+    const body = { error: 'kv_keys_exhausted', message: 'keys exhausted', keys: 999, cap: 1000 };
+    const f = mkFetch({ [`PUT ${ROOT}/k`]: { status: 507, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.set('k', 'v').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvKeysExhaustedError);
+    expect(err).toBeInstanceOf(KvQuotaExceededError);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvKeysExhaustedError).keys).toBe(999);
+    expect((err as KvKeysExhaustedError).cap).toBe(1000);
+    expect((err as KvKeysExhaustedError).code).toBe('kv_keys_exhausted');
+    expect((err as KvKeysExhaustedError).status).toBe(507);
+  });
+
+  it('throws KvError (generic) on 507 with unknown error code', async () => {
+    const body = { error: 'kv_unknown_507', message: 'something full' };
+    const f = mkFetch({ [`GET ${ROOT}/k`]: { status: 507, body: JSON.stringify(body) } });
+    const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
+    const err = await kv.get('k').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KvError);
+    expect((err as KvError).status).toBe(507);
+  });
+
+  describe('REST client mode (JWT pass-through)', () => {
+    it('makeKv with a JWT passes it as-is in the Authorization header', async () => {
+      const captured: { headers?: HeadersInit } = {};
+      const f = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        captured.headers = init?.headers;
+        return new Response(JSON.stringify({ value: 'v' }), { status: 200 });
+      });
+      const kv = makeKv({ appId: 'app_a', apiKey: 'xxx.yyy.zzz', baseUrl: BASE, fetch: f as any });
+      await kv.get('k');
+      expect(captured.headers).toMatchObject({ authorization: 'Bearer xxx.yyy.zzz' });
+    });
+  });
+});

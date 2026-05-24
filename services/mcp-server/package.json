@@ -4,16 +4,26 @@
   "private": true,
   "type": "module",
   "main": "./dist/create-server.js",
+  "types": "./dist/create-server.d.ts",
   "exports": {
-    ".": "./dist/create-server.js",
-    "./create-server": "./dist/create-server.js",
-    "./request-auth-context": "./dist/request-auth-context.js"
+    ".": {
+      "types": "./dist/create-server.d.ts",
+      "default": "./dist/create-server.js"
+    },
+    "./create-server": {
+      "types": "./dist/create-server.d.ts",
+      "default": "./dist/create-server.js"
+    },
+    "./request-auth-context": {
+      "types": "./dist/request-auth-context.d.ts",
+      "default": "./dist/request-auth-context.js"
+    }
   },
   "bin": {
     "butterbase-mcp": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b --force",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run"

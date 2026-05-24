@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.0] - 2026-05-25
+
+### Added
+- **Key-Value Store** — first-class KV primitive across SDK (`ctx.kv`), REST (`/v1/:app_id/kv/*`), CLI (`butterbase kv …`), and MCP (`manage_kv`). Regional (us-east-1, us-west-2), per-app quota-protected, `move_app`-aware. See `docs/kv`.
+- Customer dashboard KV tab — usage, expose rules, key browser, recent errors.
+- Admin dashboard KV page — cluster health, top apps, hotspots.
+- `audit_logs` table + `kv-audit-writer` plugin recording every 4xx/5xx KV response.
+- Bytes-on-TTL sidecar size index for accurate storage counters across expirations.
+
+### Fixed
+- `resolveKvAuth` accepts platform-owner JWTs as apiKey identity (unblocks dashboard KV tab).
+- Service-key validation runs before dev escape hatch (MCP/CLI calls now attribute to real owner).
+- `PUT /v1/:app_id/kv/_expose` bulk-replace endpoint (unblocks dashboard expose-rule save).
+- MCP api-client handles 204 No Content responses without throwing.
+
 ## [0.1.0] - 2026-05-20
 
 Initial open-source release.

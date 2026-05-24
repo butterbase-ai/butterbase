@@ -66,6 +66,9 @@ import { adminRoutes } from './routes/admin.js';
 import { apiKeyRoutes } from './routes/api-keys.js';
 import { realtimePlugin } from './plugins/realtime.js';
 import { realtimeRoutes } from './routes/realtime.js';
+import { CognitoAuthProvider } from './services/cognito-auth-provider.js';
+import { LocalAuthProvider } from './services/local-auth-provider.js';
+import type { AuthProvider } from './services/auth-provider.js';
 import { config, assertRegionConfig } from './config.js';
 import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
@@ -79,6 +82,8 @@ import { startFailureNotifier } from './services/failure-notifier.js';
 import { startDigestNotifier } from './services/digest-notifier.js';
 import { startRagWorker } from './services/rag-worker.js';
 import { startAnalyticsPullerCron } from './services/cf-analytics-puller.js';
+import { startKvReconcileWorker } from './services/kv/reconcile-worker.js';
+import { startKeysExpiryWorker } from './services/kv/keys-expiry-worker.js';
 import { ragRoutes } from './routes/rag.js';
 import { integrationRoutes } from './routes/integrations.js';
 import { customDomainRoutes } from './routes/custom-domains.js';
@@ -87,9 +92,18 @@ import { partnerPoolsAdminRoutes } from './routes/partner-pools-admin.js';
 import stateOutboxRoutes from './routes/admin/state-outbox.js';
 import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
+import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
+import kvResolveJwtRoutes from './routes/internal/kv-resolve-jwt.js';
+import kvQuotaPlugin from './plugins/kv-quota.js';
+import kvAuditWriter from './plugins/kv-audit-writer.js';
+import kvDataRoutes from './routes/v1/kv-data.js';
+import kvExposeRoutes from './routes/v1/kv-expose.js';
+import kvAdminRoutes from './routes/v1/kv-admin.js';
+import kvAuditRecentRoutes from './routes/v1/kv-audit-recent.js';
 import quotaStateRoutes from './routes/admin/quota-state.js';
 import regionStateRoutes from './routes/admin/region-state.js';
 import activeMigrationsRoutes from './routes/admin/active-migrations.js';
+import kvAdminStatsRoutes from './routes/admin/kv-admin-stats.js';
 import moveAppRoutes from './routes/apps/move.js';
 import reverseMoveRoutes from './routes/apps/reverse-move.js';
 import sourceReplicaRoutes from './routes/apps/source-replicas.js';
@@ -198,6 +212,17 @@ const app = Fastify({
     },
   },
 });
+
+// Decorate authProvider so admin routes (e.g. /admin/kv/cluster-health) that
+// call requireAdmin() from lib/admin-guard can access the same provider as
+// the main auth plugin and admin-auth.ts module-level instance.
+app.decorate('authProvider', (config.cognito.userPoolId
+  ? new CognitoAuthProvider(
+      config.cognito.userPoolId,
+      config.cognito.clientId,
+      config.cognito.region,
+    )
+  : new LocalAuthProvider(config.auth.jwtSecret)) as AuthProvider);
 
 // Capture all non-JSON, non-text request bodies as raw Buffers so function
 // execution can forward them faithfully to the Deno runtime.
@@ -420,11 +445,22 @@ try {
 }
 
 app.register(internalLeaseRoutes);
+app.register(kvCredentialsRoutes);
+app.register(kvResolveJwtRoutes);
+// kv-quota MUST be registered before kv-data/expose/admin routes so the
+// preHandler hook and kvAccount decoration are available when those routes mount.
+app.register(kvQuotaPlugin);
+app.register(kvAuditWriter);
+app.register(kvDataRoutes);
+app.register(kvExposeRoutes);
+app.register(kvAdminRoutes);
+app.register(kvAuditRecentRoutes);
 app.register(stateOutboxRoutes);
 app.register(appIndexReaperRoutes);
 app.register(quotaStateRoutes);
 app.register(regionStateRoutes);
 app.register(activeMigrationsRoutes);
+app.register(kvAdminStatsRoutes);
 app.register(subdomainPlugin);
 app.register(authPlugin);
 app.register(quotaEnforcementPlugin);
@@ -527,6 +563,32 @@ app.decorate('moveAppCtx', {
 app.register(reverseMoveRoutes);
 app.register(sourceReplicaRoutes);
 
+// Register KV keys-expiry onClose hook NOW (before app.ready() is called), so
+// addHook does not throw FST_ERR_INSTANCE_ALREADY_LISTENING.  avvio fires the
+// 'start' event — and sets fastify.started = true — when ready() resolves, so
+// any addHook called after that point will throw. We start the subscriber here
+// and register the cleanup hook; the subscriber begins connecting immediately.
+if (process.env.NODE_ENV !== 'test') {
+  const regionsRaw = process.env.BUTTERBASE_REGIONS ?? '';
+  const kvRegions = regionsRaw.split(',').map((r) => r.trim()).filter(Boolean);
+  if (kvRegions.length > 0) {
+    const keysExpiry = startKeysExpiryWorker({
+      regions: kvRegions,
+      urlForRegion: (region) => {
+        const envKey = `KV_REDIS_URL_${region.toUpperCase().replace(/-/g, '_')}`;
+        const url = process.env[envKey];
+        if (!url) throw new Error(`Missing ${envKey}`);
+        return url;
+      },
+      log: app.log,
+    });
+    app.log.info({ regions: kvRegions }, 'KV expiry-subscriber started');
+    app.addHook('onClose', async () => { await keysExpiry.stop(); });
+  } else {
+    app.log.warn('BUTTERBASE_REGIONS empty — KV expiry-subscriber not started');
+  }
+}
+
 // Start background workers after server is ready
 Promise.resolve(app.ready())
   .then(() => {
@@ -562,6 +624,11 @@ Promise.resolve(app.ready())
     // Start Cloudflare analytics puller (fires once at startup, then every 15 min)
     const analyticsPullerInterval = startAnalyticsPullerCron(app.controlDb);
     (app as any).analyticsPullerInterval = analyticsPullerInterval;
+
+    // Start KV storage-counter reconcile worker (every 24 hours)
+    const kvReconcileInterval = startKvReconcileWorker(app.controlDb);
+    (app as any).kvReconcileInterval = kvReconcileInterval;
+    app.log.info('KV reconcile worker started (24h interval)');
 
     // Schedule nightly soft-lock auto-restore check (runs at 2 AM)
     const scheduleNightlyRestore = () => {
@@ -726,6 +793,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).neonWorkerInterval) clearInterval((app as any).neonWorkerInterval);
       if ((app as any).failureNotifierInterval) clearInterval((app as any).failureNotifierInterval);
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
+      if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
 
       // Timeout: force exit if shutdown hangs
       const shutdownTimeout = setTimeout(() => {

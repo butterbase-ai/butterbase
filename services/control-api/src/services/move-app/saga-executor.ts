@@ -19,6 +19,8 @@ const AUTO_ABORTABLE_STEPS = new Set([
   'blocking_writes',
   'dumping_data',
   'restoring_data',
+  'dumping_kv',
+  'restoring_kv',
   'copying_blobs',
   'copying_runtime',
 ]);

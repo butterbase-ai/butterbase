@@ -78,3 +78,36 @@ export const quotaErrors = {
     };
   },
 };
+
+// KV quota error payload helpers for Fastify routes
+export function kvRateLimited(retryAfterSec: number) {
+  return {
+    statusCode: 429,
+    headers: { 'retry-after': String(retryAfterSec) },
+    body: { error: 'kv_rate_limited', retry_after: retryAfterSec },
+  };
+}
+
+export function kvCreditsExhausted() {
+  return {
+    statusCode: 402,
+    body: {
+      error: 'kv_credits_exhausted',
+      message: 'Credit balance is 0. Top up or wait for monthly reset.',
+    },
+  };
+}
+
+export function kvStorageFull(used: number, cap: number) {
+  return {
+    statusCode: 507,
+    body: { error: 'kv_storage_full', used_bytes: used, cap_bytes: cap },
+  };
+}
+
+export function kvKeysExhausted(used: number, cap: number) {
+  return {
+    statusCode: 507,
+    body: { error: 'kv_keys_exhausted', keys: used, cap },
+  };
+}
