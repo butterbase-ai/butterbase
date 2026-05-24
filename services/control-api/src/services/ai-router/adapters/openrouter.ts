@@ -272,6 +272,8 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     upstreamJobId: string,
     index = 0,
   ): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }> {
+    // Content endpoint serves raw bytes — only Authorization is needed.
+    // HTTP-Referer / X-Title are skipped intentionally.
     const res = await fetcher(`${base}/videos/${encodeURIComponent(upstreamJobId)}/content?index=${index}`, {
       headers: { 'Authorization': `Bearer ${cfg.apiKey}` },
     });
