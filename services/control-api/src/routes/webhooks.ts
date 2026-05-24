@@ -32,7 +32,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
     const isValid = CloudflarePages.verifyWebhookSignature(payload, signature, webhookSecret);
 
     if (!isValid) {
-      console.error('[Webhook] Invalid Cloudflare webhook signature');
+      request.log.warn('[Webhook] Invalid Cloudflare webhook signature');
       return reply.status(401).send({ error: 'Invalid signature' });
     }
 
@@ -64,7 +64,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
               status = 'CANCELED';
               break;
             default:
-              console.log(`[Webhook] Unhandled Cloudflare event type: ${body.type}`);
+              request.log.info(`[Webhook] Unhandled Cloudflare event type: ${body.type}`);
               return;
           }
 
@@ -80,7 +80,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
           );
 
           if (deploymentResult.rows.length === 0) {
-            console.error(`[Webhook] Deployment not found for Cloudflare ID: ${body.deployment_id}`);
+            request.log.error({ cloudflareDeploymentId: body.deployment_id }, '[Webhook] Deployment not found for Cloudflare ID');
             return;
           }
 
@@ -108,13 +108,13 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
             );
           }
 
-          console.log(`[Webhook] Updated deployment ${deployment.id} to status ${status}`);
+          request.log.info({ deploymentId: deployment.id, status }, '[Webhook] Updated deployment status');
         }
       );
 
       return reply.send({ received: true });
     } catch (error) {
-      console.error('[Webhook] Error processing Cloudflare webhook:', error);
+      request.log.error({ err: error }, '[Webhook] Error processing Cloudflare webhook');
       return reply.status(500).send({ error: 'Failed to process webhook' });
     }
   });
