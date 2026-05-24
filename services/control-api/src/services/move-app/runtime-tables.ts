@@ -49,6 +49,7 @@ export const MOVE_APP_RUNTIME_TABLES = [
   // Observability
   'audit_events',
   'ai_usage_logs',
+  'ai_video_jobs',
   'mcp_tool_call_log',
 
   // Deployment + billing history (per-app, follow the app on move)
