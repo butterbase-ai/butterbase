@@ -119,6 +119,49 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `execute_integration_action` | Execute a tool on behalf of a user. |
 | `list_connected_accounts` | List all users with connected accounts for an app. |
 
+## KV Store
+
+| Tool | Description |
+|------|-------------|
+| `manage_kv` | Manage app KV store: config rules (expose/unexpose namespaces) and data-plane operations (get/set/del/incr/etc). |
+
+### manage_kv actions
+
+| Action | Description |
+|--------|-------------|
+| `list_rules` | List all KV namespace exposure rules for the app |
+| `expose` | Expose a key pattern with read/write role access control |
+| `unexpose` | Remove an exposure rule by pattern |
+| `stats` | Get KV usage stats (key count, memory, etc.) |
+| `scan` | Scan keys by prefix (cursor-based pagination) |
+| `flush` | Delete all keys in the KV store (requires confirm: true) |
+| `get` | Get the value of a key |
+| `set` | Set a key to a value with optional TTL or ephemeral flag |
+| `del` | Delete one key |
+| `incr` | Increment a key's integer value |
+| `decr` | Decrement a key's integer value |
+| `setnx` | Set a key only if it does not already exist |
+| `setex` | Set a key with an explicit TTL in seconds |
+| `cas` | Compare-and-swap: atomically set next only if current value matches expected |
+| `exists` | Check if a key exists |
+| `ttl` | Get remaining TTL of a key in seconds |
+| `expire` | Set a TTL on an existing key |
+| `mget` | Get values of multiple keys at once |
+| `mset` | Set multiple key-value pairs at once |
+
+### manage_kv example
+
+```json
+{
+  "action": "manage_kv",
+  "app_id": "app_abc123",
+  "action": "set",
+  "key": "counter:requests",
+  "value": 42,
+  "ttl": 3600
+}
+```
+
 ## Custom Domains
 
 | Tool | Description |
