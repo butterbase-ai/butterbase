@@ -1,9 +1,10 @@
--- 072_app_kv_credentials.sql
+-- @scope: platform
+-- 073_app_kv_credentials.sql
 -- Per-app credentials for the user-facing KV primitive.
 -- One row per app. Created at app-creation time. Password rotated via control-api.
 
 CREATE TABLE app_kv_credentials (
-    app_id           TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+    app_id           TEXT PRIMARY KEY,
     region           TEXT NOT NULL,
     redis_password   TEXT NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -1,4 +1,5 @@
--- 073_app_kv_function_key.sql
+-- @scope: platform
+-- 074_app_kv_function_key.sql
 -- Adds a per-app KV "function key" — an API key minted at provisioning time
 -- that the deno-runtime injects into a function's env as
 -- BUTTERBASE_FUNCTION_SERVICE_KEY, so ctx.kv.* can authenticate to kv-gateway

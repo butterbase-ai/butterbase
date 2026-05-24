@@ -1,5 +1,9 @@
+-- @scope: platform
+-- 076_kv_app_usage_snapshot.sql
+-- Snapshot row per app for daily KV usage reconciliation (bytes_used, keys_total).
+
 CREATE TABLE IF NOT EXISTS kv_app_usage_snapshot (
-  app_id        TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+  app_id        TEXT PRIMARY KEY,
   region        TEXT NOT NULL,
   bytes_used    BIGINT NOT NULL DEFAULT 0,
   keys_total    BIGINT NOT NULL DEFAULT 0,
