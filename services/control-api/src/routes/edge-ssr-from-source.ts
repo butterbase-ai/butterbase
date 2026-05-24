@@ -20,6 +20,9 @@ import * as R2 from '../services/r2.js';
 import * as BuildDriver from '../services/build-driver.service.js';
 import { loadAppEnvVars } from '../services/build-driver.service.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
+import { config } from '../config.js';
+import { resolveAppHomeRegion } from '../services/region-resolver.js';
+import { getRuntimeDbPool } from '../services/runtime-db.js';
 
 const createSchema = z.object({
   framework: z.enum(['nextjs-edge', 'remix-edge', 'other-edge']).default('nextjs-edge'),
@@ -72,9 +75,14 @@ export async function registerEdgeSsrFromSourceRoutes(fastify: FastifyInstance) 
 
     const buildId = crypto.randomUUID();
 
-    // Insert deployment row and capture the DB-generated id atomically via
-    // RETURNING, eliminating any race between concurrent from-source POSTs.
-    const depRow = await controlDb.query<{ id: string }>(
+    // app_edge_ssr_deployments lives in the runtime DB; resolve the app's
+    // home region and route the INSERT there. app_build_jobs stays on the
+    // control DB (platform-scope) — the build_jobs.deployment_id is a soft
+    // pointer, not an FK, so cross-tier is fine.
+    const region = await resolveAppHomeRegion(controlDb, appId);
+    const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
+
+    const depRow = await runtimeDb.query<{ id: string }>(
       `INSERT INTO app_edge_ssr_deployments (app_id, framework, status, deployed_by)
        VALUES ($1, $2, 'WAITING', $3)
        RETURNING id`,
