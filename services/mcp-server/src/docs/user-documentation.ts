@@ -1871,6 +1871,55 @@ Authorization: Bearer {token}
 
 Embedding usage costs count against the same AI credits allowance as chat completions.
 
+### Video generation
+
+Some models in the catalog render **video** instead of text. Video generation is **asynchronous** — you submit a job, poll for its status, and download the result when it's ready (typically 30 seconds to several minutes per video).
+
+**Submit a job:**
+
+\`\`\`json
+POST /v1/{app_id}/videos/completions
+Authorization: Bearer {token}
+
+{
+  "model": "bytedance/seedance-2.0-fast",
+  "prompt": "A golden retriever in a field of sunflowers, cinematic",
+  "duration": 4,
+  "resolution": "720p",
+  "aspect_ratio": "16:9"
+}
+\`\`\`
+
+Returns \`202 { job_id, status: "pending", polling_url }\`.
+
+**Poll status** (every ~30s):
+
+\`\`\`
+GET /v1/{app_id}/videos/completions/{job_id}
+Authorization: Bearer {token}
+\`\`\`
+
+Statuses progress \`pending → in_progress → completed\` (or \`failed\` / \`cancelled\` / \`expired\`). When \`completed\`, the response includes:
+
+- \`content_urls\` — absolute URLs to GET the rendered MP4 (use the same Authorization header)
+- \`charged_credits_usd\` — what was billed for this job (set on the first terminal poll)
+- \`error\` — populated when \`status: "failed"\`
+
+**Download:**
+
+\`\`\`
+GET /v1/{app_id}/videos/completions/{job_id}/content?index=0
+Authorization: Bearer {token}
+\`\`\`
+
+Streams \`video/mp4\` bytes. The \`?index=\` parameter selects among multiple outputs when a model renders variants (defaults to 0).
+
+**Wrong endpoint guard:** If you POST a video model to \`/chat/completions\`, you'll get \`400 USE_VIDEO_ENDPOINT\` with the right path in the message.
+
+**Choosing a model:** Video models appear alongside chat / embedding models in \`GET /v1/{app_id}/ai/models\`. Video IDs commonly start with provider prefixes such as \`bytedance/seedance-\`, \`kwaivgi/kling-\`, \`pixverse/\`, or \`google/veo-\`.
+
+**MCP shortcut:** Through the \`manage_ai\` MCP tool, use \`{ action: "submit_video", ... }\` and \`{ action: "poll_video", ... }\`.
+
 ### Available models
 
 Butterbase supports a wide range of frontier and open-source models. Common models include:
