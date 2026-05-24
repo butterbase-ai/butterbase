@@ -100,8 +100,9 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
       MODEL_NOT_FOUND: 'model_not_found',
       NO_ROUTERS_AVAILABLE: 'model_unavailable',
       ROUTER_FALLBACK_EXHAUSTED: 'model_unavailable',
+      WRONG_MODALITY: 'wrong_modality',
     };
-    const type = err.code === 'MODEL_NOT_FOUND' ? 'invalid_request_error' : 'api_error';
+    const type = (err.code === 'MODEL_NOT_FOUND' || err.code === 'WRONG_MODALITY') ? 'invalid_request_error' : 'api_error';
     return reply.code(err.statusCode).send(openaiError(
       err.message, type, ROUTER_CODE_MAP[err.code],
     ));

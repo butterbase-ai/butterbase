@@ -53,6 +53,7 @@ import { authRoutes } from './routes/auth/index.js';
 import { adminAuthRoutes } from './routes/admin-auth.js';
 import { billingRoutes } from './routes/billing.js';
 import { aiConfigRoutes } from './routes/ai-config.js';
+import { aiVideoRoutes } from './routes/ai-videos.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
 import dashboardProxyPlugin from './plugins/dashboard-proxy.js';
@@ -486,6 +487,7 @@ try {
   await app.register(overlay.appBillingRoutes);
 } catch { /* OSS mode: no Stripe app billing */ }
 app.register(aiConfigRoutes);
+app.register(aiVideoRoutes);
 app.register(gatewayRoutes);
 app.register(autoRefillRoutes);
 app.register(initRoutes);

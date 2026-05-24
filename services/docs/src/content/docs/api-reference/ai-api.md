@@ -186,6 +186,210 @@ Authorization: Bearer {token}
 | Text Embedding 3 Large | `openai/text-embedding-3-large` | 3072 |
 | Text Embedding Ada 002 | `openai/text-embedding-ada-002` | 1536 |
 
+## Video generation
+
+Video generation is **asynchronous**. You submit a job, poll for status, then download the bytes when it's done. A single video typically takes 30 seconds to several minutes depending on model and length.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /v1/\{app_id}/videos/completions | Submit a generation job |
+| GET | /v1/\{app_id}/videos/completions/\{job_id} | Poll job status (also downloads when terminal) |
+| GET | /v1/\{app_id}/videos/completions/\{job_id}/content?index=N | Stream the rendered MP4 |
+
+### Choosing a model
+
+The video models in your gateway appear in `GET /v1/{app_id}/ai/models` alongside chat and embedding models. Look for the ones whose IDs begin with provider prefixes for video families (e.g. `bytedance/seedance-…`, `kwaivgi/kling-…`, `pixverse/…`, `google/veo-…`). If you POST a video model to `/chat/completions`, Butterbase returns `400 USE_VIDEO_ENDPOINT` with the correct URL in the message.
+
+### 1. Submit a job
+
+**curl:**
+
+```bash
+curl -X POST "https://api.butterbase.ai/v1/$APP_ID/videos/completions" \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bytedance/seedance-2.0-fast",
+    "prompt": "A golden retriever running through sunflowers at sunset, cinematic",
+    "duration": 4,
+    "resolution": "720p",
+    "aspect_ratio": "16:9"
+  }'
+```
+
+**TypeScript (fetch):**
+
+```typescript
+const res = await fetch(`${BUTTERBASE_API_URL}/v1/${APP_ID}/videos/completions`, {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    model: 'bytedance/seedance-2.0-fast',
+    prompt: 'A golden retriever running through sunflowers at sunset, cinematic',
+    duration: 4,
+    resolution: '720p',
+    aspect_ratio: '16:9',
+  }),
+});
+const job = await res.json();
+// { job_id, status: 'pending', polling_url }
+```
+
+**Python (requests):**
+
+```python
+import os, requests
+res = requests.post(
+    f"{os.environ['BUTTERBASE_API_URL']}/v1/{APP_ID}/videos/completions",
+    headers={"Authorization": f"Bearer {os.environ['BUTTERBASE_API_KEY']}"},
+    json={
+        "model": "bytedance/seedance-2.0-fast",
+        "prompt": "A golden retriever running through sunflowers at sunset, cinematic",
+        "duration": 4,
+        "resolution": "720p",
+        "aspect_ratio": "16:9",
+    },
+)
+job = res.json()
+# {"job_id": "...", "status": "pending", "polling_url": "..."}
+```
+
+**Response (202 Accepted):**
+
+```json
+{
+  "job_id": "5cd4be3e-c65e-4524-97cf-4595a76e2096",
+  "status": "pending",
+  "polling_url": "https://api.butterbase.ai/v1/{app_id}/videos/completions/5cd4be3e-c65e-4524-97cf-4595a76e2096"
+}
+```
+
+**Request fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `model` | yes | Video model ID (see "Choosing a model" above). |
+| `prompt` | yes | Text description of the video to generate. |
+| `duration` | no | Length in seconds. Model-specific (commonly 4, 6, 8). |
+| `resolution` | no | e.g. `720p`, `1080p`. Model-specific. |
+| `aspect_ratio` | no | e.g. `16:9`, `9:16`, `1:1`. Model-specific. |
+| `generate_audio` | no | Boolean. Some models can render audio alongside video. |
+| `seed` | no | Integer for deterministic generation (not all providers honor this). |
+| `input_images` | no | Array of HTTPS image URLs for image-to-video / first-frame guidance. |
+
+### 2. Poll for status
+
+Poll the URL from `polling_url` every 30 seconds until `status` is terminal (`completed`, `failed`, `cancelled`, or `expired`).
+
+**curl:**
+
+```bash
+curl "https://api.butterbase.ai/v1/$APP_ID/videos/completions/$JOB_ID" \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY"
+```
+
+**TypeScript:**
+
+```typescript
+async function poll(jobUrl: string, apiKey: string) {
+  while (true) {
+    const res = await fetch(jobUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const job = await res.json();
+    if (['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) return job;
+    await new Promise(r => setTimeout(r, 30_000));
+  }
+}
+```
+
+**Python:**
+
+```python
+import time, requests
+def poll(job_url, api_key):
+    while True:
+        job = requests.get(job_url, headers={"Authorization": f"Bearer {api_key}"}).json()
+        if job["status"] in {"completed", "failed", "cancelled", "expired"}:
+            return job
+        time.sleep(30)
+```
+
+**Response (when `completed`):**
+
+```json
+{
+  "job_id": "5cd4be3e-c65e-4524-97cf-4595a76e2096",
+  "status": "completed",
+  "model": "bytedance/seedance-2.0-fast",
+  "polling_url": "https://api.butterbase.ai/v1/{app_id}/videos/completions/5cd4be3e-...",
+  "content_urls": [
+    "https://api.butterbase.ai/v1/{app_id}/videos/completions/5cd4be3e-.../content?index=0"
+  ],
+  "error": null,
+  "created_at": "2026-05-24T09:59:10.738Z",
+  "charged_credits_usd": 0.72576,
+  "settled_at": "2026-05-24T10:00:56.769Z"
+}
+```
+
+- `content_urls` is an array because some models render multiple variants. Use `?index=N` to pick one.
+- `charged_credits_usd` is populated once the job settles (first terminal poll). It's `null` while pending or in progress.
+- For `status: "failed"`, `error` carries the upstream message.
+
+### 3. Download the video
+
+The URLs in `content_urls` are absolute and require the same `Bearer` API key. They stream `video/mp4` bytes.
+
+**curl:**
+
+```bash
+curl -L "$CONTENT_URL" \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY" \
+  --output video.mp4
+```
+
+**TypeScript:**
+
+```typescript
+const mp4 = await fetch(job.content_urls[0], { headers: { Authorization: `Bearer ${apiKey}` } });
+const buf = Buffer.from(await mp4.arrayBuffer());
+fs.writeFileSync('video.mp4', buf);
+```
+
+**Python:**
+
+```python
+import requests
+with requests.get(job["content_urls"][0],
+                  headers={"Authorization": f"Bearer {api_key}"}, stream=True) as r:
+    with open("video.mp4", "wb") as f:
+        for chunk in r.iter_content(8192):
+            f.write(chunk)
+```
+
+### Error codes
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `USE_VIDEO_ENDPOINT` | You sent a video model to `/chat/completions`; use `/videos/completions` instead. |
+| 400 | `INVALID_INDEX` | `?index=` was not a non-negative integer. |
+| 402 | `INSUFFICIENT_CREDITS` | Not enough credits to reserve the job. Response includes `required_usd`, `available_usd`, and your auto-refill state. |
+| 403 | `FORBIDDEN` | You're not the submitter of this job. |
+| 404 | `MODEL_NOT_FOUND` | Unknown model ID. |
+| 404 | `JOB_NOT_FOUND` | Unknown job ID, or the job belongs to a different app. |
+| 409 | `JOB_NOT_COMPLETED` | You requested `/content` but the job hasn't reached `completed`. |
+| 502 | `MODEL_UNAVAILABLE` | Upstream temporarily unavailable. Retry. |
+
+### Jobs survive across polls
+
+Each job is persisted. You can poll from any client / process — there's no in-memory state. Lost the `polling_url`? It's `https://api.butterbase.ai/v1/{app_id}/videos/completions/{job_id}`.
+
+If you stop polling before the job completes, the credit reservation is automatically released after a few minutes and any upstream charge that occurred is on us. Just don't expect to retrieve the video later — re-submit.
+
 ## Configuration
 
 ```json

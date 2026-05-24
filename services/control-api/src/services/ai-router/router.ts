@@ -11,7 +11,7 @@ import { logAuditEvent } from '../audit/audit-events-service.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 import { maybeSendCreditsEmail } from '../credits-email.js';
 import { sendBillingEmail } from '../auth/email-service.js';
-import { AdapterError, type RouterAdapter, type AdapterResult, type ChatCompletionRequest, type EmbeddingRequest } from './adapters/types.js';
+import { AdapterError, type RouterAdapter, type AdapterResult, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult } from './adapters/types.js';
 import type { RouterName } from './normalize.js';
 
 const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 'model_not_available', 'unknown']);
@@ -109,7 +109,7 @@ export interface RouteChatResult {
 
 export class RouterError extends Error {
   constructor(
-    public readonly code: 'MODEL_NOT_FOUND' | 'NO_ROUTERS_AVAILABLE' | 'ROUTER_FALLBACK_EXHAUSTED',
+    public readonly code: 'MODEL_NOT_FOUND' | 'NO_ROUTERS_AVAILABLE' | 'ROUTER_FALLBACK_EXHAUSTED' | 'WRONG_MODALITY',
     public readonly statusCode: number,
     message: string,
     // Internal-only — router names and failure kinds. Never surface to clients;
@@ -387,6 +387,200 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   }));
 
   return { status: result.status, body: result.body };
+}
+
+/**
+ * Safety-net estimate for video generation used when no parseable
+ * duration-based SKU exists in the model's raw_pricing (e.g. Seedance which
+ * prices per video-token). Most calls instead use a per-model estimate
+ * computed from `raw_pricing.pricing_skus` via `estimateVideoCostUsd`. $3.0
+ * is intentionally generous to ensure the lease always covers worst-case
+ * cost for unknown models; unused credit is refunded on settle.
+ */
+const VIDEO_DEFAULT_ESTIMATE_USD = 3.0;
+
+/**
+ * Video jobs may take several minutes. We hold the lease for 15 minutes;
+ * if the customer never polls back, the lease auto-expires per
+ * credit_leases.expires_at — credits are returned to the user.
+ */
+const VIDEO_LEASE_TTL_SECONDS = 15 * 60;
+
+/**
+ * Estimate the worst-case credit-cost (in USD, pre-markup) of a video job from
+ * the catalog's raw pricing payload. Used to size the credit lease.
+ *
+ * Strategy: pick the MAXIMUM rate among all SKU keys containing
+ * `duration_seconds` and multiply by the requested duration (default 10s if
+ * unspecified — most providers cap there). Apply a 20% buffer. Fall back to
+ * VIDEO_DEFAULT_ESTIMATE_USD when no parseable duration-based SKU exists
+ * (e.g. Seedance which prices per video-token).
+ *
+ * Clamped to [$0.05, $9] so a bad SKU value can't lock up an absurd reservation.
+ */
+function estimateVideoCostUsd(
+  entry: import('./catalog.js').CatalogEntry,
+  req: VideoGenerationRequest,
+): number {
+  const rawPricing = entry.routers[0]?.rawPricing as
+    | { pricing_skus?: Record<string, string> }
+    | null
+    | undefined;
+  const skus = rawPricing?.pricing_skus;
+  if (!skus || typeof skus !== 'object') return VIDEO_DEFAULT_ESTIMATE_USD;
+
+  const durationRates: number[] = [];
+  for (const [key, val] of Object.entries(skus)) {
+    if (!key.includes('duration_seconds')) continue;
+    const rate = parseFloat(val);
+    if (Number.isFinite(rate) && rate > 0) durationRates.push(rate);
+  }
+  if (durationRates.length === 0) return VIDEO_DEFAULT_ESTIMATE_USD;
+
+  const maxRate = Math.max(...durationRates);
+  const seconds = req.duration ?? 10;
+  const raw = maxRate * seconds * 1.2; // 20% buffer
+  return Math.min(Math.max(raw, 0.05), 9);
+}
+
+export interface RouteVideoSubmitResult {
+  upstreamJobId: string;
+  pollingUrl: string;
+  chosenRouter: RouterName;
+  leaseId: string;
+  estimatedCostUsd: number;
+}
+
+export async function routeVideoSubmit(
+  ctx: RouteContext,
+  req: VideoGenerationRequest,
+): Promise<RouteVideoSubmitResult> {
+  const canonicalId = req.model;
+  const entry = await readCatalogEntry(ctx.redis, canonicalId);
+  if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  if (!entry.routers.some(r => r.modality === 'video')) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is not a video model. Use /chat/completions instead.`);
+  }
+
+  const enabledStatuses = await readEnabledRouters(ctx.redis);
+  const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
+  const ranker = config.aiRouter.presenceModeEnabled ? rankRoutersPresenceMode : rankRoutersForModel;
+  const ranked = ranker(entry, enabled);
+  if (ranked.length === 0) {
+    throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
+  }
+
+  const estimatedUsd = estimateVideoCostUsd(entry, req);
+  const reservedUsd = estimatedUsd * (1 + ctx.markupPct / 100);
+  const lease = await acquireWithAudit(ctx, reservedUsd, VIDEO_LEASE_TTL_SECONDS);
+
+  const fallbackChain: string[] = [];
+  let submitted: { result: VideoSubmitResult; router: RouterName } | null = null;
+  let lastError: unknown = null;
+
+  for (const candidate of ranked) {
+    const adapter = ctx.adapters.get(candidate.name);
+    if (!adapter?.submitVideo) {
+      fallbackChain.push(`${candidate.name}:no_video_adapter`);
+      continue;
+    }
+    try {
+      const result = await adapter.submitVideo(req, adapter.toUpstreamId(canonicalId));
+      submitted = { result, router: candidate.name };
+      break;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        fallbackChain.push(`${candidate.name}:${err.kind}`);
+        continue;
+      }
+      await settleAfterCall(ctx.platformPool, lease, 0);
+      throw err;
+    }
+  }
+
+  if (!submitted) {
+    await settleAfterCall(ctx.platformPool, lease, 0);
+    const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
+    (err as any).cause = lastError;
+    throw err;
+  }
+
+  return {
+    upstreamJobId: submitted.result.upstreamJobId,
+    pollingUrl: submitted.result.pollingUrl,
+    chosenRouter: submitted.router,
+    leaseId: lease.leaseId,
+    estimatedCostUsd: estimatedUsd,
+  };
+}
+
+export async function routeVideoPoll(
+  ctx: RouteContext,
+  router: RouterName,
+  pollingUrl: string,
+): Promise<VideoPollResult> {
+  const adapter = ctx.adapters.get(router);
+  if (!adapter?.pollVideo) {
+    throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Provider for this job is no longer available.');
+  }
+  return adapter.pollVideo(pollingUrl);
+}
+
+/**
+ * Called by the route handler when a job first observes a terminal status.
+ * Settles the lease against actual provider cost and writes the usage row.
+ *
+ * NOT idempotent — call exactly once per terminal poll. The caller (the route
+ * handler in routes/ai-videos.ts) is responsible for gating this on the
+ * atomic terminal-state transition in video-jobs.ts.
+ */
+export async function settleVideoJob(
+  ctx: RouteContext,
+  args: {
+    leaseId: string;
+    chosenRouter: RouterName;
+    canonicalModel: string;
+    providerCostUsd: number;
+    fallbackChain?: string[];
+  },
+): Promise<{ chargedCreditsUsd: number; providerCostUsd: number }> {
+  const chargedCredits = applyMarkup(args.providerCostUsd, ctx.markupPct);
+  // settleAfterCall only reads handle.leaseId; the other LeaseHandle fields are
+  // not consulted, so a synthetic handle is safe here.
+  await settleAfterCall(
+    ctx.platformPool,
+    { leaseId: args.leaseId, amountGrantedUsd: 0, expiresAt: new Date() },
+    chargedCredits,
+  );
+  maybeTriggerAutoRefill(
+    { pool: ctx.platformPool, redis: ctx.redis },
+    ctx.userId,
+  ).catch((err) => console.error('[router] auto-refill check failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
+    (err) => console.error('[router] credits-email failed:', err),
+  );
+  writeAiUsageRow(ctx.runtimePool, {
+    appId: ctx.appId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
+    promptTokens: 0, completionTokens: 0, totalTokens: 0,
+    providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
+    markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    keyType: 'platform', chargedToUser: true,
+  }).catch(err => console.error('[router] usage-log write failed:', err));
+  console.log(JSON.stringify({
+    level: 'info',
+    type: 'ai_router.call',
+    app_id: ctx.appId,
+    user_id: ctx.userId,
+    canonical_model: args.canonicalModel,
+    chosen_router: args.chosenRouter,
+    fallback_chain: args.fallbackChain ?? [],
+    provider_cost_usd: args.providerCostUsd,
+    charged_credits_usd: chargedCredits,
+    markup_pct: ctx.markupPct,
+    modality: 'video',
+  }));
+  return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };
 }
 
 export { InsufficientCreditsError } from './billing-gate.js';

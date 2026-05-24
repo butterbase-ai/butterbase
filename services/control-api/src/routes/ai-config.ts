@@ -20,7 +20,7 @@ import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catal
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 
-async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promise<{
+export async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promise<{
   enabled: boolean;
   amountUsd: number | null;
   monthlyAllowanceUsd: number;
@@ -255,6 +255,15 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const catalogEntry = await readCatalogEntry(getRedisClient(), modelResolved);
+        if (catalogEntry && catalogEntry.routers.length > 0 && catalogEntry.routers.every(r => r.modality === 'video')) {
+          return reply.code(400).send({
+            error: 'wrong_endpoint',
+            code: 'USE_VIDEO_ENDPOINT',
+            message: `Model ${modelResolved} is a video model. Use POST /v1/${appId}/videos/completions instead.`,
+          });
+        }
+
         const result = await routeChatCompletion(
           {
             platformPool: app.controlDb,
@@ -439,12 +448,22 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         const redis = getRedisClient();
         const ids = await listCatalogModels(redis);
         const entries = await Promise.all(ids.map(id => readCatalogEntry(redis, id)));
-        // Strip router-internal fields; surface canonical id, display name, context length only.
-        const models = entries.filter(Boolean).map(e => ({
-          id: e!.canonicalId,
-          name: e!.displayName,
-          context_length: e!.routers.length > 0 ? Math.max(...e!.routers.map(r => r.contextLength)) : 0,
-        }));
+        const models = entries.filter(Boolean).map(e => {
+          const firstRouter = e!.routers.length > 0 ? e!.routers[0] : null;
+          // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
+          const modality = firstRouter?.modality ?? 'chat';
+          // For token-priced modalities (chat, embedding), expose token pricing
+          const isTokenPriced = modality === 'chat' || modality === 'embedding';
+          return {
+            id: e!.canonicalId,
+            name: e!.displayName,
+            context_length: e!.routers.length > 0 ? Math.max(...e!.routers.map(r => r.contextLength)) : 0,
+            modality,
+            prompt_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.promptPricePerMtok : null,
+            completion_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.completionPricePerMtok : null,
+            raw_pricing: !isTokenPriced && firstRouter ? firstRouter.rawPricing ?? null : null,
+          };
+        });
         return { models };
       }
 

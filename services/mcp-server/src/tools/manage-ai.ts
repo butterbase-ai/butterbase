@@ -21,13 +21,24 @@ Actions:
                        Set defaultModel, allowedModels, maxTokensPerRequest (1–100000), or rotate BYOK.
   - get_usage         { app_id, startDate?, endDate? }
                        Aggregate token counts and costs over a window.
+  - submit_video      { app_id, model, prompt, duration?, resolution?, aspect_ratio?, generate_audio?, seed? }
+                       Submits an async video-generation job. Returns { job_id, status, polling_url }.
+                       Poll the returned URL until status is "completed".
+  - poll_video        { app_id, job_id }
+                       Returns current { status, model, content_urls?, error?, created_at }.
+                       When status is "completed", content_urls contains absolute URLs (same origin
+                       as the polling_url) that the caller can fetch() directly using the same
+                       Authorization header. Use this to drive your own polling loop.
 
 This tool wraps the same /v1/:app_id/chat/completions, /embeddings, /ai/config, /ai/models,
 /ai/usage routes the SDK uses. The "chat" action sets stream: false; for streamed deltas,
 drive the SDK from inside a function or DO.`,
     {
       app_id: z.string().describe('The app ID'),
-      action: z.enum(['chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage']).describe('The action to perform'),
+      action: z.enum([
+        'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
+        'submit_video', 'poll_video',
+      ]).describe('The action to perform'),
       // chat
       messages: z.array(z.object({
         role: z.enum(['system', 'user', 'assistant', 'tool']),
@@ -51,6 +62,15 @@ drive the SDK from inside a function or DO.`,
       // get_usage
       startDate: z.string().optional(),
       endDate: z.string().optional(),
+      // submit_video
+      prompt: z.string().optional().describe('Required for submit_video'),
+      duration: z.number().int().positive().optional(),
+      resolution: z.string().optional(),
+      aspect_ratio: z.string().optional(),
+      generate_audio: z.boolean().optional(),
+      seed: z.number().int().optional(),
+      // poll_video
+      job_id: z.string().optional().describe('Required for poll_video'),
     },
     {
       title: 'Manage AI',
@@ -111,6 +131,32 @@ drive the SDK from inside a function or DO.`,
             result = await apiGet(`/v1/${app_id}/ai/usage${qs ? `?${qs}` : ''}`);
             break;
           }
+          case 'submit_video': {
+            if (!args.prompt) {
+              return { content: [{ type: 'text' as const, text: 'Error: "prompt" is required for "submit_video".' }], isError: true as const };
+            }
+            if (!args.model) {
+              return { content: [{ type: 'text' as const, text: 'Error: "model" is required for "submit_video".' }], isError: true as const };
+            }
+            result = await apiPost(`/v1/${app_id}/videos/completions`, {
+              model: args.model,
+              prompt: args.prompt,
+              duration: args.duration,
+              resolution: args.resolution,
+              aspect_ratio: args.aspect_ratio,
+              generate_audio: args.generate_audio,
+              seed: args.seed,
+            });
+            break;
+          }
+          case 'poll_video': {
+            if (!args.job_id) {
+              return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "poll_video".' }], isError: true as const };
+            }
+            result = await apiGet(`/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}`);
+            break;
+          }
+
         }
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
       } catch (e: unknown) {

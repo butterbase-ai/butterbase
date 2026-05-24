@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { routeChatCompletion, RouterError } from './router.js';
-import { AdapterError, type RouterAdapter } from './adapters/types.js';
+import { routeChatCompletion, routeVideoSubmit, routeVideoPoll, settleVideoJob, RouterError } from './router.js';
+import { AdapterError, type RouterAdapter, type VideoGenerationRequest } from './adapters/types.js';
+import { applyMarkup } from './markup.js';
 
 vi.mock('./billing-gate.js', () => ({
   acquireForEstimatedCost: vi.fn(async () => ({ leaseId: 'lease-1', amountGrantedUsd: 1, expiresAt: new Date() })),
@@ -247,5 +248,424 @@ describe('nullable appId', () => {
       expect.anything(),
       expect.objectContaining({ appId: null }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helper: build a CatalogEntry for a video model
+// ---------------------------------------------------------------------------
+function videoEntry(routerName: string) {
+  return {
+    canonicalId: 'bytedance/seedance-2.0',
+    displayName: 'Seedance 2.0',
+    updatedAt: new Date().toISOString(),
+    routers: [
+      {
+        name: routerName,
+        upstreamId: 'bytedance/seedance-2.0',
+        promptPricePerMtok: 0,
+        completionPricePerMtok: 0,
+        contextLength: 0,
+        modality: 'video' as const,
+      },
+    ],
+  };
+}
+
+function makeVideoRedis(catalogEntry: any, routers: any[]) {
+  return {
+    get: vi.fn(async (key: string) => {
+      if (key === 'ai_catalog:model:bytedance/seedance-2.0') return JSON.stringify(catalogEntry);
+      if (key === 'ai_catalog:routers') return JSON.stringify(routers);
+      return null;
+    }),
+  } as any;
+}
+
+describe('routeVideoSubmit', () => {
+  it('happy path: calls submitVideo and returns job details', async () => {
+    const submitVideo = vi.fn(async () => ({
+      upstreamJobId: 'job-xyz',
+      pollingUrl: 'https://openrouter.ai/api/v1/videos/job-xyz',
+      status: 'pending' as const,
+    }));
+
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      submitVideo,
+    };
+
+    const catalogEntry = videoEntry('openrouter');
+    const redis = makeVideoRedis(catalogEntry, [{ name: 'openrouter', enabled: true }]);
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    const result = await routeVideoSubmit(ctx as any, {
+      model: 'bytedance/seedance-2.0',
+      prompt: 'a cat on a piano',
+    });
+
+    expect(result.upstreamJobId).toBe('job-xyz');
+    expect(result.pollingUrl).toBe('https://openrouter.ai/api/v1/videos/job-xyz');
+    expect(result.chosenRouter).toBe('openrouter');
+    expect(result.leaseId).toBeTruthy();
+    expect(result.estimatedCostUsd).toBe(3.0); // no rawPricing on fixture → falls back to VIDEO_DEFAULT_ESTIMATE_USD
+    expect(submitVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it('lease-refund-on-failure: rejects with ROUTER_FALLBACK_EXHAUSTED and refunds lease', async () => {
+    const { settleAfterCall } = await import('./billing-gate.js');
+    vi.mocked(settleAfterCall).mockClear();
+
+    // Adapter without submitVideo — triggers fallback exhaustion
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      // submitVideo intentionally omitted
+    };
+
+    const catalogEntry = videoEntry('openrouter');
+    const redis = makeVideoRedis(catalogEntry, [{ name: 'openrouter', enabled: true }]);
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    await expect(
+      routeVideoSubmit(ctx as any, { model: 'bytedance/seedance-2.0', prompt: 'a cat on a piano' }),
+    ).rejects.toMatchObject({ code: 'ROUTER_FALLBACK_EXHAUSTED' });
+
+    // settleAfterCall should have been called with 0 to refund the lease
+    expect(vi.mocked(settleAfterCall)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ leaseId: 'lease-1' }),
+      0,
+    );
+  });
+});
+
+describe('routeVideoPoll', () => {
+  it('happy path: returns poll result from adapter', async () => {
+    const pollVideo = vi.fn(async () => ({
+      status: 'completed' as const,
+      unsignedUrls: ['https://cdn.openrouter.ai/videos/job-xyz.mp4'],
+      providerCostUsd: 0.25,
+    }));
+
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      pollVideo,
+    };
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis: { get: vi.fn(async () => null) } as any,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    const result = await routeVideoPoll(
+      ctx as any,
+      'openrouter' as any,
+      'https://openrouter.ai/api/v1/videos/job-xyz',
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.unsignedUrls).toEqual(['https://cdn.openrouter.ai/videos/job-xyz.mp4']);
+    expect(result.providerCostUsd).toBe(0.25);
+    expect(pollVideo).toHaveBeenCalledTimes(1);
+    expect(pollVideo).toHaveBeenCalledWith('https://openrouter.ai/api/v1/videos/job-xyz');
+  });
+
+  it('throws NO_ROUTERS_AVAILABLE when adapter lacks pollVideo', async () => {
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      // pollVideo intentionally omitted
+    };
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis: { get: vi.fn(async () => null) } as any,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    await expect(
+      routeVideoPoll(ctx as any, 'openrouter' as any, 'https://openrouter.ai/api/v1/videos/job-xyz'),
+    ).rejects.toMatchObject({ code: 'NO_ROUTERS_AVAILABLE' });
+  });
+});
+
+describe('routeVideoSubmit wrong-modality', () => {
+  it('throws WRONG_MODALITY when called with a non-video model', async () => {
+    // A chat model — no routers have modality: 'video'
+    const chatEntry = {
+      canonicalId: 'bytedance/seedance-2.0',
+      displayName: 'some-chat-model',
+      updatedAt: new Date().toISOString(),
+      routers: [
+        {
+          name: 'openrouter',
+          upstreamId: 'bytedance/seedance-2.0',
+          promptPricePerMtok: 1,
+          completionPricePerMtok: 1,
+          contextLength: 4096,
+          modality: 'chat' as const,
+        },
+      ],
+    };
+
+    const redis = makeVideoRedis(chatEntry, [{ name: 'openrouter', enabled: true }]);
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters: new Map(),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    await expect(
+      routeVideoSubmit(ctx as any, { model: 'bytedance/seedance-2.0', prompt: 'a cat' }),
+    ).rejects.toMatchObject({ code: 'WRONG_MODALITY', statusCode: 400 });
+  });
+});
+
+describe('settleVideoJob', () => {
+  it('applies markup, calls settleAfterCall, writes usage row, returns charged credits', async () => {
+    const { settleAfterCall } = await import('./billing-gate.js');
+    const { writeAiUsageRow } = await import('./usage-log.js');
+    vi.mocked(settleAfterCall).mockClear();
+    vi.mocked(writeAiUsageRow).mockClear();
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis: { get: vi.fn(async () => null) } as any,
+      adapters: new Map(),
+      markupPct: 20,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    const providerCostUsd = 0.25;
+    const expectedCharged = applyMarkup(providerCostUsd, 20);
+
+    const result = await settleVideoJob(ctx as any, {
+      leaseId: 'lease-1',
+      chosenRouter: 'openrouter' as any,
+      canonicalModel: 'bytedance/seedance-2.0',
+      providerCostUsd,
+    });
+
+    // settleAfterCall called with synthetic handle containing leaseId
+    expect(vi.mocked(settleAfterCall)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ leaseId: 'lease-1' }),
+      expectedCharged,
+    );
+
+    // writeAiUsageRow called with correct fields
+    expect(vi.mocked(writeAiUsageRow)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        model: 'bytedance/seedance-2.0',
+        router: 'openrouter',
+        providerCostUsd: 0.25,
+        chargedCreditsUsd: expectedCharged,
+        leaseId: 'lease-1',
+        keyType: 'platform',
+        chargedToUser: true,
+      }),
+    );
+
+    // returned shape
+    expect(result).toEqual({
+      chargedCreditsUsd: expectedCharged,
+      providerCostUsd: 0.25,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// estimateVideoCostUsd — tested indirectly through routeVideoSubmit
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal video CatalogEntry with optional rawPricing pricing_skus.
+ * The key is stored at routers[0].rawPricing.
+ */
+function videoEntryWithSkus(pricingSkus?: Record<string, string> | null, rawPricingOverride?: unknown) {
+  const rawPricing = rawPricingOverride !== undefined
+    ? rawPricingOverride
+    : (pricingSkus !== null && pricingSkus !== undefined ? { pricing_skus: pricingSkus } : undefined);
+  return {
+    canonicalId: 'bytedance/seedance-2.0',
+    displayName: 'Test Video Model',
+    updatedAt: new Date().toISOString(),
+    routers: [
+      {
+        name: 'openrouter',
+        upstreamId: 'bytedance/seedance-2.0',
+        promptPricePerMtok: 0,
+        completionPricePerMtok: 0,
+        contextLength: 0,
+        modality: 'video' as const,
+        ...(rawPricing !== undefined ? { rawPricing } : {}),
+      },
+    ],
+  };
+}
+
+async function submitVideoWithEntry(entry: any, req: Partial<VideoGenerationRequest> = {}): Promise<number> {
+  const submitVideo = vi.fn(async () => ({
+    upstreamJobId: 'job-xyz',
+    pollingUrl: 'https://openrouter.ai/api/v1/videos/job-xyz',
+    status: 'pending' as const,
+  }));
+
+  const adapter: RouterAdapter = {
+    name: 'openrouter' as any,
+    toUpstreamId: (id: string) => id,
+    listModels: vi.fn(async () => []),
+    chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+    submitVideo,
+  };
+
+  const redis: any = {
+    get: vi.fn(async (key: string) => {
+      if (key === 'ai_catalog:model:bytedance/seedance-2.0') return JSON.stringify(entry);
+      if (key === 'ai_catalog:routers') return JSON.stringify([{ name: 'openrouter', enabled: true }]);
+      return null;
+    }),
+  };
+
+  const ctx: any = {
+    platformPool: makePoolStub(),
+    runtimePool: makePoolStub(),
+    redis,
+    adapters: new Map([['openrouter', adapter]]),
+    markupPct: 0,
+    appId: 'a',
+    userId: 'u',
+    region: 'r',
+  };
+
+  const result = await routeVideoSubmit(ctx, {
+    model: 'bytedance/seedance-2.0',
+    prompt: 'test',
+    ...req,
+  });
+  return result.estimatedCostUsd;
+}
+
+describe('estimateVideoCostUsd (via routeVideoSubmit)', () => {
+  it('1. Wan 2.6 4s: picks max rate $0.15 (1080p), duration=4 → $0.72', async () => {
+    const entry = videoEntryWithSkus({
+      text_to_video_duration_seconds_720p: '0.08',
+      text_to_video_duration_seconds_1080p: '0.12',
+      image_to_video_duration_seconds_1080p: '0.15',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 4 });
+    // max=0.15, 0.15*4*1.2 = 0.72, clamp(0.72, 0.05, 9) = 0.72
+    expect(cost).toBeCloseTo(0.72, 10);
+  });
+
+  it('2. Veo 3.1 8s: max $0.60 (4k), duration=8 → $5.76', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds_with_audio: '0.40',
+      duration_seconds_with_audio_4k: '0.60',
+      duration_seconds_without_audio: '0.20',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 8 });
+    // max=0.60, 0.60*8*1.2 = 5.76, clamp(5.76, 0.05, 9) = 5.76
+    expect(cost).toBeCloseTo(5.76, 10);
+  });
+
+  it('3. Wan 2.7, no duration in request: max $0.10, defaults to 10s → $1.20', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds: '0.1',
+    });
+    // no duration field → defaults to 10
+    const cost = await submitVideoWithEntry(entry, {});
+    // 0.1*10*1.2 = 1.2
+    expect(cost).toBeCloseTo(1.2, 10);
+  });
+
+  it('4. Seedance token-based pricing (no duration_seconds SKUs) → falls back to VIDEO_DEFAULT_ESTIMATE_USD (3.0)', async () => {
+    const entry = videoEntryWithSkus({
+      video_tokens: '0.0000056',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 5 });
+    expect(cost).toBe(3.0);
+  });
+
+  it('5. No rawPricing on catalog entry → falls back to 3.0', async () => {
+    const entry = videoEntryWithSkus(undefined);
+    const cost = await submitVideoWithEntry(entry);
+    expect(cost).toBe(3.0);
+  });
+
+  it('6. rawPricing is not an object (string) → falls back to 3.0', async () => {
+    const entry = videoEntryWithSkus(undefined, 'invalid-string');
+    const cost = await submitVideoWithEntry(entry);
+    expect(cost).toBe(3.0);
+  });
+
+  it('7. All-zero rates in pricing_skus → falls back to 3.0', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds: '0',
+      duration_seconds_hd: '0.0',
+    });
+    const cost = await submitVideoWithEntry(entry);
+    expect(cost).toBe(3.0);
+  });
+
+  it('8. Crazy SKU rate of $100/s → clamped to $9', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds: '100',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 10 });
+    // 100*10*1.2 = 1200, clamped to 9
+    expect(cost).toBe(9);
   });
 });

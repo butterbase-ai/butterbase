@@ -151,6 +151,12 @@ Authorization: Bearer {token}
 | Text Embedding 3 Large | `openai/text-embedding-3-large` | 3072 |
 | Text Embedding Ada 002 | `openai/text-embedding-ada-002` | 1536 |
 
+## Video generation
+
+Video models work differently from chat: generation is **asynchronous** and can take 30 seconds to several minutes. You submit a job, poll until it's ready, and then download the rendered MP4. See [Video generation](../api-reference/ai-api.md#video-generation) in the API reference for the full flow.
+
+Video is billed per call (not per token) — the actual cost appears as `charged_credits_usd` in the job's final poll response.
+
 ## Available models
 
 Butterbase supports a wide range of frontier and open-source models, including:
