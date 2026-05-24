@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { buildPublicJobResponse } from './ai-videos.js';
+import { describe, it, expect, vi } from 'vitest';
+import { z } from 'zod';
+import { buildPublicJobResponse, handleVideoError } from './ai-videos.js';
 import type { VideoJobRow } from '../services/ai-router/video-jobs.js';
+import { RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 
 // Route-level integration tests (happy-path submit/poll/content flows) are
 // covered by the Task 9 E2E smoke tests that run against the deployed service
@@ -30,22 +32,46 @@ function makeJob(overrides: Partial<VideoJobRow> = {}): VideoJobRow {
   };
 }
 
+// Minimal chainable reply mock for handleVideoError tests
+function makeReply() {
+  const sent: { code: number; body: unknown } = { code: 0, body: undefined };
+  const proxy = {
+    _sent: sent,
+    code: vi.fn((c: number) => { sent.code = c; return proxy; }),
+    send: vi.fn((b: unknown) => { sent.body = b; return proxy; }),
+  };
+  return proxy;
+}
+
+// Minimal app mock
+function makeApp(dbQueryResult?: { rows: unknown[] }) {
+  return {
+    controlDb: {
+      query: vi.fn().mockResolvedValue({ rows: dbQueryResult?.rows ?? [] }),
+    },
+    log: {
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
+  } as unknown as import('fastify').FastifyInstance;
+}
+
 describe('buildPublicJobResponse', () => {
   it('returns expected shape for a completed job with unsigned_urls', () => {
     const job = makeJob();
-    const res = buildPublicJobResponse('app-1', job);
+    const res = buildPublicJobResponse('https://api.example.com', 'app-1', job);
     expect(res.job_id).toBe('job-abc');
     expect(res.status).toBe('completed');
     expect(res.model).toBe('wan/t2v-turbo');
-    expect(res.polling_url).toBe('/v1/app-1/videos/completions/job-abc');
-    expect(res.content_urls).toEqual(['/v1/app-1/videos/completions/job-abc/content?index=0']);
+    expect(res.polling_url).toBe('https://api.example.com/v1/app-1/videos/completions/job-abc');
+    expect(res.content_urls).toEqual(['https://api.example.com/v1/app-1/videos/completions/job-abc/content?index=0']);
     expect(res.error).toBeNull();
     expect(res.created_at).toBeInstanceOf(Date);
   });
 
   it('returns null content_urls when unsigned_urls is null', () => {
     const job = makeJob({ unsigned_urls: null });
-    const res = buildPublicJobResponse('app-1', job);
+    const res = buildPublicJobResponse('https://api.example.com', 'app-1', job);
     expect(res.content_urls).toBeNull();
   });
 
@@ -53,18 +79,107 @@ describe('buildPublicJobResponse', () => {
     const job = makeJob({
       unsigned_urls: ['https://cdn.example.com/v0.mp4', 'https://cdn.example.com/v1.mp4'],
     });
-    const res = buildPublicJobResponse('app-1', job);
+    const res = buildPublicJobResponse('https://api.example.com', 'app-1', job);
     expect(res.content_urls).toEqual([
-      '/v1/app-1/videos/completions/job-abc/content?index=0',
-      '/v1/app-1/videos/completions/job-abc/content?index=1',
+      'https://api.example.com/v1/app-1/videos/completions/job-abc/content?index=0',
+      'https://api.example.com/v1/app-1/videos/completions/job-abc/content?index=1',
     ]);
   });
 
   it('includes error field for a failed job', () => {
     const job = makeJob({ status: 'failed', error: 'upstream timeout', unsigned_urls: null });
-    const res = buildPublicJobResponse('app-1', job);
+    const res = buildPublicJobResponse('https://api.example.com', 'app-1', job);
     expect(res.status).toBe('failed');
     expect(res.error).toBe('upstream timeout');
     expect(res.content_urls).toBeNull();
+  });
+
+  it('URLs are absolute (not relative paths)', () => {
+    const job = makeJob();
+    const res = buildPublicJobResponse('https://api.example.com', 'app-1', job);
+    expect(res.polling_url).toMatch(/^https:\/\//);
+    expect(res.content_urls![0]).toMatch(/^https:\/\//);
+  });
+});
+
+describe('handleVideoError', () => {
+  it('InsufficientCreditsError → 402 with all auto-refill fields', async () => {
+    const dbRow = {
+      auto_refill_enabled: true,
+      auto_refill_amount_usd: '10.00',
+      monthly_allowance_usd: '50.00',
+      credits_usd: '5.50',
+    };
+    const app = makeApp({ rows: [dbRow] });
+    const reply = makeReply();
+
+    const error = new InsufficientCreditsError(0.05, 0.01);
+    await handleVideoError(app, reply, 'user-1', error);
+
+    expect(reply._sent.code).toBe(402);
+    const body = reply._sent.body as Record<string, unknown>;
+    expect(body.error).toBe('insufficient_credits');
+    expect(body.code).toBe('INSUFFICIENT_CREDITS');
+    expect(body.required_usd).toBe(0.05);
+    expect(body.available_usd).toBe(0.01);
+    expect(body.monthly_allowance_usd).toBe(50);
+    expect(body.credits_usd).toBe(5.5);
+    expect(body.auto_refill_enabled).toBe(true);
+    expect(body.auto_refill_amount_usd).toBe(10);
+  });
+
+  it('RouterError with WRONG_MODALITY → 400, public code WRONG_MODALITY', async () => {
+    const app = makeApp();
+    const reply = makeReply();
+
+    const error = new RouterError('WRONG_MODALITY', 400, 'wrong modality', []);
+    await handleVideoError(app, reply, 'user-1', error);
+
+    expect(reply._sent.code).toBe(400);
+    const body = reply._sent.body as Record<string, unknown>;
+    expect(body.code).toBe('WRONG_MODALITY');
+  });
+
+  it('RouterError with NO_ROUTERS_AVAILABLE → 502, public code MODEL_UNAVAILABLE', async () => {
+    const app = makeApp();
+    const reply = makeReply();
+
+    const error = new RouterError('NO_ROUTERS_AVAILABLE', 502, 'no routers available', []);
+    await handleVideoError(app, reply, 'user-1', error);
+
+    expect(reply._sent.code).toBe(502);
+    const body = reply._sent.body as Record<string, unknown>;
+    expect(body.code).toBe('MODEL_UNAVAILABLE');
+  });
+
+  it('ZodError → 400 with details', async () => {
+    const app = makeApp();
+    const reply = makeReply();
+
+    let zodErr: z.ZodError;
+    try {
+      z.object({ model: z.string() }).parse({ model: 123 });
+    } catch (e) {
+      zodErr = e as z.ZodError;
+    }
+
+    await handleVideoError(app, reply, 'user-1', zodErr!);
+
+    expect(reply._sent.code).toBe(400);
+    const body = reply._sent.body as Record<string, unknown>;
+    expect(body.error).toBe('Invalid request');
+    expect(Array.isArray(body.details)).toBe(true);
+  });
+
+  it('unknown Error → 500 with apiError shape', async () => {
+    const app = makeApp();
+    const reply = makeReply();
+
+    const error = new Error('something went wrong');
+    await handleVideoError(app, reply, 'user-1', error);
+
+    expect(reply._sent.code).toBe(500);
+    const body = reply._sent.body as Record<string, unknown>;
+    expect(body).toBeDefined();
   });
 });

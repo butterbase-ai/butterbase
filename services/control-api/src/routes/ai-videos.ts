@@ -18,6 +18,9 @@ import {
   insertVideoJob, getVideoJob, markVideoJobInProgress, markVideoJobTerminal,
   type VideoJobRow,
 } from '../services/ai-router/video-jobs.js';
+import { settleAfterCall } from '../services/ai-router/billing-gate.js';
+import { applyMarkup } from '../services/ai-router/markup.js';
+import { readAutoRefillState } from './ai-config.js';
 
 // Reuse the same adapter-build pattern as ai-config.ts. Extract into a shared
 // helper if a third route ends up needing it; one duplicate is fine for now.
@@ -71,20 +74,41 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         body,
       );
 
-      const jobId = await insertVideoJob(runtimePool, {
-        appId, userId, model: body.model, requestJson: body,
-        upstreamRouter: submit.chosenRouter,
-        upstreamJobId: submit.upstreamJobId,
-        upstreamPollingUrl: submit.pollingUrl,
-        leaseId: submit.leaseId,
-        estimatedCostUsd: submit.estimatedCostUsd,
-        markupPct: config.aiRouter.markupPct,
-      });
+      let jobId: string;
+      try {
+        jobId = await insertVideoJob(runtimePool, {
+          appId, userId, model: body.model, requestJson: body,
+          upstreamRouter: submit.chosenRouter,
+          upstreamJobId: submit.upstreamJobId,
+          upstreamPollingUrl: submit.pollingUrl,
+          leaseId: submit.leaseId,
+          estimatedCostUsd: submit.estimatedCostUsd,
+          markupPct: config.aiRouter.markupPct,
+        });
+      } catch (insertErr) {
+        // Upstream job is running but we have no row to track it. Refund the lease
+        // (synthetic handle is safe — settleAfterCall reads only leaseId), and log
+        // loudly so ops can reconcile the orphaned upstream job.
+        await settleAfterCall(
+          app.controlDb,
+          { leaseId: submit.leaseId, amountGrantedUsd: 0, expiresAt: new Date() },
+          0,
+        ).catch(refundErr => {
+          app.log.error({ err: refundErr, leaseId: submit.leaseId }, 'video: lease refund after insert failure also failed');
+        });
+        app.log.error({
+          err: insertErr,
+          appId, userId,
+          upstreamRouter: submit.chosenRouter,
+          upstreamJobId: submit.upstreamJobId,
+        }, 'video: insertVideoJob failed AFTER upstream submit — orphaned upstream job');
+        throw insertErr; // surface as 500 via handleVideoError
+      }
 
       const publicPollingUrl = `${request.protocol}://${request.hostname}/v1/${appId}/videos/completions/${jobId}`;
       return reply.code(202).send({ job_id: jobId, status: 'pending', polling_url: publicPollingUrl });
     } catch (error) {
-      return handleVideoError(app, request, reply, error);
+      return handleVideoError(app, reply, userId, error);
     }
   });
 
@@ -98,8 +122,10 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
       if (job.user_id !== userId) return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
 
+      const absoluteBase = `${request.protocol}://${request.hostname}`;
+
       if (['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) {
-        return reply.code(200).send(buildPublicJobResponse(appId, job));
+        return reply.code(200).send(buildPublicJobResponse(absoluteBase, appId, job));
       }
 
       const region = await resolveAppHomeRegion(app.controlDb, appId);
@@ -116,34 +142,40 @@ export async function aiVideoRoutes(app: FastifyInstance) {
 
       if (['completed', 'failed', 'cancelled', 'expired'].includes(poll.status)) {
         const providerCost = poll.providerCostUsd ?? 0;
-        const settle = await settleVideoJob(ctx, {
-          leaseId: job.lease_id,
-          chosenRouter: job.upstream_router as RouterName,
-          canonicalModel: job.model,
-          providerCostUsd: providerCost,
-        });
+
+        // Mark terminal FIRST — atomic gate. Only the "winner" of this row update
+        // settles the lease + writes the usage row.
         const terminal = await markVideoJobTerminal(runtimePool, jobId, {
           status: poll.status as 'completed' | 'failed' | 'cancelled' | 'expired',
           unsignedUrls: poll.unsignedUrls,
           providerCostUsd: providerCost,
-          chargedCreditsUsd: settle.chargedCreditsUsd,
+          // chargedCreditsUsd is computed below if we're the winner; pass through
+          // a tentative value matching what settleVideoJob would compute so the
+          // row reflects the same number whether we settle or not.
+          chargedCreditsUsd: applyMarkup(providerCost, parseFloat(job.markup_pct)),
           error: poll.error,
         });
-        if (!terminal.firstTerminal) {
-          const fresh = await getVideoJob(runtimePool, jobId);
-          return reply.code(200).send(buildPublicJobResponse(appId, fresh!));
+
+        if (terminal.firstTerminal) {
+          await settleVideoJob(ctx, {
+            leaseId: job.lease_id,
+            chosenRouter: job.upstream_router as RouterName,
+            canonicalModel: job.model,
+            providerCostUsd: providerCost,
+          });
         }
+
         const fresh = await getVideoJob(runtimePool, jobId);
-        return reply.code(200).send(buildPublicJobResponse(appId, fresh!));
+        return reply.code(200).send(buildPublicJobResponse(absoluteBase, appId, fresh!));
       }
 
       return reply.code(200).send({
         job_id: jobId,
         status: poll.status,
-        polling_url: `${request.protocol}://${request.hostname}/v1/${appId}/videos/completions/${jobId}`,
+        polling_url: `${absoluteBase}/v1/${appId}/videos/completions/${jobId}`,
       });
     } catch (error) {
-      return handleVideoError(app, request, reply, error);
+      return handleVideoError(app, reply, userId, error);
     }
   });
 
@@ -171,13 +203,13 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         .header('Content-Type', contentType)
         .send(Readable.fromWeb(stream as any));
     } catch (error) {
-      return handleVideoError(app, request, reply, error);
+      return handleVideoError(app, reply, userId, error);
     }
   });
 }
 
-export function buildPublicJobResponse(appId: string, job: VideoJobRow) {
-  const base = `/v1/${appId}/videos/completions/${job.id}`;
+export function buildPublicJobResponse(absoluteBase: string, appId: string, job: VideoJobRow) {
+  const base = `${absoluteBase}/v1/${appId}/videos/completions/${job.id}`;
   return {
     job_id: job.id,
     status: job.status,
@@ -191,11 +223,20 @@ export function buildPublicJobResponse(appId: string, job: VideoJobRow) {
   };
 }
 
-function handleVideoError(app: FastifyInstance, _req: unknown, reply: any, error: unknown) {
+export async function handleVideoError(app: FastifyInstance, reply: any, userId: string, error: unknown) {
   if (error instanceof InsufficientCreditsError) {
+    const ar = await readAutoRefillState(app.controlDb, userId).catch(() => ({
+      enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
+    }));
     return reply.code(402).send({
-      error: 'insufficient_credits', code: 'INSUFFICIENT_CREDITS',
-      required_usd: error.requiredUsd, available_usd: error.availableUsd,
+      error: 'insufficient_credits',
+      code: 'INSUFFICIENT_CREDITS',
+      required_usd: error.requiredUsd,
+      available_usd: error.availableUsd,
+      monthly_allowance_usd: ar.monthlyAllowanceUsd,
+      credits_usd: ar.topupUsd,
+      auto_refill_enabled: ar.enabled,
+      auto_refill_amount_usd: ar.amountUsd,
     });
   }
   if (error instanceof RouterError) {

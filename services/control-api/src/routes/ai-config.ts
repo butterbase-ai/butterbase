@@ -20,7 +20,7 @@ import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catal
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 
-async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promise<{
+export async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promise<{
   enabled: boolean;
   amountUsd: number | null;
   monthlyAllowanceUsd: number;
