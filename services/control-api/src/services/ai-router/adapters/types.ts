@@ -115,5 +115,5 @@ export interface RouterAdapter {
    * pricing snapshot drift. The report shape is adapter-specific; the
    * refresher logs it without interpretation.
    */
-  getLastCatalogDrift?(): unknown | undefined;
+  getLastCatalogDrift?(): unknown;
 }
