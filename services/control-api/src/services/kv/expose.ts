@@ -146,3 +146,30 @@ export async function nextDeclarationOrder(c: RedisClientLike, appId: string): P
   }
   return max + 1;
 }
+
+/**
+ * Delete all expose rules for an app. Used by the bulk-replace endpoint.
+ * The RedisClientLike interface does not include DEL, so we accept a client
+ * that also exposes a `del` method (the full RedisClient satisfies this).
+ */
+export async function clearRules(
+  c: RedisClientLike & { del(keys: string[]): Promise<number> },
+  appId: string,
+): Promise<void> {
+  await c.del([metaKey(appId)]);
+}
+
+/**
+ * Replace all expose rules for an app atomically (clear then save).
+ * Accepts an optional declarationOrder seed so callers can start from 0.
+ */
+export async function replaceRules(
+  c: RedisClientLike & { del(keys: string[]): Promise<number> },
+  appId: string,
+  rules: RuleSource[],
+): Promise<void> {
+  await c.del([metaKey(appId)]);
+  for (let i = 0; i < rules.length; i++) {
+    await saveRule(c, appId, rules[i]!, i);
+  }
+}

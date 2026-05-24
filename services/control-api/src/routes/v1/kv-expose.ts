@@ -5,6 +5,7 @@
  *
  * Routes:
  *   GET    /v1/:app_id/kv/_expose                  → {rules: [...]}
+ *   PUT    /v1/:app_id/kv/_expose                  → 204 (bulk-replace all rules)
  *   PUT    /v1/:app_id/kv/_expose/:pattern          → 204 | 409 {error:'KV_EXPOSE_CONFLICT'}
  *   DELETE /v1/:app_id/kv/_expose/:pattern          → {deleted: bool}
  *
@@ -23,6 +24,7 @@ import {
   compileRule,
   detectConflict,
   nextDeclarationOrder,
+  replaceRules,
   type Role,
   type RuleSource,
 } from '../../services/kv/expose.js';
@@ -95,6 +97,58 @@ const kvExposeRoutes: FastifyPluginAsync = async (fastify) => {
       });
     },
   );
+
+  // PUT /v1/:app_id/kv/_expose  (bulk-replace)
+  // Accepts { rules: [{ pattern, read, write }] } where read/write are either
+  // a Role string ('public'|'authed'|'owner'|'deny') or a boolean
+  // (true → 'public', false → 'deny') for dashboard compatibility.
+  fastify.put<{
+    Params: { app_id: string };
+    Body: { rules?: unknown };
+  }>('/v1/:app_id/kv/_expose', async (req, reply) => {
+    const { app_id: appId } = req.params;
+
+    const auth = await resolveKvAuth(fastify.controlDb, appId, req, (fastify as any).authProvider);
+    if ('error' in auth) return reply.code(auth.status).send(auth.body);
+
+    if (!auth.allowExposeWrites) {
+      return reply.code(403).send(errBody('forbidden'));
+    }
+
+    const body = req.body as { rules?: unknown };
+    if (!Array.isArray(body?.rules)) {
+      return reply.code(400).send(errBody('bad_request', 'body must be { rules: [...] }'));
+    }
+
+    // Normalise each rule: map boolean read/write to Role strings.
+    const toRole = (v: unknown): Role | null => {
+      if (v === true) return 'public';
+      if (v === false) return 'deny';
+      if (VALID_ROLES.includes(v as Role)) return v as Role;
+      return null;
+    };
+
+    const rules: RuleSource[] = [];
+    for (const item of body.rules as unknown[]) {
+      if (!item || typeof item !== 'object') {
+        return reply.code(400).send(errBody('bad_request', 'each rule must be an object'));
+      }
+      const r = item as Record<string, unknown>;
+      if (typeof r.pattern !== 'string' || !r.pattern) {
+        return reply.code(400).send(errBody('bad_request', 'each rule must have a non-empty pattern string'));
+      }
+      const read = toRole(r.read);
+      const write = toRole(r.write);
+      if (read === null || write === null) {
+        return reply.code(400).send(errBody('bad_request', 'read and write must be public|authed|owner|deny or boolean'));
+      }
+      rules.push({ pattern: r.pattern, read, write });
+    }
+
+    const baseOpts = baseOptsForRegion(auth.region, auth.redisPassword);
+    await withRedis(baseOpts, DURABLE_DB, (c) => replaceRules(c, auth.appId, rules));
+    return reply.code(204).send();
+  });
 
   // PUT /v1/:app_id/kv/_expose/:pattern
   fastify.put<{

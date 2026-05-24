@@ -116,6 +116,85 @@ describeDb('GET /v1/:app_id/kv/_expose', () => {
   });
 });
 
+// ── PUT _expose (bulk-replace) ─────────────────────────────────────────────────
+
+describeDb('PUT /v1/:app_id/kv/_expose (bulk)', () => {
+  it('replaces all rules in one call → 204', async () => {
+    // Pre-populate two rules
+    await req('PUT', `/v1/${appId}/kv/_expose/${encodeURIComponent('old:*')}`, {
+      payload: { read: 'public', write: 'deny' },
+    });
+
+    const res = await req('PUT', `/v1/${appId}/kv/_expose`, {
+      payload: {
+        rules: [
+          { pattern: 'posts:*', read: 'public', write: 'authed' },
+          { pattern: 'session:*', read: 'authed', write: 'deny' },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(204);
+
+    const list = await req('GET', `/v1/${appId}/kv/_expose`);
+    const { rules } = list.json();
+    // old:* must be gone; new rules present
+    expect(rules.find((r: any) => r.pattern === 'old:*')).toBeUndefined();
+    expect(rules.find((r: any) => r.pattern === 'posts:*')).toBeDefined();
+    expect(rules.find((r: any) => r.pattern === 'session:*')).toBeDefined();
+  });
+
+  it('accepts boolean read/write (dashboard compat: true→public, false→deny)', async () => {
+    const res = await req('PUT', `/v1/${appId}/kv/_expose`, {
+      payload: {
+        rules: [{ pattern: 'flags:*', read: true, write: false }],
+      },
+    });
+    expect(res.statusCode).toBe(204);
+
+    const list = await req('GET', `/v1/${appId}/kv/_expose`);
+    const rule = list.json().rules.find((r: any) => r.pattern === 'flags:*');
+    expect(rule).toBeDefined();
+    expect(rule.read).toBe('public');
+    expect(rule.write).toBe('deny');
+  });
+
+  it('clears all rules when given an empty array → 204', async () => {
+    await req('PUT', `/v1/${appId}/kv/_expose/${encodeURIComponent('tmp:*')}`, {
+      payload: { read: 'public', write: 'deny' },
+    });
+
+    const res = await req('PUT', `/v1/${appId}/kv/_expose`, {
+      payload: { rules: [] },
+    });
+    expect(res.statusCode).toBe(204);
+
+    const list = await req('GET', `/v1/${appId}/kv/_expose`);
+    expect(list.json().rules).toHaveLength(0);
+  });
+
+  it('returns 400 when rules field is missing', async () => {
+    const res = await req('PUT', `/v1/${appId}/kv/_expose`, {
+      payload: { notRules: [] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('returns 400 for invalid role value', async () => {
+    const res = await req('PUT', `/v1/${appId}/kv/_expose`, {
+      payload: { rules: [{ pattern: 'x:*', read: 'admin', write: 'public' }] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects JWT callers (invalid JWT → 401; valid JWT → 403)', async () => {
+    const res = await req('PUT', `/v1/${appId}/kv/_expose`, {
+      token: 'header.payload.signature',
+      payload: { rules: [] },
+    });
+    expect([401, 403]).toContain(res.statusCode);
+  });
+});
+
 // ── PUT _expose/:pattern ────────────────────────────────────────────────────────
 
 describeDb('PUT /v1/:app_id/kv/_expose/:pattern', () => {
