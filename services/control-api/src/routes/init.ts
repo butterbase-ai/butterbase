@@ -163,8 +163,8 @@ export async function initRoutes(app: FastifyInstance) {
     let subdomain = requestedSubdomain ?? name.replace(/_/g, '-');
 
     // Check subdomain uniqueness — auto-suffix with a butter-themed word if taken
-    const existing = await app.runtimeDb(region).query(
-      `SELECT id FROM apps WHERE subdomain = $1`,
+    const existing = await app.controlDb.query(
+      `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
       [subdomain]
     );
     if (existing.rows.length > 0) {
@@ -184,8 +184,8 @@ export async function initRoutes(app: FastifyInstance) {
       subdomain = `${subdomain}-${word}`;
 
       // If still taken (unlikely), add a short random number
-      const stillTaken = await app.runtimeDb(region).query(
-        `SELECT id FROM apps WHERE subdomain = $1`,
+      const stillTaken = await app.controlDb.query(
+        `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
         [subdomain]
       );
       if (stillTaken.rows.length > 0) {
