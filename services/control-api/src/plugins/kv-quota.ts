@@ -137,11 +137,11 @@ async function resolveOwnerId(controlDb: Pool, appId: string): Promise<string | 
     // Fall through
   }
 
-  // Fallback: apps table on the control DB (works in test environments where
-  // the test harness inserts apps into the control DB pool directly)
+  // Fallback: user_app_index on the control DB (cross-region projection;
+  // the apps table itself was moved to per-region runtime DBs in Phase 2).
   try {
     const r = await controlDb.query<{ owner_id: string }>(
-      'SELECT owner_id FROM apps WHERE id = $1',
+      'SELECT user_id AS owner_id FROM user_app_index WHERE app_id = $1',
       [appId],
     );
     if (r.rows.length > 0 && r.rows[0].owner_id) {

@@ -92,18 +92,13 @@ export async function insertAppRow(
     [appId, name, ownerId, dbName, region, config.deployment.defaultBackend]
   );
 
-  // Atomically register the app in the control-plane and provision KV credentials.
-  // Both writes are in a single controlDb transaction so they succeed or fail together.
-  // The control-plane apps row satisfies the FK required by app_kv_credentials.
+  // Provision KV credentials on the control-plane. The control-plane apps row
+  // (Phase 1 cutover) no longer exists; app_kv_credentials has no FK to it.
+  // Authoritative app row is the runtime DB INSERT above; cross-region projection
+  // is user_app_index, written by the init route after this helper returns.
   const client = await controlDb.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `INSERT INTO apps (id, name, owner_id, db_name, region)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (id) DO NOTHING`,
-      [appId, name, ownerId, dbName, region],
-    );
     const kvSvc = new KvCredentialsService(client);
     await kvSvc.provision(appId, region);
     await client.query('COMMIT');
