@@ -1,3 +1,4 @@
+-- @scope: platform
 -- 072_hackathon_submissions_drop_app_fk.sql
 --
 -- Post OSS-split the control-plane `apps` table only mirrors a subset of all
