@@ -390,11 +390,14 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
 }
 
 /**
- * Default conservative estimate for video generation. Most video jobs cost
- * $0.05–$0.40 at upstream; $0.50 covers nearly all single-call cases and is
- * refunded against actual `usage.cost` on the first terminal poll.
+ * Safety-net estimate for video generation used when no parseable
+ * duration-based SKU exists in the model's raw_pricing (e.g. Seedance which
+ * prices per video-token). Most calls instead use a per-model estimate
+ * computed from `raw_pricing.pricing_skus` via `estimateVideoCostUsd`. $3.0
+ * is intentionally generous to ensure the lease always covers worst-case
+ * cost for unknown models; unused credit is refunded on settle.
  */
-const VIDEO_DEFAULT_ESTIMATE_USD = 0.5;
+const VIDEO_DEFAULT_ESTIMATE_USD = 3.0;
 
 /**
  * Video jobs may take several minutes. We hold the lease for 15 minutes;
@@ -402,6 +405,43 @@ const VIDEO_DEFAULT_ESTIMATE_USD = 0.5;
  * credit_leases.expires_at — credits are returned to the user.
  */
 const VIDEO_LEASE_TTL_SECONDS = 15 * 60;
+
+/**
+ * Estimate the worst-case credit-cost (in USD, pre-markup) of a video job from
+ * the catalog's raw pricing payload. Used to size the credit lease.
+ *
+ * Strategy: pick the MAXIMUM rate among all SKU keys containing
+ * `duration_seconds` and multiply by the requested duration (default 10s if
+ * unspecified — most providers cap there). Apply a 20% buffer. Fall back to
+ * VIDEO_DEFAULT_ESTIMATE_USD when no parseable duration-based SKU exists
+ * (e.g. Seedance which prices per video-token).
+ *
+ * Clamped to [$0.05, $9] so a bad SKU value can't lock up an absurd reservation.
+ */
+function estimateVideoCostUsd(
+  entry: import('./catalog.js').CatalogEntry,
+  req: VideoGenerationRequest,
+): number {
+  const rawPricing = entry.routers[0]?.rawPricing as
+    | { pricing_skus?: Record<string, string> }
+    | null
+    | undefined;
+  const skus = rawPricing?.pricing_skus;
+  if (!skus || typeof skus !== 'object') return VIDEO_DEFAULT_ESTIMATE_USD;
+
+  const durationRates: number[] = [];
+  for (const [key, val] of Object.entries(skus)) {
+    if (!key.includes('duration_seconds')) continue;
+    const rate = parseFloat(val);
+    if (Number.isFinite(rate) && rate > 0) durationRates.push(rate);
+  }
+  if (durationRates.length === 0) return VIDEO_DEFAULT_ESTIMATE_USD;
+
+  const maxRate = Math.max(...durationRates);
+  const seconds = req.duration ?? 10;
+  const raw = maxRate * seconds * 1.2; // 20% buffer
+  return Math.min(Math.max(raw, 0.05), 9);
+}
 
 export interface RouteVideoSubmitResult {
   upstreamJobId: string;
@@ -430,7 +470,8 @@ export async function routeVideoSubmit(
     throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
   }
 
-  const reservedUsd = VIDEO_DEFAULT_ESTIMATE_USD * (1 + ctx.markupPct / 100);
+  const estimatedUsd = estimateVideoCostUsd(entry, req);
+  const reservedUsd = estimatedUsd * (1 + ctx.markupPct / 100);
   const lease = await acquireWithAudit(ctx, reservedUsd, VIDEO_LEASE_TTL_SECONDS);
 
   const fallbackChain: string[] = [];
@@ -470,7 +511,7 @@ export async function routeVideoSubmit(
     pollingUrl: submitted.result.pollingUrl,
     chosenRouter: submitted.router,
     leaseId: lease.leaseId,
-    estimatedCostUsd: VIDEO_DEFAULT_ESTIMATE_USD,
+    estimatedCostUsd: estimatedUsd,
   };
 }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { routeChatCompletion, routeVideoSubmit, routeVideoPoll, settleVideoJob, RouterError } from './router.js';
-import { AdapterError, type RouterAdapter } from './adapters/types.js';
+import { AdapterError, type RouterAdapter, type VideoGenerationRequest } from './adapters/types.js';
 import { applyMarkup } from './markup.js';
 
 vi.mock('./billing-gate.js', () => ({
@@ -321,7 +321,7 @@ describe('routeVideoSubmit', () => {
     expect(result.pollingUrl).toBe('https://openrouter.ai/api/v1/videos/job-xyz');
     expect(result.chosenRouter).toBe('openrouter');
     expect(result.leaseId).toBeTruthy();
-    expect(result.estimatedCostUsd).toBe(0.5);
+    expect(result.estimatedCostUsd).toBe(3.0); // no rawPricing on fixture → falls back to VIDEO_DEFAULT_ESTIMATE_USD
     expect(submitVideo).toHaveBeenCalledTimes(1);
   });
 
@@ -523,5 +523,149 @@ describe('settleVideoJob', () => {
       chargedCreditsUsd: expectedCharged,
       providerCostUsd: 0.25,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// estimateVideoCostUsd — tested indirectly through routeVideoSubmit
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal video CatalogEntry with optional rawPricing pricing_skus.
+ * The key is stored at routers[0].rawPricing.
+ */
+function videoEntryWithSkus(pricingSkus?: Record<string, string> | null, rawPricingOverride?: unknown) {
+  const rawPricing = rawPricingOverride !== undefined
+    ? rawPricingOverride
+    : (pricingSkus !== null && pricingSkus !== undefined ? { pricing_skus: pricingSkus } : undefined);
+  return {
+    canonicalId: 'bytedance/seedance-2.0',
+    displayName: 'Test Video Model',
+    updatedAt: new Date().toISOString(),
+    routers: [
+      {
+        name: 'openrouter',
+        upstreamId: 'bytedance/seedance-2.0',
+        promptPricePerMtok: 0,
+        completionPricePerMtok: 0,
+        contextLength: 0,
+        modality: 'video' as const,
+        ...(rawPricing !== undefined ? { rawPricing } : {}),
+      },
+    ],
+  };
+}
+
+async function submitVideoWithEntry(entry: any, req: Partial<VideoGenerationRequest> = {}): Promise<number> {
+  const submitVideo = vi.fn(async () => ({
+    upstreamJobId: 'job-xyz',
+    pollingUrl: 'https://openrouter.ai/api/v1/videos/job-xyz',
+    status: 'pending' as const,
+  }));
+
+  const adapter: RouterAdapter = {
+    name: 'openrouter' as any,
+    toUpstreamId: (id: string) => id,
+    listModels: vi.fn(async () => []),
+    chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+    submitVideo,
+  };
+
+  const redis: any = {
+    get: vi.fn(async (key: string) => {
+      if (key === 'ai_catalog:model:bytedance/seedance-2.0') return JSON.stringify(entry);
+      if (key === 'ai_catalog:routers') return JSON.stringify([{ name: 'openrouter', enabled: true }]);
+      return null;
+    }),
+  };
+
+  const ctx: any = {
+    platformPool: makePoolStub(),
+    runtimePool: makePoolStub(),
+    redis,
+    adapters: new Map([['openrouter', adapter]]),
+    markupPct: 0,
+    appId: 'a',
+    userId: 'u',
+    region: 'r',
+  };
+
+  const result = await routeVideoSubmit(ctx, {
+    model: 'bytedance/seedance-2.0',
+    prompt: 'test',
+    ...req,
+  });
+  return result.estimatedCostUsd;
+}
+
+describe('estimateVideoCostUsd (via routeVideoSubmit)', () => {
+  it('1. Wan 2.6 4s: picks max rate $0.15 (1080p), duration=4 → $0.72', async () => {
+    const entry = videoEntryWithSkus({
+      text_to_video_duration_seconds_720p: '0.08',
+      text_to_video_duration_seconds_1080p: '0.12',
+      image_to_video_duration_seconds_1080p: '0.15',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 4 });
+    // max=0.15, 0.15*4*1.2 = 0.72, clamp(0.72, 0.05, 9) = 0.72
+    expect(cost).toBeCloseTo(0.72, 10);
+  });
+
+  it('2. Veo 3.1 8s: max $0.60 (4k), duration=8 → $5.76', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds_with_audio: '0.40',
+      duration_seconds_with_audio_4k: '0.60',
+      duration_seconds_without_audio: '0.20',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 8 });
+    // max=0.60, 0.60*8*1.2 = 5.76, clamp(5.76, 0.05, 9) = 5.76
+    expect(cost).toBeCloseTo(5.76, 10);
+  });
+
+  it('3. Wan 2.7, no duration in request: max $0.10, defaults to 10s → $1.20', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds: '0.1',
+    });
+    // no duration field → defaults to 10
+    const cost = await submitVideoWithEntry(entry, {});
+    // 0.1*10*1.2 = 1.2
+    expect(cost).toBeCloseTo(1.2, 10);
+  });
+
+  it('4. Seedance token-based pricing (no duration_seconds SKUs) → falls back to VIDEO_DEFAULT_ESTIMATE_USD (3.0)', async () => {
+    const entry = videoEntryWithSkus({
+      video_tokens: '0.0000056',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 5 });
+    expect(cost).toBe(3.0);
+  });
+
+  it('5. No rawPricing on catalog entry → falls back to 3.0', async () => {
+    const entry = videoEntryWithSkus(undefined);
+    const cost = await submitVideoWithEntry(entry);
+    expect(cost).toBe(3.0);
+  });
+
+  it('6. rawPricing is not an object (string) → falls back to 3.0', async () => {
+    const entry = videoEntryWithSkus(undefined, 'invalid-string');
+    const cost = await submitVideoWithEntry(entry);
+    expect(cost).toBe(3.0);
+  });
+
+  it('7. All-zero rates in pricing_skus → falls back to 3.0', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds: '0',
+      duration_seconds_hd: '0.0',
+    });
+    const cost = await submitVideoWithEntry(entry);
+    expect(cost).toBe(3.0);
+  });
+
+  it('8. Crazy SKU rate of $100/s → clamped to $9', async () => {
+    const entry = videoEntryWithSkus({
+      duration_seconds: '100',
+    });
+    const cost = await submitVideoWithEntry(entry, { duration: 10 });
+    // 100*10*1.2 = 1200, clamped to 9
+    expect(cost).toBe(9);
   });
 });
