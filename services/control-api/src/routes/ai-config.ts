@@ -255,6 +255,15 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const catalogEntry = await readCatalogEntry(getRedisClient(), modelResolved);
+        if (catalogEntry && catalogEntry.routers.some(r => r.modality === 'video')) {
+          return reply.code(400).send({
+            error: 'wrong_endpoint',
+            code: 'USE_VIDEO_ENDPOINT',
+            message: `Model ${modelResolved} is a video model. Use POST /v1/${appId}/videos/completions instead.`,
+          });
+        }
+
         const result = await routeChatCompletion(
           {
             platformPool: app.controlDb,
