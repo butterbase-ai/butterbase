@@ -231,6 +231,9 @@ export function buildPublicJobResponse(absoluteBase: string, appId: string, job:
       : null,
     error: job.error,
     created_at: job.created_at,
+    // Charged amount is null until the first terminal poll has settled the lease.
+    charged_credits_usd: job.charged_credits_usd != null ? parseFloat(job.charged_credits_usd) : null,
+    settled_at: job.settled_at,
   };
 }
 

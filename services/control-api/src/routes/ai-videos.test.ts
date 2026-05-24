@@ -67,6 +67,9 @@ describe('buildPublicJobResponse', () => {
     expect(res.content_urls).toEqual(['https://api.example.com/v1/app-1/videos/completions/job-abc/content?index=0']);
     expect(res.error).toBeNull();
     expect(res.created_at).toBeInstanceOf(Date);
+    expect(res.charged_credits_usd).toBeCloseTo(0.099, 4);
+    expect(res.settled_at).toBeInstanceOf(Date);
+    expect(res).not.toHaveProperty('provider_cost_usd');
   });
 
   it('returns null content_urls when unsigned_urls is null', () => {
