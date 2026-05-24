@@ -49,7 +49,9 @@ async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promis
 }
 
 async function getAppDefaultModel(controlPool: pg.Pool, appId: string): Promise<string | null> {
-  const r = await controlPool.query<{ ai_config: { defaultModel?: string } | null }>(
+  const region = await resolveAppHomeRegion(controlPool, appId);
+  const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
+  const r = await runtimeDb.query<{ ai_config: { defaultModel?: string } | null }>(
     `SELECT ai_config FROM apps WHERE id = $1`,
     [appId]
   );
