@@ -476,16 +476,12 @@ export async function hackathonsMcpRoutes(app: FastifyInstance) {
 
     const submissionRow = rows[0];
 
-    // Fire-and-forget async scoring. Features live in the per-region runtime
-    // DB (control plane only mirrors a subset post OSS-split), so route the
-    // feature-count query to the app's home region. Fall back to controlDb
-    // when there's no app_id — scoring still scores the URL criterion.
+    // Fire-and-forget async scoring. Feature tables live in the per-region
+    // runtime DB; `scoreSubmission` resolves the app's home region internally
+    // via `getRuntimeDbForApp`, so we just pass `controlDb` here.
     setImmediate(async () => {
       try {
-        const pool = submissionRow.app_id
-          ? await app.runtimeDbForApp(submissionRow.app_id).catch(() => app.controlDb)
-          : app.controlDb;
-        await scoreSubmission(pool, {
+        await scoreSubmission(app.controlDb, {
           id: submissionRow.id,
           hackathon_id: h.id,
           participant_id: participantId,

@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import type { FieldSchema } from './field-schema.js';
 import { getUrlFieldKey } from './field-schema.js';
+import { getRuntimeDbForApp } from '../region-resolver.js';
 
 interface Logger {
   error(obj: unknown, msg?: string): void;
@@ -43,7 +44,7 @@ const FEATURE_WEIGHT = 50 / FEATURES.length; // ~4.17 per feature
  * Score a single submission asynchronously. Never throws — safe for fire-and-forget.
  */
 export async function scoreSubmission(
-  db: pg.Pool,
+  controlDb: pg.Pool,
   submission: SubmissionInput,
   logger: Logger,
 ): Promise<void> {
@@ -72,39 +73,54 @@ export async function scoreSubmission(
     const featureBreakdown: Record<string, { count: number; score: number }> = {};
 
     if (submission.app_id) {
-      // Build a single CTE query to count all features in one round-trip
-      const ctes = FEATURES.map((f, i) => {
-        const extra = 'where' in f && f.where ? ` ${f.where}` : '';
-        return `f${i} AS (SELECT COUNT(*) AS cnt FROM ${f.table} WHERE app_id = $1${extra})`;
-      });
-
-      const selects = FEATURES.map((_, i) => `(SELECT cnt FROM f${i}) AS f${i}`);
-      const sql = `WITH ${ctes.join(', ')} SELECT ${selects.join(', ')}`;
-      const { rows } = await db.query(sql, [submission.app_id]);
-      const row = rows[0];
-
-      for (let i = 0; i < FEATURES.length; i++) {
-        const f = FEATURES[i];
-        const count = Number(row[`f${i}`]) || 0;
-        let score = 0;
-
-        if (f.type === 'binary') {
-          score = count > 0 ? FEATURE_WEIGHT : 0;
-        } else {
-          score = (Math.min(count, f.cap) / f.cap) * FEATURE_WEIGHT;
-        }
-
-        featureBreakdown[f.key] = { count, score: Math.round(score * 100) / 100 };
-        criterionFeatures += score;
+      // Resolve the app's home region — feature tables live on the regional runtime DB
+      // (post controlplane-apps refactor). Soft-fail to features=0 if unresolvable so
+      // a single ghost app_id can't take down a whole rescore batch.
+      let runtimeDb: pg.Pool | null = null;
+      try {
+        runtimeDb = await getRuntimeDbForApp(controlDb, submission.app_id);
+      } catch (err) {
+        logger.error(
+          { err, submissionId: submission.id, appId: submission.app_id },
+          '[scoring] Could not resolve runtime DB for app; features will be 0',
+        );
       }
 
-      criterionFeatures = Math.round(criterionFeatures * 100) / 100;
+      if (runtimeDb) {
+        // Build a single CTE query to count all features in one round-trip
+        const ctes = FEATURES.map((f, i) => {
+          const extra = 'where' in f && f.where ? ` ${f.where}` : '';
+          return `f${i} AS (SELECT COUNT(*) AS cnt FROM ${f.table} WHERE app_id = $1${extra})`;
+        });
+
+        const selects = FEATURES.map((_, i) => `(SELECT cnt FROM f${i}) AS f${i}`);
+        const sql = `WITH ${ctes.join(', ')} SELECT ${selects.join(', ')}`;
+        const { rows } = await runtimeDb.query(sql, [submission.app_id]);
+        const row = rows[0];
+
+        for (let i = 0; i < FEATURES.length; i++) {
+          const f = FEATURES[i];
+          const count = Number(row[`f${i}`]) || 0;
+          let score = 0;
+
+          if (f.type === 'binary') {
+            score = count > 0 ? FEATURE_WEIGHT : 0;
+          } else {
+            score = (Math.min(count, f.cap) / f.cap) * FEATURE_WEIGHT;
+          }
+
+          featureBreakdown[f.key] = { count, score: Math.round(score * 100) / 100 };
+          criterionFeatures += score;
+        }
+
+        criterionFeatures = Math.round(criterionFeatures * 100) / 100;
+      }
     }
 
     const totalScore = Math.round((criterionDemoUrl + criterionFeatures) * 100) / 100;
 
     // --- Upsert score ---
-    await db.query(
+    await controlDb.query(
       `INSERT INTO hackathon_scores (
           submission_id, hackathon_id, participant_id, user_id,
           criterion_demo_url, criterion_features, total_score,

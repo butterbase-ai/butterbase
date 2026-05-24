@@ -5,6 +5,15 @@ export const controlDb = new pg.Pool({
   connectionString: process.env.CONTROL_DB_URL ?? 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control',
 });
 
+/**
+ * Runtime DB pool — feature tables (app_functions, app_db_connections, etc.) live here
+ * post the controlplane-apps refactor. Tests that exercise scoring/feature-count logic
+ * should seed feature rows into this pool and mock `getRuntimeDbForApp` to return it.
+ */
+export const runtimeDb = new pg.Pool({
+  connectionString: process.env.RUNTIME_DB_URL ?? 'postgresql://butterbase:butterbase_dev@localhost:5437/butterbase_runtime_us',
+});
+
 export async function setupTestDb() {
   await controlDb.query('DELETE FROM hackathon_scores');
   await controlDb.query('DELETE FROM hackathon_submissions');
