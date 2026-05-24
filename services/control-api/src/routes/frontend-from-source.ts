@@ -20,6 +20,7 @@ import * as R2 from '../services/r2.js';
 import * as BuildDriver from '../services/build-driver.service.js';
 import { loadAppEnvVars } from '../services/build-driver.service.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
+import { getRuntimeDbForApp } from '../services/region-resolver.js';
 
 const startSchema = z.object({
   buildCommand: z.string().min(1).max(500).default('npm run build'),
@@ -66,9 +67,10 @@ export async function registerFrontendFromSourceRoutes(fastify: FastifyInstance)
 
     const buildId = crypto.randomUUID();
 
-    // Insert deployment row and capture the DB-generated id atomically via
-    // RETURNING, eliminating any race between concurrent from-source POSTs.
-    const depRow = await controlDb.query<{ id: string }>(
+    // app_deployments is runtime-tier (db/runtime-plane/007); route INSERT to the app's runtime DB.
+    const runtimeDb = await getRuntimeDbForApp(controlDb, appId);
+
+    const depRow = await runtimeDb.query<{ id: string }>(
       `INSERT INTO app_deployments (app_id, framework, status, deployed_by)
        VALUES ($1, 'other', 'WAITING', $2)
        RETURNING id`,
