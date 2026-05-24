@@ -109,7 +109,7 @@ export interface RouteChatResult {
 
 export class RouterError extends Error {
   constructor(
-    public readonly code: 'MODEL_NOT_FOUND' | 'NO_ROUTERS_AVAILABLE' | 'ROUTER_FALLBACK_EXHAUSTED',
+    public readonly code: 'MODEL_NOT_FOUND' | 'NO_ROUTERS_AVAILABLE' | 'ROUTER_FALLBACK_EXHAUSTED' | 'WRONG_MODALITY',
     public readonly statusCode: number,
     message: string,
     // Internal-only — router names and failure kinds. Never surface to clients;
@@ -419,7 +419,7 @@ export async function routeVideoSubmit(
   const entry = await readCatalogEntry(ctx.redis, canonicalId);
   if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
   if (!entry.routers.some(r => r.modality === 'video')) {
-    throw new RouterError('MODEL_NOT_FOUND', 400, `Model ${canonicalId} is not a video model. Use /chat/completions instead.`);
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is not a video model. Use /chat/completions instead.`);
   }
 
   const enabledStatuses = await readEnabledRouters(ctx.redis);
@@ -489,7 +489,10 @@ export async function routeVideoPoll(
 /**
  * Called by the route handler when a job first observes a terminal status.
  * Settles the lease against actual provider cost and writes the usage row.
- * Idempotency is enforced at the DB layer (see video-jobs.ts).
+ *
+ * NOT idempotent — call exactly once per terminal poll. The caller (the route
+ * handler in routes/ai-videos.ts) is responsible for gating this on the
+ * atomic terminal-state transition in video-jobs.ts.
  */
 export async function settleVideoJob(
   ctx: RouteContext,
@@ -502,6 +505,8 @@ export async function settleVideoJob(
   },
 ): Promise<{ chargedCreditsUsd: number; providerCostUsd: number }> {
   const chargedCredits = applyMarkup(args.providerCostUsd, ctx.markupPct);
+  // settleAfterCall only reads handle.leaseId; the other LeaseHandle fields are
+  // not consulted, so a synthetic handle is safe here.
   await settleAfterCall(
     ctx.platformPool,
     { leaseId: args.leaseId, amountGrantedUsd: 0, expiresAt: new Date() },
@@ -521,6 +526,19 @@ export async function settleVideoJob(
     markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
     keyType: 'platform', chargedToUser: true,
   }).catch(err => console.error('[router] usage-log write failed:', err));
+  console.log(JSON.stringify({
+    level: 'info',
+    type: 'ai_router.call',
+    app_id: ctx.appId,
+    user_id: ctx.userId,
+    canonical_model: args.canonicalModel,
+    chosen_router: args.chosenRouter,
+    fallback_chain: args.fallbackChain ?? [],
+    provider_cost_usd: args.providerCostUsd,
+    charged_credits_usd: chargedCredits,
+    markup_pct: ctx.markupPct,
+    modality: 'video',
+  }));
   return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };
 }
 

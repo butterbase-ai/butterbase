@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { routeChatCompletion, routeVideoSubmit, routeVideoPoll, RouterError } from './router.js';
+import { routeChatCompletion, routeVideoSubmit, routeVideoPoll, settleVideoJob, RouterError } from './router.js';
 import { AdapterError, type RouterAdapter } from './adapters/types.js';
+import { applyMarkup } from './markup.js';
 
 vi.mock('./billing-gate.js', () => ({
   acquireForEstimatedCost: vi.fn(async () => ({ leaseId: 'lease-1', amountGrantedUsd: 1, expiresAt: new Date() })),
@@ -402,5 +403,125 @@ describe('routeVideoPoll', () => {
     expect(result.providerCostUsd).toBe(0.25);
     expect(pollVideo).toHaveBeenCalledTimes(1);
     expect(pollVideo).toHaveBeenCalledWith('https://openrouter.ai/api/v1/videos/job-xyz');
+  });
+
+  it('throws NO_ROUTERS_AVAILABLE when adapter lacks pollVideo', async () => {
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      // pollVideo intentionally omitted
+    };
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis: { get: vi.fn(async () => null) } as any,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    await expect(
+      routeVideoPoll(ctx as any, 'openrouter' as any, 'https://openrouter.ai/api/v1/videos/job-xyz'),
+    ).rejects.toMatchObject({ code: 'NO_ROUTERS_AVAILABLE' });
+  });
+});
+
+describe('routeVideoSubmit wrong-modality', () => {
+  it('throws WRONG_MODALITY when called with a non-video model', async () => {
+    // A chat model — no routers have modality: 'video'
+    const chatEntry = {
+      canonicalId: 'bytedance/seedance-2.0',
+      displayName: 'some-chat-model',
+      updatedAt: new Date().toISOString(),
+      routers: [
+        {
+          name: 'openrouter',
+          upstreamId: 'bytedance/seedance-2.0',
+          promptPricePerMtok: 1,
+          completionPricePerMtok: 1,
+          contextLength: 4096,
+          modality: 'chat' as const,
+        },
+      ],
+    };
+
+    const redis = makeVideoRedis(chatEntry, [{ name: 'openrouter', enabled: true }]);
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters: new Map(),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    await expect(
+      routeVideoSubmit(ctx as any, { model: 'bytedance/seedance-2.0', prompt: 'a cat' }),
+    ).rejects.toMatchObject({ code: 'WRONG_MODALITY', statusCode: 400 });
+  });
+});
+
+describe('settleVideoJob', () => {
+  it('applies markup, calls settleAfterCall, writes usage row, returns charged credits', async () => {
+    const { settleAfterCall } = await import('./billing-gate.js');
+    const { writeAiUsageRow } = await import('./usage-log.js');
+    vi.mocked(settleAfterCall).mockClear();
+    vi.mocked(writeAiUsageRow).mockClear();
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis: { get: vi.fn(async () => null) } as any,
+      adapters: new Map(),
+      markupPct: 20,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    const providerCostUsd = 0.25;
+    const expectedCharged = applyMarkup(providerCostUsd, 20);
+
+    const result = await settleVideoJob(ctx as any, {
+      leaseId: 'lease-1',
+      chosenRouter: 'openrouter' as any,
+      canonicalModel: 'bytedance/seedance-2.0',
+      providerCostUsd,
+    });
+
+    // settleAfterCall called with synthetic handle containing leaseId
+    expect(vi.mocked(settleAfterCall)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ leaseId: 'lease-1' }),
+      expectedCharged,
+    );
+
+    // writeAiUsageRow called with correct fields
+    expect(vi.mocked(writeAiUsageRow)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        model: 'bytedance/seedance-2.0',
+        router: 'openrouter',
+        providerCostUsd: 0.25,
+        chargedCreditsUsd: expectedCharged,
+        leaseId: 'lease-1',
+        keyType: 'platform',
+        chargedToUser: true,
+      }),
+    );
+
+    // returned shape
+    expect(result).toEqual({
+      chargedCreditsUsd: expectedCharged,
+      providerCostUsd: 0.25,
+    });
   });
 });
