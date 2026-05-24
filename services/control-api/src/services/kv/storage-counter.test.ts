@@ -182,10 +182,6 @@ describeDb('storage-counter (DB integration)', () => {
     const base = baseOptsFromEnv();
     const c0 = await RedisClient.connect({ ...base, db: 0 });
     const pool = makeControlPool();
-    await pool.query(
-      "INSERT INTO apps (id, name, owner_id, db_name, region) VALUES ($1, 'recon-snap', $2, $1, 'us') ON CONFLICT DO NOTHING",
-      [appId, '11111111-1111-1111-1111-111111111111'],
-    );
     try {
       await c0.set(`{${appId}}:u:x`, 'vx');
       await reconcileFromScan(c0, appId, base, { controlPool: pool, region: 'us' });
@@ -198,7 +194,6 @@ describeDb('storage-counter (DB integration)', () => {
       expect(r.rows[0].region).toBe('us');
     } finally {
       await pool.query('DELETE FROM kv_app_usage_snapshot WHERE app_id = $1', [appId]);
-      await pool.query('DELETE FROM apps WHERE id = $1', [appId]);
       await c0.del([`{${appId}}:u:x`, `{${appId}}:_meta:bytes`, `{${appId}}:_meta:keys`]);
       await c0.close();
       await pool.end();

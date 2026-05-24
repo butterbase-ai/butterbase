@@ -48,7 +48,6 @@ afterAll(async () => {
   if (!RUN_DB_TESTS) return;
   await app.close();
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-route-test-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-route-test-%'`);
   await pool.query(`DELETE FROM platform_users WHERE email = 'kv-route-test@example.com'`);
   await pool.end();
 });
@@ -56,14 +55,7 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!RUN_DB_TESTS) return;
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-route-test-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-route-test-%'`);
-  const id = `kv-route-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await pool.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, region)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [id, `KV Route Test App ${id}`, testUserId, `db_${id}`, 'us'],
-  );
-  testAppId = id;
+  testAppId = `kv-route-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 });
 
 describeDb('GET /v1/internal/kv/credentials/:app_id', () => {
@@ -282,7 +274,7 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
   });
 
   it('returns 403 when a valid key is used for an app the key user does not own', async () => {
-    // Create a second user and a second app owned by that second user
+    // Create a second user and a second app (no apps row needed — app_kv_credentials has no FK to apps)
     const r2 = await pool.query(
       `INSERT INTO platform_users (id, email, account_status, plan_id)
        VALUES ($1, 'kv-route-other-user@example.com', 'active', 'playground')
@@ -291,10 +283,6 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
     );
     const otherUserId = r2.rows[0].id;
     const otherId = `kv-route-test-other-${Date.now()}`;
-    await pool.query(
-      `INSERT INTO apps (id, name, owner_id, db_name, region) VALUES ($1, $2, $3, $4, $5)`,
-      [otherId, `KV Other App ${otherId}`, otherUserId, `db_${otherId}`, 'us'],
-    );
     await svc.provision(otherId, 'us');
 
     // Generate a key for the FIRST (test) user
@@ -321,7 +309,6 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
     // Clean up
     await pool.query(`DELETE FROM api_keys WHERE name = 'kv-resolve-forbidden-key' AND user_id = $1`, [testUserId]);
     await pool.query(`DELETE FROM app_kv_credentials WHERE app_id = $1`, [otherId]);
-    await pool.query(`DELETE FROM apps WHERE id = $1`, [otherId]);
     await pool.query(`DELETE FROM platform_users WHERE id = $1`, [otherUserId]);
   });
 
@@ -365,12 +352,8 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
     // Provision creds for the test app
     const cred = await svc.provision(testAppId, 'us');
 
-    // Create a second app owned by testUser
+    // Create a second app (no apps row needed — app_kv_credentials has no FK to apps)
     const otherId = `kv-route-test-fnkey-other-${Date.now()}`;
-    await pool.query(
-      `INSERT INTO apps (id, name, owner_id, db_name, region) VALUES ($1, $2, $3, $4, $5)`,
-      [otherId, `KV FnKey Other App ${otherId}`, testUserId, `db_${otherId}`, 'us'],
-    );
     await svc.provision(otherId, 'us');
 
     // Use testApp's kv_function_key but claim app_id = otherId
@@ -389,6 +372,5 @@ describeDb('POST /v1/internal/kv/resolve-key', () => {
 
     // Clean up
     await pool.query(`DELETE FROM app_kv_credentials WHERE app_id = $1`, [otherId]);
-    await pool.query(`DELETE FROM apps WHERE id = $1`, [otherId]);
   });
 });

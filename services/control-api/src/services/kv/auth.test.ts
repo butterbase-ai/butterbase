@@ -41,7 +41,6 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!RUN_DB_TESTS) return;
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-auth-svc-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-auth-svc-%'`);
   await pool.query(
     `DELETE FROM platform_users WHERE email = 'kv-auth-svc-test@example.com'`,
   );
@@ -51,15 +50,7 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!RUN_DB_TESTS) return;
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-auth-svc-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-auth-svc-%'`);
-
-  const id = `kv-auth-svc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await pool.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, region)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [id, `KV Auth Svc Test App ${id}`, testUserId, `db_${id}`, 'us'],
-  );
-  testAppId = id;
+  testAppId = `kv-auth-svc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 });
 
 describeDb('resolveKvAuth', () => {

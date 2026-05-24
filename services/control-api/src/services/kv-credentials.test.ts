@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import pg from 'pg';
-import { randomUUID } from 'node:crypto';
 import { KvCredentialsService } from './kv-credentials.js';
 
 const PLATFORM_URL =
@@ -12,63 +11,40 @@ const describeDb = RUN_DB_TESTS ? describe : describe.skip;
 
 let pool: pg.Pool;
 let svc: KvCredentialsService;
-let testUserId: string;
 
 beforeAll(async () => {
+  if (!RUN_DB_TESTS) return;
   pool = new pg.Pool({ connectionString: PLATFORM_URL });
-  // Create a stable test user for FK references
-  const r = await pool.query(
-    `INSERT INTO platform_users (id, email, account_status, plan_id)
-     VALUES ($1, 'kv-cred-test@example.com', 'active', 'playground')
-     ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id`,
-    [randomUUID()],
-  );
-  testUserId = r.rows[0].id;
 });
 
 afterAll(async () => {
+  if (!RUN_DB_TESTS) return;
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-test-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-test-%'`);
-  await pool.query(`DELETE FROM platform_users WHERE email = 'kv-cred-test@example.com'`);
   await pool.end();
 });
 
 beforeEach(async () => {
+  if (!RUN_DB_TESTS) return;
   svc = new KvCredentialsService(pool);
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-test-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-test-%'`);
 });
 
-async function createTestApp(region = 'us'): Promise<{ id: string }> {
+function createTestApp(_region = 'us'): { id: string } {
   const id = `kv-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await pool.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, region)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [id, `KV Test App ${id}`, testUserId, `db_${id}`, region],
-  );
   return { id };
 }
 
-// These tests simulate insertAppRow's control-plane transaction directly.
-// insertAppRow itself requires a live runtimeDb (Neon) connection that the local
-// test setup doesn't provide. The tests below validate that the same SQL +
-// service-call pattern the production code uses works transactionally.
-describeDb('app creation auto-provisions a KV credential', () => {
-  it('insertAppRow control-plane transaction creates app + kv credential atomically', async () => {
-    // Simulate what insertAppRow does on the control-plane: a single transaction
-    // that inserts the app row and provisions KV credentials. This verifies the
-    // transactional contract without requiring a live runtimeDb/Neon connection.
+// These tests exercise the kv-credentials provisioning piece in isolation.
+// Since migration 061, the apps table no longer lives on controlDb; migration 073
+// created app_kv_credentials on controlDb with no FK to apps. The tests below
+// validate that KV credential provisioning works transactionally on controlDb.
+describeDb('KV credential transactional behaviour', () => {
+  it('provisions a KV credential atomically within a transaction', async () => {
     const appId = `kv-test-${Date.now()}-autoprov`;
     const region = 'us';
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(
-        `INSERT INTO apps (id, name, owner_id, db_name, region)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (id) DO NOTHING`,
-        [appId, `Auto-prov Test ${appId}`, testUserId, `db_${appId}`, region],
-      );
       const kvSvc = new KvCredentialsService(client);
       await kvSvc.provision(appId, region);
       await client.query('COMMIT');
@@ -91,11 +67,6 @@ describeDb('app creation auto-provisions a KV credential', () => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(
-        `INSERT INTO apps (id, name, owner_id, db_name, region)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [appId, `Rollback Test ${appId}`, testUserId, `db_${appId}`, region],
-      );
       const kvSvc = new KvCredentialsService(client);
       await kvSvc.provision(appId, region);
       await client.query('ROLLBACK');
@@ -113,7 +84,7 @@ describeDb('app creation auto-provisions a KV credential', () => {
 
 describeDb('KvCredentialsService', () => {
   it('provisions a credential row with a random password', async () => {
-    const app = await createTestApp('us');
+    const app = createTestApp('us');
     const cred = await svc.provision(app.id, 'us');
     expect(cred.app_id).toBe(app.id);
     expect(cred.region).toBe('us');
@@ -121,7 +92,7 @@ describeDb('KvCredentialsService', () => {
   });
 
   it('is idempotent — provision twice returns the same password', async () => {
-    const app = await createTestApp('us');
+    const app = createTestApp('us');
     const a = await svc.provision(app.id, 'us');
     const b = await svc.provision(app.id, 'us');
     expect(a.redis_password).toBe(b.redis_password);
@@ -133,7 +104,7 @@ describeDb('KvCredentialsService', () => {
   });
 
   it('rotate replaces the password and bumps rotated_at', async () => {
-    const app = await createTestApp('us');
+    const app = createTestApp('us');
     const before = await svc.provision(app.id, 'us');
     await new Promise((r) => setTimeout(r, 5));
     const after = await svc.rotate(app.id);
@@ -142,14 +113,14 @@ describeDb('KvCredentialsService', () => {
   });
 
   it('provisions also mints a kv_function_key (48+ hex chars, distinct from redis_password)', async () => {
-    const app = await createTestApp('us');
+    const app = createTestApp('us');
     const cred = await svc.provision(app.id, 'us');
     expect(cred.kv_function_key).toMatch(/^[a-f0-9]{48,}$/);
     expect(cred.kv_function_key).not.toBe(cred.redis_password);
   });
 
   it('rotate preserves kv_function_key by default', async () => {
-    const app = await createTestApp('us');
+    const app = createTestApp('us');
     const before = await svc.provision(app.id, 'us');
     const after = await svc.rotate(app.id);
     expect(after.kv_function_key).toBe(before.kv_function_key);

@@ -52,7 +52,6 @@ afterAll(async () => {
   if (!RUN_DB_TESTS) return;
   await app.close();
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-resolve-jwt-test-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-resolve-jwt-test-%'`);
   await pool.query(`DELETE FROM platform_users WHERE email = 'kv-resolve-jwt-test@example.com'`);
   await pool.end();
 });
@@ -61,14 +60,7 @@ beforeEach(async () => {
   if (!RUN_DB_TESTS) return;
   vi.mocked(endUserAuth.verifyEndUserJwt).mockReset();
   await pool.query(`DELETE FROM app_kv_credentials WHERE app_id LIKE 'kv-resolve-jwt-test-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'kv-resolve-jwt-test-%'`);
-  const id = `kv-resolve-jwt-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await pool.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, region)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [id, `Resolve JWT Test App ${id}`, testUserId, `db_${id}`, 'us'],
-  );
-  testAppId = id;
+  testAppId = `kv-resolve-jwt-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 });
 
 describeDb('POST /v1/internal/kv/resolve-jwt', () => {
