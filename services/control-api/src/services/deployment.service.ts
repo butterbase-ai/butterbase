@@ -757,6 +757,24 @@ export async function deployArtifact(
       ]
     );
 
+    // Route-mapping write: webhook handlers consult cloudflare_deployment_index
+    // on controlDb to resolve (cloudflare_deployment_id -> app_id, region) without
+    // touching the per-region app_deployments. Best-effort: a failure here logs
+    // and does not fail the deploy; the webhook handler falls back gracefully.
+    if (result.cloudflareDeploymentId) {
+      try {
+        await db.query(
+          `INSERT INTO cloudflare_deployment_index (cloudflare_deployment_id, app_id, region)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (cloudflare_deployment_id) DO NOTHING`,
+          [result.cloudflareDeploymentId, appId, app.region]
+        );
+      } catch (err) {
+        console.error({ err, appId, cloudflareDeploymentId: result.cloudflareDeploymentId, region: app.region },
+          '[deployArtifact] cloudflare_deployment_index write failed — webhook routing may need fallback');
+      }
+    }
+
     // If terminal READY (WfP), also update apps.deployment_url + last_deployed_at,
     // and supersede any active Edge SSR deployments for the same app — they share
     // the same dispatch-namespace Worker script slot so a static WfP deploy replaces them.
