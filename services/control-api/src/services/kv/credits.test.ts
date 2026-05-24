@@ -7,41 +7,20 @@ import {
 } from './credits.js';
 
 describe('creditCostForOp', () => {
-  it('read = 1 credit', () => {
-    expect(creditCostForOp({ kind: 'read' })).toBe(1);
-  });
-
-  it('write = 2 credits', () => {
-    expect(creditCostForOp({ kind: 'write' })).toBe(2);
-  });
-
-  it('atomic_write = 2 credits', () => {
-    expect(creditCostForOp({ kind: 'atomic_write' })).toBe(2);
-  });
-
-  it('mget(1) = 1 credit', () => {
-    expect(creditCostForOp({ kind: 'mget', n: 1 })).toBe(1);
-  });
-
-  it('mget(5) = 5 credits', () => {
-    expect(creditCostForOp({ kind: 'mget', n: 5 })).toBe(5);
-  });
-
-  it('mget(100) = 100 credits', () => {
-    expect(creditCostForOp({ kind: 'mget', n: 100 })).toBe(100);
-  });
-
-  it('mset(1) = 2 credits', () => {
-    expect(creditCostForOp({ kind: 'mset', n: 1 })).toBe(2);
-  });
-
-  it('mset(5) = 10 credits', () => {
-    expect(creditCostForOp({ kind: 'mset', n: 5 })).toBe(10);
-  });
-
-  it('mset(100) = 200 credits', () => {
-    expect(creditCostForOp({ kind: 'mset', n: 100 })).toBe(200);
-  });
+  const ops: KvOp[] = [
+    { kind: 'read' },
+    { kind: 'write' },
+    { kind: 'atomic_write' },
+    { kind: 'mget', n: 1 },
+    { kind: 'mget', n: 100 },
+    { kind: 'mset', n: 1 },
+    { kind: 'mset', n: 100 },
+  ];
+  for (const op of ops) {
+    it(`${op.kind}${'n' in op ? `(${op.n})` : ''} = 0 credits`, () => {
+      expect(creditCostForOp(op)).toBe(0);
+    });
+  }
 });
 
 describe('opsCountForOp', () => {
@@ -210,33 +189,33 @@ describe('classifyRequest', () => {
   });
 
   describe('Combined cost + ops validation', () => {
-    it('read has 1 credit and 1 op', () => {
+    it('read has 0 credits and 1 op', () => {
       const op = classifyRequest('GET', null);
       expect(op).not.toBeNull();
-      expect(creditCostForOp(op!)).toBe(1);
+      expect(creditCostForOp(op!)).toBe(0);
       expect(opsCountForOp(op!)).toBe(1);
     });
 
-    it('write has 2 credits and 1 op', () => {
+    it('write has 0 credits and 1 op', () => {
       const op = classifyRequest('PUT', null);
       expect(op).not.toBeNull();
-      expect(creditCostForOp(op!)).toBe(2);
+      expect(creditCostForOp(op!)).toBe(0);
       expect(opsCountForOp(op!)).toBe(1);
     });
 
-    it('mget(5) has 5 credits and 5 ops', () => {
+    it('mget(5) has 0 credits and 5 ops', () => {
       const batchOps = Array(5).fill({ op: 'get' });
       const op = classifyRequest('POST', null, batchOps);
       expect(op).not.toBeNull();
-      expect(creditCostForOp(op!)).toBe(5);
+      expect(creditCostForOp(op!)).toBe(0);
       expect(opsCountForOp(op!)).toBe(5);
     });
 
-    it('mset(5) has 10 credits and 5 ops', () => {
+    it('mset(5) has 0 credits and 5 ops', () => {
       const batchOps = Array(5).fill({ op: 'set' });
       const op = classifyRequest('POST', null, batchOps);
       expect(op).not.toBeNull();
-      expect(creditCostForOp(op!)).toBe(10);
+      expect(creditCostForOp(op!)).toBe(0);
       expect(opsCountForOp(op!)).toBe(5);
     });
   });

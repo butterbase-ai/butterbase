@@ -32,19 +32,9 @@ export type KvOp =
  * @param op - The classified KV operation
  * @returns Credit cost (1, 2, N, or 2N depending on op kind)
  */
-export function creditCostForOp(op: KvOp): number {
-  switch (op.kind) {
-    case 'read':
-      return 1;
-    case 'write':
-      return 2;
-    case 'atomic_write':
-      return 2;
-    case 'mget':
-      return op.n;
-    case 'mset':
-      return 2 * op.n;
-  }
+export function creditCostForOp(_op: KvOp): number {
+  // KV operations are not metered against credits.
+  return 0;
 }
 
 /**
