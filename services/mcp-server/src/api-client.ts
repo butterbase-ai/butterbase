@@ -42,13 +42,21 @@ export function getHeaders(): HeadersInit {
   return headers;
 }
 
+async function parseResponse<T>(res: Response): Promise<T> {
+  // 204 No Content and other empty bodies (e.g. successful PUT on KV expose
+  // rules) return no JSON — parsing res.json() throws on empty input. Read as
+  // text and only JSON-parse when there's content.
+  const text = await res.text();
+  const body = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new Error(JSON.stringify(body));
+  return body as T;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${getBaseUrl()}${path}`, {
     headers: getHeaders(),
   });
-  const body = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(body));
-  return body as T;
+  return parseResponse<T>(res);
 }
 
 export async function apiPost<T>(path: string, data: unknown): Promise<T> {
@@ -57,9 +65,7 @@ export async function apiPost<T>(path: string, data: unknown): Promise<T> {
     headers: getHeaders(),
     body: JSON.stringify(data),
   });
-  const body = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(body));
-  return body as T;
+  return parseResponse<T>(res);
 }
 
 export async function apiPatch<T>(path: string, data: unknown): Promise<T> {
@@ -68,9 +74,7 @@ export async function apiPatch<T>(path: string, data: unknown): Promise<T> {
     headers: getHeaders(),
     body: JSON.stringify(data),
   });
-  const body = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(body));
-  return body as T;
+  return parseResponse<T>(res);
 }
 
 export async function apiPut<T>(path: string, data: unknown): Promise<T> {
@@ -79,9 +83,7 @@ export async function apiPut<T>(path: string, data: unknown): Promise<T> {
     headers: getHeaders(),
     body: JSON.stringify(data),
   });
-  const body = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(body));
-  return body as T;
+  return parseResponse<T>(res);
 }
 
 export async function apiDelete<T>(path: string): Promise<T> {
@@ -92,8 +94,5 @@ export async function apiDelete<T>(path: string): Promise<T> {
     method: 'DELETE',
     headers,
   });
-  const text = await res.text();
-  const body = text ? JSON.parse(text) : {};
-  if (!res.ok) throw new Error(JSON.stringify(body));
-  return body as T;
+  return parseResponse<T>(res);
 }
