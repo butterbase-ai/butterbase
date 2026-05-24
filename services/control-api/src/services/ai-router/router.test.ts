@@ -669,3 +669,122 @@ describe('estimateVideoCostUsd (via routeVideoSubmit)', () => {
     expect(cost).toBe(9);
   });
 });
+
+// ---------------------------------------------------------------------------
+// estimateVideoCostUsd — ImaRouter unit:'second' shape
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal video CatalogEntry with ImaRouter rawPricing shape.
+ */
+function videoEntryWithImaRouterPricing(
+  variants: Array<{ spec: string; pricePerSecond: number }>,
+  extraRawPricing?: Record<string, unknown>,
+) {
+  // Use 'openrouter' so submitVideoWithEntry's redis + adapter mocks match.
+  // The router name is irrelevant for estimateVideoCostUsd; we're testing the
+  // rawPricing shape interpretation only.
+  const rawPricing = { unit: 'second', variants, ...extraRawPricing };
+  return {
+    canonicalId: 'bytedance/seedance-2.0',
+    displayName: 'Test ImaRouter Video Model',
+    updatedAt: new Date().toISOString(),
+    routers: [
+      {
+        name: 'openrouter',
+        upstreamId: 'bytedance/seedance-2.0',
+        promptPricePerMtok: 0,
+        completionPricePerMtok: 0,
+        contextLength: 0,
+        modality: 'video' as const,
+        rawPricing,
+      },
+    ],
+  };
+}
+
+describe('estimateVideoCostUsd — ImaRouter unit:second shape', () => {
+  it.each([
+    {
+      label: '1. Happy path: picks max rate × duration × 1.2 within clamp',
+      variants: [
+        { spec: '720p', pricePerSecond: 0.05 },
+        { spec: '1080p', pricePerSecond: 0.10 },
+      ],
+      duration: 5,
+      // 0.10 * 5 * 1.2 = 0.60
+      expected: 0.60,
+    },
+    {
+      label: '2. Default duration (no req.duration) → uses 10s',
+      variants: [{ spec: '1080p', pricePerSecond: 0.10 }],
+      duration: undefined,
+      // 0.10 * 10 * 1.2 = 1.20
+      expected: 1.20,
+    },
+    {
+      label: '5. High max rate clamped to $9',
+      variants: [{ spec: '4k', pricePerSecond: 10.0 }],
+      duration: 10,
+      // 10 * 10 * 1.2 = 120, clamped to 9
+      expected: 9,
+    },
+    {
+      label: '6. Low max rate floored to $0.05',
+      variants: [{ spec: '360p', pricePerSecond: 0.001 }],
+      duration: 1,
+      // 0.001 * 1 * 1.2 = 0.0012, floored to 0.05
+      expected: 0.05,
+    },
+  ])('$label', async ({ variants, duration, expected }) => {
+    const entry = videoEntryWithImaRouterPricing(variants);
+    const req = duration !== undefined ? { duration } : {};
+    const cost = await submitVideoWithEntry(entry, req);
+    expect(cost).toBeCloseTo(expected, 10);
+  });
+
+  it('3. Empty variants array → falls back to VIDEO_DEFAULT_ESTIMATE_USD (3.0)', async () => {
+    const entry = videoEntryWithImaRouterPricing([]);
+    const cost = await submitVideoWithEntry(entry, { duration: 5 });
+    expect(cost).toBe(3.0);
+  });
+
+  it('4. Variants with zero or non-finite rates all filtered → falls back to 3.0', async () => {
+    const entry = videoEntryWithImaRouterPricing([
+      { spec: '720p', pricePerSecond: 0 },
+      { spec: '1080p', pricePerSecond: NaN },
+      { spec: '4k', pricePerSecond: -1 },
+    ]);
+    const cost = await submitVideoWithEntry(entry, { duration: 5 });
+    expect(cost).toBe(3.0);
+  });
+
+  it('8. Mixed: both pricing_skus AND unit:second present → pricing_skus wins', async () => {
+    // pricing_skus says 0.10/s; ImaRouter variants say 0.50/s
+    // pricing_skus branch should fire first and return 0.10*5*1.2 = 0.60
+    const rawPricing = {
+      pricing_skus: { duration_seconds: '0.10' },
+      unit: 'second',
+      variants: [{ spec: '1080p', pricePerSecond: 0.50 }],
+    };
+    const entry = {
+      canonicalId: 'bytedance/seedance-2.0',
+      displayName: 'Test Mixed Pricing Model',
+      updatedAt: new Date().toISOString(),
+      routers: [
+        {
+          name: 'openrouter',
+          upstreamId: 'bytedance/seedance-2.0',
+          promptPricePerMtok: 0,
+          completionPricePerMtok: 0,
+          contextLength: 0,
+          modality: 'video' as const,
+          rawPricing,
+        },
+      ],
+    };
+    const cost = await submitVideoWithEntry(entry, { duration: 5 });
+    // pricing_skus: 0.10 * 5 * 1.2 = 0.60 (not 0.50*5*1.2=3.0)
+    expect(cost).toBeCloseTo(0.60, 10);
+  });
+});

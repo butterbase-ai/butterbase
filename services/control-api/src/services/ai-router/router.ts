@@ -423,24 +423,45 @@ function estimateVideoCostUsd(
   req: VideoGenerationRequest,
 ): number {
   const rawPricing = entry.routers[0]?.rawPricing as
-    | { pricing_skus?: Record<string, string> }
+    | {
+        pricing_skus?: Record<string, string>;
+        unit?: string;
+        variants?: Array<{ spec: string; pricePerSecond: number }>;
+      }
     | null
     | undefined;
+
+  // OpenRouter shape: pricing_skus with `duration_seconds_*` keys
   const skus = rawPricing?.pricing_skus;
-  if (!skus || typeof skus !== 'object') return VIDEO_DEFAULT_ESTIMATE_USD;
-
-  const durationRates: number[] = [];
-  for (const [key, val] of Object.entries(skus)) {
-    if (!key.includes('duration_seconds')) continue;
-    const rate = parseFloat(val);
-    if (Number.isFinite(rate) && rate > 0) durationRates.push(rate);
+  if (skus && typeof skus === 'object') {
+    const durationRates: number[] = [];
+    for (const [key, val] of Object.entries(skus)) {
+      if (!key.includes('duration_seconds')) continue;
+      const rate = parseFloat(val);
+      if (Number.isFinite(rate) && rate > 0) durationRates.push(rate);
+    }
+    if (durationRates.length > 0) {
+      const maxRate = Math.max(...durationRates);
+      const seconds = req.duration ?? 10;
+      const raw = maxRate * seconds * 1.2; // 20% buffer
+      return Math.min(Math.max(raw, 0.05), 9);
+    }
   }
-  if (durationRates.length === 0) return VIDEO_DEFAULT_ESTIMATE_USD;
 
-  const maxRate = Math.max(...durationRates);
-  const seconds = req.duration ?? 10;
-  const raw = maxRate * seconds * 1.2; // 20% buffer
-  return Math.min(Math.max(raw, 0.05), 9);
+  // ImaRouter shape: rawPricing.unit === 'second', variants[] with pricePerSecond
+  if (rawPricing?.unit === 'second' && Array.isArray(rawPricing.variants)) {
+    const rates = rawPricing.variants
+      .map(v => v.pricePerSecond)
+      .filter(r => Number.isFinite(r) && r > 0);
+    if (rates.length > 0) {
+      const maxRate = Math.max(...rates);
+      const seconds = req.duration ?? 10;
+      const raw = maxRate * seconds * 1.2; // 20% buffer
+      return Math.min(Math.max(raw, 0.05), 9);
+    }
+  }
+
+  return VIDEO_DEFAULT_ESTIMATE_USD;
 }
 
 export interface RouteVideoSubmitResult {
