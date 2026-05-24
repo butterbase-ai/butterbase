@@ -441,10 +441,12 @@ function estimateVideoCostUsd(
       if (Number.isFinite(rate) && rate > 0) durationRates.push(rate);
     }
     if (durationRates.length > 0) {
+      // If a third pricing shape is added, extract this `maxRate * seconds * 1.2`
+      // + clamp pattern into a `clampVideoEstimate(maxRate, seconds)` helper.
       const maxRate = Math.max(...durationRates);
       const seconds = req.duration ?? 10;
       const raw = maxRate * seconds * 1.2; // 20% buffer
-      return Math.min(Math.max(raw, 0.05), 9);
+      return Math.min(Math.max(raw, 0.05), 9); // clamp [$0.05, $9]
     }
   }
 
@@ -457,10 +459,11 @@ function estimateVideoCostUsd(
       const maxRate = Math.max(...rates);
       const seconds = req.duration ?? 10;
       const raw = maxRate * seconds * 1.2; // 20% buffer
-      return Math.min(Math.max(raw, 0.05), 9);
+      return Math.min(Math.max(raw, 0.05), 9); // clamp [$0.05, $9]
     }
   }
 
+  // No parseable rate in any known pricing shape — safe over-reserve.
   return VIDEO_DEFAULT_ESTIMATE_USD;
 }
 

@@ -704,6 +704,9 @@ function videoEntryWithImaRouterPricing(
 }
 
 describe('estimateVideoCostUsd — ImaRouter unit:second shape', () => {
+  // Tests 3 & 4 (fallback cases) are separate `it()` blocks below — they assert
+  // the VIDEO_DEFAULT_ESTIMATE_USD branch, which doesn't fit the input/expected
+  // shape of this table.
   it.each([
     {
       label: '1. Happy path: picks max rate × duration × 1.2 within clamp',
@@ -762,27 +765,10 @@ describe('estimateVideoCostUsd — ImaRouter unit:second shape', () => {
   it('8. Mixed: both pricing_skus AND unit:second present → pricing_skus wins', async () => {
     // pricing_skus says 0.10/s; ImaRouter variants say 0.50/s
     // pricing_skus branch should fire first and return 0.10*5*1.2 = 0.60
-    const rawPricing = {
-      pricing_skus: { duration_seconds: '0.10' },
-      unit: 'second',
-      variants: [{ spec: '1080p', pricePerSecond: 0.50 }],
-    };
-    const entry = {
-      canonicalId: 'bytedance/seedance-2.0',
-      displayName: 'Test Mixed Pricing Model',
-      updatedAt: new Date().toISOString(),
-      routers: [
-        {
-          name: 'openrouter',
-          upstreamId: 'bytedance/seedance-2.0',
-          promptPricePerMtok: 0,
-          completionPricePerMtok: 0,
-          contextLength: 0,
-          modality: 'video' as const,
-          rawPricing,
-        },
-      ],
-    };
+    const entry = videoEntryWithImaRouterPricing(
+      [{ spec: '1080p', pricePerSecond: 0.50 }],
+      { pricing_skus: { duration_seconds: '0.10' } },
+    );
     const cost = await submitVideoWithEntry(entry, { duration: 5 });
     // pricing_skus: 0.10 * 5 * 1.2 = 0.60 (not 0.50*5*1.2=3.0)
     expect(cost).toBeCloseTo(0.60, 10);
