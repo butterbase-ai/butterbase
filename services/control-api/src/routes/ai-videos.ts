@@ -143,6 +143,10 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       if (['completed', 'failed', 'cancelled', 'expired'].includes(poll.status)) {
         const providerCost = poll.providerCostUsd ?? 0;
 
+        // Order matters: markVideoJobTerminal first (atomic gate via settled_at), then
+        // settleVideoJob only if we won the race. If the Worker crashes between the two,
+        // the lease auto-refunds at TTL (~15min) — acceptable since the alternative
+        // (settle-first) double-writes ai_usage_logs rows on concurrent polls.
         // Mark terminal FIRST — atomic gate. Only the "winner" of this row update
         // settles the lease + writes the usage row.
         const terminal = await markVideoJobTerminal(runtimePool, jobId, {
@@ -183,6 +187,13 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const { appId, jobId } = request.params as { appId: string; jobId: string };
     const userId = requireUserId(request);
     const index = parseInt((request.query as { index?: string }).index ?? '0', 10);
+    if (Number.isNaN(index) || index < 0) {
+      return reply.code(400).send({
+        error: 'invalid_index',
+        code: 'INVALID_INDEX',
+        message: 'index query parameter must be a non-negative integer',
+      });
+    }
 
     try {
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);

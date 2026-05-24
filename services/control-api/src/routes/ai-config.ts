@@ -256,7 +256,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         }
 
         const catalogEntry = await readCatalogEntry(getRedisClient(), modelResolved);
-        if (catalogEntry && catalogEntry.routers.some(r => r.modality === 'video')) {
+        if (catalogEntry && catalogEntry.routers.length > 0 && catalogEntry.routers.every(r => r.modality === 'video')) {
           return reply.code(400).send({
             error: 'wrong_endpoint',
             code: 'USE_VIDEO_ENDPOINT',

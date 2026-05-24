@@ -26,10 +26,9 @@ Actions:
                        Poll the returned URL until status is "completed".
   - poll_video        { app_id, job_id }
                        Returns current { status, model, content_urls?, error?, created_at }.
-                       Use this to drive your own polling loop.
-  - get_video_content { app_id, job_id, index? }
-                       Returns the proxied content URL the caller can GET to stream MP4 bytes.
-                       (Bytes are not returned through MCP; use the URL with apiGetStream.)
+                       When status is "completed", content_urls contains absolute URLs (same origin
+                       as the polling_url) that the caller can fetch() directly using the same
+                       Authorization header. Use this to drive your own polling loop.
 
 This tool wraps the same /v1/:app_id/chat/completions, /embeddings, /ai/config, /ai/models,
 /ai/usage routes the SDK uses. The "chat" action sets stream: false; for streamed deltas,
@@ -38,7 +37,7 @@ drive the SDK from inside a function or DO.`,
       app_id: z.string().describe('The app ID'),
       action: z.enum([
         'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
-        'submit_video', 'poll_video', 'get_video_content',
+        'submit_video', 'poll_video',
       ]).describe('The action to perform'),
       // chat
       messages: z.array(z.object({
@@ -70,9 +69,8 @@ drive the SDK from inside a function or DO.`,
       aspect_ratio: z.string().optional(),
       generate_audio: z.boolean().optional(),
       seed: z.number().int().optional(),
-      // poll_video / get_video_content
-      job_id: z.string().optional().describe('Required for poll_video / get_video_content'),
-      index: z.number().int().min(0).optional(),
+      // poll_video
+      job_id: z.string().optional().describe('Required for poll_video'),
     },
     {
       title: 'Manage AI',
@@ -158,14 +156,7 @@ drive the SDK from inside a function or DO.`,
             result = await apiGet(`/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}`);
             break;
           }
-          case 'get_video_content': {
-            if (!args.job_id) {
-              return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "get_video_content".' }], isError: true as const };
-            }
-            const idx = args.index ?? 0;
-            result = { content_url: `/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}/content?index=${idx}` };
-            break;
-          }
+
         }
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
       } catch (e: unknown) {
