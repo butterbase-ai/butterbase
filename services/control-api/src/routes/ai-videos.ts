@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { z } from 'zod';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { apiError } from '../utils/api-error.js';
 import { isHttpError } from '../services/error-handler.js';
 import { requireUserId } from '../utils/require-auth.js';
@@ -21,6 +21,23 @@ import {
 import { settleAfterCall } from '../services/ai-router/billing-gate.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { readAutoRefillState } from './ai-config.js';
+
+// Public URLs returned to clients must honor the X-Forwarded-* headers that
+// Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
+// globally. Without these helpers, polling_url and content_urls would render
+// `http://api.butterbase.ai/...` even though the request came in over HTTPS.
+function publicProto(request: FastifyRequest): string {
+  const xfp = request.headers['x-forwarded-proto'];
+  if (typeof xfp === 'string' && xfp) return xfp.split(',')[0].trim();
+  if (Array.isArray(xfp) && xfp[0]) return xfp[0].trim();
+  return request.protocol;
+}
+function publicHost(request: FastifyRequest): string {
+  const xfh = request.headers['x-forwarded-host'];
+  if (typeof xfh === 'string' && xfh) return xfh.split(',')[0].trim();
+  if (Array.isArray(xfh) && xfh[0]) return xfh[0].trim();
+  return request.hostname;
+}
 
 // Reuse the same adapter-build pattern as ai-config.ts. Extract into a shared
 // helper if a third route ends up needing it; one duplicate is fine for now.
@@ -105,7 +122,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         throw insertErr; // surface as 500 via handleVideoError
       }
 
-      const publicPollingUrl = `${request.protocol}://${request.hostname}/v1/${appId}/videos/completions/${jobId}`;
+      const publicPollingUrl = `${publicProto(request)}://${publicHost(request)}/v1/${appId}/videos/completions/${jobId}`;
       return reply.code(202).send({ job_id: jobId, status: 'pending', polling_url: publicPollingUrl });
     } catch (error) {
       return handleVideoError(app, reply, userId, error);
@@ -122,7 +139,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
       if (job.user_id !== userId) return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
 
-      const absoluteBase = `${request.protocol}://${request.hostname}`;
+      const absoluteBase = `${publicProto(request)}://${publicHost(request)}`;
 
       if (['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) {
         return reply.code(200).send(buildPublicJobResponse(absoluteBase, appId, job));
