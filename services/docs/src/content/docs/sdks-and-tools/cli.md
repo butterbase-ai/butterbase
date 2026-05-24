@@ -336,6 +336,41 @@ butterbase kv unexpose "user:*"
 butterbase kv apply ./kv.config.ts --dry-run
 ```
 
+### Common KV workflows
+
+**Deploy expose rules from a config file:**
+
+```bash
+# kv.config.ts in your project root, then:
+butterbase kv apply kv.config.ts
+```
+
+The config declares which key patterns are reachable from frontend code. The CLI diffs against the live rules and applies only the deltas — safe to re-run.
+
+**Browse keys in production:**
+
+```bash
+butterbase kv ls --prefix session:
+# 142 keys under session:*
+
+butterbase kv stats
+# {
+#   "keys_total": 1284,
+#   "bytes_used": 2202112,
+#   "max_keys": 100000,
+#   "max_storage_bytes": 104857600,
+#   "max_ops_per_sec": 500,
+#   "max_value_bytes": 65536
+# }
+```
+
+**Read/write a single key during an incident:**
+
+```bash
+butterbase kv get rate-limit:user_42        # peek a counter
+butterbase kv set feature:new-checkout off  # flip a flag without redeploying
+```
+
 ## Environment variables
 
 | Variable | Description |
