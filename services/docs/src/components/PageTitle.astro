@@ -1,0 +1,111 @@
+---
+const { entry, id } = Astro.locals.starlightRoute;
+// id is like "getting-started/intro.md" — strip extension to match our /raw/[...slug].md route.
+const slug = id.replace(/\.(md|mdx)$/, '');
+const rawUrl = `/raw/${slug}.md`;
+---
+
+<div class="page-title-row sl-flex">
+  <h1 id="_top">{entry.data.title}</h1>
+  <button
+    type="button"
+    class="copy-page-btn print:hidden"
+    data-raw-url={rawUrl}
+    aria-label="Copy page contents as Markdown"
+    title="Copy page contents as Markdown"
+  >
+    <svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+    </svg>
+    <svg class="check-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="20 6 9 17 4 12"></polyline>
+    </svg>
+    <span class="label">Copy page</span>
+  </button>
+</div>
+
+<script>
+  function init() {
+    document.querySelectorAll<HTMLButtonElement>('.copy-page-btn').forEach((btn) => {
+      if (btn.dataset.bound === '1') return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', async () => {
+        const url = btn.dataset.rawUrl;
+        if (!url) return;
+        try {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const text = await res.text();
+          await navigator.clipboard.writeText(text);
+          btn.classList.add('copied');
+          const label = btn.querySelector('.label');
+          const prev = label?.textContent ?? 'Copy page';
+          if (label) label.textContent = 'Copied';
+          setTimeout(() => {
+            btn.classList.remove('copied');
+            if (label) label.textContent = prev;
+          }, 1500);
+        } catch (err) {
+          console.error('[copy-page] failed', err);
+          const label = btn.querySelector('.label');
+          if (label) label.textContent = 'Failed';
+          setTimeout(() => {
+            if (label) label.textContent = 'Copy page';
+          }, 1500);
+        }
+      });
+    });
+  }
+  init();
+  document.addEventListener('astro:page-load', init);
+</script>
+
+<style>
+  .page-title-row {
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .page-title-row h1 {
+    margin: 0;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--sl-text-h1);
+    line-height: var(--sl-line-height-headings);
+    font-weight: 600;
+    color: var(--sl-color-white);
+  }
+  .page-title-row {
+    margin-top: 1rem;
+  }
+  .copy-page-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.65rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--sl-color-gray-5);
+    background: var(--sl-color-gray-6, transparent);
+    color: var(--sl-color-text);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    line-height: 1;
+    margin-top: 0.35rem;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    flex: 0 0 auto;
+  }
+  .copy-page-btn:hover {
+    background: var(--sl-color-gray-5);
+    border-color: var(--sl-color-gray-4);
+  }
+  .copy-page-btn .check-icon { display: none; }
+  .copy-page-btn.copied .copy-icon { display: none; }
+  .copy-page-btn.copied .check-icon { display: inline-block; }
+  .copy-page-btn.copied {
+    color: var(--sl-color-text-accent);
+    border-color: var(--sl-color-text-accent);
+  }
+</style>
