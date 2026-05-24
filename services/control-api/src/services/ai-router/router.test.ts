@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { routeChatCompletion, RouterError } from './router.js';
+import { routeChatCompletion, routeVideoSubmit, routeVideoPoll, RouterError } from './router.js';
 import { AdapterError, type RouterAdapter } from './adapters/types.js';
 
 vi.mock('./billing-gate.js', () => ({
@@ -247,5 +247,160 @@ describe('nullable appId', () => {
       expect.anything(),
       expect.objectContaining({ appId: null }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helper: build a CatalogEntry for a video model
+// ---------------------------------------------------------------------------
+function videoEntry(routerName: string) {
+  return {
+    canonicalId: 'bytedance/seedance-2.0',
+    displayName: 'Seedance 2.0',
+    updatedAt: new Date().toISOString(),
+    routers: [
+      {
+        name: routerName,
+        upstreamId: 'bytedance/seedance-2.0',
+        promptPricePerMtok: 0,
+        completionPricePerMtok: 0,
+        contextLength: 0,
+        modality: 'video' as const,
+      },
+    ],
+  };
+}
+
+function makeVideoRedis(catalogEntry: any, routers: any[]) {
+  return {
+    get: vi.fn(async (key: string) => {
+      if (key === 'ai_catalog:model:bytedance/seedance-2.0') return JSON.stringify(catalogEntry);
+      if (key === 'ai_catalog:routers') return JSON.stringify(routers);
+      return null;
+    }),
+  } as any;
+}
+
+describe('routeVideoSubmit', () => {
+  it('happy path: calls submitVideo and returns job details', async () => {
+    const submitVideo = vi.fn(async () => ({
+      upstreamJobId: 'job-xyz',
+      pollingUrl: 'https://openrouter.ai/api/v1/videos/job-xyz',
+      status: 'pending' as const,
+    }));
+
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      submitVideo,
+    };
+
+    const catalogEntry = videoEntry('openrouter');
+    const redis = makeVideoRedis(catalogEntry, [{ name: 'openrouter', enabled: true }]);
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    const result = await routeVideoSubmit(ctx as any, {
+      model: 'bytedance/seedance-2.0',
+      prompt: 'a cat on a piano',
+    });
+
+    expect(result.upstreamJobId).toBe('job-xyz');
+    expect(result.pollingUrl).toBe('https://openrouter.ai/api/v1/videos/job-xyz');
+    expect(result.chosenRouter).toBe('openrouter');
+    expect(result.leaseId).toBeTruthy();
+    expect(result.estimatedCostUsd).toBe(0.5);
+    expect(submitVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it('lease-refund-on-failure: rejects with ROUTER_FALLBACK_EXHAUSTED and refunds lease', async () => {
+    const { settleAfterCall } = await import('./billing-gate.js');
+    vi.mocked(settleAfterCall).mockClear();
+
+    // Adapter without submitVideo — triggers fallback exhaustion
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      // submitVideo intentionally omitted
+    };
+
+    const catalogEntry = videoEntry('openrouter');
+    const redis = makeVideoRedis(catalogEntry, [{ name: 'openrouter', enabled: true }]);
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    await expect(
+      routeVideoSubmit(ctx as any, { model: 'bytedance/seedance-2.0', prompt: 'a cat on a piano' }),
+    ).rejects.toMatchObject({ code: 'ROUTER_FALLBACK_EXHAUSTED' });
+
+    // settleAfterCall should have been called with 0 to refund the lease
+    expect(vi.mocked(settleAfterCall)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ leaseId: 'lease-1' }),
+      0,
+    );
+  });
+});
+
+describe('routeVideoPoll', () => {
+  it('happy path: returns poll result from adapter', async () => {
+    const pollVideo = vi.fn(async () => ({
+      status: 'completed' as const,
+      unsignedUrls: ['https://cdn.openrouter.ai/videos/job-xyz.mp4'],
+      providerCostUsd: 0.25,
+    }));
+
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (id: string) => id,
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+      pollVideo,
+    };
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis: { get: vi.fn(async () => null) } as any,
+      adapters: new Map([['openrouter', adapter]]),
+      markupPct: 0,
+      appId: 'a',
+      userId: 'u',
+      region: 'r',
+    };
+
+    const result = await routeVideoPoll(
+      ctx as any,
+      'openrouter' as any,
+      'https://openrouter.ai/api/v1/videos/job-xyz',
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.unsignedUrls).toEqual(['https://cdn.openrouter.ai/videos/job-xyz.mp4']);
+    expect(result.providerCostUsd).toBe(0.25);
+    expect(pollVideo).toHaveBeenCalledTimes(1);
+    expect(pollVideo).toHaveBeenCalledWith('https://openrouter.ai/api/v1/videos/job-xyz');
   });
 });
