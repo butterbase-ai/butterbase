@@ -124,7 +124,7 @@ describe('Auth Middleware', () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it('returns 401 for JWT tokens (not yet implemented)', async () => {
+  it('returns 401 for invalid JWT tokens', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/apps',
@@ -134,6 +134,6 @@ describe('Auth Middleware', () => {
     });
 
     expect(response.statusCode).toBe(401);
-    expect(response.json().error).toContain('JWT authentication not yet implemented');
+    expect(response.json().error.message).toContain('Invalid JWT token');
   });
 });

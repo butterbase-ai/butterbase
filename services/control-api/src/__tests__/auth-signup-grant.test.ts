@@ -13,24 +13,24 @@ describeDb('signup grant integration', () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: PLATFORM_URL });
-    await pool.query(`UPDATE plans SET signup_credit_grant_usd = 2.00 WHERE id = 'free'`);
+    await pool.query(`UPDATE plans SET signup_credit_grant_usd = 2.00 WHERE id = 'playground'`);
   });
   afterAll(async () => { await pool.end(); });
 
   it('first call grants signup credits exactly once', async () => {
     const ins = await pool.query(
       `INSERT INTO platform_users (id, email, account_status, plan_id, credits_usd)
-       VALUES (gen_random_uuid(), $1, 'active', 'free', 0)
+       VALUES (gen_random_uuid(), $1, 'active', 'playground', 0)
        RETURNING id`,
       [`signup-grant-test-${Date.now()}-${Math.random()}@x.com`]
     );
     const userId = ins.rows[0].id;
 
-    const r1 = await grantSignupCredits(pool, { userId, planId: 'free' });
+    const r1 = await grantSignupCredits(pool, { userId, planId: 'playground' });
     expect(r1.granted).toBeCloseTo(2, 2);
 
     // Second call (simulating a returning user re-authenticating)
-    const r2 = await grantSignupCredits(pool, { userId, planId: 'free' });
+    const r2 = await grantSignupCredits(pool, { userId, planId: 'playground' });
     expect(r2.granted).toBe(0);
 
     const balance = await pool.query(`SELECT credits_usd FROM platform_users WHERE id = $1`, [userId]);

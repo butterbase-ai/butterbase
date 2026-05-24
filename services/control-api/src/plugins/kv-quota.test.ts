@@ -204,7 +204,7 @@ describeDb('kv-quota plugin', () => {
       const r = await req(app, 'PUT', `/v1/${appId}/kv/credit-test`, {
         payload: { value: 'x' },
       });
-      expect(r.statusCode).toBe(200);
+      expect(r.statusCode).toBe(204);
     } finally {
       await app.close();
     }
