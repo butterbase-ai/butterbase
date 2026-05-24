@@ -34,6 +34,32 @@ export interface EmbeddingRequest {
   encoding_format?: 'float' | 'base64';
 }
 
+export interface VideoGenerationRequest {
+  model: string; // canonical id; adapter translates to upstream id
+  prompt: string;
+  duration?: number;
+  resolution?: string;
+  aspect_ratio?: string;
+  generate_audio?: boolean;
+  seed?: number;
+  input_images?: string[];
+  input_references?: string[];
+  provider?: Record<string, unknown>;
+}
+
+export interface VideoSubmitResult {
+  upstreamJobId: string;
+  pollingUrl: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'expired';
+}
+
+export interface VideoPollResult {
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'expired';
+  unsignedUrls?: string[];
+  providerCostUsd?: number;
+  error?: string;
+}
+
 export interface AdapterUsage {
   promptTokens: number;
   completionTokens: number;
@@ -78,4 +104,8 @@ export interface RouterAdapter {
   listModels(): Promise<UpstreamModel[]>;
   chatCompletion(req: ChatCompletionRequest, upstreamId: string): Promise<AdapterResult>;
   embedding?(req: EmbeddingRequest, upstreamId: string): Promise<AdapterResult>;
+  submitVideo?(req: VideoGenerationRequest, upstreamId: string): Promise<VideoSubmitResult>;
+  pollVideo?(pollingUrl: string): Promise<VideoPollResult>;
+  /** Fetch the raw MP4 bytes for a completed job. Pass through to caller as a stream. */
+  fetchVideoContent?(upstreamJobId: string, index?: number): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
 }
