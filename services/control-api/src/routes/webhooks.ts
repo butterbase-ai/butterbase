@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import * as CloudflarePages from '../services/cloudflare-pages.js';
 import { handleWebhook } from '../services/webhook-handler.js';
+import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { config } from '../config.js';
 
 const cloudflareWebhookSchema = z.object({
@@ -39,9 +40,12 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
     try {
       const body = cloudflareWebhookSchema.parse(request.body);
 
-      // FIXME(batch-9.7): handleWebhook uses a single transaction spanning processed_webhook_events (platform)
-      // and app_deployments/apps (runtime). Split into two-phase commit or move idempotency to controlDb
-      // and runtime writes to runtimeDb in a separate step.
+      // Cross-tier two-phase write: Phase 1 (controlDb) inside handleWebhook,
+      // Phase 2 (runtimeDb) below. If Phase 2 fails after Phase 1 commits,
+      // apps.deployment_url is stale until reconciled; cross-tier 2PC is not
+      // implemented here (single-tier transactions are the design contract).
+      let runtimeUpdate: { appId: string; url: string } | null = null;
+
       await handleWebhook(
         controlDb,
         'cloudflare',
@@ -98,19 +102,32 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
             [status, errorMessage, body.url, deployment.id]
           );
 
-          // Update apps table if deployment succeeded
           if (status === 'READY' && body.url) {
-            await client.query(
-              `UPDATE apps
-               SET deployment_url = $1, last_deployed_at = now()
-               WHERE id = $2`,
-              [body.url, deployment.app_id]
-            );
+            // apps lives on runtime now; defer the UPDATE to Phase 2 (after controlDb commits).
+            runtimeUpdate = { appId: deployment.app_id, url: body.url };
           }
 
           console.log(`[Webhook] Updated deployment ${deployment.id} to status ${status}`);
         }
       );
+
+      const pendingRuntimeUpdate = runtimeUpdate as { appId: string; url: string } | null;
+      if (pendingRuntimeUpdate) {
+        try {
+          const runtimeDb = await getRuntimeDbForApp(controlDb, pendingRuntimeUpdate.appId);
+          await runtimeDb.query(
+            `UPDATE apps
+             SET deployment_url = $1, last_deployed_at = now()
+             WHERE id = $2`,
+            [pendingRuntimeUpdate.url, pendingRuntimeUpdate.appId]
+          );
+        } catch (err) {
+          console.error(
+            { err, appId: pendingRuntimeUpdate.appId, url: pendingRuntimeUpdate.url },
+            '[Webhook] Phase 2 apps UPDATE failed after controlDb commit — event marked processed but apps row stale; manual reconciliation may be needed'
+          );
+        }
+      }
 
       return reply.send({ received: true });
     } catch (error) {
