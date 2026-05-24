@@ -33,7 +33,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
     const isValid = CloudflarePages.verifyWebhookSignature(payload, signature, webhookSecret);
 
     if (!isValid) {
-      console.error('[Webhook] Invalid Cloudflare webhook signature');
+      request.log.warn('[Webhook] Invalid Cloudflare webhook signature');
       return reply.status(401).send({ error: 'Invalid signature' });
     }
 
@@ -78,7 +78,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
               status = 'CANCELED';
               break;
             default:
-              console.log(`[Webhook] Unhandled Cloudflare event type: ${body.type}`);
+              request.log.info({ eventType: body.type }, '[Webhook] Unhandled Cloudflare event type');
               return;
           }
 
@@ -103,7 +103,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
               [body.deployment_id]
             );
             if (fb.rows.length === 0) {
-              console.error(
+              request.log.warn(
                 { cfDeploymentId: body.deployment_id, type: body.type },
                 '[Webhook] No routing entry in cloudflare_deployment_index or legacy app_deployments — dropping webhook'
               );
@@ -139,7 +139,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
 
             if (dep.rows.length === 0) {
               await rtClient.query('ROLLBACK');
-              console.error(
+              request.log.error(
                 { cfDeploymentId: body.deployment_id, region: r.region, appId: r.appId },
                 '[Webhook] Phase 2: runtime app_deployments row not found at resolved region'
               );
@@ -163,7 +163,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
               }
 
               await rtClient.query('COMMIT');
-              console.log(`[Webhook] Updated deployment ${dep.rows[0].id} to status ${r.status}`);
+              request.log.info({ deploymentId: dep.rows[0].id, status: r.status }, '[Webhook] Updated deployment status');
             }
           } catch (txErr) {
             await rtClient.query('ROLLBACK').catch(() => { /* swallow rollback failures */ });
@@ -172,7 +172,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
             rtClient.release();
           }
         } catch (err) {
-          console.error(
+          request.log.error(
             { err, appId: r.appId, region: r.region, cfDeploymentId: body.deployment_id, status: r.status, url: r.url },
             '[Webhook] Phase 2 runtime transaction failed after Phase 1 commit — manual reconciliation needed'
           );
@@ -181,7 +181,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
 
       return reply.send({ received: true });
     } catch (error) {
-      console.error('[Webhook] Failed to process Cloudflare webhook:', error);
+      request.log.error({ err: error }, '[Webhook] Failed to process Cloudflare webhook');
       return reply.status(500).send({
         error: 'Webhook processing failed',
         message: error instanceof Error ? error.message : 'Unknown error',
