@@ -23,12 +23,17 @@ async function collectRegionInfo(region: string): Promise<RegionInfo> {
   const url = process.env[envKey];
   if (!url) throw new Error(`Missing ${envKey}`);
   const r = new Redis(url, { maxRetriesPerRequest: 2 });
+  // Each metric is collected independently: managed providers (e.g. Upstash) reject
+  // CLIENT LIST and SLOWLOG, but still answer INFO. Don't let an unsupported command
+  // mask the metrics that did succeed.
+  const safe = <T>(p: Promise<T>, fallback: T): Promise<T> =>
+    p.catch(() => fallback);
   try {
     const [memRaw, statsRaw, clientsListRaw, slowLenRaw] = await Promise.all([
-      r.info('memory'),
-      r.info('stats'),
-      r.call('CLIENT', 'LIST') as Promise<string>,
-      r.call('SLOWLOG', 'LEN') as Promise<number>,
+      safe(r.info('memory'), ''),
+      safe(r.info('stats'), ''),
+      safe(r.call('CLIENT', 'LIST') as Promise<string>, ''),
+      safe(r.call('SLOWLOG', 'LEN') as Promise<number>, 0),
     ]);
     const memUsed = parseInfoInt(memRaw, 'used_memory');
     const memMax  = parseInfoInt(memRaw, 'maxmemory') || 0;
