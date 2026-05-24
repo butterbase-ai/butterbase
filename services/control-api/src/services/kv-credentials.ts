@@ -64,14 +64,14 @@ export class KvCredentialsService {
       owns_app: boolean;
     }>(
       `SELECT
-         ak.user_id IS NOT NULL AS key_valid,
-         a.id IS NOT NULL      AS owns_app,
-         a.id                  AS app_id,
-         a.region              AS region,
+         ak.user_id IS NOT NULL  AS key_valid,
+         uai.app_id IS NOT NULL  AS owns_app,
+         uai.app_id              AS app_id,
+         uai.region              AS region,
          kv.redis_password
        FROM api_keys ak
-       LEFT JOIN apps a ON a.id = $2 AND a.owner_id = ak.user_id
-       LEFT JOIN app_kv_credentials kv ON kv.app_id = a.id
+       LEFT JOIN user_app_index uai ON uai.app_id = $2 AND uai.user_id = ak.user_id
+       LEFT JOIN app_kv_credentials kv ON kv.app_id = uai.app_id
        WHERE ak.key_hash = $1
          AND ak.revoked_at IS NULL
          AND (ak.expires_at IS NULL OR ak.expires_at > now())
