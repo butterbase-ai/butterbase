@@ -21,7 +21,7 @@ export async function clearKvScope(
   const match = `{${appId}}:*`;
   let total = 0;
 
-  for (const db of [0, 1] as const) {
+  for (const db of [0] as const) {
     const c = await RedisClient.connect({ ...opts, db });
     try {
       let cursor = '0';

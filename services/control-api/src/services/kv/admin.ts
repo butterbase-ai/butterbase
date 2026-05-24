@@ -73,14 +73,12 @@ export async function scanKeys(
   const userPrefix = opts.prefix ?? '';
   const pattern = `{${appId}}:u:${userPrefix}*`;
 
-  // Collect from both DBs sequentially to avoid shared-state races.
   const db0Keys = await scanAllKeys(baseOpts, 0, pattern);
-  const db1Keys = await scanAllKeys(baseOpts, 1, pattern);
 
-  // Union + deduplicate, strip prefix, apply limit.
+  // Strip prefix, apply limit. (Single-DB substrate.)
   const seen = new Set<string>();
   const result: string[] = [];
-  for (const stored of [...db0Keys, ...db1Keys]) {
+  for (const stored of db0Keys) {
     const userKey = stripPrefix(appId, stored);
     if (userKey === null) continue;
     if (seen.has(userKey)) continue;
@@ -183,9 +181,7 @@ export async function flushApp(
     });
   }
 
-  // Sequential to avoid shared-state races on the `deleted` accumulator.
   await flushDb(0);
-  await flushDb(1);
 
   // Reset the running storage-byte counter so it doesn't drift after a flush.
   const metaClient = await RedisClient.connect({ ...baseOpts, db: 0 });

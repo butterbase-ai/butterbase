@@ -79,7 +79,7 @@ async function* defaultIterateRecords(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   appId: string,
 ): AsyncGenerator<KvDumpRecord> {
-  for (const db of [0, 1] as const) {
+  for (const db of [0] as const) {
     const c = await RedisClient.connect({ ...baseOpts, db });
     try {
       let cursor = '0';

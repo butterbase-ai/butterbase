@@ -78,7 +78,7 @@ async function assertDestEmpty(
   baseOpts: Omit<RedisClientOptions, 'db'>,
   appId: string,
 ): Promise<void> {
-  for (const db of [0, 1] as const) {
+  for (const db of [0] as const) {
     const c = await RedisClient.connect({ ...baseOpts, db });
     try {
       let cursor = '0';
@@ -119,11 +119,12 @@ export async function restoreKvIntoRegion(opts: RestoreKvOpts): Promise<{ record
   const rl = createInterface({ input: gunzipped, crlfDelay: Infinity });
 
   const clients = new Map<0 | 1, RedisClient>();
-  async function clientForDb(db: 0 | 1): Promise<RedisClient> {
-    let c = clients.get(db);
+  async function clientForDb(_db: 0 | 1): Promise<RedisClient> {
+    // Single-DB substrate: legacy dumps may carry db: 1 records; collapse onto DB 0.
+    let c = clients.get(0);
     if (!c) {
-      c = await RedisClient.connect({ ...destBase, db });
-      clients.set(db, c);
+      c = await RedisClient.connect({ ...destBase, db: 0 });
+      clients.set(0, c);
     }
     return c;
   }

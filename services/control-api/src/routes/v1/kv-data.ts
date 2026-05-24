@@ -67,8 +67,6 @@ function keyDeltaForWrite(oldRaw: string | null, newRaw: string | null): number 
 // ── Constants (must match kv-gateway/src/worker.ts) ───────────────────────────
 
 const DEFAULT_TTL_SECONDS = 30 * 24 * 3600; // 30 days
-const DURABLE_DB = 0;
-const EPHEMERAL_DB = 1;
 const BATCH_MAX_OPS = 100;
 const MAX_VALUE_BYTES = 256 * 1024;
 
@@ -105,32 +103,18 @@ function baseOptsForRegion(region: string, password: string): Omit<RedisClientOp
   };
 }
 
-// Open a short-lived RedisClient for a specific DB, run fn, always close.
+// Open a short-lived RedisClient, run fn, always close. All KV data lives on
+// the substrate's default logical DB (0); we don't use the second-DB ephemeral
+// split because managed providers like Upstash only support DB 0.
 async function withRedis<T>(
   baseOpts: Omit<RedisClientOptions, 'db'>,
-  db: number,
   fn: (c: RedisClient) => Promise<T>,
 ): Promise<T> {
-  const c = await RedisClient.connect({ ...baseOpts, db });
+  const c = await RedisClient.connect(baseOpts);
   try {
     return await fn(c);
   } finally {
     await c.close();
-  }
-}
-
-// After writing a key to one DB, remove any stale copy from the other DB.
-async function deleteFromOtherDb(
-  baseOpts: Omit<RedisClientOptions, 'db'>,
-  writtenDb: number,
-  fullKey: string,
-): Promise<void> {
-  const otherDb = writtenDb === DURABLE_DB ? EPHEMERAL_DB : DURABLE_DB;
-  try {
-    await withRedis(baseOpts, otherDb, (c) => c.del([fullKey]));
-  } catch (e) {
-    // Best-effort; swallowed so the original write is never reported as failed.
-    console.warn('[kv-data] cross-db cleanup failed (swallowed):', (e as any)?.message ?? e);
   }
 }
 
@@ -249,32 +233,22 @@ async function handleGet(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
 
   const fk = userKey(auth.appId, key);
 
-  let foundIn: number | null = null;
   let v: string | null = null;
-
-  await withRedis(baseOpts, DURABLE_DB, async (c) => {
+  await withRedis(baseOpts, async (c) => {
     v = await c.get(fk);
-    if (v !== null) foundIn = DURABLE_DB;
   });
-  if (v === null) {
-    await withRedis(baseOpts, EPHEMERAL_DB, async (c) => {
-      v = await c.get(fk);
-      if (v !== null) foundIn = EPHEMERAL_DB;
-    });
-  }
   if (v === null) return reply.code(404).send(errBody('not_found'));
 
-  // Touch-on-read: only for durable hits. Ephemeral keys are allowed to expire.
-  if (touch && foundIn === DURABLE_DB) {
+  if (touch) {
     try {
-      await withRedis(baseOpts, DURABLE_DB, async (c) => {
+      await withRedis(baseOpts, async (c) => {
         const sidecarKey = sidecarTtlKey(auth.appId, key);
         const stored = await c.get(sidecarKey);
         let originalTtl: number | null = stored !== null ? Number(stored) : null;
@@ -307,14 +281,13 @@ async function handleGetTtl(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
 
   const fk = userKey(auth.appId, key);
-  let t = await withRedis(baseOpts, DURABLE_DB, (c) => c.ttl(fk));
-  if (t === -2) t = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.ttl(fk));
+  const t = await withRedis(baseOpts, (c) => c.ttl(fk));
   if (t === -2) return reply.code(404).send(errBody('not_found'));
   account(0, 0);
   return reply.code(200).send({ ttl: t === -1 ? null : t });
@@ -328,17 +301,15 @@ async function handleGetExists(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'read', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
 
   const fk = userKey(auth.appId, key);
-  const existsDurable = await withRedis(baseOpts, DURABLE_DB, (c) => c.exists(fk));
+  const exists = await withRedis(baseOpts, (c) => c.exists(fk));
   account(0, 0);
-  if (existsDurable) return reply.code(200).send({ exists: true });
-  const existsEphemeral = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.exists(fk));
-  return reply.code(200).send({ exists: existsEphemeral });
+  return reply.code(200).send({ exists });
 }
 
 async function handlePut(
@@ -350,7 +321,7 @@ async function handlePut(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
@@ -361,7 +332,6 @@ async function handlePut(
   if (!ttlResult.ok) return reply.code(400).send(errBody(ttlResult.error, ttlResult.message));
   const resolvedTtl = ttlResult.ttl;
 
-  const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
   const encoded = JSON.stringify(body.value);
   const sizeErr = checkValueSize(encoded);
   if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
@@ -373,23 +343,22 @@ async function handlePut(
   // any drift in case this read races with a concurrent write.
   let oldRaw: string | null = null;
   try {
-    oldRaw = await withRedis(baseOpts, db, (c) => c.get(fk));
+    oldRaw = await withRedis(baseOpts, (c) => c.get(fk));
   } catch {
     // best-effort; delta will be slightly inaccurate, reconcile corrects it
   }
 
-  await withRedis(baseOpts, db, async (c) => {
+  await withRedis(baseOpts, async (c) => {
     if (resolvedTtl === null) {
       await c.set(fk, encoded);
     } else {
       await c.setex(fk, resolvedTtl, encoded);
     }
   });
-  await deleteFromOtherDb(baseOpts, db, fk);
 
   // Best-effort sidecar size index update (raw key suffix, no encoding).
   const sizeBytes = Buffer.byteLength(encoded, 'utf8');
-  void withRedis(baseOpts, DURABLE_DB, (c) =>
+  void withRedis(baseOpts, (c) =>
     c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
   ).catch(() => {});
 
@@ -405,39 +374,32 @@ async function handleDelete(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
 
   const fk = userKey(auth.appId, key);
 
-  // Read old value from both DBs before deletion to compute size delta.
-  let oldDurable: string | null = null;
-  let oldEphemeral: string | null = null;
+  let oldRaw: string | null = null;
   try {
-    oldDurable = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
-    oldEphemeral = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.get(fk));
+    oldRaw = await withRedis(baseOpts, (c) => c.get(fk));
   } catch {
     // best-effort
   }
 
-  const delDur = await withRedis(baseOpts, DURABLE_DB, (c) => c.del([fk]));
-  const delEph = await withRedis(baseOpts, EPHEMERAL_DB, (c) => c.del([fk]));
+  const deleted = await withRedis(baseOpts, (c) => c.del([fk]));
 
   // Best-effort sidecar size index cleanup (raw key suffix, no encoding).
-  void withRedis(baseOpts, DURABLE_DB, (c) =>
+  void withRedis(baseOpts, (c) =>
     c.hdel(`{${auth.appId}}:_meta:bytes_idx`, [key])
   ).catch(() => {});
 
-  // Negative delta: bytes freed by the deletion
-  const freed = (oldDurable !== null ? Buffer.byteLength(oldDurable) : 0)
-    + (oldEphemeral !== null ? Buffer.byteLength(oldEphemeral) : 0);
-  // Key is deleted if it existed in at least one DB
-  const keyDelta = oldDurable !== null || oldEphemeral !== null ? -1 : 0;
+  const freed = oldRaw !== null ? Buffer.byteLength(oldRaw) : 0;
+  const keyDelta = oldRaw !== null ? -1 : 0;
   account(-freed, keyDelta);
 
-  return reply.code(200).send({ deleted: delDur + delEph });
+  return reply.code(200).send({ deleted });
 }
 
 async function handleIncr(
@@ -449,7 +411,7 @@ async function handleIncr(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
@@ -463,15 +425,15 @@ async function handleIncr(
   // Read old raw value to compute size delta (number length may change)
   let oldRaw: string | null = null;
   try {
-    oldRaw = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
+    oldRaw = await withRedis(baseOpts, (c) => c.get(fk));
   } catch { /* best-effort */ }
 
-  const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.incrBy(fk, by));
+  const value = await withRedis(baseOpts, (c) => c.incrBy(fk, by));
   const newRaw = String(value);
 
   // Best-effort sidecar size index update.
   const sizeBytes = Buffer.byteLength(newRaw, 'utf8');
-  void withRedis(baseOpts, DURABLE_DB, (c) =>
+  void withRedis(baseOpts, (c) =>
     c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
   ).catch(() => {});
 
@@ -488,7 +450,7 @@ async function handleDecr(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
@@ -502,15 +464,15 @@ async function handleDecr(
   // Read old raw value to compute size delta (number length may change)
   let oldRaw: string | null = null;
   try {
-    oldRaw = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
+    oldRaw = await withRedis(baseOpts, (c) => c.get(fk));
   } catch { /* best-effort */ }
 
-  const value = await withRedis(baseOpts, DURABLE_DB, (c) => c.decrBy(fk, by));
+  const value = await withRedis(baseOpts, (c) => c.decrBy(fk, by));
   const newRaw = String(value);
 
   // Best-effort sidecar size index update.
   const sizeBytes = Buffer.byteLength(newRaw, 'utf8');
-  void withRedis(baseOpts, DURABLE_DB, (c) =>
+  void withRedis(baseOpts, (c) =>
     c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
   ).catch(() => {});
 
@@ -527,7 +489,7 @@ async function handleSetnx(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
@@ -538,24 +500,22 @@ async function handleSetnx(
   if (!ttlResult.ok) return reply.code(400).send(errBody(ttlResult.error, ttlResult.message));
   const resolvedTtl = ttlResult.ttl;
 
-  const db = body.ephemeral === true ? EPHEMERAL_DB : DURABLE_DB;
   const encoded = JSON.stringify(body.value);
   const sizeErr = checkValueSize(encoded);
   if (sizeErr) return reply.code(413).send(errBody('KV_VALUE_TOO_LARGE', sizeErr));
 
   const fk = userKey(auth.appId, key);
-  const wrote = await withRedis(baseOpts, db, (c) =>
+  const wrote = await withRedis(baseOpts, (c) =>
     c.setWithOptions(fk, encoded, {
       ex: resolvedTtl !== null ? resolvedTtl : undefined,
       nx: true,
     }),
   );
   if (wrote) {
-    await deleteFromOtherDb(baseOpts, db, fk);
     // setnx only writes if key didn't exist; delta is the full new value size + 1 key
     // Best-effort sidecar size index update (raw key suffix, no encoding).
     const sizeBytes = Buffer.byteLength(encoded, 'utf8');
-    void withRedis(baseOpts, DURABLE_DB, (c) =>
+    void withRedis(baseOpts, (c) =>
       c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
     ).catch(() => {});
     account(sizeDeltaBytes(null, encoded), keyDeltaForWrite(null, encoded));
@@ -575,7 +535,7 @@ async function handleCas(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
@@ -595,17 +555,17 @@ async function handleCas(
   // Read old value before CAS to compute delta on success
   let oldRaw: string | null = null;
   try {
-    oldRaw = await withRedis(baseOpts, DURABLE_DB, (c) => c.get(fk));
+    oldRaw = await withRedis(baseOpts, (c) => c.get(fk));
   } catch { /* best-effort */ }
 
-  const r = await withRedis(baseOpts, DURABLE_DB, (c) =>
+  const r = await withRedis(baseOpts, (c) =>
     c.eval(CAS_SCRIPT, [fk], [expectedArg, nextArg]),
   );
   const swapped = r === 1;
   if (swapped) {
     // Best-effort sidecar size index update (raw key suffix, no encoding).
     const sizeBytes = Buffer.byteLength(nextArg, 'utf8');
-    void withRedis(baseOpts, DURABLE_DB, (c) =>
+    void withRedis(baseOpts, (c) =>
       c.hset(`{${auth.appId}}:_meta:bytes_idx`, key, String(sizeBytes))
     ).catch(() => {});
     account(sizeDeltaBytes(oldRaw, nextArg), keyDeltaForWrite(oldRaw, nextArg));
@@ -624,7 +584,7 @@ async function handleExpire(
   account: AccountFn,
 ) {
   if (auth.identity.kind === 'jwt' || auth.identity.kind === 'anon') {
-    const rules = await withRedis(baseOpts, DURABLE_DB, (c) => loadRules(c, auth.appId));
+    const rules = await withRedis(baseOpts, (c) => loadRules(c, auth.appId));
     const denial = enforceExposeAccess(rules, key, 'write', claimsFromAuth(auth.identity));
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
@@ -639,7 +599,7 @@ async function handleExpire(
   }
 
   const fk = userKey(auth.appId, key);
-  const applied = await withRedis(baseOpts, DURABLE_DB, (c) => c.expire(fk, ttl));
+  const applied = await withRedis(baseOpts, (c) => c.expire(fk, ttl));
   // expire doesn't change value bytes or key count; no deltas
   account(0, 0);
   return reply.code(200).send({ applied });
@@ -679,7 +639,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     let exposeRules: CompiledRule[] | null = null;
     async function ensureRules(): Promise<CompiledRule[]> {
       if (exposeRules) return exposeRules;
-      exposeRules = await withRedis(baseOpts, DURABLE_DB, (c) =>
+      exposeRules = await withRedis(baseOpts, (c) =>
         loadRules(c, authOk.appId),
       );
       return exposeRules!;
@@ -688,7 +648,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     const results: unknown[] = [];
     let batchStorageDelta = 0;
     let batchKeyDelta = 0;
-    await withRedis(baseOpts, DURABLE_DB, async (client) => {
+    await withRedis(baseOpts, async (client) => {
       for (const op of body.ops as Array<{ op?: unknown; key?: unknown; value?: unknown }>) {
         if (typeof op.op !== 'string' || !['get', 'set', 'del'].includes(op.op)) {
           results.push({ error: 'invalid op' });

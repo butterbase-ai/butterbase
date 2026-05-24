@@ -126,7 +126,6 @@ export async function reconcileFromScan(
   }
 
   await collectDb(0);
-  await collectDb(1);
 
   // Update the byte counter and the key counter with actual values.
   await client.set(metaKey(appId), String(actual));
