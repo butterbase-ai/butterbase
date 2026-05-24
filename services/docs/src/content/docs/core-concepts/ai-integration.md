@@ -153,7 +153,7 @@ Authorization: Bearer {token}
 
 ## Video generation
 
-Video models work differently from chat: generation is **asynchronous** and can take 30 seconds to several minutes. You submit a job, poll until it's ready, and then download the rendered MP4. See [Video generation](../api-reference/ai-api.md#video-generation) in the API reference for the full flow.
+Video models work differently from chat: generation is **asynchronous** and can take 30 seconds to several minutes. You submit a job, poll until it's ready, and then download the rendered MP4. See [Video generation](/api-reference/ai-api/#video-generation) in the API reference for the full flow.
 
 Video is billed per call (not per token) — the actual cost appears as `charged_credits_usd` in the job's final poll response.
 
