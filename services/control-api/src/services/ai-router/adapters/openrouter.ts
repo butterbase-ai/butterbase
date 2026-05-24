@@ -1,4 +1,4 @@
-import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality } from './types.js';
+import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult } from './types.js';
 import { AdapterError } from './types.js';
 
 interface OpenRouterConfig {
@@ -215,11 +215,84 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     };
   }
 
+  async function submitVideo(
+    req: VideoGenerationRequest,
+    upstreamId: string,
+  ): Promise<VideoSubmitResult> {
+    const body = { ...req, model: upstreamId };
+    const res = await fetcher(`${base}/videos`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'HTTP-Referer': referer,
+        'X-Title': title,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
+    }
+    const json = await res.json() as { id: string; polling_url: string; status: string };
+    return {
+      upstreamJobId: json.id,
+      pollingUrl: json.polling_url,
+      status: json.status as VideoSubmitResult['status'],
+    };
+  }
+
+  async function pollVideo(pollingUrl: string): Promise<VideoPollResult> {
+    const res = await fetcher(pollingUrl, {
+      headers: {
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'HTTP-Referer': referer,
+        'X-Title': title,
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
+    }
+    const json = await res.json() as {
+      status: string;
+      unsigned_urls?: string[];
+      usage?: { cost?: number };
+      error?: string;
+    };
+    return {
+      status: json.status as VideoPollResult['status'],
+      unsignedUrls: json.unsigned_urls,
+      providerCostUsd: typeof json.usage?.cost === 'number' ? json.usage.cost : undefined,
+      error: json.error,
+    };
+  }
+
+  async function fetchVideoContent(
+    upstreamJobId: string,
+    index = 0,
+  ): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }> {
+    const res = await fetcher(`${base}/videos/${encodeURIComponent(upstreamJobId)}/content?index=${index}`, {
+      headers: { 'Authorization': `Bearer ${cfg.apiKey}` },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
+    }
+    if (!res.body) {
+      throw new AdapterError('openrouter', 500, 'transport', 'video content response had no body');
+    }
+    return { stream: res.body, contentType: res.headers.get('content-type') ?? 'video/mp4' };
+  }
+
   return {
     name: 'openrouter',
     toUpstreamId: (canonical) => canonical,
     listModels,
     chatCompletion,
     embedding,
+    submitVideo,
+    pollVideo,
+    fetchVideoContent,
   };
 }

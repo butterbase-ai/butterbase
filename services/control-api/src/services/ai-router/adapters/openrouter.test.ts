@@ -157,3 +157,57 @@ describe('openrouter adapter', () => {
     expect(a.toUpstreamId('anthropic/claude-3-5-sonnet')).toBe('anthropic/claude-3-5-sonnet');
   });
 });
+
+describe('openrouterAdapter — video', () => {
+  it('submitVideo POSTs /videos and returns the upstream job id + polling url', async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit | undefined) => {
+      expect(url).toBe('https://openrouter.ai/api/v1/videos');
+      expect(init?.method).toBe('POST');
+      const body = JSON.parse((init?.body as string) ?? '{}');
+      expect(body.model).toBe('bytedance/seedance-2.0');
+      expect(body.prompt).toBe('a cat on a piano');
+      return new Response(JSON.stringify({
+        id: 'job-abc',
+        polling_url: 'https://openrouter.ai/api/v1/videos/job-abc',
+        status: 'pending',
+      }), { status: 202, headers: { 'Content-Type': 'application/json' } });
+    });
+    const adapter = openrouterAdapter({ apiKey: 'sk-test', fetch: fetchMock as any });
+    const out = await adapter.submitVideo!(
+      { model: 'bytedance/seedance-2.0', prompt: 'a cat on a piano' },
+      'bytedance/seedance-2.0',
+    );
+    expect(out).toEqual({
+      upstreamJobId: 'job-abc',
+      pollingUrl: 'https://openrouter.ai/api/v1/videos/job-abc',
+      status: 'pending',
+    });
+  });
+
+  it('pollVideo GETs the polling url and returns terminal state with cost', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe('https://openrouter.ai/api/v1/videos/job-abc');
+      return new Response(JSON.stringify({
+        id: 'job-abc',
+        status: 'completed',
+        unsigned_urls: ['https://openrouter.ai/api/v1/videos/job-abc/content?index=0'],
+        usage: { cost: 0.25, is_byok: false },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    const adapter = openrouterAdapter({ apiKey: 'sk-test', fetch: fetchMock as any });
+    const out = await adapter.pollVideo!('https://openrouter.ai/api/v1/videos/job-abc');
+    expect(out).toEqual({
+      status: 'completed',
+      unsignedUrls: ['https://openrouter.ai/api/v1/videos/job-abc/content?index=0'],
+      providerCostUsd: 0.25,
+    });
+  });
+
+  it('submitVideo throws AdapterError with classified kind on HTTP error', async () => {
+    const fetchMock = vi.fn(async () => new Response('rate limited', { status: 429 }));
+    const adapter = openrouterAdapter({ apiKey: 'sk-test', fetch: fetchMock as any });
+    await expect(
+      adapter.submitVideo!({ model: 'x', prompt: 'y' }, 'x')
+    ).rejects.toMatchObject({ kind: 'rate_limit', statusCode: 429 });
+  });
+});
