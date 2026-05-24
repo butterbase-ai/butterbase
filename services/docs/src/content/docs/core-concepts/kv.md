@@ -68,11 +68,36 @@ export default async function handler(ctx) {
 }
 ```
 
+Make a counter visible to the frontend without granting writes:
+
+```ts
+// In a function handler — set up the rule once
+await ctx.kv.expose('hits:home', { read: 'public', write: 'deny' });
+await ctx.kv.incr('hits:home');
+```
+
+```ts
+// In the frontend
+const res = await fetch(`${api}/v1/${appId}/kv/hits:home`);
+const { value } = await res.json();
+```
+
 ## Access control
 
 By default, **all KV keys are private** — they are only accessible from your own serverless functions using a service key. End-user clients (browser, mobile) cannot read or write KV keys at all unless you explicitly opt in.
 
 Use `ctx.kv.expose(pattern, { read, write })` to open a key pattern to end-users. This is typically called once during app setup or in a migration function.
+
+Per-user keyspaces use `{user.id}` templating — each end user sees only their own keys:
+
+```ts
+// Function: allow each signed-in user to read & write their own profile blob
+await ctx.kv.expose('profile:{user.id}', { read: 'owner', write: 'owner' });
+
+// User u_42 signs in. From the frontend:
+//   GET  /v1/:app_id/kv/profile:u_42  → 200, value
+//   GET  /v1/:app_id/kv/profile:u_99  → 403 (not their key)
+```
 
 ### Roles
 
