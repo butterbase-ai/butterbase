@@ -21,13 +21,25 @@ Actions:
                        Set defaultModel, allowedModels, maxTokensPerRequest (1–100000), or rotate BYOK.
   - get_usage         { app_id, startDate?, endDate? }
                        Aggregate token counts and costs over a window.
+  - submit_video      { app_id, model, prompt, duration?, resolution?, aspect_ratio?, generate_audio?, seed? }
+                       Submits an async video-generation job. Returns { job_id, status, polling_url }.
+                       Poll the returned URL until status is "completed".
+  - poll_video        { app_id, job_id }
+                       Returns current { status, model, content_urls?, error?, created_at }.
+                       Use this to drive your own polling loop.
+  - get_video_content { app_id, job_id, index? }
+                       Returns the proxied content URL the caller can GET to stream MP4 bytes.
+                       (Bytes are not returned through MCP; use the URL with apiGetStream.)
 
 This tool wraps the same /v1/:app_id/chat/completions, /embeddings, /ai/config, /ai/models,
 /ai/usage routes the SDK uses. The "chat" action sets stream: false; for streamed deltas,
 drive the SDK from inside a function or DO.`,
     {
       app_id: z.string().describe('The app ID'),
-      action: z.enum(['chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage']).describe('The action to perform'),
+      action: z.enum([
+        'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
+        'submit_video', 'poll_video', 'get_video_content',
+      ]).describe('The action to perform'),
       // chat
       messages: z.array(z.object({
         role: z.enum(['system', 'user', 'assistant', 'tool']),
@@ -51,6 +63,16 @@ drive the SDK from inside a function or DO.`,
       // get_usage
       startDate: z.string().optional(),
       endDate: z.string().optional(),
+      // submit_video
+      prompt: z.string().optional().describe('Required for submit_video'),
+      duration: z.number().int().positive().optional(),
+      resolution: z.string().optional(),
+      aspect_ratio: z.string().optional(),
+      generate_audio: z.boolean().optional(),
+      seed: z.number().int().optional(),
+      // poll_video / get_video_content
+      job_id: z.string().optional().describe('Required for poll_video / get_video_content'),
+      index: z.number().int().min(0).optional(),
     },
     {
       title: 'Manage AI',
@@ -109,6 +131,39 @@ drive the SDK from inside a function or DO.`,
             if (args.endDate) q.set('endDate', args.endDate);
             const qs = q.toString();
             result = await apiGet(`/v1/${app_id}/ai/usage${qs ? `?${qs}` : ''}`);
+            break;
+          }
+          case 'submit_video': {
+            if (!args.prompt) {
+              return { content: [{ type: 'text' as const, text: 'Error: "prompt" is required for "submit_video".' }], isError: true as const };
+            }
+            if (!args.model) {
+              return { content: [{ type: 'text' as const, text: 'Error: "model" is required for "submit_video".' }], isError: true as const };
+            }
+            result = await apiPost(`/v1/${app_id}/videos/completions`, {
+              model: args.model,
+              prompt: args.prompt,
+              duration: args.duration,
+              resolution: args.resolution,
+              aspect_ratio: args.aspect_ratio,
+              generate_audio: args.generate_audio,
+              seed: args.seed,
+            });
+            break;
+          }
+          case 'poll_video': {
+            if (!args.job_id) {
+              return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "poll_video".' }], isError: true as const };
+            }
+            result = await apiGet(`/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}`);
+            break;
+          }
+          case 'get_video_content': {
+            if (!args.job_id) {
+              return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "get_video_content".' }], isError: true as const };
+            }
+            const idx = args.index ?? 0;
+            result = { content_url: `/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}/content?index=${idx}` };
             break;
           }
         }
