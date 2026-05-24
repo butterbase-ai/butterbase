@@ -108,4 +108,12 @@ export interface RouterAdapter {
   pollVideo?(pollingUrl: string): Promise<VideoPollResult>;
   /** Fetch the raw MP4 bytes for a completed job. Pass through to caller as a stream. */
   fetchVideoContent?(upstreamJobId: string, index?: number): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
+  /**
+   * Optional accessor returning a drift report from the most recent
+   * `listModels()` call. Adapters that dynamically refresh their catalog from
+   * an upstream source can use this to surface known modelIds vs. local
+   * pricing snapshot drift. The report shape is adapter-specific; the
+   * refresher logs it without interpretation.
+   */
+  getLastCatalogDrift?(): unknown | undefined;
 }
