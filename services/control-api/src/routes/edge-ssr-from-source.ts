@@ -20,6 +20,7 @@ import * as R2 from '../services/r2.js';
 import * as BuildDriver from '../services/build-driver.service.js';
 import { loadAppEnvVars } from '../services/build-driver.service.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
+import { getRuntimeDbForApp } from '../services/region-resolver.js';
 
 const createSchema = z.object({
   framework: z.enum(['nextjs-edge', 'remix-edge', 'other-edge']).default('nextjs-edge'),
@@ -72,9 +73,10 @@ export async function registerEdgeSsrFromSourceRoutes(fastify: FastifyInstance) 
 
     const buildId = crypto.randomUUID();
 
-    // Insert deployment row and capture the DB-generated id atomically via
-    // RETURNING, eliminating any race between concurrent from-source POSTs.
-    const depRow = await controlDb.query<{ id: string }>(
+    // app_edge_ssr_deployments is runtime-tier (migration 061); route INSERT to the app's runtime DB.
+    const runtimeDb = await getRuntimeDbForApp(controlDb, appId);
+
+    const depRow = await runtimeDb.query<{ id: string }>(
       `INSERT INTO app_edge_ssr_deployments (app_id, framework, status, deployed_by)
        VALUES ($1, $2, 'WAITING', $3)
        RETURNING id`,
