@@ -235,10 +235,15 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
     const ownerId = await resolveOwnerId(fastify.controlDb, appId);
     if (!ownerId) return; // Shouldn't happen — let route handle auth
 
-    const bal = await getCreditsBalance(fastify.controlDb, ownerId);
-    if (bal.totalUsd <= 0) {
-      const r = kvCreditsExhausted();
-      return reply.code(r.statusCode).send(r.body);
+    // Skip the balance gate when the op has no credit cost (KV is not metered).
+    // If creditCostForOp is changed to return a non-zero cost in the future,
+    // the gate re-engages automatically.
+    if (creditCostForOp(op) > 0) {
+      const bal = await getCreditsBalance(fastify.controlDb, ownerId);
+      if (bal.totalUsd <= 0) {
+        const r = kvCreditsExhausted();
+        return reply.code(r.statusCode).send(r.body);
+      }
     }
 
     // ── (4) Storage cap (writes only; reads pass even if over cap) ────────

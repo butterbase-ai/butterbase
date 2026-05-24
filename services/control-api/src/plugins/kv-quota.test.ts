@@ -188,11 +188,14 @@ describeDb('kv-quota plugin', () => {
   });
 
   // ── Credits exhausted ───────────────────────────────────────────────────────
+  //
+  // KV ops currently have a per-op cost of 0 (see creditCostForOp), so the
+  // credits-balance gate is skipped. A zero-balance owner can still PUT/GET.
+  // If non-zero costs are ever restored, swap this test back to asserting 402.
 
-  it('returns 402 when the owner has zero credits', async () => {
+  it('allows ops at zero balance because KV ops cost 0 credits', async () => {
     const app = await buildTestApp(pool);
     try {
-      // Zero out both allowance pools
       await pool.query(
         `UPDATE platform_users SET monthly_allowance_usd = 0, credits_usd = 0 WHERE id = $1`,
         [fixture.userId],
@@ -201,8 +204,7 @@ describeDb('kv-quota plugin', () => {
       const r = await req(app, 'PUT', `/v1/${appId}/kv/credit-test`, {
         payload: { value: 'x' },
       });
-      expect(r.statusCode).toBe(402);
-      expect(r.json()).toMatchObject({ error: 'kv_credits_exhausted' });
+      expect(r.statusCode).toBe(200);
     } finally {
       await app.close();
     }
