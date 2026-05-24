@@ -120,68 +120,77 @@ async function collectDigestItems(userId: string): Promise<DigestItem[]> {
 }
 
 /**
- * Failed-deploy aggregation across both deploy tables. Lives in the
- * control DB, joined to apps for the owner filter. Returns top
+ * Failed-deploy aggregation across both deploy tables. Fans out across
+ * runtime regions (apps, app_deployments, and app_edge_ssr_deployments all
+ * moved to runtime). Per-region errors are caught and logged so one bad
+ * region doesn't take the whole digest down. Returns top
  * MAX_ITEMS_PER_DIGEST by failure count.
  */
 async function collectDeployFailures(
-  controlPool: Pool,
+  _controlPool: Pool,
   userId: string,
 ): Promise<DigestDeployItem[]> {
-  try {
-    const r = await controlPool.query<{
-      app_id: string;
-      app_name: string;
-      kind: 'frontend' | 'edge-ssr';
-      failure_count: number;
-      last_error: string | null;
-    }>(
-      `WITH frontend AS (
-         SELECT d.app_id, a.name AS app_name, 'frontend'::text AS kind,
-                COUNT(*)::int AS failure_count,
-                (SELECT error_message FROM app_deployments
-                  WHERE app_id = d.app_id AND status = 'failed'
-                    AND created_at >= now() - interval '7 days'
-                    AND error_message IS NOT NULL
-                  ORDER BY created_at DESC LIMIT 1) AS last_error
-           FROM app_deployments d
-           JOIN apps a ON a.id = d.app_id
-          WHERE d.status = 'failed'
-            AND d.created_at >= now() - interval '7 days'
-            AND a.owner_id = $1
-          GROUP BY d.app_id, a.name
-       ),
-       edge AS (
-         SELECT d.app_id, a.name AS app_name, 'edge-ssr'::text AS kind,
-                COUNT(*)::int AS failure_count,
-                (SELECT error_message FROM app_edge_ssr_deployments
-                  WHERE app_id = d.app_id AND status = 'ERROR'
-                    AND created_at >= now() - interval '7 days'
-                    AND error_message IS NOT NULL
-                  ORDER BY created_at DESC LIMIT 1) AS last_error
-           FROM app_edge_ssr_deployments d
-           JOIN apps a ON a.id = d.app_id
-          WHERE d.status = 'ERROR'
-            AND d.created_at >= now() - interval '7 days'
-            AND a.owner_id = $1
-          GROUP BY d.app_id, a.name
-       )
-       SELECT * FROM frontend UNION ALL SELECT * FROM edge
-       ORDER BY failure_count DESC
-       LIMIT $2`,
-      [userId, MAX_ITEMS_PER_DIGEST],
-    );
-    return r.rows.map((row) => ({
-      appId: row.app_id,
-      appName: row.app_name,
-      kind: row.kind,
-      failureCount: row.failure_count,
-      lastError: row.last_error ?? '',
-    }));
-  } catch (err) {
-    console.warn(`[digest-notifier] deploy scan failed: ${err}`);
-    return [];
+  const regions = Object.keys(config.runtimeDb.urlsByRegion);
+  const items: DigestDeployItem[] = [];
+  for (const region of regions) {
+    try {
+      const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
+      const r = await runtimePool.query<{
+        app_id: string;
+        app_name: string;
+        kind: 'frontend' | 'edge-ssr';
+        failure_count: number;
+        last_error: string | null;
+      }>(
+        `WITH frontend AS (
+           SELECT d.app_id, a.name AS app_name, 'frontend'::text AS kind,
+                  COUNT(*)::int AS failure_count,
+                  (SELECT error_message FROM app_deployments
+                    WHERE app_id = d.app_id AND status = 'failed'
+                      AND created_at >= now() - interval '7 days'
+                      AND error_message IS NOT NULL
+                    ORDER BY created_at DESC LIMIT 1) AS last_error
+             FROM app_deployments d
+             JOIN apps a ON a.id = d.app_id
+            WHERE d.status = 'failed'
+              AND d.created_at >= now() - interval '7 days'
+              AND a.owner_id = $1
+            GROUP BY d.app_id, a.name
+         ),
+         edge AS (
+           SELECT d.app_id, a.name AS app_name, 'edge-ssr'::text AS kind,
+                  COUNT(*)::int AS failure_count,
+                  (SELECT error_message FROM app_edge_ssr_deployments
+                    WHERE app_id = d.app_id AND status = 'ERROR'
+                      AND created_at >= now() - interval '7 days'
+                      AND error_message IS NOT NULL
+                    ORDER BY created_at DESC LIMIT 1) AS last_error
+             FROM app_edge_ssr_deployments d
+             JOIN apps a ON a.id = d.app_id
+            WHERE d.status = 'ERROR'
+              AND d.created_at >= now() - interval '7 days'
+              AND a.owner_id = $1
+            GROUP BY d.app_id, a.name
+         )
+         SELECT * FROM frontend UNION ALL SELECT * FROM edge
+         ORDER BY failure_count DESC`,
+        [userId],
+      );
+      for (const row of r.rows) {
+        items.push({
+          appId: row.app_id,
+          appName: row.app_name,
+          kind: row.kind,
+          failureCount: row.failure_count,
+          lastError: row.last_error ?? '',
+        });
+      }
+    } catch (err) {
+      console.warn(`[digest-notifier] deploy-failures region scan failed for ${region}: ${err}`);
+    }
   }
+  items.sort((a, b) => b.failureCount - a.failureCount);
+  return items.slice(0, MAX_ITEMS_PER_DIGEST);
 }
 
 /**
