@@ -96,6 +96,23 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `configure_realtime` | Enable realtime on tables. |
 | `get_realtime_config` | View realtime configuration. |
 
+## AI Gateway
+
+All AI actions are routed through the single `manage_ai` MCP tool. Pass `{ app_id, action, ... }` where `action` selects the operation.
+
+| Action | Description |
+|--------|-------------|
+| `chat` | Synchronous chat completion (OpenAI-compatible). Pass `messages`, optional `model`, `temperature`, `max_tokens`. |
+| `embed` | Generate vector embeddings. Pass `input` (string or array), optional `model`, `encoding_format`. |
+| `list_models` | List models available through the app's gateway (chat, embedding, and video). |
+| `get_config` | Read the app's AI configuration (default model, allowed models, max tokens). |
+| `update_config` | Update AI configuration. Can rotate BYOK keys, set default model, set allowed models. |
+| `get_usage` | Aggregate token counts and credit spend over a date window. |
+| `submit_video` | Submit an async video generation job. Pass `model`, `prompt`, optional `duration`, `resolution`, `aspect_ratio`, `generate_audio`, `seed`. Returns `{ job_id, status, polling_url }`. |
+| `poll_video` | Poll a video job's status. Pass `job_id`. Returns the current job state including `content_urls` (absolute) and `charged_credits_usd` when `status === 'completed'`. |
+
+For the full HTTP request/response shapes and end-to-end video example, see the [AI API reference](./ai-api.md).
+
 ## RAG (Retrieval-Augmented Generation)
 
 | Tool | Description |
