@@ -219,8 +219,9 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
     }
 
     // ── (2) Value size cap (writes only) ──────────────────────────────────
+    // -1 means unlimited (enterprise / custom tiers).
     const isWrite = op.kind === 'write' || op.kind === 'atomic_write' || op.kind === 'mset';
-    if (isWrite) {
+    if (isWrite && limits.maxValueBytes >= 0) {
       const valBytes = sizeOfBody(body);
       if (valBytes > limits.maxValueBytes) {
         return reply.code(413).send({
@@ -247,7 +248,8 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
     }
 
     // ── (4) Storage cap (writes only; reads pass even if over cap) ────────
-    if (isWrite) {
+    // -1 means unlimited (enterprise / custom tiers).
+    if (isWrite && limits.maxStorageBytes >= 0) {
       const used = await getStorageBytes(kvR, appId);
       const incoming = sizeOfBody(body);
       if (used + incoming > limits.maxStorageBytes) {
