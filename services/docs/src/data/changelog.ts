@@ -21,6 +21,14 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-05-25',
+    category: 'compute',
+    title: 'Key-Value Store',
+    description: 'Regional KV substrate with SDK, REST, CLI, and MCP surfaces. Sessions, locks, rate limiters, idempotency keys, and feature flags ship with copy-pasteable recipes.',
+    href: '/core-concepts/kv/',
+    icon: '🗃️',
+  },
+  {
     date: '2026-05-04',
     category: 'compute',
     title: 'Durable Object env vars',
