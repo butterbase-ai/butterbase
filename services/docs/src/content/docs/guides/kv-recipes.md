@@ -42,6 +42,12 @@ async function destroySession(ctx, sessionId: string) {
 
 TTL is fixed at write time and does not slide automatically. If you want sliding sessions (i.e., reset the clock on every request), call `ctx.kv.expire(key, seconds)` after a successful `get` to push the expiry forward. Keep session blobs small — store a user ID and role, not the full user record. For large payloads consider [File Storage](/core-concepts/storage/).
 
+```bash
+# Inspect a live session; force sign-out a specific user without waiting for TTL
+butterbase kv get session:<id>
+butterbase kv del session:<id>
+```
+
 ## Distributed lock
 
 Use a distributed lock when two workers must not run the same job simultaneously — for example, processing a webhook, sending an email, or charging a card. `setnx` sets the key only if it does not already exist and returns `true` when the lock is acquired.
@@ -71,6 +77,12 @@ export default async function handler(req, ctx) {
 ```
 
 The TTL is a safety net, not a hard deadline — if your worker crashes before the `finally` block, the lock releases automatically when the TTL elapses. Keep your work duration well under the TTL. If work could legitimately take longer than 30 seconds, increase the TTL or implement lock renewal with `ctx.kv.expire`. Do not use this pattern for human-facing critical sections where the user needs immediate feedback on contention — design around idempotency (see below) instead.
+
+```bash
+# Inspect who holds the lock; force-release if a worker crashed without TTL covering it
+butterbase kv get lock:order:<id>
+butterbase kv del lock:order:<id>
+```
 
 ## Rate limiter
 
@@ -106,6 +118,11 @@ await ctx.kv.expose('ratelimit:{user.id}:*', { read: 'owner', write: 'owner' });
 `expose()` is the only KV method that controls client-side access. See [Access control](/core-concepts/kv/#access-control) for the full role model and pattern syntax rather than repeating it here.
 
 Fixed-window counters are simple but allow a burst of up to 2× the limit at window boundaries (requests at the tail of one window plus the head of the next). For most APIs this is acceptable. If you need smoother enforcement, use a sliding-window approach with a sorted-set or store a small list of timestamps — or just halve your limit.
+
+```bash
+# Inspect the running request count for a user in the current time window
+butterbase kv get ratelimit:<user>:<window>
+```
 
 ## Idempotency keys
 
@@ -153,6 +170,11 @@ async function doTheWork() {
 
 The TTL controls how long duplicate detection lasts — make it longer than your client's retry window. If your work function throws, the key stays set to `'pending'` indefinitely; add error handling that either stores the error response or deletes the key so the client can retry cleanly.
 
+```bash
+# Verify whether a specific request ID has already been claimed
+butterbase kv get idempotent:<request-id>
+```
+
 ## Feature flags
 
 Store a flag value in KV and read it at request time. Changes take effect on the next request without a redeployment.
@@ -192,3 +214,9 @@ const enabled = bucket < threshold;
 ```
 
 This gives a stable assignment per user — the same user always sees the same variant — and you can gradually raise the threshold to roll out to a wider audience.
+
+```bash
+# Flip a flag instantly without redeploying; read back to confirm the new value
+butterbase kv set feature:<name> on
+butterbase kv get feature:<name>
+```
