@@ -48,6 +48,7 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'React', slug: 'guides/react' },
       { label: 'Next.js', slug: 'guides/nextjs' },
       { label: 'Monetization', slug: 'guides/monetization' },
+      { label: 'KV Recipes', slug: 'guides/kv-recipes' },
     ],
   },
   {
