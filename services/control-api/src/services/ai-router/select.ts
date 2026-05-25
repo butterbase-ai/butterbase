@@ -41,6 +41,7 @@ function score(r: CatalogRouter): number {
  */
 const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
   'bytedance/seedance-2.0': 'provider-tertiary',
+  'bytedance/seedance-2.0-fast': 'provider-tertiary',
 };
 
 /**
