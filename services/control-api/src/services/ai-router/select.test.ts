@@ -49,6 +49,64 @@ describe('rankRoutersForModel', () => {
     const e = entry([{ name: 'openrouter', pp: 1, cp: 1 }]);
     expect(rankRoutersForModel(e, new Set())).toEqual([]);
   });
+
+  describe('PREFERRED_ROUTER_BY_MODEL override (bytedance/seedance-2.0 → provider-tertiary)', () => {
+    function seedanceEntry(routers: Array<{ name: string; pp: number; cp: number }>): CatalogEntry {
+      return {
+        canonicalId: 'bytedance/seedance-2.0',
+        displayName: 'Seedance 2.0',
+        updatedAt: new Date().toISOString(),
+        routers: routers.map(r => ({
+          name: r.name as any,
+          upstreamId: 'x',
+          promptPricePerMtok: r.pp,
+          completionPricePerMtok: r.cp,
+          contextLength: 0,
+          modality: 'video' as const,
+        })),
+      };
+    }
+
+    it('promotes provider-tertiary to the head even when openrouter is cheaper', () => {
+      const e = seedanceEntry([
+        { name: 'openrouter',        pp: 0, cp: 0 }, // tied score, alphabetically wins normally
+        { name: 'provider-tertiary', pp: 0, cp: 0 },
+      ]);
+      const order = rankRoutersForModel(e, new Set(['openrouter', 'provider-tertiary']));
+      expect(order.map(r => r.name)).toEqual(['provider-tertiary', 'openrouter']);
+    });
+
+    it('falls through to price ranking when provider-tertiary is disabled', () => {
+      const e = seedanceEntry([
+        { name: 'openrouter',        pp: 0, cp: 0 },
+        { name: 'provider-tertiary', pp: 0, cp: 0 },
+      ]);
+      const order = rankRoutersForModel(e, new Set(['openrouter']));
+      expect(order.map(r => r.name)).toEqual(['openrouter']);
+    });
+
+    it('falls through when provider-tertiary is not on the entry', () => {
+      const e = seedanceEntry([{ name: 'openrouter', pp: 0, cp: 0 }]);
+      const order = rankRoutersForModel(e, new Set(['openrouter', 'provider-tertiary']));
+      expect(order.map(r => r.name)).toEqual(['openrouter']);
+    });
+
+    it('does not affect non-preferred models', () => {
+      const e: CatalogEntry = {
+        canonicalId: 'anthropic/claude-3-5-sonnet',
+        displayName: 'Claude 3.5 Sonnet',
+        updatedAt: new Date().toISOString(),
+        routers: [
+          { name: 'openrouter' as any,        upstreamId: 'x', promptPricePerMtok: 1, completionPricePerMtok: 1, contextLength: 0 },
+          { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0 },
+        ],
+      };
+      // Cheapest wins as usual — no promotion.
+      const order = rankRoutersForModel(e, new Set(['openrouter', 'provider-tertiary']));
+      expect(order.map(r => r.name)).toEqual(['provider-tertiary', 'openrouter']);
+      // (Tertiary is genuinely cheaper here — the assertion is about score, not the override.)
+    });
+  });
 });
 
 describe('estimateWorstCaseUsd', () => {
@@ -64,7 +122,7 @@ describe('estimateWorstCaseUsd', () => {
 });
 
 describe('rankRoutersPresenceMode', () => {
-  const mk = (name: 'openrouter' | 'provider-primary' | 'provider-secondary'): CatalogRouter => ({
+  const mk = (name: 'openrouter' | 'provider-primary' | 'provider-secondary' | 'provider-tertiary'): CatalogRouter => ({
     name: name as any,
     upstreamId: `${name}-id`,
     promptPricePerMtok: 1,
@@ -163,5 +221,29 @@ describe('rankRoutersPresenceMode', () => {
       () => 0,
     );
     expect(r).toEqual([]);
+  });
+
+  it('provider-tertiary trails primary/secondary and precedes openrouter by default', () => {
+    const r = rankRoutersPresenceMode(
+      entry([mk('openrouter'), mk('provider-primary'), mk('provider-secondary'), mk('provider-tertiary')]),
+      new Set(['openrouter', 'provider-primary', 'provider-secondary', 'provider-tertiary']),
+      () => 0.1, // ER first in the ER/IR tiebreak
+    );
+    expect(r.map(x => x.name)).toEqual(['provider-primary', 'provider-secondary', 'provider-tertiary', 'openrouter']);
+  });
+
+  it('promotes provider-tertiary to head for bytedance/seedance-2.0', () => {
+    const seedance: CatalogEntry = {
+      canonicalId: 'bytedance/seedance-2.0',
+      displayName: 'Seedance 2.0',
+      updatedAt: '2026-05-25T00:00:00Z',
+      routers: [mk('openrouter'), mk('provider-tertiary')],
+    };
+    const r = rankRoutersPresenceMode(
+      seedance,
+      new Set(['openrouter', 'provider-tertiary']),
+      () => 0,
+    );
+    expect(r.map(x => x.name)).toEqual(['provider-tertiary', 'openrouter']);
   });
 });

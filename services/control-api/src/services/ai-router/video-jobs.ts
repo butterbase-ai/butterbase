@@ -6,6 +6,13 @@ export interface VideoJobRow {
   user_id: string;
   model: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'expired';
+  /**
+   * Original submit-time body (the VideoGenerationRequest the caller sent).
+   * Stored so the settle path can recover request shape — `resolution`,
+   * `input_images`, `input_references` — for the per-request variant match
+   * in estimateVideoCostUsd when the upstream doesn't return a cost on poll.
+   */
+  request_json: Record<string, unknown>;
   upstream_router: string;
   upstream_job_id: string;
   upstream_polling_url: string;

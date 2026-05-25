@@ -72,6 +72,10 @@ async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
       baseUrl: config.aiRouter.providerSecondaryBaseUrl,
       catalogUrl: config.aiRouter.providerSecondaryCatalogUrl,
     }));
+    if (config.aiRouter.providerTertiaryApiKey) m.set('provider-tertiary', overlay.providerTertiaryAdapter({
+      apiKey: config.aiRouter.providerTertiaryApiKey,
+      baseUrl: config.aiRouter.providerTertiaryBaseUrl,
+    }));
   } catch { /* OSS mode: only openrouter is available */ }
   return m;
 }

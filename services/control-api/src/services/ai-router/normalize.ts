@@ -1,6 +1,6 @@
 import overridesRaw from './normalize-overrides.json' with { type: 'json' };
 
-export type RouterName = 'openrouter' | 'provider-primary' | 'provider-secondary';
+export type RouterName = 'openrouter' | 'provider-primary' | 'provider-secondary' | 'provider-tertiary';
 
 const overrides = overridesRaw as unknown as Record<RouterName, Record<string, string>>;
 

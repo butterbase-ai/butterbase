@@ -420,21 +420,28 @@ const VIDEO_LEASE_TTL_SECONDS = 15 * 60;
  *
  * Clamped to [$0.05, $9] so a bad SKU value can't lock up an absurd reservation.
  */
-function estimateVideoCostUsd(
-  entry: import('./catalog.js').CatalogEntry,
+/**
+ * Compute USD/sec for one router's rawPricing payload, given the request's
+ * resolution + visual-input mode. Returns null when the router has no
+ * usable per-second or duration-keyed pricing — so callers can skip and try
+ * the next router.
+ */
+function ratePerSecondFromRouter(
+  rawPricing: unknown,
   req: VideoGenerationRequest,
-): number {
-  const rawPricing = entry.routers[0]?.rawPricing as
+): number | null {
+  const rp = rawPricing as
     | {
         pricing_skus?: Record<string, string>;
         unit?: string;
-        variants?: Array<{ spec: string; pricePerSecond: number }>;
+        variants?: Array<{ spec: string; pricePerSecond: number; visualInput?: boolean }>;
       }
     | null
     | undefined;
 
-  // OpenRouter shape: pricing_skus with `duration_seconds_*` keys
-  const skus = rawPricing?.pricing_skus;
+  // OpenRouter shape: pricing_skus with `duration_seconds_*` keys.
+  // No resolution split is encoded — take max across keys (historical behavior).
+  const skus = rp?.pricing_skus;
   if (skus && typeof skus === 'object') {
     const durationRates: number[] = [];
     for (const [key, val] of Object.entries(skus)) {
@@ -442,31 +449,122 @@ function estimateVideoCostUsd(
       const rate = parseFloat(val);
       if (Number.isFinite(rate) && rate > 0) durationRates.push(rate);
     }
-    if (durationRates.length > 0) {
-      // If a third pricing shape is added, extract this `maxRate * seconds * 1.2`
-      // + clamp pattern into a `clampVideoEstimate(maxRate, seconds)` helper.
-      const maxRate = Math.max(...durationRates);
-      const seconds = req.duration ?? 10;
-      const raw = maxRate * seconds * 1.2; // 20% buffer
-      return Math.min(Math.max(raw, 0.05), 9); // clamp [$0.05, $9]
+    if (durationRates.length > 0) return Math.max(...durationRates);
+  }
+
+  // Per-second variant shape: rawPricing.unit === 'second', variants[].
+  // Variants may carry a `visualInput` flag for per-mode pricing. Filter
+  // by resolution + mode for fair billing; fall back to max-rate when no
+  // narrower match exists. Variants without the flag (legacy ImaRouter
+  // snapshot) match any mode — they're treated as "rate applies to either".
+  if (rp?.unit === 'second' && Array.isArray(rp.variants)) {
+    const variants = rp.variants
+      .filter(v => Number.isFinite(v.pricePerSecond) && v.pricePerSecond > 0);
+    if (variants.length > 0) {
+      const requestedRes = (req.resolution ?? '').toLowerCase();
+      const isVisual = (req.input_images?.length ?? 0) > 0
+                    || (req.input_references?.length ?? 0) > 0;
+
+      // 1) Exact match on resolution AND visualInput (when flag present).
+      let candidates = requestedRes
+        ? variants.filter(v => v.spec.toLowerCase() === requestedRes
+            && (v.visualInput === undefined || v.visualInput === isVisual))
+        : [];
+      // 2) Resolution-only match.
+      if (candidates.length === 0 && requestedRes) {
+        candidates = variants.filter(v => v.spec.toLowerCase() === requestedRes);
+      }
+      // 3) visualInput-only narrowing when no resolution given.
+      if (candidates.length === 0 && !requestedRes) {
+        candidates = variants.filter(v => v.visualInput === undefined || v.visualInput === isVisual);
+      }
+      // 4) Max across all.
+      if (candidates.length === 0) candidates = variants;
+
+      return Math.max(...candidates.map(v => v.pricePerSecond));
     }
   }
 
-  // ImaRouter shape: rawPricing.unit === 'second', variants[] with pricePerSecond
-  if (rawPricing?.unit === 'second' && Array.isArray(rawPricing.variants)) {
-    const rates = rawPricing.variants
-      .map(v => v.pricePerSecond)
-      .filter(r => Number.isFinite(r) && r > 0);
-    if (rates.length > 0) {
-      const maxRate = Math.max(...rates);
-      const seconds = req.duration ?? 10;
-      const raw = maxRate * seconds * 1.2; // 20% buffer
-      return Math.min(Math.max(raw, 0.05), 9); // clamp [$0.05, $9]
-    }
-  }
+  return null;
+}
 
-  // No parseable rate in any known pricing shape — safe over-reserve.
+/**
+ * Lease-sizing buffer: pad the catalog estimate by this factor so the
+ * reservation covers minor SKU drift between snapshot and upstream actuals.
+ * Applied only at submit time; settle uses the un-buffered rate.
+ */
+const VIDEO_LEASE_BUFFER = 1.2;
+
+function clampVideoCost(ratePerSecond: number, req: VideoGenerationRequest, withBuffer: boolean): number {
+  const seconds = req.duration ?? 10;
+  const raw = ratePerSecond * seconds * (withBuffer ? VIDEO_LEASE_BUFFER : 1);
+  return Math.min(Math.max(raw, 0.05), 9); // clamp [$0.05, $9]
+}
+
+/**
+ * Pick the rate-per-second to use, scanning all routers' rawPricing.
+ * Returns null when no router has a parseable pricing shape.
+ *
+ * When `preferRouter` is provided, that router's pricing is used directly
+ * (settle-time semantics — bill against the actual upstream that served
+ * the request). When omitted, the function returns the MAX rate across
+ * all routers (submit-time semantics — size the lease for any router the
+ * fallback chain might land on).
+ */
+function resolveRateForRequest(
+  entry: import('./catalog.js').CatalogEntry,
+  req: VideoGenerationRequest,
+  preferRouter: RouterName | undefined,
+): number | null {
+  if (preferRouter) {
+    const r = entry.routers.find(x => x.name === preferRouter);
+    const rate = r ? ratePerSecondFromRouter(r.rawPricing, req) : null;
+    if (rate !== null) return rate;
+    // Preferred router has no pricing — fall through to global scan.
+  }
+  let best: number | null = null;
+  for (const router of entry.routers) {
+    const rate = ratePerSecondFromRouter(router.rawPricing, req);
+    if (rate !== null && (best === null || rate > best)) best = rate;
+  }
+  return best;
+}
+
+/**
+ * Estimate worst-case USD cost for a video request — used at submit time
+ * to size the credit lease. Pads the rate by VIDEO_LEASE_BUFFER (1.2×) so
+ * the reservation covers minor pricing drift; unused credit refunds on settle.
+ *
+ * Scans all routers' rawPricing and returns the MAX. Falls back to
+ * VIDEO_DEFAULT_ESTIMATE_USD ($3) only when no router has parseable pricing.
+ */
+export function estimateVideoCostUsd(
+  entry: import('./catalog.js').CatalogEntry,
+  req: VideoGenerationRequest,
+): number {
+  const rate = resolveRateForRequest(entry, req, undefined);
+  if (rate !== null) return clampVideoCost(rate, req, /*withBuffer*/ true);
   return VIDEO_DEFAULT_ESTIMATE_USD;
+}
+
+/**
+ * Compute settled billing cost for a completed video job — used at poll
+ * time when the upstream's `providerCostUsd` is unavailable. Pins to the
+ * chosen router's pricing variants (so a 480p text-to-video request bills
+ * at the 480p text rate, not the worst-case 1080p rate) and does NOT apply
+ * the lease buffer (this is the exact bill, not a reservation estimate).
+ *
+ * Returns null when neither the chosen router nor any sibling has parseable
+ * pricing — the caller can decide whether to charge $0 (safer for goodwill)
+ * or fall back to VIDEO_DEFAULT_ESTIMATE_USD (safer for revenue).
+ */
+export function billedVideoCostUsd(
+  entry: import('./catalog.js').CatalogEntry,
+  req: VideoGenerationRequest,
+  chosenRouter: RouterName,
+): number | null {
+  const rate = resolveRateForRequest(entry, req, chosenRouter);
+  return rate !== null ? clampVideoCost(rate, req, /*withBuffer*/ false) : null;
 }
 
 export interface RouteVideoSubmitResult {

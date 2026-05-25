@@ -571,19 +571,35 @@ async function submitVideoWithEntry(entry: any, req: Partial<VideoGenerationRequ
     submitVideo,
   };
 
+  // Enable every router named in the entry so multi-router fixtures don't
+  // get filtered out as "no available router."
+  const enabledList = (entry?.routers ?? []).map((r: any) => ({ name: r.name, enabled: true }));
   const redis: any = {
     get: vi.fn(async (key: string) => {
       if (key === 'ai_catalog:model:bytedance/seedance-2.0') return JSON.stringify(entry);
-      if (key === 'ai_catalog:routers') return JSON.stringify([{ name: 'openrouter', enabled: true }]);
+      if (key === 'ai_catalog:routers') return JSON.stringify(
+        enabledList.length > 0 ? enabledList : [{ name: 'openrouter', enabled: true }],
+      );
       return null;
     }),
   };
+
+  // Register a submitVideo stub for every router so the route handler can
+  // pick whichever the ranker chose. They all return the same stub job —
+  // the test asserts on the lease estimate, not on which router won.
+  const adapters = new Map<string, RouterAdapter>();
+  const routerNames: string[] = enabledList.length > 0
+    ? enabledList.map((r: any) => r.name)
+    : ['openrouter'];
+  for (const name of routerNames) {
+    adapters.set(name, { ...adapter, name: name as any });
+  }
 
   const ctx: any = {
     platformPool: makePoolStub(),
     runtimePool: makePoolStub(),
     redis,
-    adapters: new Map([['openrouter', adapter]]),
+    adapters,
     markupPct: 0,
     appId: 'a',
     userId: 'u',
@@ -772,6 +788,234 @@ describe('estimateVideoCostUsd — ImaRouter unit:second shape', () => {
     const cost = await submitVideoWithEntry(entry, { duration: 5 });
     // pricing_skus: 0.10 * 5 * 1.2 = 0.60 (not 0.50*5*1.2=3.0)
     expect(cost).toBeCloseTo(0.60, 10);
+  });
+
+  // ─── Per-request resolution + visualInput matching ────────────────────────
+  //
+  // Token360 seedance pricing: text-only vs visual-input × {480p, 720p, 1080p}.
+  // The estimator picks the variant matching the request's resolution +
+  // (input_images || input_references).
+  describe('resolution + visualInput matching', () => {
+    const tieredVariants = [
+      { spec: '480p',  visualInput: false, pricePerSecond: 0.07 },
+      { spec: '720p',  visualInput: false, pricePerSecond: 0.16 },
+      { spec: '1080p', visualInput: false, pricePerSecond: 0.35 },
+      { spec: '480p',  visualInput: true,  pricePerSecond: 0.04 },
+      { spec: '720p',  visualInput: true,  pricePerSecond: 0.10 },
+      { spec: '1080p', visualInput: true,  pricePerSecond: 0.22 },
+    ];
+
+    it('text-only 720p picks text 720p rate, not 1080p text or visual', async () => {
+      const entry = videoEntryWithImaRouterPricing(tieredVariants as any);
+      const cost = await submitVideoWithEntry(entry, { duration: 5, resolution: '720p' });
+      // 0.16 * 5 * 1.2 = 0.96
+      expect(cost).toBeCloseTo(0.96, 10);
+    });
+
+    it('visual-input 480p (input_images present) picks visual 480p rate', async () => {
+      const entry = videoEntryWithImaRouterPricing(tieredVariants as any);
+      const cost = await submitVideoWithEntry(entry, {
+        duration: 5, resolution: '480p', input_images: ['https://e/x.png'],
+      });
+      // 0.04 * 5 * 1.2 = 0.24
+      expect(cost).toBeCloseTo(0.24, 10);
+    });
+
+    it('visual-input via input_references (no input_images) still routes to visual rate', async () => {
+      const entry = videoEntryWithImaRouterPricing(tieredVariants as any);
+      const cost = await submitVideoWithEntry(entry, {
+        duration: 5, resolution: '1080p', input_references: ['https://e/r.png'],
+      });
+      // 0.22 * 5 * 1.2 = 1.32
+      expect(cost).toBeCloseTo(1.32, 10);
+    });
+
+    it('legacy variants (no visualInput flag) still match by resolution only', async () => {
+      const entry = videoEntryWithImaRouterPricing([
+        { spec: '720p',  pricePerSecond: 0.16 },
+        { spec: '1080p', pricePerSecond: 0.35 },
+      ]);
+      const cost = await submitVideoWithEntry(entry, {
+        duration: 5, resolution: '720p', input_images: ['https://e/x.png'],
+      });
+      // 0.16 * 5 * 1.2 = 0.96 — visualInput filter is dropped, resolution still wins
+      expect(cost).toBeCloseTo(0.96, 10);
+    });
+
+    it('no req.resolution + visual input → max across visual variants only', async () => {
+      const entry = videoEntryWithImaRouterPricing(tieredVariants as any);
+      const cost = await submitVideoWithEntry(entry, {
+        duration: 5, input_images: ['https://e/x.png'],
+      });
+      // max visual rate = 0.22; 0.22 * 5 * 1.2 = 1.32
+      expect(cost).toBeCloseTo(1.32, 10);
+    });
+
+    it('no req.resolution + text-only → max across text variants', async () => {
+      const entry = videoEntryWithImaRouterPricing(tieredVariants as any);
+      const cost = await submitVideoWithEntry(entry, { duration: 5 });
+      // max text rate = 0.35; 0.35 * 5 * 1.2 = 2.1
+      expect(cost).toBeCloseTo(2.1, 10);
+    });
+
+    it('unknown resolution (no variant matches spec) → full fallback to max-rate', async () => {
+      const entry = videoEntryWithImaRouterPricing(tieredVariants as any);
+      const cost = await submitVideoWithEntry(entry, { duration: 5, resolution: '4k' });
+      // No match — falls all the way back to max across all variants = 0.35
+      // 0.35 * 5 * 1.2 = 2.1
+      expect(cost).toBeCloseTo(2.1, 10);
+    });
+
+    it('resolution match exists for text but request is visual → resolution-only fallback', async () => {
+      // Only text variants for 1080p, only visual for 480p — request 1080p visual.
+      const entry = videoEntryWithImaRouterPricing([
+        { spec: '1080p', visualInput: false, pricePerSecond: 0.35 },
+        { spec: '480p',  visualInput: true,  pricePerSecond: 0.04 },
+      ] as any);
+      const cost = await submitVideoWithEntry(entry, {
+        duration: 5, resolution: '1080p', input_images: ['https://e/x.png'],
+      });
+      // Step 1 (exact res+visual): no match. Step 2 (res only): 0.35. → 2.1
+      expect(cost).toBeCloseTo(2.1, 10);
+    });
+  });
+
+  // ─── Multi-router scan ──────────────────────────────────────────────────
+  //
+  // Regression: estimator used to read entry.routers[0].rawPricing only, so
+  // when openrouter (which has no per-second variants for seedance) was
+  // refresh-ordered first, the call silently returned VIDEO_DEFAULT_ESTIMATE_USD.
+  describe('multi-router rawPricing scan', () => {
+    it('falls back to a sibling router with usable rawPricing when routers[0] has none', async () => {
+      const entry = {
+        canonicalId: 'bytedance/seedance-2.0',
+        displayName: 'mixed',
+        updatedAt: new Date().toISOString(),
+        routers: [
+          // openrouter: chat-shaped, no per-second variants
+          { name: 'openrouter' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const },
+          // provider-tertiary: usable per-second pricing
+          { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const,
+            rawPricing: { unit: 'second', variants: [
+              { spec: '720p', visualInput: false, pricePerSecond: 0.16 },
+            ] } },
+        ],
+      };
+      const cost = await submitVideoWithEntry(entry, { duration: 5, resolution: '720p' });
+      // 0.16 * 5 * 1.2 = 0.96 — NOT the $3 default
+      expect(cost).toBeCloseTo(0.96, 10);
+    });
+
+    it('takes the MAX rate across routers (worst-case lease)', async () => {
+      const entry = {
+        canonicalId: 'bytedance/seedance-2.0',
+        displayName: 'mixed',
+        updatedAt: new Date().toISOString(),
+        routers: [
+          { name: 'provider-secondary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const,
+            rawPricing: { unit: 'second', variants: [{ spec: '720p', pricePerSecond: 0.10 }] } },
+          { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const,
+            rawPricing: { unit: 'second', variants: [{ spec: '720p', pricePerSecond: 0.20 }] } },
+        ],
+      };
+      const cost = await submitVideoWithEntry(entry, { duration: 5, resolution: '720p' });
+      // Max rate 0.20 wins: 0.20 * 5 * 1.2 = 1.20
+      expect(cost).toBeCloseTo(1.20, 10);
+    });
+
+    it('returns VIDEO_DEFAULT_ESTIMATE_USD only when ALL routers lack pricing', async () => {
+      const entry = {
+        canonicalId: 'bytedance/seedance-2.0',
+        displayName: 'no pricing',
+        updatedAt: new Date().toISOString(),
+        routers: [
+          { name: 'openrouter' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const },
+          { name: 'provider-secondary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const },
+        ],
+      };
+      const cost = await submitVideoWithEntry(entry, { duration: 5 });
+      expect(cost).toBe(3.0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// billedVideoCostUsd — settle-time variant
+// ---------------------------------------------------------------------------
+
+describe('billedVideoCostUsd', () => {
+  const entry = {
+    canonicalId: 'bytedance/seedance-2.0',
+    displayName: 'seedance',
+    updatedAt: new Date().toISOString(),
+    routers: [
+      // provider-secondary: cheaper, would win on max-rate scan
+      { name: 'provider-secondary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const,
+        rawPricing: { unit: 'second', variants: [
+          { spec: '480p', pricePerSecond: 0.09 },
+        ] } },
+      // provider-tertiary: chosen router, has per-mode pricing
+      { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const,
+        rawPricing: { unit: 'second', variants: [
+          { spec: '480p', visualInput: false, pricePerSecond: 0.071039 },
+          { spec: '720p', visualInput: false, pricePerSecond: 0.157500 },
+        ] } },
+    ],
+  };
+
+  it('pins to the chosen router (provider-tertiary), does NOT apply the lease buffer', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const cost = billedVideoCostUsd(entry as any, { model: 'x', prompt: 'p', duration: 4, resolution: '480p' }, 'provider-tertiary' as any);
+    // 0.071039 * 4 = 0.284156 (no 1.2× buffer, clamped above floor 0.05)
+    expect(cost).toBeCloseTo(0.284156, 6);
+  });
+
+  it('uses higher tier when resolution = 720p (text mode)', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const cost = billedVideoCostUsd(entry as any, { model: 'x', prompt: 'p', duration: 5, resolution: '720p' }, 'provider-tertiary' as any);
+    // 0.157500 * 5 = 0.7875
+    expect(cost).toBeCloseTo(0.7875, 6);
+  });
+
+  it('falls back to sibling router pricing when chosen router has none', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = {
+      ...entry,
+      routers: [
+        // chosen router has no usable pricing
+        { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const },
+        { name: 'provider-secondary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const,
+          rawPricing: { unit: 'second', variants: [{ spec: '480p', pricePerSecond: 0.09 }] } },
+      ],
+    };
+    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 4, resolution: '480p' }, 'provider-tertiary' as any);
+    // 0.09 * 4 = 0.36
+    expect(cost).toBeCloseTo(0.36, 6);
+  });
+
+  it('returns null when no router has parseable pricing', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = {
+      ...entry,
+      routers: [
+        { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const },
+      ],
+    };
+    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p' }, 'provider-tertiary' as any);
+    expect(cost).toBeNull();
+  });
+
+  it('floor of $0.05 is applied even at settle time', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = {
+      ...entry,
+      routers: [
+        { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const,
+          rawPricing: { unit: 'second', variants: [{ spec: '480p', pricePerSecond: 0.001 }] } },
+      ],
+    };
+    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 1, resolution: '480p' }, 'provider-tertiary' as any);
+    expect(cost).toBe(0.05);
   });
 });
 

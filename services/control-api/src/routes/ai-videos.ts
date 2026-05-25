@@ -9,8 +9,10 @@ import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-res
 import { getRedisClient } from '../services/redis.js';
 import {
   routeVideoSubmit, routeVideoPoll, settleVideoJob,
+  billedVideoCostUsd,
   RouterError, InsufficientCreditsError,
 } from '../services/ai-router/router.js';
+import { readCatalogEntry } from '../services/ai-router/catalog.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
@@ -60,6 +62,12 @@ async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
         apiKey: config.aiRouter.providerSecondaryApiKey,
         baseUrl: config.aiRouter.providerSecondaryBaseUrl,
         catalogUrl: config.aiRouter.providerSecondaryCatalogUrl,
+      }));
+    }
+    if (config.aiRouter.providerTertiaryApiKey) {
+      m.set('provider-tertiary', overlay.providerTertiaryAdapter({
+        apiKey: config.aiRouter.providerTertiaryApiKey,
+        baseUrl: config.aiRouter.providerTertiaryBaseUrl,
       }));
     }
   } catch { /* OSS mode */ }
@@ -165,7 +173,36 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       }
 
       if (['completed', 'failed', 'cancelled', 'expired'].includes(poll.status)) {
-        const providerCost = poll.providerCostUsd ?? 0;
+        // Settlement cost resolution:
+        //   1) upstream's reported per-job cost (poll.providerCostUsd), or
+        //   2) billedVideoCostUsd — pins to the chosen router's variants
+        //      and matches the original submit-time request (resolution +
+        //      visual-input mode), so a 480p text-to-video request bills
+        //      at the 480p text rate instead of the worst-case 1080p rate.
+        //      No lease-buffer markup is applied — this is the exact bill.
+        //   3) $0 as final guard — only reached for `failed`/`cancelled`
+        //      where charging would be wrong anyway, or when the catalog
+        //      lacks any pricing for the chosen router (favor goodwill).
+        // Bug history: this used to be `poll.providerCostUsd ?? 0`, which
+        // made every Token360 video job free since that upstream's poll
+        // response carries no cost field.
+        let providerCost = poll.providerCostUsd ?? 0;
+        if (poll.providerCostUsd === undefined && poll.status === 'completed') {
+          const entry = await readCatalogEntry(getRedisClient(), job.model);
+          if (entry) {
+            // job.request_json was the validated VideoGenerationRequest body
+            // (see videoSubmitSchema). The cast restores that shape; the
+            // billing computation reads only duration/resolution/
+            // input_images/input_references — all optional fields the
+            // schema preserves.
+            const billed = billedVideoCostUsd(
+              entry,
+              job.request_json as unknown as import('../services/ai-router/adapters/types.js').VideoGenerationRequest,
+              job.upstream_router as RouterName,
+            );
+            if (billed !== null) providerCost = billed;
+          }
+        }
 
         // Order matters: markVideoJobTerminal first (atomic gate via settled_at), then
         // settleVideoJob only if we won the race. If the Worker crashes between the two,

@@ -49,6 +49,7 @@ async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
     if (config.aiRouter.providerPrimaryApiKey) m.set('provider-primary', overlay.providerPrimaryAdapter({ apiKey: config.aiRouter.providerPrimaryApiKey }));
     if (config.aiRouter.providerSecondaryApiKey) m.set('provider-secondary', overlay.providerSecondaryAdapter({ apiKey: config.aiRouter.providerSecondaryApiKey }));
+    if (config.aiRouter.providerTertiaryApiKey) m.set('provider-tertiary', overlay.providerTertiaryAdapter({ apiKey: config.aiRouter.providerTertiaryApiKey, baseUrl: config.aiRouter.providerTertiaryBaseUrl }));
   } catch { /* OSS mode: only openrouter is available */ }
   return m;
 }

@@ -68,6 +68,8 @@ export const config = {
       providerSecondaryApiKey: process.env.AI_PROVIDER_SECONDARY_API_KEY ?? '',
       providerSecondaryBaseUrl: process.env.AI_PROVIDER_SECONDARY_BASE_URL || undefined,
       providerSecondaryCatalogUrl: process.env.AI_PROVIDER_SECONDARY_CATALOG_URL || undefined,
+      providerTertiaryApiKey: process.env.AI_PROVIDER_TERTIARY_API_KEY ?? '',
+      providerTertiaryBaseUrl: process.env.AI_PROVIDER_TERTIARY_BASE_URL || undefined,
       catalogRefreshLockTtlSec: parseInt(process.env.AI_CATALOG_LOCK_TTL_SEC ?? '600', 10),
     } as const;
   })(),

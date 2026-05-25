@@ -27,15 +27,47 @@ function score(r: CatalogRouter): number {
 }
 
 /**
+ * Per-canonical-id router preference. When the named router is enabled AND
+ * present on the entry's router list, it wins the head position over the
+ * normal price-based ranking; the rest of the chain follows in the usual
+ * order. Used to pin specific models to a preferred upstream for quality /
+ * latency / cost reasons not captured by per-Mtok pricing alone — e.g. video
+ * models where the catalog's prompt/completion columns are $0 and the real
+ * pricing lives in `rawPricing` per-second variants.
+ *
+ * Soft hint: if the preferred router is disabled or not on the entry, the
+ * ranker silently falls back to price ordering. An operator can flip the
+ * router off in admin without code changes.
+ */
+const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
+  'bytedance/seedance-2.0': 'provider-tertiary',
+};
+
+/**
+ * Move the model's preferred router (if any) to the head of `chain`, leaving
+ * the relative order of the rest unchanged. No-op when there's no override,
+ * the override isn't in the chain, or it's already at the head.
+ */
+function promotePreferred(canonicalId: string, chain: CatalogRouter[]): CatalogRouter[] {
+  const preferred = PREFERRED_ROUTER_BY_MODEL[canonicalId];
+  if (!preferred) return chain;
+  const idx = chain.findIndex(r => r.name === preferred);
+  if (idx <= 0) return chain;
+  const head = chain[idx];
+  return [head, ...chain.slice(0, idx), ...chain.slice(idx + 1)];
+}
+
+/**
  * Rank routers for a model entry by weighted score (prompt*1 + completion*3),
  * ascending. Disabled routers are excluded. Ties break by router name alphabetical
- * for determinism.
+ * for determinism. A `PREFERRED_ROUTER_BY_MODEL` entry, when applicable, is
+ * promoted to the head after sorting.
  */
 export function rankRoutersForModel(
   entry: CatalogEntry,
   enabled: Set<string>
 ): CatalogRouter[] {
-  return entry.routers
+  const ranked = entry.routers
     .filter(r => enabled.has(r.name))
     .sort((a, b) => {
       const sa = score(a);
@@ -43,6 +75,7 @@ export function rankRoutersForModel(
       if (sa !== sb) return sa - sb;
       return a.name.localeCompare(b.name);
     });
+  return promotePreferred(entry.canonicalId, ranked);
 }
 
 /**
@@ -75,6 +108,7 @@ export function rankRoutersPresenceMode(
   const available = entry.routers.filter(r => enabled.has(r.name));
   const er = available.find(r => r.name === 'provider-primary');
   const ir = available.find(r => r.name === 'provider-secondary');
+  const tr = available.find(r => r.name === 'provider-tertiary');
   const or = available.find(r => r.name === 'openrouter');
 
   const head: CatalogRouter[] = [];
@@ -85,6 +119,10 @@ export function rankRoutersPresenceMode(
   } else if (ir) {
     head.push(ir);
   }
+  // provider-tertiary trails the primary/secondary pair but precedes openrouter.
+  // The PREFERRED_ROUTER_BY_MODEL hook can still promote it to the head when
+  // applicable; this default keeps it routable for non-preferred models too.
+  if (tr) head.push(tr);
   if (or) head.push(or);
-  return head;
+  return promotePreferred(entry.canonicalId, head);
 }
