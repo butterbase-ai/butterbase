@@ -156,6 +156,8 @@ services:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       REDIS_URL: redis://redis:6379
+      # Per-region KV Redis (keys match BUTTERBASE_REGIONS long-form names)
+      KV_REDIS_URL_US_EAST_1: redis://redis:6379
       REALTIME_MAX_LISTEN_CONNECTIONS: "100"
     depends_on:
       control-plane-db:

@@ -29,15 +29,23 @@ If you have an idea that touches the boundary, please open an issue first to tal
 
 ## Dev setup
 
-Requirements: Docker, Node 22+, npm.
+Requirements: Docker, Node 22+, npm. Full walkthrough: [`SETUP.md`](./SETUP.md).
 
 ```bash
-git clone https://github.com/NetGPT-Inc/butterbase-oss.git
+git clone --recurse-submodules https://github.com/NetGPT-Inc/butterbase-oss.git
 cd butterbase-oss
+git submodule update --init --recursive   # if plugin/ is empty
 npm ci
-cp .env.example .env  # then fill in any values you need locally
+cp .env.example .env
 docker compose -f docker-compose.local.yml up -d
-npm test
+
+export NEON_PLATFORM_PRIMARY_URL=postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control
+export NEON_RUNTIME_PROJECT_ID_US_EAST_1=postgresql://butterbase:butterbase_dev@localhost:5437/butterbase_runtime_us
+export BUTTERBASE_REGIONS=us-east-1
+npm run migrate:all
+npm run seed:dev
+
+curl -sf http://localhost:4000/health/ready
 ```
 
 The repo is an npm workspaces monorepo. Per-workspace commands:
@@ -45,11 +53,12 @@ The repo is an npm workspaces monorepo. Per-workspace commands:
 ```bash
 npm run build --workspace=services/control-api
 npm test --workspace=@butterbase/shared
+npm test --workspace=services/control-api
 ```
 
 ## Running tests
 
-- **Unit tests:** `npm test` (root) or per workspace
+- **Unit tests:** per workspace (`npm test --workspace=...`); there is no root `npm test`
 - **E2E tests:** `npm run e2e:all` (requires the docker-compose stack running)
 
 Tests that hit the network or an external service are skipped unless their env vars are set; see individual test files.
@@ -61,7 +70,7 @@ Tests that hit the network or an external service are skipped unless their env v
 3. Keep PRs focused. One concern per PR.
 4. Add tests. Coverage matters most around RLS, auth, and the AI gateway request path.
 5. Commit messages: imperative mood, scoped prefix when useful (`feat(control-api):`, `fix(mcp):`). One blank line, then a body explaining *why* if non-obvious.
-6. Run `npm run typecheck` and `npm test` before pushing.
+6. Run `npm run typecheck` (where defined) and workspace tests before pushing.
 7. Open a PR against `main`. Fill in the PR template.
 
 ## Coding style

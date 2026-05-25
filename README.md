@@ -8,83 +8,149 @@ Butterbase gives you the building blocks for AI-driven applications without lock
 
 This repo ships the **runtime data plane**:
 
-- `services/control-api` — Fastify control plane (apps, auth, storage, functions, AI gateway, RLS, migrations)
-- `services/mcp-server` — MCP server exposing 30+ backend ops as tools
-- `services/agent-runtime`, `services/deno-runtime`, `services/build-runner` — function and frontend execution
-- `services/storage-indexer` — async storage indexing
+- `services/control-api` — Fastify control plane (apps, auth, storage, functions, AI gateway, RLS, migrations). Embeds the MCP server at `/mcp`.
+- `services/mcp-server` — MCP tool implementations (built into the control-api image; can also run standalone over stdio)
+- `services/deno-runtime` — serverless function executor (included in local Docker)
+- `services/agent-runtime`, `services/build-runner`, `services/storage-indexer` — used in production / managed deploys; not started by the local compose file
 - `packages/sdk`, `packages/cli`, `packages/plugin`, `packages/shared` — client surfaces
 
-The **managed offering** at [butterbase.ai](https://butterbase.ai) adds: multi-region orchestration, billing, the AI router's upstream provider adapters, lease-based quota enforcement, and ops dashboards. Those live in a private repo that consumes this one as a submodule.
+The **managed offering** at [butterbase.ai](https://butterbase.ai) adds multi-region orchestration, billing, upstream AI router adapters, lease-based quota enforcement, and ops dashboards. Those live in a private repo that consumes this one as a submodule.
 
-When you self-host this repo, the AI gateway runs with no upstream router adapters registered, billing uses a no-op provider, and quotas are unlimited — you wire your own implementations against the `BillingProvider`, `QuotaEnforcer`, and `RouterAdapter` interfaces in `packages/shared`.
+When you self-host, the AI gateway runs without upstream router adapters, billing uses a no-op provider, and quotas are unlimited. Wire your own implementations via the `BillingProvider`, `QuotaEnforcer`, and `RouterAdapter` interfaces in `packages/shared`.
 
-## Quickstart
+## Quickstart (self-host)
 
-Requirements: Docker, Node 22+, npm.
+**Requirements:** Docker, Node 22+, npm.
 
-> **Always clone with `--recurse-submodules`.** The Claude Code plugin
-> (`packages/plugin`) lives in its own repo,
-> [butterbase-plugin](https://github.com/NetGPT-Inc/butterbase-plugin), and is
-> wired in here as a git submodule. A plain `git clone` will leave
-> `packages/plugin/` empty and `npm install` will silently skip that workspace.
+### 1. Clone (with submodules)
+
+The Claude Code plugin (`packages/plugin`) is a git submodule ([butterbase-plugin](https://github.com/NetGPT-Inc/butterbase-plugin)). A plain clone leaves `packages/plugin/` empty and `npm install` silently skips that workspace.
 
 ```bash
 git clone --recurse-submodules https://github.com/NetGPT-Inc/butterbase-oss.git
 cd butterbase-oss
-cp .env.example .env
-docker compose -f docker-compose.local.yml up -d
 ```
 
-If you forgot `--recurse-submodules`, run this from inside the repo to fix it:
+If you already cloned without submodules:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-To keep the plugin submodule current when pulling later, either run
-`git pull --recurse-submodules` each time, or set it as the default once:
+Optional — keep submodules updated on every pull:
 
 ```bash
 git config --global submodule.recurse true
 ```
 
-The control-api will be available at `http://localhost:4000`. See `SETUP.md` for full setup including auth provider configuration.
+### 2. Install dependencies and configure env
+
+```bash
+npm ci
+cp .env.example .env
+```
+
+`docker-compose.local.yml` sets `KV_REDIS_URL_US_EAST_1` for you. Edit `.env` only if you override defaults (e.g. run control-api on the host — use `redis://localhost:6379`).
+
+### 3. Start the stack
+
+First run builds images and can take several minutes.
+
+```bash
+docker compose -f docker-compose.local.yml up -d
+```
+
+Wait until control-api is healthy:
+
+```bash
+curl -sf http://localhost:4000/health/ready
+```
+
+### 4. Run database migrations
+
+Schema is **not** applied automatically on container start. From the repo root (with the stack running):
+
+```bash
+export NEON_PLATFORM_PRIMARY_URL=postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control
+export NEON_RUNTIME_PROJECT_ID_US_EAST_1=postgresql://butterbase:butterbase_dev@localhost:5437/butterbase_runtime_us
+export BUTTERBASE_REGIONS=us-east-1
+
+npm run migrate:all
+```
+
+### 5. Seed the local dev user
+
+With `AUTH_ENABLED=false`, the API uses `DEV_OWNER_ID` from compose. That user must exist in `platform_users` (fresh volumes start empty):
+
+```bash
+export NEON_PLATFORM_PRIMARY_URL=postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control
+npm run seed:dev
+```
+
+### 6. Smoke test
+
+Auth is disabled in the local compose profile (`AUTH_ENABLED=false`):
+
+```bash
+curl -X POST http://localhost:4000/init \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-app"}'
+
+curl http://localhost:4000/apps
+```
+
+### Local endpoints
+
+| Service | URL / port |
+|---------|------------|
+| Control API | http://localhost:4000 |
+| MCP (HTTP, via control-api) | http://localhost:4000/mcp |
+| Deno runtime | http://localhost:7133 |
+| Docs site | http://localhost:4321 |
+| Control plane Postgres | `localhost:5433` |
+| Data plane Postgres | `localhost:5435` |
+| Runtime plane Postgres | `localhost:5437` |
+| LocalStack (S3) | http://localhost:4566 |
+
+Full setup (auth, MCP clients, troubleshooting, production notes): **[`SETUP.md`](./SETUP.md)**.
 
 ## Architecture
 
 ```
                   ┌──────────────────────────────────┐
-                  │  Your app / agent / MCP client   │
+                  │  Your app / agent / MCP client │
                   └──────────────┬───────────────────┘
                                  │
                   ┌──────────────▼───────────────────┐
                   │     control-api (Fastify)        │
                   │  apps · auth · storage · funcs   │
-                  │  AI gateway · RLS · migrations   │
+                  │  AI gateway · RLS · MCP /mcp     │
                   └──┬─────────┬─────────┬────────┬──┘
                      │         │         │        │
-              ┌──────▼──┐ ┌────▼────┐ ┌──▼──┐ ┌───▼────┐
-              │ Postgres│ │ Storage │ │ MCP │ │Function│
-              │ runtime │ │ indexer │ │ srv │ │runtime │
-              └─────────┘ └─────────┘ └─────┘ └────────┘
+              ┌──────▼──┐ ┌────▼────┐ ┌──▼──┐ ┌───▼────────┐
+              │ Postgres│ │ Storage │ │Redis│ │deno-runtime│
+              │ planes  │ │ (S3/R2) │ │ KV  │ │ (functions)│
+              └─────────┘ └─────────┘ └─────┘ └────────────┘
 ```
 
-The control-api is the single entry point. Postgres holds tenant runtime metadata in `db/runtime-plane` and per-app data in `db/data-plane`. Functions run in `agent-runtime` or `deno-runtime` workers dispatched via Cloudflare Workers (`dispatch-worker`).
+The control-api is the main entry point. Platform metadata lives in the control-plane DB; per-app data in the data plane; hot-path runtime tables in the runtime-plane DB (`db/control-plane`, `db/runtime-plane`, `db/data-plane` migrations).
 
 ## Documentation
 
-- [`SETUP.md`](./SETUP.md) — self-hoster setup guide
+- [`SETUP.md`](./SETUP.md) — self-host and local development guide
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor workflow and OSS scope
+- [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md) — multi-region E2E stack
 - [`SUBDOMAIN_IMPLEMENTATION.md`](./SUBDOMAIN_IMPLEMENTATION.md) — tenant subdomain routing
 - [`docs/runbooks`](./docs/runbooks) — operational runbooks
-- [`Examples/`](./Examples) — example apps you can deploy as-is
+- [`Examples/`](./Examples) — example apps
 
 ## Project status
 
-Initial open-source release (v0.1.0). The internal data plane is production-tested by the managed offering. Public APIs and the MCP tool surface are stable but the OSS distribution is new — expect some self-host rough edges that we will smooth out from issues and PRs.
+Initial open-source release (v0.1.0). The data plane is production-tested by the managed offering. Public APIs and the MCP tool surface are stabilizing; the OSS distribution is new — report self-host issues and we will tighten docs and defaults from feedback.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md). The boundary between OSS and the managed offering is intentional — please read the "scope" section before opening a PR that touches billing, quota math, or upstream router adapters.
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Read the scope section before PRs that touch billing, quota math, or upstream router adapters.
 
 ## Security
 

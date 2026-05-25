@@ -15,6 +15,7 @@
     "migrate:control": "tsx db/control-plane/migrate.ts",
     "migrate:runtime": "tsx db/runtime-plane/migrate.ts",
     "migrate:all": "npm run migrate:control && npm run migrate:runtime",
+    "seed:dev": "tsx scripts/seed-dev-user.ts",
     "e2e:bootstrap": "docker compose -f docker-compose.local.yml up -d control-plane-db data-plane-db data-plane-db-eu runtime-plane-db runtime-plane-db-eu localstack && tsx scripts/e2e/bootstrap-regions.ts",
     "e2e:run": "vitest run --config vitest.e2e.config.ts",
     "e2e:teardown": "docker compose -f docker-compose.local.yml down -v",
