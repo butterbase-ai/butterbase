@@ -9,6 +9,23 @@ interface OpenRouterConfig {
   title?: string;
 }
 
+/**
+ * Pull the billed USD cost out of an OpenRouter usage object.
+ *
+ * OpenRouter's chat/completions and embeddings APIs return the cost as
+ * `usage.cost`; older docs used `usage.total_cost`. Accept either so the
+ * router records what was actually billed instead of falling back to a
+ * catalog-token estimate (which understates image models — they bill
+ * per-image, not per-token).
+ */
+export function pickProviderCost(usage: unknown): number | null {
+  if (!usage || typeof usage !== 'object') return null;
+  const u = usage as Record<string, unknown>;
+  if (typeof u.cost === 'number') return u.cost;
+  if (typeof u.total_cost === 'number') return u.total_cost;
+  return null;
+}
+
 function classifyHttp(status: number): AdapterErrorKind {
   if (status === 401 || status === 403) return 'auth';
   if (status === 404) return 'model_not_available';
@@ -174,15 +191,20 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       return { status: res.status, stream: res.body ?? undefined, usage: null, providerCostUsd: null };
     }
     const json = await res.json() as any;
+    // OpenRouter's chat-completions API returns the billed cost in `usage.cost`.
+    // Older docs/responses used `usage.total_cost`; accept either so we don't
+    // silently fall back to a catalog-token estimate (which under-counts image
+    // models that bill per-image, not per-token).
+    const cost = pickProviderCost(json.usage);
     return {
       status: res.status,
       body: json,
       usage: json.usage ? {
         promptTokens: json.usage.prompt_tokens ?? 0,
         completionTokens: json.usage.completion_tokens ?? 0,
-        totalCost: typeof json.usage.total_cost === 'number' ? json.usage.total_cost : null,
+        totalCost: cost,
       } : null,
-      providerCostUsd: typeof json.usage?.total_cost === 'number' ? json.usage.total_cost : null,
+      providerCostUsd: cost,
     };
   }
 
@@ -203,15 +225,16 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
     }
     const json = await res.json() as any;
+    const cost = pickProviderCost(json.usage);
     return {
       status: res.status,
       body: json,
       usage: json.usage ? {
         promptTokens: json.usage.prompt_tokens ?? 0,
         completionTokens: 0,
-        totalCost: typeof json.usage.total_cost === 'number' ? json.usage.total_cost : null,
+        totalCost: cost,
       } : null,
-      providerCostUsd: typeof json.usage?.total_cost === 'number' ? json.usage.total_cost : null,
+      providerCostUsd: cost,
     };
   }
 

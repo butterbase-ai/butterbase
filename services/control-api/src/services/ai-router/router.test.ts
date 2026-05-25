@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { routeChatCompletion, routeVideoSubmit, routeVideoPoll, settleVideoJob, RouterError } from './router.js';
+import { routeChatCompletion, routeVideoSubmit, routeVideoPoll, settleVideoJob, RouterError, wrapStreamForSettlement } from './router.js';
 import { AdapterError, type RouterAdapter, type VideoGenerationRequest } from './adapters/types.js';
 import { applyMarkup } from './markup.js';
 
@@ -772,5 +772,50 @@ describe('estimateVideoCostUsd — ImaRouter unit:second shape', () => {
     const cost = await submitVideoWithEntry(entry, { duration: 5 });
     // pricing_skus: 0.10 * 5 * 1.2 = 0.60 (not 0.50*5*1.2=3.0)
     expect(cost).toBeCloseTo(0.60, 10);
+  });
+});
+
+describe('wrapStreamForSettlement', () => {
+  // Regression: the SSE parser used to read `parsed.usage.total_cost`, but
+  // OpenRouter sends `parsed.usage.cost`. The settlement callback got null
+  // every time and the router fell back to a catalog-token estimate.
+  it('extracts cost from streamed usage.cost (OpenRouter wire format)', async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      'data: {"usage":{"prompt_tokens":10,"completion_tokens":1299,"cost":0.0387255}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(c));
+        controller.close();
+      },
+    });
+    let captured: { promptTokens: number; completionTokens: number; cost: number | null } | null = null;
+    const wrapped = wrapStreamForSettlement(upstream, async (usage, providerCost) => {
+      captured = { ...usage, cost: providerCost };
+    });
+    // Drain the wrapped stream to trigger the onComplete callback.
+    const reader = wrapped.getReader();
+    while (!(await reader.read()).done) { /* drain */ }
+    expect(captured).toEqual({ promptTokens: 10, completionTokens: 1299, cost: 0.0387255 });
+  });
+
+  it('still reads legacy total_cost when cost is absent', async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(
+          'data: {"usage":{"prompt_tokens":1,"completion_tokens":2,"total_cost":0.005}}\n\ndata: [DONE]\n\n'
+        ));
+        controller.close();
+      },
+    });
+    let cost: number | null = -1;
+    const wrapped = wrapStreamForSettlement(upstream, async (_u, c) => { cost = c; });
+    const reader = wrapped.getReader();
+    while (!(await reader.read()).done) { /* drain */ }
+    expect(cost).toBe(0.005);
   });
 });

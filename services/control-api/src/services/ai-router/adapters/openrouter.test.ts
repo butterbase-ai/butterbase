@@ -130,6 +130,29 @@ describe('openrouter adapter', () => {
     expect(r.providerCostUsd).toBe(0.001);
   });
 
+  // Regression: OpenRouter's live chat/completions response carries the billed
+  // amount in `usage.cost`, not `usage.total_cost`. Reading only `total_cost`
+  // caused providerCostUsd to be null on every chat/image request, silently
+  // falling back to a catalog-token estimate that under-counts image models
+  // (verified live: gemini-2.5-flash-image charged $0.0387 but recorded $0.0033).
+  it('chatCompletion reads OpenRouter\'s usage.cost field (image model shape)', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'hi', images: [] } }],
+      usage: {
+        prompt_tokens: 10, completion_tokens: 1299, total_tokens: 1309,
+        cost: 0.0387255,
+        cost_details: { upstream_inference_cost: 0.0387255 },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+    const r = await a.chatCompletion(
+      { model: 'google/gemini-2.5-flash-image', messages: [{ role: 'user', content: 'hi' }] },
+      'google/gemini-2.5-flash-image'
+    );
+    expect(r.providerCostUsd).toBe(0.0387255);
+    expect(r.usage?.totalCost).toBe(0.0387255);
+  });
+
   it('chatCompletion 429 throws AdapterError kind=rate_limit', async () => {
     const fetcher = vi.fn(async () => new Response('{"error":{"message":"rate"}}', { status: 429 })) as unknown as typeof fetch;
     const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });

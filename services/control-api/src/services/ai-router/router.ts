@@ -7,6 +7,7 @@ import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
 import { acquireForEstimatedCost, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
+import { pickProviderCost } from './adapters/openrouter.js';
 import { logAuditEvent } from '../audit/audit-events-service.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 import { maybeSendCreditsEmail } from '../credits-email.js';
@@ -257,7 +258,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
 
 interface StreamUsage { promptTokens: number; completionTokens: number; }
 
-function wrapStreamForSettlement(
+export function wrapStreamForSettlement(
   upstream: ReadableStream<Uint8Array>,
   onComplete: (usage: StreamUsage, providerCostUsd: number | null) => Promise<void>,
 ): ReadableStream<Uint8Array> {
@@ -285,7 +286,8 @@ function wrapStreamForSettlement(
               if (parsed.usage) {
                 promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
                 completionTokens = parsed.usage.completion_tokens ?? completionTokens;
-                if (typeof parsed.usage.total_cost === 'number') providerCost = parsed.usage.total_cost;
+                const c = pickProviderCost(parsed.usage);
+                if (c !== null) providerCost = c;
               }
             } catch { /* ignore non-JSON */ }
           }

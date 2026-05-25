@@ -64,7 +64,10 @@ export const config = {
       platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-3-5-sonnet',
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
       providerPrimaryApiKey: process.env.AI_PROVIDER_PRIMARY_API_KEY ?? '',
+      providerPrimaryBaseUrl: process.env.AI_PROVIDER_PRIMARY_BASE_URL || undefined,
       providerSecondaryApiKey: process.env.AI_PROVIDER_SECONDARY_API_KEY ?? '',
+      providerSecondaryBaseUrl: process.env.AI_PROVIDER_SECONDARY_BASE_URL || undefined,
+      providerSecondaryCatalogUrl: process.env.AI_PROVIDER_SECONDARY_CATALOG_URL || undefined,
       catalogRefreshLockTtlSec: parseInt(process.env.AI_CATALOG_LOCK_TTL_SEC ?? '600', 10),
     } as const;
   })(),

@@ -1916,10 +1916,17 @@ export async function adminRoutes(app: FastifyInstance) {
         adapters.push(openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
       }
       if (providerPrimaryAdapter && config.aiRouter.providerPrimaryApiKey) {
-        adapters.push(providerPrimaryAdapter({ apiKey: config.aiRouter.providerPrimaryApiKey }));
+        adapters.push(providerPrimaryAdapter({
+          apiKey: config.aiRouter.providerPrimaryApiKey,
+          baseUrl: config.aiRouter.providerPrimaryBaseUrl,
+        }));
       }
       if (providerSecondaryAdapter && config.aiRouter.providerSecondaryApiKey) {
-        adapters.push(providerSecondaryAdapter({ apiKey: config.aiRouter.providerSecondaryApiKey }));
+        adapters.push(providerSecondaryAdapter({
+          apiKey: config.aiRouter.providerSecondaryApiKey,
+          baseUrl: config.aiRouter.providerSecondaryBaseUrl,
+          catalogUrl: config.aiRouter.providerSecondaryCatalogUrl,
+        }));
       }
       if (adapters.length === 0) {
         return reply.code(400).send({ error: 'no_adapters_configured' });

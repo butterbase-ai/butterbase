@@ -50,10 +50,17 @@ async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
     // @ts-expect-error overlay resolved at runtime
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
     if (config.aiRouter.providerPrimaryApiKey) {
-      m.set('provider-primary', overlay.providerPrimaryAdapter({ apiKey: config.aiRouter.providerPrimaryApiKey }));
+      m.set('provider-primary', overlay.providerPrimaryAdapter({
+        apiKey: config.aiRouter.providerPrimaryApiKey,
+        baseUrl: config.aiRouter.providerPrimaryBaseUrl,
+      }));
     }
     if (config.aiRouter.providerSecondaryApiKey) {
-      m.set('provider-secondary', overlay.providerSecondaryAdapter({ apiKey: config.aiRouter.providerSecondaryApiKey }));
+      m.set('provider-secondary', overlay.providerSecondaryAdapter({
+        apiKey: config.aiRouter.providerSecondaryApiKey,
+        baseUrl: config.aiRouter.providerSecondaryBaseUrl,
+        catalogUrl: config.aiRouter.providerSecondaryCatalogUrl,
+      }));
     }
   } catch { /* OSS mode */ }
   return m;
