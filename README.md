@@ -139,9 +139,6 @@ The control-api is the main entry point. Platform metadata lives in the control-
 
 - [`SETUP.md`](./SETUP.md) — self-host and local development guide
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor workflow and OSS scope
-- [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md) — multi-region E2E stack
-- [`SUBDOMAIN_IMPLEMENTATION.md`](./SUBDOMAIN_IMPLEMENTATION.md) — tenant subdomain routing
-- [`docs/runbooks`](./docs/runbooks) — operational runbooks
 - [`Examples/`](./Examples) — example apps
 
 ## Project status

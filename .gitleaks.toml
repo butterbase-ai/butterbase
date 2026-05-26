@@ -22,6 +22,4 @@ paths = [
   # Docs page describing platform features (no real secrets, but gitleaks
   # generic-api-key heuristic triggers on the prose around "bb_sk_..." example)
   '''services/docs/src/content/docs/getting-started/before-you-start\.md''',
-  # Subdomain implementation doc with curl placeholder
-  '''SUBDOMAIN_IMPLEMENTATION\.md''',
 ]
