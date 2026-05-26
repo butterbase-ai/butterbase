@@ -54,6 +54,7 @@ import { adminAuthRoutes } from './routes/admin-auth.js';
 import { billingRoutes } from './routes/billing.js';
 import { aiConfigRoutes } from './routes/ai-config.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
+import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
 import dashboardProxyPlugin from './plugins/dashboard-proxy.js';
@@ -748,6 +749,17 @@ Promise.resolve(app.ready())
 
     // Store interval for cleanup
     (app as any).flushInterval = flushInterval;
+
+    // Video sweeper: server-driven settle for jobs whose customers never poll
+    // back after the upstream completes. Per-region Redis lock prevents
+    // duplicate work across machines. Skip in tests (no runtime DBs).
+    if (process.env.SKIP_VIDEO_SWEEPER !== '1') {
+      startVideoSweeper(app, 30_000)
+        .then((stop) => { (app as any).videoSweeperStop = stop; })
+        .catch((err: unknown) => {
+          app.log.error({ err }, 'video-sweeper: failed to start');
+        });
+    }
   })
   .catch((err: unknown) => {
     app.log.error({ err }, 'Failed to start background workers');
@@ -803,6 +815,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).failureNotifierInterval) clearInterval((app as any).failureNotifierInterval);
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
+      if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
 
       // Timeout: force exit if shutdown hangs
       const shutdownTimeout = setTimeout(() => {

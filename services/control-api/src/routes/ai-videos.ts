@@ -11,6 +11,7 @@ import {
   routeVideoSubmit, routeVideoPoll, settleVideoJob,
   billedVideoCostUsd,
   RouterError, InsufficientCreditsError,
+  type RouteContext,
 } from '../services/ai-router/router.js';
 import { readCatalogEntry } from '../services/ai-router/catalog.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
@@ -41,9 +42,10 @@ function publicHost(request: FastifyRequest): string {
   return request.hostname;
 }
 
-// Reuse the same adapter-build pattern as ai-config.ts. Extract into a shared
-// helper if a third route ends up needing it; one duplicate is fine for now.
-async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
+// Reuse the same adapter-build pattern as ai-config.ts. Exported so the
+// video sweeper can reuse the exact same set of routers without duplicating
+// the overlay-import dance.
+export async function buildVideoAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
   if (config.aiRouter.openrouterApiKey) {
     m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
@@ -88,7 +90,7 @@ const videoSubmitSchema = z.object({
 });
 
 export async function aiVideoRoutes(app: FastifyInstance) {
-  const adapters = await buildAdapters();
+  const adapters = await buildVideoAdapters();
 
   app.post('/v1/:appId/videos/completions', async (request, reply) => {
     const { appId } = request.params as { appId: string };
@@ -161,82 +163,20 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       }
 
       const region = await resolveAppHomeRegion(app.controlDb, appId);
-      const ctx = {
+      const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
         appId, userId, region,
       };
-      const poll = await routeVideoPoll(ctx, job.upstream_router as RouterName, job.upstream_polling_url);
+      const result = await pollAndSettleVideoJob(ctx, job);
 
-      if (poll.status === 'in_progress' && job.status === 'pending') {
-        await markVideoJobInProgress(runtimePool, jobId);
-      }
-
-      if (['completed', 'failed', 'cancelled', 'expired'].includes(poll.status)) {
-        // Settlement cost resolution:
-        //   1) upstream's reported per-job cost (poll.providerCostUsd), or
-        //   2) billedVideoCostUsd — pins to the chosen router's variants
-        //      and matches the original submit-time request (resolution +
-        //      visual-input mode), so a 480p text-to-video request bills
-        //      at the 480p text rate instead of the worst-case 1080p rate.
-        //      No lease-buffer markup is applied — this is the exact bill.
-        //   3) $0 as final guard — only reached for `failed`/`cancelled`
-        //      where charging would be wrong anyway, or when the catalog
-        //      lacks any pricing for the chosen router (favor goodwill).
-        // Bug history: this used to be `poll.providerCostUsd ?? 0`, which
-        // made every Token360 video job free since that upstream's poll
-        // response carries no cost field.
-        let providerCost = poll.providerCostUsd ?? 0;
-        if (poll.providerCostUsd === undefined && poll.status === 'completed') {
-          const entry = await readCatalogEntry(getRedisClient(), job.model);
-          if (entry) {
-            // job.request_json was the validated VideoGenerationRequest body
-            // (see videoSubmitSchema). The cast restores that shape; the
-            // billing computation reads only duration/resolution/
-            // input_images/input_references — all optional fields the
-            // schema preserves.
-            const billed = billedVideoCostUsd(
-              entry,
-              job.request_json as unknown as import('../services/ai-router/adapters/types.js').VideoGenerationRequest,
-              job.upstream_router as RouterName,
-            );
-            if (billed !== null) providerCost = billed;
-          }
-        }
-
-        // Order matters: markVideoJobTerminal first (atomic gate via settled_at), then
-        // settleVideoJob only if we won the race. If the Worker crashes between the two,
-        // the lease auto-refunds at TTL (~15min) — acceptable since the alternative
-        // (settle-first) double-writes ai_usage_logs rows on concurrent polls.
-        // Mark terminal FIRST — atomic gate. Only the "winner" of this row update
-        // settles the lease + writes the usage row.
-        const terminal = await markVideoJobTerminal(runtimePool, jobId, {
-          status: poll.status as 'completed' | 'failed' | 'cancelled' | 'expired',
-          unsignedUrls: poll.unsignedUrls,
-          providerCostUsd: providerCost,
-          // chargedCreditsUsd is computed below if we're the winner; pass through
-          // a tentative value matching what settleVideoJob would compute so the
-          // row reflects the same number whether we settle or not.
-          chargedCreditsUsd: applyMarkup(providerCost, parseFloat(job.markup_pct)),
-          error: poll.error,
-        });
-
-        if (terminal.firstTerminal) {
-          await settleVideoJob(ctx, {
-            leaseId: job.lease_id,
-            chosenRouter: job.upstream_router as RouterName,
-            canonicalModel: job.model,
-            providerCostUsd: providerCost,
-          });
-        }
-
+      if (result.terminal) {
         const fresh = await getVideoJob(runtimePool, jobId);
         return reply.code(200).send(buildPublicJobResponse(absoluteBase, appId, fresh!));
       }
-
       return reply.code(200).send({
         job_id: jobId,
-        status: poll.status,
+        status: result.status,
         polling_url: `${absoluteBase}/v1/${appId}/videos/completions/${jobId}`,
       });
     } catch (error) {
@@ -278,6 +218,64 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       return handleVideoError(app, reply, userId, error);
     }
   });
+}
+
+/**
+ * Poll the upstream for a video job and, if terminal, settle the lease + mark
+ * the row. Shared between the customer GET handler and the server-side
+ * sweeper. Caller supplies the RouteContext (with adapters + pools + redis).
+ * Returns the upstream poll status and whether the row reached terminal here.
+ */
+export async function pollAndSettleVideoJob(
+  ctx: RouteContext,
+  job: VideoJobRow,
+): Promise<{ status: string; terminal: boolean }> {
+  const poll = await routeVideoPoll(ctx, job.upstream_router as RouterName, job.upstream_polling_url);
+
+  if (poll.status === 'in_progress' && job.status === 'pending') {
+    await markVideoJobInProgress(ctx.runtimePool, job.id);
+  }
+
+  if (!['completed', 'failed', 'cancelled', 'expired'].includes(poll.status)) {
+    return { status: poll.status, terminal: false };
+  }
+
+  // Settlement cost resolution:
+  //   1) upstream's reported per-job cost (poll.providerCostUsd), or
+  //   2) billedVideoCostUsd — pins to the chosen router's variants and
+  //      matches the submit-time request (resolution + visual-input mode).
+  //   3) $0 as final guard — only `failed`/`cancelled` paths, where
+  //      charging would be wrong anyway.
+  let providerCost = poll.providerCostUsd ?? 0;
+  if (poll.providerCostUsd === undefined && poll.status === 'completed') {
+    const entry = await readCatalogEntry(ctx.redis, job.model);
+    if (entry) {
+      const billed = billedVideoCostUsd(
+        entry,
+        job.request_json as unknown as import('../services/ai-router/adapters/types.js').VideoGenerationRequest,
+        job.upstream_router as RouterName,
+      );
+      if (billed !== null) providerCost = billed;
+    }
+  }
+
+  const terminal = await markVideoJobTerminal(ctx.runtimePool, job.id, {
+    status: poll.status as 'completed' | 'failed' | 'cancelled' | 'expired',
+    unsignedUrls: poll.unsignedUrls,
+    providerCostUsd: providerCost,
+    chargedCreditsUsd: applyMarkup(providerCost, parseFloat(job.markup_pct)),
+    error: poll.error,
+  });
+
+  if (terminal.firstTerminal) {
+    await settleVideoJob(ctx, {
+      leaseId: job.lease_id,
+      chosenRouter: job.upstream_router as RouterName,
+      canonicalModel: job.model,
+      providerCostUsd: providerCost,
+    });
+  }
+  return { status: poll.status, terminal: true };
 }
 
 export function buildPublicJobResponse(absoluteBase: string, appId: string, job: VideoJobRow) {
