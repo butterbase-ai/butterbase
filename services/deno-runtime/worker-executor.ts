@@ -679,6 +679,49 @@ function buildWorkerCode(
       },
     };
 
+    ${metadata.substrate_user_id ? `
+    ctx.substrate = {
+      async propose(capability, payload, opts) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/propose', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')},
+          },
+          body: JSON.stringify({ capability, payload, idempotency_key: opts?.idempotency_key }),
+        });
+        if (!res.ok) throw new Error('substrate.propose failed: ' + res.status + ' ' + await res.text());
+        return await res.json();
+      },
+      async getEntity(id) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/entities/' + encodeURIComponent(id), {
+          headers: { 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+        });
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error('substrate.getEntity failed: ' + res.status);
+        return await res.json();
+      },
+      async findEntities(filter) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/entities:find', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+          body: JSON.stringify(filter ?? {}),
+        });
+        if (!res.ok) throw new Error('substrate.findEntities failed: ' + res.status);
+        return (await res.json()).entities;
+      },
+      async searchMemory(q, opts) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/memory:search', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+          body: JSON.stringify({ q, kinds: opts?.kinds, limit: opts?.limit }),
+        });
+        if (!res.ok) throw new Error('substrate.searchMemory failed: ' + res.status);
+        return (await res.json()).results;
+      },
+    };
+    ` : '/* ctx.substrate: substrate_user_id not set — substrate omitted */'}
+
     // Execute handler
     try {
       const response = await handler(request, ctx);
