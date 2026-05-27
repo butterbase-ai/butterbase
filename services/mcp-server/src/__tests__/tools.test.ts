@@ -3,12 +3,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { createButterbaseMcpServer } from '../create-server.js';
 
-function createTestServer() {
-  return createButterbaseMcpServer();
-}
-
 async function createConnectedPair() {
-  const server = createTestServer();
+  const server = await createButterbaseMcpServer();
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([

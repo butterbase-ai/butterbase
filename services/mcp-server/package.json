@@ -17,6 +17,10 @@
     "./request-auth-context": {
       "types": "./dist/request-auth-context.d.ts",
       "default": "./dist/request-auth-context.js"
+    },
+    "./api-client": {
+      "types": "./dist/api-client.d.ts",
+      "default": "./dist/api-client.js"
     }
   },
   "bin": {

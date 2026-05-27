@@ -7,6 +7,6 @@ const regionConfig = loadRegionConfig(process.env);
 console.log(`[mcp-server] Starting in region ${regionConfig.instanceRegion} (allowed: ${regionConfig.regions.join(',')})`);
 
 // Connect via stdio
-const server = createButterbaseMcpServer();
+const server = await createButterbaseMcpServer();
 const transport = new StdioServerTransport();
 await server.connect(transport);

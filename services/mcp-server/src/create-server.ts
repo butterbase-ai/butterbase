@@ -63,7 +63,7 @@ export function filterToolsByActiveWindow<T extends { name: string }>(
 }
 
 
-export function createButterbaseMcpServer() {
+export async function createButterbaseMcpServer() {
   const server = new McpServer({
     name: 'butterbase',
     version: '0.1.0',
@@ -208,6 +208,18 @@ export function createButterbaseMcpServer() {
     const original = (await originalListTools(request, extra)) as { tools: Array<{ name: string }>; [k: string]: unknown };
     return { ...original, tools: filterToolsByActiveWindow(original.tools, isActiveWindowCached()) };
   });
+
+  // Cloud overlay: substrate tools. In OSS-only builds the import fails and we skip.
+  // We use a runtime variable so TypeScript does not attempt to resolve the path
+  // at compile time (the overlay only exists in the cloud build).
+  try {
+    const overlayPath = '../../../cloud-overlays/dist/cloud-overlays/substrate/mcp-tools/index.js';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const substrateOverlay = await (Function('p', 'return import(p)')(overlayPath) as Promise<any>);
+    substrateOverlay.registerSubstrateMcpTools(server);
+  } catch {
+    // OSS mode: no substrate overlay. Silently skip.
+  }
 
   return server;
 }

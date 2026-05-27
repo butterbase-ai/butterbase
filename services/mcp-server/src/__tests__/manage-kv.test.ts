@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { createButterbaseMcpServer } from '../create-server.js';
 
 async function createConnectedPair() {
-  const server = createButterbaseMcpServer();
+  const server = await createButterbaseMcpServer();
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([
