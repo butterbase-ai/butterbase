@@ -7,7 +7,7 @@ async function handleMcp(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const server = createButterbaseMcpServer();
+  const server = await createButterbaseMcpServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });

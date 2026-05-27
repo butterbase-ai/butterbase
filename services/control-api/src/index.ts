@@ -487,6 +487,14 @@ try {
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/app-billing.js');
   await app.register(overlay.appBillingRoutes);
 } catch { /* OSS mode: no Stripe app billing */ }
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/substrate/index.js');
+  await app.register(overlay.substrateRoutes);
+  app.log.info('substrate overlay routes registered');
+} catch (err) {
+  app.log.info({ err: err instanceof Error ? err.message : err }, 'substrate overlay not present, skipping');
+}
 app.register(aiConfigRoutes);
 app.register(aiVideoRoutes);
 app.register(gatewayRoutes);
