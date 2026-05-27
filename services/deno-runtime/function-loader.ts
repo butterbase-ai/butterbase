@@ -77,6 +77,7 @@ export interface FunctionMetadata {
   trigger_type: string;
   trigger_config: any;
   db_connection_string: string | null;
+  substrate_user_id: string | null;
 }
 
 interface CacheEntry {
@@ -163,7 +164,7 @@ export async function loadFunction(
 
     // Check if app database is provisioned
     const appCheck = await client.queryObject(
-      `SELECT db_provisioned FROM apps WHERE id = $1`,
+      `SELECT db_provisioned, substrate_user_id FROM apps WHERE id = $1`,
       [appId]
     );
 
@@ -216,6 +217,7 @@ export async function loadFunction(
       trigger_type: row.trigger_type,
       trigger_config: row.trigger_config,
       db_connection_string: dbConnectionString,
+      substrate_user_id: appCheck.rows[0]?.substrate_user_id ?? null,
     };
 
     // Add to cache (LRU eviction if full)
