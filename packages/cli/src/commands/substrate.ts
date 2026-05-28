@@ -131,18 +131,107 @@ export async function substrateSettingsShowCommand(opts: { json?: boolean }) {
 
 // Stubs - implemented in Task 9 (inspect) and Task 10 (write commands)
 export async function substrateLedgerInspectCommand(_actionId: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 9)'); }
-export async function substrateProposeCommand(_capability: string, _opts: { payload?: string; idempotencyKey?: string; json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateApproveCommand(_actionId: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateRejectCommand(_actionId: string, _opts: { reason?: string; json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateEntitiesUpdateCommand(_id: string, _opts: { patch?: string; json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateOutboxCancelCommand(_id: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateOutboxRetryCommand(_id: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateRulesCreateCommand(_opts: { file?: string; json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateRulesUpdateCommand(_id: string, _opts: { file?: string; json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateRulesDeleteCommand(_id: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateRulesEnableCommand(_id: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateRulesDisableCommand(_id: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 10)'); }
-export async function substrateSettingsYoloCommand(_state: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 10)'); }
+
+export async function substrateProposeCommand(
+  capability: string,
+  opts: { payload?: string; idempotencyKey?: string; json?: boolean },
+) {
+  if (!opts.payload) fail('missing --payload @path/to/file.json');
+  const payload = readJsonFile(opts.payload);
+  const body: Record<string, unknown> = { capability, payload };
+  if (opts.idempotencyKey) body.idempotency_key = opts.idempotencyKey;
+  try {
+    const res = await apiPost<unknown>('/v1/me/substrate/actions/propose', body);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateApproveCommand(actionId: string, opts: { json?: boolean }) {
+  try {
+    const res = await apiPost<unknown>(`/v1/me/substrate/actions/${encodeURIComponent(actionId)}/approve`, {});
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateRejectCommand(actionId: string, opts: { reason?: string; json?: boolean }) {
+  const body: Record<string, unknown> = {};
+  if (opts.reason) body.reason = opts.reason;
+  try {
+    const res = await apiPost<unknown>(`/v1/me/substrate/actions/${encodeURIComponent(actionId)}/reject`, body);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateEntitiesUpdateCommand(id: string, opts: { patch?: string; json?: boolean }) {
+  if (!opts.patch) fail('missing --patch @path/to/file.json');
+  const body = readJsonFile(opts.patch) as Record<string, unknown>;
+  try {
+    const res = await apiPut<unknown>(`/v1/me/substrate/entities/${encodeURIComponent(id)}`, body);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateOutboxCancelCommand(id: string, opts: { json?: boolean }) {
+  try {
+    const res = await apiPost<unknown>(`/v1/me/substrate/outbox/${encodeURIComponent(id)}/cancel`, {});
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateOutboxRetryCommand(id: string, opts: { json?: boolean }) {
+  try {
+    const res = await apiPost<unknown>(`/v1/me/substrate/outbox/${encodeURIComponent(id)}/retry`, {});
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateRulesCreateCommand(opts: { file?: string; json?: boolean }) {
+  if (!opts.file) fail('missing --file @path/to/rule.json');
+  const body = readJsonFile(opts.file) as Record<string, unknown>;
+  try {
+    const res = await apiPost<unknown>('/v1/me/substrate/attention-rules', body);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateRulesUpdateCommand(id: string, opts: { file?: string; json?: boolean }) {
+  if (!opts.file) fail('missing --file @path/to/rule.json');
+  const body = readJsonFile(opts.file) as Record<string, unknown>;
+  try {
+    const res = await apiPut<unknown>(`/v1/me/substrate/attention-rules/${encodeURIComponent(id)}`, body);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateRulesDeleteCommand(id: string, opts: { json?: boolean }) {
+  try {
+    const res = await apiDelete<unknown>(`/v1/me/substrate/attention-rules/${encodeURIComponent(id)}`);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateRulesEnableCommand(id: string, opts: { json?: boolean }) {
+  try {
+    const res = await apiPost<unknown>(`/v1/me/substrate/attention-rules/${encodeURIComponent(id)}/enable`, {});
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateRulesDisableCommand(id: string, opts: { json?: boolean }) {
+  try {
+    const res = await apiPost<unknown>(`/v1/me/substrate/attention-rules/${encodeURIComponent(id)}/disable`, {});
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateSettingsYoloCommand(state: string, opts: { json?: boolean }) {
+  const normalized = state.toLowerCase();
+  if (normalized !== 'on' && normalized !== 'off') fail(`expected 'on' or 'off', got '${state}'`);
+  try {
+    const res = await apiPut<unknown>(`/v1/me/substrate/settings/yolo`, { yolo_mode: normalized === 'on' });
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
 
 // Re-export helpers so Tasks 9/10 can use them.
 export const _internal = { fail, handleAuthError, readJsonFile, print, apiGet, apiPost, apiPut, apiDelete };

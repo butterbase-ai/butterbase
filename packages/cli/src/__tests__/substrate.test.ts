@@ -99,3 +99,116 @@ describe('read commands', () => {
     exit.mockRestore(); errSpy.mockRestore();
   });
 });
+
+import {
+  substrateProposeCommand,
+  substrateApproveCommand,
+  substrateRejectCommand,
+  substrateEntitiesUpdateCommand,
+  substrateOutboxCancelCommand,
+  substrateOutboxRetryCommand,
+  substrateRulesCreateCommand,
+  substrateRulesUpdateCommand,
+  substrateRulesDeleteCommand,
+  substrateRulesEnableCommand,
+  substrateRulesDisableCommand,
+  substrateSettingsYoloCommand,
+} from '../commands/substrate.js';
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+function tmpJson(obj: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), 'bb-cli-'));
+  const p = join(dir, 'payload.json');
+  writeFileSync(p, JSON.stringify(obj));
+  return `@${p}`;
+}
+
+describe('write commands', () => {
+  it('propose sends POST /actions/propose with body from --payload @file', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'act_1', status: 'proposed' });
+    const payload = tmpJson({ to: 'a@b.c', subject: 'x', body: 'y' });
+    await substrateProposeCommand('send_email_draft', { payload, idempotencyKey: 'k1', json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/actions/propose', {
+      capability: 'send_email_draft',
+      payload: { to: 'a@b.c', subject: 'x', body: 'y' },
+      idempotency_key: 'k1',
+    });
+  });
+
+  it('approve sends POST /actions/:id/approve', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'act_1', status: 'executed' });
+    await substrateApproveCommand('act_1', { json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/actions/act_1/approve', {});
+  });
+
+  it('reject sends POST /actions/:id/reject with reason', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'act_1', status: 'rejected' });
+    await substrateRejectCommand('act_1', { reason: 'no', json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/actions/act_1/reject', { reason: 'no' });
+  });
+
+  it('entities update sends PUT /entities/:id with patch body', async () => {
+    (apiPut as any).mockResolvedValue({ id: 'ent_1' });
+    const patch = tmpJson({ display_name: 'New name' });
+    await substrateEntitiesUpdateCommand('ent_1', { patch, json: true });
+    expect(apiPut).toHaveBeenCalledWith('/v1/me/substrate/entities/ent_1', { display_name: 'New name' });
+  });
+
+  it('outbox cancel sends POST /outbox/:id/cancel', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'ob_1', state: 'cancelled' });
+    await substrateOutboxCancelCommand('ob_1', { json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/outbox/ob_1/cancel', {});
+  });
+
+  it('outbox retry sends POST /outbox/:id/retry', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'ob_1', state: 'queued' });
+    await substrateOutboxRetryCommand('ob_1', { json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/outbox/ob_1/retry', {});
+  });
+
+  it('rules create POSTs the file body', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'rule_1' });
+    const file = tmpJson({ name: 'r', trigger_cron: '0 9 * * *' });
+    await substrateRulesCreateCommand({ file, json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/attention-rules', { name: 'r', trigger_cron: '0 9 * * *' });
+  });
+
+  it('rules update PUTs the file body', async () => {
+    (apiPut as any).mockResolvedValue({ id: 'rule_1' });
+    const file = tmpJson({ enabled: false });
+    await substrateRulesUpdateCommand('rule_1', { file, json: true });
+    expect(apiPut).toHaveBeenCalledWith('/v1/me/substrate/attention-rules/rule_1', { enabled: false });
+  });
+
+  it('rules delete sends DELETE', async () => {
+    (apiDelete as any).mockResolvedValue({ deleted: true });
+    await substrateRulesDeleteCommand('rule_1', { json: true });
+    expect(apiDelete).toHaveBeenCalledWith('/v1/me/substrate/attention-rules/rule_1');
+  });
+
+  it('rules enable sends POST /enable', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'rule_1', enabled: true });
+    await substrateRulesEnableCommand('rule_1', { json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/attention-rules/rule_1/enable', {});
+  });
+
+  it('rules disable sends POST /disable', async () => {
+    (apiPost as any).mockResolvedValue({ id: 'rule_1', enabled: false });
+    await substrateRulesDisableCommand('rule_1', { json: true });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/attention-rules/rule_1/disable', {});
+  });
+
+  it('settings yolo on sends PUT /settings/yolo', async () => {
+    (apiPut as any).mockResolvedValue({ yolo_mode: true });
+    await substrateSettingsYoloCommand('on', { json: true });
+    expect(apiPut).toHaveBeenCalledWith('/v1/me/substrate/settings/yolo', { yolo_mode: true });
+  });
+
+  it('settings yolo off sends PUT /settings/yolo with false', async () => {
+    (apiPut as any).mockResolvedValue({ yolo_mode: false });
+    await substrateSettingsYoloCommand('off', { json: true });
+    expect(apiPut).toHaveBeenCalledWith('/v1/me/substrate/settings/yolo', { yolo_mode: false });
+  });
+});
