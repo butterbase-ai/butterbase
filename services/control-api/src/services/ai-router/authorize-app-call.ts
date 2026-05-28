@@ -2,8 +2,19 @@ import type { Pool } from 'pg';
 import type { FastifyRequest } from 'fastify';
 import { verifyEndUserJwt } from '../end-user-auth.js';
 
+/**
+ * Identifies *who* made an authorized per-app AI call. Routes that persist
+ * per-call state (notably `ai_video_jobs`) use this to scope visibility on
+ * subsequent reads: end-users see only their own rows; owners and scoped
+ * keys see every row in the app.
+ */
+export type AppAiCaller =
+  | { kind: 'owner' }
+  | { kind: 'end_user'; sub: string }
+  | { kind: 'scoped_key' };
+
 export type AppAiAuthResult =
-  | { ok: true; ownerId: string }
+  | { ok: true; ownerId: string; caller: AppAiCaller }
   | { ok: false; status: number; body: { error: string; code: string } };
 
 /**
@@ -48,14 +59,18 @@ export async function authorizeAppAiCall(
 
   // 1. Direct ownership (platform JWT or owner-minted API key)
   if (userId && userId === ownerId) {
-    return { ok: true, ownerId };
+    return { ok: true, ownerId, caller: { kind: 'owner' } };
   }
 
   // 2. End-user JWT issued by this app
   if (authMethod === 'end_user_jwt' && rawToken) {
     try {
-      await verifyEndUserJwt(controlDb, appId, rawToken);
-      return { ok: true, ownerId };
+      const claims = await verifyEndUserJwt(controlDb, appId, rawToken);
+      const sub = String(claims.sub ?? '');
+      if (sub) {
+        return { ok: true, ownerId, caller: { kind: 'end_user', sub } };
+      }
+      // No sub claim — treat as malformed and fall through.
     } catch {
       // Fall through to 403 — verification failed or signing key missing
     }
@@ -66,7 +81,7 @@ export async function authorizeAppAiCall(
   // user", which case (1) already covered. Without an explicit `app:<appId>`
   // grant we must not let a stranger's key drain the owner's credits.
   if (authMethod === 'api_key' && Array.isArray(scopes) && scopes.includes(`app:${appId}`)) {
-    return { ok: true, ownerId };
+    return { ok: true, ownerId, caller: { kind: 'scoped_key' } };
   }
 
   return { ok: false, status: 403, body: { error: 'forbidden', code: 'FORBIDDEN' } };

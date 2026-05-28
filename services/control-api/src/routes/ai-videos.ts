@@ -98,6 +98,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const authz = await authorizeAppAiCall(app.controlDb, appId, request);
     if (!authz.ok) return reply.code(authz.status).send(authz.body);
     const ownerId = authz.ownerId;
+    const endUserSub = authz.caller.kind === 'end_user' ? authz.caller.sub : null;
 
     try {
       const body = videoSubmitSchema.parse(request.body);
@@ -114,7 +115,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       let jobId: string;
       try {
         jobId = await insertVideoJob(runtimePool, {
-          appId, userId: ownerId, model: body.model, requestJson: body,
+          appId, userId: ownerId, endUserSub, model: body.model, requestJson: body,
           upstreamRouter: submit.chosenRouter,
           upstreamJobId: submit.upstreamJobId,
           upstreamPollingUrl: submit.pollingUrl,
@@ -152,9 +153,8 @@ export async function aiVideoRoutes(app: FastifyInstance) {
   app.get('/v1/:appId/videos/completions/:jobId', async (request, reply) => {
     const { appId, jobId } = request.params as { appId: string; jobId: string };
 
-    // Same authz model as POST — owner / end-user JWT for this app / scoped key
-    // can poll any job in this app. Per-end-user job isolation would require
-    // storing the end-user sub on video_jobs (not done yet).
+    // Same authz model as POST — owner / end-user JWT / app-scoped key.
+    // Per-end-user isolation is enforced on the row below.
     const authz = await authorizeAppAiCall(app.controlDb, appId, request);
     if (!authz.ok) return reply.code(authz.status).send(authz.body);
     const ownerId = authz.ownerId;
@@ -163,6 +163,11 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+      // End-users can only see jobs they submitted themselves. 404 (not 403)
+      // because revealing existence would leak that *some* other user owns it.
+      if (authz.caller.kind === 'end_user' && job.end_user_sub !== authz.caller.sub) {
+        return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+      }
 
       const absoluteBase = `${publicProto(request)}://${publicHost(request)}`;
 
@@ -212,6 +217,9 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+      if (authz.caller.kind === 'end_user' && job.end_user_sub !== authz.caller.sub) {
+        return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+      }
       if (job.status !== 'completed') {
         return reply.code(409).send({ error: 'job_not_completed', code: 'JOB_NOT_COMPLETED', current_status: job.status });
       }

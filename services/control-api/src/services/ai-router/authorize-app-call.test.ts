@@ -47,14 +47,14 @@ describe('authorizeAppAiCall', () => {
     const db = makeDb({ owner_id: OWNER_ID });
     const req = makeReq({ userId: OWNER_ID, authMethod: 'jwt', scopes: ['*'] });
     const r = await authorizeAppAiCall(db, APP_ID, req);
-    expect(r).toEqual({ ok: true, ownerId: OWNER_ID });
+    expect(r).toEqual({ ok: true, ownerId: OWNER_ID, caller: { kind: 'owner' } });
   });
 
   it('allows the owner via bb_sk_* API key with `*` scope', async () => {
     const db = makeDb({ owner_id: OWNER_ID });
     const req = makeReq({ userId: OWNER_ID, authMethod: 'api_key', scopes: ['*'] });
     const r = await authorizeAppAiCall(db, APP_ID, req);
-    expect(r).toEqual({ ok: true, ownerId: OWNER_ID });
+    expect(r).toEqual({ ok: true, ownerId: OWNER_ID, caller: { kind: 'owner' } });
   });
 
   it('rejects a different platform user with `*` scope (the original bug)', async () => {
@@ -75,7 +75,7 @@ describe('authorizeAppAiCall', () => {
     const db = makeDb({ owner_id: OWNER_ID });
     const req = makeReq({ userId: OTHER_ID, authMethod: 'api_key', scopes: [`app:${APP_ID}`] });
     const r = await authorizeAppAiCall(db, APP_ID, req);
-    expect(r).toEqual({ ok: true, ownerId: OWNER_ID });
+    expect(r).toEqual({ ok: true, ownerId: OWNER_ID, caller: { kind: 'scoped_key' } });
   });
 
   it('rejects an API key scoped to a different app', async () => {
@@ -90,8 +90,16 @@ describe('authorizeAppAiCall', () => {
     mockedVerify.mockResolvedValueOnce({ sub: 'end-user-1' });
     const req = makeReq({ userId: '', authMethod: 'end_user_jwt', rawToken: 'tok' });
     const r = await authorizeAppAiCall(db, APP_ID, req);
-    expect(r).toEqual({ ok: true, ownerId: OWNER_ID });
+    expect(r).toEqual({ ok: true, ownerId: OWNER_ID, caller: { kind: 'end_user', sub: 'end-user-1' } });
     expect(mockedVerify).toHaveBeenCalledWith(db, APP_ID, 'tok');
+  });
+
+  it('rejects an end-user JWT with empty/missing `sub`', async () => {
+    const db = makeDb({ owner_id: OWNER_ID });
+    mockedVerify.mockResolvedValueOnce({ sub: '' });
+    const req = makeReq({ userId: '', authMethod: 'end_user_jwt', rawToken: 'tok' });
+    const r = await authorizeAppAiCall(db, APP_ID, req);
+    expect(r).toEqual({ ok: false, status: 403, body: { error: 'forbidden', code: 'FORBIDDEN' } });
   });
 
   it('rejects an end-user JWT whose verification fails (e.g. wrong app or expired)', async () => {

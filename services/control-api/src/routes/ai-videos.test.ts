@@ -14,6 +14,7 @@ function makeJob(overrides: Partial<VideoJobRow> = {}): VideoJobRow {
     id: 'job-abc',
     app_id: 'app-1',
     user_id: 'user-1',
+    end_user_sub: null,
     model: 'wan/t2v-turbo',
     status: 'completed',
     upstream_router: 'openrouter',

@@ -4,6 +4,12 @@ export interface VideoJobRow {
   id: string;
   app_id: string;
   user_id: string;
+  /**
+   * End-user subject from the app-scoped JWT that submitted this job.
+   * NULL when submitted by the app owner or an app-scoped API key.
+   * GETs by an end-user JWT are restricted to rows matching their own sub.
+   */
+  end_user_sub: string | null;
   model: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'expired';
   /**
@@ -32,6 +38,8 @@ export async function insertVideoJob(
   args: {
     appId: string;
     userId: string;
+    /** End-user sub when submitted via app-scoped JWT; NULL otherwise. */
+    endUserSub: string | null;
     model: string;
     requestJson: unknown;
     upstreamRouter: string;
@@ -44,13 +52,13 @@ export async function insertVideoJob(
 ): Promise<string> {
   const r = await pool.query<{ id: string }>(
     `INSERT INTO ai_video_jobs
-       (app_id, user_id, model, request_json, status,
+       (app_id, user_id, end_user_sub, model, request_json, status,
         upstream_router, upstream_job_id, upstream_polling_url,
         lease_id, estimated_cost_usd, markup_pct)
-     VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10)
+     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10, $11)
      RETURNING id`,
     [
-      args.appId, args.userId, args.model, args.requestJson,
+      args.appId, args.userId, args.endUserSub, args.model, args.requestJson,
       args.upstreamRouter, args.upstreamJobId, args.upstreamPollingUrl,
       args.leaseId, args.estimatedCostUsd, args.markupPct,
     ],
