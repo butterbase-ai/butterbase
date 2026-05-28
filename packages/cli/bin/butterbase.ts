@@ -101,6 +101,31 @@ import {
   kvStatsCommand, kvFlushCommand, kvRulesCommand,
   kvExposeCommand, kvUnexposeCommand, kvApplyCommand,
 } from '../src/commands/kv.js';
+import {
+  substrateLedgerCommand,
+  substrateLedgerInspectCommand,
+  substrateProposeCommand,
+  substrateApproveCommand,
+  substrateRejectCommand,
+  substrateEntitiesListCommand,
+  substrateEntitiesGetCommand,
+  substrateEntitiesUpdateCommand,
+  substrateMemoryCommand,
+  substrateOutboxListCommand,
+  substrateOutboxCancelCommand,
+  substrateOutboxRetryCommand,
+  substrateRulesListCommand,
+  substrateRulesGetCommand,
+  substrateRulesCreateCommand,
+  substrateRulesUpdateCommand,
+  substrateRulesDeleteCommand,
+  substrateRulesEnableCommand,
+  substrateRulesDisableCommand,
+  substrateRulesFiringsCommand,
+  substrateSnapshotsCommand,
+  substrateSettingsShowCommand,
+  substrateSettingsYoloCommand,
+} from '../src/commands/substrate.js';
 
 const program = new Command();
 
@@ -1171,6 +1196,182 @@ kv.command('apply <file>')
   .option('--dry-run', 'Preview changes without applying')
   .option('--yes', 'Skip confirmation prompt')
   .action((file, opts) => kvApplyCommand({ app: opts.app, file, dryRun: opts.dryRun, yes: opts.yes }));
+
+// Substrate
+const substrate = program.command('substrate').description('Manage the Substrate AI-agent runtime');
+
+// substrate ledger
+const substrateLedger = substrate.command('ledger').description('Browse the substrate action ledger');
+
+substrateLedger
+  .command('list')
+  .description('List ledger entries')
+  .option('--status <status>', 'Filter by status (pending|approved|rejected|executed|failed)')
+  .option('--capability <cap>', 'Filter by capability')
+  .option('--limit <n>', 'Max rows')
+  .option('--before <cursor>', 'Pagination cursor')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateLedgerCommand(opts));
+
+substrateLedger
+  .command('inspect <actionId>')
+  .description('Show full details of a ledger entry')
+  .option('--json', 'Output raw JSON')
+  .action((actionId, opts) => substrateLedgerInspectCommand(actionId, opts));
+
+// substrate propose / approve / reject (top-level convenience)
+substrate
+  .command('propose <capability>')
+  .description('Propose a new substrate action')
+  .option('--payload <@path|json>', 'Payload as JSON or @path to JSON file')
+  .option('--idempotency-key <key>', 'Client-supplied idempotency key')
+  .option('--json', 'Output raw JSON')
+  .action((capability, opts) => substrateProposeCommand(capability, opts));
+
+substrate
+  .command('approve <actionId>')
+  .description('Approve a pending substrate action')
+  .option('--json', 'Output raw JSON')
+  .action((actionId, opts) => substrateApproveCommand(actionId, opts));
+
+substrate
+  .command('reject <actionId>')
+  .description('Reject a pending substrate action')
+  .option('--reason <text>', 'Rejection reason')
+  .option('--json', 'Output raw JSON')
+  .action((actionId, opts) => substrateRejectCommand(actionId, opts));
+
+// substrate entities
+const substrateEntities = substrate.command('entities').description('Manage substrate entities');
+
+substrateEntities
+  .command('list')
+  .description('List substrate entities')
+  .option('--type <type>', 'Filter by entity type')
+  .option('--limit <n>', 'Max rows')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateEntitiesListCommand(opts));
+
+substrateEntities
+  .command('get <id>')
+  .description('Get a substrate entity by ID')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateEntitiesGetCommand(id, opts));
+
+substrateEntities
+  .command('update <id>')
+  .description('Patch a substrate entity')
+  .option('--patch <@path|json>', 'Patch as JSON or @path to JSON file')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateEntitiesUpdateCommand(id, opts));
+
+// substrate memory
+substrate
+  .command('memory <query>')
+  .description('Semantic search over substrate memory')
+  .option('--limit <n>', 'Max results')
+  .option('--json', 'Output raw JSON')
+  .action((query, opts) => substrateMemoryCommand(query, opts));
+
+// substrate outbox
+const substrateOutbox = substrate.command('outbox').description('Manage the substrate outbox queue');
+
+substrateOutbox
+  .command('list')
+  .description('List outbox messages')
+  .option('--state <state>', 'Filter by state (pending|sent|failed|cancelled)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateOutboxListCommand(opts));
+
+substrateOutbox
+  .command('cancel <id>')
+  .description('Cancel a pending outbox message')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateOutboxCancelCommand(id, opts));
+
+substrateOutbox
+  .command('retry <id>')
+  .description('Retry a failed outbox message')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateOutboxRetryCommand(id, opts));
+
+// substrate rules
+const substrateRules = substrate.command('rules').description('Manage substrate automation rules');
+
+substrateRules
+  .command('list')
+  .description('List automation rules')
+  .option('--enabled', 'Show only enabled rules')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateRulesListCommand(opts));
+
+substrateRules
+  .command('get <id>')
+  .description('Get a rule by ID')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateRulesGetCommand(id, opts));
+
+substrateRules
+  .command('create')
+  .description('Create a new automation rule')
+  .option('--file <@path>', 'Rule definition from JSON file')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateRulesCreateCommand(opts));
+
+substrateRules
+  .command('update <id>')
+  .description('Update an existing automation rule')
+  .option('--file <@path>', 'Updated rule definition from JSON file')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateRulesUpdateCommand(id, opts));
+
+substrateRules
+  .command('delete <id>')
+  .description('Delete an automation rule')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateRulesDeleteCommand(id, opts));
+
+substrateRules
+  .command('enable <id>')
+  .description('Enable an automation rule')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateRulesEnableCommand(id, opts));
+
+substrateRules
+  .command('disable <id>')
+  .description('Disable an automation rule')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateRulesDisableCommand(id, opts));
+
+substrateRules
+  .command('firings <id>')
+  .description('List firings for an automation rule')
+  .option('--limit <n>', 'Max rows')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateRulesFiringsCommand(id, opts));
+
+// substrate snapshots
+substrate
+  .command('snapshots')
+  .description('List substrate snapshots')
+  .option('--days <n>', 'Look-back window in days')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateSnapshotsCommand(opts));
+
+// substrate settings
+const substrateSettings = substrate.command('settings').description('Manage substrate settings');
+
+substrateSettings
+  .command('show')
+  .description('Show current substrate settings')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateSettingsShowCommand(opts));
+
+substrateSettings
+  .command('yolo <state>')
+  .description('Enable or disable YOLO mode (auto-approve all actions)')
+  .option('--json', 'Output raw JSON')
+  .action((state, opts) => substrateSettingsYoloCommand(state, opts));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {
