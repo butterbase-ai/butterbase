@@ -1,6 +1,8 @@
 import type { Pool } from 'pg';
 import type { FastifyRequest } from 'fastify';
 import { verifyEndUserJwt } from '../end-user-auth.js';
+import { getRuntimeDbForApp } from '../region-resolver.js';
+import { AppNotFoundError } from '../app-resolver.js';
 
 /**
  * Identifies *who* made an authorized per-app AI call. Routes that persist
@@ -38,6 +40,11 @@ export type AppAiAuthResult =
  *      delegation path: a developer can mint a scoped key for a third-party
  *      integrator and the integrator's calls still bill the app owner.
  *
+ * The `apps` table lives in the per-region runtime DB (post-cutover migration
+ * 061), so the owner lookup resolves the app's home region first and queries
+ * the runtime pool. Pass the control-plane pool — it's used for the
+ * `user_app_index` lookup inside `getRuntimeDbForApp`.
+ *
  * Returns `{ ok: true, ownerId }` on success, or a `{ status, body }` payload
  * the route handler should `reply.code(status).send(body)`.
  */
@@ -46,14 +53,23 @@ export async function authorizeAppAiCall(
   appId: string,
   request: FastifyRequest,
 ): Promise<AppAiAuthResult> {
-  const ownerResult = await controlDb.query<{ owner_id: string }>(
-    'SELECT owner_id FROM apps WHERE id = $1',
-    [appId],
-  );
-  if (ownerResult.rows.length === 0) {
-    return { ok: false, status: 404, body: { error: 'app_not_found', code: 'APP_NOT_FOUND' } };
+  let ownerId: string;
+  try {
+    const runtimePool = await getRuntimeDbForApp(controlDb, appId);
+    const ownerResult = await runtimePool.query<{ owner_id: string }>(
+      'SELECT owner_id FROM apps WHERE id = $1',
+      [appId],
+    );
+    if (ownerResult.rows.length === 0) {
+      return { ok: false, status: 404, body: { error: 'app_not_found', code: 'APP_NOT_FOUND' } };
+    }
+    ownerId = ownerResult.rows[0].owner_id;
+  } catch (err) {
+    if (err instanceof AppNotFoundError) {
+      return { ok: false, status: 404, body: { error: 'app_not_found', code: 'APP_NOT_FOUND' } };
+    }
+    throw err;
   }
-  const ownerId = ownerResult.rows[0].owner_id;
 
   const { userId, authMethod, scopes, rawToken } = request.auth;
 

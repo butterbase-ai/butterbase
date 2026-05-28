@@ -7,8 +7,24 @@ vi.mock('../end-user-auth.js', () => ({
   verifyEndUserJwt: vi.fn(),
 }));
 
+vi.mock('../region-resolver.js', () => ({
+  getRuntimeDbForApp: vi.fn(),
+}));
+
+vi.mock('../app-resolver.js', () => ({
+  AppNotFoundError: class AppNotFoundError extends Error {
+    constructor(appId: string) {
+      super(`app not found: ${appId}`);
+      this.name = 'AppNotFoundError';
+    }
+  },
+}));
+
 import { verifyEndUserJwt } from '../end-user-auth.js';
+import { getRuntimeDbForApp } from '../region-resolver.js';
+import { AppNotFoundError } from '../app-resolver.js';
 const mockedVerify = verifyEndUserJwt as ReturnType<typeof vi.fn>;
+const mockedResolve = getRuntimeDbForApp as ReturnType<typeof vi.fn>;
 
 const APP_ID = 'app_target';
 const OWNER_ID = 'owner-uuid';
@@ -34,10 +50,23 @@ function makeReq(auth: Partial<FastifyRequest['auth']>): FastifyRequest {
 describe('authorizeAppAiCall', () => {
   beforeEach(() => {
     mockedVerify.mockReset();
+    mockedResolve.mockReset();
+    // Default: resolver returns whatever `db` the test built — keeps the
+    // existing `db.query` mock in the per-test setup as the source of truth
+    // for the `apps` row.
+    mockedResolve.mockImplementation(async (db: Pool) => db);
   });
 
-  it('returns 404 when the app does not exist', async () => {
+  it('returns 404 when the app does not exist in the runtime DB', async () => {
     const db = makeDb(null);
+    const req = makeReq({ userId: OWNER_ID, authMethod: 'jwt' });
+    const r = await authorizeAppAiCall(db, APP_ID, req);
+    expect(r).toEqual({ ok: false, status: 404, body: { error: 'app_not_found', code: 'APP_NOT_FOUND' } });
+  });
+
+  it('returns 404 when the app has no user_app_index entry (AppNotFoundError)', async () => {
+    const db = makeDb({ owner_id: OWNER_ID });
+    mockedResolve.mockRejectedValueOnce(new AppNotFoundError(APP_ID));
     const req = makeReq({ userId: OWNER_ID, authMethod: 'jwt' });
     const r = await authorizeAppAiCall(db, APP_ID, req);
     expect(r).toEqual({ ok: false, status: 404, body: { error: 'app_not_found', code: 'APP_NOT_FOUND' } });
