@@ -45,7 +45,9 @@ export async function apiKeyRoutes(app: FastifyInstance) {
   // GET /api-keys — List user's API keys
   app.get('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);
-    const keys = await ApiKeyService.listKeys(app.controlDb, userId);
+    const { scope } = request.query as { scope?: string };
+    const filterScope = scope === 'app' || scope === 'substrate' ? scope : undefined;
+    const keys = await ApiKeyService.listKeys(app.controlDb, userId, filterScope);
     return { keys };
   });
 

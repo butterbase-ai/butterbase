@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import crypto from 'node:crypto';
 import pg from 'pg';
 import { ApiKeyService } from '../services/api-key-service.js';
 import { API_KEY_PREFIX } from '@butterbase/shared/constants';
@@ -102,5 +103,62 @@ describe('ApiKeyService', () => {
     );
 
     expect(result).toBe(false);
+  });
+
+  describe('listKeys scope filter', () => {
+    let scopeUserId: string;
+
+    async function seedKey(scope: 'app' | 'substrate', substrateUserId: string | null) {
+      const hash = crypto.randomBytes(20).toString('hex');
+      await pool.query(
+        `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
+         VALUES ($1, $2, 'bb_sk_xxx12', 'test', $3, $4, $5)`,
+        [scopeUserId, hash, ['*'], scope, substrateUserId]
+      );
+    }
+
+    beforeAll(async () => {
+      const result = await pool.query(
+        `INSERT INTO platform_users (email, cognito_sub)
+         VALUES ('scope-test@example.com', 'scope-test-sub')
+         RETURNING id`
+      );
+      scopeUserId = result.rows[0].id;
+    });
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM platform_users WHERE id = $1', [scopeUserId]);
+    });
+
+    beforeEach(async () => {
+      await pool.query('DELETE FROM api_keys WHERE user_id = $1', [scopeUserId]);
+    });
+
+    it('listKeys with no scope returns all non-revoked keys for the user (with scope field)', async () => {
+      const substrateUserId = crypto.randomUUID();
+      await seedKey('substrate', substrateUserId);
+      await seedKey('app', null);
+      const result = await ApiKeyService.listKeys(pool, scopeUserId);
+      expect(result).toHaveLength(2);
+      expect(result.map((k: any) => k.scope).sort()).toEqual(['app', 'substrate']);
+    });
+
+    it('listKeys with scope=substrate returns only substrate keys', async () => {
+      const substrateUserId = crypto.randomUUID();
+      await seedKey('substrate', substrateUserId);
+      await seedKey('app', null);
+      const result = await ApiKeyService.listKeys(pool, scopeUserId, 'substrate');
+      expect(result).toHaveLength(1);
+      expect(result.every((k: any) => k.scope === 'substrate')).toBe(true);
+    });
+
+    it('listKeys with scope=app returns only app keys', async () => {
+      const substrateUserId = crypto.randomUUID();
+      await seedKey('substrate', substrateUserId);
+      await seedKey('app', null);
+      const result = await ApiKeyService.listKeys(pool, scopeUserId, 'app');
+      expect(result).toHaveLength(1);
+      expect(result.every((k: any) => k.scope === 'app')).toBe(true);
+    });
   });
 });

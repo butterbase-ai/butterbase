@@ -119,14 +119,22 @@ export class ApiKeyService {
 
   /**
    * List all API keys for a user (never returns hashes)
+   * Optionally filter by scope: 'app' | 'substrate'
    */
-  static async listKeys(pool: Pool, userId: string) {
+  static async listKeys(pool: Pool, userId: string, scope?: 'app' | 'substrate') {
+    const params: unknown[] = [userId];
+    let where = `user_id = $1 AND revoked_at IS NULL`;
+    if (scope === 'app' || scope === 'substrate') {
+      params.push(scope);
+      where += ` AND scope = $${params.length}`;
+    }
     const result = await pool.query(
-      `SELECT id, key_prefix, name, scopes, last_used_at, expires_at, created_at
+      `SELECT id, key_prefix, name, scopes, scope, substrate_user_id,
+              last_used_at, expires_at, created_at
        FROM api_keys
-       WHERE user_id = $1 AND revoked_at IS NULL
+       WHERE ${where}
        ORDER BY created_at DESC`,
-      [userId]
+      params
     );
 
     return result.rows;
