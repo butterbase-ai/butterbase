@@ -244,9 +244,26 @@ export async function aiConfigRoutes(app: FastifyInstance) {
   // Chat completions endpoint (OpenAI-compatible)
   app.post('/v1/:appId/chat/completions', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);  // Can be platform user or app user
+    const userId = requireUserId(request);
 
     try {
+      // Authorize caller against the app and resolve the billing identity.
+      // Per-app AI routes always bill the app owner's credit pool — never the
+      // caller's — so that an end-user (or any other platform user) hitting a
+      // deployed app can't silently drain their own credits. Until org / scoped
+      // access lands, only the owner themselves may call these routes.
+      const ownerResult = await app.controlDb.query<{ owner_id: string }>(
+        'SELECT owner_id FROM apps WHERE id = $1',
+        [appId]
+      );
+      if (ownerResult.rows.length === 0) {
+        return reply.code(404).send({ error: 'app_not_found', code: 'APP_NOT_FOUND' });
+      }
+      const ownerId = ownerResult.rows[0].owner_id;
+      if (ownerId !== userId) {
+        return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
+      }
+
       const body = chatCompletionSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
@@ -282,7 +299,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId, region,
+            appId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -306,7 +323,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       const response = await proxyChatCompletion(
         app.controlDb,
         appId,
-        userId,
+        ownerId,
         body as Parameters<typeof proxyChatCompletion>[3]
       );
 
@@ -374,6 +391,20 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     try {
+      // Authorize caller and resolve billing identity — bill the app owner, not the caller.
+      // See the chat completions route above for the rationale.
+      const ownerResult = await app.controlDb.query<{ owner_id: string }>(
+        'SELECT owner_id FROM apps WHERE id = $1',
+        [appId]
+      );
+      if (ownerResult.rows.length === 0) {
+        return reply.code(404).send({ error: 'app_not_found', code: 'APP_NOT_FOUND' });
+      }
+      const ownerId = ownerResult.rows[0].owner_id;
+      if (ownerId !== userId) {
+        return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
+      }
+
       const body = embeddingSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
@@ -400,7 +431,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId, region,
+            appId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -412,7 +443,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       const response = await proxyEmbedding(
         app.controlDb,
         appId,
-        userId,
+        ownerId,
         body as Parameters<typeof proxyEmbedding>[3]
       );
 

@@ -97,6 +97,20 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     try {
+      // Authorize caller and resolve billing identity — bill the app owner, not the caller.
+      // See ai-config.ts (chat completions) for the rationale.
+      const ownerResult = await app.controlDb.query<{ owner_id: string }>(
+        'SELECT owner_id FROM apps WHERE id = $1',
+        [appId]
+      );
+      if (ownerResult.rows.length === 0) {
+        return reply.code(404).send({ error: 'app_not_found', code: 'APP_NOT_FOUND' });
+      }
+      const ownerId = ownerResult.rows[0].owner_id;
+      if (ownerId !== userId) {
+        return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
+      }
+
       const body = videoSubmitSchema.parse(request.body);
       const region = await resolveAppHomeRegion(app.controlDb, appId);
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
@@ -104,14 +118,14 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const submit = await routeVideoSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
           adapters, markupPct: config.aiRouter.markupPct,
-          appId, userId, region },
+          appId, userId: ownerId, region },
         body,
       );
 
       let jobId: string;
       try {
         jobId = await insertVideoJob(runtimePool, {
-          appId, userId, model: body.model, requestJson: body,
+          appId, userId: ownerId, model: body.model, requestJson: body,
           upstreamRouter: submit.chosenRouter,
           upstreamJobId: submit.upstreamJobId,
           upstreamPollingUrl: submit.pollingUrl,
