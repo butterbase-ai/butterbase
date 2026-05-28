@@ -494,6 +494,10 @@ try {
   app.log.info('substrate overlay routes registered');
   await app.register(overlay.substrateInternalBridge);
   app.log.info('substrate internal bridge registered');
+  // @ts-expect-error — overlay path resolved at runtime
+  const appSubstrate = await import('../../../cloud-overlays/dist/cloud-overlays/control-api-app-substrate.js');
+  await app.register(appSubstrate.appSubstrateRoutes);
+  app.log.info('app-substrate link routes registered');
 } catch (err) {
   app.log.info({ err: err instanceof Error ? err.message : err }, 'substrate overlay not present, skipping');
 }
