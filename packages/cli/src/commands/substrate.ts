@@ -129,8 +129,12 @@ export async function substrateSettingsShowCommand(opts: { json?: boolean }) {
   } catch (e) { handleAuthError(e); }
 }
 
-// Stubs - implemented in Task 9 (inspect) and Task 10 (write commands)
-export async function substrateLedgerInspectCommand(_actionId: string, _opts: { json?: boolean }) { fail('not yet implemented (Task 9)'); }
+export async function substrateLedgerInspectCommand(actionId: string, _opts: { json?: boolean }) {
+  try {
+    const res = await apiGet<unknown>(`/v1/me/substrate/actions/${encodeURIComponent(actionId)}`);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
 
 export async function substrateProposeCommand(
   capability: string,
@@ -164,9 +168,12 @@ export async function substrateRejectCommand(actionId: string, opts: { reason?: 
 
 export async function substrateEntitiesUpdateCommand(id: string, opts: { patch?: string; json?: boolean }) {
   if (!opts.patch) fail('missing --patch @path/to/file.json');
-  const body = readJsonFile(opts.patch) as Record<string, unknown>;
+  const patch = readJsonFile(opts.patch) as Record<string, unknown>;
+  // Entity mutations flow through the substrate action ledger for auditability —
+  // there is no direct PUT route. We propose an `update_entity` capability action.
+  const body = { capability: 'update_entity', payload: { id, ...patch } };
   try {
-    const res = await apiPut<unknown>(`/v1/me/substrate/entities/${encodeURIComponent(id)}`, body);
+    const res = await apiPost<unknown>('/v1/me/substrate/actions/propose', body);
     console.log(JSON.stringify(res, null, 2));
   } catch (e) { handleAuthError(e); }
 }

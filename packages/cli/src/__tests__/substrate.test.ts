@@ -10,6 +10,7 @@ vi.mock('../lib/api-client.js', () => ({
 import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api-client.js';
 import {
   substrateLedgerCommand,
+  substrateLedgerInspectCommand,
   substrateEntitiesListCommand,
   substrateEntitiesGetCommand,
   substrateMemoryCommand,
@@ -40,6 +41,12 @@ describe('read commands', () => {
     (apiGet as any).mockResolvedValue({ entities: [] });
     await substrateEntitiesListCommand({ type: 'person', limit: '10', json: true });
     expect((apiGet as any).mock.calls[0][0]).toBe('/v1/me/substrate/entities?type=person&limit=10');
+  });
+
+  it('ledger inspect fetches a single action by id', async () => {
+    (apiGet as any).mockResolvedValue({ id: 'act_1', capability: 'record_decision' });
+    await substrateLedgerInspectCommand('act_1', { json: true });
+    expect(apiGet).toHaveBeenCalledWith('/v1/me/substrate/actions/act_1');
   });
 
   it('entities get fetches a single entity', async () => {
@@ -149,11 +156,14 @@ describe('write commands', () => {
     expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/actions/act_1/reject', { reason: 'no' });
   });
 
-  it('entities update sends PUT /entities/:id with patch body', async () => {
-    (apiPut as any).mockResolvedValue({ id: 'ent_1' });
+  it('entities update proposes update_entity action (mutations flow through ledger, not PUT)', async () => {
+    (apiPost as any).mockResolvedValue({ action_id: 'act_42', verdict: { result: 'auto_approved' } });
     const patch = tmpJson({ display_name: 'New name' });
     await substrateEntitiesUpdateCommand('ent_1', { patch, json: true });
-    expect(apiPut).toHaveBeenCalledWith('/v1/me/substrate/entities/ent_1', { display_name: 'New name' });
+    expect(apiPost).toHaveBeenCalledWith('/v1/me/substrate/actions/propose', {
+      capability: 'update_entity',
+      payload: { id: 'ent_1', display_name: 'New name' },
+    });
   });
 
   it('outbox cancel sends POST /outbox/:id/cancel', async () => {
