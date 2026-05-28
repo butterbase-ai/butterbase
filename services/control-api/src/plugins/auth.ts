@@ -151,17 +151,20 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       }
 
       try {
-        // Upsert user into platform_users
+        // Upsert user into platform_users. We return plan_id from the INSERT
+        // itself (DB default 'playground') so the signup-grant path below does
+        // not race with provisionStripeCustomer to read it back.
         const result = await fastify.controlDb.query(
           `INSERT INTO platform_users (cognito_sub, email, email_verified)
            VALUES ($1, $2, $3)
            ON CONFLICT (cognito_sub)
            DO UPDATE SET email = $2, email_verified = $3, updated_at = now()
-           RETURNING id, stripe_customer_id`,
+           RETURNING id, stripe_customer_id, plan_id`,
           [claims.sub, claims.email, claims.email_verified]
         );
 
         const userId = result.rows[0].id;
+        const planId = result.rows[0].plan_id;
 
         // Auto-provision Stripe customer + Playground subscription for new users
         if (!result.rows[0].stripe_customer_id) {
@@ -174,15 +177,13 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
           // Fire-and-forget: errors logged but never block auth.
           (async () => {
             try {
-              const planRow = await fastify.controlDb.query<{ plan_id: string }>(
-                `SELECT plan_id FROM platform_users WHERE id = $1`,
-                [userId]
-              );
-              const planId = planRow.rows[0]?.plan_id ?? 'free';
               const { grantSignupCredits } = await import('../services/credit-grants-service.js');
               await grantSignupCredits(fastify.controlDb, { userId, planId });
             } catch (err) {
-              fastify.log.error({ err }, `Failed to grant signup credits to user ${userId}`);
+              fastify.log.error(
+                { err, userId, planId },
+                'signup-grant: failed to grant signup credits'
+              );
             }
           })();
         }
