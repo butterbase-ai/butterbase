@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { apiError } from '../utils/api-error.js';
 import { isHttpError } from '../services/error-handler.js';
-import { requireUserId } from '../utils/require-auth.js';
+import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRedisClient } from '../services/redis.js';
@@ -94,23 +94,12 @@ export async function aiVideoRoutes(app: FastifyInstance) {
 
   app.post('/v1/:appId/videos/completions', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);
+
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
 
     try {
-      // Authorize caller and resolve billing identity — bill the app owner, not the caller.
-      // See ai-config.ts (chat completions) for the rationale.
-      const ownerResult = await app.controlDb.query<{ owner_id: string }>(
-        'SELECT owner_id FROM apps WHERE id = $1',
-        [appId]
-      );
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'app_not_found', code: 'APP_NOT_FOUND' });
-      }
-      const ownerId = ownerResult.rows[0].owner_id;
-      if (ownerId !== userId) {
-        return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
-      }
-
       const body = videoSubmitSchema.parse(request.body);
       const region = await resolveAppHomeRegion(app.controlDb, appId);
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
@@ -146,7 +135,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         });
         app.log.error({
           err: insertErr,
-          appId, userId,
+          appId, ownerId,
           upstreamRouter: submit.chosenRouter,
           upstreamJobId: submit.upstreamJobId,
         }, 'video: insertVideoJob failed AFTER upstream submit — orphaned upstream job');
@@ -156,19 +145,24 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const publicPollingUrl = `${publicProto(request)}://${publicHost(request)}/v1/${appId}/videos/completions/${jobId}`;
       return reply.code(202).send({ job_id: jobId, status: 'pending', polling_url: publicPollingUrl });
     } catch (error) {
-      return handleVideoError(app, reply, userId, error);
+      return handleVideoError(app, reply, ownerId, error);
     }
   });
 
   app.get('/v1/:appId/videos/completions/:jobId', async (request, reply) => {
     const { appId, jobId } = request.params as { appId: string; jobId: string };
-    const userId = requireUserId(request);
+
+    // Same authz model as POST — owner / end-user JWT for this app / scoped key
+    // can poll any job in this app. Per-end-user job isolation would require
+    // storing the end-user sub on video_jobs (not done yet).
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
 
     try {
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
-      if (job.user_id !== userId) return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
 
       const absoluteBase = `${publicProto(request)}://${publicHost(request)}`;
 
@@ -180,7 +174,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
-        appId, userId, region,
+        appId, userId: ownerId, region,
       };
       const result = await pollAndSettleVideoJob(ctx, job);
 
@@ -194,13 +188,17 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         polling_url: `${absoluteBase}/v1/${appId}/videos/completions/${jobId}`,
       });
     } catch (error) {
-      return handleVideoError(app, reply, userId, error);
+      return handleVideoError(app, reply, ownerId, error);
     }
   });
 
   app.get('/v1/:appId/videos/completions/:jobId/content', async (request, reply) => {
     const { appId, jobId } = request.params as { appId: string; jobId: string };
-    const userId = requireUserId(request);
+
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
+
     const index = parseInt((request.query as { index?: string }).index ?? '0', 10);
     if (Number.isNaN(index) || index < 0) {
       return reply.code(400).send({
@@ -214,7 +212,6 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
-      if (job.user_id !== userId) return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
       if (job.status !== 'completed') {
         return reply.code(409).send({ error: 'job_not_completed', code: 'JOB_NOT_COMPLETED', current_status: job.status });
       }
@@ -229,7 +226,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         .header('Content-Type', contentType)
         .send(Readable.fromWeb(stream as any));
     } catch (error) {
-      return handleVideoError(app, reply, userId, error);
+      return handleVideoError(app, reply, ownerId, error);
     }
   });
 }

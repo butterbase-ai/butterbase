@@ -9,6 +9,7 @@ import { proxyChatCompletion, proxyEmbedding, getAvailableModels, OpenRouterErro
 import { getAiUsageSummary } from '../services/ai-usage-logger.js';
 import { encrypt, decrypt } from '../services/crypto.js';
 import { requireUserId } from '../utils/require-auth.js';
+import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
@@ -244,26 +245,15 @@ export async function aiConfigRoutes(app: FastifyInstance) {
   // Chat completions endpoint (OpenAI-compatible)
   app.post('/v1/:appId/chat/completions', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);
+
+    // Authorize the caller (owner JWT/key, end-user JWT for this app, or
+    // app-scoped API key) and resolve the billing identity. See
+    // authorize-app-call.ts for the full policy.
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
 
     try {
-      // Authorize caller against the app and resolve the billing identity.
-      // Per-app AI routes always bill the app owner's credit pool — never the
-      // caller's — so that an end-user (or any other platform user) hitting a
-      // deployed app can't silently drain their own credits. Until org / scoped
-      // access lands, only the owner themselves may call these routes.
-      const ownerResult = await app.controlDb.query<{ owner_id: string }>(
-        'SELECT owner_id FROM apps WHERE id = $1',
-        [appId]
-      );
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'app_not_found', code: 'APP_NOT_FOUND' });
-      }
-      const ownerId = ownerResult.rows[0].owner_id;
-      if (ownerId !== userId) {
-        return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
-      }
-
       const body = chatCompletionSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
@@ -348,7 +338,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       // OpenRouterError all satisfy isHttpError and would otherwise escape to
       // the global handler which masks them as a generic 500.
       if (error instanceof InsufficientCreditsError) {
-        const ar = await readAutoRefillState(app.controlDb, userId).catch(() => ({
+        const ar = await readAutoRefillState(app.controlDb, ownerId).catch(() => ({
           enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
         }));
         return reply.code(402).send({
@@ -388,23 +378,12 @@ export async function aiConfigRoutes(app: FastifyInstance) {
   // Embeddings endpoint (OpenAI-compatible)
   app.post('/v1/:appId/embeddings', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);
+
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
 
     try {
-      // Authorize caller and resolve billing identity — bill the app owner, not the caller.
-      // See the chat completions route above for the rationale.
-      const ownerResult = await app.controlDb.query<{ owner_id: string }>(
-        'SELECT owner_id FROM apps WHERE id = $1',
-        [appId]
-      );
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'app_not_found', code: 'APP_NOT_FOUND' });
-      }
-      const ownerId = ownerResult.rows[0].owner_id;
-      if (ownerId !== userId) {
-        return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
-      }
-
       const body = embeddingSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
@@ -451,7 +430,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       return reply.code(response.status).send(data);
     } catch (error) {
       if (error instanceof InsufficientCreditsError) {
-        const ar = await readAutoRefillState(app.controlDb, userId).catch(() => ({
+        const ar = await readAutoRefillState(app.controlDb, ownerId).catch(() => ({
           enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
         }));
         return reply.code(402).send({
