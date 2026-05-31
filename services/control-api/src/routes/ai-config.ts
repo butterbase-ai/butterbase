@@ -9,6 +9,7 @@ import { proxyChatCompletion, proxyEmbedding, getAvailableModels, OpenRouterErro
 import { getAiUsageSummary } from '../services/ai-usage-logger.js';
 import { encrypt, decrypt } from '../services/crypto.js';
 import { requireUserId } from '../utils/require-auth.js';
+import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
@@ -244,7 +245,13 @@ export async function aiConfigRoutes(app: FastifyInstance) {
   // Chat completions endpoint (OpenAI-compatible)
   app.post('/v1/:appId/chat/completions', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);  // Can be platform user or app user
+
+    // Authorize the caller (owner JWT/key, end-user JWT for this app, or
+    // app-scoped API key) and resolve the billing identity. See
+    // authorize-app-call.ts for the full policy.
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
 
     try {
       const body = chatCompletionSchema.parse(request.body);
@@ -282,7 +289,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId, region,
+            appId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -306,7 +313,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       const response = await proxyChatCompletion(
         app.controlDb,
         appId,
-        userId,
+        ownerId,
         body as Parameters<typeof proxyChatCompletion>[3]
       );
 
@@ -331,7 +338,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       // OpenRouterError all satisfy isHttpError and would otherwise escape to
       // the global handler which masks them as a generic 500.
       if (error instanceof InsufficientCreditsError) {
-        const ar = await readAutoRefillState(app.controlDb, userId).catch(() => ({
+        const ar = await readAutoRefillState(app.controlDb, ownerId).catch(() => ({
           enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
         }));
         return reply.code(402).send({
@@ -371,7 +378,10 @@ export async function aiConfigRoutes(app: FastifyInstance) {
   // Embeddings endpoint (OpenAI-compatible)
   app.post('/v1/:appId/embeddings', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);
+
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
 
     try {
       const body = embeddingSchema.parse(request.body);
@@ -400,7 +410,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId, region,
+            appId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -412,7 +422,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       const response = await proxyEmbedding(
         app.controlDb,
         appId,
-        userId,
+        ownerId,
         body as Parameters<typeof proxyEmbedding>[3]
       );
 
@@ -420,7 +430,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       return reply.code(response.status).send(data);
     } catch (error) {
       if (error instanceof InsufficientCreditsError) {
-        const ar = await readAutoRefillState(app.controlDb, userId).catch(() => ({
+        const ar = await readAutoRefillState(app.controlDb, ownerId).catch(() => ({
           enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
         }));
         return reply.code(402).send({

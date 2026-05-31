@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { apiError } from '../utils/api-error.js';
 import { isHttpError } from '../services/error-handler.js';
-import { requireUserId } from '../utils/require-auth.js';
+import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRedisClient } from '../services/redis.js';
@@ -94,7 +94,11 @@ export async function aiVideoRoutes(app: FastifyInstance) {
 
   app.post('/v1/:appId/videos/completions', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);
+
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
+    const endUserSub = authz.caller.kind === 'end_user' ? authz.caller.sub : null;
 
     try {
       const body = videoSubmitSchema.parse(request.body);
@@ -104,14 +108,14 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const submit = await routeVideoSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
           adapters, markupPct: config.aiRouter.markupPct,
-          appId, userId, region },
+          appId, userId: ownerId, region },
         body,
       );
 
       let jobId: string;
       try {
         jobId = await insertVideoJob(runtimePool, {
-          appId, userId, model: body.model, requestJson: body,
+          appId, userId: ownerId, endUserSub, model: body.model, requestJson: body,
           upstreamRouter: submit.chosenRouter,
           upstreamJobId: submit.upstreamJobId,
           upstreamPollingUrl: submit.pollingUrl,
@@ -132,7 +136,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         });
         app.log.error({
           err: insertErr,
-          appId, userId,
+          appId, ownerId,
           upstreamRouter: submit.chosenRouter,
           upstreamJobId: submit.upstreamJobId,
         }, 'video: insertVideoJob failed AFTER upstream submit — orphaned upstream job');
@@ -142,19 +146,28 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const publicPollingUrl = `${publicProto(request)}://${publicHost(request)}/v1/${appId}/videos/completions/${jobId}`;
       return reply.code(202).send({ job_id: jobId, status: 'pending', polling_url: publicPollingUrl });
     } catch (error) {
-      return handleVideoError(app, reply, userId, error);
+      return handleVideoError(app, reply, ownerId, error);
     }
   });
 
   app.get('/v1/:appId/videos/completions/:jobId', async (request, reply) => {
     const { appId, jobId } = request.params as { appId: string; jobId: string };
-    const userId = requireUserId(request);
+
+    // Same authz model as POST — owner / end-user JWT / app-scoped key.
+    // Per-end-user isolation is enforced on the row below.
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
 
     try {
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
-      if (job.user_id !== userId) return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
+      // End-users can only see jobs they submitted themselves. 404 (not 403)
+      // because revealing existence would leak that *some* other user owns it.
+      if (authz.caller.kind === 'end_user' && job.end_user_sub !== authz.caller.sub) {
+        return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+      }
 
       const absoluteBase = `${publicProto(request)}://${publicHost(request)}`;
 
@@ -166,7 +179,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
-        appId, userId, region,
+        appId, userId: ownerId, region,
       };
       const result = await pollAndSettleVideoJob(ctx, job);
 
@@ -180,13 +193,17 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         polling_url: `${absoluteBase}/v1/${appId}/videos/completions/${jobId}`,
       });
     } catch (error) {
-      return handleVideoError(app, reply, userId, error);
+      return handleVideoError(app, reply, ownerId, error);
     }
   });
 
   app.get('/v1/:appId/videos/completions/:jobId/content', async (request, reply) => {
     const { appId, jobId } = request.params as { appId: string; jobId: string };
-    const userId = requireUserId(request);
+
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
+
     const index = parseInt((request.query as { index?: string }).index ?? '0', 10);
     if (Number.isNaN(index) || index < 0) {
       return reply.code(400).send({
@@ -200,7 +217,9 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
-      if (job.user_id !== userId) return reply.code(403).send({ error: 'forbidden', code: 'FORBIDDEN' });
+      if (authz.caller.kind === 'end_user' && job.end_user_sub !== authz.caller.sub) {
+        return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+      }
       if (job.status !== 'completed') {
         return reply.code(409).send({ error: 'job_not_completed', code: 'JOB_NOT_COMPLETED', current_status: job.status });
       }
@@ -215,7 +234,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         .header('Content-Type', contentType)
         .send(Readable.fromWeb(stream as any));
     } catch (error) {
-      return handleVideoError(app, reply, userId, error);
+      return handleVideoError(app, reply, ownerId, error);
     }
   });
 }

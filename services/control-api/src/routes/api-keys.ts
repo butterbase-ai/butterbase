@@ -21,6 +21,29 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       }));
     }
 
+    // Validate `app:<appId>` scopes against ownership. Without this check the
+    // delegation path (granting a key access to a specific app's AI routes)
+    // would let any logged-in user mint a key bearing another developer's app
+    // scope and drain that owner's credits — exactly the leak we're closing.
+    const appScopes = (scopes ?? []).filter((s) => typeof s === 'string' && s.startsWith('app:'));
+    if (appScopes.length > 0) {
+      const appIds = Array.from(new Set(appScopes.map((s) => s.slice('app:'.length))));
+      const r = await app.controlDb.query<{ id: string }>(
+        `SELECT id FROM apps WHERE owner_id = $1 AND id = ANY($2::text[])`,
+        [userId, appIds]
+      );
+      const owned = new Set(r.rows.map((row) => row.id));
+      const notOwned = appIds.filter((id) => !owned.has(id));
+      if (notOwned.length > 0) {
+        return reply.code(403).send(createAgentError({
+          code: 'AUTH_INSUFFICIENT_PERMISSIONS',
+          message: `Cannot grant scopes for apps you don't own: ${notOwned.map((id) => `app:${id}`).join(', ')}`,
+          remediation: 'Only the owner of an app may mint a key bearing its `app:<appId>` scope.',
+          documentation_url: getDocUrl('AUTH_INSUFFICIENT_PERMISSIONS'),
+        }));
+      }
+    }
+
     const result = await ApiKeyService.generateApiKey(
       app.controlDb,
       userId,

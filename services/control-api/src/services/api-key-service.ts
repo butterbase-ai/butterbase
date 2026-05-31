@@ -11,12 +11,20 @@ const apiKeyCacheKey = (keyHash: string) => `auth:apikey:${keyHash}`;
 
 /**
  * Known scope values:
- *   '*'           — full access; default for all keys minted today
- *   'ai:gateway'  — grants access to the app-less model gateway endpoints
- *                   (POST /v1/chat/completions, POST /v1/embeddings,
- *                    GET  /v1/models). Use this for keys distributed to
- *                    end users who should only access the gateway, not
- *                    other control-API resources.
+ *   '*'              — full access for the key's own user. Does NOT grant
+ *                      cross-user access: an `*` key minted by Alice can only
+ *                      hit Alice's own apps. To delegate access to a specific
+ *                      app owned by someone else, use the `app:<appId>` scope.
+ *   'ai:gateway'     — grants access to the app-less model gateway endpoints
+ *                      (POST /v1/chat/completions, POST /v1/embeddings,
+ *                       GET  /v1/models). Use this for keys distributed to
+ *                       end users who should only access the gateway, not
+ *                       other control-API resources.
+ *   'app:<appId>'    — grants access to the per-app AI routes
+ *                      (POST /v1/:appId/{chat,embeddings,videos}/completions)
+ *                      for that one appId, **billing the app owner**. Use this
+ *                      when a developer wants to mint a key for a third-party
+ *                      integrator without granting full account access.
  *
  * New scopes can be added without a migration — `scopes` is a TEXT[] column.
  * Route handlers gate access by checking `request.auth.scopes`.
