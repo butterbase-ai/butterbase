@@ -38,71 +38,66 @@ export function cloneRoutes(app: FastifyInstance) {
   app.post('/v1/templates/:source_app_id/clone', async (request, reply) => {
     const { source_app_id } = request.params as { source_app_id: string };
     const body = (request.body ?? {}) as { name?: string; region?: string };
+    const userId = requireUserId(request);
+
+    // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
+    // user_app_index. We translate to the same generic 404 we use for the
+    // non-public case below, to avoid leaking existence information.
+    let sourcePool;
     try {
-      const userId = requireUserId(request);
-
-      // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
-      // user_app_index. We translate to the same generic 404 we use for the
-      // non-public case below, to avoid leaking existence information.
-      let sourcePool;
-      try {
-        sourcePool = await getRuntimeDbForApp(app.controlDb, source_app_id);
-      } catch (err) {
-        if (err instanceof AppNotFoundError) {
-          return reply.code(404).send(createAgentError({
-            code: RESOURCE_NOT_FOUND,
-            message: 'Source app not found or not public.',
-            remediation: 'Verify the app id and that the source app has visibility=public.',
-            documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
-          }));
-        }
-        throw err;
-      }
-
-      const srcRow = await sourcePool.query<{
-        id: string;
-        visibility: string;
-        region: string;
-        repo_latest_snapshot: string | null;
-      }>(
-        `SELECT id, visibility, region, repo_latest_snapshot FROM apps WHERE id = $1`,
-        [source_app_id],
-      );
-      const src = srcRow.rows[0];
-      if (!src || src.visibility !== 'public') {
+      sourcePool = await getRuntimeDbForApp(app.controlDb, source_app_id);
+    } catch (err) {
+      if (err instanceof AppNotFoundError) {
         return reply.code(404).send(createAgentError({
           code: RESOURCE_NOT_FOUND,
           message: 'Source app not found or not public.',
-          remediation: 'Only public apps are clonable.',
+          remediation: 'Verify the app id and that the source app has visibility=public.',
           documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
         }));
       }
-      if (!src.repo_latest_snapshot) {
-        return reply.code(400).send(createAgentError({
-          code: VALIDATION_INVALID_SCHEMA,
-          message: 'Source app has no repo snapshot yet.',
-          remediation: 'The source must run `butterbase repo push` at least once before it can be cloned.',
-          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-        }));
-      }
-
-      const destRegion = body.region ?? src.region;
-      const job = await createCloneJob(app.controlDb, {
-        sourceAppId: source_app_id,
-        sourceSnapshotId: src.repo_latest_snapshot,
-        sourceRegion: src.region,
-        destRegion,
-        requestedByUserId: userId,
-        destAppName: body.name,
-      });
-
-      await enqueueCloneTask(source_app_id, src.region, job.id);
-
-      return reply.send({ job_id: job.id, status: 'pending' });
-    } catch (error) {
-      app.log.error({ err: error }, 'Failed to create clone job');
-      return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: (error as Error).message } });
+      throw err;
     }
+
+    const srcRow = await sourcePool.query<{
+      id: string;
+      visibility: string;
+      region: string;
+      repo_latest_snapshot: string | null;
+    }>(
+      `SELECT id, visibility, region, repo_latest_snapshot FROM apps WHERE id = $1`,
+      [source_app_id],
+    );
+    const src = srcRow.rows[0];
+    if (!src || src.visibility !== 'public') {
+      return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: 'Source app not found or not public.',
+        remediation: 'Only public apps are clonable.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
+    }
+    if (!src.repo_latest_snapshot) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Source app has no repo snapshot yet.',
+        remediation: 'The source must run `butterbase repo push` at least once before it can be cloned.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+
+    const destRegion = body.region ?? src.region;
+    const job = await createCloneJob(app.controlDb, {
+      sourceAppId: source_app_id,
+      sourceSnapshotId: src.repo_latest_snapshot,
+      sourceRegion: src.region,
+      destRegion,
+      requestedByUserId: userId,
+      destAppName: body.name,
+    });
+
+    await enqueueCloneTask(source_app_id, src.region, job.id);
+
+    return reply.send({ job_id: job.id, status: 'pending' });
   });
 
   // GET /v1/clone-jobs/:job_id
