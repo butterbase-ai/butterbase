@@ -320,3 +320,92 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
     console.log(chalk.green(`✓ pulled snapshot ${latest.snapshot_id.slice(0, 12)} — ${toDownload.length} downloaded, ${toDelete.length} deleted`));
   }
 }
+
+type RepoStatusFile = { path: string; state: 'unchanged' | 'modified' | 'untracked' | 'deleted' | 'new' };
+
+export async function repoStatusCommand(opts: { app?: string; json?: boolean }) {
+  const appId = await requireBoundApp(opts);
+  const root = process.cwd();
+  const pinned = await getPinnedSnapshotId();
+
+  let remoteLatest: string | null = null;
+  let remoteFiles: Map<string, string> | null = null;  // path → sha256
+  try {
+    const latest = await repoApi.getLatest(appId);
+    remoteLatest = latest.snapshot_id;
+    remoteFiles = new Map(latest.manifest.files.map(f => [f.path, f.sha256]));
+  } catch (e: any) {
+    // 404 = no snapshots yet. Anything else: surface.
+    const msg = String((e as Error).message ?? '');
+    if (!msg.includes('404') && !/not found/i.test(msg)) throw e;
+  }
+
+  let pinnedFiles: Map<string, string> | null = null;
+  if (pinned) {
+    try {
+      const p = await repoApi.getSnapshot(appId, pinned);
+      pinnedFiles = new Map(p.manifest.files.map(f => [f.path, f.sha256]));
+    } catch { /* pruned */ }
+  }
+
+  const ig = await loadIgnoreRules(root);
+  const local: { path: string; sha256: string }[] = [];
+  for await (const f of walkRepo(root, ig)) {
+    const buf = await fs.readFile(f.absPath);
+    local.push({ path: f.relPath, sha256: createHash('sha256').update(buf).digest('hex') });
+  }
+  const localBy = new Map(local.map(f => [f.path, f.sha256]));
+
+  // Diff against pinned (or remote if no pin).
+  const baseline = pinnedFiles ?? remoteFiles ?? new Map<string, string>();
+  const files: RepoStatusFile[] = [];
+  for (const f of local) {
+    const base = baseline.get(f.path);
+    if (base === undefined) {
+      files.push({ path: f.path, state: 'untracked' });
+    } else if (base !== f.sha256) {
+      files.push({ path: f.path, state: 'modified' });
+    } else {
+      files.push({ path: f.path, state: 'unchanged' });
+    }
+  }
+  for (const [p] of baseline) {
+    if (!localBy.has(p)) files.push({ path: p, state: 'deleted' });
+  }
+  // Anything in remote that isn't in pinned or local → new since pin.
+  if (remoteFiles && pinnedFiles) {
+    for (const [p] of remoteFiles) {
+      if (!pinnedFiles.has(p) && !localBy.has(p)) files.push({ path: p, state: 'new' });
+    }
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify({
+      app_id: appId,
+      pinned_snapshot_id: pinned,
+      remote_latest_snapshot_id: remoteLatest,
+      files: files.filter(f => f.state !== 'unchanged'),
+    }, null, 2));
+    return;
+  }
+
+  console.log(`${chalk.bold('app')}      ${appId}`);
+  console.log(`${chalk.bold('pinned')}   ${pinned ? pinned.slice(0, 12) : chalk.gray('(none)')}`);
+  console.log(`${chalk.bold('remote')}   ${remoteLatest ? remoteLatest.slice(0, 12) : chalk.gray('(no snapshots)')}`);
+  if (pinned && remoteLatest && pinned !== remoteLatest) {
+    console.log(chalk.yellow('⚠ pin is behind remote — run `butterbase repo pull`'));
+  }
+  console.log();
+  let printed = 0;
+  for (const f of files) {
+    if (f.state === 'unchanged') continue;
+    printed++;
+    const tag =
+      f.state === 'modified' ? chalk.yellow('M') :
+      f.state === 'untracked' ? chalk.cyan('?') :
+      f.state === 'deleted' ? chalk.red('D') :
+      chalk.green('N');
+    console.log(`  ${tag} ${f.path}`);
+  }
+  if (printed === 0) console.log(chalk.green('working tree clean'));
+}
