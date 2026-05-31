@@ -764,3 +764,7 @@ export async function listOrders(appId: string) {
 export async function getOrder(appId: string, orderId: string) {
   return apiGet<any>(`/v1/${appId}/billing/orders/${orderId}`);
 }
+
+export async function setAppVisibility(appId: string, body: { visibility: 'public' | 'private'; listed?: boolean }) {
+  return apiPatch(`/v1/${appId}/config/visibility`, body);
+}

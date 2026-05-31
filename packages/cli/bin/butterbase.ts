@@ -126,6 +126,11 @@ import {
   substrateSettingsShowCommand,
   substrateSettingsYoloCommand,
 } from '../src/commands/substrate.js';
+import {
+  repoInitCommand, repoPushCommand, repoPullCommand,
+  repoStatusCommand, repoLogCommand, repoWipeCommand,
+} from '../src/commands/repo.js';
+import { visibilityCommand } from '../src/commands/visibility.js';
 
 const program = new Command();
 
@@ -1373,6 +1378,64 @@ substrateSettings
   .description('Enable or disable YOLO mode (auto-approve all actions)')
   .option('--json', 'Output raw JSON')
   .action((state, opts) => substrateSettingsYoloCommand(state, opts));
+
+// Repo
+const repo = program.command('repo').description('Push, pull, and inspect this app\'s repository snapshot');
+
+repo
+  .command('init <app-id>')
+  .description('Bind this folder to an app — writes .butterbase/config.json and seeds .butterbaseignore')
+  .option('--force', 'Overwrite an existing .butterbase/config.json')
+  .option('--no-ignore', 'Skip seeding .butterbaseignore')
+  .action((appId, opts) => repoInitCommand(appId, opts));
+
+repo
+  .command('push')
+  .description('Walk this folder, hash files, upload missing blobs, commit a new snapshot')
+  .option('--app <app-id>', 'Override the bound app')
+  .option('--message <text>', 'Attach a push message to the snapshot')
+  .option('--dry-run', 'Print the manifest summary without contacting the API')
+  .option('--json', 'Output raw JSON on success')
+  .action((opts) => repoPushCommand(opts));
+
+repo
+  .command('pull')
+  .description('Reconcile this folder against the latest remote snapshot')
+  .option('--app <app-id>', 'Override the bound app')
+  .option('--force', 'Drop local changes that conflict with remote deletes')
+  .option('--json', 'Output raw JSON on success')
+  .action((opts) => repoPullCommand(opts));
+
+repo
+  .command('status')
+  .description('git status-style summary of the working tree vs the pinned snapshot')
+  .option('--app <app-id>', 'Override the bound app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => repoStatusCommand(opts));
+
+repo
+  .command('log')
+  .description('List snapshot history (newest first)')
+  .option('--app <app-id>', 'Override the bound app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => repoLogCommand(opts));
+
+repo
+  .command('wipe')
+  .description('Delete the entire repo (irreversible)')
+  .option('--app <app-id>', 'Override the bound app')
+  .option('-y, --yes', 'Skip the name-confirmation prompt')
+  .action((opts) => repoWipeCommand(opts));
+
+// Visibility (top-level convenience wrapper for PATCH /config/visibility)
+program
+  .command('visibility <mode>')
+  .description('Set app visibility: public | private')
+  .option('--app <app-id>', 'Override current app')
+  .option('--listed', 'List in /v1/templates (public only)')
+  .option('--unlisted', 'Hide from /v1/templates (public only)')
+  .option('--json', 'Output raw JSON')
+  .action((mode, opts) => visibilityCommand(mode as 'public' | 'private', opts));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {
