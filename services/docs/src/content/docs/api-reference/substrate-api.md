@@ -11,7 +11,7 @@ The substrate API is a per-user surface: every route operates on the substrate t
 
 All routes accept either:
 
-- A **substrate-scoped API key**: `Authorization: Bearer bb_sub_…` (generate with `bb keys generate --scope substrate`).
+- A **substrate-scoped API key**: `Authorization: Bearer bb_sub_…` (generate with `butterbase keys generate --scope substrate`).
 - A **platform JWT** (dashboard / Cognito session).
 
 Non-substrate-scoped API keys (`bb_sk_…`) are not accepted by these routes — they return `403`.
@@ -330,6 +330,6 @@ The stream does not include payloads — clients are expected to re-fetch the af
 
 ## SDK / CLI
 
-- **CLI**: see [`bb substrate`](/cli/substrate/) for every command.
+- **CLI**: see [`butterbase substrate`](/cli/substrate/) for every command.
 - **TypeScript SDK**: substrate calls are namespaced under `butterbase.substrate.*` (mirror of the HTTP surface).
 - **Inside a function**: `ctx.substrate.*` (`propose`, `getEntity`, `findEntities`, `searchMemory`) — see [Substrate](/core-concepts/substrate/).

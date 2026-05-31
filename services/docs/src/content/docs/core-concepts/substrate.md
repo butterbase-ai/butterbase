@@ -5,7 +5,7 @@ description: A per-user memory and action coordination layer for AI agents — e
 
 Substrate is a per-user layer that gives your AI agents durable memory and a way to take real-world actions through a single audited surface. Instead of each agent owning its own scratchpad and side effects, all your apps share the same substrate for a given user — entities they reference, decisions they record, and actions they propose all land in one ledger you can review and govern.
 
-It plugs into Butterbase the same way [Functions](/core-concepts/functions/) and [Storage](/core-concepts/storage/) do: you call it from inside a function via `ctx.substrate`, from the CLI with [`bb substrate`](/cli/substrate/), or from any client over HTTP with a substrate-scoped API key.
+It plugs into Butterbase the same way [Functions](/core-concepts/functions/) and [Storage](/core-concepts/storage/) do: you call it from inside a function via `ctx.substrate`, from the CLI with [`butterbase substrate`](/cli/substrate/), or from any client over HTTP with a substrate-scoped API key.
 
 ## What you get
 
@@ -58,7 +58,7 @@ When the function runs on behalf of an app, the proposer is recorded as `kind: '
 
 Three ways to reach the substrate over HTTP:
 
-1. **Substrate-scoped API key** (`bb_sub_*`) — for CLIs, SDK clients, and headless integrations. Generate one with `bb keys generate --scope substrate`.
+1. **Substrate-scoped API key** (`bb_sub_*`) — for CLIs, SDK clients, and headless integrations. Generate one with `butterbase keys generate --scope substrate`.
 2. **Cognito session** (the dashboard at [docs.butterbase.ai](https://docs.butterbase.ai)) — handled for you by the web app.
 3. **Inside a deployed function** — `ctx.substrate` is wired automatically when the app is linked to a substrate user; no token to manage.
 
@@ -67,14 +67,14 @@ Three ways to reach the substrate over HTTP:
 By default every action goes through the policy engine and may require approval before it executes. Turn on `yolo_mode` to auto-approve any action where the proposer is a human:
 
 ```bash
-bb substrate settings yolo on
+butterbase substrate settings yolo on
 ```
 
 Agent proposals from `ctx.substrate` are **not** affected by `yolo_mode` for side-effecting capabilities — that's a deliberate safety rail.
 
 ## The dashboard
 
-Visit `/substrate` in your Butterbase dashboard to see the action ledger, entities, memory, attention rules, and pending approvals in a UI. The dashboard is a complete substitute for the CLI — anything you can do with `bb substrate` you can do in the browser.
+Visit `/substrate` in your Butterbase dashboard to see the action ledger, entities, memory, attention rules, and pending approvals in a UI. The dashboard is a complete substitute for the CLI — anything you can do with `butterbase substrate` you can do in the browser.
 
 ## Walkthrough — your first substrate-aware agent
 
@@ -85,7 +85,7 @@ This walkthrough takes you from zero to a function that proposes a decision, an 
 A substrate is created on first use. Either trigger it from the dashboard (click "Open Substrate") or from the CLI:
 
 ```bash
-bb substrate settings show
+butterbase substrate settings show
 ```
 
 If you see `{"yolo_mode": false, ...}`, you're provisioned. If you see a `not provisioned` error with a remediation hint, follow it.
@@ -93,7 +93,7 @@ If you see `{"yolo_mode": false, ...}`, you're provisioned. If you see a `not pr
 ### 2. Generate a substrate-scoped key
 
 ```bash
-bb keys generate --scope substrate --name "my-laptop"
+butterbase keys generate --scope substrate --name "my-laptop"
 # → bb_sub_…  (shown once — store it now)
 export BUTTERBASE_API_KEY="bb_sub_..."
 ```
@@ -103,7 +103,7 @@ The key is bound to your user's substrate. It cannot read or write any *app* dat
 ### 3. Propose your first action from the CLI
 
 ```bash
-bb substrate propose record_decision \
+butterbase substrate propose record_decision \
   --payload '{"title":"Adopt substrate","kind":"strategic","rationale":"agent memory needs a single source of truth"}'
 ```
 
@@ -121,7 +121,7 @@ Returns:
 Your decision is now in `substrate.decisions`. Verify:
 
 ```bash
-bb substrate memory "adopt substrate" --kinds decisions
+butterbase substrate memory "adopt substrate" --kinds decisions
 ```
 
 ### 4. Link an app to substrate
@@ -145,7 +145,7 @@ export async function handler(req, ctx) {
 }
 ```
 
-Deploy with `bb fn deploy` (or via MCP `deploy_function`). Invoke it once; in the action ledger you'll see the new decision attributed to `kind: 'agent'` with `source_app_id` set to your app.
+Deploy with `butterbase fn deploy` (or via MCP `deploy_function`). Invoke it once; in the action ledger you'll see the new decision attributed to `kind: 'agent'` with `source_app_id` set to your app.
 
 ### 6. Add an attention rule
 
@@ -169,13 +169,13 @@ Attention rules let your substrate take initiative on a schedule. They run a [JS
 Save it and create:
 
 ```bash
-bb substrate rules create --file rule.json
+butterbase substrate rules create --file rule.json
 ```
 
 Preview what it would do today without scheduling it:
 
 ```bash
-bb substrate rules preview --file rule.json
+butterbase substrate rules preview --file rule.json
 ```
 
 ### 7. Send execution events to a webhook
@@ -183,7 +183,7 @@ bb substrate rules preview --file rule.json
 When an action with a `send_email_draft` capability auto-executes, the substrate can POST it to your own endpoint:
 
 ```bash
-bb substrate outbox put send_email_draft \
+butterbase substrate outbox put send_email_draft \
   --webhook-url https://example.com/hooks/substrate \
   --signing-secret "$(openssl rand -hex 16)"
 ```
@@ -214,7 +214,7 @@ The server pushes a `{type: 'hello'}` frame on connect, then one message per cha
 
 ## See also
 
-- [CLI: `bb substrate`](/cli/substrate/) — every command for managing substrate from the shell.
+- [CLI: `butterbase substrate`](/cli/substrate/) — every command for managing substrate from the shell.
 - [Substrate API reference](/api-reference/substrate-api/) — every HTTP route, payload, and response shape.
 - [Functions](/core-concepts/functions/) — how `ctx.substrate` plugs in.
 - [Realtime](/core-concepts/realtime/) — the general realtime layer (substrate stream is a sibling, not a replacement).

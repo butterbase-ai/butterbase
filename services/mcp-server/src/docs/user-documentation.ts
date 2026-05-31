@@ -3369,7 +3369,7 @@ Skip it when state is purely app-local (per-row TODOs, ephemeral form state) —
 
 Three ways to reach the substrate over HTTP:
 
-1. **Substrate-scoped API key** (\`bb_sub_*\`) — CLI / SDK / integrations. Generate with \`bb keys generate --scope substrate\`.
+1. **Substrate-scoped API key** (\`bb_sub_*\`) — CLI / SDK / integrations. Generate with \`butterbase keys generate --scope substrate\`.
 2. **Platform JWT** — dashboard / Cognito session.
 3. **Inside a serverless function** — \`ctx.substrate\` is wired automatically when the app is linked to a substrate user; no token to manage.
 
@@ -3496,7 +3496,7 @@ Server-side clients (with a \`bb_sub_\` key) can skip the ticket exchange and pa
 
 ### CLI
 
-The \`bb substrate\` command group mirrors the HTTP surface end-to-end. \`bb substrate ledger\`, \`bb substrate propose <capability>\`, \`bb substrate approve|reject\`, \`bb substrate entities list|get|update\`, \`bb substrate memory <query>\`, \`bb substrate outbox list|cancel|retry\`, \`bb substrate rules list|get|create|enable|disable|delete|firings\`, \`bb substrate snapshots\`, \`bb substrate settings show|yolo on|off\`. All commands accept \`--json\` for scripting. See the [CLI Substrate page](https://docs.butterbase.ai/cli/substrate/) for full syntax.
+The \`butterbase substrate\` command group mirrors the HTTP surface end-to-end. \`butterbase substrate ledger\`, \`butterbase substrate propose <capability>\`, \`butterbase substrate approve|reject\`, \`butterbase substrate entities list|get|update\`, \`butterbase substrate memory <query>\`, \`butterbase substrate outbox list|cancel|retry\`, \`butterbase substrate rules list|get|create|enable|disable|delete|firings\`, \`butterbase substrate snapshots\`, \`butterbase substrate settings show|yolo on|off\`. All commands accept \`--json\` for scripting. See the [CLI Substrate page](https://docs.butterbase.ai/cli/substrate/) for full syntax.
 
 ### Common errors
 

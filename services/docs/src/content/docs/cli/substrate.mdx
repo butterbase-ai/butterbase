@@ -1,16 +1,16 @@
 ---
-title: bb substrate
+title: butterbase substrate
 description: Manage Butterbase substrate from the command line — memory, actions, attention rules, outbox, and settings.
 ---
 
-# `bb substrate`
+# `butterbase substrate`
 
-The `bb substrate` command group gives you scriptable access to the Butterbase substrate: the per-user memory + action coordination plane that backs your AI agents.
+The `butterbase substrate` command group gives you scriptable access to the Butterbase substrate: the per-user memory + action coordination plane that backs your AI agents.
 
 It uses your active Butterbase API key. The key must be **substrate-scoped** — generate one with:
 
 ```bash
-bb keys generate --scope substrate
+butterbase keys generate --scope substrate
 export BUTTERBASE_API_KEY="bb_sk_..."
 ```
 
@@ -18,40 +18,40 @@ All commands accept `--json` to emit the raw API response (suitable for piping t
 
 ## Action ledger
 
-### `bb substrate ledger`
+### `butterbase substrate ledger`
 
 List actions in the substrate ledger.
 
 ```bash
-bb substrate ledger --status executed --capability send_email_draft --limit 25
-bb substrate ledger --before 2026-05-28T00:00:00Z --json | jq '.actions[].id'
+butterbase substrate ledger --status executed --capability send_email_draft --limit 25
+butterbase substrate ledger --before 2026-05-28T00:00:00Z --json | jq '.actions[].id'
 ```
 
-### `bb substrate propose <capability>`
+### `butterbase substrate propose <capability>`
 
 Propose a new action.
 
 ```bash
 echo '{"to":"hello@example.com","subject":"hi","body":"hi"}' > payload.json
-bb substrate propose send_email_draft --payload @payload.json --idempotency-key my-key-1
+butterbase substrate propose send_email_draft --payload @payload.json --idempotency-key my-key-1
 ```
 
-### `bb substrate approve <id>` / `bb substrate reject <id> [--reason]`
+### `butterbase substrate approve <id>` / `butterbase substrate reject <id> [--reason]`
 
 Approve or reject a pending action.
 
 ```bash
-bb substrate approve act_01H...
-bb substrate reject  act_01H... --reason "policy mismatch"
+butterbase substrate approve act_01H...
+butterbase substrate reject  act_01H... --reason "policy mismatch"
 ```
 
 ## Entities
 
 ```bash
-bb substrate entities list --type person
-bb substrate entities get  ent_01H...
+butterbase substrate entities list --type person
+butterbase substrate entities get  ent_01H...
 echo '{"display_name":"Renamed"}' > patch.json
-bb substrate entities update ent_01H... --patch @patch.json
+butterbase substrate entities update ent_01H... --patch @patch.json
 ```
 
 ## Memory
@@ -59,22 +59,22 @@ bb substrate entities update ent_01H... --patch @patch.json
 Full-text search across decisions, commitments, learnings, and principles.
 
 ```bash
-bb substrate memory "OKR planning Q3" --limit 10
+butterbase substrate memory "OKR planning Q3" --limit 10
 ```
 
 ## Outbox
 
 ```bash
-bb substrate outbox list --state pending
-bb substrate outbox cancel ob_01H...
-bb substrate outbox retry  ob_01H...
+butterbase substrate outbox list --state pending
+butterbase substrate outbox cancel ob_01H...
+butterbase substrate outbox retry  ob_01H...
 ```
 
 ## Attention rules
 
 ```bash
-bb substrate rules list --enabled
-bb substrate rules get rule_01H...
+butterbase substrate rules list --enabled
+butterbase substrate rules get rule_01H...
 
 echo '{
   "name": "weekly digest",
@@ -89,11 +89,11 @@ echo '{
   }
 }' > rule.json
 
-bb substrate rules create --file @rule.json
-bb substrate rules enable  rule_01H...
-bb substrate rules disable rule_01H...
-bb substrate rules firings rule_01H... --limit 50
-bb substrate rules delete  rule_01H...
+butterbase substrate rules create --file @rule.json
+butterbase substrate rules enable  rule_01H...
+butterbase substrate rules disable rule_01H...
+butterbase substrate rules firings rule_01H... --limit 50
+butterbase substrate rules delete  rule_01H...
 ```
 
 ## Snapshots
@@ -101,15 +101,15 @@ bb substrate rules delete  rule_01H...
 Daily state snapshots used by attention-rule conditions.
 
 ```bash
-bb substrate snapshots --days 7
+butterbase substrate snapshots --days 7
 ```
 
 ## Settings
 
 ```bash
-bb substrate settings show
-bb substrate settings yolo on
-bb substrate settings yolo off
+butterbase substrate settings show
+butterbase substrate settings yolo on
+butterbase substrate settings yolo off
 ```
 
 ## Output formats
@@ -122,5 +122,5 @@ bb substrate settings yolo off
 If a command returns `your active key is app-scoped`, generate a substrate-scoped key:
 
 ```bash
-bb keys generate --scope substrate
+butterbase keys generate --scope substrate
 ```
