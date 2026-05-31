@@ -344,9 +344,14 @@ export async function getFrontendEnv(appId: string) {
 
 // — Keys wrappers —
 
-export async function generateApiKey(name: string, scopes?: string[]) {
+export async function generateApiKey(
+  name: string,
+  scopes?: string[],
+  scope?: 'app' | 'substrate'
+) {
   const body: Record<string, unknown> = { name };
   if (scopes && scopes.length > 0) body.scopes = scopes;
+  if (scope) body.scope = scope;
   return apiPost<{ key: string; keyId: string; name: string }>('/api-keys', body);
 }
 

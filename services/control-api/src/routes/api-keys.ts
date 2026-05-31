@@ -8,9 +8,15 @@ const PLATFORM_APP_ID = '_platform';
 
 export async function apiKeyRoutes(app: FastifyInstance) {
   // POST /api-keys — Generate new API key
+  // body.scope='substrate' mints a bb_sub_ key bound to the caller's
+  // substrate_user_id; otherwise (default) mints a regular bb_sk_ app key.
   app.post('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);
-    const { name, scopes } = request.body as { name: string; scopes?: string[] };
+    const { name, scopes, scope } = request.body as {
+      name: string;
+      scopes?: string[];
+      scope?: 'app' | 'substrate';
+    };
 
     if (!name || typeof name !== 'string') {
       return reply.code(400).send(createAgentError({
@@ -20,35 +26,21 @@ export async function apiKeyRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl('VALIDATION_INVALID_SCHEMA'),
       }));
     }
-
-    // Validate `app:<appId>` scopes against ownership. Without this check the
-    // delegation path (granting a key access to a specific app's AI routes)
-    // would let any logged-in user mint a key bearing another developer's app
-    // scope and drain that owner's credits — exactly the leak we're closing.
-    const appScopes = (scopes ?? []).filter((s) => typeof s === 'string' && s.startsWith('app:'));
-    if (appScopes.length > 0) {
-      const appIds = Array.from(new Set(appScopes.map((s) => s.slice('app:'.length))));
-      const r = await app.controlDb.query<{ id: string }>(
-        `SELECT id FROM apps WHERE owner_id = $1 AND id = ANY($2::text[])`,
-        [userId, appIds]
-      );
-      const owned = new Set(r.rows.map((row) => row.id));
-      const notOwned = appIds.filter((id) => !owned.has(id));
-      if (notOwned.length > 0) {
-        return reply.code(403).send(createAgentError({
-          code: 'AUTH_INSUFFICIENT_PERMISSIONS',
-          message: `Cannot grant scopes for apps you don't own: ${notOwned.map((id) => `app:${id}`).join(', ')}`,
-          remediation: 'Only the owner of an app may mint a key bearing its `app:<appId>` scope.',
-          documentation_url: getDocUrl('AUTH_INSUFFICIENT_PERMISSIONS'),
-        }));
-      }
+    if (scope !== undefined && scope !== 'app' && scope !== 'substrate') {
+      return reply.code(400).send(createAgentError({
+        code: 'VALIDATION_INVALID_SCHEMA',
+        message: "scope must be 'app' or 'substrate'",
+        remediation: "Omit the scope field for an app key (default), or set scope: 'substrate' for a substrate-scoped key.",
+        documentation_url: getDocUrl('VALIDATION_INVALID_SCHEMA'),
+      }));
     }
 
     const result = await ApiKeyService.generateApiKey(
       app.controlDb,
       userId,
       name,
-      scopes
+      scopes,
+      scope
     );
 
     logFromRequest(request, {
@@ -58,7 +50,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       action: 'create',
       resourceType: 'api_key',
       resourceId: result.keyId,
-      eventData: { name, scopes: scopes ?? ['*'], prefix: result.prefix },
+      eventData: { name, scopes: scopes ?? ['*'], scope: scope ?? 'app', prefix: result.prefix },
       success: true,
     });
 

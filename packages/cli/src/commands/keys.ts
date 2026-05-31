@@ -3,7 +3,10 @@ import ora from 'ora';
 import prompts from 'prompts';
 import { generateApiKey, listApiKeys, revokeApiKey } from '../lib/api-client.js';
 
-export async function keysGenerateCommand(name: string | undefined, options: { scope?: string[]; json?: boolean }) {
+export async function keysGenerateCommand(
+  name: string | undefined,
+  options: { scope?: string[]; substrate?: boolean; json?: boolean }
+) {
   if (!name) {
     const { keyName } = await prompts({
       type: 'text',
@@ -18,7 +21,7 @@ export async function keysGenerateCommand(name: string | undefined, options: { s
   const spinner = ora('Generating API key...').start();
 
   try {
-    const result = await generateApiKey(name!, options.scope);
+    const result = await generateApiKey(name!, options.scope, options.substrate ? 'substrate' : undefined);
     spinner.succeed('API key generated');
 
     if (options.json) {

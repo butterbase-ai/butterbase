@@ -58,7 +58,7 @@ When the function runs on behalf of an app, the proposer is recorded as `kind: '
 
 Three ways to reach the substrate over HTTP:
 
-1. **Substrate-scoped API key** (`bb_sub_*`) — for CLIs, SDK clients, and headless integrations. Generate one with `butterbase keys generate --scope substrate`.
+1. **Substrate-scoped API key** (`bb_sub_*`) — for CLIs, SDK clients, and headless integrations. Generate one with `butterbase keys generate --substrate`.
 2. **Cognito session** (the dashboard at [docs.butterbase.ai](https://docs.butterbase.ai)) — handled for you by the web app.
 3. **Inside a deployed function** — `ctx.substrate` is wired automatically when the app is linked to a substrate user; no token to manage.
 
@@ -93,7 +93,7 @@ If you see `{"yolo_mode": false, ...}`, you're provisioned. If you see a `not pr
 ### 2. Generate a substrate-scoped key
 
 ```bash
-butterbase keys generate --scope substrate --name "my-laptop"
+butterbase keys generate --substrate --name "my-laptop"
 # → bb_sub_…  (shown once — store it now)
 export BUTTERBASE_API_KEY="bb_sub_..."
 ```

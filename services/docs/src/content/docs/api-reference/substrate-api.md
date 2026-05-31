@@ -11,7 +11,7 @@ The substrate API is a per-user surface: every route operates on the substrate t
 
 All routes accept either:
 
-- A **substrate-scoped API key**: `Authorization: Bearer bb_sub_…` (generate with `butterbase keys generate --scope substrate`).
+- A **substrate-scoped API key**: `Authorization: Bearer bb_sub_…` (generate with `butterbase keys generate --substrate`).
 - A **platform JWT** (dashboard / Cognito session).
 
 Non-substrate-scoped API keys (`bb_sk_…`) are not accepted by these routes — they return `403`.

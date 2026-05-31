@@ -3369,7 +3369,7 @@ Skip it when state is purely app-local (per-row TODOs, ephemeral form state) —
 
 Three ways to reach the substrate over HTTP:
 
-1. **Substrate-scoped API key** (\`bb_sub_*\`) — CLI / SDK / integrations. Generate with \`butterbase keys generate --scope substrate\`.
+1. **Substrate-scoped API key** (\`bb_sub_*\`) — CLI / SDK / integrations. Generate with \`butterbase keys generate --substrate\`.
 2. **Platform JWT** — dashboard / Cognito session.
 3. **Inside a serverless function** — \`ctx.substrate\` is wired automatically when the app is linked to a substrate user; no token to manage.
 

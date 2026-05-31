@@ -13,7 +13,7 @@ function handleAuthError(err: unknown): never {
   const e = err as ApiError & { status?: number };
   if (e?.status === 401) fail('your key is invalid or expired — run `butterbase login`');
   if (e?.status === 403 && /scope/i.test(e?.error ?? '')) {
-    fail('your active key is app-scoped — run `butterbase keys generate --scope substrate` and re-export BUTTERBASE_API_KEY');
+    fail('your active key is app-scoped — run `butterbase keys generate --substrate` and re-export BUTTERBASE_API_KEY');
   }
   fail(e?.error ?? String(err));
 }

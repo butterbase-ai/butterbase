@@ -3,6 +3,10 @@ export const APP_ID_LENGTH = 12;
 export const APP_ID_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
 
 export const API_KEY_PREFIX = 'bb_sk_';
+// Substrate-scoped keys live in the same api_keys table but use a distinct
+// prefix so the auth plugin's bb_sub_ passthrough and the substrate overlay's
+// Path A gate can route them correctly.
+export const API_KEY_SUBSTRATE_PREFIX = 'bb_sub_';
 export const API_KEY_RANDOM_LENGTH = 40;
 export const API_KEY_DISPLAY_LENGTH = 12;
 

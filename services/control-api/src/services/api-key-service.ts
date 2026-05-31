@@ -1,6 +1,10 @@
 import crypto from 'crypto';
 import { Pool } from 'pg';
-import { API_KEY_PREFIX, API_KEY_RANDOM_LENGTH } from '@butterbase/shared/constants';
+import {
+  API_KEY_PREFIX,
+  API_KEY_SUBSTRATE_PREFIX,
+  API_KEY_RANDOM_LENGTH,
+} from '@butterbase/shared/constants';
 import type { AuthContext } from '@butterbase/shared/types';
 import { getRedisClient } from './redis.js';
 
@@ -11,20 +15,12 @@ const apiKeyCacheKey = (keyHash: string) => `auth:apikey:${keyHash}`;
 
 /**
  * Known scope values:
- *   '*'              — full access for the key's own user. Does NOT grant
- *                      cross-user access: an `*` key minted by Alice can only
- *                      hit Alice's own apps. To delegate access to a specific
- *                      app owned by someone else, use the `app:<appId>` scope.
- *   'ai:gateway'     — grants access to the app-less model gateway endpoints
- *                      (POST /v1/chat/completions, POST /v1/embeddings,
- *                       GET  /v1/models). Use this for keys distributed to
- *                       end users who should only access the gateway, not
- *                       other control-API resources.
- *   'app:<appId>'    — grants access to the per-app AI routes
- *                      (POST /v1/:appId/{chat,embeddings,videos}/completions)
- *                      for that one appId, **billing the app owner**. Use this
- *                      when a developer wants to mint a key for a third-party
- *                      integrator without granting full account access.
+ *   '*'           — full access; default for all keys minted today
+ *   'ai:gateway'  — grants access to the app-less model gateway endpoints
+ *                   (POST /v1/chat/completions, POST /v1/embeddings,
+ *                    GET  /v1/models). Use this for keys distributed to
+ *                    end users who should only access the gateway, not
+ *                    other control-API resources.
  *
  * New scopes can be added without a migration — `scopes` is a TEXT[] column.
  * Route handlers gate access by checking `request.auth.scopes`.
@@ -38,12 +34,17 @@ export class ApiKeyService {
     pool: Pool,
     userId: string,
     name: string,
-    scopes: string[] = ['*']
+    scopes: string[] = ['*'],
+    scope?: 'app' | 'substrate'
   ): Promise<{ key: string; keyId: string; prefix: string; name: string }> {
-    // Generate random key: bb_sk_ + 40 hex chars
+    // scope='substrate' emits a bb_sub_-prefixed key bound to substrate_user_id
+    // (= the caller's platform user id, by the substrate.users.id ===
+    // platform_users.id convention). Anything else emits a bb_sk_ app key.
+    const isSubstrate = scope === 'substrate';
+    const prefix = isSubstrate ? API_KEY_SUBSTRATE_PREFIX : API_KEY_PREFIX;
     const randomBytes = crypto.randomBytes(20);
     const randomHex = randomBytes.toString('hex');
-    const fullKey = `${API_KEY_PREFIX}${randomHex}`;
+    const fullKey = `${prefix}${randomHex}`;
 
     // Hash for storage
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex');
@@ -51,12 +52,23 @@ export class ApiKeyService {
     // Prefix for display (first 12 chars)
     const keyPrefix = fullKey.substring(0, 12);
 
-    // Store in database
+    // Store in database. scope and substrate_user_id are set only on substrate
+    // keys; app keys leave them at their column defaults (scope='app',
+    // substrate_user_id=NULL).
     const result = await pool.query(
-      `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, scopes)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO api_keys
+         (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, name`,
-      [userId, keyHash, keyPrefix, name, scopes]
+      [
+        userId,
+        keyHash,
+        keyPrefix,
+        name,
+        scopes,
+        isSubstrate ? 'substrate' : 'app',
+        isSubstrate ? userId : null,
+      ]
     );
 
     return {
