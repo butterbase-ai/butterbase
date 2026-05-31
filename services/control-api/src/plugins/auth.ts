@@ -92,6 +92,21 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       return;
     }
 
+    // Substrate-scoped tokens (bb_sub_*) are validated by the substrate overlay's
+    // requireSubstrateProposer preHandler, which looks them up by SHA-256 hash in
+    // api_keys (scope='substrate') and decorates `request.substrateProposer`. This
+    // top-level hook just needs to NOT short-circuit with AUTH_INVALID_TOKEN so
+    // the substrate preHandler can run. Set an anonymous auth so any non-substrate
+    // route that happens to be hit by a substrate token still 401s correctly.
+    if (token && token.startsWith('bb_sub_')) {
+      request.auth = {
+        userId: null,
+        authMethod: 'anonymous',
+        scopes: [],
+      };
+      return;
+    }
+
     // Development escape hatch (anonymous or non-service-key requests only)
     if (!config.auth.enabled) {
       request.auth = {
