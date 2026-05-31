@@ -241,8 +241,11 @@ describe('butterbase repo', () => {
       throw new Error(`unexpected URL: ${url}`);
     });
     await repoStatusCommand({ json: true });
-    const stdout = (logSpy.mock.calls.map((c: any[]) => c[0]).join('\n'));
-    const parsed = JSON.parse(stdout);
+    const jsonCall = logSpy.mock.calls
+      .map((c: any[]) => String(c[0] ?? ''))
+      .find(s => s.trim().startsWith('{'));
+    expect(jsonCall).toBeDefined();
+    const parsed = JSON.parse(jsonCall!);
     const states: Record<string, string> = Object.fromEntries(parsed.files.map((f: any) => [f.path, f.state]));
     expect(states['modified.txt']).toBe('modified');
     expect(states['untracked.txt']).toBe('untracked');
