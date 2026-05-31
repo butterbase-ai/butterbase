@@ -131,6 +131,7 @@ import {
   repoStatusCommand, repoLogCommand, repoWipeCommand,
 } from '../src/commands/repo.js';
 import { visibilityCommand } from '../src/commands/visibility.js';
+import { cloneCommand } from '../src/commands/clone.js';
 
 const program = new Command();
 
@@ -1426,6 +1427,15 @@ repo
   .option('--app <app-id>', 'Override the bound app')
   .option('-y, --yes', 'Skip the name-confirmation prompt')
   .action((opts) => repoWipeCommand(opts));
+
+// Clone
+program
+  .command('clone <source-app-id> [target-dir]')
+  .description('Clone a public app into a new owned app + local folder')
+  .option('--name <text>', 'Name for the new app (defaults to "Clone of <source>")')
+  .option('--region <region>', 'Region for the new app (defaults to source\'s region)')
+  .option('--json', 'Output raw JSON on success')
+  .action((sourceAppId, targetDir, opts) => cloneCommand(sourceAppId, targetDir, opts));
 
 // Visibility (top-level convenience wrapper for PATCH /config/visibility)
 program
