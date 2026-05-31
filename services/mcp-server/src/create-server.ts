@@ -24,6 +24,7 @@ import { registerRagQuery } from './tools/rag-query.js';
 import { registerIntegrations } from './tools/integrations.js';
 import { registerManageAuthConfig } from './tools/manage-auth-config.js';
 import { registerManageApp } from './tools/manage-app.js';
+import { registerManageRepo } from './tools/manage-repo.js';
 import { registerSubmitHackathonEntry } from './tools/submit-hackathon-entry.js';
 import { registerListPartnerApis } from './tools/list-partner-apis.js';
 import { registerManageDurableObjects } from './tools/manage-durable-objects.js';
@@ -94,6 +95,7 @@ export async function createButterbaseMcpServer() {
   registerIntegrations(server);
   registerManageAuthConfig(server);
   registerManageApp(server);
+  registerManageRepo(server);
   registerSubmitHackathonEntry(server);
   registerManageDurableObjects(server);
   registerManageAi(server);
