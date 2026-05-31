@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { authorizeRepoWrite } from '../services/repo-auth.js';
+import { authorizeRepoWrite, authorizeRepoRead } from '../services/repo-auth.js';
 import { AppNotFoundError, AppPausedError } from '../services/app-resolver.js';
 import {
   validateManifest,
@@ -8,18 +8,21 @@ import {
 } from '../services/repo-manifest.js';
 import {
   headBlobs,
+  headBlob,
   presignBlobPut,
+  presignBlobGet,
   putManifest,
   setLatest,
   listSnapshots,
   getManifestJson,
+  getLatestSnapshotId,
   deleteSnapshot,
   deleteBlob,
 } from '../services/repo-storage.js';
 import { planRetention } from '../services/repo-retention.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { config } from '../config.js';
-import { requireUserId } from '../utils/require-auth.js';
+import { requireUserId, tryGetUserId } from '../utils/require-auth.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import {
   VALIDATION_INVALID_SCHEMA,
@@ -196,6 +199,96 @@ export async function repoRoutes(app: FastifyInstance) {
         }));
       }
       return handleRepoRouteError(app, request, reply, error, 'Failed to commit repo snapshot');
+    }
+  });
+
+  // GET /v1/:app_id/repo/snapshots/latest
+  app.get('/v1/:app_id/repo/snapshots/latest', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+    try {
+      const userId = tryGetUserId(request);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+
+      const latestId = await getLatestSnapshotId(ctx.appId);
+      if (!latestId) return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: 'No snapshots have been pushed for this app',
+        remediation: 'Push a snapshot via POST /v1/:app_id/repo/snapshots/prepare + commit.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
+
+      const json = await getManifestJson(ctx.appId, latestId);
+      if (!json) return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: `latest pointer references missing manifest ${latestId}`,
+        remediation: 'Push a new snapshot to overwrite the stale pointer.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
+
+      const manifest = JSON.parse(json);
+      return reply.send({ snapshot_id: latestId, manifest });
+    } catch (error) {
+      return handleRepoRouteError(app, request, reply, error, 'Failed to load latest snapshot');
+    }
+  });
+
+  // GET /v1/:app_id/repo/snapshots/:snapshot_id
+  app.get('/v1/:app_id/repo/snapshots/:snapshot_id', async (request, reply) => {
+    const { app_id, snapshot_id } = request.params as { app_id: string; snapshot_id: string };
+    if (!/^[a-f0-9]{64}$/.test(snapshot_id)) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'snapshot_id must be a 64-char lowercase hex string',
+        remediation: 'Use the snapshot_id returned by prepare/commit.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    try {
+      const userId = tryGetUserId(request);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+
+      const json = await getManifestJson(ctx.appId, snapshot_id);
+      if (!json) return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: `Snapshot ${snapshot_id} not found`,
+        remediation: 'Verify the snapshot_id or push a new snapshot.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
+
+      const manifest = JSON.parse(json);
+      return reply.send({ snapshot_id, manifest });
+    } catch (error) {
+      return handleRepoRouteError(app, request, reply, error, 'Failed to load snapshot');
+    }
+  });
+
+  // GET /v1/:app_id/repo/blobs/:sha256
+  app.get('/v1/:app_id/repo/blobs/:sha256', async (request, reply) => {
+    const { app_id, sha256 } = request.params as { app_id: string; sha256: string };
+    if (!/^[a-f0-9]{64}$/.test(sha256)) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'sha256 must be a 64-char lowercase hex string',
+        remediation: 'Use a sha256 listed in a snapshot manifest.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    try {
+      const userId = tryGetUserId(request);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+
+      const head = await headBlob(ctx.appId, sha256);
+      if (!head.exists) return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: `Blob ${sha256} not found in this app's repo`,
+        remediation: 'The blob may have been pruned. Re-pull a current snapshot manifest first.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
+
+      const downloadUrl = await presignBlobGet(ctx.appId, sha256);
+      return reply.send({ sha256, size: head.size, downloadUrl, expiresIn: 3600 });
+    } catch (error) {
+      return handleRepoRouteError(app, request, reply, error, 'Failed to load blob');
     }
   });
 }

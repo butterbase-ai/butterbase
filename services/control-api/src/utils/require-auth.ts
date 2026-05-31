@@ -13,3 +13,12 @@ export function requireUserId(request: FastifyRequest): string {
   }
   return userId;
 }
+
+/** Returns the authenticated platform user id, or null if anonymous. Does not throw. */
+export function tryGetUserId(request: FastifyRequest): string | null {
+  try {
+    return requireUserId(request);
+  } catch {
+    return null;
+  }
+}
