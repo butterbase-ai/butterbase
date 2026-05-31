@@ -160,6 +160,7 @@ Push has two phases:
 |--------|------|---------|
 | POST | /v1/\{app_id}/repo/snapshots/prepare | Validate a manifest; receive presigned PUTs for missing blobs |
 | POST | /v1/\{app_id}/repo/snapshots/commit | Finalize the snapshot after all blobs are uploaded |
+| GET | /v1/\{app_id}/repo/snapshots | List snapshot history (newest first) |
 | GET | /v1/\{app_id}/repo/snapshots/latest | Fetch the current snapshot manifest |
 | GET | /v1/\{app_id}/repo/snapshots/\{snapshot_id} | Fetch a specific snapshot's manifest |
 | GET | /v1/\{app_id}/repo/blobs/\{sha256} | Receive a presigned GET URL for a single blob |
@@ -224,6 +225,10 @@ Returns `{ snapshot_id, manifest }`. For each file in the manifest, request `GET
 ### Wipe
 
 `DELETE /v1/{app_id}/repo` removes every snapshot, blob, and the `latest` pointer. Cannot be undone.
+
+### Snapshot history
+
+`GET /v1/{app_id}/repo/snapshots` returns `{ snapshots: [{ snapshot_id, created_at }] }` sorted newest-first. Visibility rules are the same as `latest`: anonymous on a public app, owner-only on a private one (returns 404 to non-owners — no existence leak).
 
 ## Per-app subdomains
 

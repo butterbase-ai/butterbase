@@ -1,0 +1,79 @@
+---
+title: Repo (Push / Pull)
+description: Sync a local codebase to your app's content-addressed repo storage.
+---
+
+# `butterbase repo`
+
+`butterbase repo` syncs a folder to your app's repo snapshots. Pushes are content-addressed: unchanged files aren't re-uploaded. The five most recent snapshots are retained.
+
+Repo storage is **not** the same as `butterbase storage` (user-uploaded files). It's a dedicated, reserved area for your app's *source code*. Limits: 10 MB per file, 100 MB per snapshot.
+
+## Bind a folder to an app
+
+```bash
+butterbase repo init <app_id>
+```
+
+Writes `.butterbase/config.json` with `currentApp` set, and seeds a `.butterbaseignore` if none exists. Use `--force` to overwrite an existing `.butterbase/config.json` (the `pinned_snapshot_id` and other fields are preserved). Use `--no-ignore` to skip the `.butterbaseignore` seed.
+
+## Push
+
+```bash
+butterbase repo push [--message "<text>"] [--dry-run] [--json]
+```
+
+Walks the folder, hashes each file, calls the server's `prepare` endpoint, uploads any blobs the server doesn't already have, and commits. On success, updates `.butterbase/config.json` with the new `pinned_snapshot_id`.
+
+`--dry-run` prints the manifest summary (sha + size + path per file) without contacting the API. Useful for inspecting what would be pushed.
+
+## Pull
+
+```bash
+butterbase repo pull [--force] [--json]
+```
+
+Three-way reconcile against the pinned snapshot:
+
+- Files in the remote `latest` that don't match local → fetched and overwritten.
+- Files locally that aren't in `latest`:
+  - If their content matches the pinned snapshot (you haven't touched them), deleted silently.
+  - Otherwise flagged as a conflict; exits with code 1 unless `--force` is passed.
+
+If the pinned snapshot has been pruned server-side, untracked-local deletions always require `--force`.
+
+## Status
+
+```bash
+butterbase repo status [--json]
+```
+
+`git status`-style summary:
+
+- `M` modified locally vs the pinned snapshot
+- `?` untracked (not in pinned)
+- `D` deleted (in pinned, missing locally)
+- `N` new on remote (in `latest` but not in pinned and not locally — pull would bring it in)
+
+## History and wipe
+
+```bash
+butterbase repo log [--json]      # snapshot history newest-first
+butterbase repo wipe              # destructive — name-confirm prompt
+```
+
+## Ignore rules
+
+Three layers, highest-precedence wins:
+
+1. `.butterbaseignore` (negates a default with `!path`)
+2. `.gitignore`
+3. Hardcoded defaults: `.git/`, `node_modules/`, `dist/`, `.next/`, `.turbo/`, `.DS_Store`, `.butterbase/`
+
+## App visibility
+
+```bash
+butterbase visibility <public|private> [--listed|--unlisted] [--app <id>]
+```
+
+Marks the app public or private. When public, `--unlisted` hides it from the templates browse listing (the public templates list is itself shipping in a later release).

@@ -61,6 +61,12 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `secure_app` | Set `access_mode = "authenticated"` and create user-isolation RLS policies on listed tables in one call. |
 | `configure_auth_hook` | Configure (or remove) the function invoked after every successful auth event. |
 
+## App Repo
+
+| Tool | Description |
+|------|-------------|
+| `manage_repo` | Push, pull, inspect, or wipe your app's repo (content-addressed code snapshots). MCP pushes are capped at ~1 MB; for larger snapshots shell out to `butterbase repo push`. |
+
 ## Storage
 
 | Tool | Description |
