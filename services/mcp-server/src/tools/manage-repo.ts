@@ -50,10 +50,21 @@ Auth matrix: writes (push, wipe) require app owner. Reads (pull_latest, status, 
       switch (args.action) {
         case 'pull_latest': {
           const latest = await apiGet<{ snapshot_id: string; manifest: Manifest }>(`/v1/${args.app_id}/repo/snapshots/latest`);
-          // Resolve each blob to a presigned URL so agents can fetch directly.
-          const files = await Promise.all(latest.manifest.files.map(async f => {
-            const url = await apiGet<{ sha256: string; size: number; downloadUrl: string }>(`/v1/${args.app_id}/repo/blobs/${f.sha256}`);
-            return { path: f.path, sha256: f.sha256, size: f.size, downloadUrl: url.downloadUrl };
+          const shas = latest.manifest.files.map(f => f.sha256);
+          // De-dup shas — content-addressed storage means multiple paths can share the same sha.
+          const uniqueShas = Array.from(new Set(shas));
+          // Batch endpoint caps at 1000 shas per call; chunk if needed.
+          const urlBySha = new Map<string, string>();
+          for (let i = 0; i < uniqueShas.length; i += 1000) {
+            const chunk = uniqueShas.slice(i, i + 1000);
+            const res = await apiPost<{ blobs: { sha256: string; size: number; downloadUrl: string }[] }>(`/v1/${args.app_id}/repo/blobs/batch`, { shas: chunk });
+            for (const b of res.blobs) urlBySha.set(b.sha256, b.downloadUrl);
+          }
+          const files = latest.manifest.files.map(f => ({
+            path: f.path,
+            sha256: f.sha256,
+            size: f.size,
+            downloadUrl: urlBySha.get(f.sha256) ?? null,
           }));
           return text({ snapshot_id: latest.snapshot_id, files });
         }
