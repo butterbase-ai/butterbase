@@ -4,15 +4,23 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import * as neonClient from './neon-client.js';
 import { getDataProjectIdForRegion } from './neon-projects.js';
-import { runMigrationsWithRetry } from './provisioner.js';
+import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed } from './failure-notifications.service.js';
 import { removeUserAppIndex } from './user-app-index.js';
+import { getCloneJob, setCloneJobStatus } from './clone-jobs.js';
+import {
+  getManifestJson,
+  putManifest,
+  setLatest,
+  copyBlobSameRegion,
+  copyManifestSameRegion,
+} from './repo-storage.js';
 
 interface NeonTask {
   id: number;
   app_id: string;
-  task_type: 'provision' | 'deprovision';
+  task_type: 'provision' | 'deprovision' | 'clone';
   status: string;
   attempts: number;
   max_attempts: number;
@@ -20,6 +28,7 @@ interface NeonTask {
   locked_at: Date | null;
   run_after: Date;
   created_at: Date;
+  task_meta: { job_id?: string } | null;
 }
 
 interface Logger {
@@ -146,8 +155,12 @@ async function processNextTask(
   try {
     if (task.task_type === 'provision') {
       await executeProvision(controlDb, dataPlaneDb, task, logger);
-    } else {
+    } else if (task.task_type === 'deprovision') {
       await executeDeprovision(controlDb, dataPlaneDb, task, logger);
+    } else if (task.task_type === 'clone') {
+      await executeClone(controlDb, dataPlaneDb, task, logger);
+    } else {
+      throw new Error(`Unknown task_type: ${task.task_type}`);
     }
 
     // Mark completed
@@ -359,4 +372,117 @@ async function executeDeprovision(
   await removeUserAppIndex(controlDb, appId).catch((err) =>
     console.warn('[neon-task-worker] user_app_index remove failed', { err, appId }),
   );
+}
+
+/**
+ * Poll the dest app's apps.provisioning_status until 'ready' or timeout.
+ * Returns once provisioning completes; throws on failure or timeout.
+ */
+async function waitForDestReady(
+  controlDb: pg.Pool,
+  destAppId: string,
+  timeoutMs: number = 5 * 60 * 1000,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const appPool = await getRuntimeDbForApp(controlDb, destAppId).catch(() => null);
+    if (appPool) {
+      const r = await appPool.query<{ provisioning_status: string }>(
+        `SELECT provisioning_status FROM apps WHERE id = $1`,
+        [destAppId],
+      );
+      const s = r.rows[0]?.provisioning_status;
+      if (s === 'ready') return;
+      if (s === 'failed') throw new Error('Dest app provisioning failed');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error('Dest app provisioning timed out');
+}
+
+/**
+ * Phase 4a app-template clone: read job, provision fresh dest app, copy
+ * blobs + manifest, set dest's latest pointer, mark job completed.
+ *
+ * CROSS-REGION COPY IS INTENTIONALLY UNIMPLEMENTED. Phase 4a e2e covers
+ * same-region only — cross-region wires up when the first multi-region
+ * test fires (would use copyBlobCrossRegion + putManifest).
+ */
+async function executeClone(
+  controlDb: pg.Pool,
+  dataPlaneDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Clone task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Clone job ${jobId} not found`);
+  if (job.status !== 'pending') {
+    logger.info({ jobId, status: job.status }, '[clone] job no longer pending; skipping');
+    return;
+  }
+
+  await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
+
+  // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
+  //    insertAppRow has no template_source_app_id parameter today — write it via
+  //    a follow-up UPDATE on the dest's home runtime DB.
+  const destAppId = generateAppId();
+  const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
+  await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
+  await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
+
+  // Record template lineage on the dest app row (column added by Phase 1 migration).
+  const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+  await destRuntimePool.query(
+    `UPDATE apps SET template_source_app_id = $1, updated_at = now() WHERE id = $2`,
+    [job.source_app_id, destAppId],
+  );
+
+  // Provision DB + run migrations. provisionAppBackground swallows errors
+  // internally (sets provisioning_status='failed'), so waitForDestReady is
+  // what surfaces failure back to us.
+  provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
+    logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
+  });
+  await waitForDestReady(controlDb, destAppId);
+
+  // 2. Read source manifest.
+  const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
+  if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
+  const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
+
+  // 3. Copy blobs.
+  const sameRegion = job.source_region === job.dest_region;
+  const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
+  for (const sha of distinctShas) {
+    if (sameRegion) {
+      await copyBlobSameRegion(job.source_app_id, destAppId, sha);
+    } else {
+      throw new Error('Cross-region clone not yet wired — Phase 4a is same-region only');
+    }
+  }
+
+  // 4. Copy manifest.
+  if (sameRegion) {
+    await copyManifestSameRegion(job.source_app_id, destAppId, job.source_snapshot_id);
+  } else {
+    await putManifest(destAppId, job.source_snapshot_id, manifestJson);
+  }
+
+  // 5. Set dest's latest pointer + repo_latest_snapshot column.
+  await setLatest(destAppId, job.source_snapshot_id);
+  const destAppPool = await getRuntimeDbForApp(controlDb, destAppId).catch(() => null);
+  if (destAppPool) {
+    await destAppPool.query(
+      `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+      [job.source_snapshot_id, destAppId],
+    );
+  }
+
+  // 6. Mark job completed.
+  await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
+  logger.info({ jobId, destAppId }, '[clone] completed');
 }
