@@ -25,13 +25,10 @@ export function planRetention(
   const keepSet = new Set<string>();
   let recentSlots = retain;
   for (const s of byRecent) {
-    if (pinned.has(s.snapshotId)) {
+    const isPinned = pinned.has(s.snapshotId);
+    if (isPinned || recentSlots > 0) {
       keepSet.add(s.snapshotId);
-      continue;
-    }
-    if (recentSlots > 0) {
-      keepSet.add(s.snapshotId);
-      recentSlots--;
+      if (recentSlots > 0) recentSlots--;
     }
   }
   const retainSnapshots = [...keepSet];

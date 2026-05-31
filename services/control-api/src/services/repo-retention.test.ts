@@ -38,6 +38,16 @@ describe('planRetention', () => {
     expect(plan.dropSnapshots).toEqual(['s2']);
   });
 
+  it('pinning the newest snapshot does not expand retention beyond the limit', () => {
+    // Real-world case: commit handler pins the just-written snapshot, which is also the newest.
+    // Pin must not give it a "free" extra slot — total retained should still equal `retain`.
+    const all = Array.from({ length: 6 }, (_, i) => snap(`s${i}`, i, [`b${i}`]));
+    const newest = 's5';
+    const plan = planRetention(all, new Set([newest]), 5);
+    expect(plan.retainSnapshots.sort()).toEqual(['s1', 's2', 's3', 's4', 's5']);
+    expect(plan.dropSnapshots).toEqual(['s0']);
+  });
+
   it('does not orphan blobs still referenced by retained snapshots', () => {
     const all = [
       snap('old', 1, ['shared']),

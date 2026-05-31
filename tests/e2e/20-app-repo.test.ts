@@ -198,8 +198,12 @@ describe('app repo storage (Phase 2)', () => {
       return (c.json() as any).snapshot_id;
     }
 
+    // S3 LastModified has 1-second resolution; space pushes apart so retention sort is deterministic.
     const ids: string[] = [];
-    for (let i = 0; i < 7; i++) ids.push(await pushOne(`v${i}`));
+    for (let i = 0; i < 7; i++) {
+      ids.push(await pushOne(`v${i}`));
+      if (i < 6) await new Promise(r => setTimeout(r, 1100));
+    }
 
     for (let i = 0; i < 2; i++) {
       const r = await env.app.inject({ method: 'GET', url: `/v1/${owner.appId}/repo/snapshots/${ids[i]}`, headers: { 'x-test-user-id': owner.userId } });
