@@ -315,6 +315,55 @@ export async function repoRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST /v1/:app_id/repo/blobs/batch
+  app.post('/v1/:app_id/repo/blobs/batch', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+    const body = request.body as { shas?: unknown } | null;
+    const shas = Array.isArray(body?.shas) ? (body!.shas as unknown[]) : null;
+    if (!shas || shas.length === 0) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Body must include a non-empty `shas` array.',
+        remediation: 'Pass { shas: ["<sha256>", ...] } with at least one entry.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    if (shas.length > 1000) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Batch size exceeds 1000 shas.',
+        remediation: 'Split the request into multiple calls of at most 1000 shas.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    for (const s of shas) {
+      if (typeof s !== 'string' || !/^[a-f0-9]{64}$/.test(s)) {
+        return reply.code(400).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: 'Each sha must be a 64-char lowercase hex string.',
+          remediation: 'Use sha256 values from a snapshot manifest.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+    }
+    try {
+      const userId = tryGetUserId(request);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+
+      const heads = await headBlobs(ctx.appId, shas as string[]);
+      const present = [...heads.entries()].filter(([, h]) => h.exists);
+      const blobs = await Promise.all(present.map(async ([sha, h]) => ({
+        sha256: sha,
+        size: typeof h.size === 'number' ? h.size : 0,
+        downloadUrl: await presignBlobGet(ctx.appId, sha),
+        expiresIn: 3600,
+      })));
+      return reply.send({ blobs });
+    } catch (error) {
+      return handleRepoRouteError(app, request, reply, error, 'Failed to batch-presign blobs');
+    }
+  });
+
   // DELETE /v1/:app_id/repo
   app.delete('/v1/:app_id/repo', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };

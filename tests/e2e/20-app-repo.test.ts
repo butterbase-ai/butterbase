@@ -244,4 +244,41 @@ describe('app repo storage (Phase 2)', () => {
     });
     expect(r.statusCode).toBe(404);
   });
+
+  it('batch-presigns multiple blob URLs in a single auth call', async () => {
+    const { userId, appId } = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'repo-batch' });
+    const files = ['a.txt', 'b.txt', 'c.txt'].map((path, i) => {
+      const content = `batch ${i}\n`;
+      return { path, content, sha: sha256(content), size: Buffer.byteLength(content) };
+    });
+    const manifest = { files: files.map(f => ({ path: f.path, sha256: f.sha, size: f.size })) };
+    const p = await env.app.inject({ method: 'POST', url: `/v1/${appId}/repo/snapshots/prepare`, headers: { 'x-test-user-id': userId }, payload: manifest });
+    for (const m of (p.json() as any).missing_blobs) await uploadToPresigned(m.uploadUrl, files.find(f => f.sha === m.sha256)!.content);
+    await env.app.inject({ method: 'POST', url: `/v1/${appId}/repo/snapshots/commit`, headers: { 'x-test-user-id': userId }, payload: { manifest } });
+
+    const r = await env.app.inject({
+      method: 'POST',
+      url: `/v1/${appId}/repo/blobs/batch`,
+      headers: { 'x-test-user-id': userId, 'content-type': 'application/json' },
+      payload: { shas: files.map(f => f.sha) },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json() as { blobs: { sha256: string; size: number; downloadUrl: string; expiresIn: number }[] };
+    expect(body.blobs).toHaveLength(3);
+    for (const f of files) {
+      const b = body.blobs.find(b => b.sha256 === f.sha);
+      expect(b).toBeDefined();
+      expect(b!.size).toBe(f.size);
+      expect(b!.downloadUrl).toMatch(/^https?:\/\//);
+    }
+  });
+
+  it('batch-presign rejects malformed shas and oversized batches', async () => {
+    const { userId, appId } = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'repo-batch-bad' });
+    const bad = await env.app.inject({ method: 'POST', url: `/v1/${appId}/repo/blobs/batch`, headers: { 'x-test-user-id': userId, 'content-type': 'application/json' }, payload: { shas: ['not-hex'] } });
+    expect(bad.statusCode).toBe(400);
+
+    const empty = await env.app.inject({ method: 'POST', url: `/v1/${appId}/repo/blobs/batch`, headers: { 'x-test-user-id': userId, 'content-type': 'application/json' }, payload: { shas: [] } });
+    expect(empty.statusCode).toBe(400);
+  });
 });
