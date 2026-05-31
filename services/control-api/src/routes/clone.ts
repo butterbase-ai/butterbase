@@ -20,13 +20,25 @@ import {
   RESOURCE_NOT_FOUND,
 } from '@butterbase/shared/error-types';
 
-/** Insert a 'clone' row into the source app's region neon_tasks queue. */
+/**
+ * Insert a 'clone' row into the source app's region neon_tasks queue.
+ * A partial unique index (idx_neon_tasks_active_unique) prevents two
+ * pending/processing tasks of the same (app_id, task_type), so retry
+ * needs to clear any still-active prior task first — the clone job's
+ * 'failed' status flips on the worker's first failure, but the neon_task
+ * row stays 'pending' through backoff retries until maxAttempts.
+ */
 async function enqueueCloneTask(
   sourceAppId: string,
   sourceRegion: string,
   jobId: string,
 ): Promise<void> {
   const runtimePool = getRuntimeDbPool(config.runtimeDb, sourceRegion);
+  await runtimePool.query(
+    `DELETE FROM neon_tasks
+     WHERE app_id = $1 AND task_type = 'clone' AND status IN ('pending', 'processing')`,
+    [sourceAppId],
+  );
   await runtimePool.query(
     `INSERT INTO neon_tasks (app_id, task_type, task_meta) VALUES ($1, 'clone', $2)`,
     [sourceAppId, JSON.stringify({ job_id: jobId })],

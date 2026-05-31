@@ -11,6 +11,14 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- The apps table moved to runtime-plane in the Phase 1 cutover, so the FK
+-- from app_kv_credentials.app_id → apps(id) (control-plane) references a
+-- table that no longer exists in this DB. Drop it before backfilling, or
+-- the INSERT below fails on every row whose app_id has no control-plane
+-- apps peer (i.e. all of them, post-cutover).
+ALTER TABLE app_kv_credentials
+  DROP CONSTRAINT IF EXISTS app_kv_credentials_app_id_fkey;
+
 INSERT INTO app_kv_credentials (app_id, region, redis_password, kv_function_key)
 SELECT
   uai.app_id,

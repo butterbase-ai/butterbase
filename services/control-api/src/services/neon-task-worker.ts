@@ -7,7 +7,7 @@ import { getDataProjectIdForRegion } from './neon-projects.js';
 import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed } from './failure-notifications.service.js';
-import { removeUserAppIndex } from './user-app-index.js';
+import { addUserAppIndex, removeUserAppIndex } from './user-app-index.js';
 import { getCloneJob, setCloneJobStatus } from './clone-jobs.js';
 import {
   getManifestJson,
@@ -379,25 +379,26 @@ async function executeDeprovision(
  * Returns once provisioning completes; throws on failure or timeout.
  */
 async function waitForDestReady(
-  controlDb: pg.Pool,
+  destRegion: string,
   destAppId: string,
   logger: Logger,
   timeoutMs: number = 5 * 60 * 1000,
 ): Promise<void> {
+  // Use the region from the job row directly — getRuntimeDbForApp would go
+  // through user_app_index, which provisionAppBackground populates only after
+  // it finishes. We know the region at job-create time, so skip the lookup.
+  const appPool = getRuntimeDbPool(config.runtimeDb, destRegion);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const appPool = await getRuntimeDbForApp(controlDb, destAppId).catch((err) => {
-      logger.warn({ err, destAppId }, '[clone] waitForDestReady: could not resolve runtime DB pool, will retry');
-      return null;
-    });
-    if (appPool) {
-      const r = await appPool.query<{ provisioning_status: string }>(
-        `SELECT provisioning_status FROM apps WHERE id = $1`,
-        [destAppId],
-      );
-      const s = r.rows[0]?.provisioning_status;
-      if (s === 'ready') return;
-      if (s === 'failed') throw new Error('Dest app provisioning failed');
+    const r = await appPool.query<{ provisioning_status: string }>(
+      `SELECT provisioning_status FROM apps WHERE id = $1`,
+      [destAppId],
+    );
+    const s = r.rows[0]?.provisioning_status;
+    if (s === 'ready') return;
+    if (s === 'failed') throw new Error('Dest app provisioning failed');
+    if (s === undefined) {
+      logger.warn({ destAppId }, '[clone] waitForDestReady: apps row not yet visible, will retry');
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
@@ -446,6 +447,18 @@ async function executeClone(
       await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
       await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
+      // Cross-region index so authorizeRepoRead/Write and other lookups can
+      // resolve the dest app's region. Init route does the same step after
+      // its insertAppRow; the clone worker is the equivalent caller here.
+      await addUserAppIndex(controlDb, {
+        userId: job.requested_by_user_id,
+        appId: destAppId,
+        region: job.dest_region,
+        appName: destName,
+      }).catch((err) => {
+        logger.warn({ err, destAppId }, '[clone] user_app_index add failed; backfill will repair');
+      });
+
       // Record template lineage on the dest app row (column added by Phase 1 migration).
       //    insertAppRow has no template_source_app_id parameter today — write it via
       //    a follow-up UPDATE on the dest's home runtime DB.
@@ -462,7 +475,7 @@ async function executeClone(
         logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
       });
     }
-    await waitForDestReady(controlDb, destAppId, logger);
+    await waitForDestReady(job.dest_region, destAppId, logger);
 
     // 2. Read source manifest.
     const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
@@ -487,10 +500,10 @@ async function executeClone(
       await putManifest(destAppId, job.source_snapshot_id, manifestJson);
     }
 
-    // 5. Set dest's latest pointer + repo_latest_snapshot column.
+    // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
+    //    region-direct pool (we already know dest's region from the job).
     await setLatest(destAppId, job.source_snapshot_id);
-    const destAppPool = await getRuntimeDbForApp(controlDb, destAppId).catch(() => null);
-    if (!destAppPool) throw new Error(`Could not resolve runtime DB for dest app ${destAppId}`);
+    const destAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
     await destAppPool.query(
       `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
       [job.source_snapshot_id, destAppId],

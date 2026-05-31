@@ -339,6 +339,7 @@ describe('Phase 4a app-template clone (end-to-end)', () => {
     const retryRes = await fetch(`${API_URL}/v1/clone-jobs/${j.job_id}/retry`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
+      body: '{}',
     });
     expect(retryRes.status, await retryRes.clone().text()).toBe(200);
 
