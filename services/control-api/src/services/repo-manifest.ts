@@ -40,18 +40,18 @@ export class RepoManifestError extends Error {
 }
 
 export function validateRelativePath(p: string): void {
-  if (p.length === 0) throw new RepoManifestError('repo_path_empty', '[repo_path_empty] Path is empty');
+  if (p.length === 0) throw new RepoManifestError('repo_path_empty', 'Path is empty');
   if (Buffer.byteLength(p, 'utf8') > REPO_MAX_PATH_BYTES) {
-    throw new RepoManifestError('repo_path_too_long', `[repo_path_too_long] Path exceeds ${REPO_MAX_PATH_BYTES} bytes: ${p}`);
+    throw new RepoManifestError('repo_path_too_long', `Path exceeds ${REPO_MAX_PATH_BYTES} bytes: ${p}`);
   }
-  if (p.startsWith('/')) throw new RepoManifestError('repo_path_absolute', `[repo_path_absolute] Path is absolute: ${p}`);
-  if (p.includes('\\')) throw new RepoManifestError('repo_path_backslash', `[repo_path_backslash] Path contains backslash: ${p}`);
-  if (p.includes('\0')) throw new RepoManifestError('repo_path_null_byte', `[repo_path_null_byte] Path contains null byte`);
+  if (p.startsWith('/')) throw new RepoManifestError('repo_path_absolute', `Path is absolute: ${p}`);
+  if (p.includes('\\')) throw new RepoManifestError('repo_path_backslash', `Path contains backslash: ${p}`);
+  if (p.includes('\0')) throw new RepoManifestError('repo_path_null_byte', `Path contains null byte`);
   const segs = p.split('/');
   for (const seg of segs) {
-    if (seg === '..') throw new RepoManifestError('repo_path_traversal', `[repo_path_traversal] Path contains '..': ${p}`);
-    if (seg === '.') throw new RepoManifestError('repo_path_dot_segment', `[repo_path_dot_segment] Path contains '.' segment: ${p}`);
-    if (seg.length === 0) throw new RepoManifestError('repo_path_empty_segment', `[repo_path_empty_segment] Path has empty segment: ${p}`);
+    if (seg === '..') throw new RepoManifestError('repo_path_traversal', `Path contains '..': ${p}`);
+    if (seg === '.') throw new RepoManifestError('repo_path_dot_segment', `Path contains '.' segment: ${p}`);
+    if (seg.length === 0) throw new RepoManifestError('repo_path_empty_segment', `Path has empty segment: ${p}`);
   }
 }
 
@@ -72,7 +72,7 @@ function sha256Hex(s: string): string {
 export function validateManifest(input: unknown): ValidatedManifest {
   const parsed = manifestInputSchema.safeParse(input);
   if (!parsed.success) {
-    throw new RepoManifestError('repo_manifest_invalid', '[repo_manifest_invalid] Manifest schema invalid', parsed.error.errors);
+    throw new RepoManifestError('repo_manifest_invalid', 'Manifest schema invalid', parsed.error.errors);
   }
   const { files, message } = parsed.data;
 
@@ -81,19 +81,19 @@ export function validateManifest(input: unknown): ValidatedManifest {
   for (const f of files) {
     validateRelativePath(f.path);
     if (seenPaths.has(f.path)) {
-      throw new RepoManifestError('repo_path_duplicate', `[repo_path_duplicate] Duplicate path: ${f.path}`);
+      throw new RepoManifestError('repo_path_duplicate', `Duplicate path: ${f.path}`);
     }
     seenPaths.add(f.path);
     if (f.size > REPO_FILE_BYTES_LIMIT) {
       throw new RepoManifestError('repo_file_too_large',
-        `[repo_file_too_large] File exceeds ${REPO_FILE_BYTES_LIMIT} bytes: ${f.path} (${f.size} bytes)`,
+        `File exceeds ${REPO_FILE_BYTES_LIMIT} bytes: ${f.path} (${f.size} bytes)`,
         { path: f.path, size: f.size, limit: REPO_FILE_BYTES_LIMIT });
     }
     total += f.size;
   }
   if (total > REPO_TOTAL_BYTES_LIMIT) {
     throw new RepoManifestError('repo_too_large',
-      `[repo_too_large] Total manifest size ${total} exceeds ${REPO_TOTAL_BYTES_LIMIT}`,
+      `Total manifest size ${total} exceeds ${REPO_TOTAL_BYTES_LIMIT}`,
       { totalBytes: total, limit: REPO_TOTAL_BYTES_LIMIT });
   }
 

@@ -17,7 +17,13 @@ describe('validateRelativePath', () => {
     });
   }
   it('rejects > 4 KB path', () => {
-    expect(() => validateRelativePath('a/'.repeat(2100))).toThrow(/repo_path_too_long/);
+    try {
+      validateRelativePath('a/'.repeat(2100));
+      throw new Error('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RepoManifestError);
+      expect((err as RepoManifestError).code).toBe('repo_path_too_long');
+    }
   });
   for (const ok of ['a', 'src/index.ts', 'deep/nested/dir/file.tsx', 'with-dash_and.dot/x']) {
     it(`accepts ${JSON.stringify(ok)}`, () => {
@@ -50,24 +56,42 @@ describe('validateManifest', () => {
   });
 
   it('rejects duplicate paths', () => {
-    expect(() => validateManifest({
-      files: [
-        { path: 'a.ts', sha256: sha(1), size: 1 },
-        { path: 'a.ts', sha256: sha(2), size: 2 },
-      ],
-    })).toThrow(/repo_path_duplicate/);
+    try {
+      validateManifest({
+        files: [
+          { path: 'a.ts', sha256: sha(1), size: 1 },
+          { path: 'a.ts', sha256: sha(2), size: 2 },
+        ],
+      });
+      throw new Error('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RepoManifestError);
+      expect((err as RepoManifestError).code).toBe('repo_path_duplicate');
+    }
   });
 
   it('rejects a single file > REPO_FILE_BYTES_LIMIT', () => {
-    expect(() => validateManifest({
-      files: [{ path: 'big.bin', sha256: sha(1), size: REPO_FILE_BYTES_LIMIT + 1 }],
-    })).toThrow(/repo_file_too_large/);
+    try {
+      validateManifest({
+        files: [{ path: 'big.bin', sha256: sha(1), size: REPO_FILE_BYTES_LIMIT + 1 }],
+      });
+      throw new Error('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RepoManifestError);
+      expect((err as RepoManifestError).code).toBe('repo_file_too_large');
+    }
   });
 
   it('rejects total > REPO_TOTAL_BYTES_LIMIT', () => {
     const file = (n: number) => ({ path: `f${n}.bin`, sha256: sha(n), size: REPO_FILE_BYTES_LIMIT });
     const files = Array.from({ length: 11 }, (_, i) => file(i));
-    expect(() => validateManifest({ files })).toThrow(/repo_too_large/);
+    try {
+      validateManifest({ files });
+      throw new Error('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RepoManifestError);
+      expect((err as RepoManifestError).code).toBe('repo_too_large');
+    }
   });
 
   it('blobsReferenced returns distinct shas', () => {
