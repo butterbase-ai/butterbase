@@ -637,12 +637,13 @@ Promise.resolve(app.ready())
     const digestNotifierInterval = startDigestNotifier(app.controlDb, app.log);
     (app as any).digestNotifierInterval = digestNotifierInterval;
 
-    // Start Neon task queue worker (polls every 2 seconds)
-    if (config.neon.enabled) {
-      const neonWorkerInterval = startNeonTaskWorker(app.controlDb, app.dataPlaneDb, app.log);
-      (app as any).neonWorkerInterval = neonWorkerInterval;
-      app.log.info('Neon task queue worker started');
-    }
+    // Start neon_tasks queue worker (polls every 2 seconds).
+    // Always start: executeProvision has a local-Postgres branch when
+    // config.neon.enabled is false, and clone tasks must be processed
+    // regardless of provisioning backend.
+    const neonWorkerInterval = startNeonTaskWorker(app.controlDb, app.dataPlaneDb, app.log);
+    (app as any).neonWorkerInterval = neonWorkerInterval;
+    app.log.info('neon_tasks queue worker started');
 
     // Start RAG ingestion worker (polls every 5 seconds)
     const ragWorkerInterval = startRagWorker(app.controlDb, app.log);
