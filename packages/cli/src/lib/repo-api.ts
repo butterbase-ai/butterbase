@@ -18,6 +18,17 @@ export interface SnapshotResponse { snapshot_id: string; manifest: Manifest }
 export interface SnapshotListItem { snapshot_id: string; created_at: string }
 export interface BlobUrlResponse { sha256: string; size: number; downloadUrl: string; expiresIn: number }
 
+export interface CloneJob {
+  job_id: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  source_app_id: string;
+  dest_app_id: string | null;
+  retry_count: number;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
 export const repoApi = {
   prepare(appId: string, body: { files: FileEntry[]; message?: string }) {
     return apiPost<PrepareResponse>(`/v1/${appId}/repo/snapshots/prepare`, body);
@@ -42,6 +53,18 @@ export const repoApi = {
   },
   wipe(appId: string) {
     return apiDelete<{ message: string; app_id: string }>(`/v1/${appId}/repo`);
+  },
+};
+
+export const cloneApi = {
+  create(sourceAppId: string, body: { name?: string; region?: string }) {
+    return apiPost<{ job_id: string; status: string }>(`/v1/templates/${sourceAppId}/clone`, body);
+  },
+  get(jobId: string) {
+    return apiGet<CloneJob>(`/v1/clone-jobs/${jobId}`);
+  },
+  retry(jobId: string) {
+    return apiPost<{ job_id: string; status: string }>(`/v1/clone-jobs/${jobId}/retry`, {});
   },
 };
 
