@@ -22,6 +22,7 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `update_cors` | Set allowed CORS origins. |
 | `update_jwt_config` | Configure access/refresh token lifetimes. |
 | `update_app_access_mode` | Toggle anonymous vs authenticated-only access. |
+| `set_visibility` | Mark an app public or private, optionally setting the templates-browser `listed` flag. |
 | `generate_service_key` | Generate a `bb_sk_` API key. Shown only once. |
 
 ## Schema & Migrations

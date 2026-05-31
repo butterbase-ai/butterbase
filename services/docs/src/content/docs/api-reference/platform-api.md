@@ -112,6 +112,39 @@ Authorization: Bearer {token}
 
 Pass an empty body or omit `tables` to flip access mode only. Response includes `tables_secured` and a `table_errors` array — failures on individual tables don't roll back the whole call.
 
+## App visibility
+
+Control whether other Butterbase users can discover and clone your app as a template. This is separate from [access mode](#app-access-mode), which controls whether anonymous requests reach the data API. An app can be `visibility="public"` (template-shareable) and `access_mode="authenticated"` (no anonymous data reads) at the same time.
+
+`visibility` defaults to `"private"`. Setting it to `"public"` reserves the flag for when browse-and-clone features ship; that consumer experience is being rolled out in stages and is not yet available in the current release.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| PATCH | /v1/\{app_id}/config/visibility | Set `visibility` and optionally `listed` |
+
+### Toggle visibility
+
+```json
+PATCH /v1/{app_id}/config/visibility
+Authorization: Bearer {token}
+
+{ "visibility": "public" }
+```
+
+Response:
+
+```json
+{ "message": "Visibility updated to \"public\"", "app_id": "{app_id}", "visibility": "public", "listed": true }
+```
+
+`listed` is optional. When `true` (the default for public apps), the app will appear in the upcoming public templates browser. Pass `"listed": false` to keep the app accessible by direct link while hiding it from the browse list.
+
+`visibility` accepts `"public"` or `"private"`. Defaults to `"private"`.
+
+### Read current visibility
+
+`GET /v1/{app_id}/config` returns `visibility` and `listed` alongside the other app settings.
+
 ## Per-app subdomains
 
 When subdomain routing is enabled, each app has a subdomain derived from its name. Traffic to `https://{subdomain}.{base_domain}` resolves the app from the Host header, so you omit `{app_id}` from paths.
