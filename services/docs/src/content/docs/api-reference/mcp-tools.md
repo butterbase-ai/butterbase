@@ -57,6 +57,7 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `delete_rls_policy` | Remove RLS from a table. |
 | `query_audit_logs` | Search auth audit logs. |
 | `update_app_access_mode` | Toggle an app's data-API access between `public` and `authenticated`. |
+| `set_visibility` | Mark an app public or private as a template, optionally setting the templates browser `listed` flag. |
 | `secure_app` | Set `access_mode = "authenticated"` and create user-isolation RLS policies on listed tables in one call. |
 | `configure_auth_hook` | Configure (or remove) the function invoked after every successful auth event. |
 
