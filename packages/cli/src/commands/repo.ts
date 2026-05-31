@@ -4,8 +4,9 @@ import ora from 'ora';
 import prompts from 'prompts';
 import fs from 'fs-extra';
 import path from 'path';
-import { loadProjectConfig, saveProjectConfig, getBoundAppId, setPinnedSnapshotId } from '../lib/config.js';
-import { repoApi, uploadBlob, type FileEntry } from '../lib/repo-api.js';
+import { createHash } from 'crypto';
+import { loadProjectConfig, saveProjectConfig, getBoundAppId, setPinnedSnapshotId, getPinnedSnapshotId } from '../lib/config.js';
+import { repoApi, uploadBlob, downloadBlob, type FileEntry } from '../lib/repo-api.js';
 import { loadIgnoreRules } from '../lib/repo-ignore.js';
 import { walkRepo, type WalkedFile } from '../lib/repo-walk.js';
 import { buildManifest } from '../lib/repo-manifest.js';
@@ -191,4 +192,131 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+async function sha256File(absPath: string): Promise<string | null> {
+  try {
+    const buf = await fs.readFile(absPath);
+    return createHash('sha256').update(buf).digest('hex');
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
+export async function repoPullCommand(opts: { app?: string; force?: boolean; json?: boolean }) {
+  const appId = await requireBoundApp(opts);
+  const root = process.cwd();
+
+  const pinned = await getPinnedSnapshotId();
+
+  const latestSpin = ora('Fetching latest snapshot…').start();
+  let latest;
+  try {
+    latest = await repoApi.getLatest(appId);
+  } catch (e) {
+    latestSpin.fail((e as Error).message);
+    process.exit(1);
+    return;
+  }
+  latestSpin.succeed(`Remote latest: ${latest.snapshot_id.slice(0, 12)}`);
+
+  if (pinned === latest.snapshot_id) {
+    console.log(chalk.gray('Already up to date.'));
+    return;
+  }
+
+  // Build the set of paths in the new manifest for quick lookup, plus path → expected sha.
+  const wantedSha = new Map<string, string>();
+  for (const f of latest.manifest.files) wantedSha.set(f.path, f.sha256);
+
+  // Fetch the pinned manifest so we can reason about "files locally but not in latest".
+  // If pinned was pruned (404) or pinned is null, we can only safely delete on --force.
+  let pinnedManifestFiles: { path: string; sha256: string }[] | null = null;
+  if (pinned) {
+    try {
+      const p = await repoApi.getSnapshot(appId, pinned);
+      pinnedManifestFiles = p.manifest.files;
+    } catch {
+      console.log(chalk.yellow(`⚠ pinned snapshot ${pinned.slice(0,12)} no longer on server (pruned). Local untracked deletions will require --force.`));
+    }
+  }
+  const pinnedSha = new Map<string, string>();
+  if (pinnedManifestFiles) for (const f of pinnedManifestFiles) pinnedSha.set(f.path, f.sha256);
+
+  // 1. Decide downloads (latest has it; local sha doesn't match).
+  const toDownload: { path: string; sha256: string }[] = [];
+  for (const f of latest.manifest.files) {
+    const localSha = await sha256File(path.join(root, f.path));
+    if (localSha !== f.sha256) toDownload.push(f);
+  }
+
+  // 2. Decide deletions (local has it; latest doesn't).
+  const ig = await loadIgnoreRules(root);
+  const localFiles: string[] = [];
+  for await (const f of walkRepo(root, ig)) localFiles.push(f.relPath);
+  const toDelete: string[] = [];
+  const conflicts: string[] = [];
+  for (const lp of localFiles) {
+    if (wantedSha.has(lp)) continue;
+    const localSha = await sha256File(path.join(root, lp));
+    if (localSha === null) continue;
+    const expectedPinned = pinnedSha.get(lp);
+    if (expectedPinned === undefined || expectedPinned === localSha) {
+      // Either we never knew about it (pinned doesn't include it — shouldn't happen for tracked files,
+      // but be permissive) or the user hasn't touched it since the pinned snapshot.
+      toDelete.push(lp);
+    } else {
+      conflicts.push(lp);
+    }
+  }
+
+  if (conflicts.length > 0 && !opts.force) {
+    console.log(chalk.red(`✗ ${conflicts.length} local file(s) deleted on the remote but modified locally:`));
+    for (const p of conflicts) console.log(`    ${p}`);
+    console.log(chalk.gray('Re-run with --force to drop local changes for those files.'));
+    process.exit(1);
+  }
+  // With --force, the conflicts also get deleted.
+  if (opts.force) for (const p of conflicts) toDelete.push(p);
+
+  if (toDownload.length === 0 && toDelete.length === 0) {
+    // No file changes — just bump the pin and done.
+    await setPinnedSnapshotId(latest.snapshot_id);
+    console.log(chalk.gray('Nothing to change locally; pin updated.'));
+    return;
+  }
+
+  // Apply downloads.
+  for (let i = 0; i < toDownload.length; i++) {
+    const f = toDownload[i];
+    const dlSpin = ora(`Fetching ${i + 1}/${toDownload.length} ${f.path}`).start();
+    try {
+      const url = await repoApi.getBlobUrl(appId, f.sha256);
+      const buf = await downloadBlob(url.downloadUrl);
+      await fs.ensureDir(path.dirname(path.join(root, f.path)));
+      await fs.writeFile(path.join(root, f.path), buf);
+      dlSpin.succeed();
+    } catch (e) {
+      dlSpin.fail((e as Error).message);
+      process.exit(1);
+    }
+  }
+
+  // Apply deletes.
+  for (const p of toDelete) {
+    await fs.remove(path.join(root, p));
+    console.log(chalk.gray(`  deleted ${p}`));
+  }
+
+  await setPinnedSnapshotId(latest.snapshot_id);
+  if (opts.json) {
+    console.log(JSON.stringify({
+      snapshot_id: latest.snapshot_id,
+      downloaded: toDownload.map(f => f.path),
+      deleted: toDelete,
+    }, null, 2));
+  } else {
+    console.log(chalk.green(`✓ pulled snapshot ${latest.snapshot_id.slice(0, 12)} — ${toDownload.length} downloaded, ${toDelete.length} deleted`));
+  }
 }
