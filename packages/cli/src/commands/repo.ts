@@ -362,41 +362,47 @@ export async function repoStatusCommand(opts: { app?: string; json?: boolean }) 
   const pinned = await getPinnedSnapshotId();
 
   let remoteLatest: string | null = null;
-  let remoteFiles: Map<string, string> | null = null;  // path → sha256
+  let remoteFiles: Map<string, { sha256: string; size: number }> | null = null;  // path → { sha256, size }
   try {
     const latest = await repoApi.getLatest(appId);
     remoteLatest = latest.snapshot_id;
-    remoteFiles = new Map(latest.manifest.files.map(f => [f.path, f.sha256]));
+    remoteFiles = new Map(latest.manifest.files.map(f => [f.path, { sha256: f.sha256, size: f.size }]));
   } catch (e: any) {
     // 404 = no snapshots yet. Anything else: surface.
     const msg = String((e as Error).message ?? '');
     if (!msg.includes('404') && !/not found/i.test(msg)) throw e;
   }
 
-  let pinnedFiles: Map<string, string> | null = null;
+  let pinnedFiles: Map<string, { sha256: string; size: number }> | null = null;
   if (pinned) {
     try {
       const p = await repoApi.getSnapshot(appId, pinned);
-      pinnedFiles = new Map(p.manifest.files.map(f => [f.path, f.sha256]));
+      pinnedFiles = new Map(p.manifest.files.map(f => [f.path, { sha256: f.sha256, size: f.size }]));
     } catch { /* pruned */ }
   }
 
   const ig = await loadIgnoreRules(root);
+  const baseline = pinnedFiles ?? remoteFiles ?? new Map<string, { sha256: string; size: number }>();
   const local: { path: string; sha256: string }[] = [];
   for await (const f of walkRepo(root, ig)) {
-    const buf = await fs.readFile(f.absPath);
-    local.push({ path: f.relPath, sha256: createHash('sha256').update(buf).digest('hex') });
+    const base = baseline.get(f.relPath);
+    if (base !== undefined && base.size !== f.size) {
+      // Sizes differ — definitively modified. Skip the read+hash.
+      local.push({ path: f.relPath, sha256: '__size_mismatch__' });
+    } else {
+      const buf = await fs.readFile(f.absPath);
+      local.push({ path: f.relPath, sha256: createHash('sha256').update(buf).digest('hex') });
+    }
   }
   const localBy = new Map(local.map(f => [f.path, f.sha256]));
 
   // Diff against pinned (or remote if no pin).
-  const baseline = pinnedFiles ?? remoteFiles ?? new Map<string, string>();
   const files: RepoStatusFile[] = [];
   for (const f of local) {
     const base = baseline.get(f.path);
     if (base === undefined) {
       files.push({ path: f.path, state: 'untracked' });
-    } else if (base !== f.sha256) {
+    } else if (base.sha256 !== f.sha256) {
       files.push({ path: f.path, state: 'modified' });
     } else {
       files.push({ path: f.path, state: 'unchanged' });
