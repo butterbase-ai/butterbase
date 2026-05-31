@@ -22,6 +22,7 @@ export const DOC_TOPICS = [
   'realtime',
   'rag',
   'integrations',
+  'substrate',
 ] as const;
 
 export type DocTopic = (typeof DOC_TOPICS)[number];
@@ -3354,6 +3355,160 @@ butterbase integrations execute <tool-name> --data '{"to":"user@example.com","su
 | INTEGRATIONS_EXECUTION_FAILED | The tool action returned a failure response |
 `,
 
+  substrate: `## Substrate
+
+Substrate is a per-user memory and action coordination layer for AI agents. Entities, decisions, attention rules, and an audited action ledger all live in one shared per-user surface that every app linked to that user reads and writes against.
+
+### When to use it
+
+Reach for substrate whenever your app's job is on behalf of a person and a different app for the same person might want to know what happened. Concrete examples: a Q3 OKR was set (decision); the user committed to "ship phase 6 by Friday" (commitment); "Alice from Acme" is the same person across the CRM and the support tool (entity); on every Monday morning, summarize last week's decisions (attention rule).
+
+Skip it when state is purely app-local (per-row TODOs, ephemeral form state) — use the regular [app database](./README.md#database) for that.
+
+### Authentication
+
+Three ways to reach the substrate over HTTP:
+
+1. **Substrate-scoped API key** (\`bb_sub_*\`) — CLI / SDK / integrations. Generate with \`bb keys generate --scope substrate\`.
+2. **Platform JWT** — dashboard / Cognito session.
+3. **Inside a serverless function** — \`ctx.substrate\` is wired automatically when the app is linked to a substrate user; no token to manage.
+
+Non-substrate API keys (\`bb_sk_*\`) return 403 on substrate routes.
+
+### \`ctx.substrate\` in functions
+
+\`\`\`typescript
+export async function handler(req, ctx) {
+  const verdict = await ctx.substrate.propose('record_decision', {
+    title: 'Adopt substrate',
+    kind: 'strategic',
+    rationale: 'agents need shared memory',
+  });
+  const prior = await ctx.substrate.searchMemory('billing', { kinds: ['decisions'], limit: 5 });
+  const people = await ctx.substrate.findEntities({ type: 'person', limit: 10 });
+  const one = await ctx.substrate.getEntity('ent_…');
+  return Response.json({ verdict, prior, people, one });
+}
+\`\`\`
+
+Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require human approval even if the user has \`yolo_mode\` on. Memory writes (\`record_decision\`, etc.) auto-execute.
+
+### HTTP surface (high-traffic routes)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET    | /v1/me/substrate/settings | Read yolo mode + other toggles |
+| PUT    | /v1/me/substrate/settings/yolo | Toggle yolo mode |
+| POST   | /v1/me/substrate/actions/propose | Propose an action |
+| GET    | /v1/me/substrate/actions | List action ledger |
+| GET    | /v1/me/substrate/actions/{id} | Fetch one action |
+| POST   | /v1/me/substrate/actions/{id}/approve | Approve a pending action |
+| POST   | /v1/me/substrate/actions/{id}/reject | Reject a pending action |
+| GET    | /v1/me/substrate/entities | List / search entities |
+| GET    | /v1/me/substrate/entities/{id} | Fetch one entity |
+| GET    | /v1/me/substrate/memory/search?q=… | Full-text search across decisions/commitments/learnings |
+| GET    | /v1/me/substrate/snapshots?days=N | Daily snapshots |
+| GET\\|POST\\|PUT\\|DELETE | /v1/me/substrate/attention-rules[…] | Attention rule CRUD + preview + enable/disable + firings |
+| GET\\|PUT\\|DELETE | /v1/me/substrate/outbox-targets[…] | Webhook targets per capability |
+| POST   | /v1/me/substrate/ws-ticket | Mint a 60s ticket for the WS stream |
+| WS     | /v1/me/substrate/stream | Live push of every ledger / entity / rule / firing change |
+
+### Propose an action
+
+\`\`\`json
+POST /v1/me/substrate/actions/propose
+
+{
+  "capability": "record_decision",
+  "payload": { "title": "…", "kind": "operational", "rationale": "…" },
+  "idempotency_key": "optional"
+}
+\`\`\`
+
+Response:
+\`\`\`json
+{
+  "action_id": "act_01…",
+  "verdict": { "result": "auto_approved", "reason": "capability default = auto" },
+  "requires_approval": false,
+  "result": { "decision_id": "dec_01…" }
+}
+\`\`\`
+
+Verdict values: \`auto_approved\`, \`auto_approved_yolo\`, \`requires_approval\`, \`rejected\`.
+
+### Attention rules
+
+A rule fires on a cron schedule, evaluates a JSON-Logic predicate against today's snapshot, and proposes one action per matched binding.
+
+\`\`\`json
+POST /v1/me/substrate/attention-rules
+{
+  "name": "weekly digest",
+  "trigger_cron": "0 9 * * 1",
+  "condition_mode": "snapshot_predicate",
+  "condition": { ">": [{ "var": "entity_count" }, 0] },
+  "action_capability": "send_email_draft",
+  "action_payload_template": {
+    "to": "you@example.com",
+    "subject": "Weekly digest",
+    "body": "{{entity_count}} entities."
+  }
+}
+\`\`\`
+
+Use \`POST /v1/me/substrate/attention-rules/preview\` to dry-run a rule body against today's snapshot before saving.
+
+### Outbox targets (webhooks)
+
+Register one webhook per capability. When an action executes, the substrate POSTs the rendered payload to that URL, HMAC-signed with the secret you provided.
+
+\`\`\`json
+PUT /v1/me/substrate/outbox-targets/send_email_draft
+{ "webhook_url": "https://example.com/hook", "signing_secret": "min-8-chars" }
+\`\`\`
+
+Delivery headers: \`X-Butterbase-Signature: sha256=<hex>\`, \`X-Butterbase-Delivery: <uuid>\`. Retries with backoff; final failures go to a dead-letter list.
+
+### WebSocket stream
+
+Browser clients can't put a Bearer in the WS handshake, so they exchange a one-shot 60s ticket first:
+
+\`\`\`typescript
+const { ticket } = await fetch('/v1/me/substrate/ws-ticket', {
+  method: 'POST', credentials: 'include',
+}).then(r => r.json());
+
+const ws = new WebSocket(\`wss://api.butterbase.ai/v1/me/substrate/stream?ticket=\${ticket}\`);
+ws.onmessage = (e) => {
+  const change = JSON.parse(e.data);
+  // { tbl: 'action_ledger', op: 'insert', id: 'act_…', user: '…' }
+};
+\`\`\`
+
+Server frames:
+- \`{"type":"hello","ts":…}\` on connect
+- \`{"tbl":"…","op":"insert|update|delete","id":"…","user":"…"}\` per change
+
+The stream does NOT include row payloads — clients refetch by id.
+
+Server-side clients (with a \`bb_sub_\` key) can skip the ticket exchange and pass the key as the Authorization header on the upgrade, or as \`?token=bb_sub_…\`.
+
+### CLI
+
+The \`bb substrate\` command group mirrors the HTTP surface end-to-end. \`bb substrate ledger\`, \`bb substrate propose <capability>\`, \`bb substrate approve|reject\`, \`bb substrate entities list|get|update\`, \`bb substrate memory <query>\`, \`bb substrate outbox list|cancel|retry\`, \`bb substrate rules list|get|create|enable|disable|delete|firings\`, \`bb substrate snapshots\`, \`bb substrate settings show|yolo on|off\`. All commands accept \`--json\` for scripting. See the [CLI Substrate page](https://docs.butterbase.ai/cli/substrate/) for full syntax.
+
+### Common errors
+
+| Code | Meaning |
+|------|---------|
+| AUTH_INVALID_TOKEN | Token couldn't be verified |
+| 403 token is not substrate-scoped | Caller used a \`bb_sk_\` or app-scoped key |
+| 403 substrate not provisioned for this user | First-time user; POST /v1/me/substrate/provision to create |
+| 1008 unauthenticated (WS close) | Ticket missing, expired, reused, or token rejected |
+| 409 wrong_status | Tried to approve/reject an action that already executed or was rejected |
+`,
+
 };
 
 export function getUserDocumentation(topic: DocTopic): string {
@@ -3374,6 +3529,7 @@ export function getUserDocumentation(topic: DocTopic): string {
       SECTIONS.sdk,
       SECTIONS.cli,
       SECTIONS.integrations,
+      SECTIONS.substrate,
     ].join('\n\n');
   }
   return SECTIONS[topic];

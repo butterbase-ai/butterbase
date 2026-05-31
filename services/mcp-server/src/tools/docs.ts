@@ -24,6 +24,7 @@ Available topics:
   - sdk: TypeScript SDK installation, client setup, query builder, auth, storage, functions
   - cli: CLI installation, commands for apps, schema, functions, storage, config
   - integrations: Third-party integrations (OAuth connect flow, tool execution, SDK, CLI)
+  - substrate: Per-user memory + action coordination plane for AI agents (entities, decisions, attention rules, action ledger, outbox, ws stream, ctx.substrate inside functions)
 
 Example:
   Input: { topic: "auth" }
@@ -44,7 +45,7 @@ Idempotency: Safe to call anytime (read-only operation).`,
         .enum(DOC_TOPICS)
         .optional()
         .describe(
-          'Section to return: all (default), overview, mcp, rest, auth, storage, functions, frontend, ai, billing, platform, regions, schema, sdk, cli, realtime, rag, integrations.'
+          'Section to return: all (default), overview, mcp, rest, auth, storage, functions, frontend, ai, billing, platform, regions, schema, sdk, cli, realtime, rag, integrations, substrate.'
         ),
     },
     {
