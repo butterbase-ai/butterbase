@@ -4,6 +4,7 @@ import {
   DeleteObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  CopyObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -213,6 +214,48 @@ export async function wipeRepo(appId: string): Promise<void> {
     }
     token = res.IsTruncated ? res.NextContinuationToken : undefined;
   } while (token);
+}
+
+/** Server-side S3 copy. Use when src and dst are in the same region (same bucket, different prefix). */
+export async function copyBlobSameRegion(srcAppId: string, dstAppId: string, sha256: string): Promise<void> {
+  await internalClient.send(new CopyObjectCommand({
+    Bucket: config.s3.bucket,
+    CopySource: encodeURIComponent(`${config.s3.bucket}/${blobKey(srcAppId, sha256)}`),
+    Key: blobKey(dstAppId, sha256),
+    MetadataDirective: 'COPY',
+  }));
+}
+
+/** Stream GET source → PUT dest. Use when src and dst are in different regions/buckets. */
+export async function copyBlobCrossRegion(
+  srcAppId: string,
+  dstAppId: string,
+  sha256: string,
+  srcS3: S3Client,
+  srcBucket: string,
+  dstS3: S3Client,
+  dstBucket: string,
+): Promise<void> {
+  const get = await srcS3.send(new GetObjectCommand({ Bucket: srcBucket, Key: blobKey(srcAppId, sha256) }));
+  const body = get.Body as import('stream').Readable | undefined;
+  if (!body) throw new Error(`Blob ${sha256} has no body when fetched from source`);
+  await dstS3.send(new PutObjectCommand({
+    Bucket: dstBucket,
+    Key: blobKey(dstAppId, sha256),
+    Body: body,
+    ContentLength: get.ContentLength,
+    ContentType: 'application/octet-stream',
+  }));
+}
+
+/** Copy the manifest JSON object from source's prefix to dest's prefix (same region). */
+export async function copyManifestSameRegion(srcAppId: string, dstAppId: string, snapshotId: string): Promise<void> {
+  await internalClient.send(new CopyObjectCommand({
+    Bucket: config.s3.bucket,
+    CopySource: encodeURIComponent(`${config.s3.bucket}/${manifestKey(srcAppId, snapshotId)}`),
+    Key: manifestKey(dstAppId, snapshotId),
+    MetadataDirective: 'COPY',
+  }));
 }
 
 async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
