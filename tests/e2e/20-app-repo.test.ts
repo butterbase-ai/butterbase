@@ -214,4 +214,34 @@ describe('app repo storage (Phase 2)', () => {
       expect(r.statusCode).toBe(200);
     }
   });
+
+  it('lists snapshots newest-first', async () => {
+    const { userId, appId } = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'repo-list' });
+    // S3 LastModified is 1-second resolution; space pushes apart for stable order.
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const f = `list ${i}\n`;
+      const manifest = { files: [{ path: `l${i}.txt`, sha256: sha256(f), size: Buffer.byteLength(f) }] };
+      const p = await env.app.inject({ method: 'POST', url: `/v1/${appId}/repo/snapshots/prepare`, headers: { 'x-test-user-id': userId }, payload: manifest });
+      for (const m of (p.json() as any).missing_blobs) await uploadToPresigned(m.uploadUrl, f);
+      const c = await env.app.inject({ method: 'POST', url: `/v1/${appId}/repo/snapshots/commit`, headers: { 'x-test-user-id': userId }, payload: { manifest } });
+      ids.push((c.json() as any).snapshot_id);
+      if (i < 2) await new Promise(r => setTimeout(r, 1100));
+    }
+
+    const r = await env.app.inject({ method: 'GET', url: `/v1/${appId}/repo/snapshots`, headers: { 'x-test-user-id': userId } });
+    expect(r.statusCode).toBe(200);
+    const body = r.json() as { snapshots: { snapshot_id: string; created_at: string }[] };
+    expect(body.snapshots.map(s => s.snapshot_id)).toEqual([ids[2], ids[1], ids[0]]);
+  });
+
+  it('snapshot list honors visibility (404 to non-owner on private)', async () => {
+    const owner = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'repo-list-own' });
+    const other = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'repo-list-other' });
+    const r = await env.app.inject({
+      method: 'GET', url: `/v1/${owner.appId}/repo/snapshots`,
+      headers: { 'x-test-user-id': other.userId },
+    });
+    expect(r.statusCode).toBe(404);
+  });
 });

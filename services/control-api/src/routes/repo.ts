@@ -233,6 +233,28 @@ export async function repoRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /v1/:app_id/repo/snapshots
+  app.get('/v1/:app_id/repo/snapshots', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+    try {
+      const userId = tryGetUserId(request);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+
+      const snapshots = await listSnapshots(ctx.appId);
+      // Sort newest-first; this is what every consumer will want.
+      snapshots.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+
+      return reply.send({
+        snapshots: snapshots.map(s => ({
+          snapshot_id: s.snapshotId,
+          created_at: s.lastModified.toISOString(),
+        })),
+      });
+    } catch (error) {
+      return handleRepoRouteError(app, request, reply, error, 'Failed to list snapshots');
+    }
+  });
+
   // GET /v1/:app_id/repo/snapshots/:snapshot_id
   app.get('/v1/:app_id/repo/snapshots/:snapshot_id', async (request, reply) => {
     const { app_id, snapshot_id } = request.params as { app_id: string; snapshot_id: string };
