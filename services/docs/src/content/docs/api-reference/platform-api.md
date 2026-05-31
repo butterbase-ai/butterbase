@@ -145,6 +145,86 @@ Response:
 
 `GET /v1/{app_id}/config` returns `visibility` and `listed` alongside the other app settings.
 
+## App repo
+
+Push a codebase to your app as a content-addressed snapshot. Useful as a cross-device backup / source of truth for your app's files. Snapshots are content-addressed: re-pushing an unchanged file does not re-upload it. The last 5 snapshots are retained.
+
+Repo content is stored in your app's object storage under a reserved prefix and is **not** counted as a normal storage object — uploads go through a separate two-phase flow.
+
+Push has two phases:
+
+1. `prepare` — send the manifest (file paths + their sha256 + sizes). Server validates and returns presigned PUT URLs for any blobs it doesn't already have.
+2. `commit` — after uploading the listed blobs to S3 with the returned URLs, send the manifest again. Server verifies every blob landed at the declared size, writes the manifest, and points `latest` at the new snapshot.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /v1/\{app_id}/repo/snapshots/prepare | Validate a manifest; receive presigned PUTs for missing blobs |
+| POST | /v1/\{app_id}/repo/snapshots/commit | Finalize the snapshot after all blobs are uploaded |
+| GET | /v1/\{app_id}/repo/snapshots/latest | Fetch the current snapshot manifest |
+| GET | /v1/\{app_id}/repo/snapshots/\{snapshot_id} | Fetch a specific snapshot's manifest |
+| GET | /v1/\{app_id}/repo/blobs/\{sha256} | Receive a presigned GET URL for a single blob |
+| DELETE | /v1/\{app_id}/repo | Wipe the entire repo |
+
+Reads (`GET`) on a **public** app are anonymous. On a **private** app, only the owner can read or write.
+
+### Manifest shape
+
+```json
+{
+  "files": [
+    { "path": "src/index.ts", "sha256": "<64 hex>", "size": 1234 }
+  ],
+  "message": "optional push message"
+}
+```
+
+Paths must be relative, ASCII-safe, contain no `..` segments, no leading `/`, no backslashes, no null bytes, and be at most 4 KB. Hard caps: 10 MB per file, 100 MB per snapshot.
+
+### Prepare
+
+```json
+POST /v1/{app_id}/repo/snapshots/prepare
+Authorization: Bearer {token}
+
+{ "files": [ { "path": "a.txt", "sha256": "...", "size": 5 } ] }
+```
+
+Response:
+
+```json
+{
+  "snapshot_id": "<64 hex>",
+  "total_bytes": 5,
+  "file_count": 1,
+  "missing_blobs": [ { "sha256": "...", "uploadUrl": "https://..." } ]
+}
+```
+
+Upload each `missing_blob.uploadUrl` with `PUT`. The presigned URL expires after 10 minutes.
+
+### Commit
+
+```json
+POST /v1/{app_id}/repo/snapshots/commit
+Authorization: Bearer {token}
+
+{ "manifest": { "files": [ ... ], "message": "..." } }
+```
+
+If any blob is still missing or its uploaded size doesn't match the manifest, the response is 409 with `details.missing_shas` and `details.size_mismatches`. Re-upload the listed blobs and re-call commit.
+
+### Pull
+
+```http
+GET /v1/{app_id}/repo/snapshots/latest
+```
+
+Returns `{ snapshot_id, manifest }`. For each file in the manifest, request `GET /v1/{app_id}/repo/blobs/{sha256}` to receive a presigned GET URL (1 hour expiry), then fetch.
+
+### Wipe
+
+`DELETE /v1/{app_id}/repo` removes every snapshot, blob, and the `latest` pointer. Cannot be undone.
+
 ## Per-app subdomains
 
 When subdomain routing is enabled, each app has a subdomain derived from its name. Traffic to `https://{subdomain}.{base_domain}` resolves the app from the Host header, so you omit `{app_id}` from paths.
