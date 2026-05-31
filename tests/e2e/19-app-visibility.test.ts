@@ -171,4 +171,53 @@ describe('App visibility — PATCH /v1/:app_id/config/visibility', () => {
 
     expect(patch.statusCode).toBe(404);
   });
+
+  it('persists listed=false across private → public flips', async () => {
+    const a = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'visibility-listed-persistence' });
+
+    // Set to public with listed=false
+    const patch1 = await env.app.inject({
+      method: 'PATCH',
+      url: `/v1/${a.appId}/config/visibility`,
+      headers: { 'x-test-user-id': a.userId },
+      payload: { visibility: 'public', listed: false },
+    });
+
+    expect(patch1.statusCode).toBe(200);
+    const body1 = patch1.json() as Record<string, unknown>;
+    expect(body1.listed).toBe(false);
+
+    // Flip to private (listed should persist)
+    const patch2 = await env.app.inject({
+      method: 'PATCH',
+      url: `/v1/${a.appId}/config/visibility`,
+      headers: { 'x-test-user-id': a.userId },
+      payload: { visibility: 'private' },
+    });
+
+    expect(patch2.statusCode).toBe(200);
+
+    // Flip back to public (listed should still be false)
+    const patch3 = await env.app.inject({
+      method: 'PATCH',
+      url: `/v1/${a.appId}/config/visibility`,
+      headers: { 'x-test-user-id': a.userId },
+      payload: { visibility: 'public' },
+    });
+
+    expect(patch3.statusCode).toBe(200);
+    const body3 = patch3.json() as Record<string, unknown>;
+    expect(body3.listed).toBe(false);
+
+    // Sanity check: GET /v1/:app_id/config confirms listed is still false
+    const get = await env.app.inject({
+      method: 'GET',
+      url: `/v1/${a.appId}/config`,
+      headers: { 'x-test-user-id': a.userId },
+    });
+
+    expect(get.statusCode).toBe(200);
+    const getBody = get.json() as Record<string, unknown>;
+    expect(getBody.listed).toBe(false);
+  });
 });
