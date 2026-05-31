@@ -21,6 +21,7 @@ import {
   wipeRepo,
 } from '../services/repo-storage.js';
 import { planRetention } from '../services/repo-retention.js';
+import { listActiveCloneSnapshotIdsForApp } from '../services/clone-jobs.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { config } from '../config.js';
 import { requireUserId, tryGetUserId } from '../utils/require-auth.js';
@@ -158,7 +159,9 @@ export async function repoRoutes(app: FastifyInstance) {
           blobs: new Set(m.files.map(f => f.sha256)),
         };
       }));
-      const plan = planRetention(summaries, new Set([manifest.snapshotId]));
+      const cloneActivePins = await listActiveCloneSnapshotIdsForApp(app.controlDb, ctx.appId);
+      const pinned = new Set<string>([manifest.snapshotId, ...cloneActivePins]);
+      const plan = planRetention(summaries, pinned);
       for (const snap of plan.dropSnapshots) {
         await deleteSnapshot(ctx.appId, snap);
       }
