@@ -100,6 +100,76 @@ describe('butterbase repo', () => {
     expect(calls.filter(c => c.includes('/repo/snapshots/commit'))).toHaveLength(1);
   });
 
+  it('repo push: retries once on 409 missing_shas, then succeeds', async () => {
+    await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_x' });
+    await fs.outputFile(path.join(tmpDir, 'a.txt'), 'hello\n');
+
+    const calls: string[] = [];
+    let commitAttempt = 0;
+    mockFetch(async (url, init) => {
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      if (url.endsWith('/repo/snapshots/prepare')) {
+        const body = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          snapshot_id: 'snap_rt',
+          total_bytes: 6,
+          file_count: 1,
+          missing_blobs: body.files.map((f: any) => ({ sha256: f.sha256, uploadUrl: `https://s3.test/put/${f.sha256}` })),
+        }), { status: 200 });
+      }
+      if (url.startsWith('https://s3.test/put/')) return new Response('', { status: 200 });
+      if (url.endsWith('/repo/snapshots/commit')) {
+        commitAttempt++;
+        if (commitAttempt === 1) {
+          const sha = sha256('hello\n');
+          return new Response(JSON.stringify({
+            error: { code: 'VALIDATION_INVALID_SCHEMA', message: 'Commit blocked', remediation: 'Retry', details: { missing_shas: [sha], size_mismatches: [] } },
+          }), { status: 409 });
+        }
+        return new Response(JSON.stringify({ snapshot_id: 'snap_rt', total_bytes: 6, file_count: 1 }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await repoPushCommand({});
+
+    expect(calls.filter(c => c.includes('/repo/snapshots/prepare'))).toHaveLength(2);  // initial + retry
+    expect(calls.filter(c => c.includes('/repo/snapshots/commit'))).toHaveLength(2);
+    expect(calls.filter(c => c.startsWith('PUT https://s3.test/put/'))).toHaveLength(2);  // initial + re-upload
+    const cfg = await fs.readJson(path.join(tmpDir, '.butterbase/config.json'));
+    expect(cfg.pinned_snapshot_id).toBe('snap_rt');
+  });
+
+  it('repo push: exits 1 if commit still 409 after retry', async () => {
+    await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_x' });
+    await fs.outputFile(path.join(tmpDir, 'a.txt'), 'hello\n');
+
+    mockFetch(async (url, init) => {
+      if (url.endsWith('/repo/snapshots/prepare')) {
+        const body = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          snapshot_id: 'snap_x', total_bytes: 6, file_count: 1,
+          missing_blobs: body.files.map((f: any) => ({ sha256: f.sha256, uploadUrl: `https://s3.test/put/${f.sha256}` })),
+        }), { status: 200 });
+      }
+      if (url.startsWith('https://s3.test/put/')) return new Response('', { status: 200 });
+      if (url.endsWith('/repo/snapshots/commit')) {
+        const sha = sha256('hello\n');
+        return new Response(JSON.stringify({
+          error: { code: 'VALIDATION_INVALID_SCHEMA', message: 'still missing', remediation: 'Retry', details: { missing_shas: [sha], size_mismatches: [] } },
+        }), { status: 409 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await repoPushCommand({});
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    // Pin should NOT have been updated.
+    const cfg = await fs.readJson(path.join(tmpDir, '.butterbase/config.json'));
+    expect(cfg.pinned_snapshot_id).toBeUndefined();
+  });
+
   it('repo pull: skips when pinned matches remote', async () => {
     await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_x', pinned_snapshot_id: 'pin1' });
     mockFetch(async (url) => {

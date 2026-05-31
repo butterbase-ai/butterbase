@@ -135,6 +135,32 @@ export async function repoPushCommand(opts: {
     return;
   }
 
+  // Lookup table absPath by sha256 — picking any one path per sha is fine since
+  // content-addressed blobs are by sha, not by path.
+  const absBySha = new Map<string, string>();
+  for (let i = 0; i < walked.length; i++) absBySha.set(files[i].sha256, walked[i].absPath);
+
+  // Upload missing blobs serially. (Parallelization can come later — see Task 7 notes.)
+  const uploadMissing = async (missing: { sha256: string; uploadUrl: string }[], label: string) => {
+    for (let i = 0; i < missing.length; i++) {
+      const m = missing[i];
+      const abs = absBySha.get(m.sha256);
+      if (!abs) {
+        console.log(chalk.red(`✗ server asked for blob ${m.sha256} that isn't in our manifest`));
+        process.exit(1);
+      }
+      const upSpin = ora(`${label} ${i + 1}/${missing.length} ${m.sha256.slice(0, 12)}…`).start();
+      try {
+        const buf = await fs.readFile(abs!);
+        await uploadBlob(m.uploadUrl, buf as any);
+        upSpin.succeed();
+      } catch (e) {
+        upSpin.fail((e as Error).message);
+        process.exit(1);
+      }
+    }
+  };
+
   const prepSpin = ora('Preparing snapshot…').start();
   let prep;
   try {
@@ -146,38 +172,45 @@ export async function repoPushCommand(opts: {
   }
   prepSpin.succeed(`Snapshot id ${prep.snapshot_id.slice(0, 12)} — ${prep.missing_blobs.length} new blobs to upload`);
 
-  // Upload missing blobs serially. (Parallelization can come later — see Task 7 notes.)
-  // Lookup table absPath by sha256 — picking any one path per sha is fine since
-  // content-addressed blobs are by sha, not by path.
-  const absBySha = new Map<string, string>();
-  for (let i = 0; i < walked.length; i++) absBySha.set(files[i].sha256, walked[i].absPath);
+  await uploadMissing(prep.missing_blobs, 'Uploading');
 
-  for (let i = 0; i < prep.missing_blobs.length; i++) {
-    const m = prep.missing_blobs[i];
-    const abs = absBySha.get(m.sha256);
-    if (!abs) {
-      console.log(chalk.red(`✗ server asked for blob ${m.sha256} that isn't in our manifest`));
-      process.exit(1);
-    }
-    const upSpin = ora(`Uploading ${i + 1}/${prep.missing_blobs.length} ${m.sha256.slice(0, 12)}…`).start();
-    try {
-      const buf = await fs.readFile(abs!);
-      await uploadBlob(m.uploadUrl, buf as any);
-      upSpin.succeed();
-    } catch (e) {
-      upSpin.fail((e as Error).message);
-      process.exit(1);
-    }
-  }
+  const requestBody = opts.message === undefined ? { files } : { files, message: opts.message };
 
   const commitSpin = ora('Committing snapshot…').start();
   let commitRes;
   try {
-    commitRes = await repoApi.commit(appId, opts.message === undefined ? { files } : { files, message: opts.message });
+    commitRes = await repoApi.commit(appId, requestBody);
   } catch (e) {
-    commitSpin.fail((e as Error).message);
-    process.exit(1);
-    return;
+    const status = (e as any)?.status;
+    const details = (e as any)?.details as { missing_shas?: string[]; size_mismatches?: { sha256: string }[] } | undefined;
+    const recoverable = status === 409 && (details?.missing_shas?.length || details?.size_mismatches?.length);
+    if (!recoverable) {
+      commitSpin.fail((e as Error).message);
+      process.exit(1);
+      return;
+    }
+    // Retry path: re-prepare to get fresh presigned URLs for whatever the server still wants.
+    const stillMissing = new Set<string>([
+      ...(details?.missing_shas ?? []),
+      ...(details?.size_mismatches?.map(s => s.sha256) ?? []),
+    ]);
+    commitSpin.warn(`Commit returned 409 for ${stillMissing.size} blob(s). Re-uploading and retrying once…`);
+    let reprep;
+    try {
+      reprep = await repoApi.prepare(appId, requestBody);
+    } catch (e2) {
+      console.log(chalk.red(`✗ re-prepare failed: ${(e2 as Error).message}`));
+      process.exit(1);
+      return;
+    }
+    await uploadMissing(reprep.missing_blobs, 'Re-uploading');
+    try {
+      commitRes = await repoApi.commit(appId, requestBody);
+    } catch (e2) {
+      console.log(chalk.red(`✗ commit still failing after retry: ${(e2 as Error).message}`));
+      process.exit(1);
+      return;
+    }
   }
   commitSpin.succeed(`Committed ${commitRes.snapshot_id.slice(0, 12)} (${commitRes.file_count} files, ${formatBytes(commitRes.total_bytes)})`);
 
