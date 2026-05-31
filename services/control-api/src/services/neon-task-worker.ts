@@ -419,70 +419,76 @@ async function executeClone(
 
   const job = await getCloneJob(controlDb, jobId);
   if (!job) throw new Error(`Clone job ${jobId} not found`);
-  if (job.status !== 'pending') {
-    logger.info({ jobId, status: job.status }, '[clone] job no longer pending; skipping');
+  if (job.status !== 'pending' && job.status !== 'processing') {
+    logger.info({ jobId, status: job.status }, '[clone] job in terminal status; skipping');
     return;
   }
 
   await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
 
-  // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
-  //    insertAppRow has no template_source_app_id parameter today — write it via
-  //    a follow-up UPDATE on the dest's home runtime DB.
-  const destAppId = generateAppId();
-  const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
-  await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
-  await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
+  try {
+    // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
+    //    insertAppRow has no template_source_app_id parameter today — write it via
+    //    a follow-up UPDATE on the dest's home runtime DB.
+    const destAppId = generateAppId();
+    const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
+    await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
+    await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
-  // Record template lineage on the dest app row (column added by Phase 1 migration).
-  const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-  await destRuntimePool.query(
-    `UPDATE apps SET template_source_app_id = $1, updated_at = now() WHERE id = $2`,
-    [job.source_app_id, destAppId],
-  );
+    // Record template lineage on the dest app row (column added by Phase 1 migration).
+    const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+    await destRuntimePool.query(
+      `UPDATE apps SET template_source_app_id = $1, updated_at = now() WHERE id = $2`,
+      [job.source_app_id, destAppId],
+    );
 
-  // Provision DB + run migrations. provisionAppBackground swallows errors
-  // internally (sets provisioning_status='failed'), so waitForDestReady is
-  // what surfaces failure back to us.
-  provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
-    logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
-  });
-  await waitForDestReady(controlDb, destAppId);
+    // Provision DB + run migrations. provisionAppBackground swallows errors
+    // internally (sets provisioning_status='failed'), so waitForDestReady is
+    // what surfaces failure back to us.
+    provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
+      logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
+    });
+    await waitForDestReady(controlDb, destAppId);
 
-  // 2. Read source manifest.
-  const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
-  if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
-  const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
+    // 2. Read source manifest.
+    const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
+    if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
+    const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
 
-  // 3. Copy blobs.
-  const sameRegion = job.source_region === job.dest_region;
-  const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
-  for (const sha of distinctShas) {
-    if (sameRegion) {
-      await copyBlobSameRegion(job.source_app_id, destAppId, sha);
-    } else {
-      throw new Error('Cross-region clone not yet wired — Phase 4a is same-region only');
+    // 3. Copy blobs.
+    const sameRegion = job.source_region === job.dest_region;
+    const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
+    for (const sha of distinctShas) {
+      if (sameRegion) {
+        await copyBlobSameRegion(job.source_app_id, destAppId, sha);
+      } else {
+        throw new Error('Cross-region clone not yet wired — Phase 4a is same-region only');
+      }
     }
-  }
 
-  // 4. Copy manifest.
-  if (sameRegion) {
-    await copyManifestSameRegion(job.source_app_id, destAppId, job.source_snapshot_id);
-  } else {
-    await putManifest(destAppId, job.source_snapshot_id, manifestJson);
-  }
+    // 4. Copy manifest.
+    if (sameRegion) {
+      await copyManifestSameRegion(job.source_app_id, destAppId, job.source_snapshot_id);
+    } else {
+      await putManifest(destAppId, job.source_snapshot_id, manifestJson);
+    }
 
-  // 5. Set dest's latest pointer + repo_latest_snapshot column.
-  await setLatest(destAppId, job.source_snapshot_id);
-  const destAppPool = await getRuntimeDbForApp(controlDb, destAppId).catch(() => null);
-  if (destAppPool) {
+    // 5. Set dest's latest pointer + repo_latest_snapshot column.
+    await setLatest(destAppId, job.source_snapshot_id);
+    const destAppPool = await getRuntimeDbForApp(controlDb, destAppId).catch(() => null);
+    if (!destAppPool) throw new Error(`Could not resolve runtime DB for dest app ${destAppId}`);
     await destAppPool.query(
       `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
       [job.source_snapshot_id, destAppId],
     );
-  }
 
-  // 6. Mark job completed.
-  await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
-  logger.info({ jobId, destAppId }, '[clone] completed');
+    // 6. Mark job completed.
+    await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
+    logger.info({ jobId, destAppId }, '[clone] completed');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Best-effort failure marker; swallow secondary errors so we still rethrow the original.
+    await setCloneJobStatus(controlDb, jobId, { status: 'failed', error_message: msg }).catch(() => {});
+    throw err; // re-throw so the neon-task queue applies its retry/fail logic
+  }
 }
