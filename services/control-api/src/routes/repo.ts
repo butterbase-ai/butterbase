@@ -18,6 +18,7 @@ import {
   getLatestSnapshotId,
   deleteSnapshot,
   deleteBlob,
+  wipeRepo,
 } from '../services/repo-storage.js';
 import { planRetention } from '../services/repo-retention.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
@@ -289,6 +290,36 @@ export async function repoRoutes(app: FastifyInstance) {
       return reply.send({ sha256, size: head.size, downloadUrl, expiresIn: 3600 });
     } catch (error) {
       return handleRepoRouteError(app, request, reply, error, 'Failed to load blob');
+    }
+  });
+
+  // DELETE /v1/:app_id/repo
+  app.delete('/v1/:app_id/repo', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+    try {
+      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request));
+      await wipeRepo(ctx.appId);
+
+      const runtimeDb = getRuntimeDbPool(config.runtimeDb, ctx.region);
+      await runtimeDb.query(
+        `UPDATE apps SET repo_latest_snapshot = NULL, updated_at = now() WHERE id = $1`,
+        [ctx.appId],
+      );
+
+      logFromRequest(request, {
+        appId: ctx.appId,
+        category: 'admin',
+        eventType: 'app.repo.wipe',
+        action: 'delete',
+        resourceType: 'app_repo' as AuditResourceType,
+        resourceId: 'repo',
+        eventData: {},
+        success: true,
+      });
+
+      return reply.send({ message: 'Repo wiped', app_id: ctx.appId });
+    } catch (error) {
+      return handleRepoRouteError(app, request, reply, error, 'Failed to wipe repo');
     }
   });
 }
