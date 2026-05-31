@@ -13,15 +13,10 @@ export interface CommitResponse {
   total_bytes: number;
   file_count: number;
 }
-export interface Manifest { v?: 1; files: FileEntry[]; message?: string }
+export interface Manifest { files: FileEntry[]; message?: string }
 export interface SnapshotResponse { snapshot_id: string; manifest: Manifest }
 export interface SnapshotListItem { snapshot_id: string; created_at: string }
 export interface BlobUrlResponse { sha256: string; size: number; downloadUrl: string; expiresIn: number }
-
-/** Build a request-manifest payload (no `v` field needed; server ignores extras). */
-export function manifestRequest(files: FileEntry[], message?: string): { files: FileEntry[]; message?: string } {
-  return message === undefined ? { files } : { files, message };
-}
 
 export const repoApi = {
   prepare(appId: string, body: { files: FileEntry[]; message?: string }) {
@@ -41,6 +36,9 @@ export const repoApi = {
   },
   getBlobUrl(appId: string, sha256: string) {
     return apiGet<BlobUrlResponse>(`/v1/${appId}/repo/blobs/${sha256}`);
+  },
+  batchBlobUrls(appId: string, shas: string[]) {
+    return apiPost<{ blobs: { sha256: string; size: number; downloadUrl: string; expiresIn: number }[] }>(`/v1/${appId}/repo/blobs/batch`, { shas });
   },
   wipe(appId: string) {
     return apiDelete<{ message: string; app_id: string }>(`/v1/${appId}/repo`);
