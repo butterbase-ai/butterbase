@@ -164,6 +164,7 @@ Push has two phases:
 | GET | /v1/\{app_id}/repo/snapshots/latest | Fetch the current snapshot manifest |
 | GET | /v1/\{app_id}/repo/snapshots/\{snapshot_id} | Fetch a specific snapshot's manifest |
 | GET | /v1/\{app_id}/repo/blobs/\{sha256} | Receive a presigned GET URL for a single blob |
+| POST | /v1/\{app_id}/repo/blobs/batch | Presign multiple blob download URLs in a single call |
 | DELETE | /v1/\{app_id}/repo | Wipe the entire repo |
 
 Reads (`GET`) on a **public** app are anonymous. On a **private** app, only the owner can read or write.
@@ -229,6 +230,12 @@ Returns `{ snapshot_id, manifest }`. For each file in the manifest, request `GET
 ### Snapshot history
 
 `GET /v1/{app_id}/repo/snapshots` returns `{ snapshots: [{ snapshot_id, created_at }] }` sorted newest-first. Visibility rules are the same as `latest`: anonymous on a public app, owner-only on a private one (returns 404 to non-owners — no existence leak).
+
+### Batch blob presign
+
+`POST /v1/{app_id}/repo/blobs/batch` accepts `{ shas: string[] }` (max 1000 entries) and returns `{ blobs: [{ sha256, size, downloadUrl, expiresIn }] }`. Missing or pruned shas are omitted from the response, so the response length can be less than the request length. Visibility rules match the single-blob endpoint: anonymous on a public app, owner-only on a private one.
+
+This is useful when you have a manifest with many files and want to fetch all blobs without N round trips. The MCP `manage_repo` `pull_latest` action uses this internally.
 
 ## Per-app subdomains
 
