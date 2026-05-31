@@ -381,11 +381,15 @@ async function executeDeprovision(
 async function waitForDestReady(
   controlDb: pg.Pool,
   destAppId: string,
+  logger: Logger,
   timeoutMs: number = 5 * 60 * 1000,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const appPool = await getRuntimeDbForApp(controlDb, destAppId).catch(() => null);
+    const appPool = await getRuntimeDbForApp(controlDb, destAppId).catch((err) => {
+      logger.warn({ err, destAppId }, '[clone] waitForDestReady: could not resolve runtime DB pool, will retry');
+      return null;
+    });
     if (appPool) {
       const r = await appPool.query<{ provisioning_status: string }>(
         `SELECT provisioning_status FROM apps WHERE id = $1`,
@@ -428,27 +432,37 @@ async function executeClone(
 
   try {
     // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
-    //    insertAppRow has no template_source_app_id parameter today — write it via
-    //    a follow-up UPDATE on the dest's home runtime DB.
-    const destAppId = generateAppId();
-    const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
-    await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
-    await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
+    //    On retry, job.dest_app_id is already set from the prior attempt — reuse it
+    //    and skip provision entirely to avoid creating a second orphaned app row +
+    //    Neon database.
+    let destAppId: string;
+    if (job.dest_app_id) {
+      // Resume from a prior in-flight attempt: dest app already exists.
+      destAppId = job.dest_app_id;
+      logger.info({ jobId, destAppId }, '[clone] resuming from prior attempt; skipping provision');
+    } else {
+      destAppId = generateAppId();
+      const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
+      await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
+      await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
-    // Record template lineage on the dest app row (column added by Phase 1 migration).
-    const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-    await destRuntimePool.query(
-      `UPDATE apps SET template_source_app_id = $1, updated_at = now() WHERE id = $2`,
-      [job.source_app_id, destAppId],
-    );
+      // Record template lineage on the dest app row (column added by Phase 1 migration).
+      //    insertAppRow has no template_source_app_id parameter today — write it via
+      //    a follow-up UPDATE on the dest's home runtime DB.
+      const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+      await destRuntimePool.query(
+        `UPDATE apps SET template_source_app_id = $1, updated_at = now() WHERE id = $2`,
+        [job.source_app_id, destAppId],
+      );
 
-    // Provision DB + run migrations. provisionAppBackground swallows errors
-    // internally (sets provisioning_status='failed'), so waitForDestReady is
-    // what surfaces failure back to us.
-    provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
-      logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
-    });
-    await waitForDestReady(controlDb, destAppId);
+      // Provision DB + run migrations. provisionAppBackground swallows errors
+      // internally (sets provisioning_status='failed'), so waitForDestReady is
+      // what surfaces failure back to us.
+      provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
+        logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
+      });
+    }
+    await waitForDestReady(controlDb, destAppId, logger);
 
     // 2. Read source manifest.
     const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
