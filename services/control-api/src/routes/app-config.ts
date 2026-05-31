@@ -58,7 +58,9 @@ export async function appConfigRoutes(app: FastifyInstance) {
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
       const result = await runtimeDb.query(
-        `SELECT id, name, db_name, db_provisioned, region, allowed_origins, storage_config, auth_hook_function, access_mode, created_at, updated_at
+        `SELECT id, name, db_name, db_provisioned, region, allowed_origins, storage_config, auth_hook_function, access_mode,
+                visibility, listed, template_source_app_id, repo_latest_snapshot, fork_count,
+                created_at, updated_at
          FROM apps
          WHERE id = $1`,
         [resolvedApp.id]
