@@ -11,6 +11,8 @@ export interface ButterbaseConfig {
     name: string;
     apiUrl: string;
   }>;
+  /** Set in the per-folder .butterbase/config.json by `butterbase repo init`/push/pull. */
+  pinned_snapshot_id?: string;
 }
 
 const CONFIG_DIR = path.join(os.homedir(), '.butterbase');
@@ -125,4 +127,27 @@ export async function getApiKey(): Promise<string | undefined> {
 export async function getApiUrl(): Promise<string> {
   const config = await getMergedConfig();
   return config.endpoint ?? 'https://api.butterbase.ai';
+}
+
+/** Read the per-folder pinned snapshot id, or null when not bound or never synced. */
+export async function getPinnedSnapshotId(): Promise<string | null> {
+  const proj = await loadProjectConfig();
+  return (proj?.pinned_snapshot_id as string | undefined) ?? null;
+}
+
+/** Update the per-folder pinned snapshot id. Creates the project config if missing. */
+export async function setPinnedSnapshotId(snapshotId: string | null): Promise<void> {
+  const existing = (await loadProjectConfig()) ?? {};
+  if (snapshotId === null) {
+    delete (existing as any).pinned_snapshot_id;
+  } else {
+    (existing as any).pinned_snapshot_id = snapshotId;
+  }
+  await saveProjectConfig(existing);
+}
+
+/** Read the bound app id from the per-folder config (not from the global currentApp). */
+export async function getBoundAppId(): Promise<string | null> {
+  const proj = await loadProjectConfig();
+  return (proj?.currentApp as string | undefined) ?? null;
 }
