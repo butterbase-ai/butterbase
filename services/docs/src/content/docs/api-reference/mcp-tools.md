@@ -24,6 +24,14 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `update_app_access_mode` | Toggle anonymous vs authenticated-only access. |
 | `set_visibility` | Mark an app public or private, optionally setting the templates-browser `listed` flag. |
 | `generate_service_key` | Generate a `bb_sk_` API key. Shown only once. |
+| `manage_app` | Template clone actions. See `manage_app` actions below. |
+
+### manage_app actions
+
+| Action | Description |
+|--------|-------------|
+| `clone` | Clone a public app's repo snapshot into a new app you own. Pass `source_app_id` and optionally `name` and `region`. Returns `{ job_id, status: "pending" }`. |
+| `get_clone_job` | Poll the status of a clone job by `job_id`. Returns `status` (`pending`, `completed`, or `failed`), `dest_app_id` when completed, and `error_message` when failed. |
 
 ## Schema & Migrations
 

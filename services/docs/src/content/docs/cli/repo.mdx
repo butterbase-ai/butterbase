@@ -77,3 +77,19 @@ butterbase visibility <public|private> [--listed|--unlisted] [--app <id>]
 ```
 
 Marks the app public or private. When public, `--unlisted` hides it from the templates browse listing (the public templates list is itself shipping in a later release).
+
+## Clone a public app
+
+```bash
+butterbase clone <source_app_id> [target_dir] [--name "<text>"] [--region <region>] [--json]
+```
+
+Creates a fresh, owned app cloned from a public template. The CLI:
+
+1. Calls the clone endpoint to start a job.
+2. Polls until the job completes (max 5 minutes).
+3. `butterbase repo init <new_app_id>` + `butterbase repo pull` in `<target_dir>` (defaults to a dir named after the new app id).
+
+The cloned app's schema and functions are **not** copied in this release — you re-apply them yourself. Only the repo snapshot is.
+
+If the clone fails, the error is printed and exit code is 1. Failed jobs can be retried via the HTTP API directly (`POST /v1/clone-jobs/<job_id>/retry`).

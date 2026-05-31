@@ -145,6 +145,24 @@ Response:
 
 `GET /v1/{app_id}/config` returns `visibility` and `listed` alongside the other app settings.
 
+## Templates
+
+Clone a public app to get a copy of its repo snapshot as a starting point for your own project.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /v1/templates/\{source_app_id}/clone | Start a clone of a public app. Returns `{ job_id }` |
+| GET | /v1/clone-jobs/\{job_id} | Status of a clone job |
+| POST | /v1/clone-jobs/\{job_id}/retry | Retry a failed clone job |
+
+### Clone a public app
+
+`POST /v1/templates/{source_app_id}/clone` creates a fresh, empty-DB app owned by the caller and copies the source's repo snapshot into it. Body: `{ name?: string, region?: string }` — region defaults to the source's region. Source must be public; private apps return 404 (no existence leak). Returns `{ job_id, status: "pending" }`.
+
+Poll `GET /v1/clone-jobs/{job_id}` until `status` is `"completed"` (response includes the new `dest_app_id`) or `"failed"` (response includes `error_message`). Failed jobs can be retried via `POST /v1/clone-jobs/{job_id}/retry`.
+
+**What the clone covers in this release:** the repo snapshot (your code). **What it does NOT cover yet:** the source app's schema (tables, columns, indexes) or deployed functions. The cloned app starts with an empty database; you re-apply the schema and re-deploy functions yourself.
+
 ## App repo
 
 Push a codebase to your app as a content-addressed snapshot. Useful as a cross-device backup / source of truth for your app's files. Snapshots are content-addressed: re-pushing an unchanged file does not re-upload it. The last 5 snapshots are retained.
