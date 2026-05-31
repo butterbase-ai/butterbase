@@ -5,7 +5,7 @@ import { apiGet, apiDelete, apiPatch, apiPost } from '../api-client.js';
 export function registerManageApp(server: McpServer) {
   server.tool(
     'manage_app',
-    `Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, and update CORS.
+    `Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, update CORS, and clone.
 
 Actions:
   - "list":               List all backend apps with basic metadata (no app_id needed)
@@ -16,6 +16,8 @@ Actions:
   - "update_access_mode": Toggle an app's access mode between "public" and "authenticated"
   - "secure":             Lock down an app: sets access_mode to "authenticated" and optionally enables RLS user isolation
   - "update_cors":        Update CORS allowed origins to control which frontend domains can access your API
+  - "clone":              Create a clone of a public app. Returns { job_id }. The dest app is a fresh empty-DB app owned by the caller. Source must be public and have a repo snapshot.
+  - "get_clone_job":      Look up the status of a previously-started clone job. Returns { status, dest_app_id?, error_message? }.
 
 Parameters by action:
   list:               { action: "list" }
@@ -26,12 +28,14 @@ Parameters by action:
   update_access_mode: { action: "update_access_mode", app_id, access_mode }
   secure:             { action: "secure", app_id, tables? }
   update_cors:        { action: "update_cors", app_id, allowed_origins }
+  clone:              { action: "clone", source_app_id, name?, region? }
+  get_clone_job:      { action: "get_clone_job", job_id }
 
 Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'clone', 'get_clone_job'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -50,6 +54,12 @@ Common errors:
       })).optional().describe('Optional for "secure". Tables to enable RLS user isolation on. Omit to only toggle access_mode.'),
       // update_cors params
       allowed_origins: z.array(z.string().url()).min(1).optional().describe('Required for "update_cors". Array of allowed origin URLs (e.g. ["http://localhost:3000", "https://myapp.com"])'),
+      // clone params
+      source_app_id: z.string().optional().describe('Required for "clone". The id of the public app to clone.'),
+      name: z.string().optional().describe('Optional for "clone". A name for the new app; defaults to `Clone of <source_app_id>`.'),
+      region: z.string().optional().describe('Optional for "clone". The region for the new app; defaults to the source app\'s region.'),
+      // get_clone_job params
+      job_id: z.string().optional().describe('Required for "get_clone_job".'),
     },
     {
       title: 'Manage App',
@@ -119,6 +129,21 @@ Common errors:
           if (err2) return err2;
           const result = await apiPatch(`/v1/${args.app_id}/config/cors`, { allowed_origins: args.allowed_origins });
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'clone': {
+          const err = need(args.source_app_id !== undefined, '"source_app_id" is required for the "clone" action.');
+          if (err) return err;
+          const body: { name?: string; region?: string } = {};
+          if (args.name) body.name = args.name;
+          if (args.region) body.region = args.region;
+          const res = await apiPost<{ job_id: string; status: string }>(`/v1/templates/${args.source_app_id}/clone`, body);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'get_clone_job': {
+          const err = need(args.job_id !== undefined, '"job_id" is required for the "get_clone_job" action.');
+          if (err) return err;
+          const res = await apiGet(`/v1/clone-jobs/${args.job_id}`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
         }
       }
     }
