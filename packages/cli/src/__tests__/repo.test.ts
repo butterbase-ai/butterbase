@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
 import { repoInitCommand, repoPushCommand, repoPullCommand, repoStatusCommand } from '../commands/repo.js';
+import { cloneCommand } from '../commands/clone.js';
 
 const sha256 = (s: string | Buffer) => createHash('sha256').update(s).digest('hex');
 
@@ -252,4 +253,130 @@ describe('butterbase repo', () => {
     expect(states['wasDeletedLocally.txt']).toBe('deleted');
     expect(states['deletedOnRemote.txt']).toBe('new');
   });
+});
+
+describe('butterbase clone', () => {
+  let tmpDir: string;
+  let prevCwd: string;
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let prevHome: string | undefined;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bb-clone-test-'));
+    prevCwd = process.cwd();
+    process.chdir(tmpDir);
+
+    prevHome = process.env.HOME;
+    process.env.HOME = tmpDir;
+    process.env.BUTTERBASE_API_KEY = 'TK';
+
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(async () => {
+    fetchSpy.mockRestore();
+    logSpy.mockRestore();
+    exitSpy.mockRestore();
+    process.chdir(prevCwd);
+    if (prevHome !== undefined) process.env.HOME = prevHome;
+    await fs.remove(tmpDir);
+  });
+
+  function mockFetch(handler: (url: string, init?: any) => Promise<Response> | Response) {
+    fetchSpy.mockImplementation(async (url: any, init: any) => handler(String(url), init));
+  }
+
+  it('clone: creates job, polls, then init+pull lands files', async () => {
+    const sha = createHash('sha256').update('hello\n').digest('hex');
+    let pollCount = 0;
+
+    mockFetch(async (url, init) => {
+      // POST /v1/templates/app_src/clone → job created
+      if (url.endsWith('/templates/app_src/clone') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ job_id: 'cj_1', status: 'pending' }), { status: 200 });
+      }
+      // GET /v1/clone-jobs/cj_1 → processing first, then completed
+      if (url.endsWith('/clone-jobs/cj_1')) {
+        pollCount++;
+        if (pollCount === 1) {
+          return new Response(JSON.stringify({ job_id: 'cj_1', status: 'processing', source_app_id: 'app_src', dest_app_id: null, retry_count: 0, error_message: null, created_at: '', completed_at: null }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ job_id: 'cj_1', status: 'completed', source_app_id: 'app_src', dest_app_id: 'app_dest', retry_count: 0, error_message: null, created_at: '', completed_at: '' }), { status: 200 });
+      }
+      // GET /v1/app_dest/repo/snapshots/latest → snapshot with one file
+      if (url.endsWith('/app_dest/repo/snapshots/latest')) {
+        return new Response(JSON.stringify({
+          snapshot_id: 'snap1',
+          manifest: { files: [{ path: 'a.txt', sha256: sha, size: 6 }] },
+        }), { status: 200 });
+      }
+      // GET /v1/app_dest/repo/blobs/<sha> → download URL
+      if (url.includes('/app_dest/repo/blobs/')) {
+        return new Response(JSON.stringify({ sha256: sha, size: 6, downloadUrl: 'https://s3.test/x', expiresIn: 3600 }), { status: 200 });
+      }
+      // GET presigned download URL → file content
+      if (url === 'https://s3.test/x') {
+        return new Response('hello\n', { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const targetDir = path.join(tmpDir, 'cloned');
+    await cloneCommand('app_src', targetDir, {});
+
+    expect(await fs.readFile(path.join(targetDir, 'a.txt'), 'utf8')).toBe('hello\n');
+    const cfg = await fs.readJson(path.join(targetDir, '.butterbase/config.json'));
+    expect(cfg.currentApp).toBe('app_dest');
+    expect(cfg.pinned_snapshot_id).toBe('snap1');
+  }, 30_000);
+
+  it('clone: exits 1 when job fails', async () => {
+    mockFetch(async (url, init) => {
+      if (url.endsWith('/templates/app_src/clone') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ job_id: 'cj_x', status: 'pending' }), { status: 200 });
+      }
+      if (url.endsWith('/clone-jobs/cj_x')) {
+        return new Response(JSON.stringify({ job_id: 'cj_x', status: 'failed', source_app_id: 'app_src', dest_app_id: null, retry_count: 0, error_message: 'blob missing', created_at: '', completed_at: null }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await cloneCommand('app_src', path.join(tmpDir, 'x'), {});
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  }, 30_000);
+
+  it('clone --region: forwards region in POST body', async () => {
+    const sha = createHash('sha256').update('hi\n').digest('hex');
+    let postedBody: any = null;
+
+    mockFetch(async (url, init) => {
+      if (url.endsWith('/templates/app_src/clone') && init?.method === 'POST') {
+        postedBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ job_id: 'cj_2', status: 'pending' }), { status: 200 });
+      }
+      if (url.endsWith('/clone-jobs/cj_2')) {
+        return new Response(JSON.stringify({ job_id: 'cj_2', status: 'completed', source_app_id: 'app_src', dest_app_id: 'app_r', retry_count: 0, error_message: null, created_at: '', completed_at: '' }), { status: 200 });
+      }
+      if (url.endsWith('/app_r/repo/snapshots/latest')) {
+        return new Response(JSON.stringify({
+          snapshot_id: 'snap_r',
+          manifest: { files: [{ path: 'hi.txt', sha256: sha, size: 3 }] },
+        }), { status: 200 });
+      }
+      if (url.includes('/app_r/repo/blobs/')) {
+        return new Response(JSON.stringify({ sha256: sha, size: 3, downloadUrl: 'https://s3.test/r', expiresIn: 3600 }), { status: 200 });
+      }
+      if (url === 'https://s3.test/r') {
+        return new Response('hi\n', { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await cloneCommand('app_src', path.join(tmpDir, 'r'), { region: 'eu-west-1' });
+    expect(postedBody?.region).toBe('eu-west-1');
+  }, 30_000);
 });
