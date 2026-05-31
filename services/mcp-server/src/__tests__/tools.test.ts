@@ -44,6 +44,7 @@ describe('MCP Server Tools', () => {
       'manage_oauth',
       'manage_rag_content',
       'manage_realtime',
+      'manage_repo',
       'manage_rls',
       'manage_schema',
       'manage_storage',
@@ -107,7 +108,7 @@ describe('MCP Server Tools', () => {
     const actions = (tool!.inputSchema as unknown as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'delete', 'get_config', 'list', 'pause', 'secure', 'update_access_mode', 'update_cors',
+      'delete', 'get_config', 'list', 'pause', 'secure', 'set_visibility', 'update_access_mode', 'update_cors',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [
