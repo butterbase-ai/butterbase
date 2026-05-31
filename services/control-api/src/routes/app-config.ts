@@ -30,6 +30,11 @@ const updateAccessModeSchema = z.object({
   access_mode: z.enum(['public', 'authenticated']),
 });
 
+const updateVisibilitySchema = z.object({
+  visibility: z.enum(['private', 'public']),
+  listed: z.boolean().optional(),
+});
+
 const updatePausedSchema = z.object({
   paused: z.boolean(),
   reason: z.string().max(500).optional(),
@@ -495,6 +500,85 @@ export async function appConfigRoutes(app: FastifyInstance) {
       return reply.code(500).send(createAgentError({
         code: EXTERNAL_DB_ERROR,
         message: 'Failed to update access mode',
+        remediation: 'Retry the operation. If the problem persists, check database connectivity or contact support.',
+        documentation_url: getDocUrl(EXTERNAL_DB_ERROR)
+      }));
+    }
+  });
+
+  // PATCH /v1/:app_id/config/visibility - Toggle template visibility
+  app.patch('/v1/:app_id/config/visibility', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+
+    const parseResult = updateVisibilitySchema.safeParse(request.body);
+    if (!parseResult.success) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Invalid request body',
+        remediation: 'Provide visibility as "public" or "private". Optionally include listed (boolean).',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        details: parseResult.error.errors,
+      }));
+    }
+
+    const { visibility, listed } = parseResult.data;
+
+    try {
+      const resolvedApp = await AppResolver.resolveApp(
+        app.controlDb,
+        app_id,
+        requireUserId(request)
+      );
+      const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
+      const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
+
+      // Update visibility (and listed if provided) in a single statement.
+      const update = listed === undefined
+        ? await runtimeDb.query(
+            `UPDATE apps SET visibility = $1, updated_at = now()
+             WHERE id = $2
+             RETURNING visibility, listed`,
+            [visibility, resolvedApp.id]
+          )
+        : await runtimeDb.query(
+            `UPDATE apps SET visibility = $1, listed = $2, updated_at = now()
+             WHERE id = $3
+             RETURNING visibility, listed`,
+            [visibility, listed, resolvedApp.id]
+          );
+
+      const row = update.rows[0];
+
+      logFromRequest(request, {
+        appId: resolvedApp.id,
+        category: 'admin',
+        eventType: 'app.config.visibility',
+        action: 'update',
+        resourceType: 'app_config',
+        resourceId: 'visibility',
+        eventData: { visibility: row.visibility, listed: row.listed },
+        success: true,
+      });
+
+      return reply.send({
+        message: `Visibility updated to "${row.visibility}"`,
+        app_id: resolvedApp.id,
+        visibility: row.visibility,
+        listed: row.listed,
+      });
+    } catch (error) {
+      if (error instanceof AppNotFoundError) {
+        return reply.code(404).send(createAgentError({
+          code: RESOURCE_NOT_FOUND,
+          message: 'App not found',
+          remediation: 'Verify the app_id is correct. Use list_apps to see available apps.',
+          documentation_url: getDocUrl(RESOURCE_NOT_FOUND)
+        }));
+      }
+      app.log.error({ error }, 'Failed to update visibility');
+      return reply.code(500).send(createAgentError({
+        code: EXTERNAL_DB_ERROR,
+        message: 'Failed to update visibility',
         remediation: 'Retry the operation. If the problem persists, check database connectivity or contact support.',
         documentation_url: getDocUrl(EXTERNAL_DB_ERROR)
       }));
