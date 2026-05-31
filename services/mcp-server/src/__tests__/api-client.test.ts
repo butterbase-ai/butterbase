@@ -18,10 +18,9 @@ describe('API Client', () => {
   it('forwards request-scoped Authorization header when present', async () => {
     process.env.BUTTERBASE_API_KEY = 'bb_sk_service_fallback';
 
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ apps: [] }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ apps: [] }), { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     await runWithRequestAuthorizationHeader('Bearer user_token_123', async () => {
@@ -37,10 +36,9 @@ describe('API Client', () => {
   it('falls back to BUTTERBASE_API_KEY when request token is absent', async () => {
     process.env.BUTTERBASE_API_KEY = 'bb_sk_service_fallback';
 
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ apps: [] }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ apps: [] }), { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     await apiGet('/apps');
@@ -54,10 +52,9 @@ describe('API Client', () => {
   it('sends no Authorization header when neither request token nor env key exists', async () => {
     delete process.env.BUTTERBASE_API_KEY;
 
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ apps: [] }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ apps: [] }), { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     await apiGet('/apps');

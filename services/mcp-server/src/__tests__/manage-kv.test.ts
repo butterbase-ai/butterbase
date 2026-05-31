@@ -24,10 +24,9 @@ describe('manage_kv tool', () => {
   });
 
   it('set action forwards a PUT request to the correct URL', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: true }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     const { client } = await createConnectedPair();
@@ -52,10 +51,9 @@ describe('manage_kv tool', () => {
   });
 
   it('get action forwards a GET request to the correct URL', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ value: 'hello' }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ value: 'hello' }), { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     const { client } = await createConnectedPair();
