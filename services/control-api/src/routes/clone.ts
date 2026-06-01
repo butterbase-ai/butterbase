@@ -49,7 +49,7 @@ export function cloneRoutes(app: FastifyInstance) {
   // POST /v1/templates/:source_app_id/clone
   app.post('/v1/templates/:source_app_id/clone', async (request, reply) => {
     const { source_app_id } = request.params as { source_app_id: string };
-    const body = (request.body ?? {}) as { name?: string; region?: string };
+    const body = (request.body ?? {}) as { name?: string; region?: string; dest_region?: string };
     const userId = requireUserId(request);
 
     // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
@@ -97,7 +97,8 @@ export function cloneRoutes(app: FastifyInstance) {
       }));
     }
 
-    const destRegion = body.region ?? src.region;
+    // Accept dest_region (preferred) or the legacy region alias.
+    const destRegion = body.dest_region ?? body.region ?? src.region;
     const job = await createCloneJob(app.controlDb, {
       sourceAppId: source_app_id,
       sourceSnapshotId: src.repo_latest_snapshot,

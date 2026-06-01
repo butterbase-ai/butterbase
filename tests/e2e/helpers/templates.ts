@@ -12,8 +12,15 @@ import pg from 'pg';
 export const API_URL = 'http://localhost:4000';
 export const CONTROL_DB_URL = 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
 export const RUNTIME_DB_URL_US = 'postgresql://butterbase:butterbase_dev@localhost:5437/butterbase_runtime_us';
+export const RUNTIME_DB_URL_EU = 'postgresql://butterbase:butterbase_dev@localhost:5438/butterbase_runtime_eu';
 // Local data-plane DB (us-east-1 / only region in local dev): port 5435.
 export const DATA_PLANE_DB_ADMIN_URL = 'postgresql://butterbase:butterbase_dev@localhost:5435/postgres';
+
+/** Map of region → local runtime DB connection string (for local dev only). */
+const RUNTIME_DB_URLS_BY_REGION: Record<string, string> = {
+  'us-east-1': RUNTIME_DB_URL_US,
+  'eu-west-1': RUNTIME_DB_URL_EU,
+};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -313,15 +320,15 @@ export async function insertRowsAsOwner(
 
 /**
  * Runs a query directly against the local runtime DB for a given region.
- * Only 'us-east-1' is supported in local dev (port 5437).
+ * Supports 'us-east-1' (port 5437) and 'eu-west-1' (port 5438) in local dev.
  */
 export async function queryRuntimeDb(
-  _region: string,
+  region: string,
   sql: string,
   params: unknown[] = [],
 ): Promise<pg.QueryResult> {
-  // Local dev has a single runtime DB regardless of region label.
-  const pool = new pg.Pool({ connectionString: RUNTIME_DB_URL_US });
+  const connectionString = RUNTIME_DB_URLS_BY_REGION[region] ?? RUNTIME_DB_URL_US;
+  const pool = new pg.Pool({ connectionString });
   try {
     return await pool.query(sql, params);
   } finally {

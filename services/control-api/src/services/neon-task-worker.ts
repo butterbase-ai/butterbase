@@ -14,8 +14,10 @@ import {
   putManifest,
   setLatest,
   copyBlobSameRegion,
+  copyBlobCrossRegion,
   copyManifestSameRegion,
 } from './repo-storage.js';
+import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding } from './clone-replay.js';
 
@@ -408,12 +410,13 @@ async function waitForDestReady(
 }
 
 /**
- * Phase 4a app-template clone: read job, provision fresh dest app, copy
- * blobs + manifest, set dest's latest pointer, mark job completed.
+ * Phase 4a / Phase 5 B1 app-template clone: read job, provision fresh dest
+ * app, copy blobs + manifest, set dest's latest pointer, mark job completed.
  *
- * CROSS-REGION COPY IS INTENTIONALLY UNIMPLEMENTED. Phase 4a e2e covers
- * same-region only — cross-region wires up when the first multi-region
- * test fires (would use copyBlobCrossRegion + putManifest).
+ * Same-region: uses S3 server-side CopyObject (copyBlobSameRegion).
+ * Cross-region: streams GET→PUT via copyBlobCrossRegion (Phase 5 B1).
+ * The manifest is either server-side-copied (same region) or re-put from the
+ * already-fetched JSON (cross-region, via putManifest).
  */
 async function executeClone(
   controlDb: pg.Pool,
@@ -528,11 +531,29 @@ async function executeClone(
     // 3. Copy blobs.
     const sameRegion = job.source_region === job.dest_region;
     const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
-    for (const sha of distinctShas) {
-      if (sameRegion) {
+    if (sameRegion) {
+      for (const sha of distinctShas) {
         await copyBlobSameRegion(job.source_app_id, destAppId, sha);
-      } else {
-        throw new Error('Cross-region clone not yet wired — Phase 4a is same-region only');
+      }
+    } else {
+      // Cross-region: stream GET from source S3 → PUT to dest S3.
+      // In local dev both regions share one LocalStack endpoint; in production
+      // each region has its own bucket/endpoint (injected via config).
+      const s3Opts = {
+        region: config.s3.region,
+        endpoint: config.s3.endpoint,
+        forcePathStyle: config.s3.forcePathStyle,
+        requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+        responseChecksumValidation: 'WHEN_REQUIRED' as const,
+        credentials: config.s3.accessKeyId && config.s3.secretAccessKey
+          ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+          : undefined,
+      };
+      const srcS3 = new S3Client(s3Opts);
+      const dstS3 = new S3Client(s3Opts);
+      const bucket = config.s3.bucket;
+      for (const sha of distinctShas) {
+        await copyBlobCrossRegion(job.source_app_id, destAppId, sha, srcS3, bucket, dstS3, bucket);
       }
     }
 
