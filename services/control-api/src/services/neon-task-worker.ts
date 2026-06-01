@@ -17,7 +17,7 @@ import {
   copyManifestSameRegion,
 } from './repo-storage.js';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema, replayRls, replaySeedData, replayFunctions } from './clone-replay.js';
+import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig } from './clone-replay.js';
 
 interface NeonTask {
   id: number;
@@ -576,6 +576,23 @@ async function executeClone(
     logger.info(
       { destAppId, count: fnResult.count, warnings: fnResult.warnings.length },
       '[clone] functions replayed',
+    );
+
+    // Step 6 (Phase 5 A5): Replay non-secret config onto dest runtime DB.
+    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_config' });
+    const cfgResult = await replayNonSecretConfig(
+      sourceRuntimePool,
+      destRuntimePool,
+      job.source_app_id,
+      destAppId,
+      logger,
+    );
+    if (cfgResult.warnings.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);
+    }
+    logger.info(
+      { destAppId, warnings: cfgResult.warnings.length },
+      '[clone] non-secret config replayed',
     );
 
     // 6. Mark job completed.

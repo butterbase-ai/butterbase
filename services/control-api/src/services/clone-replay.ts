@@ -306,3 +306,299 @@ export async function replayFunctions(
 
   return { count: inserted, warnings };
 }
+
+// ---------------------------------------------------------------------------
+// replayNonSecretConfig — step 6
+// ---------------------------------------------------------------------------
+//
+// Six config subsystems live in the RUNTIME DB. Their locations and blanking
+// rules are summarised here so future auditors can cross-check:
+//
+//   apps.storage_config      JSONB   — copy verbatim (no secrets)
+//   apps.jwt_config          JSONB   — copy verbatim (signing keys live in
+//                                      app_signing_keys, NOT here)
+//   apps.allowed_origins     text[]  — copy verbatim (CORS whitelist)
+//   apps.ai_config           JSONB   — copy all fields EXCEPT byokKey which
+//                                      is BLANKED (encrypted BYOK API key)
+//   app_realtime_config      TABLE   — copy verbatim (per-table RT flags)
+//                                      columns: id, app_id, table_name,
+//                                      events, enabled, created_at, updated_at
+//                                      unique: (app_id, table_name)
+//   app_oauth_configs        TABLE   — copy provider/urls/scopes/metadata;
+//                                      BLANK client_id + client_secret_encrypted
+//                                      columns: id, app_id, provider,
+//                                      client_id, client_secret_encrypted,
+//                                      scopes, authorization_url, token_url,
+//                                      userinfo_url, enabled, created_at,
+//                                      redirect_uris, provider_metadata
+//                                      unique: (app_id, provider)
+
+async function replayStorageConfig(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  warnings: string[],
+  logger: ReplayLogger,
+): Promise<void> {
+  try {
+    const src = await sourceRuntimePool.query<{ storage_config: unknown }>(
+      `SELECT storage_config FROM apps WHERE id = $1`,
+      [sourceAppId],
+    );
+    if (src.rows.length === 0) {
+      warnings.push('storage_config: source app row not found; skipping');
+      return;
+    }
+    await destRuntimePool.query(
+      `UPDATE apps SET storage_config = $1, updated_at = now() WHERE id = $2`,
+      [src.rows[0].storage_config, destAppId],
+    );
+    logger.info({ destAppId }, '[clone] storage_config replayed');
+  } catch (err) {
+    const msg = `storage_config replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] storage_config replay failed; continuing');
+  }
+}
+
+async function replayJwtConfig(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  warnings: string[],
+  logger: ReplayLogger,
+): Promise<void> {
+  try {
+    const src = await sourceRuntimePool.query<{ jwt_config: unknown }>(
+      `SELECT jwt_config FROM apps WHERE id = $1`,
+      [sourceAppId],
+    );
+    if (src.rows.length === 0) {
+      warnings.push('jwt_config: source app row not found; skipping');
+      return;
+    }
+    await destRuntimePool.query(
+      `UPDATE apps SET jwt_config = $1, updated_at = now() WHERE id = $2`,
+      [src.rows[0].jwt_config, destAppId],
+    );
+    logger.info({ destAppId }, '[clone] jwt_config replayed');
+  } catch (err) {
+    const msg = `jwt_config replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] jwt_config replay failed; continuing');
+  }
+}
+
+async function replayAllowedOrigins(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  warnings: string[],
+  logger: ReplayLogger,
+): Promise<void> {
+  try {
+    const src = await sourceRuntimePool.query<{ allowed_origins: string[] }>(
+      `SELECT allowed_origins FROM apps WHERE id = $1`,
+      [sourceAppId],
+    );
+    if (src.rows.length === 0) {
+      warnings.push('allowed_origins: source app row not found; skipping');
+      return;
+    }
+    await destRuntimePool.query(
+      `UPDATE apps SET allowed_origins = $1, updated_at = now() WHERE id = $2`,
+      [src.rows[0].allowed_origins, destAppId],
+    );
+    logger.info({ destAppId }, '[clone] allowed_origins replayed');
+  } catch (err) {
+    const msg = `allowed_origins replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] allowed_origins replay failed; continuing');
+  }
+}
+
+async function replayAiConfig(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  warnings: string[],
+  logger: ReplayLogger,
+): Promise<void> {
+  try {
+    const src = await sourceRuntimePool.query<{ ai_config: Record<string, unknown> | null }>(
+      `SELECT ai_config FROM apps WHERE id = $1`,
+      [sourceAppId],
+    );
+    if (src.rows.length === 0) {
+      warnings.push('ai_config: source app row not found; skipping');
+      return;
+    }
+    // Strip the BYOK key; all other non-secret fields (defaultModel, etc.) copy verbatim.
+    const raw = src.rows[0].ai_config ?? {};
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { byokKey: _blanked, ...safeConfig } = raw;
+    await destRuntimePool.query(
+      `UPDATE apps SET ai_config = $1, updated_at = now() WHERE id = $2`,
+      [safeConfig, destAppId],
+    );
+    logger.info({ destAppId, byokBlanked: 'byokKey' in raw }, '[clone] ai_config replayed');
+  } catch (err) {
+    const msg = `ai_config replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] ai_config replay failed; continuing');
+  }
+}
+
+async function replayRealtimeConfig(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  warnings: string[],
+  logger: ReplayLogger,
+): Promise<void> {
+  try {
+    const src = await sourceRuntimePool.query<{
+      table_name: string;
+      events: string[];
+      enabled: boolean;
+    }>(
+      `SELECT table_name, events, enabled FROM app_realtime_config WHERE app_id = $1`,
+      [sourceAppId],
+    );
+    if (src.rows.length === 0) {
+      logger.info({ destAppId }, '[clone] no realtime config to replay');
+      return;
+    }
+    for (const row of src.rows) {
+      try {
+        await destRuntimePool.query(
+          `INSERT INTO app_realtime_config (id, app_id, table_name, events, enabled)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4)
+           ON CONFLICT (app_id, table_name) DO UPDATE
+             SET events = EXCLUDED.events, enabled = EXCLUDED.enabled, updated_at = now()`,
+          [destAppId, row.table_name, row.events, row.enabled],
+        );
+      } catch (err) {
+        const msg = `app_realtime_config row ${row.table_name} failed: ${(err as Error).message}`;
+        warnings.push(msg);
+        logger.warn({ table: row.table_name, err }, '[clone] realtime config row failed; continuing');
+      }
+    }
+    logger.info({ destAppId, count: src.rows.length }, '[clone] realtime config replayed');
+  } catch (err) {
+    const msg = `app_realtime_config replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] realtime config replay failed; continuing');
+  }
+}
+
+async function replayOauthConfigs(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  warnings: string[],
+  logger: ReplayLogger,
+): Promise<void> {
+  try {
+    const src = await sourceRuntimePool.query<{
+      provider: string;
+      scopes: string[] | null;
+      authorization_url: string | null;
+      token_url: string | null;
+      userinfo_url: string | null;
+      enabled: boolean;
+      redirect_uris: string[];
+      provider_metadata: Record<string, unknown>;
+    }>(
+      // client_id and client_secret_encrypted are intentionally excluded from SELECT.
+      `SELECT provider, scopes, authorization_url, token_url,
+              userinfo_url, enabled, redirect_uris, provider_metadata
+         FROM app_oauth_configs
+        WHERE app_id = $1`,
+      [sourceAppId],
+    );
+    if (src.rows.length === 0) {
+      logger.info({ destAppId }, '[clone] no oauth configs to replay');
+      return;
+    }
+    for (const row of src.rows) {
+      try {
+        await destRuntimePool.query(
+          `INSERT INTO app_oauth_configs (
+             id, app_id, provider,
+             client_id, client_secret_encrypted,
+             scopes, authorization_url, token_url, userinfo_url,
+             enabled, redirect_uris, provider_metadata
+           ) VALUES (
+             gen_random_uuid(), $1, $2,
+             NULL, NULL,
+             $3, $4, $5, $6,
+             $7, $8, $9
+           )
+           ON CONFLICT (app_id, provider) DO UPDATE
+             SET client_id              = NULL,
+                 client_secret_encrypted = NULL,
+                 scopes                 = EXCLUDED.scopes,
+                 authorization_url      = EXCLUDED.authorization_url,
+                 token_url              = EXCLUDED.token_url,
+                 userinfo_url           = EXCLUDED.userinfo_url,
+                 enabled                = EXCLUDED.enabled,
+                 redirect_uris          = EXCLUDED.redirect_uris,
+                 provider_metadata      = EXCLUDED.provider_metadata`,
+          [
+            destAppId, row.provider,
+            row.scopes, row.authorization_url, row.token_url, row.userinfo_url,
+            row.enabled, row.redirect_uris, row.provider_metadata,
+          ],
+        );
+      } catch (err) {
+        const msg = `app_oauth_configs row ${row.provider} failed: ${(err as Error).message}`;
+        warnings.push(msg);
+        logger.warn({ provider: row.provider, err }, '[clone] oauth config row failed; continuing');
+      }
+    }
+    logger.info({ destAppId, count: src.rows.length }, '[clone] oauth configs replayed');
+  } catch (err) {
+    const msg = `app_oauth_configs replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] oauth configs replay failed; continuing');
+  }
+}
+
+/**
+ * Replay all non-secret config from the source app's runtime DB onto the dest
+ * app's runtime DB (step 6 of the clone pipeline).
+ *
+ * Subsystems and their blanking rules:
+ *   - storage_config (apps.storage_config)      — verbatim
+ *   - jwt_config (apps.jwt_config)              — verbatim
+ *   - allowed_origins (apps.allowed_origins)    — verbatim
+ *   - ai_config (apps.ai_config)                — byokKey BLANKED; rest verbatim
+ *   - app_realtime_config (table)               — verbatim
+ *   - app_oauth_configs (table)                 — client_id + client_secret_encrypted BLANKED
+ *
+ * Each subsystem soft-fails independently: an error is pushed to `warnings`
+ * and the function continues with the next subsystem.
+ */
+export async function replayNonSecretConfig(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  logger: ReplayLogger,
+): Promise<{ warnings: string[] }> {
+  const warnings: string[] = [];
+  await replayStorageConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  await replayJwtConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  await replayAllowedOrigins(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  return { warnings };
+}
