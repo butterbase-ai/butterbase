@@ -30,6 +30,7 @@ import {
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import pg from 'pg';
+import { RATE_LIMIT_BYPASS_HEADERS, waitForProvisioning } from './helpers/templates.js';
 
 const API_URL = 'http://localhost:4000';
 const CONTROL_DB_URL = 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
@@ -70,26 +71,21 @@ async function seedUser(): Promise<SeededUser> {
   return { userId, apiKey: fullKey };
 }
 
-async function seedApp(ownerId: string, region: string): Promise<string> {
-  const stamp = Date.now() + Math.random().toString(36).slice(2, 8);
-  const appId = `clone-e2e-app-${stamp}`;
-  const subdomain = `clone-e2e-${stamp}`;
-  await controlPool.query(
-    `INSERT INTO user_app_index (app_id, user_id, region) VALUES ($1, $2, $3)`,
-    [appId, ownerId, region],
-  );
-  await runtimePool.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, subdomain, region, provisioning_status, db_provisioned)
-     VALUES ($1, $2, $3, $4, $5, $6, 'ready', true)`,
-    [appId, `clone-e2e ${stamp}`, ownerId, `cust_${appId.replace(/-/g, '_')}`, subdomain, region],
-  );
-  return appId;
-}
-
 async function seedUserAndApp(region: string): Promise<SeededApp> {
   const u = await seedUser();
-  const appId = await seedApp(u.userId, region);
-  return { userId: u.userId, appId, apiKey: u.apiKey };
+  const res = await fetch(`${API_URL}/init`, {
+    method: 'POST',
+    headers: {
+      ...RATE_LIMIT_BYPASS_HEADERS,
+      Authorization: `Bearer ${u.apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ name: 'clone-e2e', region }),
+  });
+  if (!res.ok) throw new Error(`/init failed: ${res.status} ${await res.text()}`);
+  const init = await res.json() as { app_id: string };
+  await waitForProvisioning(u.apiKey, init.app_id, 120_000);
+  return { userId: u.userId, appId: init.app_id, apiKey: u.apiKey };
 }
 
 async function setVisibilityPublic(appId: string): Promise<void> {
