@@ -1,3 +1,4 @@
+-- @scope: runtime
 -- Allow multiple concurrent clone tasks per source app.
 -- Other task types (provision, deprovision) keep the single-active-per-app constraint.
 --
