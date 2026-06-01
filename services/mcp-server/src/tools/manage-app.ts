@@ -19,6 +19,7 @@ Actions:
   - "clone":              Create a clone of a public app. Returns { job_id }. The dest app is a fresh empty-DB app owned by the caller. Source must be public and have a repo snapshot.
   - "get_clone_job":      Look up the status of a previously-started clone job. Returns { status, dest_app_id?, error_message? }.
   - "find_templates":     Search public templates by name, region, sort order, and pagination. Returns paginated list of public app templates.
+  - "set_clone_webhook":  Set or clear a webhook that fires when someone clones this app. Pass webhook_url + webhook_secret to configure, or clear_webhook: true to remove.
 
 Parameters by action:
   list:               { action: "list" }
@@ -32,12 +33,13 @@ Parameters by action:
   clone:              { action: "clone", source_app_id, name?, region? }
   get_clone_job:      { action: "get_clone_job", job_id }
   find_templates:     { action: "find_templates", q?, region?, sort?, limit?, offset? }
+  set_clone_webhook:  { action: "set_clone_webhook", app_id, webhook_url, webhook_secret } or { action: "set_clone_webhook", app_id, clear_webhook: true }
 
 Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'clone', 'get_clone_job', 'find_templates'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -62,6 +64,10 @@ Common errors:
       region: z.string().optional().describe('Optional for "clone". The region for the new app; defaults to the source app\'s region.'),
       // get_clone_job params
       job_id: z.string().optional().describe('Required for "get_clone_job".'),
+      // set_clone_webhook params
+      webhook_url: z.string().url().optional().describe('Required for "set_clone_webhook" (unless clear_webhook is true). HTTPS URL to receive clone event POST requests.'),
+      webhook_secret: z.string().min(16).max(256).optional().describe('Required for "set_clone_webhook" (unless clear_webhook is true). Secret used to sign the HMAC-SHA256 webhook payload (16–256 characters).'),
+      clear_webhook: z.boolean().optional().describe('Optional for "set_clone_webhook". Pass true to remove the clone webhook instead of setting one.'),
       // find_templates params
       q: z.string().optional().describe('Optional for "find_templates". Search query to filter templates by name.'),
       sort: z.enum(['recent', 'popular']).optional().describe('Optional for "find_templates". Sort order: "recent" or "popular". Defaults to "recent".'),
@@ -162,6 +168,23 @@ Common errors:
           const suffix = params.toString() ? `?${params.toString()}` : '';
           const res = await apiGet(`/v1/templates${suffix}`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'set_clone_webhook': {
+          const err = need(args.app_id, '"app_id" is required for this action.');
+          if (err) return err;
+          if (args.clear_webhook === true) {
+            const result = await apiPatch(`/v1/${args.app_id}/config/clone-webhook`, { clear: true });
+            return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+          }
+          const err2 = need(args.webhook_url, '"webhook_url" is required for "set_clone_webhook" unless clear_webhook is true.');
+          if (err2) return err2;
+          const err3 = need(args.webhook_secret, '"webhook_secret" is required for "set_clone_webhook" unless clear_webhook is true.');
+          if (err3) return err3;
+          const result = await apiPatch(`/v1/${args.app_id}/config/clone-webhook`, {
+            webhook_url: args.webhook_url,
+            webhook_secret: args.webhook_secret,
+          });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
       }
     }
