@@ -696,6 +696,7 @@ async function executeClone(
       // B2 sweeper reconciles if this fails (non-fatal catch below).
       try {
         const sourceRuntimePoolForForkCount = getRuntimeDbPool(config.runtimeDb, job.source_region);
+        // B2 audit 2026-06-01: no INSERT trigger on apps auto-increments fork_count; unconditional bump is correct.
         await sourceRuntimePoolForForkCount.query(
           `UPDATE apps SET fork_count = COALESCE(fork_count, 0) + 1 WHERE id = $1`,
           [job.source_app_id],
