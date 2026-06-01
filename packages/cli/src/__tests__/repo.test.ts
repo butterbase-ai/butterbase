@@ -255,6 +255,199 @@ describe('butterbase repo', () => {
   });
 });
 
+/**
+ * G4: repo status exit-code coverage.
+ *
+ * The current repoStatusCommand does NOT differentiate exit codes by sync
+ * state (no-remote / up-to-date / ahead / behind / diverged). It exits 0 on
+ * every successful invocation and exits 1 only on hard errors (missing config,
+ * API errors). These tests document and enforce the current contract.
+ *
+ * NOTE: If a future task adds differentiated exit codes (e.g. exit 1 for
+ * "behind", exit 2 for "diverged"), these tests must be updated accordingly.
+ */
+describe('butterbase repo status — exit code behavior', () => {
+  let tmpDir: string;
+  let prevCwd: string;
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let prevHome: string | undefined;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bb-repo-ec-test-'));
+    prevCwd = process.cwd();
+    process.chdir(tmpDir);
+    prevHome = process.env.HOME;
+    process.env.HOME = tmpDir;
+    process.env.BUTTERBASE_API_KEY = 'TK';
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(async () => {
+    fetchSpy.mockRestore();
+    logSpy.mockRestore();
+    exitSpy.mockRestore();
+    process.chdir(prevCwd);
+    if (prevHome !== undefined) process.env.HOME = prevHome;
+    await fs.remove(tmpDir);
+  });
+
+  function mockFetch(handler: (url: string, init?: any) => Promise<Response> | Response) {
+    fetchSpy.mockImplementation(async (url: any, init: any) => handler(String(url), init));
+  }
+
+  it('exit code 0 — no remote (remote 404, no pinned snapshot)', async () => {
+    // Repo with no snapshots ever pushed. Remote returns 404.
+    await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_ec' });
+    mockFetch(async (url) => {
+      if (url.includes('/repo/snapshots/latest')) {
+        return new Response('not found', { status: 404 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    await repoStatusCommand({ json: true });
+    // Must NOT have called process.exit — command exits cleanly (0).
+    expect(exitSpy).not.toHaveBeenCalled();
+    // JSON output should show empty files array.
+    const jsonCall = logSpy.mock.calls.map((c: any[]) => String(c[0] ?? '')).find(s => s.trim().startsWith('{'));
+    expect(jsonCall).toBeDefined();
+    const parsed = JSON.parse(jsonCall!);
+    expect(parsed.remote_latest_snapshot_id).toBeNull();
+    expect(Array.isArray(parsed.files)).toBe(true);
+  });
+
+  it('exit code 0 — up-to-date (pinned === remote, working tree clean)', async () => {
+    const content = 'hello\n';
+    const h = createHash('sha256').update(content).digest('hex');
+    await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_ec', pinned_snapshot_id: 'snap1' });
+    await fs.outputFile(path.join(tmpDir, 'hello.txt'), content);
+
+    mockFetch(async (url) => {
+      if (url.includes('/repo/snapshots/latest')) {
+        return new Response(JSON.stringify({ snapshot_id: 'snap1', manifest: { files: [{ path: 'hello.txt', sha256: h, size: Buffer.byteLength(content) }] } }), { status: 200 });
+      }
+      if (url.includes('/repo/snapshots/snap1')) {
+        return new Response(JSON.stringify({ snapshot_id: 'snap1', manifest: { files: [{ path: 'hello.txt', sha256: h, size: Buffer.byteLength(content) }] } }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await repoStatusCommand({ json: true });
+    expect(exitSpy).not.toHaveBeenCalled();
+    const jsonCall = logSpy.mock.calls.map((c: any[]) => String(c[0] ?? '')).find(s => s.trim().startsWith('{'));
+    const parsed = JSON.parse(jsonCall!);
+    // Working tree clean — no non-unchanged files.
+    expect(parsed.files.filter((f: any) => f.state !== 'unchanged')).toHaveLength(0);
+  });
+
+  it('exit code 0 — ahead (local has untracked/modified files; no remote advance)', async () => {
+    // Pin matches remote, but there are local modifications ("local is ahead of remote").
+    const original = 'original\n';
+    const modified = 'modified content\n';
+    const h = createHash('sha256').update(original).digest('hex');
+    await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_ec', pinned_snapshot_id: 'snap2' });
+    await fs.outputFile(path.join(tmpDir, 'file.txt'), modified);  // modified locally
+
+    mockFetch(async (url) => {
+      if (url.includes('/repo/snapshots/latest')) {
+        return new Response(JSON.stringify({ snapshot_id: 'snap2', manifest: { files: [{ path: 'file.txt', sha256: h, size: Buffer.byteLength(original) }] } }), { status: 200 });
+      }
+      if (url.includes('/repo/snapshots/snap2')) {
+        return new Response(JSON.stringify({ snapshot_id: 'snap2', manifest: { files: [{ path: 'file.txt', sha256: h, size: Buffer.byteLength(original) }] } }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await repoStatusCommand({ json: true });
+    // Exit code stays 0 — current contract.
+    expect(exitSpy).not.toHaveBeenCalled();
+    const jsonCall = logSpy.mock.calls.map((c: any[]) => String(c[0] ?? '')).find(s => s.trim().startsWith('{'));
+    const parsed = JSON.parse(jsonCall!);
+    expect(parsed.files.some((f: any) => f.path === 'file.txt' && f.state === 'modified')).toBe(true);
+  });
+
+  it('exit code 0 — behind (pinned is behind remote; working tree otherwise clean)', async () => {
+    // Remote has a newer snapshot than pinned. Command prints a warning but exits 0.
+    const content = 'data\n';
+    const h = createHash('sha256').update(content).digest('hex');
+    await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_ec', pinned_snapshot_id: 'snap_old' });
+    await fs.outputFile(path.join(tmpDir, 'data.txt'), content);
+
+    mockFetch(async (url) => {
+      if (url.includes('/repo/snapshots/latest')) {
+        return new Response(JSON.stringify({ snapshot_id: 'snap_new', manifest: { files: [{ path: 'data.txt', sha256: h, size: Buffer.byteLength(content) }] } }), { status: 200 });
+      }
+      if (url.includes('/repo/snapshots/snap_old')) {
+        return new Response(JSON.stringify({ snapshot_id: 'snap_old', manifest: { files: [{ path: 'data.txt', sha256: h, size: Buffer.byteLength(content) }] } }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await repoStatusCommand({});  // non-json so the "behind" warning is printed
+    // Exit code 0 — current contract does not exit 1 for "behind".
+    expect(exitSpy).not.toHaveBeenCalled();
+    // The command prints the yellow warning via chalk — verify some log output happened.
+    expect(logSpy).toHaveBeenCalled();
+  });
+
+  it('exit code 0 — diverged (both local modifications and behind remote)', async () => {
+    const original = 'base\n';
+    const localMod = 'local-change\n';
+    const remoteNew = 'remote-new\n';
+    const hOrig = createHash('sha256').update(original).digest('hex');
+    const hRemote = createHash('sha256').update(remoteNew).digest('hex');
+
+    await fs.outputJson(path.join(tmpDir, '.butterbase/config.json'), { currentApp: 'app_ec', pinned_snapshot_id: 'snap_base' });
+    await fs.outputFile(path.join(tmpDir, 'shared.txt'), localMod);  // modified locally from original
+
+    mockFetch(async (url) => {
+      if (url.includes('/repo/snapshots/latest')) {
+        // Remote has both shared.txt (unchanged from base) and a new remote-only file.
+        return new Response(JSON.stringify({
+          snapshot_id: 'snap_diverged',
+          manifest: { files: [
+            { path: 'shared.txt', sha256: hOrig, size: Buffer.byteLength(original) },
+            { path: 'remote-only.txt', sha256: hRemote, size: Buffer.byteLength(remoteNew) },
+          ] },
+        }), { status: 200 });
+      }
+      if (url.includes('/repo/snapshots/snap_base')) {
+        return new Response(JSON.stringify({
+          snapshot_id: 'snap_base',
+          manifest: { files: [
+            { path: 'shared.txt', sha256: hOrig, size: Buffer.byteLength(original) },
+          ] },
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await repoStatusCommand({ json: true });
+    // Exit code 0 — current contract.
+    expect(exitSpy).not.toHaveBeenCalled();
+    const jsonCall = logSpy.mock.calls.map((c: any[]) => String(c[0] ?? '')).find(s => s.trim().startsWith('{'));
+    const parsed = JSON.parse(jsonCall!);
+    // shared.txt is locally modified; remote-only.txt is new on remote.
+    expect(parsed.files.some((f: any) => f.path === 'shared.txt' && f.state === 'modified')).toBe(true);
+    expect(parsed.files.some((f: any) => f.path === 'remote-only.txt' && f.state === 'new')).toBe(true);
+  });
+
+  it('exit code 1 — hard error: no .butterbase/config.json in tree', async () => {
+    // No config file → requireBoundApp calls process.exit(1).
+    // Because process.exit is mocked to return undefined (not actually exit),
+    // execution continues with appId=undefined. Provide a permissive fetch mock
+    // that returns well-shaped responses so the rest of the function doesn't crash.
+    fetchSpy.mockImplementation(async () =>
+      new Response(JSON.stringify({ snapshot_id: 'snap0', manifest: { files: [] } }), { status: 200 }),
+    );
+    await repoStatusCommand({});
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+});
+
 describe('butterbase clone', () => {
   let tmpDir: string;
   let prevCwd: string;

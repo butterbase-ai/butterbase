@@ -278,4 +278,48 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
     const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
     expect(res.status).toBe(404);
   }, 30_000);
+
+  it('detail endpoint 404 matrix: only public+listed is reachable; the rest are identical 404 bodies', async () => {
+    // Seed 4 apps covering all visibility × listed combinations.
+    const apps = {
+      publicListed: await seedUserAndApp('us-east-1'),
+      publicUnlisted: await seedUserAndApp('us-east-1'),
+      privateListed: await seedUserAndApp('us-east-1'),
+      privateUnlisted: await seedUserAndApp('us-east-1'),
+    };
+
+    async function patchVis(app: typeof apps.publicListed, visibility: 'public' | 'private', listed: boolean) {
+      const r = await fetch(`${API_URL}/v1/${app.appId}/config/visibility`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${app.apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ visibility, listed }),
+      });
+      if (!r.ok) throw new Error(`patchVis failed for ${app.appId}: ${r.status} ${await r.text()}`);
+    }
+
+    await patchVis(apps.publicListed, 'public', true);
+    await patchVis(apps.publicUnlisted, 'public', false);
+    await patchVis(apps.privateListed, 'private', true);
+    await patchVis(apps.privateUnlisted, 'private', false);
+
+    const results = await Promise.all(
+      Object.entries(apps).map(async ([k, a]) => {
+        const r = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+        return { k, status: r.status, body: r.status >= 400 ? await r.json() : null };
+      }),
+    );
+
+    // Only public+listed is accessible.
+    expect(results.find(r => r.k === 'publicListed')!.status).toBe(200);
+
+    // The other three must all return 404 with code TEMPLATE_NOT_FOUND.
+    for (const k of ['publicUnlisted', 'privateListed', 'privateUnlisted']) {
+      const r = results.find(x => x.k === k)!;
+      expect(r.status, `${k} should be 404`).toBe(404);
+      expect(
+        (r.body as { error?: { code?: string } } | null)?.error?.code,
+        `${k} error.code should be TEMPLATE_NOT_FOUND`,
+      ).toBe('TEMPLATE_NOT_FOUND');
+    }
+  }, 60_000);
 });
