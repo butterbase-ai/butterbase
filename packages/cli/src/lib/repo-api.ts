@@ -89,7 +89,7 @@ export const cloneApi = {
   retry(jobId: string) {
     return apiPost<{ job_id: string; status: string }>(`/v1/clone-jobs/${jobId}/retry`, {});
   },
-  list(opts: { q?: string; sort?: 'recent' | 'popular'; region?: string; limit?: number; offset?: number } = {}) {
+  listTemplates(opts: { q?: string; sort?: 'recent' | 'popular'; region?: string; limit?: number; offset?: number } = {}) {
     const params = new URLSearchParams();
     if (opts.q) params.set('q', opts.q);
     if (opts.sort) params.set('sort', opts.sort);

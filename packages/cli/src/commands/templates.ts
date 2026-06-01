@@ -27,7 +27,7 @@ export async function templatesCommand(opts: {
 
   let result;
   try {
-    result = await cloneApi.list({
+    result = await cloneApi.listTemplates({
       q: opts.q,
       sort: opts.sort as 'recent' | 'popular' | undefined,
       region: opts.region,
@@ -52,7 +52,8 @@ export async function templatesCommand(opts: {
 
   // Compute column widths.
   const COL_APP_ID = Math.max(6, ...result.items.map(r => r.app_id.length));
-  const COL_NAME = Math.max(4, ...result.items.map(r => Math.min(r.name.length, 30)));
+  const COL_NAME = Math.max(4, ...result.items.map(r => Math.min(r.name.length, 24)));
+  const COL_OWNER = Math.max(5, ...result.items.map(r => Math.min((r.owner_display_name ?? 'anonymous').length, 24)));
   const COL_REGION = Math.max(6, ...result.items.map(r => r.region.length));
   const COL_CLONES = 6;
   const COL_TABLES = 6;
@@ -61,6 +62,7 @@ export async function templatesCommand(opts: {
   const header = [
     pad('APP_ID', COL_APP_ID),
     pad('NAME', COL_NAME),
+    pad('OWNER', COL_OWNER),
     pad('REGION', COL_REGION),
     pad('CLONES', COL_CLONES),
     pad('TABLES', COL_TABLES),
@@ -70,9 +72,13 @@ export async function templatesCommand(opts: {
   console.log(chalk.dim(header));
 
   for (const item of result.items) {
+    const ownerCell = item.owner_display_name
+      ? pad(truncate(item.owner_display_name, 24), COL_OWNER)
+      : chalk.dim(pad('anonymous', COL_OWNER));
     const row = [
       pad(item.app_id, COL_APP_ID),
-      pad(truncate(item.name, 30), COL_NAME),
+      pad(truncate(item.name, 24), COL_NAME),
+      ownerCell,
       pad(item.region, COL_REGION),
       pad(String(item.fork_count), COL_CLONES),
       pad(String(item.schema_summary.table_count), COL_TABLES),
