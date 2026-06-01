@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { apiGet, apiPost } from '../api-client.js';
 
-const ColumnDefInput = z.object({
+export const ColumnDefInput = z.object({
   type: z.string().describe('Postgres column type (e.g. "uuid", "text", "integer", "boolean", "vector(1536)")'),
   primaryKey: z.boolean().optional().describe('Whether this is the primary key'),
   nullable: z.boolean().optional().describe('Whether NULL is allowed (default: true)'),
@@ -21,23 +21,30 @@ const ColumnDefInput = z.object({
   ]).optional().describe('Foreign key — string "table.column" or object { table, column, onDelete?, onUpdate? }'),
 });
 
-const IndexDefInput = z.object({
+export const IndexDefInput = z.object({
   columns: z.array(z.string()).describe('Columns to index'),
   unique: z.boolean().optional().describe('Whether the index is unique'),
   method: z.string().optional().describe('Index method: btree, hash, gist, gin, hnsw, ivfflat'),
   opclass: z.string().optional().describe('Operator class (e.g. "vector_cosine_ops")'),
 });
 
-const TableDefInput = z.object({
+export const TableDefInput = z.object({
   columns: z.record(z.string(), ColumnDefInput).describe('Column definitions'),
   indexes: z.record(z.string(), IndexDefInput).optional().describe('Index definitions'),
   _dropColumns: z.array(z.string()).optional().describe('Columns to drop (explicit opt-in for destructive ops)'),
   _seed: z.boolean().optional().describe('Mark this table as containing seed data (rows that travel with the app on clone). Forward-compatible marker; clone-time row copy lands in a later release.'),
 });
 
-const SchemaInput = z.object({
+export const SchemaInput = z.object({
   tables: z.record(z.string(), TableDefInput).describe('Table definitions keyed by table name'),
   _drop: z.array(z.string()).optional().describe('Tables to drop (explicit opt-in for destructive ops)'),
+});
+
+export const ManageSchemaInput = z.object({
+  app_id: z.string().describe('The app ID'),
+  action: z.enum(['get', 'apply', 'dry_run', 'list_migrations']).describe('The action to perform'),
+  schema: SchemaInput.optional().describe('Required for apply/dry_run. The desired database schema.'),
+  name: z.string().optional().describe('Optional for apply. Migration name (auto-generated if omitted).'),
 });
 
 export function registerManageSchema(server: McpServer) {
