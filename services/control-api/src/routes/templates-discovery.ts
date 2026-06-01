@@ -10,6 +10,32 @@
 //
 import type { FastifyInstance } from 'fastify';
 import pg from 'pg';
+
+// ---------------------------------------------------------------------------
+// Internal-table filter — used by the detail endpoint to hide platform tables
+// from public discovery responses.
+// ---------------------------------------------------------------------------
+const INTERNAL_TABLE_PREFIXES = ['_', 'agent_'] as const;
+const INTERNAL_TABLE_EXACT = new Set([
+  'app_signing_keys',
+  'app_users',
+  'app_oauth_configs',
+  'app_refresh_tokens',
+  'app_verification_codes',
+  'app_functions',
+  'app_integration_configs',
+  'app_connected_accounts',
+  'app_realtime_config',
+  'auth_audit_logs',
+  'api_keys',
+  'neon_tasks',
+  'template_clone_jobs',
+]);
+
+function isInternalTable(name: string): boolean {
+  if (INTERNAL_TABLE_EXACT.has(name)) return true;
+  return INTERNAL_TABLE_PREFIXES.some((p) => name.startsWith(p));
+}
 import {
   getConfiguredRuntimeRegions,
   fanOutRuntimeRegions,
@@ -257,10 +283,12 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
       return null;
     });
     const tables = schema
-      ? Object.entries(schema.tables).map(([name, info]) => ({
-          name,
-          column_count: Object.keys(info.columns).length,
-        }))
+      ? Object.entries(schema.tables)
+          .filter(([name]) => !isInternalTable(name))
+          .map(([name, info]) => ({
+            name,
+            column_count: Object.keys(info.columns).length,
+          }))
       : [];
 
     // Query functions; degrade gracefully on failure.

@@ -279,6 +279,61 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
     expect(res.status).toBe(404);
   }, 30_000);
 
+  it('detail tables[] excludes internal/platform tables', async () => {
+    const a = await seedUserAndApp('us-east-1');
+
+    // The introspector runs against the shared runtime DB pool (schemaname='public').
+    // Create a uniquely-named user table and an internal-prefixed table in the
+    // shared runtime DB so introspection has something to see.
+    const stamp = Date.now().toString(36);
+    const userTableName = `j2_posts_${stamp}`;
+    const internalTableName = `_j2_internal_${stamp}`;
+
+    await runtimePool.query(
+      `CREATE TABLE IF NOT EXISTS ${userTableName} (id uuid PRIMARY KEY)`,
+    );
+    await runtimePool.query(
+      `CREATE TABLE IF NOT EXISTS ${internalTableName} (id uuid PRIMARY KEY)`,
+    );
+
+    // Mark public + listed.
+    await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ visibility: 'public', listed: true }),
+    });
+
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { tables: Array<{ name: string }> };
+    expect(Array.isArray(body.tables)).toBe(true);
+
+    const tableNames = body.tables.map((t) => t.name);
+
+    // The user table must be visible.
+    expect(tableNames).toContain(userTableName);
+
+    // The internal-prefixed table must be filtered out.
+    expect(tableNames).not.toContain(internalTableName);
+
+    // Validate the filter holds for every returned table name.
+    const PLATFORM_EXACT = [
+      'app_signing_keys', 'app_users', 'app_oauth_configs', 'app_refresh_tokens',
+      'app_verification_codes', 'app_functions', 'app_integration_configs',
+      'app_connected_accounts', 'app_realtime_config', 'auth_audit_logs',
+      'api_keys', 'neon_tasks', 'template_clone_jobs',
+    ];
+    for (const n of tableNames) {
+      expect(n.startsWith('_'), `${n} starts with _`).toBe(false);
+      expect(n.startsWith('agent_'), `${n} starts with agent_`).toBe(false);
+      expect(PLATFORM_EXACT.includes(n), `${n} is a platform table`).toBe(false);
+    }
+
+    // Cleanup — drop the scratch tables.
+    await runtimePool.query(`DROP TABLE IF EXISTS ${userTableName}`);
+    await runtimePool.query(`DROP TABLE IF EXISTS ${internalTableName}`);
+  }, 60_000);
+
   it('detail endpoint 404 matrix: only public+listed is reachable; the rest are identical 404 bodies', async () => {
     // Seed 4 apps covering all visibility × listed combinations.
     const apps = {
