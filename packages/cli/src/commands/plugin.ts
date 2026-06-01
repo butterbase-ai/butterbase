@@ -32,7 +32,7 @@ export async function pluginSetupCommand() {
   console.log(chalk.white('Next steps:'));
   console.log(chalk.gray('  1. Set your API key:'));
   console.log(chalk.white('     export BUTTERBASE_API_KEY=bb_sk_your_key_here'));
-  console.log(chalk.gray('  2. Install the Claude Code plugin (optional \u2014 for skills):'));
+  console.log(chalk.gray('  2. Install Butterbase Skills (optional \u2014 for guided skills):'));
   console.log(chalk.white('     claude plugin add @butterbase/skills'));
   console.log(chalk.gray('  3. Start Claude Code in this directory'));
 }

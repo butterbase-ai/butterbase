@@ -13,7 +13,7 @@ The **Model Context Protocol (MCP)** is a standard for connecting AI assistants 
 
 ### Option 1: Claude Code Plugin (recommended)
 
-Install the Butterbase plugin for Claude Code. This auto-configures the MCP server and includes 6 guided skills:
+Install Butterbase Skills for Claude Code. This auto-configures the MCP server and includes 6 guided skills:
 
 ```bash
 # Add the marketplace

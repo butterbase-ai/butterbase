@@ -24,7 +24,7 @@ When you self-host, the AI gateway runs without upstream router adapters, billin
 
 ### 1. Clone (with submodules)
 
-The Claude Code plugin (`packages/plugin`) is a git submodule ([butterbase-plugin](https://github.com/butterbase-ai/butterbase-skills)). A plain clone leaves `packages/plugin/` empty and `npm install` silently skips that workspace.
+The Claude Code plugin (`packages/plugin`) is a git submodule ([Butterbase Skills](https://github.com/butterbase-ai/butterbase-skills)). A plain clone leaves `packages/plugin/` empty and `npm install` silently skips that workspace.
 
 ```bash
 git clone --recurse-submodules https://github.com/NetGPT-Inc/butterbase-oss.git

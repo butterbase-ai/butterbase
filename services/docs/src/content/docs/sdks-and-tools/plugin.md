@@ -3,7 +3,7 @@ title: Claude Code Plugin
 description: Claude Code plugin with guided skills for building, deploying, and debugging Butterbase apps.
 ---
 
-The `@butterbase/skills` is a Claude Code plugin that auto-configures the Butterbase MCP server and provides guided skills for common workflows.
+**Butterbase Skills** is a Claude Code plugin that auto-configures the Butterbase MCP server and provides guided skills for common workflows.
 
 ## Installation
 
@@ -82,5 +82,5 @@ claude --plugin-dir /path/to/butterbase-plugin
 
 ## Source
 
-- **GitHub**: [github.com/butterbase-ai/butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)
+- **GitHub**: [Butterbase Skills](https://github.com/butterbase-ai/butterbase-skills)
 - **License**: MIT

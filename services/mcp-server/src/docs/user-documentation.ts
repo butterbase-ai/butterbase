@@ -149,7 +149,7 @@ You can generate API keys using \`manage_auth_config\` (action: "generate_servic
 
 ### Claude Code Plugin
 
-If you are using Claude Code, install the Butterbase plugin for guided skills and auto-configured MCP:
+If you are using Claude Code, install Butterbase Skills for guided skills and auto-configured MCP:
 
 \`\`\`bash
 # Add the Butterbase marketplace

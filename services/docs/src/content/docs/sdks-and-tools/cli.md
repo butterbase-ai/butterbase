@@ -250,7 +250,7 @@ butterbase plugin setup
 
 This generates a `.mcp.json` file in your current directory that configures the Butterbase MCP server connection. If `.mcp.json` already exists, the command skips to avoid overwriting.
 
-For the full plugin with guided skills, install separately:
+For Butterbase Skills with guided skills, install separately:
 
 ```bash
 claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills

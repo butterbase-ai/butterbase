@@ -203,8 +203,8 @@ export const changelog: RoadmapItem[] = [
   {
     date: '2026-04-13',
     category: 'ai',
-    title: 'Claude Code Plugin',
-    description: 'Six AI-coding skills installed via `butterbase plugin setup`: build-app, schema-design, function-dev, debug-rls, deploy-frontend, contributing.',
+    title: 'Butterbase Skills',
+    description: 'Six AI-coding skills for Claude Code, installed via `claude plugin add @butterbase/skills`: build-app, schema-design, function-dev, debug-rls, deploy-frontend, contributing.',
     href: '/sdks-and-tools/plugin',
     icon: '🧩',
   },
