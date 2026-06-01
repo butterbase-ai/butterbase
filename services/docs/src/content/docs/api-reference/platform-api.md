@@ -151,9 +151,17 @@ Clone a public app to get a copy of its repo snapshot as a starting point for yo
 
 | Method | Path | Purpose |
 |--------|------|---------|
+| GET | /v1/templates | Browse public app templates (anonymous) |
+| GET | /v1/templates/\{app_id} | Detail for a single public app template |
 | POST | /v1/templates/\{source_app_id}/clone | Start a clone of a public app. Returns `{ job_id }` |
 | GET | /v1/clone-jobs/\{job_id} | Status of a clone job |
 | POST | /v1/clone-jobs/\{job_id}/retry | Retry a failed clone job |
+
+### Discover public templates
+
+`GET /v1/templates` returns the catalog of public, listed apps across all regions. No authentication required. Supports `q` (name prefix), `region`, `sort=recent|popular`, `limit` (max 50), `offset`. Response: `{ items: [{ app_id, name, owner_display_name, region, created_at, fork_count, has_repo, schema_summary: { table_count, function_count } }], total, limit, offset }`.
+
+`GET /v1/templates/{app_id}` returns full detail for a single template, including `tables`, `functions`, and `forks_sample` (5 most recent clones). Private or unlisted apps return 404 (no existence leak).
 
 ### Clone a public app
 
