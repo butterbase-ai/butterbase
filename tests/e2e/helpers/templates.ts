@@ -127,12 +127,12 @@ export async function applySchemaAsOwner(
 
 export interface CloneJobCreated {
   jobId: string;
-  destAppId: string | null;
 }
 
 /**
- * Calls `POST /v1/templates/:sourceAppId/clone` and returns `{ jobId, destAppId }`.
- * `destAppId` is null immediately after creation (assigned by the worker later).
+ * Calls `POST /v1/templates/:sourceAppId/clone` and returns `{ jobId }`.
+ * The clone POST response returns `{ job_id, status }` only — `dest_app_id`
+ * is assigned by the worker later and can be retrieved via `waitForCloneStep`.
  *
  * Throws if the HTTP response is not 200.
  */
@@ -158,7 +158,7 @@ export async function startCloneJob(
     throw new Error(`startCloneJob failed: ${res.status} ${await res.text()}`);
   }
   const j = await res.json() as { job_id: string; status: string };
-  return { jobId: j.job_id, destAppId: null };
+  return { jobId: j.job_id };
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +192,36 @@ export async function waitForCloneStep(
     `Job ${jobId} did not reach [${terminalStatuses.join('|')}] within ${timeoutMs}ms ` +
     `(last=${JSON.stringify(last)})`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// waitForProvisioning
+// ---------------------------------------------------------------------------
+
+/**
+ * Polls `GET /apps/:appId/status` until `provisioning_status` is 'ready'.
+ * Throws on 'failed' or timeout.
+ */
+export async function waitForProvisioning(
+  apiKey: string,
+  appId: string,
+  timeoutMs: number,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const r = await fetch(`${API_URL}/apps/${appId}/status`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (r.ok) {
+      const body = await r.json() as { provisioning_status?: string };
+      if (body.provisioning_status === 'ready') return;
+      if (body.provisioning_status === 'failed') {
+        throw new Error(`App ${appId} provisioning failed`);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error(`App ${appId} provisioning timed out after ${timeoutMs}ms`);
 }
 
 // ---------------------------------------------------------------------------

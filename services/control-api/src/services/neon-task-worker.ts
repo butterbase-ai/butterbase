@@ -485,7 +485,7 @@ async function executeClone(
     // We intentionally keep the status as 'processing' for the duration.
     // A follow-up migration to add 'replaying_schema' would be task A1's
     // DONE_WITH_CONCERNS item — the constraint gap is flagged here.
-    try {
+    {
       // Resolve per-app DB pools: look up db_name from each app's runtime DB.
       const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
       const sourceAppRow = await sourceRuntimePool.query<{ db_name: string }>(
@@ -498,8 +498,8 @@ async function executeClone(
       const sourceDbName = sourceAppRow.rows[0].db_name;
       const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceDbName);
 
-      const destRuntimePool2 = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-      const destAppRow = await destRuntimePool2.query<{ db_name: string }>(
+      const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+      const destAppRow = await destRuntimePool.query<{ db_name: string }>(
         `SELECT db_name FROM apps WHERE id = $1`,
         [destAppId],
       );
@@ -510,10 +510,6 @@ async function executeClone(
       const destAppPool = await getAppPoolForApp(controlDb, destAppId, destDbName);
 
       await replaySchema(sourceAppPool, destAppPool, destAppId, logger);
-    } catch (schemaReplayErr) {
-      // Re-throw so the task queue's retry/fail logic applies.
-      // The outer try/catch in executeClone marks the job 'failed' + re-throws to the worker.
-      throw schemaReplayErr;
     }
 
     // 2. Read source manifest.

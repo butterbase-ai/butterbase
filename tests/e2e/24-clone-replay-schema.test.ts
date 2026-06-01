@@ -17,6 +17,7 @@ import {
   seedUserAndApp,
   applySchemaAsOwner,
   waitForCloneStep,
+  waitForProvisioning,
   pushSnapshot,
 } from './helpers/templates.js';
 
@@ -172,28 +173,3 @@ describe('Phase 5 A1 — clone worker replays source schema onto dest', () => {
   }, 300_000);
 });
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-async function waitForProvisioning(
-  apiKey: string,
-  appId: string,
-  timeoutMs: number,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const r = await fetch(`${API_URL}/apps/${appId}/status`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (r.ok) {
-      const body = await r.json() as { provisioning_status?: string };
-      if (body.provisioning_status === 'ready') return;
-      if (body.provisioning_status === 'failed') {
-        throw new Error(`App ${appId} provisioning failed`);
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
-  throw new Error(`App ${appId} provisioning timed out after ${timeoutMs}ms`);
-}
