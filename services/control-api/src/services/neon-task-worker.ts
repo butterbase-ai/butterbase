@@ -467,10 +467,16 @@ async function executeClone(
       // Record template lineage on the dest app row (column added by Phase 1 migration).
       //    insertAppRow has no template_source_app_id parameter today — write it via
       //    a follow-up UPDATE on the dest's home runtime DB.
+      //    template_source_region (added by B2 migration) lets the delete handler know
+      //    which region pool to target without a fan-out lookup.
       const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
       await destRuntimePool.query(
-        `UPDATE apps SET template_source_app_id = $1, updated_at = now() WHERE id = $2`,
-        [job.source_app_id, destAppId],
+        `UPDATE apps
+            SET template_source_app_id = $1,
+                template_source_region  = $2,
+                updated_at              = now()
+          WHERE id = $3`,
+        [job.source_app_id, job.source_region, destAppId],
       );
 
       // Provision DB + run migrations. provisionAppBackground swallows errors

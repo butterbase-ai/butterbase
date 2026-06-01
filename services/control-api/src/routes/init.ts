@@ -304,7 +304,7 @@ export async function initRoutes(app: FastifyInstance) {
     }
 
     const appResult = await app.runtimeDb(region).query(
-      'SELECT id, db_name, owner_id FROM apps WHERE id = $1',
+      'SELECT id, db_name, owner_id, template_source_app_id, template_source_region FROM apps WHERE id = $1',
       [app_id]
     );
 
@@ -334,6 +334,28 @@ export async function initRoutes(app: FastifyInstance) {
     // user_app_index drifted from apps.owner_id mid-flight.
     if (appData.owner_id !== callerUserId) {
       return reply.code(403).send({ error: 'Forbidden: You do not own this app' });
+    }
+
+    // Cross-region fork_count outbox: if this is a cloned app whose source lives
+    // in a different region, queue a decrement for the sweeper. The intra-region
+    // case is handled by the runtime-plane DELETE trigger (trg_apps_fork_count_delete).
+    if (
+      appData.template_source_app_id &&
+      appData.template_source_region &&
+      appData.template_source_region !== region
+    ) {
+      await app.controlDb
+        .query(
+          `INSERT INTO fork_count_decrements (source_app_id, source_region)
+           VALUES ($1, $2)`,
+          [appData.template_source_app_id, appData.template_source_region],
+        )
+        .catch((err) =>
+          app.log.warn(
+            { err, app_id, sourceAppId: appData.template_source_app_id, sourceRegion: appData.template_source_region },
+            'fork_count_decrements insert failed; fork_count will be eventually consistent',
+          ),
+        );
     }
 
     // Mark app as deleting immediately
