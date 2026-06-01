@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.butterbase-ai/mcp",
+  "description": "Butterbase MCP server — manage your backend: schemas, auth, functions, storage, RAG, deploys.",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/butterbase-ai/butterbase-oss",
+    "source": "github",
+    "subfolder": "services/mcp-server"
+  },
+  "websiteUrl": "https://butterbase.ai",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@butterbase/mcp",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "BUTTERBASE_API_KEY",
+          "description": "Butterbase API key (bb_sk_...). Create one at https://butterbase.ai.",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.butterbase.ai/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <BUTTERBASE_API_KEY>",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,28 @@
 {
-  "name": "@butterbase/mcp-server",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@butterbase/mcp",
+  "version": "1.0.0",
+  "description": "Butterbase MCP server — manage schemas, auth, functions, storage, RAG, realtime, and deploys on Butterbase from any MCP-capable client.",
+  "license": "Apache-2.0",
+  "homepage": "https://butterbase.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/butterbase-ai/butterbase-oss.git",
+    "directory": "services/mcp-server"
+  },
+  "bugs": {
+    "url": "https://github.com/butterbase-ai/butterbase-oss/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "butterbase",
+    "backend",
+    "database",
+    "auth",
+    "serverless",
+    "ai-agents"
+  ],
+  "mcpName": "io.github.butterbase-ai/mcp",
   "type": "module",
   "main": "./dist/create-server.js",
   "types": "./dist/create-server.d.ts",
@@ -26,6 +47,10 @@
   "bin": {
     "butterbase-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -b --force",
     "dev": "tsx src/index.ts",
@@ -33,6 +58,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@butterbase/sdk": "^2.3.4",
+    "@butterbase/shared": "^0.2.2",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "adm-zip": "^0.5.17",
     "zod": "^3.24.0"
