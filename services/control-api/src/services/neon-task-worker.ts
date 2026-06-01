@@ -16,6 +16,8 @@ import {
   copyBlobSameRegion,
   copyManifestSameRegion,
 } from './repo-storage.js';
+import { getAppPoolForApp } from './app-pool.js';
+import { replaySchema } from './clone-replay.js';
 
 interface NeonTask {
   id: number;
@@ -476,6 +478,43 @@ async function executeClone(
       });
     }
     await waitForDestReady(job.dest_region, destAppId, logger);
+
+    // Step 3 (Phase 5 A1): Replay source schema onto the dest DB.
+    // NOTE: 'replaying_schema' is not in the status check constraint
+    // (082_template_clone_jobs.sql only allows pending/processing/completed/failed).
+    // We intentionally keep the status as 'processing' for the duration.
+    // A follow-up migration to add 'replaying_schema' would be task A1's
+    // DONE_WITH_CONCERNS item — the constraint gap is flagged here.
+    try {
+      // Resolve per-app DB pools: look up db_name from each app's runtime DB.
+      const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
+      const sourceAppRow = await sourceRuntimePool.query<{ db_name: string }>(
+        `SELECT db_name FROM apps WHERE id = $1`,
+        [job.source_app_id],
+      );
+      if (sourceAppRow.rows.length === 0) {
+        throw new Error(`[clone] source app ${job.source_app_id} not found in ${job.source_region} runtime DB`);
+      }
+      const sourceDbName = sourceAppRow.rows[0].db_name;
+      const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceDbName);
+
+      const destRuntimePool2 = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+      const destAppRow = await destRuntimePool2.query<{ db_name: string }>(
+        `SELECT db_name FROM apps WHERE id = $1`,
+        [destAppId],
+      );
+      if (destAppRow.rows.length === 0) {
+        throw new Error(`[clone] dest app ${destAppId} not found in ${job.dest_region} runtime DB`);
+      }
+      const destDbName = destAppRow.rows[0].db_name;
+      const destAppPool = await getAppPoolForApp(controlDb, destAppId, destDbName);
+
+      await replaySchema(sourceAppPool, destAppPool, destAppId, logger);
+    } catch (schemaReplayErr) {
+      // Re-throw so the task queue's retry/fail logic applies.
+      // The outer try/catch in executeClone marks the job 'failed' + re-throws to the worker.
+      throw schemaReplayErr;
+    }
 
     // 2. Read source manifest.
     const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
