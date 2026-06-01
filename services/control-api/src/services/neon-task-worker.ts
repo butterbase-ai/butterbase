@@ -613,6 +613,46 @@ async function executeClone(
       '[clone] auth_hook_function binding step complete',
     );
 
+    // A7: Ensure dest.db_provisioned=true. provisionAppBackground already sets this
+    // when provisioning_status becomes 'ready' (which waitForDestReady confirmed), but
+    // we assert it here explicitly so the finalization block is self-contained and
+    // robust to any future refactor that might decouple those two writes.
+    await destRuntimePool.query(
+      `UPDATE apps SET db_provisioned = true, updated_at = now() WHERE id = $1`,
+      [destAppId],
+    );
+    logger.info({ destAppId }, '[clone] dest.db_provisioned=true confirmed');
+
+    // A7: Increment source fork_count.
+    // Migration 014 only installs a trigger for the decrement-on-delete case;
+    // there is no INSERT trigger that auto-increments fork_count for same-region
+    // clones. The worker is therefore always responsible for the increment,
+    // regardless of whether source and dest share a region.
+    //
+    // For cross-region: we use the source's per-region pool explicitly, which
+    // is the only way to reach the source's runtime DB from the dest worker.
+    // For same-region: the source's runtime pool and the dest's are the same
+    // physical DB, but we still use getRuntimeDbPool(source_region) for clarity.
+    //
+    // B2 sweeper reconciles if this fails (non-fatal catch below).
+    try {
+      const sourceRuntimePoolForForkCount = getRuntimeDbPool(config.runtimeDb, job.source_region);
+      await sourceRuntimePoolForForkCount.query(
+        `UPDATE apps SET fork_count = COALESCE(fork_count, 0) + 1 WHERE id = $1`,
+        [job.source_app_id],
+      );
+      logger.info(
+        { source: job.source_app_id, sourceRegion: job.source_region, destRegion: job.dest_region },
+        '[clone] incremented source.fork_count',
+      );
+    } catch (err) {
+      // Don't fail the clone over fork_count; B2 sweeper will reconcile.
+      logger.error(
+        { err, source: job.source_app_id },
+        '[clone] fork_count increment failed; deferring to sweeper',
+      );
+    }
+
     // 6. Mark job completed.
     await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
     logger.info({ jobId, destAppId }, '[clone] completed');
