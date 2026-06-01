@@ -17,7 +17,7 @@ import {
   copyManifestSameRegion,
 } from './repo-storage.js';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema, replayRls, replaySeedData } from './clone-replay.js';
+import { replaySchema, replayRls, replaySeedData, replayFunctions } from './clone-replay.js';
 
 interface NeonTask {
   id: number;
@@ -559,6 +559,24 @@ async function executeClone(
       await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
     }
     logger.info({ destAppId, ...seedResult }, '[clone] seed data complete');
+
+    // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
+    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
+    const fnResult = await replayFunctions(
+      sourceRuntimePool,
+      destRuntimePool,
+      job.source_app_id,
+      destAppId,
+      job.requested_by_user_id,
+      logger,
+    );
+    if (fnResult.warnings.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, fnResult.warnings);
+    }
+    logger.info(
+      { destAppId, count: fnResult.count, warnings: fnResult.warnings.length },
+      '[clone] functions replayed',
+    );
 
     // 6. Mark job completed.
     await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });

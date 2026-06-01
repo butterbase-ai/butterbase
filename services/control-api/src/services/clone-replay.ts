@@ -215,3 +215,94 @@ export async function replayRls(
 
   return { replayed, warnings };
 }
+
+// ---------------------------------------------------------------------------
+// replayFunctions
+// ---------------------------------------------------------------------------
+
+/**
+ * Copy non-deleted app_functions rows from the source app's runtime DB into
+ * the dest app's runtime DB.
+ *
+ * Behavior-defining columns (name, code, description, trigger_type,
+ * trigger_config, timeout_ms, memory_limit_mb, agent_tool,
+ * agent_tool_description, agent_tool_mode, agent_tool_exposed_to) are copied
+ * verbatim.  Runtime-stat columns (invocation_count, error_count, etc.) are
+ * left at their defaults.  encrypted_env_vars is intentionally blanked (NULL)
+ * per the secrets allowlist policy.
+ *
+ * Soft-fails per function: an insert error is recorded as a warning and the
+ * clone continues with the next function.
+ *
+ * NOTE: app_functions lives in the RUNTIME DB (not the per-app DB), so this
+ * function accepts runtime-DB pools, not per-app pools.
+ *
+ * @param sourceRuntimePool   - Runtime DB pool for the source app's region.
+ * @param destRuntimePool     - Runtime DB pool for the dest app's region.
+ * @param sourceAppId         - Source app ID.
+ * @param destAppId           - Dest app ID.
+ * @param requestedByUserId   - User ID to record as deployed_by on dest rows.
+ * @param logger              - Logger compatible with pino's info/warn interface.
+ * @returns `{ count, warnings }` — rows successfully inserted and warning strings.
+ */
+export async function replayFunctions(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  requestedByUserId: string,
+  logger: ReplayLogger,
+): Promise<{ count: number; warnings: string[] }> {
+  const src = await sourceRuntimePool.query(
+    `SELECT name, code, description,
+            trigger_type, trigger_config,
+            timeout_ms, memory_limit_mb,
+            agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to
+       FROM app_functions
+      WHERE app_id = $1 AND deleted_at IS NULL`,
+    [sourceAppId],
+  );
+
+  const warnings: string[] = [];
+  let inserted = 0;
+
+  for (const f of src.rows) {
+    try {
+      await destRuntimePool.query(
+        `INSERT INTO app_functions (
+           id, app_id,
+           name, code, description,
+           trigger_type, trigger_config,
+           timeout_ms, memory_limit_mb,
+           agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
+           encrypted_env_vars,
+           deployed_by, deployed_at
+         ) VALUES (
+           gen_random_uuid(), $1,
+           $2, $3, $4,
+           $5, $6,
+           $7, $8,
+           $9, $10, $11, $12,
+           NULL,
+           $13, now()
+         )
+         ON CONFLICT (app_id, name) DO NOTHING`,
+        [
+          destAppId,
+          f.name, f.code, f.description,
+          f.trigger_type, f.trigger_config,
+          f.timeout_ms, f.memory_limit_mb,
+          f.agent_tool, f.agent_tool_description, f.agent_tool_mode, f.agent_tool_exposed_to,
+          requestedByUserId,
+        ],
+      );
+      inserted++;
+    } catch (err) {
+      const msg = `Function ${f.name} replay failed: ${(err as Error).message}`;
+      warnings.push(msg);
+      logger.warn({ name: f.name, err }, '[clone] function replay failed; continuing');
+    }
+  }
+
+  return { count: inserted, warnings };
+}

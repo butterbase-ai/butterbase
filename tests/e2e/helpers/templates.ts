@@ -308,6 +308,68 @@ export async function insertRowsAsOwner(
 // ---------------------------------------------------------------------------
 // queryAppDb — run a query directly against a per-app database (local dev only)
 // ---------------------------------------------------------------------------
+// queryRuntimeDb — run a query directly against a region's runtime DB (local dev only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs a query directly against the local runtime DB for a given region.
+ * Only 'us-east-1' is supported in local dev (port 5437).
+ */
+export async function queryRuntimeDb(
+  _region: string,
+  sql: string,
+  params: unknown[] = [],
+): Promise<pg.QueryResult> {
+  // Local dev has a single runtime DB regardless of region label.
+  const pool = new pg.Pool({ connectionString: RUNTIME_DB_URL_US });
+  try {
+    return await pool.query(sql, params);
+  } finally {
+    await pool.end();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// deployFunctionAsOwner — POST /v1/:appId/functions as the app owner
+// ---------------------------------------------------------------------------
+
+export interface DeployFunctionArgs {
+  name: string;
+  code: string;
+  trigger_type?: 'http' | 'cron' | 's3_upload' | 'webhook' | 'websocket';
+  trigger_config?: Record<string, unknown>;
+}
+
+/**
+ * Deploys a function to an app via `POST /v1/:appId/functions`. Throws if the
+ * HTTP response is not 2xx.
+ */
+export async function deployFunctionAsOwner(
+  apiKey: string,
+  appId: string,
+  fn: DeployFunctionArgs,
+): Promise<void> {
+  const res = await fetch(`${API_URL}/v1/${appId}/functions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: fn.name,
+      code: fn.code,
+      trigger: {
+        type: fn.trigger_type ?? 'http',
+        config: fn.trigger_config ?? { auth: 'none' },
+      },
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`deployFunctionAsOwner failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 /**
  * Connects directly to the per-app Postgres database (local data-plane, port
