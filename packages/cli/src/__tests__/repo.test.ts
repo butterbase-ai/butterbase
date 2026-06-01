@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
 import { repoInitCommand, repoPushCommand, repoPullCommand, repoStatusCommand } from '../commands/repo.js';
-import { cloneCommand } from '../commands/clone.js';
+import { cloneCommand, cloneRetryCommand } from '../commands/clone.js';
 
 const sha256 = (s: string | Buffer) => createHash('sha256').update(s).digest('hex');
 
@@ -571,5 +571,84 @@ describe('butterbase clone', () => {
 
     await cloneCommand('app_src', path.join(tmpDir, 'r'), { region: 'eu-west-1' });
     expect(postedBody?.region).toBe('eu-west-1');
+  }, 30_000);
+
+  it('clone --retry: calls POST /v1/clone-jobs/:id/retry and polls until done', async () => {
+    const sha = createHash('sha256').update('retried\n').digest('hex');
+    let retryCallCount = 0;
+    let pollCount = 0;
+
+    mockFetch(async (url, init) => {
+      // POST /v1/clone-jobs/cj_failed/retry → re-queues job
+      if (url.endsWith('/clone-jobs/cj_failed/retry') && init?.method === 'POST') {
+        retryCallCount++;
+        return new Response(JSON.stringify({ job_id: 'cj_failed', status: 'pending' }), { status: 200 });
+      }
+      // GET /v1/clone-jobs/cj_failed → pending first, then completed
+      if (url.endsWith('/clone-jobs/cj_failed')) {
+        pollCount++;
+        if (pollCount === 1) {
+          return new Response(JSON.stringify({ job_id: 'cj_failed', status: 'pending', source_app_id: 'app_src', dest_app_id: null, retry_count: 1, error_message: null, created_at: '', completed_at: null }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ job_id: 'cj_failed', status: 'completed', source_app_id: 'app_src', dest_app_id: 'app_retried', retry_count: 1, error_message: null, created_at: '', completed_at: '' }), { status: 200 });
+      }
+      if (url.endsWith('/app_retried/repo/snapshots/latest')) {
+        return new Response(JSON.stringify({
+          snapshot_id: 'snap_retried',
+          manifest: { files: [{ path: 'retried.txt', sha256: sha, size: 8 }] },
+        }), { status: 200 });
+      }
+      if (url.includes('/app_retried/repo/blobs/')) {
+        return new Response(JSON.stringify({ sha256: sha, size: 8, downloadUrl: 'https://s3.test/retried', expiresIn: 3600 }), { status: 200 });
+      }
+      if (url === 'https://s3.test/retried') {
+        return new Response('retried\n', { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const targetDir = path.join(tmpDir, 'retried');
+    await cloneRetryCommand('cj_failed', targetDir, {});
+
+    // Retry endpoint was called (not the create endpoint)
+    expect(retryCallCount).toBe(1);
+    // Poll loop was entered
+    expect(pollCount).toBeGreaterThanOrEqual(1);
+    // Files landed
+    expect(await fs.readFile(path.join(targetDir, 'retried.txt'), 'utf8')).toBe('retried\n');
+    const cfg = await fs.readJson(path.join(targetDir, '.butterbase/config.json'));
+    expect(cfg.currentApp).toBe('app_retried');
+  }, 30_000);
+
+  it('clone --retry: does NOT call the create endpoint', async () => {
+    const sha = createHash('sha256').update('data\n').digest('hex');
+    let createCallCount = 0;
+
+    mockFetch(async (url, init) => {
+      if (url.includes('/templates/') && init?.method === 'POST') {
+        createCallCount++;
+        return new Response(JSON.stringify({ job_id: 'should-not-happen', status: 'pending' }), { status: 200 });
+      }
+      if (url.endsWith('/clone-jobs/cj_r2/retry') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ job_id: 'cj_r2', status: 'pending' }), { status: 200 });
+      }
+      if (url.endsWith('/clone-jobs/cj_r2')) {
+        return new Response(JSON.stringify({ job_id: 'cj_r2', status: 'completed', source_app_id: 'app_s', dest_app_id: 'app_d2', retry_count: 1, error_message: null, created_at: '', completed_at: '' }), { status: 200 });
+      }
+      if (url.endsWith('/app_d2/repo/snapshots/latest')) {
+        return new Response(JSON.stringify({ snapshot_id: 'snap_d2', manifest: { files: [{ path: 'f.txt', sha256: sha, size: 5 }] } }), { status: 200 });
+      }
+      if (url.includes('/app_d2/repo/blobs/')) {
+        return new Response(JSON.stringify({ sha256: sha, size: 5, downloadUrl: 'https://s3.test/d2', expiresIn: 3600 }), { status: 200 });
+      }
+      if (url === 'https://s3.test/d2') {
+        return new Response('data\n', { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await cloneRetryCommand('cj_r2', path.join(tmpDir, 'd2'), {});
+
+    expect(createCallCount).toBe(0);
   }, 30_000);
 });

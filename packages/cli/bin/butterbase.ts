@@ -131,7 +131,7 @@ import {
   repoStatusCommand, repoLogCommand, repoWipeCommand,
 } from '../src/commands/repo.js';
 import { visibilityCommand } from '../src/commands/visibility.js';
-import { cloneCommand } from '../src/commands/clone.js';
+import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
 
 const program = new Command();
 
@@ -1430,12 +1430,28 @@ repo
 
 // Clone
 program
-  .command('clone <source-app-id> [target-dir]')
+  .command('clone [source-app-id] [target-dir]')
   .description('Clone a public app into a new owned app + local folder')
   .option('--name <text>', 'Name for the new app (defaults to "Clone of <source>")')
   .option('--region <region>', 'Region for the new app (defaults to source\'s region)')
+  .option('--retry <job_id>', 'Resume a previously-failed clone job by id (mutually exclusive with source-app-id)')
   .option('--json', 'Output raw JSON on success')
-  .action((sourceAppId, targetDir, opts) => cloneCommand(sourceAppId, targetDir, opts));
+  .action((sourceAppId, targetDir, opts) => {
+    if (opts.retry && sourceAppId) {
+      console.error('Error: --retry and <source-app-id> are mutually exclusive. Provide one or the other.');
+      process.exit(1);
+      return;
+    }
+    if (opts.retry) {
+      return cloneRetryCommand(opts.retry, targetDir, opts);
+    }
+    if (!sourceAppId) {
+      console.error('Error: <source-app-id> is required unless --retry is provided.');
+      process.exit(1);
+      return;
+    }
+    return cloneCommand(sourceAppId, targetDir, opts);
+  });
 
 // Visibility (top-level convenience wrapper for PATCH /config/visibility)
 program
