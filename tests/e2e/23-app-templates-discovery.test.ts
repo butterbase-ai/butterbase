@@ -141,6 +141,82 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
     }
   }, 30_000);
 
+  it('sort=popular orders by fork_count descending', async () => {
+    const stamp = Date.now().toString(36);
+    const u = await seedUser();
+
+    // Seed two apps with distinct fork counts.
+    const appIdLow = await seedApp(u.userId, 'us-east-1');
+    const appIdHigh = await seedApp(u.userId, 'us-east-1');
+    const uniquePrefix = `sortpop-${stamp}`;
+
+    await runtimePool.query(
+      `UPDATE apps SET name = $1, visibility = 'public', listed = true, fork_count = 1 WHERE id = $2`,
+      [`${uniquePrefix}-low`, appIdLow],
+    );
+    await runtimePool.query(
+      `UPDATE apps SET name = $1, visibility = 'public', listed = true, fork_count = 99 WHERE id = $2`,
+      [`${uniquePrefix}-high`, appIdHigh],
+    );
+
+    const res = await fetch(
+      `${API_URL}/v1/templates?q=${encodeURIComponent(uniquePrefix)}&sort=popular&limit=50`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { items: Array<{ app_id: string; fork_count: number }> };
+
+    const relevant = body.items.filter(
+      (t) => t.app_id === appIdLow || t.app_id === appIdHigh,
+    );
+    expect(relevant.length).toBe(2);
+    // Higher fork_count must come first.
+    expect(relevant[0].app_id).toBe(appIdHigh);
+    expect(relevant[1].app_id).toBe(appIdLow);
+  }, 30_000);
+
+  it('offset > 0 paginates correctly', async () => {
+    const stamp = Date.now().toString(36);
+    const u = await seedUser();
+
+    // Seed 3 apps with a unique prefix so we can filter precisely.
+    const uniquePrefix = `paginate-${stamp}`;
+    const appIds: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const appId = await seedApp(u.userId, 'us-east-1');
+      await runtimePool.query(
+        `UPDATE apps SET name = $1, visibility = 'public', listed = true WHERE id = $2`,
+        [`${uniquePrefix}-${i}`, appId],
+      );
+      appIds.push(appId);
+    }
+
+    // Fetch first page (limit=2, offset=0).
+    const page1Res = await fetch(
+      `${API_URL}/v1/templates?q=${encodeURIComponent(uniquePrefix)}&limit=2&offset=0`,
+    );
+    expect(page1Res.status).toBe(200);
+    const page1 = await page1Res.json() as { items: Array<{ app_id: string }>; limit: number; offset: number };
+    expect(page1.limit).toBe(2);
+    expect(page1.offset).toBe(0);
+    expect(page1.items.length).toBe(2);
+
+    // Fetch second page (limit=2, offset=2) — should have the remaining 1 item.
+    const page2Res = await fetch(
+      `${API_URL}/v1/templates?q=${encodeURIComponent(uniquePrefix)}&limit=2&offset=2`,
+    );
+    expect(page2Res.status).toBe(200);
+    const page2 = await page2Res.json() as { items: Array<{ app_id: string }>; limit: number; offset: number };
+    expect(page2.limit).toBe(2);
+    expect(page2.offset).toBe(2);
+    expect(page2.items.length).toBe(1);
+
+    // All 3 unique apps should appear across both pages exactly once.
+    const allItems = [...page1.items, ...page2.items].map((t) => t.app_id);
+    for (const id of appIds) {
+      expect(allItems).toContain(id);
+    }
+  }, 30_000);
+
   it('returns well-shaped TemplateRow items', async () => {
     const a = await seedUserAndApp('us-east-1');
 

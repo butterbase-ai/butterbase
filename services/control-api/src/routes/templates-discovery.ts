@@ -18,6 +18,8 @@ import {
   getConfiguredRuntimeRegions,
   fanOutRuntimeRegions,
 } from '../services/region-resolver.js';
+import { config } from '../config.js';
+import { getRuntimeDbPool } from '../services/runtime-db.js';
 
 interface TemplateRow {
   app_id: string;
@@ -109,7 +111,7 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
   //
   // Response:
   //   { items: TemplateRow[], total: number, limit: number, offset: number }
-  //   total is approximate (bounded by limit+offset per region, not unbounded COUNT).
+  //   total is best-effort; clients should paginate until items.length < limit
   app.get('/v1/templates', async (request, reply) => {
     const q = request.query as {
       q?: string;
@@ -125,8 +127,12 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
 
     // Determine which regions to query.
     const allRegions = getConfiguredRuntimeRegions();
-    const targetRegions =
-      q.region && allRegions.includes(q.region) ? [q.region] : allRegions;
+
+    // Validate region filter: if provided but not a configured region, return empty page.
+    // (A 400 would leak which regions exist; an empty page is the safe choice.)
+    if (q.region !== undefined && !allRegions.includes(q.region)) {
+      return reply.send({ items: [], total: 0, limit, offset });
+    }
 
     // Over-fetch (limit + offset) from each region so that after merging we have
     // enough rows to paginate correctly without an unbounded COUNT query.
@@ -134,19 +140,40 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
 
     let merged: TemplateRowWithoutOwner[];
 
-    if (q.region && allRegions.includes(q.region)) {
-      // Single-region path — use fanOutRuntimeRegions with filter.
-      const results = await fanOutRuntimeRegions(async (pool, region) => {
-        if (region !== q.region) return [];
-        return fetchRegionPublicApps(pool, region, q.q, sort, fetchLimit);
-      });
-      merged = results.flatMap((r) => r.result);
+    if (q.region) {
+      // Single-region path — call getRuntimeDbPool once, no fan-out overhead.
+      const pool = getRuntimeDbPool(config.runtimeDb, q.region);
+      try {
+        merged = await fetchRegionPublicApps(pool, q.region, q.q, sort, fetchLimit);
+      } catch (err) {
+        app.log.error({ err, region: q.region }, 'templates-discovery: single-region query failed');
+        return reply.code(503).send({ error: { code: 'DISCOVERY_UNAVAILABLE' } });
+      }
     } else {
-      // All-region fan-out.
-      const results = await fanOutRuntimeRegions(async (pool, region) =>
-        fetchRegionPublicApps(pool, region, q.q, sort, fetchLimit),
+      // All-region fan-out — degrade gracefully if individual regions fail.
+      const regionResults: TemplateRowWithoutOwner[] = [];
+      const regions = allRegions;
+
+      const settled = await Promise.allSettled(
+        regions.map(async (region) => {
+          const pool = getRuntimeDbPool(config.runtimeDb, region);
+          const rows = await fetchRegionPublicApps(pool, region, q.q, sort, fetchLimit);
+          return { region, rows };
+        }),
       );
-      merged = results.flatMap((r) => r.result);
+
+      for (const outcome of settled) {
+        if (outcome.status === 'fulfilled') {
+          regionResults.push(...outcome.value.rows);
+        } else {
+          app.log.error(
+            { err: outcome.reason },
+            'templates-discovery: fan-out region query failed, skipping region',
+          );
+        }
+      }
+
+      merged = regionResults;
     }
 
     // Sort the merged results.
@@ -159,7 +186,8 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
 
     merged.sort(cmp);
 
-    const total = merged.length; // approximate — bounded by (limit+offset) × regionCount
+    // total is best-effort; bounded by (limit+offset) × regionCount, not unbounded COUNT.
+    const total = merged.length;
     const page = merged.slice(offset, offset + limit);
 
     // Enrich with owner display names from the control-plane platform_users table.
