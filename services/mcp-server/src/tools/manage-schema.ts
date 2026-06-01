@@ -32,6 +32,7 @@ const TableDefInput = z.object({
   columns: z.record(z.string(), ColumnDefInput).describe('Column definitions'),
   indexes: z.record(z.string(), IndexDefInput).optional().describe('Index definitions'),
   _dropColumns: z.array(z.string()).optional().describe('Columns to drop (explicit opt-in for destructive ops)'),
+  _seed: z.boolean().optional().describe('Mark this table as containing seed data (rows that travel with the app on clone). Forward-compatible marker; clone-time row copy lands in a later release.'),
 });
 
 const SchemaInput = z.object({
