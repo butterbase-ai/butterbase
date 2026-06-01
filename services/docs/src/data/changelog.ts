@@ -21,6 +21,30 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-06-01',
+    category: 'tooling',
+    title: 'App Templates',
+    description: 'Mark any app public and let others clone it. Clones get your schema, RLS policies, function code, non-secret config, repo files, and seed-marked rows. Browse, clone, and configure clone webhooks from the dashboard, CLI (`butterbase clone`), or MCP.',
+    href: '/core-concepts/database#what-a-clone-copies',
+    icon: '🧬',
+  },
+  {
+    date: '2026-05-31',
+    category: 'storage',
+    title: 'App repo',
+    description: 'Per-app version-controlled file storage. Push your source with `butterbase repo push`, pull a fresh copy with `butterbase repo pull`, browse snapshot history. Powers app templates and gives every app a durable source-of-truth.',
+    href: '/cli/repo',
+    icon: '📦',
+  },
+  {
+    date: '2026-05-27',
+    category: 'tooling',
+    title: 'Substrate',
+    description: 'Institutional-memory layer for your AI agents. Record entities, decisions, commitments, learnings, and principles to a per-account ledger with approve/reject gating, attention rules, real-time updates, and a dashboard browser. Surfaced via SDK, MCP, REST, and `bb substrate` CLI.',
+    href: '/core-concepts/substrate',
+    icon: '🧠',
+  },
+  {
     date: '2026-05-25',
     category: 'compute',
     title: 'Key-Value Store',
