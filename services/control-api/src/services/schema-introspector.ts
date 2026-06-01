@@ -34,6 +34,7 @@ const EXCLUDED_TABLES = [
   '_rag_documents',
   '_rag_chunks',
   '_idempotency_keys',
+  '_seed_tables',
 ];
 
 export async function introspectSchema(pool: pg.Pool): Promise<IntrospectedSchema> {

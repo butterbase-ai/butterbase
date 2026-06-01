@@ -109,6 +109,12 @@ export async function applyMigration(
       }
     }
 
+    // Ensure seed-table marker exists (defensive: handles apps provisioned before
+    // data-plane migration 012 ran, i.e. any app already in the field).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS _seed_tables (name TEXT PRIMARY KEY)
+    `);
+
     // Log migration
     const sqlUp = statements.map((s) => s.sql).join(';\n');
     const sqlDown = generateSqlDown(statements);
