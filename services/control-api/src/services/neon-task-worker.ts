@@ -17,7 +17,7 @@ import {
   copyManifestSameRegion,
 } from './repo-storage.js';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig } from './clone-replay.js';
+import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding } from './clone-replay.js';
 
 interface NeonTask {
   id: number;
@@ -593,6 +593,24 @@ async function executeClone(
     logger.info(
       { destAppId, warnings: cfgResult.warnings.length },
       '[clone] non-secret config replayed',
+    );
+
+    // Step 6b (Phase 5 A6): Replay auth_hook_function binding — only if the
+    // referenced function was replicated successfully (A4). Runs after
+    // replayNonSecretConfig so the binding cannot be clobbered by config replay.
+    const hookResult = await replayAuthHookBinding(
+      sourceRuntimePool,
+      destRuntimePool,
+      job.source_app_id,
+      destAppId,
+      logger,
+    );
+    if (hookResult.warnings.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, hookResult.warnings);
+    }
+    logger.info(
+      { destAppId, warnings: hookResult.warnings.length },
+      '[clone] auth_hook_function binding step complete',
     );
 
     // 6. Mark job completed.

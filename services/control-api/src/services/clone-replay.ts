@@ -571,6 +571,77 @@ async function replayOauthConfigs(
   }
 }
 
+// ---------------------------------------------------------------------------
+// replayAuthHookBinding — step 6 sub-task (Phase 5 A6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Copy the source app's `auth_hook_function` binding to the dest app, but
+ * ONLY if the referenced function was successfully replicated (i.e. a
+ * non-deleted row with that name exists in dest's `app_functions`).
+ *
+ * If the function is absent on dest the binding is left NULL and a warning is
+ * appended so operators know the hook will not fire on the template clone.
+ *
+ * NOTE: `auth_hook_function` lives on the `apps` row in the RUNTIME DB
+ * (not the per-app DB), so this function takes runtime-DB pools.
+ *
+ * @param sourceRuntimePool - Runtime DB pool for the source app's region.
+ * @param destRuntimePool   - Runtime DB pool for the dest app's region.
+ * @param sourceAppId       - Source app ID.
+ * @param destAppId         - Dest app ID.
+ * @param logger            - Logger compatible with pino's info/warn interface.
+ * @returns `{ warnings }` — warning strings if the binding could not be applied.
+ */
+export async function replayAuthHookBinding(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  logger: ReplayLogger,
+): Promise<{ warnings: string[] }> {
+  const warnings: string[] = [];
+
+  try {
+    const src = await sourceRuntimePool.query<{ auth_hook_function: string | null }>(
+      `SELECT auth_hook_function FROM apps WHERE id = $1`,
+      [sourceAppId],
+    );
+    const hookName = src.rows[0]?.auth_hook_function;
+
+    // Nothing to copy.
+    if (!hookName) return { warnings };
+
+    // Verify the function was replicated to dest (not soft-deleted).
+    const exists = await destRuntimePool.query(
+      `SELECT 1 FROM app_functions WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
+      [destAppId, hookName],
+    );
+
+    if ((exists.rowCount ?? 0) === 0) {
+      const msg = `auth_hook_function "${hookName}" not replicated to dest; binding left NULL`;
+      warnings.push(msg);
+      logger.warn(
+        { hookName, destAppId },
+        '[clone] auth_hook_function not found on dest; binding left NULL',
+      );
+      return { warnings };
+    }
+
+    await destRuntimePool.query(
+      `UPDATE apps SET auth_hook_function = $1, updated_at = now() WHERE id = $2`,
+      [hookName, destAppId],
+    );
+    logger.info({ destAppId, hookName }, '[clone] auth_hook_function binding replayed');
+  } catch (err) {
+    const msg = `auth_hook_function replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] auth_hook_function replay failed; continuing');
+  }
+
+  return { warnings };
+}
+
 /**
  * Replay all non-secret config from the source app's runtime DB onto the dest
  * app's runtime DB (step 6 of the clone pipeline).

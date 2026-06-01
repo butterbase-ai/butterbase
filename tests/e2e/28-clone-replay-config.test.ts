@@ -23,6 +23,7 @@ import {
   waitForProvisioning,
   pushSnapshot,
   queryRuntimeDb,
+  deployFunctionAsOwner,
 } from './helpers/templates.js';
 
 const API_URL = 'http://localhost:4000';
@@ -274,5 +275,215 @@ describe('Phase 5 A5 — non-secret config replays; secrets blanked', () => {
       expect.arrayContaining(['https://example.com', 'https://staging.example.com']),
     );
     expect(dest.rows[0].allowed_origins).toHaveLength(2);
+  }, 240_000);
+});
+
+// ---------------------------------------------------------------------------
+// Helper: set auth_hook_function on an app via the API
+// ---------------------------------------------------------------------------
+
+async function setAuthHookAsOwner(
+  apiKey: string,
+  appId: string,
+  functionName: string | null,
+): Promise<void> {
+  const res = await fetch(`${API_URL}/v1/${appId}/config/auth-hooks`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ post_auth_function: functionName }),
+  });
+  if (!res.ok) {
+    throw new Error(`setAuthHookAsOwner failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+describe('Phase 5 A6 — auth_hook_function binding replay', () => {
+  it('auth_hook_function copies to dest when referenced function was replicated', async () => {
+    // 1. Create source app.
+    const sourceOwner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'authhook-src');
+
+    const sourceInitRes = await fetch(`${API_URL}/init`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'authhook-source' }),
+    });
+    if (!sourceInitRes.ok) {
+      throw new Error(`POST /init failed: ${sourceInitRes.status} ${await sourceInitRes.text()}`);
+    }
+    const { app_id: sourceAppId } = await sourceInitRes.json() as { app_id: string };
+
+    // 2. Wait for provisioning.
+    await waitForProvisioning(sourceOwner.apiKey, sourceAppId, 120_000);
+
+    // 3. Deploy a function that will be used as the auth hook.
+    const fnCode = `export async function handler(request, context) { return new Response("auth hook ok"); }`;
+    await deployFunctionAsOwner(sourceOwner.apiKey, sourceAppId, {
+      name: 'my-auth-hook',
+      code: fnCode,
+      trigger_type: 'http',
+      trigger_config: { auth: 'none' },
+    });
+
+    // 4. Set auth_hook_function via the API (requires the function to exist).
+    await setAuthHookAsOwner(sourceOwner.apiKey, sourceAppId, 'my-auth-hook');
+
+    // 5. Mark source public+listed.
+    const patchRes = await fetch(`${API_URL}/v1/${sourceAppId}/config/visibility`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ visibility: 'public', listed: true }),
+    });
+    expect(patchRes.status, await patchRes.clone().text()).toBe(200);
+
+    // 6. Push snapshot.
+    await pushSnapshot(sourceOwner.apiKey, sourceAppId, '# authhook source\n');
+
+    // 7. Clone.
+    const cloner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'authhook-cln');
+    const cloneRes = await fetch(`${API_URL}/v1/templates/${sourceAppId}/clone`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cloner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'replica-authhook' }),
+    });
+    expect(cloneRes.status, await cloneRes.clone().text()).toBe(200);
+    const { job_id } = await cloneRes.json() as { job_id: string };
+
+    // 8. Wait for completed / failed.
+    const final = await waitForCloneStep(cloner.apiKey, job_id, ['completed', 'failed'], 180_000);
+    expect(
+      final.status,
+      `Clone job ended with unexpected status: ${JSON.stringify(final)}`,
+    ).toBe('completed');
+
+    const destAppId = final.dest_app_id!;
+
+    // 9. Assert auth_hook_function on dest matches source.
+    const dest = await queryRuntimeDb(
+      'us-east-1',
+      `SELECT auth_hook_function FROM apps WHERE id = $1`,
+      [destAppId],
+    );
+    expect(dest.rows.length).toBe(1);
+    expect(dest.rows[0].auth_hook_function).toBe('my-auth-hook');
+
+    // 10. Confirm the function itself was also replicated.
+    const fnOnDest = await queryRuntimeDb(
+      'us-east-1',
+      `SELECT name FROM app_functions WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
+      [destAppId, 'my-auth-hook'],
+    );
+    expect(fnOnDest.rows.length).toBe(1);
+  }, 240_000);
+
+  it('auth_hook_function left NULL and warning recorded when referenced function was not replicated', async () => {
+    // 1. Create source app.
+    const sourceOwner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'authhook-neg');
+
+    const sourceInitRes = await fetch(`${API_URL}/init`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'authhook-neg-source' }),
+    });
+    if (!sourceInitRes.ok) {
+      throw new Error(`POST /init failed: ${sourceInitRes.status} ${await sourceInitRes.text()}`);
+    }
+    const { app_id: sourceAppId } = await sourceInitRes.json() as { app_id: string };
+
+    // 2. Wait for provisioning.
+    await waitForProvisioning(sourceOwner.apiKey, sourceAppId, 120_000);
+
+    // 3. Deploy a function and set it as the auth hook.
+    const fnCode = `export async function handler(request, context) { return new Response("ghost hook"); }`;
+    await deployFunctionAsOwner(sourceOwner.apiKey, sourceAppId, {
+      name: 'ghost-hook',
+      code: fnCode,
+      trigger_type: 'http',
+      trigger_config: { auth: 'none' },
+    });
+    await setAuthHookAsOwner(sourceOwner.apiKey, sourceAppId, 'ghost-hook');
+
+    // 4. Soft-delete the function on source so it won't be replicated (deleted_at set).
+    await queryRuntimeDb(
+      'us-east-1',
+      `UPDATE app_functions SET deleted_at = now() WHERE app_id = $1 AND name = $2`,
+      [sourceAppId, 'ghost-hook'],
+    );
+
+    // 5. Mark source public+listed.
+    const patchRes = await fetch(`${API_URL}/v1/${sourceAppId}/config/visibility`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ visibility: 'public', listed: true }),
+    });
+    expect(patchRes.status, await patchRes.clone().text()).toBe(200);
+
+    // 6. Push snapshot.
+    await pushSnapshot(sourceOwner.apiKey, sourceAppId, '# authhook-neg source\n');
+
+    // 7. Clone.
+    const cloner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'authhook-ncln');
+    const cloneRes = await fetch(`${API_URL}/v1/templates/${sourceAppId}/clone`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cloner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'replica-authhook-neg' }),
+    });
+    expect(cloneRes.status, await cloneRes.clone().text()).toBe(200);
+    const { job_id } = await cloneRes.json() as { job_id: string };
+
+    // 8. Wait for completed.
+    const final = await waitForCloneStep(cloner.apiKey, job_id, ['completed', 'failed'], 180_000);
+    expect(
+      final.status,
+      `Clone job ended with unexpected status: ${JSON.stringify(final)}`,
+    ).toBe('completed');
+
+    const destAppId = final.dest_app_id!;
+
+    // 9. auth_hook_function on dest must be NULL.
+    const dest = await queryRuntimeDb(
+      'us-east-1',
+      `SELECT auth_hook_function FROM apps WHERE id = $1`,
+      [destAppId],
+    );
+    expect(dest.rows.length).toBe(1);
+    expect(
+      dest.rows[0].auth_hook_function,
+      'auth_hook_function should be NULL when referenced function was not replicated',
+    ).toBeNull();
+
+    // 10. A warning must be recorded in the clone job.
+    const jobRow = await controlPool.query(
+      `SELECT warnings FROM template_clone_jobs WHERE id = $1`,
+      [job_id],
+    );
+    const warnings: string[] = jobRow.rows[0]?.warnings ?? [];
+    const hookWarning = warnings.find((w: string) => w.includes('ghost-hook'));
+    expect(
+      hookWarning,
+      `Expected a warning mentioning 'ghost-hook', got: ${JSON.stringify(warnings)}`,
+    ).toBeTruthy();
   }, 240_000);
 });
