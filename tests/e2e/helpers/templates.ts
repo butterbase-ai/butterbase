@@ -274,6 +274,38 @@ export async function pushSnapshot(
 }
 
 // ---------------------------------------------------------------------------
+// insertRowsAsOwner — POST rows via the auto-API as the app owner
+// ---------------------------------------------------------------------------
+
+/**
+ * Inserts one or more rows into `table` via `POST /v1/:appId/:table`.
+ * Each row object is sent as a separate request (the auto-API accepts one
+ * object per call). Throws if any request is not 200/201.
+ */
+export async function insertRowsAsOwner(
+  apiKey: string,
+  appId: string,
+  table: string,
+  rows: Record<string, unknown>[],
+): Promise<void> {
+  for (const row of rows) {
+    const res = await fetch(`${API_URL}/v1/${appId}/${table}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(row),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `insertRowsAsOwner failed on table "${table}": ${res.status} ${await res.text()}`,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // queryAppDb — run a query directly against a per-app database (local dev only)
 // ---------------------------------------------------------------------------
 

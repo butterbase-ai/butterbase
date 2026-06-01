@@ -62,6 +62,94 @@ export async function replaySchema(
   );
 }
 
+// ---------------------------------------------------------------------------
+// replaySeedData
+// ---------------------------------------------------------------------------
+
+const SEED_BATCH_SIZE = 500;
+
+/**
+ * Copy rows from every seed-flagged table on the source DB into the matching
+ * table on the dest DB.
+ *
+ * Seed-flagged tables are recorded in the source's `_seed_tables` registry
+ * (populated by Phase 4d's schema-applier when `_seed: true` is set on a
+ * table).  Apps that pre-date the bootstrap won't have `_seed_tables` at all;
+ * in that case the function returns immediately with an empty result
+ * (forward-compat / soft-fail).
+ *
+ * Per-table soft-fail: a constraint / column-mismatch error on INSERT is
+ * recorded as a warning and the copy continues with the next table.
+ *
+ * @param sourceAppPool - Connected pool for the source app's per-app DB.
+ * @param destAppPool   - Connected pool for the dest app's per-app DB.
+ * @param logger        - Logger compatible with pino's info/warn interface.
+ * @returns `{ tables, rows, warnings }` — tables successfully copied, total
+ *          rows inserted, and any per-table warning strings.
+ */
+export async function replaySeedData(
+  sourceAppPool: pg.Pool,
+  destAppPool: pg.Pool,
+  logger: ReplayLogger,
+): Promise<{ tables: string[]; rows: number; warnings: string[] }> {
+  let flagged;
+  try {
+    flagged = await sourceAppPool.query<{ name: string }>(`SELECT name FROM _seed_tables`);
+  } catch (err) {
+    // Forward-compat: apps pre-dating the _seed_tables bootstrap don't have it.
+    logger.warn({ err }, '[clone] _seed_tables missing on source; no seed copy');
+    return { tables: [], rows: 0, warnings: [] };
+  }
+  const warnings: string[] = [];
+  let totalRows = 0;
+  const tablesCopied: string[] = [];
+  for (const row of flagged.rows) {
+    const table = row.name;
+    const cols = await sourceAppPool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`,
+      [table],
+    );
+    if (cols.rows.length === 0) {
+      warnings.push(`Seed table ${table} flagged but has no columns; skipping`);
+      continue;
+    }
+    const colList = cols.rows.map(c => `"${c.column_name}"`).join(', ');
+    let offset = 0;
+    while (true) {
+      const batch = await sourceAppPool.query(
+        `SELECT ${colList} FROM "${table}" ORDER BY 1 OFFSET ${offset} LIMIT ${SEED_BATCH_SIZE}`,
+      );
+      if (batch.rows.length === 0) break;
+      const placeholders: string[] = [];
+      const values: unknown[] = [];
+      let i = 1;
+      for (const r of batch.rows) {
+        const rowPh = cols.rows.map(() => `$${i++}`);
+        placeholders.push(`(${rowPh.join(', ')})`);
+        for (const c of cols.rows) values.push((r as Record<string, unknown>)[c.column_name]);
+      }
+      const sql = `INSERT INTO "${table}" (${colList}) VALUES ${placeholders.join(', ')} ON CONFLICT DO NOTHING`;
+      try {
+        await destAppPool.query(sql, values);
+        totalRows += batch.rows.length;
+      } catch (err) {
+        warnings.push(`Seed insert into ${table} failed at offset ${offset}: ${(err as Error).message}`);
+        logger.warn({ table, offset, err }, '[clone] seed insert failed; continuing with next table');
+        break;
+      }
+      offset += SEED_BATCH_SIZE;
+      if (batch.rows.length < SEED_BATCH_SIZE) break;
+    }
+    tablesCopied.push(table);
+  }
+  return { tables: tablesCopied, rows: totalRows, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// replayRls helpers
+// ---------------------------------------------------------------------------
+
 const CMD_MAP: Record<string, string> = {
   r: 'SELECT',
   a: 'INSERT',

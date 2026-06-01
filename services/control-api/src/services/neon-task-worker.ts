@@ -17,7 +17,7 @@ import {
   copyManifestSameRegion,
 } from './repo-storage.js';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema, replayRls } from './clone-replay.js';
+import { replaySchema, replayRls, replaySeedData } from './clone-replay.js';
 
 interface NeonTask {
   id: number;
@@ -481,45 +481,44 @@ async function executeClone(
 
     // Step 3 (Phase 5 A1): Replay source schema onto the dest DB.
     // Step 4 (Phase 5 A2): Replay source RLS policies onto the dest DB.
-    {
-      // Resolve per-app DB pools: look up db_name from each app's runtime DB.
-      const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
-      const sourceAppRow = await sourceRuntimePool.query<{ db_name: string }>(
-        `SELECT db_name FROM apps WHERE id = $1`,
-        [job.source_app_id],
-      );
-      if (sourceAppRow.rows.length === 0) {
-        throw new Error(`[clone] source app ${job.source_app_id} not found in ${job.source_region} runtime DB`);
-      }
-      const sourceDbName = sourceAppRow.rows[0].db_name;
-      const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceDbName);
-
-      const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-      const destAppRow = await destRuntimePool.query<{ db_name: string }>(
-        `SELECT db_name FROM apps WHERE id = $1`,
-        [destAppId],
-      );
-      if (destAppRow.rows.length === 0) {
-        throw new Error(`[clone] dest app ${destAppId} not found in ${job.dest_region} runtime DB`);
-      }
-      const destDbName = destAppRow.rows[0].db_name;
-      const destAppPool = await getAppPoolForApp(controlDb, destAppId, destDbName);
-
-      // A1: schema replay
-      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
-      await replaySchema(sourceAppPool, destAppPool, destAppId, logger);
-
-      // A2: RLS replay
-      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
-      const rlsResult = await replayRls(sourceAppPool, destAppPool, logger);
-      if (rlsResult.warnings.length > 0) {
-        await appendCloneJobWarnings(controlDb, jobId, rlsResult.warnings);
-      }
-      logger.info(
-        { destAppId, replayed: rlsResult.replayed, warnings: rlsResult.warnings.length },
-        '[clone] RLS replayed',
-      );
+    // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
+    // Pools are declared here so they can be shared across all three steps.
+    const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
+    const sourceAppRowForPools = await sourceRuntimePool.query<{ db_name: string }>(
+      `SELECT db_name FROM apps WHERE id = $1`,
+      [job.source_app_id],
+    );
+    if (sourceAppRowForPools.rows.length === 0) {
+      throw new Error(`[clone] source app ${job.source_app_id} not found in ${job.source_region} runtime DB`);
     }
+    const sourceDbName = sourceAppRowForPools.rows[0].db_name;
+    const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceDbName);
+
+    const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+    const destAppRowForPools = await destRuntimePool.query<{ db_name: string }>(
+      `SELECT db_name FROM apps WHERE id = $1`,
+      [destAppId],
+    );
+    if (destAppRowForPools.rows.length === 0) {
+      throw new Error(`[clone] dest app ${destAppId} not found in ${job.dest_region} runtime DB`);
+    }
+    const destDbNameForPools = destAppRowForPools.rows[0].db_name;
+    const destAppPoolForReplay = await getAppPoolForApp(controlDb, destAppId, destDbNameForPools);
+
+    // A1: schema replay
+    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
+    await replaySchema(sourceAppPool, destAppPoolForReplay, destAppId, logger);
+
+    // A2: RLS replay
+    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
+    const rlsResult = await replayRls(sourceAppPool, destAppPoolForReplay, logger);
+    if (rlsResult.warnings.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, rlsResult.warnings);
+    }
+    logger.info(
+      { destAppId, replayed: rlsResult.replayed, warnings: rlsResult.warnings.length },
+      '[clone] RLS replayed',
+    );
 
     // 2. Read source manifest.
     const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
@@ -547,11 +546,19 @@ async function executeClone(
     // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
     //    region-direct pool (we already know dest's region from the job).
     await setLatest(destAppId, job.source_snapshot_id);
-    const destAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-    await destAppPool.query(
+    const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+    await destRuntimeAppPool.query(
       `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
       [job.source_snapshot_id, destAppId],
     );
+
+    // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
+    await setCloneJobStatus(controlDb, jobId, { status: 'seeding_data' });
+    const seedResult = await replaySeedData(sourceAppPool, destAppPoolForReplay, logger);
+    if (seedResult.warnings.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
+    }
+    logger.info({ destAppId, ...seedResult }, '[clone] seed data complete');
 
     // 6. Mark job completed.
     await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
