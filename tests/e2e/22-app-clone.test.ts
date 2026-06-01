@@ -349,6 +349,43 @@ describe('Phase 4a app-template clone (end-to-end)', () => {
     expect(done.dest_app_id).toBe(failed.dest_app_id);
   }, 300_000);
 
+  it('Phase 5 D2 — returns 429 CLONE_LIMIT_INFLIGHT when user already has 3 non-terminal jobs', async () => {
+    const src = await seedUserAndApp('us-east-1');
+    await setVisibilityPublic(src.appId);
+    await pushSnapshot(src.appId, src.apiKey, '# D2 cap test source\n');
+
+    // Directly insert 3 non-terminal clone jobs for this user — one per extended status variant.
+    const nonTerminalStatuses = ['processing', 'replaying_schema', 'copying_repo'];
+    for (let i = 0; i < 3; i++) {
+      const jobId = `cj_d2cap_${randomBytes(9).toString('hex').slice(0, 16)}_${i}`;
+      await controlPool.query(
+        `INSERT INTO template_clone_jobs
+           (id, source_app_id, source_snapshot_id, source_region, dest_app_id, dest_region, requested_by_user_id, status, dest_app_name)
+         VALUES ($1, $2, 'fake_snapshot_d2', 'us-east-1', NULL, 'us-east-1', $3, $4, $5)`,
+        [jobId, src.appId, src.userId, nonTerminalStatuses[i], `cap-dummy-${i}`],
+      );
+    }
+
+    try {
+      // Attempt a 4th clone via the API — should be rejected with 429.
+      const res = await fetch(`${API_URL}/v1/templates/${src.appId}/clone`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${src.apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ dest_app_name: 'over-cap', dest_region: 'us-east-1' }),
+      });
+      expect(res.status).toBe(429);
+      const body = await res.json() as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('CLONE_LIMIT_INFLIGHT');
+      expect(body.error.message).toContain('3 clones in progress');
+    } finally {
+      // Clean up stub jobs so they don't affect other tests.
+      await controlPool.query(
+        `DELETE FROM template_clone_jobs WHERE requested_by_user_id = $1 AND id LIKE 'cj_d2cap_%'`,
+        [src.userId],
+      );
+    }
+  }, 90_000);
+
   it('case 5: retention pin protects an in-flight clone source snapshot from pruning', async () => {
     // Strategy: directly insert a clone_job row in 'processing' status (NO neon_task
     // enqueued) so it stays in-flight indefinitely. Then push 7 snapshots (>retain=5)

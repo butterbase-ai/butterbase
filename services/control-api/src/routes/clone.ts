@@ -97,6 +97,23 @@ export function cloneRoutes(app: FastifyInstance) {
       }));
     }
 
+    // Cap simultaneous non-terminal clone jobs per user at 3.
+    const inflightResult = await app.controlDb.query<{ c: number }>(
+      `SELECT count(*)::int AS c
+         FROM template_clone_jobs
+        WHERE requested_by_user_id = $1
+          AND status NOT IN ('completed', 'failed')`,
+      [userId],
+    );
+    if (inflightResult.rows[0].c >= 3) {
+      return reply.code(429).send({
+        error: {
+          code: 'CLONE_LIMIT_INFLIGHT',
+          message: 'You already have 3 clones in progress. Wait for one to complete or fail.',
+        },
+      });
+    }
+
     // Accept dest_region (preferred) or the legacy region alias.
     const destRegion = body.dest_region ?? body.region ?? src.region;
     const job = await createCloneJob(app.controlDb, {
