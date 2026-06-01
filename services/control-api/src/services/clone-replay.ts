@@ -42,11 +42,12 @@ export async function replaySchema(
     return;
   }
 
-  // 2. Diff against an empty dest schema so every source table becomes a CREATE.
-  //    IntrospectedSchema and SchemaDSL share compatible column-info shapes;
-  //    cast is safe because diffSchema only reads the common fields.
-  const emptyCurrentSchema = { tables: {} };
-  const statements = diffSchema(emptyCurrentSchema, sourceDsl as unknown as SchemaDSL);
+  // 2. Diff against the dest's CURRENT schema (not an empty schema) so that
+  //    re-running replaySchema is idempotent: tables that already exist produce
+  //    no diff statements and are skipped rather than erroring with
+  //    "relation already exists".
+  const currentDestSchema = await introspectSchema(destAppPool);
+  const statements = diffSchema(currentDestSchema as unknown as SchemaDSL, sourceDsl as unknown as SchemaDSL);
 
   if (statements.length === 0) {
     logger.info({ destAppId }, '[clone] diff produced no statements; skipping schema replay');

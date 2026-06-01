@@ -9,6 +9,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { requireUserId } from '../utils/require-auth.js';
+import { rateLimitAllowList } from '../plugins/rate-limit.js';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { createCloneJob, getCloneJob, incrementRetry } from '../services/clone-jobs.js';
@@ -46,6 +47,7 @@ export function cloneRoutes(app: FastifyInstance) {
   app.post('/v1/templates/:source_app_id/clone', {
     config: {
       rateLimit: {
+        allowList: rateLimitAllowList,
         max: 5,
         timeWindow: '1 hour',
         keyGenerator: (req) => {

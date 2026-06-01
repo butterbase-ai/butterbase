@@ -10,6 +10,7 @@
 //
 import type { FastifyInstance } from 'fastify';
 import pg from 'pg';
+import { rateLimitAllowList } from '../plugins/rate-limit.js';
 
 // ---------------------------------------------------------------------------
 // Internal-table filter — used by the detail endpoint to hide platform tables
@@ -139,6 +140,7 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
   app.get('/v1/templates', {
     config: {
       rateLimit: {
+        allowList: rateLimitAllowList,
         max: 60,
         timeWindow: '1 minute',
         keyGenerator: (req) => `ip:${req.ip}:templates-list`,

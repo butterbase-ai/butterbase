@@ -39,6 +39,7 @@ import {
   replayNonSecretConfig,
 } from '../../services/control-api/src/services/clone-replay.js';
 import { introspectSchema } from '../../services/control-api/src/services/schema-introspector.js';
+import { RATE_LIMIT_BYPASS_HEADERS, waitForProvisioning } from './helpers/templates.js';
 
 const API_URL = 'http://localhost:4000';
 const CONTROL_DB_URL = 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
@@ -114,7 +115,7 @@ async function pushSnapshot(appId: string, apiKey: string, body: string): Promis
 
   const prep = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/prepare`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify(manifestBody),
   });
   if (!prep.ok) throw new Error(`prepare failed: ${prep.status} ${await prep.text()}`);
@@ -131,12 +132,36 @@ async function pushSnapshot(appId: string, apiKey: string, body: string): Promis
 
   const commit = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/commit`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({ manifest: manifestBody }),
   });
   if (!commit.ok) throw new Error(`commit failed: ${commit.status} ${await commit.text()}`);
   const cj = await commit.json() as { snapshot_id: string };
   return cj.snapshot_id;
+}
+
+/**
+ * Creates a user (DB rows), then calls POST /init to provision a real per-app
+ * DB, and waits until provisioning_status is 'ready'.
+ * Returns { userId, apiKey, appId } for the provisioned source app.
+ */
+async function provisionSourceApp(name: string): Promise<{ userId: string; apiKey: string; appId: string }> {
+  const { userId, apiKey } = await seedUser();
+  const initRes = await fetch(`${API_URL}/init`, {
+    method: 'POST',
+    headers: {
+      ...RATE_LIMIT_BYPASS_HEADERS,
+      Authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ name }),
+  });
+  if (!initRes.ok) {
+    throw new Error(`POST /init failed for ${name}: ${initRes.status} ${await initRes.text()}`);
+  }
+  const { app_id: appId } = await initRes.json() as { app_id: string };
+  await waitForProvisioning(apiKey, appId, 120_000);
+  return { userId, apiKey, appId };
 }
 
 async function waitForJobStatus(
@@ -149,7 +174,7 @@ async function waitForJobStatus(
   let last: { job_id: string; status: string; dest_app_id: string | null } | undefined;
   while (Date.now() - start < timeoutMs) {
     const r = await fetch(`${API_URL}/v1/clone-jobs/${jobId}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}` },
     });
     if (!r.ok) throw new Error(`get job failed: ${r.status} ${await r.text()}`);
     last = await r.json() as typeof last;
@@ -176,9 +201,9 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
   it(
     'replaySchema is idempotent: second call leaves dest schema identical to after first call',
     async () => {
-      // 1. Seed source app and apply a real schema via control-api.
-      const srcUser = await seedUser();
-      const srcAppId = await seedApp(srcUser.userId, 'us-east-1');
+      // 1. Provision source app with a real per-app DB, then apply schema.
+      const srcUser = await provisionSourceApp('idem-schema-src');
+      const srcAppId = srcUser.appId;
 
       // Mark source public+listed so clone is permitted.
       await runtimePool.query(
@@ -189,7 +214,7 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
       // Apply a schema with a single table.
       const schemaApply = await fetch(`${API_URL}/v1/${srcAppId}/schema/apply`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${srcUser.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${srcUser.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({
           schema: {
             tables: {
@@ -215,7 +240,7 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
 
       const cloneRes = await fetch(`${API_URL}/v1/templates/${srcAppId}/clone`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name: `idem-schema-${Date.now()}` }),
       });
       if (!cloneRes.ok) {
@@ -258,8 +283,8 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
   it(
     'replayRls second call produces no net new policies (soft-fail on duplicate policy is acceptable)',
     async () => {
-      const srcUser = await seedUser();
-      const srcAppId = await seedApp(srcUser.userId, 'us-east-1');
+      const srcUser = await provisionSourceApp('idem-rls-src');
+      const srcAppId = srcUser.appId;
       await runtimePool.query(
         `UPDATE apps SET visibility = 'public', listed = true WHERE id = $1`,
         [srcAppId],
@@ -269,7 +294,7 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
       const cloner = await seedUser();
       const cloneRes = await fetch(`${API_URL}/v1/templates/${srcAppId}/clone`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name: `idem-rls-${Date.now()}` }),
       });
       if (!cloneRes.ok) {
@@ -322,8 +347,8 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
   it(
     'replayFunctions is idempotent: second call inserts 0 rows (ON CONFLICT DO NOTHING)',
     async () => {
-      const srcUser = await seedUser();
-      const srcAppId = await seedApp(srcUser.userId, 'us-east-1');
+      const srcUser = await provisionSourceApp('idem-fn-src');
+      const srcAppId = srcUser.appId;
       await runtimePool.query(
         `UPDATE apps SET visibility = 'public', listed = true WHERE id = $1`,
         [srcAppId],
@@ -332,7 +357,7 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
       // Deploy a function to the source app.
       const fnDeploy = await fetch(`${API_URL}/v1/${srcAppId}/functions`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${srcUser.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${srcUser.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({
           name: 'hello-idem',
           code: 'export default () => new Response("hi")',
@@ -349,7 +374,7 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
       const cloner = await seedUser();
       const cloneRes = await fetch(`${API_URL}/v1/templates/${srcAppId}/clone`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name: `idem-fn-${Date.now()}` }),
       });
       if (!cloneRes.ok) {
@@ -395,8 +420,8 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
   it(
     'replaySeedData is idempotent: second call inserts 0 new rows (ON CONFLICT DO NOTHING)',
     async () => {
-      const srcUser = await seedUser();
-      const srcAppId = await seedApp(srcUser.userId, 'us-east-1');
+      const srcUser = await provisionSourceApp('idem-seed-src');
+      const srcAppId = srcUser.appId;
       await runtimePool.query(
         `UPDATE apps SET visibility = 'public', listed = true WHERE id = $1`,
         [srcAppId],
@@ -406,7 +431,7 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
       const cloner = await seedUser();
       const cloneRes = await fetch(`${API_URL}/v1/templates/${srcAppId}/clone`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name: `idem-seed-${Date.now()}` }),
       });
       if (!cloneRes.ok) {
@@ -472,8 +497,8 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
   it(
     'replayNonSecretConfig is idempotent: second call produces no warnings and leaves config unchanged',
     async () => {
-      const srcUser = await seedUser();
-      const srcAppId = await seedApp(srcUser.userId, 'us-east-1');
+      const srcUser = await provisionSourceApp('idem-config-src');
+      const srcAppId = srcUser.appId;
       await runtimePool.query(
         `UPDATE apps SET visibility = 'public', listed = true WHERE id = $1`,
         [srcAppId],
@@ -483,7 +508,7 @@ describe('G2: clone-replay idempotency (e2e re-invoke)', () => {
       const cloner = await seedUser();
       const cloneRes = await fetch(`${API_URL}/v1/templates/${srcAppId}/clone`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${cloner.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name: `idem-config-${Date.now()}` }),
       });
       if (!cloneRes.ok) {

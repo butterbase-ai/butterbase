@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import pg from 'pg';
+import { RATE_LIMIT_BYPASS_HEADERS } from './helpers/templates.js';
 
 const API_URL = 'http://localhost:4000';
 const CONTROL_DB_URL = 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
@@ -87,13 +88,13 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
     // Mark public + listed via PATCH endpoint.
     const patch = await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ visibility: 'public', listed: true }),
     });
     expect(patch.status).toBe(200);
 
     // Anonymous — no Authorization header.
-    const res = await fetch(`${API_URL}/v1/templates?limit=50`);
+    const res = await fetch(`${API_URL}/v1/templates?limit=50`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     expect(res.status).toBe(200);
     const body = await res.json() as { items: Array<{ app_id: string }>; total: number; limit: number; offset: number };
 
@@ -108,7 +109,7 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
     const a = await seedUserAndApp('us-east-1');
     // App stays private (default). Do not patch visibility.
 
-    const res = await fetch(`${API_URL}/v1/templates?limit=50`);
+    const res = await fetch(`${API_URL}/v1/templates?limit=50`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     expect(res.status).toBe(200);
     const body = await res.json() as { items: Array<{ app_id: string }> };
 
@@ -130,7 +131,7 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
       [appId],
     );
 
-    const res = await fetch(`${API_URL}/v1/templates?q=${encodeURIComponent('templatefilter-')}&limit=50`);
+    const res = await fetch(`${API_URL}/v1/templates?q=${encodeURIComponent('templatefilter-')}&limit=50`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     expect(res.status).toBe(200);
     const body = await res.json() as { items: Array<{ app_id: string; name: string }> };
 
@@ -161,6 +162,7 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
 
     const res = await fetch(
       `${API_URL}/v1/templates?q=${encodeURIComponent(uniquePrefix)}&sort=popular&limit=50`,
+      { headers: RATE_LIMIT_BYPASS_HEADERS },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { items: Array<{ app_id: string; fork_count: number }> };
@@ -193,6 +195,7 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
     // Fetch first page (limit=2, offset=0).
     const page1Res = await fetch(
       `${API_URL}/v1/templates?q=${encodeURIComponent(uniquePrefix)}&limit=2&offset=0`,
+      { headers: RATE_LIMIT_BYPASS_HEADERS },
     );
     expect(page1Res.status).toBe(200);
     const page1 = await page1Res.json() as { items: Array<{ app_id: string }>; limit: number; offset: number };
@@ -203,6 +206,7 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
     // Fetch second page (limit=2, offset=2) — should have the remaining 1 item.
     const page2Res = await fetch(
       `${API_URL}/v1/templates?q=${encodeURIComponent(uniquePrefix)}&limit=2&offset=2`,
+      { headers: RATE_LIMIT_BYPASS_HEADERS },
     );
     expect(page2Res.status).toBe(200);
     const page2 = await page2Res.json() as { items: Array<{ app_id: string }>; limit: number; offset: number };
@@ -222,11 +226,11 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
 
     await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ visibility: 'public', listed: true }),
     });
 
-    const res = await fetch(`${API_URL}/v1/templates?limit=50`);
+    const res = await fetch(`${API_URL}/v1/templates?limit=50`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     const body = await res.json() as { items: Array<Record<string, unknown>> };
 
     const item = body.items.find(t => t.app_id === a.appId);
@@ -247,10 +251,10 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
     const a = await seedUserAndApp('us-east-1');
     await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ visibility: 'public', listed: true }),
     });
-    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     expect(res.status).toBe(200);
     const body = await res.json() as {
       app_id: string; tables: unknown[]; functions: unknown[]; forks_sample: unknown[];
@@ -264,7 +268,7 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
   it('GET /v1/templates/:id returns 404 for private app', async () => {
     const a = await seedUserAndApp('us-east-1');
     // Default visibility=private.
-    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     expect(res.status).toBe(404);
   }, 30_000);
 
@@ -272,10 +276,10 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
     const a = await seedUserAndApp('us-east-1');
     await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ visibility: 'public', listed: false }),
     });
-    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     expect(res.status).toBe(404);
   }, 30_000);
 
@@ -299,11 +303,11 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
     // Mark public + listed.
     await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ visibility: 'public', listed: true }),
     });
 
-    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`, { headers: RATE_LIMIT_BYPASS_HEADERS });
     expect(res.status).toBe(200);
     const body = await res.json() as { tables: Array<{ name: string }> };
     expect(Array.isArray(body.tables)).toBe(true);
@@ -346,7 +350,7 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
     async function patchVis(app: typeof apps.publicListed, visibility: 'public' | 'private', listed: boolean) {
       const r = await fetch(`${API_URL}/v1/${app.appId}/config/visibility`, {
         method: 'PATCH',
-        headers: { Authorization: `Bearer ${app.apiKey}`, 'content-type': 'application/json' },
+        headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${app.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ visibility, listed }),
       });
       if (!r.ok) throw new Error(`patchVis failed for ${app.appId}: ${r.status} ${await r.text()}`);
@@ -359,7 +363,7 @@ describe('Phase 4b discovery — GET /v1/templates/:id', () => {
 
     const results = await Promise.all(
       Object.entries(apps).map(async ([k, a]) => {
-        const r = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+        const r = await fetch(`${API_URL}/v1/templates/${a.appId}`, { headers: RATE_LIMIT_BYPASS_HEADERS });
         return { k, status: r.status, body: r.status >= 400 ? await r.json() : null };
       }),
     );

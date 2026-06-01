@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { rateLimitAllowList } from '../plugins/rate-limit.js';
 import { authorizeRepoWrite, authorizeRepoRead } from '../services/repo-auth.js';
 import { AppNotFoundError, AppPausedError } from '../services/app-resolver.js';
 import {
@@ -41,6 +42,7 @@ export async function repoRoutes(app: FastifyInstance) {
   app.post('/v1/:app_id/repo/snapshots/prepare', {
     config: {
       rateLimit: {
+        allowList: rateLimitAllowList,
         max: 20,
         timeWindow: '1 minute',
         keyGenerator: (req) => {

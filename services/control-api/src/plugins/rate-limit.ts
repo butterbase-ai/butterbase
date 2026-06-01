@@ -7,6 +7,24 @@ import { getLimitsForApp } from '../services/app-plan-resolver.js';
 const DEFAULT_MAX = 100;
 const UNLIMITED_SENTINEL = 1_000_000;
 
+// ---------------------------------------------------------------------------
+// Test-mode bypass: when RATE_LIMIT_BYPASS_TOKEN is set, requests carrying
+// `x-rate-limit-bypass: <token>` skip rate limiting entirely.
+// This is intentionally only wired in local dev / docker-compose.local.yml.
+// ---------------------------------------------------------------------------
+const _bypassToken = process.env.RATE_LIMIT_BYPASS_TOKEN;
+
+/**
+ * Returns a rate-limit `allowList` function if `RATE_LIMIT_BYPASS_TOKEN` is
+ * set, otherwise returns `undefined`. Export this so per-route configs can
+ * also inherit the same bypass without duplicating the env-var read.
+ */
+export const rateLimitAllowList = _bypassToken
+  ? (req: FastifyRequest) => req.headers['x-rate-limit-bypass'] === _bypassToken
+  : undefined;
+
+const _allowList = rateLimitAllowList;
+
 function extractAppId(req: FastifyRequest): string | undefined {
   const params = req.params as { app_id?: string; appId?: string } | undefined;
   return params?.app_id ?? params?.appId;
@@ -28,6 +46,7 @@ const rateLimitPlugin: FastifyPluginAsync = async (fastify) => {
     routeOptions.config = {
       ...(routeOptions.config ?? {}),
       rateLimit: {
+        allowList: _allowList,
         max: async (req: FastifyRequest) => {
           const appId = extractAppId(req);
           if (!appId) return DEFAULT_MAX;
@@ -54,6 +73,7 @@ const rateLimitPlugin: FastifyPluginAsync = async (fastify) => {
     max: DEFAULT_MAX,
     timeWindow: '1 minute',
     redis: getRedisClient(),
+    allowList: _allowList,
     keyGenerator: (req: FastifyRequest) => {
       const appId = extractAppId(req);
       return appId ? `app:${appId}` : `ip:${req.ip}`;

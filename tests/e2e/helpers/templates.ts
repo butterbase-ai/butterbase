@@ -11,6 +11,18 @@ import pg from 'pg';
 
 export const API_URL = 'http://localhost:4000';
 export const CONTROL_DB_URL = 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
+
+// ---------------------------------------------------------------------------
+// Rate-limit bypass header
+// When RATE_LIMIT_BYPASS_TOKEN is set (e.g. via docker-compose.local.yml),
+// include it on every helper fetch so pre-Phase-5 tests don't trip the new
+// per-IP and per-app limits. 32-rate-limits.test.ts uses raw fetch() without
+// this header so the limits are still exercised there.
+// ---------------------------------------------------------------------------
+const _RATE_LIMIT_BYPASS_TOKEN = process.env.RATE_LIMIT_BYPASS_TOKEN ?? 'e2e-test-bypass-token';
+export const RATE_LIMIT_BYPASS_HEADERS: Record<string, string> = {
+  'x-rate-limit-bypass': _RATE_LIMIT_BYPASS_TOKEN,
+};
 export const RUNTIME_DB_URL_US = 'postgresql://butterbase:butterbase_dev@localhost:5437/butterbase_runtime_us';
 export const RUNTIME_DB_URL_EU = 'postgresql://butterbase:butterbase_dev@localhost:5438/butterbase_runtime_eu';
 // Local data-plane DB (us-east-1 / only region in local dev): port 5435.
@@ -120,6 +132,7 @@ export async function applySchemaAsOwner(
   const res = await fetch(`${API_URL}/v1/${appId}/schema/apply`, {
     method: 'POST',
     headers: {
+      ...RATE_LIMIT_BYPASS_HEADERS,
       Authorization: `Bearer ${apiKey}`,
       'content-type': 'application/json',
     },
@@ -158,6 +171,7 @@ export async function startCloneJob(
   const res = await fetch(`${API_URL}/v1/templates/${sourceAppId}/clone`, {
     method: 'POST',
     headers: {
+      ...RATE_LIMIT_BYPASS_HEADERS,
       Authorization: `Bearer ${apiKey}`,
       'content-type': 'application/json',
     },
@@ -189,7 +203,7 @@ export async function waitForCloneStep(
 
   while (Date.now() - start < timeoutMs) {
     const r = await fetch(`${API_URL}/v1/clone-jobs/${jobId}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}` },
     });
     if (!r.ok) throw new Error(`waitForCloneStep GET failed: ${r.status} ${await r.text()}`);
     last = await r.json() as CloneJobStatusRes;
@@ -219,7 +233,7 @@ export async function waitForProvisioning(
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const r = await fetch(`${API_URL}/apps/${appId}/status`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}` },
     });
     if (r.ok) {
       const body = await r.json() as { provisioning_status?: string };
@@ -252,7 +266,7 @@ export async function pushSnapshot(
 
   const prep = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/prepare`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify(manifestBody),
   });
   if (!prep.ok) throw new Error(`pushSnapshot prepare failed: ${prep.status} ${await prep.text()}`);
@@ -272,7 +286,7 @@ export async function pushSnapshot(
 
   const commit = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/commit`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({ manifest: manifestBody }),
   });
   if (!commit.ok) throw new Error(`pushSnapshot commit failed: ${commit.status} ${await commit.text()}`);
@@ -303,7 +317,7 @@ export async function pushFileSnapshot(
 
   const prep = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/prepare`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify(manifestBody),
   });
   if (!prep.ok) throw new Error(`pushFileSnapshot prepare failed: ${prep.status} ${await prep.text()}`);
@@ -323,7 +337,7 @@ export async function pushFileSnapshot(
 
   const commit = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/commit`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    headers: { ...RATE_LIMIT_BYPASS_HEADERS, Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({ manifest: manifestBody }),
   });
   if (!commit.ok) throw new Error(`pushFileSnapshot commit failed: ${commit.status} ${await commit.text()}`);
@@ -350,6 +364,7 @@ export async function insertRowsAsOwner(
     const res = await fetch(`${API_URL}/v1/${appId}/${table}`, {
       method: 'POST',
       headers: {
+        ...RATE_LIMIT_BYPASS_HEADERS,
         Authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
       },
@@ -410,6 +425,7 @@ export async function deployFunctionAsOwner(
   const res = await fetch(`${API_URL}/v1/${appId}/functions`, {
     method: 'POST',
     headers: {
+      ...RATE_LIMIT_BYPASS_HEADERS,
       Authorization: `Bearer ${apiKey}`,
       'content-type': 'application/json',
     },
