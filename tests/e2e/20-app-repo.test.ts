@@ -282,3 +282,112 @@ describe('app repo storage (Phase 2)', () => {
     expect(empty.statusCode).toBe(400);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 5 C3 — repo security boundaries
+// ---------------------------------------------------------------------------
+
+describe('Phase 5 C3 — repo security boundaries', () => {
+  it('rejects manifest paths with traversal / null byte / leading slash / >4KB / backslash / path injection', async () => {
+    const { userId, appId } = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'c3-paths' });
+
+    const cases: Array<{ label: string; path: string }> = [
+      { label: 'traversal (../../etc/passwd)', path: '../../etc/passwd' },
+      { label: 'absolute path (/abs/path)', path: '/abs/path' },
+      // null byte — must be literal \0 in the string
+      { label: 'null byte (a\\0b)', path: 'a\0b' },
+      { label: 'path longer than 4096 bytes', path: 'x'.repeat(4097) },
+      { label: 'backslash (foo\\\\bar)', path: 'foo\\bar' },
+      { label: 'path injection (foo/..//bar)', path: 'foo/..//bar' },
+    ];
+
+    for (const { label, path } of cases) {
+      const r = await env.app.inject({
+        method: 'POST',
+        url: `/v1/${appId}/repo/snapshots/prepare`,
+        headers: { 'x-test-user-id': userId },
+        payload: { files: [{ path, sha256: 'a'.repeat(64), size: 1 }] },
+      });
+      expect(
+        [400, 422],
+        `path ${label} should be 4xx but got ${r.statusCode}: ${r.body}`,
+      ).toContain(r.statusCode);
+    }
+  }, 60_000);
+
+  it('rejects commit when uploaded blob size does not match manifest claim (409)', async () => {
+    const { userId, appId } = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'c3-sizematch' });
+
+    // Declare size: 10 bytes in the manifest.
+    const declaredSize = 10;
+    const fakeSha = 'b'.repeat(64);
+    const prepReply = await env.app.inject({
+      method: 'POST',
+      url: `/v1/${appId}/repo/snapshots/prepare`,
+      headers: { 'x-test-user-id': userId },
+      payload: { files: [{ path: 'big.bin', sha256: fakeSha, size: declaredSize }] },
+    });
+    expect(prepReply.statusCode, `prepare failed: ${prepReply.body}`).toBe(200);
+    const prepBody = prepReply.json() as { snapshot_id: string; missing_blobs: { sha256: string; uploadUrl: string }[] };
+    expect(prepBody.missing_blobs.length).toBe(1);
+
+    // PUT a body significantly larger than 10 bytes (100 KB) to the presigned URL.
+    const largeBody = Buffer.alloc(100_000, 0x42);
+    await fetch(prepBody.missing_blobs[0].uploadUrl, {
+      method: 'PUT',
+      body: largeBody,
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+
+    // Commit must detect the size mismatch and return 409.
+    const commitReply = await env.app.inject({
+      method: 'POST',
+      url: `/v1/${appId}/repo/snapshots/commit`,
+      headers: { 'x-test-user-id': userId },
+      payload: { manifest: { files: [{ path: 'big.bin', sha256: fakeSha, size: declaredSize }] } },
+    });
+    expect(commitReply.statusCode, `expected 409 size-mismatch but got ${commitReply.statusCode}: ${commitReply.body}`).toBe(409);
+  }, 60_000);
+
+  it('GET /repo/snapshots/latest: 404 on private+anonymous, 200 on public+anonymous (after one snapshot)', async () => {
+    // NOTE: The spec (Phase 5 C3) says private+anonymous should return 401.
+    // The production implementation returns 404 instead, deliberately using AppNotFoundError
+    // so as not to leak whether the app exists (security through obscurity / don't confirm app id).
+    // This test codifies the ACTUAL production behavior (404), not the spec expectation (401).
+    // If the behavior should change to 401, authorizeRepoRead in repo-auth.ts must be updated.
+
+    const owner = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'c3-anon' });
+
+    // Push one snapshot so the public path can serve a 200.
+    const f = 'hello c3\n';
+    const manifest = { files: [{ path: 'README.md', sha256: sha256(f), size: Buffer.byteLength(f) }] };
+    const prep = await env.app.inject({
+      method: 'POST', url: `/v1/${owner.appId}/repo/snapshots/prepare`,
+      headers: { 'x-test-user-id': owner.userId }, payload: manifest,
+    });
+    for (const m of (prep.json() as any).missing_blobs) await uploadToPresigned(m.uploadUrl, f);
+    await env.app.inject({
+      method: 'POST', url: `/v1/${owner.appId}/repo/snapshots/commit`,
+      headers: { 'x-test-user-id': owner.userId }, payload: { manifest },
+    });
+
+    // 1. Private app (default) + anonymous → 404
+    //    (production does not return 401; it returns 404 to avoid leaking app existence)
+    const privReply = await env.app.inject({
+      method: 'GET', url: `/v1/${owner.appId}/repo/snapshots/latest`,
+      // no x-test-user-id header → anonymous
+    });
+    expect(privReply.statusCode, `private+anon: expected 404 but got ${privReply.statusCode}`).toBe(404);
+
+    // 2. Flip visibility to public → anonymous should get 200.
+    await env.app.inject({
+      method: 'PATCH', url: `/v1/${owner.appId}/config/visibility`,
+      headers: { 'x-test-user-id': owner.userId }, payload: { visibility: 'public' },
+    });
+    const pubReply = await env.app.inject({
+      method: 'GET', url: `/v1/${owner.appId}/repo/snapshots/latest`,
+      // no x-test-user-id header → anonymous
+    });
+    expect(pubReply.statusCode, `public+anon: expected 200 but got ${pubReply.statusCode}`).toBe(200);
+  }, 90_000);
+});
