@@ -105,6 +105,61 @@ describe('ApiKeyService', () => {
     expect(result).toBe(false);
   });
 
+  describe("generateApiKey with scope='both'", () => {
+    let bothUserId: string;
+
+    beforeAll(async () => {
+      const result = await pool.query(
+        `INSERT INTO platform_users (email, cognito_sub)
+         VALUES ('plan-test-both@example.test', 'both-sub')
+         RETURNING id`
+      );
+      bothUserId = result.rows[0].id;
+    });
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM platform_users WHERE id = $1', [bothUserId]);
+    });
+
+    it("mints a bb_sk_-prefixed key, sets scope=both, and sets substrate_user_id=user_id", async () => {
+      const result = await ApiKeyService.generateApiKey(
+        pool, bothUserId, 'combined key', ['*'], 'both'
+      );
+
+      expect(result.key.startsWith('bb_sk_')).toBe(true);
+
+      const row = (await pool.query(
+        `SELECT scope, substrate_user_id, user_id FROM api_keys WHERE id = $1`,
+        [result.keyId]
+      )).rows[0];
+
+      expect(row.scope).toBe('both');
+      expect(row.substrate_user_id).toBe(bothUserId);
+      expect(row.user_id).toBe(bothUserId);
+    });
+
+    it("regression guard: 'both' always sets substrate_user_id=userId", async () => {
+      const guardResult = await pool.query(
+        `INSERT INTO platform_users (email, cognito_sub)
+         VALUES ('plan-test-both-guard@example.test', 'both-guard-sub')
+         RETURNING id`
+      );
+      const guardUserId = guardResult.rows[0].id;
+
+      try {
+        const result = await ApiKeyService.generateApiKey(
+          pool, guardUserId, 'guard key', ['*'], 'both'
+        );
+        const row = (await pool.query(
+          `SELECT substrate_user_id FROM api_keys WHERE id = $1`, [result.keyId]
+        )).rows[0];
+        expect(row.substrate_user_id).toBe(guardUserId);
+      } finally {
+        await pool.query('DELETE FROM platform_users WHERE id = $1', [guardUserId]);
+      }
+    });
+  });
+
   describe('listKeys scope filter', () => {
     let scopeUserId: string;
 
@@ -135,8 +190,8 @@ describe('ApiKeyService', () => {
     });
 
     it('listKeys with no scope returns all non-revoked keys for the user (with scope field)', async () => {
-      const substrateUserId = crypto.randomUUID();
-      await seedKey('substrate', substrateUserId);
+      // migration 073: substrate_user_id must equal user_id for substrate keys
+      await seedKey('substrate', scopeUserId);
       await seedKey('app', null);
       const result = await ApiKeyService.listKeys(pool, scopeUserId);
       expect(result).toHaveLength(2);
@@ -144,8 +199,7 @@ describe('ApiKeyService', () => {
     });
 
     it('listKeys with scope=substrate returns only substrate keys', async () => {
-      const substrateUserId = crypto.randomUUID();
-      await seedKey('substrate', substrateUserId);
+      await seedKey('substrate', scopeUserId);
       await seedKey('app', null);
       const result = await ApiKeyService.listKeys(pool, scopeUserId, 'substrate');
       expect(result).toHaveLength(1);
@@ -153,8 +207,7 @@ describe('ApiKeyService', () => {
     });
 
     it('listKeys with scope=app returns only app keys', async () => {
-      const substrateUserId = crypto.randomUUID();
-      await seedKey('substrate', substrateUserId);
+      await seedKey('substrate', scopeUserId);
       await seedKey('app', null);
       const result = await ApiKeyService.listKeys(pool, scopeUserId, 'app');
       expect(result).toHaveLength(1);

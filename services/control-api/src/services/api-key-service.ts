@@ -35,26 +35,26 @@ export class ApiKeyService {
     userId: string,
     name: string,
     scopes: string[] = ['*'],
-    scope?: 'app' | 'substrate'
+    scope?: 'app' | 'substrate' | 'both'
   ): Promise<{ key: string; keyId: string; prefix: string; name: string }> {
-    // scope='substrate' emits a bb_sub_-prefixed key bound to substrate_user_id
-    // (= the caller's platform user id, by the substrate.users.id ===
-    // platform_users.id convention). Anything else emits a bb_sk_ app key.
-    const isSubstrate = scope === 'substrate';
-    const prefix = isSubstrate ? API_KEY_SUBSTRATE_PREFIX : API_KEY_PREFIX;
+    // scope='substrate' emits a bb_sub_-prefixed key bound to the caller's
+    // substrate_user_id. scope='both' emits a bb_sk_-prefixed key that ALSO
+    // carries substrate_user_id — same identity, two access surfaces.
+    // Anything else (default 'app') emits a plain bb_sk_ app key.
+    const isSubstrateOnly = scope === 'substrate';
+    const isBoth = scope === 'both';
+    const carriesSubstrate = isSubstrateOnly || isBoth;
+    const prefix = isSubstrateOnly ? API_KEY_SUBSTRATE_PREFIX : API_KEY_PREFIX;
+
     const randomBytes = crypto.randomBytes(20);
     const randomHex = randomBytes.toString('hex');
     const fullKey = `${prefix}${randomHex}`;
 
-    // Hash for storage
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex');
-
-    // Prefix for display (first 12 chars)
     const keyPrefix = fullKey.substring(0, 12);
 
-    // Store in database. scope and substrate_user_id are set only on substrate
-    // keys; app keys leave them at their column defaults (scope='app',
-    // substrate_user_id=NULL).
+    const dbScope = isBoth ? 'both' : (isSubstrateOnly ? 'substrate' : 'app');
+
     const result = await pool.query(
       `INSERT INTO api_keys
          (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
@@ -66,8 +66,8 @@ export class ApiKeyService {
         keyPrefix,
         name,
         scopes,
-        isSubstrate ? 'substrate' : 'app',
-        isSubstrate ? userId : null,
+        dbScope,
+        carriesSubstrate ? userId : null,
       ]
     );
 
@@ -141,10 +141,10 @@ export class ApiKeyService {
    * List all API keys for a user (never returns hashes)
    * Optionally filter by scope: 'app' | 'substrate'
    */
-  static async listKeys(pool: Pool, userId: string, scope?: 'app' | 'substrate') {
+  static async listKeys(pool: Pool, userId: string, scope?: 'app' | 'substrate' | 'both') {
     const params: unknown[] = [userId];
     let where = `user_id = $1 AND revoked_at IS NULL`;
-    if (scope === 'app' || scope === 'substrate') {
+    if (scope === 'app' || scope === 'substrate' || scope === 'both') {
       params.push(scope);
       where += ` AND scope = $${params.length}`;
     }

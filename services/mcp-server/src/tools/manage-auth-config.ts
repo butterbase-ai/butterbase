@@ -146,7 +146,22 @@ Security notes:
   - Keys have full access to all your apps and data
   - Treat keys like passwords - never commit them to git
   - Revoke keys immediately if compromised
-  - Use descriptive names to track key usage`,
+  - Use descriptive names to track key usage
+
+Example — with substrate access:
+  Input: {
+    action: "generate_service_key",
+    name: "Agent Key",
+    substrate_access: true
+  }
+  Output: {
+    key: "bb_sk_a1b2c3d4e5f6...",
+    key_id: "uuid-1234",
+    prefix: "bb_sk_a1b2c3",
+    name: "Agent Key",
+    created_at: "2024-01-15T10:00:00Z"
+  }
+  Note: key works on app endpoints AND on substrate endpoints for this account.`,
     {
       action: z.enum(['configure_auth_hook', 'update_jwt', 'generate_service_key'])
         .describe('The action to perform'),
@@ -163,6 +178,8 @@ Security notes:
       ),
       // generate_service_key params
       name: z.string().optional().describe('Descriptive name for the key (e.g., "Production Deploy Key") (generate_service_key only)'),
+      substrate_access: z.boolean().optional()
+        .describe('When true, the generated key works for BOTH app operations and substrate operations on the caller\'s substrate. Default false (app-only). (generate_service_key only)'),
     },
     {
       title: 'Manage Auth Config',
@@ -213,10 +230,13 @@ Security notes:
           if (err) return err;
 
           const url = `${getBaseUrl()}/api-keys`;
+          const body: Record<string, unknown> = { name: args.name };
+          if (args.substrate_access) body.scope = 'both';
+
           const res = await fetch(url, {
             method: 'POST',
             headers: getHeaders(),
-            body: JSON.stringify({ name: args.name }),
+            body: JSON.stringify(body),
           });
 
           const data = await res.json();
