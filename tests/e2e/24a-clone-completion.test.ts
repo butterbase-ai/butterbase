@@ -127,5 +127,20 @@ describe('Phase 5 A7 — clone completion finalizes dest', () => {
     );
     expect(srcRow.rows).toHaveLength(1);
     expect(srcRow.rows[0].fork_count).toBe(1);
+
+    // 9. Assert auth_audit_logs rows on SOURCE app (C1: clone lifecycle audit).
+    // Two rows expected: template_clone_started + template_clone_completed.
+    // Written by the worker into the control-plane DB (where auth_audit_logs lives).
+    const audit = await controlPool.query(
+      `SELECT event_type, event_data FROM auth_audit_logs
+       WHERE app_id = $1 AND event_type LIKE 'template_clone_%'
+       ORDER BY created_at`,
+      [sourceAppId],
+    );
+    expect(audit.rows.map((r: { event_type: string }) => r.event_type)).toEqual([
+      'template_clone_started',
+      'template_clone_completed',
+    ]);
+    expect(audit.rows[1].event_data.dest_app_id).toBe(destAppId);
   }, 300_000);
 });

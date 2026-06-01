@@ -2,6 +2,37 @@ import type { Pool } from 'pg';
 import type { AuditEventInput } from './types.js';
 
 /**
+ * Insert a clone lifecycle event into auth_audit_logs, scoped to the SOURCE
+ * app so that source owners can see who cloned and when.
+ *
+ * Written to the control-plane DB (where auth_audit_logs lives).
+ * Returns a promise that resolves on success; callers in the clone worker
+ * should .catch() secondary failures so they don't compound the original error.
+ */
+export async function insertCloneAuditLog(
+  controlDb: Pool,
+  opts: {
+    appId: string;
+    userId: string | null;
+    eventType: 'template_clone_started' | 'template_clone_completed' | 'template_clone_failed';
+    metadata: Record<string, unknown>;
+  },
+): Promise<void> {
+  await controlDb.query(
+    `INSERT INTO auth_audit_logs (app_id, user_id, event_type, event_data, success, error_message)
+     VALUES ($1, $2::uuid, $3, $4::jsonb, $5, $6)`,
+    [
+      opts.appId,
+      opts.userId ?? null,
+      opts.eventType,
+      JSON.stringify(opts.metadata),
+      opts.eventType !== 'template_clone_failed',
+      opts.eventType === 'template_clone_failed' ? (opts.metadata.error as string | undefined) ?? null : null,
+    ],
+  );
+}
+
+/**
  * Insert a single audit event. Fire-and-forget safe: failures are logged
  * but never thrown, so a broken audit pipeline cannot fail a user request.
  */

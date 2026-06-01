@@ -20,6 +20,7 @@ import {
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding } from './clone-replay.js';
+import { insertCloneAuditLog } from './audit/audit-events-service.js';
 
 interface NeonTask {
   id: number;
@@ -436,12 +437,22 @@ async function executeClone(
 
   await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
 
+  // Emit audit log on source app so source owners can see who cloned and when.
+  await insertCloneAuditLog(controlDb, {
+    appId: job.source_app_id,
+    userId: job.requested_by_user_id,
+    eventType: 'template_clone_started',
+    metadata: { job_id: jobId, dest_region: job.dest_region },
+  }).catch((err) => logger.error({ err }, '[clone] audit log started event insert failed'));
+
+  // Hoist destAppId so the catch block can include it in the failed audit event.
+  let destAppId: string | undefined;
+
   try {
     // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
     //    On retry, job.dest_app_id is already set from the prior attempt — reuse it
     //    and skip provision entirely to avoid creating a second orphaned app row +
     //    Neon database.
-    let destAppId: string;
     if (job.dest_app_id) {
       // Resume from a prior in-flight attempt: dest app already exists.
       destAppId = job.dest_app_id;
@@ -486,7 +497,9 @@ async function executeClone(
         logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
       });
     }
-    await waitForDestReady(job.dest_region, destAppId, logger);
+    // destAppId is always assigned in both branches of the if/else above.
+    const resolvedDestAppId = destAppId!;
+    await waitForDestReady(job.dest_region, resolvedDestAppId, logger);
 
     // Step 3 (Phase 5 A1): Replay source schema onto the dest DB.
     // Step 4 (Phase 5 A2): Replay source RLS policies onto the dest DB.
@@ -506,17 +519,17 @@ async function executeClone(
     const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
     const destAppRowForPools = await destRuntimePool.query<{ db_name: string }>(
       `SELECT db_name FROM apps WHERE id = $1`,
-      [destAppId],
+      [resolvedDestAppId],
     );
     if (destAppRowForPools.rows.length === 0) {
-      throw new Error(`[clone] dest app ${destAppId} not found in ${job.dest_region} runtime DB`);
+      throw new Error(`[clone] dest app ${resolvedDestAppId} not found in ${job.dest_region} runtime DB`);
     }
     const destDbNameForPools = destAppRowForPools.rows[0].db_name;
-    const destAppPoolForReplay = await getAppPoolForApp(controlDb, destAppId, destDbNameForPools);
+    const destAppPoolForReplay = await getAppPoolForApp(controlDb, resolvedDestAppId, destDbNameForPools);
 
     // A1: schema replay
     await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
-    await replaySchema(sourceAppPool, destAppPoolForReplay, destAppId, logger);
+    await replaySchema(sourceAppPool, destAppPoolForReplay, resolvedDestAppId, logger);
 
     // A2: RLS replay
     await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
@@ -525,7 +538,7 @@ async function executeClone(
       await appendCloneJobWarnings(controlDb, jobId, rlsResult.warnings);
     }
     logger.info(
-      { destAppId, replayed: rlsResult.replayed, warnings: rlsResult.warnings.length },
+      { destAppId: resolvedDestAppId, replayed: rlsResult.replayed, warnings: rlsResult.warnings.length },
       '[clone] RLS replayed',
     );
 
@@ -539,7 +552,7 @@ async function executeClone(
     const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
     if (sameRegion) {
       for (const sha of distinctShas) {
-        await copyBlobSameRegion(job.source_app_id, destAppId, sha);
+        await copyBlobSameRegion(job.source_app_id, resolvedDestAppId, sha);
       }
     } else {
       // Cross-region: stream GET from source S3 → PUT to dest S3.
@@ -559,24 +572,24 @@ async function executeClone(
       const dstS3 = new S3Client(s3Opts);
       const bucket = config.s3.bucket;
       for (const sha of distinctShas) {
-        await copyBlobCrossRegion(job.source_app_id, destAppId, sha, srcS3, bucket, dstS3, bucket);
+        await copyBlobCrossRegion(job.source_app_id, resolvedDestAppId, sha, srcS3, bucket, dstS3, bucket);
       }
     }
 
     // 4. Copy manifest.
     if (sameRegion) {
-      await copyManifestSameRegion(job.source_app_id, destAppId, job.source_snapshot_id);
+      await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, job.source_snapshot_id);
     } else {
-      await putManifest(destAppId, job.source_snapshot_id, manifestJson);
+      await putManifest(resolvedDestAppId, job.source_snapshot_id, manifestJson);
     }
 
     // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
     //    region-direct pool (we already know dest's region from the job).
-    await setLatest(destAppId, job.source_snapshot_id);
+    await setLatest(resolvedDestAppId, job.source_snapshot_id);
     const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
     await destRuntimeAppPool.query(
       `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
-      [job.source_snapshot_id, destAppId],
+      [job.source_snapshot_id, resolvedDestAppId],
     );
 
     // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
@@ -585,7 +598,7 @@ async function executeClone(
     if (seedResult.warnings.length > 0) {
       await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
     }
-    logger.info({ destAppId, ...seedResult }, '[clone] seed data complete');
+    logger.info({ destAppId: resolvedDestAppId, ...seedResult }, '[clone] seed data complete');
 
     // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
     await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
@@ -593,7 +606,7 @@ async function executeClone(
       sourceRuntimePool,
       destRuntimePool,
       job.source_app_id,
-      destAppId,
+      resolvedDestAppId,
       job.requested_by_user_id,
       logger,
     );
@@ -601,7 +614,7 @@ async function executeClone(
       await appendCloneJobWarnings(controlDb, jobId, fnResult.warnings);
     }
     logger.info(
-      { destAppId, count: fnResult.count, warnings: fnResult.warnings.length },
+      { destAppId: resolvedDestAppId, count: fnResult.count, warnings: fnResult.warnings.length },
       '[clone] functions replayed',
     );
 
@@ -611,14 +624,14 @@ async function executeClone(
       sourceRuntimePool,
       destRuntimePool,
       job.source_app_id,
-      destAppId,
+      resolvedDestAppId,
       logger,
     );
     if (cfgResult.warnings.length > 0) {
       await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);
     }
     logger.info(
-      { destAppId, warnings: cfgResult.warnings.length },
+      { destAppId: resolvedDestAppId, warnings: cfgResult.warnings.length },
       '[clone] non-secret config replayed',
     );
 
@@ -629,14 +642,14 @@ async function executeClone(
       sourceRuntimePool,
       destRuntimePool,
       job.source_app_id,
-      destAppId,
+      resolvedDestAppId,
       logger,
     );
     if (hookResult.warnings.length > 0) {
       await appendCloneJobWarnings(controlDb, jobId, hookResult.warnings);
     }
     logger.info(
-      { destAppId, warnings: hookResult.warnings.length },
+      { destAppId: resolvedDestAppId, warnings: hookResult.warnings.length },
       '[clone] auth_hook_function binding step complete',
     );
 
@@ -646,9 +659,9 @@ async function executeClone(
     // robust to any future refactor that might decouple those two writes.
     await destRuntimePool.query(
       `UPDATE apps SET db_provisioned = true, updated_at = now() WHERE id = $1`,
-      [destAppId],
+      [resolvedDestAppId],
     );
-    logger.info({ destAppId }, '[clone] dest.db_provisioned=true confirmed');
+    logger.info({ destAppId: resolvedDestAppId }, '[clone] dest.db_provisioned=true confirmed');
 
     // A7: Increment source fork_count.
     // Migration 014 only installs a trigger for the decrement-on-delete case;
@@ -682,11 +695,29 @@ async function executeClone(
 
     // 6. Mark job completed.
     await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
-    logger.info({ jobId, destAppId }, '[clone] completed');
+
+    // Emit completed audit event on source app.
+    await insertCloneAuditLog(controlDb, {
+      appId: job.source_app_id,
+      userId: job.requested_by_user_id,
+      eventType: 'template_clone_completed',
+      metadata: { job_id: jobId, dest_app_id: resolvedDestAppId, dest_region: job.dest_region },
+    }).catch((err) => logger.error({ err }, '[clone] audit log completed event insert failed'));
+
+    logger.info({ jobId, destAppId: resolvedDestAppId }, '[clone] completed');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Best-effort failure marker; swallow secondary errors so we still rethrow the original.
     await setCloneJobStatus(controlDb, jobId, { status: 'failed', error_message: msg }).catch(() => {});
+
+    // Emit failed audit event on source app. Wrap in catch so we don't compound the original error.
+    await insertCloneAuditLog(controlDb, {
+      appId: job.source_app_id,
+      userId: job.requested_by_user_id,
+      eventType: 'template_clone_failed',
+      metadata: { job_id: jobId, dest_app_id: destAppId ?? null, dest_region: job.dest_region, error: msg },
+    }).catch((auditErr) => logger.error({ auditErr }, '[clone] audit log failed event insert failed'));
+
     throw err; // re-throw so the neon-task queue applies its retry/fail logic
   }
 }
