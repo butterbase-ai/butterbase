@@ -1,4 +1,5 @@
 import pg from 'pg';
+import * as Sentry from '@sentry/node';
 import { config, assertRegionConfig } from '../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
@@ -448,276 +449,295 @@ async function executeClone(
   // Hoist destAppId so the catch block can include it in the failed audit event.
   let destAppId: string | undefined;
 
-  try {
-    // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
-    //    On retry, job.dest_app_id is already set from the prior attempt — reuse it
-    //    and skip provision entirely to avoid creating a second orphaned app row +
-    //    Neon database.
-    if (job.dest_app_id) {
-      // Resume from a prior in-flight attempt: dest app already exists.
-      destAppId = job.dest_app_id;
-      logger.info({ jobId, destAppId }, '[clone] resuming from prior attempt; skipping provision');
-    } else {
-      destAppId = generateAppId();
-      const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
-      await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
-      await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
+  await Sentry.withScope(async (scope) => {
+    scope.setTag('clone_job_id', jobId);
+    scope.setTag('source_app_id', job.source_app_id);
+    scope.setTag('target_app_id', 'pending');
 
-      // Cross-region index so authorizeRepoRead/Write and other lookups can
-      // resolve the dest app's region. Init route does the same step after
-      // its insertAppRow; the clone worker is the equivalent caller here.
-      await addUserAppIndex(controlDb, {
-        userId: job.requested_by_user_id,
-        appId: destAppId,
-        region: job.dest_region,
-        appName: destName,
-      }).catch((err) => {
-        logger.warn({ err, destAppId }, '[clone] user_app_index add failed; backfill will repair');
-      });
-
-      // Record template lineage on the dest app row (column added by Phase 1 migration).
-      //    insertAppRow has no template_source_app_id parameter today — write it via
-      //    a follow-up UPDATE on the dest's home runtime DB.
-      //    template_source_region (added by B2 migration) lets the delete handler know
-      //    which region pool to target without a fan-out lookup.
-      const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-      await destRuntimePool.query(
-        `UPDATE apps
-            SET template_source_app_id = $1,
-                template_source_region  = $2,
-                updated_at              = now()
-          WHERE id = $3`,
-        [job.source_app_id, job.source_region, destAppId],
-      );
-
-      // Provision DB + run migrations. provisionAppBackground swallows errors
-      // internally (sets provisioning_status='failed'), so waitForDestReady is
-      // what surfaces failure back to us.
-      provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
-        logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
-      });
-    }
-    // destAppId is always assigned in both branches of the if/else above.
-    const resolvedDestAppId = destAppId!;
-    await waitForDestReady(job.dest_region, resolvedDestAppId, logger);
-
-    // Step 3 (Phase 5 A1): Replay source schema onto the dest DB.
-    // Step 4 (Phase 5 A2): Replay source RLS policies onto the dest DB.
-    // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
-    // Pools are declared here so they can be shared across all three steps.
-    const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
-    const sourceAppRowForPools = await sourceRuntimePool.query<{ db_name: string }>(
-      `SELECT db_name FROM apps WHERE id = $1`,
-      [job.source_app_id],
-    );
-    if (sourceAppRowForPools.rows.length === 0) {
-      throw new Error(`[clone] source app ${job.source_app_id} not found in ${job.source_region} runtime DB`);
-    }
-    const sourceDbName = sourceAppRowForPools.rows[0].db_name;
-    const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceDbName);
-
-    const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-    const destAppRowForPools = await destRuntimePool.query<{ db_name: string }>(
-      `SELECT db_name FROM apps WHERE id = $1`,
-      [resolvedDestAppId],
-    );
-    if (destAppRowForPools.rows.length === 0) {
-      throw new Error(`[clone] dest app ${resolvedDestAppId} not found in ${job.dest_region} runtime DB`);
-    }
-    const destDbNameForPools = destAppRowForPools.rows[0].db_name;
-    const destAppPoolForReplay = await getAppPoolForApp(controlDb, resolvedDestAppId, destDbNameForPools);
-
-    // A1: schema replay
-    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
-    await replaySchema(sourceAppPool, destAppPoolForReplay, resolvedDestAppId, logger);
-
-    // A2: RLS replay
-    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
-    const rlsResult = await replayRls(sourceAppPool, destAppPoolForReplay, logger);
-    if (rlsResult.warnings.length > 0) {
-      await appendCloneJobWarnings(controlDb, jobId, rlsResult.warnings);
-    }
-    logger.info(
-      { destAppId: resolvedDestAppId, replayed: rlsResult.replayed, warnings: rlsResult.warnings.length },
-      '[clone] RLS replayed',
-    );
-
-    // 2. Read source manifest.
-    const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
-    if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
-    const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
-
-    // 3. Copy blobs.
-    const sameRegion = job.source_region === job.dest_region;
-    const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
-    if (sameRegion) {
-      for (const sha of distinctShas) {
-        await copyBlobSameRegion(job.source_app_id, resolvedDestAppId, sha);
-      }
-    } else {
-      // Cross-region: stream GET from source S3 → PUT to dest S3.
-      // In local dev both regions share one LocalStack endpoint; in production
-      // each region has its own bucket/endpoint (injected via config).
-      const s3Opts = {
-        region: config.s3.region,
-        endpoint: config.s3.endpoint,
-        forcePathStyle: config.s3.forcePathStyle,
-        requestChecksumCalculation: 'WHEN_REQUIRED' as const,
-        responseChecksumValidation: 'WHEN_REQUIRED' as const,
-        credentials: config.s3.accessKeyId && config.s3.secretAccessKey
-          ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
-          : undefined,
-      };
-      const srcS3 = new S3Client(s3Opts);
-      const dstS3 = new S3Client(s3Opts);
-      const bucket = config.s3.bucket;
-      for (const sha of distinctShas) {
-        await copyBlobCrossRegion(job.source_app_id, resolvedDestAppId, sha, srcS3, bucket, dstS3, bucket);
-      }
-    }
-
-    // 4. Copy manifest.
-    if (sameRegion) {
-      await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, job.source_snapshot_id);
-    } else {
-      await putManifest(resolvedDestAppId, job.source_snapshot_id, manifestJson);
-    }
-
-    // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
-    //    region-direct pool (we already know dest's region from the job).
-    await setLatest(resolvedDestAppId, job.source_snapshot_id);
-    const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-    await destRuntimeAppPool.query(
-      `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
-      [job.source_snapshot_id, resolvedDestAppId],
-    );
-
-    // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
-    await setCloneJobStatus(controlDb, jobId, { status: 'seeding_data' });
-    const seedResult = await replaySeedData(sourceAppPool, destAppPoolForReplay, logger);
-    if (seedResult.warnings.length > 0) {
-      await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
-    }
-    logger.info({ destAppId: resolvedDestAppId, ...seedResult }, '[clone] seed data complete');
-
-    // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
-    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
-    const fnResult = await replayFunctions(
-      sourceRuntimePool,
-      destRuntimePool,
-      job.source_app_id,
-      resolvedDestAppId,
-      job.requested_by_user_id,
-      logger,
-    );
-    if (fnResult.warnings.length > 0) {
-      await appendCloneJobWarnings(controlDb, jobId, fnResult.warnings);
-    }
-    logger.info(
-      { destAppId: resolvedDestAppId, count: fnResult.count, warnings: fnResult.warnings.length },
-      '[clone] functions replayed',
-    );
-
-    // Step 6 (Phase 5 A5): Replay non-secret config onto dest runtime DB.
-    await setCloneJobStatus(controlDb, jobId, { status: 'replaying_config' });
-    const cfgResult = await replayNonSecretConfig(
-      sourceRuntimePool,
-      destRuntimePool,
-      job.source_app_id,
-      resolvedDestAppId,
-      logger,
-    );
-    if (cfgResult.warnings.length > 0) {
-      await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);
-    }
-    logger.info(
-      { destAppId: resolvedDestAppId, warnings: cfgResult.warnings.length },
-      '[clone] non-secret config replayed',
-    );
-
-    // Step 6b (Phase 5 A6): Replay auth_hook_function binding — only if the
-    // referenced function was replicated successfully (A4). Runs after
-    // replayNonSecretConfig so the binding cannot be clobbered by config replay.
-    const hookResult = await replayAuthHookBinding(
-      sourceRuntimePool,
-      destRuntimePool,
-      job.source_app_id,
-      resolvedDestAppId,
-      logger,
-    );
-    if (hookResult.warnings.length > 0) {
-      await appendCloneJobWarnings(controlDb, jobId, hookResult.warnings);
-    }
-    logger.info(
-      { destAppId: resolvedDestAppId, warnings: hookResult.warnings.length },
-      '[clone] auth_hook_function binding step complete',
-    );
-
-    // A7: Ensure dest.db_provisioned=true. provisionAppBackground already sets this
-    // when provisioning_status becomes 'ready' (which waitForDestReady confirmed), but
-    // we assert it here explicitly so the finalization block is self-contained and
-    // robust to any future refactor that might decouple those two writes.
-    await destRuntimePool.query(
-      `UPDATE apps SET db_provisioned = true, updated_at = now() WHERE id = $1`,
-      [resolvedDestAppId],
-    );
-    logger.info({ destAppId: resolvedDestAppId }, '[clone] dest.db_provisioned=true confirmed');
-
-    // A7: Increment source fork_count.
-    // Migration 014 only installs a trigger for the decrement-on-delete case;
-    // there is no INSERT trigger that auto-increments fork_count for same-region
-    // clones. The worker is therefore always responsible for the increment,
-    // regardless of whether source and dest share a region.
-    //
-    // For cross-region: we use the source's per-region pool explicitly, which
-    // is the only way to reach the source's runtime DB from the dest worker.
-    // For same-region: the source's runtime pool and the dest's are the same
-    // physical DB, but we still use getRuntimeDbPool(source_region) for clarity.
-    //
-    // B2 sweeper reconciles if this fails (non-fatal catch below).
     try {
-      const sourceRuntimePoolForForkCount = getRuntimeDbPool(config.runtimeDb, job.source_region);
-      await sourceRuntimePoolForForkCount.query(
-        `UPDATE apps SET fork_count = COALESCE(fork_count, 0) + 1 WHERE id = $1`,
+      scope.setTag('step', 'provisioning');
+
+      // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
+      //    On retry, job.dest_app_id is already set from the prior attempt — reuse it
+      //    and skip provision entirely to avoid creating a second orphaned app row +
+      //    Neon database.
+      if (job.dest_app_id) {
+        // Resume from a prior in-flight attempt: dest app already exists.
+        destAppId = job.dest_app_id;
+        logger.info({ jobId, destAppId }, '[clone] resuming from prior attempt; skipping provision');
+      } else {
+        destAppId = generateAppId();
+        const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
+        await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
+        await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
+
+        // Cross-region index so authorizeRepoRead/Write and other lookups can
+        // resolve the dest app's region. Init route does the same step after
+        // its insertAppRow; the clone worker is the equivalent caller here.
+        await addUserAppIndex(controlDb, {
+          userId: job.requested_by_user_id,
+          appId: destAppId,
+          region: job.dest_region,
+          appName: destName,
+        }).catch((err) => {
+          logger.warn({ err, destAppId }, '[clone] user_app_index add failed; backfill will repair');
+        });
+
+        // Record template lineage on the dest app row (column added by Phase 1 migration).
+        //    insertAppRow has no template_source_app_id parameter today — write it via
+        //    a follow-up UPDATE on the dest's home runtime DB.
+        //    template_source_region (added by B2 migration) lets the delete handler know
+        //    which region pool to target without a fan-out lookup.
+        const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+        await destRuntimePool.query(
+          `UPDATE apps
+              SET template_source_app_id = $1,
+                  template_source_region  = $2,
+                  updated_at              = now()
+            WHERE id = $3`,
+          [job.source_app_id, job.source_region, destAppId],
+        );
+
+        // Provision DB + run migrations. provisionAppBackground swallows errors
+        // internally (sets provisioning_status='failed'), so waitForDestReady is
+        // what surfaces failure back to us.
+        provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
+          logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected');
+        });
+      }
+      // destAppId is always assigned in both branches of the if/else above.
+      const resolvedDestAppId = destAppId!;
+      // Now that destAppId is resolved, update the Sentry tag.
+      scope.setTag('target_app_id', resolvedDestAppId);
+      await waitForDestReady(job.dest_region, resolvedDestAppId, logger);
+
+      // Step 3 (Phase 5 A1): Replay source schema onto the dest DB.
+      // Step 4 (Phase 5 A2): Replay source RLS policies onto the dest DB.
+      // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
+      // Pools are declared here so they can be shared across all three steps.
+      const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
+      const sourceAppRowForPools = await sourceRuntimePool.query<{ db_name: string }>(
+        `SELECT db_name FROM apps WHERE id = $1`,
         [job.source_app_id],
       );
+      if (sourceAppRowForPools.rows.length === 0) {
+        throw new Error(`[clone] source app ${job.source_app_id} not found in ${job.source_region} runtime DB`);
+      }
+      const sourceDbName = sourceAppRowForPools.rows[0].db_name;
+      const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceDbName);
+
+      const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+      const destAppRowForPools = await destRuntimePool.query<{ db_name: string }>(
+        `SELECT db_name FROM apps WHERE id = $1`,
+        [resolvedDestAppId],
+      );
+      if (destAppRowForPools.rows.length === 0) {
+        throw new Error(`[clone] dest app ${resolvedDestAppId} not found in ${job.dest_region} runtime DB`);
+      }
+      const destDbNameForPools = destAppRowForPools.rows[0].db_name;
+      const destAppPoolForReplay = await getAppPoolForApp(controlDb, resolvedDestAppId, destDbNameForPools);
+
+      // A1: schema replay
+      scope.setTag('step', 'replaying_schema');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
+      await replaySchema(sourceAppPool, destAppPoolForReplay, resolvedDestAppId, logger);
+
+      // A2: RLS replay
+      scope.setTag('step', 'replaying_rls');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
+      const rlsResult = await replayRls(sourceAppPool, destAppPoolForReplay, logger);
+      if (rlsResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, rlsResult.warnings);
+      }
       logger.info(
-        { source: job.source_app_id, sourceRegion: job.source_region, destRegion: job.dest_region },
-        '[clone] incremented source.fork_count',
+        { destAppId: resolvedDestAppId, replayed: rlsResult.replayed, warnings: rlsResult.warnings.length },
+        '[clone] RLS replayed',
       );
+
+      // 2. Read source manifest.
+      scope.setTag('step', 'copying_repo');
+      const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
+      if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
+      const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
+
+      // 3. Copy blobs.
+      const sameRegion = job.source_region === job.dest_region;
+      const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
+      if (sameRegion) {
+        for (const sha of distinctShas) {
+          await copyBlobSameRegion(job.source_app_id, resolvedDestAppId, sha);
+        }
+      } else {
+        // Cross-region: stream GET from source S3 → PUT to dest S3.
+        // In local dev both regions share one LocalStack endpoint; in production
+        // each region has its own bucket/endpoint (injected via config).
+        const s3Opts = {
+          region: config.s3.region,
+          endpoint: config.s3.endpoint,
+          forcePathStyle: config.s3.forcePathStyle,
+          requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+          responseChecksumValidation: 'WHEN_REQUIRED' as const,
+          credentials: config.s3.accessKeyId && config.s3.secretAccessKey
+            ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+            : undefined,
+        };
+        const srcS3 = new S3Client(s3Opts);
+        const dstS3 = new S3Client(s3Opts);
+        const bucket = config.s3.bucket;
+        for (const sha of distinctShas) {
+          await copyBlobCrossRegion(job.source_app_id, resolvedDestAppId, sha, srcS3, bucket, dstS3, bucket);
+        }
+      }
+
+      // 4. Copy manifest.
+      if (sameRegion) {
+        await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, job.source_snapshot_id);
+      } else {
+        await putManifest(resolvedDestAppId, job.source_snapshot_id, manifestJson);
+      }
+
+      // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
+      //    region-direct pool (we already know dest's region from the job).
+      await setLatest(resolvedDestAppId, job.source_snapshot_id);
+      const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+      await destRuntimeAppPool.query(
+        `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+        [job.source_snapshot_id, resolvedDestAppId],
+      );
+
+      // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
+      scope.setTag('step', 'seeding_data');
+      await setCloneJobStatus(controlDb, jobId, { status: 'seeding_data' });
+      const seedResult = await replaySeedData(sourceAppPool, destAppPoolForReplay, logger);
+      if (seedResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
+      }
+      logger.info({ destAppId: resolvedDestAppId, ...seedResult }, '[clone] seed data complete');
+
+      // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
+      scope.setTag('step', 'replaying_functions');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
+      const fnResult = await replayFunctions(
+        sourceRuntimePool,
+        destRuntimePool,
+        job.source_app_id,
+        resolvedDestAppId,
+        job.requested_by_user_id,
+        logger,
+      );
+      if (fnResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, fnResult.warnings);
+      }
+      logger.info(
+        { destAppId: resolvedDestAppId, count: fnResult.count, warnings: fnResult.warnings.length },
+        '[clone] functions replayed',
+      );
+
+      // Step 6 (Phase 5 A5): Replay non-secret config onto dest runtime DB.
+      scope.setTag('step', 'replaying_config');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_config' });
+      const cfgResult = await replayNonSecretConfig(
+        sourceRuntimePool,
+        destRuntimePool,
+        job.source_app_id,
+        resolvedDestAppId,
+        logger,
+      );
+      if (cfgResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);
+      }
+      logger.info(
+        { destAppId: resolvedDestAppId, warnings: cfgResult.warnings.length },
+        '[clone] non-secret config replayed',
+      );
+
+      // Step 6b (Phase 5 A6): Replay auth_hook_function binding — only if the
+      // referenced function was replicated successfully (A4). Runs after
+      // replayNonSecretConfig so the binding cannot be clobbered by config replay.
+      // (Runs under the same 'replaying_config' step tag.)
+      const hookResult = await replayAuthHookBinding(
+        sourceRuntimePool,
+        destRuntimePool,
+        job.source_app_id,
+        resolvedDestAppId,
+        logger,
+      );
+      if (hookResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, hookResult.warnings);
+      }
+      logger.info(
+        { destAppId: resolvedDestAppId, warnings: hookResult.warnings.length },
+        '[clone] auth_hook_function binding step complete',
+      );
+
+      scope.setTag('step', 'finalizing');
+
+      // A7: Ensure dest.db_provisioned=true. provisionAppBackground already sets this
+      // when provisioning_status becomes 'ready' (which waitForDestReady confirmed), but
+      // we assert it here explicitly so the finalization block is self-contained and
+      // robust to any future refactor that might decouple those two writes.
+      await destRuntimePool.query(
+        `UPDATE apps SET db_provisioned = true, updated_at = now() WHERE id = $1`,
+        [resolvedDestAppId],
+      );
+      logger.info({ destAppId: resolvedDestAppId }, '[clone] dest.db_provisioned=true confirmed');
+
+      // A7: Increment source fork_count.
+      // Migration 014 only installs a trigger for the decrement-on-delete case;
+      // there is no INSERT trigger that auto-increments fork_count for same-region
+      // clones. The worker is therefore always responsible for the increment,
+      // regardless of whether source and dest share a region.
+      //
+      // For cross-region: we use the source's per-region pool explicitly, which
+      // is the only way to reach the source's runtime DB from the dest worker.
+      // For same-region: the source's runtime pool and the dest's are the same
+      // physical DB, but we still use getRuntimeDbPool(source_region) for clarity.
+      //
+      // B2 sweeper reconciles if this fails (non-fatal catch below).
+      try {
+        const sourceRuntimePoolForForkCount = getRuntimeDbPool(config.runtimeDb, job.source_region);
+        await sourceRuntimePoolForForkCount.query(
+          `UPDATE apps SET fork_count = COALESCE(fork_count, 0) + 1 WHERE id = $1`,
+          [job.source_app_id],
+        );
+        logger.info(
+          { source: job.source_app_id, sourceRegion: job.source_region, destRegion: job.dest_region },
+          '[clone] incremented source.fork_count',
+        );
+      } catch (err) {
+        // Don't fail the clone over fork_count; B2 sweeper will reconcile.
+        logger.error(
+          { err, source: job.source_app_id },
+          '[clone] fork_count increment failed; deferring to sweeper',
+        );
+      }
+
+      // 6. Mark job completed.
+      await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
+
+      // Emit completed audit event on source app.
+      await insertCloneAuditLog(controlDb, {
+        appId: job.source_app_id,
+        userId: job.requested_by_user_id,
+        eventType: 'template_clone_completed',
+        metadata: { job_id: jobId, dest_app_id: resolvedDestAppId, dest_region: job.dest_region },
+      }).catch((err) => logger.error({ err }, '[clone] audit log completed event insert failed'));
+
+      logger.info({ jobId, destAppId: resolvedDestAppId }, '[clone] completed');
     } catch (err) {
-      // Don't fail the clone over fork_count; B2 sweeper will reconcile.
-      logger.error(
-        { err, source: job.source_app_id },
-        '[clone] fork_count increment failed; deferring to sweeper',
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      // Best-effort failure marker; swallow secondary errors so we still rethrow the original.
+      await setCloneJobStatus(controlDb, jobId, { status: 'failed', error_message: msg }).catch(() => {});
+
+      // Emit failed audit event on source app. Wrap in catch so we don't compound the original error.
+      await insertCloneAuditLog(controlDb, {
+        appId: job.source_app_id,
+        userId: job.requested_by_user_id,
+        eventType: 'template_clone_failed',
+        metadata: { job_id: jobId, dest_app_id: destAppId ?? null, dest_region: job.dest_region, error: msg },
+      }).catch((auditErr) => logger.error({ auditErr }, '[clone] audit log failed event insert failed'));
+
+      throw err; // re-throw so the neon-task queue applies its retry/fail logic
     }
-
-    // 6. Mark job completed.
-    await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
-
-    // Emit completed audit event on source app.
-    await insertCloneAuditLog(controlDb, {
-      appId: job.source_app_id,
-      userId: job.requested_by_user_id,
-      eventType: 'template_clone_completed',
-      metadata: { job_id: jobId, dest_app_id: resolvedDestAppId, dest_region: job.dest_region },
-    }).catch((err) => logger.error({ err }, '[clone] audit log completed event insert failed'));
-
-    logger.info({ jobId, destAppId: resolvedDestAppId }, '[clone] completed');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Best-effort failure marker; swallow secondary errors so we still rethrow the original.
-    await setCloneJobStatus(controlDb, jobId, { status: 'failed', error_message: msg }).catch(() => {});
-
-    // Emit failed audit event on source app. Wrap in catch so we don't compound the original error.
-    await insertCloneAuditLog(controlDb, {
-      appId: job.source_app_id,
-      userId: job.requested_by_user_id,
-      eventType: 'template_clone_failed',
-      metadata: { job_id: jobId, dest_app_id: destAppId ?? null, dest_region: job.dest_region, error: msg },
-    }).catch((auditErr) => logger.error({ auditErr }, '[clone] audit log failed event insert failed'));
-
-    throw err; // re-throw so the neon-task queue applies its retry/fail logic
-  }
+  });
 }
