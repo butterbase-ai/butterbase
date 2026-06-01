@@ -253,7 +253,7 @@ This generates a `.mcp.json` file in your current directory that configures the 
 For the full plugin with guided skills, install separately:
 
 ```bash
-claude plugin marketplace add https://github.com/NetGPT-Inc/butterbase-plugin
+claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
 claude plugin install butterbase
 ```
 

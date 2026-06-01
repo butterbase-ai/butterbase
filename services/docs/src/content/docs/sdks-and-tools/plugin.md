@@ -3,13 +3,13 @@ title: Claude Code Plugin
 description: Claude Code plugin with guided skills for building, deploying, and debugging Butterbase apps.
 ---
 
-The `@butterbase/plugin` is a Claude Code plugin that auto-configures the Butterbase MCP server and provides guided skills for common workflows.
+The `@butterbase/skills` is a Claude Code plugin that auto-configures the Butterbase MCP server and provides guided skills for common workflows.
 
 ## Installation
 
 ```bash
 # Add the Butterbase marketplace
-claude plugin marketplace add https://github.com/NetGPT-Inc/butterbase-plugin
+claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
 
 # Install the plugin
 claude plugin install butterbase
@@ -41,12 +41,12 @@ The plugin provides Claude with always-on context about Butterbase:
 
 | Skill | Slash command | Description |
 |-------|--------------|-------------|
-| Build App | `/butterbase:build-app` | End-to-end guide: create app, design schema, set up RLS, configure auth, deploy functions, deploy frontend |
-| Schema Design | `/butterbase:schema` | Database schema DSL reference with column types, indexes, and 4 complete data model patterns |
-| Deploy Frontend | `/butterbase:deploy` | 7-step deployment workflow for React, Next.js, and static HTML frontends |
-| Debug RLS | `/butterbase:debug-rls` | Systematic Row-Level Security debugging with role simulation |
-| Function Dev | `/butterbase:function` | Serverless function development with handler signatures, triggers, and working examples |
-| Contributing | `/butterbase:contributing` | Contributor guide for the Butterbase monorepo |
+| Build App | `/butterbase-skills:build-app` | End-to-end guide: create app, design schema, set up RLS, configure auth, deploy functions, deploy frontend |
+| Schema Design | `/butterbase-skills:schema` | Database schema DSL reference with column types, indexes, and 4 complete data model patterns |
+| Deploy Frontend | `/butterbase-skills:deploy` | 7-step deployment workflow for React, Next.js, and static HTML frontends |
+| Debug RLS | `/butterbase-skills:debug-rls` | Systematic Row-Level Security debugging with role simulation |
+| Function Dev | `/butterbase-skills:function` | Serverless function development with handler signatures, triggers, and working examples |
+| Contributing | `/butterbase-skills:contributing` | Contributor guide for the Butterbase monorepo |
 
 ## Alternative: CLI Setup
 
@@ -82,5 +82,5 @@ claude --plugin-dir /path/to/butterbase-plugin
 
 ## Source
 
-- **GitHub**: [github.com/NetGPT-Inc/butterbase-plugin](https://github.com/NetGPT-Inc/butterbase-plugin)
+- **GitHub**: [github.com/butterbase-ai/butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)
 - **License**: MIT

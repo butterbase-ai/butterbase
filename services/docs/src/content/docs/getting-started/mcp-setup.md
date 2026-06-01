@@ -17,7 +17,7 @@ Install the Butterbase plugin for Claude Code. This auto-configures the MCP serv
 
 ```bash
 # Add the marketplace
-claude plugin marketplace add https://github.com/NetGPT-Inc/butterbase-plugin
+claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
 
 # Install the plugin
 claude plugin install butterbase
@@ -31,7 +31,7 @@ export BUTTERBASE_API_KEY=bb_sk_your_key_here
 
 The plugin includes:
 - **Auto-configured MCP server** — 43 tools and 1 prompt available immediately
-- **6 skills** — `/butterbase:build-app`, `/butterbase:schema`, `/butterbase:deploy`, `/butterbase:debug-rls`, `/butterbase:function`, `/butterbase:contributing`
+- **6 skills** — `/butterbase-skills:build-app`, `/butterbase-skills:schema`, `/butterbase-skills:deploy`, `/butterbase-skills:debug-rls`, `/butterbase-skills:function`, `/butterbase-skills:contributing`
 - **Always-on context** — environment variables, workflows, and patterns
 
 ### Option 2: CLI Setup

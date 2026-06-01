@@ -160,7 +160,7 @@ export async function initCommand(template?: string) {
     console.log(chalk.cyan('\n\ud83e\udd16 AI Agent Integration:'));
     console.log(chalk.white('  .mcp.json has been created for Claude Code / MCP integration.'));
     console.log(chalk.gray('  Set your API key: ') + chalk.white('export BUTTERBASE_API_KEY=bb_sk_...'));
-    console.log(chalk.gray('  Install skills:   ') + chalk.white('claude plugin add @butterbase/plugin'));
+    console.log(chalk.gray('  Install skills:   ') + chalk.white('claude plugin add @butterbase/skills'));
 
     if (!appId) {
       console.log(chalk.yellow('\n⚠ Remember to update .env with your Butterbase App ID'));

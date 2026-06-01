@@ -153,7 +153,7 @@ If you are using Claude Code, install the Butterbase plugin for guided skills an
 
 \`\`\`bash
 # Add the Butterbase marketplace
-claude plugin marketplace add https://github.com/NetGPT-Inc/butterbase-plugin
+claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
 
 # Install the plugin
 claude plugin install butterbase
@@ -172,12 +172,12 @@ The plugin includes:
 
 | Skill | Slash command | Description |
 |-------|--------------|-------------|
-| Build App | \`/butterbase:build-app\` | End-to-end guide: create app, design schema, set up RLS, configure auth, deploy functions, deploy frontend |
-| Schema Design | \`/butterbase:schema\` | Database schema DSL reference with column types, indexes, and data model patterns |
-| Deploy Frontend | \`/butterbase:deploy\` | Deployment workflow for React, Next.js, and static HTML frontends |
-| Debug RLS | \`/butterbase:debug-rls\` | Systematic Row-Level Security debugging with role simulation |
-| Function Dev | \`/butterbase:function\` | Serverless function development with handler signatures, triggers, and examples |
-| Contributing | \`/butterbase:contributing\` | Contributor guide for the Butterbase monorepo |
+| Build App | \`/butterbase-skills:build-app\` | End-to-end guide: create app, design schema, set up RLS, configure auth, deploy functions, deploy frontend |
+| Schema Design | \`/butterbase-skills:schema\` | Database schema DSL reference with column types, indexes, and data model patterns |
+| Deploy Frontend | \`/butterbase-skills:deploy\` | Deployment workflow for React, Next.js, and static HTML frontends |
+| Debug RLS | \`/butterbase-skills:debug-rls\` | Systematic Row-Level Security debugging with role simulation |
+| Function Dev | \`/butterbase-skills:function\` | Serverless function development with handler signatures, triggers, and examples |
+| Contributing | \`/butterbase-skills:contributing\` | Contributor guide for the Butterbase monorepo |
 `,
 
   rest: `## HTTP Data API
@@ -2842,7 +2842,7 @@ This generates a \`.mcp.json\` file configuring the Butterbase MCP server.
 For guided skills (build-app, schema-design, deploy, debug-rls, functions, contributing):
 
 \`\`\`bash
-claude plugin marketplace add https://github.com/NetGPT-Inc/butterbase-plugin
+claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
 claude plugin install butterbase
 \`\`\`
 `,

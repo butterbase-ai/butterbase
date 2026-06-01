@@ -1,3 +1,3 @@
 [submodule "packages/plugin"]
 	path = packages/plugin
-	url = https://github.com/NetGPT-Inc/butterbase-plugin.git
+	url = https://github.com/butterbase-ai/butterbase-skills.git
