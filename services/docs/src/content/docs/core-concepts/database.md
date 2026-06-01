@@ -238,6 +238,29 @@ Set `_drop: true` to remove an entire table:
 }
 ```
 
+## Marking tables as seed data
+
+Use `_seed: true` to mark a table as containing seed data — rows that should be included when your app is cloned as a template:
+
+```json
+{
+  "tables": {
+    "roles": {
+      "_seed": true,
+      "columns": {
+        "id": { "type": "uuid", "primary": true, "default": "gen_random_uuid()" },
+        "name": { "type": "text", "nullable": false, "unique": true },
+        "created_at": { "type": "timestamptz", "default": "now()" }
+      }
+    }
+  }
+}
+```
+
+The marker persists across schema apply/introspect cycles. Use it on lookup tables, reference data, default roles, or example rows so your templates are ready when they need them.
+
+**Note:** Currently the marker is forward-compatible only — it does not yet trigger automatic row copying during template clone. That capability will arrive in a future release. Mark your seed tables now to prepare for when row copying becomes active.
+
 ## Dry run (preview changes)
 
 Always preview before applying destructive changes:
