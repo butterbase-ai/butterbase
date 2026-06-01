@@ -132,6 +132,7 @@ import {
 } from '../src/commands/repo.js';
 import { visibilityCommand } from '../src/commands/visibility.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
+import { templatesCommand } from '../src/commands/templates.js';
 
 const program = new Command();
 
@@ -1452,6 +1453,18 @@ program
     }
     return cloneCommand(sourceAppId, targetDir, opts);
   });
+
+// Templates (browse public templates)
+program
+  .command('templates')
+  .description('Browse public app templates')
+  .option('--q <text>', 'Search query')
+  .option('--sort <recent|popular>', 'Sort order (recent or popular)')
+  .option('--region <slug>', 'Filter by region')
+  .option('--limit <n>', 'Max results', parseInt)
+  .option('--offset <n>', 'Pagination offset', parseInt)
+  .option('--json', 'Output raw JSON')
+  .action((opts) => templatesCommand(opts));
 
 // Visibility (top-level convenience wrapper for PATCH /config/visibility)
 program
