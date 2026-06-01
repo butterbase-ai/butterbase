@@ -19,6 +19,12 @@ const rateLimitPlugin: FastifyPluginAsync = async (fastify) => {
     const url = routeOptions.url ?? '';
     if (!url.startsWith('/v1/:app_id') && !url.startsWith('/v1/:appId')) return;
 
+    // If the route already declares its own per-route rateLimit config, honour it
+    // and skip the global app-plan-based override. This allows specific endpoints
+    // (e.g. /repo/snapshots/prepare) to define tighter per-route limits without
+    // being overridden by the plan-based limit.
+    if ((routeOptions.config as { rateLimit?: unknown } | undefined)?.rateLimit) return;
+
     routeOptions.config = {
       ...(routeOptions.config ?? {}),
       rateLimit: {

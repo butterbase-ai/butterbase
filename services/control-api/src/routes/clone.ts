@@ -47,7 +47,20 @@ async function enqueueCloneTask(
 
 export function cloneRoutes(app: FastifyInstance) {
   // POST /v1/templates/:source_app_id/clone
-  app.post('/v1/templates/:source_app_id/clone', async (request, reply) => {
+  app.post('/v1/templates/:source_app_id/clone', {
+    config: {
+      rateLimit: {
+        max: 5,
+        timeWindow: '1 hour',
+        keyGenerator: (req) => {
+          // auth plugin runs its onRequest hook before rate-limit (registered first),
+          // so req.auth.userId is available here.
+          const userId = req.auth?.userId;
+          return userId ? `user:${userId}:clone` : `ip:${req.ip}:clone`;
+        },
+      },
+    },
+  }, async (request, reply) => {
     const { source_app_id } = request.params as { source_app_id: string };
     const body = (request.body ?? {}) as { name?: string; region?: string; dest_region?: string };
     const userId = requireUserId(request);

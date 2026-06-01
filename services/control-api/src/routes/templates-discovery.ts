@@ -8,10 +8,6 @@
 // clones will miss the increment until a control-plane outbox sweeper is wired up
 // (out of scope for Phase 4bcd — tracked as a known gap).
 //
-// NOTE: Rate limiting (60 req/min per IP) is not yet wired to this endpoint.
-// @fastify/rate-limit is already in package.json; adding the limit is deferred
-// to a follow-up task to avoid non-trivial infra setup.
-
 import type { FastifyInstance } from 'fastify';
 import pg from 'pg';
 import {
@@ -114,7 +110,15 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
   // Response:
   //   { items: TemplateRow[], total: number, limit: number, offset: number }
   //   total is best-effort; clients should paginate until items.length < limit
-  app.get('/v1/templates', async (request, reply) => {
+  app.get('/v1/templates', {
+    config: {
+      rateLimit: {
+        max: 60,
+        timeWindow: '1 minute',
+        keyGenerator: (req) => `ip:${req.ip}:templates-list`,
+      },
+    },
+  }, async (request, reply) => {
     const q = request.query as {
       q?: string;
       region?: string;

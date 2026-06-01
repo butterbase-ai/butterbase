@@ -38,7 +38,18 @@ import type { AuditResourceType } from '../services/audit/types.js';
 
 export async function repoRoutes(app: FastifyInstance) {
   // POST /v1/:app_id/repo/snapshots/prepare
-  app.post('/v1/:app_id/repo/snapshots/prepare', async (request, reply) => {
+  app.post('/v1/:app_id/repo/snapshots/prepare', {
+    config: {
+      rateLimit: {
+        max: 20,
+        timeWindow: '1 minute',
+        keyGenerator: (req) => {
+          const { app_id } = req.params as { app_id: string };
+          return `app:${app_id}:prepare`;
+        },
+      },
+    },
+  }, async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     try {
       const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request));
