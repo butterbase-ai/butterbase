@@ -27,6 +27,7 @@ import {
   CONTROL_DB_URL,
   RUNTIME_DB_URL_US,
   seedUserAndApp,
+  waitForProvisioning,
   startCloneJob,
   waitForCloneStep,
   pushFileSnapshot,
@@ -61,15 +62,35 @@ afterAll(async () => {
 
 describe('Phase 5 G3 — two concurrent clones; pinned snapshot survives retention pressure', () => {
   it('both clones complete; both dest apps reflect the v1 snapshot pinned at job-create time', async () => {
-    // --- 1. Seed the source app ---
-    // Use the source owner as the cloner too — cloning your own public template is allowed.
-    const src = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'g3-src');
+    // --- 1. Provision the source app via the API so its per-app DB exists ---
+    // seedUserAndApp creates the user/key/row but not the actual Postgres DB.
+    // The clone worker reads the source DB for schema/RLS replay, so the source
+    // must be fully provisioned before cloning begins.
+    const srcOwner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'g3-src');
+
+    const sourceInitRes = await fetch(`${API_URL}/init`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${srcOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'g3-concurrent-source' }),
+    });
+    if (!sourceInitRes.ok) {
+      throw new Error(`POST /init for source failed: ${sourceInitRes.status} ${await sourceInitRes.text()}`);
+    }
+    const sourceInitBody = await sourceInitRes.json() as { app_id: string };
+    const srcAppId = sourceInitBody.app_id;
+    const srcApiKey = srcOwner.apiKey;
+
+    // Wait for the source app's DB to be ready.
+    await waitForProvisioning(srcApiKey, srcAppId, 120_000);
 
     // Mark the app public+listed so the clone endpoint accepts it.
-    const patchRes = await fetch(`${API_URL}/v1/${src.appId}/config/visibility`, {
+    const patchRes = await fetch(`${API_URL}/v1/${srcAppId}/config/visibility`, {
       method: 'PATCH',
       headers: {
-        Authorization: `Bearer ${src.apiKey}`,
+        Authorization: `Bearer ${srcApiKey}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify({ visibility: 'public', listed: true }),
@@ -82,31 +103,31 @@ describe('Phase 5 G3 — two concurrent clones; pinned snapshot survives retenti
     // Both clone jobs are created before any further pushes, so this is the snapshot
     // captured in source_snapshot_id for both jobs.
     const v1Content = 'v1';
-    await pushFileSnapshot(src.apiKey, src.appId, 'a.txt', v1Content);
+    await pushFileSnapshot(srcApiKey, srcAppId, 'a.txt', v1Content);
     const v1Hash = createHash('sha256').update(v1Content).digest('hex');
 
     // --- 3. Start BOTH clones before pushing any more snapshots ---
     // The clone endpoint reads apps.repo_latest_snapshot and records it as
     // source_snapshot_id in template_clone_jobs (the "pin").
-    const job1 = await startCloneJob(src.apiKey, src.appId, 'g3-dest-1', 'us-east-1');
-    const job2 = await startCloneJob(src.apiKey, src.appId, 'g3-dest-2', 'us-east-1');
+    const job1 = await startCloneJob(srcApiKey, srcAppId, 'g3-dest-1', 'us-east-1');
+    const job2 = await startCloneJob(srcApiKey, srcAppId, 'g3-dest-2', 'us-east-1');
 
     // --- 4. Retention pressure: push 7 more snapshots ---
     // REPO_RETAIN_SNAPSHOTS = 5.  After 7 more pushes the v1 snapshot is the oldest
     // of 8 total and would normally be pruned.  The in-flight clone pins protect it.
     for (let i = 2; i <= 8; i++) {
-      await pushFileSnapshot(src.apiKey, src.appId, 'a.txt', `v${i}`);
+      await pushFileSnapshot(srcApiKey, srcAppId, 'a.txt', `v${i}`);
     }
 
     // --- 5. Wait for both clones to reach a terminal state ---
     const final1 = await waitForCloneStep(
-      src.apiKey,
+      srcApiKey,
       job1.jobId,
       ['completed', 'failed'],
       300_000,
     );
     const final2 = await waitForCloneStep(
-      src.apiKey,
+      srcApiKey,
       job2.jobId,
       ['completed', 'failed'],
       300_000,
@@ -135,7 +156,7 @@ describe('Phase 5 G3 — two concurrent clones; pinned snapshot survives retenti
 
     const latestRes1 = await fetch(
       `${API_URL}/v1/${destAppId1}/repo/snapshots/latest`,
-      { headers: { Authorization: `Bearer ${src.apiKey}` } },
+      { headers: { Authorization: `Bearer ${srcApiKey}` } },
     );
     expect(
       latestRes1.status,
@@ -148,7 +169,7 @@ describe('Phase 5 G3 — two concurrent clones; pinned snapshot survives retenti
 
     const latestRes2 = await fetch(
       `${API_URL}/v1/${destAppId2}/repo/snapshots/latest`,
-      { headers: { Authorization: `Bearer ${src.apiKey}` } },
+      { headers: { Authorization: `Bearer ${srcApiKey}` } },
     );
     expect(
       latestRes2.status,
