@@ -25,6 +25,7 @@ export interface CloneJob {
   status: CloneJobStatus;
   retry_count: number;
   error_message: string | null;
+  warnings: string[] | null;
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
