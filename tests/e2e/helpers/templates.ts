@@ -12,6 +12,8 @@ import pg from 'pg';
 export const API_URL = 'http://localhost:4000';
 export const CONTROL_DB_URL = 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
 export const RUNTIME_DB_URL_US = 'postgresql://butterbase:butterbase_dev@localhost:5437/butterbase_runtime_us';
+// Local data-plane DB (us-east-1 / only region in local dev): port 5435.
+export const DATA_PLANE_DB_ADMIN_URL = 'postgresql://butterbase:butterbase_dev@localhost:5435/postgres';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -269,4 +271,40 @@ export async function pushSnapshot(
   if (!commit.ok) throw new Error(`pushSnapshot commit failed: ${commit.status} ${await commit.text()}`);
   const cj = await commit.json() as { snapshot_id: string };
   return cj.snapshot_id;
+}
+
+// ---------------------------------------------------------------------------
+// queryAppDb — run a query directly against a per-app database (local dev only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Connects directly to the per-app Postgres database (local data-plane, port
+ * 5435) and runs a single query. The app's `db_name` is resolved from the
+ * runtime DB first.
+ *
+ * Only works in local dev where the data-plane DB is exposed on localhost:5435.
+ */
+export async function queryAppDb(
+  runtimePool: pg.Pool,
+  appId: string,
+  sql: string,
+  params: unknown[] = [],
+): Promise<pg.QueryResult> {
+  // Look up the per-app DB name from the runtime DB.
+  const appRow = await runtimePool.query<{ db_name: string }>(
+    `SELECT db_name FROM apps WHERE id = $1`,
+    [appId],
+  );
+  if (appRow.rows.length === 0) {
+    throw new Error(`queryAppDb: app ${appId} not found in runtime DB`);
+  }
+  const dbName = appRow.rows[0].db_name;
+  const appPool = new pg.Pool({
+    connectionString: `postgresql://butterbase:butterbase_dev@localhost:5435/${dbName}`,
+  });
+  try {
+    return await appPool.query(sql, params);
+  } finally {
+    await appPool.end();
+  }
 }

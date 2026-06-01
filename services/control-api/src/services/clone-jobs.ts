@@ -1,7 +1,17 @@
 import pg from 'pg';
 import { randomBytes } from 'crypto';
 
-export type CloneJobStatus = 'pending' | 'processing' | 'completed' | 'failed';
+export type CloneJobStatus =
+  | 'pending'
+  | 'processing'
+  | 'replaying_schema'
+  | 'replaying_rls'
+  | 'replaying_functions'
+  | 'replaying_config'
+  | 'copying_repo'
+  | 'seeding_data'
+  | 'completed'
+  | 'failed';
 
 export interface CloneJob {
   id: string;
@@ -77,6 +87,20 @@ export async function incrementRetry(controlDb: pg.Pool, jobId: string): Promise
      SET retry_count = retry_count + 1, status = 'pending', error_message = NULL, updated_at = now()
      WHERE id = $1`,
     [jobId],
+  );
+}
+
+export async function appendCloneJobWarnings(
+  controlDb: pg.Pool,
+  jobId: string,
+  warnings: string[],
+): Promise<void> {
+  if (warnings.length === 0) return;
+  await controlDb.query(
+    `UPDATE template_clone_jobs
+     SET warnings = COALESCE(warnings, '[]'::jsonb) || $1::jsonb
+     WHERE id = $2`,
+    [JSON.stringify(warnings), jobId],
   );
 }
 

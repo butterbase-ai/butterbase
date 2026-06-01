@@ -8,7 +8,7 @@ import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackgr
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed } from './failure-notifications.service.js';
 import { addUserAppIndex, removeUserAppIndex } from './user-app-index.js';
-import { getCloneJob, setCloneJobStatus } from './clone-jobs.js';
+import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings } from './clone-jobs.js';
 import {
   getManifestJson,
   putManifest,
@@ -17,7 +17,7 @@ import {
   copyManifestSameRegion,
 } from './repo-storage.js';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema } from './clone-replay.js';
+import { replaySchema, replayRls } from './clone-replay.js';
 
 interface NeonTask {
   id: number;
@@ -480,11 +480,7 @@ async function executeClone(
     await waitForDestReady(job.dest_region, destAppId, logger);
 
     // Step 3 (Phase 5 A1): Replay source schema onto the dest DB.
-    // NOTE: 'replaying_schema' is not in the status check constraint
-    // (082_template_clone_jobs.sql only allows pending/processing/completed/failed).
-    // We intentionally keep the status as 'processing' for the duration.
-    // A follow-up migration to add 'replaying_schema' would be task A1's
-    // DONE_WITH_CONCERNS item — the constraint gap is flagged here.
+    // Step 4 (Phase 5 A2): Replay source RLS policies onto the dest DB.
     {
       // Resolve per-app DB pools: look up db_name from each app's runtime DB.
       const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
@@ -509,7 +505,20 @@ async function executeClone(
       const destDbName = destAppRow.rows[0].db_name;
       const destAppPool = await getAppPoolForApp(controlDb, destAppId, destDbName);
 
+      // A1: schema replay
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
       await replaySchema(sourceAppPool, destAppPool, destAppId, logger);
+
+      // A2: RLS replay
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
+      const rlsResult = await replayRls(sourceAppPool, destAppPool, logger);
+      if (rlsResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, rlsResult.warnings);
+      }
+      logger.info(
+        { destAppId, replayed: rlsResult.replayed, warnings: rlsResult.warnings.length },
+        '[clone] RLS replayed',
+      );
     }
 
     // 2. Read source manifest.
