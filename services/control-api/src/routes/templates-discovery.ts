@@ -17,9 +17,11 @@ import pg from 'pg';
 import {
   getConfiguredRuntimeRegions,
   fanOutRuntimeRegions,
+  resolveAppHomeRegion,
 } from '../services/region-resolver.js';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
+import { introspectSchema } from '../services/schema-introspector.js';
 
 interface TemplateRow {
   app_id: string;
@@ -202,5 +204,139 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
     }));
 
     return reply.send({ items, total, limit, offset });
+  });
+
+  // GET /v1/templates/:app_id — anonymous detail endpoint for a single public+listed template.
+  //
+  // Returns 404 (TEMPLATE_NOT_FOUND) in all these cases to avoid existence leaks:
+  //   - app doesn't exist
+  //   - app exists but visibility !== 'public'
+  //   - app exists but listed === false
+  //
+  // Response: app_id, name, region, owner_display_name, created_at (ISO),
+  //   fork_count, has_repo, schema_summary, tables, functions, forks_sample (up to 5).
+  app.get('/v1/templates/:app_id', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+
+    // Resolve which region hosts this app. Throws AppNotFoundError if unknown.
+    const region = await resolveAppHomeRegion(app.controlDb, app_id).catch(() => null);
+    if (!region) {
+      return reply.code(404).send({ error: { code: 'TEMPLATE_NOT_FOUND' } });
+    }
+
+    // Look up the app row and verify it is public + listed.
+    const pool = getRuntimeDbPool(config.runtimeDb, region);
+    const row = await pool.query<{
+      id: string;
+      name: string;
+      owner_id: string;
+      created_at: Date;
+      fork_count: number;
+      repo_latest_snapshot: string | null;
+      visibility: string;
+      listed: boolean;
+    }>(
+      `SELECT id, name, owner_id, created_at, fork_count, repo_latest_snapshot,
+              visibility, listed
+       FROM apps WHERE id = $1`,
+      [app_id],
+    );
+    const r = row.rows[0];
+    if (!r || r.visibility !== 'public' || !r.listed) {
+      // No existence leak — same 404 for not-found, private, and unlisted.
+      return reply.code(404).send({ error: { code: 'TEMPLATE_NOT_FOUND' } });
+    }
+
+    // Introspect user tables; degrade gracefully on failure.
+    const schema = await introspectSchema(pool).catch((err) => {
+      app.log.error({ err, app_id }, 'templates-discovery: introspectSchema failed, returning empty tables');
+      return null;
+    });
+    const tables = schema
+      ? Object.entries(schema.tables).map(([name, info]) => ({
+          name,
+          column_count: Object.keys(info.columns).length,
+        }))
+      : [];
+
+    // Query functions; degrade gracefully on failure.
+    const fnsResult = await pool
+      .query<{ name: string; trigger_type: string }>(
+        `SELECT name, trigger_type FROM app_functions
+         WHERE app_id = $1 AND deleted_at IS NULL
+         ORDER BY name`,
+        [app_id],
+      )
+      .catch((err) => {
+        app.log.error({ err, app_id }, 'templates-discovery: app_functions query failed, returning empty functions');
+        return { rows: [] as Array<{ name: string; trigger_type: string }> };
+      });
+    const functions = fnsResult.rows;
+
+    // Forks sample — cross-region fan-out, up to 5 most recent.
+    const allRegions = getConfiguredRuntimeRegions();
+    interface ForkCandidate {
+      app_id: string;
+      name: string;
+      owner_id: string;
+      created_at: string; // ISO
+    }
+    const forkCandidates: ForkCandidate[] = [];
+
+    const forkSettled = await Promise.allSettled(
+      allRegions.map(async (reg) => {
+        const p = getRuntimeDbPool(config.runtimeDb, reg);
+        const fr = await p.query<{ id: string; name: string; owner_id: string; created_at: Date }>(
+          `SELECT id, name, owner_id, created_at FROM apps
+           WHERE template_source_app_id = $1
+           ORDER BY created_at DESC LIMIT 5`,
+          [app_id],
+        );
+        return fr.rows.map((f) => ({
+          app_id: f.id,
+          name: f.name,
+          owner_id: f.owner_id,
+          created_at: f.created_at.toISOString(),
+        }));
+      }),
+    );
+
+    for (const outcome of forkSettled) {
+      if (outcome.status === 'fulfilled') {
+        forkCandidates.push(...outcome.value);
+      } else {
+        app.log.error(
+          { err: outcome.reason, app_id },
+          'templates-discovery: forks fan-out region query failed, skipping region',
+        );
+      }
+    }
+
+    // Sort newest first, take top 5 across all regions.
+    forkCandidates.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const forks = forkCandidates.slice(0, 5);
+
+    // Bulk-lookup owner display names (template owner + fork owners).
+    const allOwnerIds = [r.owner_id, ...forks.map((f) => f.owner_id)];
+    const names = await lookupOwnerNames(app.controlDb, allOwnerIds);
+
+    return reply.send({
+      app_id: r.id,
+      name: r.name,
+      region,
+      owner_display_name: names.get(r.owner_id) ?? null,
+      created_at: r.created_at.toISOString(),
+      fork_count: r.fork_count,
+      has_repo: r.repo_latest_snapshot !== null,
+      schema_summary: { table_count: tables.length, function_count: functions.length },
+      tables,
+      functions,
+      forks_sample: forks.map((f) => ({
+        app_id: f.app_id,
+        name: f.name,
+        owner_display_name: names.get(f.owner_id) ?? null,
+        created_at: f.created_at,
+      })),
+    });
   });
 }

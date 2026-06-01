@@ -241,3 +241,41 @@ describe('Phase 4b discovery — GET /v1/templates', () => {
     expect(typeof item.has_repo).toBe('boolean');
   }, 30_000);
 });
+
+describe('Phase 4b discovery — GET /v1/templates/:id', () => {
+  it('GET /v1/templates/:id returns detail for a public+listed app', async () => {
+    const a = await seedUserAndApp('us-east-1');
+    await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ visibility: 'public', listed: true }),
+    });
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      app_id: string; tables: unknown[]; functions: unknown[]; forks_sample: unknown[];
+    };
+    expect(body.app_id).toBe(a.appId);
+    expect(Array.isArray(body.tables)).toBe(true);
+    expect(Array.isArray(body.functions)).toBe(true);
+    expect(Array.isArray(body.forks_sample)).toBe(true);
+  }, 30_000);
+
+  it('GET /v1/templates/:id returns 404 for private app', async () => {
+    const a = await seedUserAndApp('us-east-1');
+    // Default visibility=private.
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    expect(res.status).toBe(404);
+  }, 30_000);
+
+  it('GET /v1/templates/:id returns 404 for unlisted app', async () => {
+    const a = await seedUserAndApp('us-east-1');
+    await fetch(`${API_URL}/v1/${a.appId}/config/visibility`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${a.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ visibility: 'public', listed: false }),
+    });
+    const res = await fetch(`${API_URL}/v1/templates/${a.appId}`);
+    expect(res.status).toBe(404);
+  }, 30_000);
+});
