@@ -116,7 +116,7 @@ Pass an empty body or omit `tables` to flip access mode only. Response includes 
 
 Control whether other Butterbase users can discover and clone your app as a template. This is separate from [access mode](#app-access-mode), which controls whether anonymous requests reach the data API. An app can be `visibility="public"` (template-shareable) and `access_mode="authenticated"` (no anonymous data reads) at the same time.
 
-`visibility` defaults to `"private"`. Setting it to `"public"` reserves the flag for when browse-and-clone features ship; that consumer experience is being rolled out in stages and is not yet available in the current release.
+`visibility` defaults to `"private"`. Set it to `"public"` to make the app appear in the dashboard Templates browser and `GET /v1/templates`. Combine with `listed: false` to keep the app clonable by direct id but hidden from browse listings.
 
 | Method | Path | Purpose |
 |--------|------|---------|

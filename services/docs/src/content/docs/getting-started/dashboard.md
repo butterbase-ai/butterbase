@@ -13,6 +13,9 @@ The Butterbase dashboard at [dashboard.butterbase.ai](https://dashboard.butterba
 | **API Keys** | Generate and manage `bb_sk_` API keys for programmatic access |
 | **Billing** | View your plan, usage metrics, and upgrade options |
 | **Settings** | Account settings and developer mode toggle |
+| **Templates** | Browse public app templates and clone any of them into a new app you own |
+
+On the Apps page, you'll also find a "Clone template" button for users who already know a source `app_id` — use it to clone without browsing the Templates page.
 
 ## App management
 

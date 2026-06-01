@@ -76,7 +76,7 @@ Three layers, highest-precedence wins:
 butterbase visibility <public|private> [--listed|--unlisted] [--app <id>]
 ```
 
-Marks the app public or private. When public, `--unlisted` hides it from the templates browse listing (the public templates list is itself shipping in a later release).
+Marks the app public or private. When public, `--unlisted` hides it from the templates browse listing (`/v1/templates`, the dashboard Templates page, and `butterbase templates`) while still allowing clone by direct app id.
 
 ## Clone a public app
 
@@ -90,6 +90,8 @@ Creates a fresh, owned app cloned from a public template. The CLI:
 2. Polls until the job completes (max 5 minutes).
 3. `butterbase repo init <new_app_id>` + `butterbase repo pull` in `<target_dir>` (defaults to a dir named after the new app id).
 
-The cloned app's schema and functions are **not** copied in this release — you re-apply them yourself. Only the repo snapshot is.
+Clones receive the source's schema, RLS policies, function code, non-secret config, repo files, and rows from `_seed: true` tables. End-user accounts, secrets, env vars, BYOK AI keys, custom domains, and audit logs stay with the source. See [What a clone copies](/core-concepts/database#what-a-clone-copies) for the full breakdown.
+
+The `butterbase clone` command prints any warnings returned by the clone job — for example, if the source's `auth_hook_function` references a function that didn't replay onto the destination, the binding is left NULL and a warning is printed.
 
 If the clone fails, the error is printed and exit code is 1. Failed jobs can be retried via the HTTP API directly (`POST /v1/clone-jobs/<job_id>/retry`).
