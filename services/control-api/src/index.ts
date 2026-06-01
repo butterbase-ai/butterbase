@@ -61,6 +61,7 @@ import { aiVideoRoutes } from './routes/ai-videos.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
 import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
+import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
 import dashboardProxyPlugin from './plugins/dashboard-proxy.js';
@@ -622,6 +623,9 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).cloneJobsPrunerHandle) {
         await (app as any).cloneJobsPrunerHandle.stop();
       }
+      if ((app as any).cloneWebhookSweeperHandle) {
+        await (app as any).cloneWebhookSweeperHandle.stop();
+      }
     });
   } else {
     app.log.warn('BUTTERBASE_REGIONS empty — KV expiry-subscriber not started');
@@ -806,6 +810,14 @@ Promise.resolve(app.ready())
       (app as any).cloneJobsPrunerHandle = cloneJobsPrunerHandle;
       app.log.info('Clone-jobs pruner started (24h interval)');
     }
+
+    // Clone-webhook sweeper: delivers clone_webhook_outbox rows with HMAC-SHA256
+    // signing and 3-attempt exponential-backoff retry (runs every 30 s).
+    if (process.env.SKIP_CLONE_WEBHOOK_SWEEPER !== '1') {
+      const cloneWebhookSweeperHandle = startCloneWebhookSweeper(app.controlDb, app.log);
+      (app as any).cloneWebhookSweeperHandle = cloneWebhookSweeperHandle;
+      app.log.info('Clone-webhook sweeper started (30s interval)');
+    }
   })
   .catch((err: unknown) => {
     app.log.error({ err }, 'Failed to start background workers');
@@ -864,6 +876,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).cloneJobsPrunerHandle) await (app as any).cloneJobsPrunerHandle.stop().catch(() => {});
+      if ((app as any).cloneWebhookSweeperHandle) await (app as any).cloneWebhookSweeperHandle.stop().catch(() => {});
 
       // Timeout: force exit if shutdown hangs
       const shutdownTimeout = setTimeout(() => {

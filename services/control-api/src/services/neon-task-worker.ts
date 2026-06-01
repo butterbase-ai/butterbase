@@ -22,6 +22,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding } from './clone-replay.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
+import { enqueueWebhookDelivery } from './clone-webhook-store.js';
 
 interface NeonTask {
   id: number;
@@ -714,7 +715,28 @@ async function executeClone(
       }
 
       // 6. Mark job completed.
-      await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
+      const completedAt = new Date();
+      await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: completedAt });
+
+      // Enqueue webhook outbox row for the source app (sweeper will skip if no webhook configured).
+      enqueueWebhookDelivery(controlDb, {
+        appId: job.source_app_id,
+        jobId,
+        sourceAppId: job.source_app_id,
+        destAppId: resolvedDestAppId,
+        destRegion: job.dest_region,
+        completedAt,
+      }).catch((err) => logger.error({ err }, '[clone] enqueueWebhookDelivery (source) failed'));
+
+      // Enqueue webhook outbox row for the dest app (sweeper will skip if no webhook configured).
+      enqueueWebhookDelivery(controlDb, {
+        appId: resolvedDestAppId,
+        jobId,
+        sourceAppId: job.source_app_id,
+        destAppId: resolvedDestAppId,
+        destRegion: job.dest_region,
+        completedAt,
+      }).catch((err) => logger.error({ err }, '[clone] enqueueWebhookDelivery (dest) failed'));
 
       // Emit completed audit event on source app.
       await insertCloneAuditLog(controlDb, {
