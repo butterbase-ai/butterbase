@@ -59,6 +59,7 @@ import { aiConfigRoutes } from './routes/ai-config.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
+import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
 import dashboardProxyPlugin from './plugins/dashboard-proxy.js';
@@ -615,6 +616,11 @@ if (process.env.NODE_ENV !== 'test') {
     });
     app.log.info({ regions: kvRegions }, 'KV expiry-subscriber started');
     app.addHook('onClose', async () => { await keysExpiry.stop(); });
+    app.addHook('onClose', async () => {
+      if ((app as any).cloneJobsPrunerHandle) {
+        await (app as any).cloneJobsPrunerHandle.stop();
+      }
+    });
   } else {
     app.log.warn('BUTTERBASE_REGIONS empty — KV expiry-subscriber not started');
   }
@@ -790,6 +796,14 @@ Promise.resolve(app.ready())
       const forkSweeperHandle = startForkCountSweeper(app.controlDb, config.runtimeDb, app.log);
       (app as any).forkSweeperHandle = forkSweeperHandle;
     }
+
+    // Clone-jobs pruner: deletes template_clone_jobs rows in status
+    // 'completed' or 'failed' older than 30 days (runs every 24 h).
+    if (process.env.SKIP_CLONE_JOBS_PRUNER !== '1') {
+      const cloneJobsPrunerHandle = startCloneJobsPruner(app.controlDb, app.log);
+      (app as any).cloneJobsPrunerHandle = cloneJobsPrunerHandle;
+      app.log.info('Clone-jobs pruner started (24h interval)');
+    }
   })
   .catch((err: unknown) => {
     app.log.error({ err }, 'Failed to start background workers');
@@ -847,6 +861,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
+      if ((app as any).cloneJobsPrunerHandle) await (app as any).cloneJobsPrunerHandle.stop().catch(() => {});
 
       // Timeout: force exit if shutdown hangs
       const shutdownTimeout = setTimeout(() => {
