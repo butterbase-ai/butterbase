@@ -98,7 +98,32 @@ export async function schemaRoutes(app: FastifyInstance) {
       const current = await introspectSchema(pool);
       const statements = diffSchema(current, desired);
 
+      // Helper: sync _seed_tables to match the _seed flags in the DSL.
+      // Called unconditionally so that toggling _seed without any DDL change
+      // (statements.length === 0) is still persisted.
+      const syncSeedTables = async (): Promise<void> => {
+        const client = await pool!.connect();
+        try {
+          for (const [tableName, tableDef] of Object.entries(desired.tables)) {
+            if (tableDef._seed === true) {
+              await client.query(
+                `INSERT INTO _seed_tables (name) VALUES ($1) ON CONFLICT DO NOTHING`,
+                [tableName]
+              );
+            } else {
+              await client.query(
+                `DELETE FROM _seed_tables WHERE name = $1`,
+                [tableName]
+              );
+            }
+          }
+        } finally {
+          client.release();
+        }
+      };
+
       if (statements.length === 0) {
+        await syncSeedTables();
         return { applied: 0, statements: [], message: 'Schema is up to date' };
       }
 
@@ -136,6 +161,8 @@ export async function schemaRoutes(app: FastifyInstance) {
         statements,
         migrationName
       );
+
+      await syncSeedTables();
 
       logFromRequest(request, {
         appId: app_id,

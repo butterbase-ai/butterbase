@@ -20,6 +20,7 @@ export interface IndexInfo {
 export interface TableInfo {
   columns: Record<string, ColumnInfo>;
   indexes?: Record<string, IndexInfo>;
+  _seed?: boolean;
 }
 
 export interface IntrospectedSchema {
@@ -251,6 +252,22 @@ export async function introspectSchema(pool: pg.Pool): Promise<IntrospectedSchem
   }
   if (Object.keys(fkConstraints).length > 0) {
     schema._fkConstraints = fkConstraints;
+  }
+
+  // Read _seed_tables to annotate seed marker on tables that have it set.
+  // _seed_tables may not exist on older apps (pre-migration 012) — handle defensively.
+  try {
+    const seedResult = await pool.query<{ name: string }>(
+      `SELECT name FROM _seed_tables`
+    );
+    const seedSet = new Set(seedResult.rows.map((r) => r.name));
+    for (const tableName of Object.keys(schema.tables)) {
+      if (seedSet.has(tableName)) {
+        schema.tables[tableName]._seed = true;
+      }
+    }
+  } catch {
+    // _seed_tables does not exist yet on this app — skip silently.
   }
 
   return schema;

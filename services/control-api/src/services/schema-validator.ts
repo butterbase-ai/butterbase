@@ -61,6 +61,7 @@ const TableDefSchema = z.object({
   columns: z.record(z.string().regex(identifierPattern), ColumnDefSchema),
   indexes: z.record(z.string().regex(identifierPattern), IndexDefSchema).optional(),
   _dropColumns: z.array(z.string().regex(identifierPattern)).optional(),
+  _seed: z.boolean().optional(),
 });
 
 export const SchemaDSLSchema = z.object({
