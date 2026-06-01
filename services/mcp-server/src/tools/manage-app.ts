@@ -5,7 +5,7 @@ import { apiGet, apiDelete, apiPatch, apiPost } from '../api-client.js';
 export function registerManageApp(server: McpServer) {
   server.tool(
     'manage_app',
-    `Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, update CORS, and clone.
+    `Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, update CORS, clone, and find templates.
 
 Actions:
   - "list":               List all backend apps with basic metadata (no app_id needed)
@@ -18,6 +18,7 @@ Actions:
   - "update_cors":        Update CORS allowed origins to control which frontend domains can access your API
   - "clone":              Create a clone of a public app. Returns { job_id }. The dest app is a fresh empty-DB app owned by the caller. Source must be public and have a repo snapshot.
   - "get_clone_job":      Look up the status of a previously-started clone job. Returns { status, dest_app_id?, error_message? }.
+  - "find_templates":     Search public templates by name, region, sort order, and pagination. Returns paginated list of public app templates.
 
 Parameters by action:
   list:               { action: "list" }
@@ -30,12 +31,13 @@ Parameters by action:
   update_cors:        { action: "update_cors", app_id, allowed_origins }
   clone:              { action: "clone", source_app_id, name?, region? }
   get_clone_job:      { action: "get_clone_job", job_id }
+  find_templates:     { action: "find_templates", q?, region?, sort?, limit?, offset? }
 
 Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'clone', 'get_clone_job'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'clone', 'get_clone_job', 'find_templates'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -60,6 +62,11 @@ Common errors:
       region: z.string().optional().describe('Optional for "clone". The region for the new app; defaults to the source app\'s region.'),
       // get_clone_job params
       job_id: z.string().optional().describe('Required for "get_clone_job".'),
+      // find_templates params
+      q: z.string().optional().describe('Optional for "find_templates". Search query to filter templates by name.'),
+      sort: z.enum(['recent', 'popular']).optional().describe('Optional for "find_templates". Sort order: "recent" or "popular". Defaults to "recent".'),
+      limit: z.number().int().optional().describe('Optional for "find_templates". Max results per page (default 20).'),
+      offset: z.number().int().optional().describe('Optional for "find_templates". Pagination offset (default 0).'),
     },
     {
       title: 'Manage App',
@@ -143,6 +150,17 @@ Common errors:
           const err = need(args.job_id !== undefined, '"job_id" is required for the "get_clone_job" action.');
           if (err) return err;
           const res = await apiGet(`/v1/clone-jobs/${args.job_id}`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'find_templates': {
+          const params = new URLSearchParams();
+          if (args.q !== undefined) params.append('q', args.q);
+          if (args.region !== undefined) params.append('region', args.region);
+          if (args.sort !== undefined) params.append('sort', args.sort);
+          if (args.limit !== undefined) params.append('limit', String(args.limit));
+          if (args.offset !== undefined) params.append('offset', String(args.offset));
+          const suffix = params.toString() ? `?${params.toString()}` : '';
+          const res = await apiGet(`/v1/templates${suffix}`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
         }
       }
