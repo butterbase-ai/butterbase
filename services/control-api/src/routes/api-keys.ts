@@ -13,9 +13,9 @@ export async function apiKeyRoutes(app: FastifyInstance) {
   app.post('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);
     const { name, scopes, scope } = request.body as {
-      name: string;
+      name?: string;
       scopes?: string[];
-      scope?: 'app' | 'substrate';
+      scope?: 'app' | 'substrate' | 'both';
     };
 
     if (!name || typeof name !== 'string') {
@@ -26,13 +26,12 @@ export async function apiKeyRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl('VALIDATION_INVALID_SCHEMA'),
       }));
     }
-    if (scope !== undefined && scope !== 'app' && scope !== 'substrate') {
-      return reply.code(400).send(createAgentError({
-        code: 'VALIDATION_INVALID_SCHEMA',
-        message: "scope must be 'app' or 'substrate'",
-        remediation: "Omit the scope field for an app key (default), or set scope: 'substrate' for a substrate-scoped key.",
-        documentation_url: getDocUrl('VALIDATION_INVALID_SCHEMA'),
-      }));
+    if (scope !== undefined && scope !== 'app' && scope !== 'substrate' && scope !== 'both') {
+      return reply.code(400).send({
+        error: 'INVALID_SCOPE',
+        message: "scope must be 'app', 'substrate', or 'both'",
+        remediation: "Omit the scope field for an app key (default), set 'substrate' for a substrate-only key, or 'both' for a single key that works on both surfaces.",
+      });
     }
 
     const result = await ApiKeyService.generateApiKey(
@@ -61,7 +60,8 @@ export async function apiKeyRoutes(app: FastifyInstance) {
   app.get('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);
     const { scope } = request.query as { scope?: string };
-    const filterScope = scope === 'app' || scope === 'substrate' ? scope : undefined;
+    const filterScope =
+      scope === 'app' || scope === 'substrate' || scope === 'both' ? scope : undefined;
     const keys = await ApiKeyService.listKeys(app.controlDb, userId, filterScope);
     return { keys };
   });
