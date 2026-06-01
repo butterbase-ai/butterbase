@@ -1,20 +1,74 @@
-# Butterbase
+<p align="center">
+  <img src=".github/assets/logo.png" alt="Butterbase" width="420" />
+</p>
 
-**AI-native, open-source backend-as-a-service.** Postgres data plane, auth, storage, functions, an AI gateway, and a built-in Model Context Protocol (MCP) server. Apache-2.0 licensed.
+<p align="center"><strong>AI-native, open-source backend-as-a-service.</strong><br/>Postgres · Auth · Storage · Functions · AI Gateway · MCP server</p>
 
-Butterbase gives you the building blocks for AI-driven applications without lock-in: spin up a Postgres-backed backend with row-level security, ship serverless functions, route LLM traffic through a single gateway, and let agents drive it all via MCP tools.
+<p align="center">
+  <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
+  <a href="https://github.com/butterbase-ai/butterbase-oss/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/butterbase-ai/butterbase-oss?style=social"></a>
+  <a href="https://github.com/butterbase-ai/butterbase-oss/network/members"><img alt="GitHub forks" src="https://img.shields.io/github/forks/butterbase-ai/butterbase-oss?style=social"></a>
+  <br/>
+  <a href="https://github.com/butterbase-ai/butterbase-oss/issues"><img alt="GitHub issues" src="https://img.shields.io/github/issues/butterbase-ai/butterbase-oss"></a>
+  <a href="https://github.com/butterbase-ai/butterbase-oss/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/butterbase-ai/butterbase-oss"></a>
+  <a href="https://github.com/butterbase-ai/butterbase-oss/releases"><img alt="Release" src="https://img.shields.io/github/v/release/butterbase-ai/butterbase-oss?include_prereleases&sort=semver"></a>
+  <a href="https://discord.gg/eZ7PT68uP"><img alt="Discord" src="https://img.shields.io/discord/1495105159469207702?logo=discord&logoColor=white&label=Discord&color=5865F2"></a>
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white">
+  <img alt="Postgres" src="https://img.shields.io/badge/Postgres-336791?logo=postgresql&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white">
+</p>
+
+<p align="center">
+  <a href="https://butterbase.ai"><strong>Website</strong></a> ·
+  <a href="https://discord.gg/eZ7PT68uP"><strong>Discord</strong></a> ·
+  <a href="./SETUP.md"><strong>Self-host</strong></a> ·
+  <a href="./docs"><strong>Docs</strong></a> ·
+  <a href="./ROADMAP.md"><strong>Roadmap</strong></a> ·
+  <a href="./Examples"><strong>Examples</strong></a> ·
+  <a href="./CONTRIBUTING.md"><strong>Contributing</strong></a>
+</p>
+
+---
+
+<!-- Drop a demo gif at .github/assets/demo.gif and uncomment:
+<p align="center"><img src=".github/assets/demo.gif" alt="Butterbase demo" width="720" /></p>
+-->
+
+Butterbase gives you the building blocks for AI-driven applications without lock-in: a Postgres-backed backend with row-level security, serverless functions, an LLM gateway, realtime subscriptions, key-value store, file storage, RAG, durable per-key actors, and a built-in **Model Context Protocol (MCP) server** so agents can operate your backend with tools instead of glue code.
+
+## Features
+
+**Data**
+- **Postgres data plane** — per-app databases with declarative schema (`/schema`), automatic REST endpoints (`/auto-api`), and migrations.
+- **Row-Level Security** — first-class RLS policy management with user-isolation helpers (`/rls`).
+- **Key-Value store** — regional, quota-protected KV with TTL, audit trail, and dashboard expose rules (`/v1/:app/kv/*`). *New in v0.2.0.*
+- **File storage** — S3/R2-backed object storage with presigned URLs, ACLs, and async indexing (`/storage`).
+
+**Compute**
+- **Serverless functions** — TypeScript functions executed on the Deno runtime (`/functions`).
+- **Durable Objects** — stateful per-key actors for chat rooms, multiplayer, rate limiters, long-running agents (`/durable-objects`).
+- **Realtime** — WebSocket subscriptions to table changes for live UIs and presence (`/realtime`).
+- **Edge SSR** — deploy Next.js / Remix / Astro edge handlers from source (`/edge-ssr`, `/edge-ssr-from-source`).
+- **Frontend hosting** — zip or build-from-source static / SPA deploys with custom domains (`/frontend`, `/custom-domains`).
+
+**AI**
+- **AI gateway** — single endpoint for chat, embeddings, model listing; pluggable router adapters (`/gateway`, `/ai-config`).
+- **RAG** — managed collections, document ingestion, semantic search and synthesized answers (`/rag`).
+- **Integrations** — third-party tool access via Composio (`/integrations`).
+
+**Identity & ops**
+- **Auth** — email + OAuth (Google, GitHub, Apple, X, …), JWT tuning, post-login hooks, service keys (`/auth`, `/oauth-config`, `/api-keys`).
+- **Audit logs** — structured request audit trail across KV and other surfaces (`/audit-logs`).
+- **Webhooks** — outbound webhooks for app events (`/webhooks`).
+- **Multi-region app moves** — relocate an app across regions with retained source replicas (`scripts/move-app/`).
+
+**Agent surface**
+- **MCP server** — every capability above is exposed as MCP tools at `/mcp` (HTTP) or via stdio (`@butterbase/mcp` — `npx @butterbase/mcp`).
+- **Claude Code plugin** — `packages/plugin` (submodule of [butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)) ships 30+ guided skills (idea → plan → schema → auth → functions → deploy → submit) for agentic app building.
 
 ## Open-source vs. managed
 
-This repo ships the **runtime data plane**:
-
-- `services/control-api` — Fastify control plane (apps, auth, storage, functions, AI gateway, RLS, migrations). Embeds the MCP server at `/mcp`.
-- `services/mcp-server` — MCP tool implementations (built into the control-api image; can also run standalone over stdio)
-- `services/deno-runtime` — serverless function executor (included in local Docker)
-- `services/agent-runtime`, `services/build-runner`, `services/storage-indexer` — used in production / managed deploys; not started by the local compose file
-- `packages/sdk`, `packages/cli`, `packages/plugin`, `packages/shared` — client surfaces
-
-The **managed offering** at [butterbase.ai](https://butterbase.ai) adds multi-region orchestration, billing, upstream AI router adapters, lease-based quota enforcement, and ops dashboards. Those live in a private repo that consumes this one as a submodule.
+This repo ships the **runtime data plane** — everything required to self-host a fully featured Butterbase instance. The **managed offering** at [butterbase.ai](https://butterbase.ai) adds multi-region orchestration, billing, upstream AI router adapters, lease-based quota enforcement, and ops dashboards (those live in a private repo that consumes this one as a submodule).
 
 When you self-host, the AI gateway runs without upstream router adapters, billing uses a no-op provider, and quotas are unlimited. Wire your own implementations via the `BillingProvider`, `QuotaEnforcer`, and `RouterAdapter` interfaces in `packages/shared`.
 
@@ -24,10 +78,10 @@ When you self-host, the AI gateway runs without upstream router adapters, billin
 
 ### 1. Clone (with submodules)
 
-The Claude Code plugin (`packages/plugin`) is a git submodule ([Butterbase Skills](https://github.com/butterbase-ai/butterbase-skills)). A plain clone leaves `packages/plugin/` empty and `npm install` silently skips that workspace.
+The Claude Code plugin containing skills (`packages/plugin`) is a git submodule ([butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)). A plain clone leaves `packages/plugin/` empty and `npm install` silently skips that workspace.
 
 ```bash
-git clone --recurse-submodules https://github.com/NetGPT-Inc/butterbase-oss.git
+git clone --recurse-submodules https://github.com/butterbase-ai/butterbase-oss.git
 cd butterbase-oss
 ```
 
@@ -117,37 +171,99 @@ Full setup (auth, MCP clients, troubleshooting, production notes): **[`SETUP.md`
 ## Architecture
 
 ```
-                  ┌──────────────────────────────────┐
-                  │  Your app / agent / MCP client │
-                  └──────────────┬───────────────────┘
-                                 │
-                  ┌──────────────▼───────────────────┐
-                  │     control-api (Fastify)        │
-                  │  apps · auth · storage · funcs   │
-                  │  AI gateway · RLS · MCP /mcp     │
-                  └──┬─────────┬─────────┬────────┬──┘
-                     │         │         │        │
-              ┌──────▼──┐ ┌────▼────┐ ┌──▼──┐ ┌───▼────────┐
-              │ Postgres│ │ Storage │ │Redis│ │deno-runtime│
-              │ planes  │ │ (S3/R2) │ │ KV  │ │ (functions)│
-              └─────────┘ └─────────┘ └─────┘ └────────────┘
+              ┌──────────────────────────────────────────┐
+              │    Your app · agent · MCP client · CLI   │
+              └──────────────────────┬───────────────────┘
+                                     │  REST · WebSocket · MCP
+              ┌──────────────────────▼───────────────────┐
+              │            control-api (Fastify)         │
+              │   apps · auth · schema · auto-api · RLS  │
+              │   storage · functions · KV · realtime    │
+              │   AI gateway · RAG · DOs · MCP at /mcp   │
+              └──┬──────┬───────┬───────┬────────┬───────┘
+                 │      │       │       │        │
+        ┌────────▼─┐ ┌──▼───┐ ┌─▼──┐ ┌──▼─────┐ ┌▼─────────────┐
+        │ Postgres │ │ S3 / │ │Redis│ │ Deno   │ │ Python agent │
+        │ 3 planes │ │ R2   │ │ KV  │ │runtime │ │   runtime    │
+        └──────────┘ └──────┘ └────┘ └────────┘ └──────────────┘
+                                              ┌──────────────────┐
+                                              │ Cloudflare:      │
+                                              │ build-runner ·   │
+                                              │ dispatch-worker  │
+                                              └──────────────────┘
 ```
 
-The control-api is the main entry point. Platform metadata lives in the control-plane DB; per-app data in the data plane; hot-path runtime tables in the runtime-plane DB (`db/control-plane`, `db/runtime-plane`, `db/data-plane` migrations).
+**Three Postgres planes:**
+- **control-plane** (`db/control-plane/`) — platform metadata: users, apps, billing, audit.
+- **runtime-plane** (`db/runtime-plane/`) — hot-path runtime tables (KV expose rules, realtime channels, sessions).
+- **data-plane** (`db/data-plane/`) — per-app user data; each app gets isolated schemas with RLS.
+
+## Repo layout
+
+**Services** (`services/`)
+
+| Service | Language | What it does |
+|---|---|---|
+| `control-api` | Node.js / Fastify | Main entry point. All public APIs, embeds MCP at `/mcp`. |
+| `mcp-server` | Node.js | MCP tool implementations (built into control-api; also ships as `butterbase-mcp` stdio binary). |
+| `deno-runtime` | Deno | Executes user serverless functions in isolates. |
+| `agent-runtime` | Python (uv) | Long-running agent executor for `manage_ai` / agent tasks. |
+| `build-runner` | Cloudflare Worker | Builds frontends and edge-SSR bundles from source. |
+| `storage-indexer` | Node.js | Async indexer for uploaded objects. |
+| `docs` | Astro | Public documentation site (also served locally at `:4321`). |
+
+**Packages** (`packages/`)
+
+| Package | Description |
+|---|---|
+| `@butterbase/sdk` | Universal TypeScript SDK (browser + server). |
+| `@butterbase/cli` | `butterbase` CLI for scaffolding and backend management. |
+| `@butterbase/plugin` | Claude Code plugin — 30+ guided skills for AI-driven app building. Git submodule of [butterbase-skills](https://github.com/butterbase-ai/butterbase-skills). |
+| `@butterbase/shared` | Shared types, constants, and pluggable interfaces (`BillingProvider`, `QuotaEnforcer`, `RouterAdapter`). |
+
+**Other top-level pieces**
+- `dispatch-worker/` — Cloudflare Worker that routes per-app subdomain traffic.
+- `bb-placeholder/` — placeholder origin for unprovisioned subdomains.
+- `infra/` — `pgbouncer` and `traefik` configs for self-host.
+- `db/` — SQL migrations for the three Postgres planes.
+- `Examples/` — `todo-2026-04-02`, `grocery-list-2026-04-03`.
+
+## What's *not* in this repo
+
+The OSS / managed boundary is intentional. The following are private to the managed offering:
+
+- Multi-region orchestration and the cross-region scheduler.
+- Billing logic, lease-based quota math, and Stripe wire-up beyond the no-op provider.
+- Upstream AI router adapters (OpenAI / Anthropic / Bedrock provider integrations beyond the gateway interface).
+- Customer / admin dashboards, hackathon-host dashboards, and ops tooling.
+
+If you need these for self-host, implement against the interfaces in `packages/shared` — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the scope rules.
 
 ## Documentation
 
 - [`SETUP.md`](./SETUP.md) — self-host and local development guide
+- [`CHANGELOG.md`](./CHANGELOG.md) — release notes (latest: **v0.2.0**, 2026-05-25 — KV store)
+- [`ROADMAP.md`](./ROADMAP.md) — what's next
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor workflow and OSS scope
-- [`Examples/`](./Examples) — example apps
+- [`SUBDOMAIN_IMPLEMENTATION.md`](./SUBDOMAIN_IMPLEMENTATION.md) — tenant subdomain routing
+- [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md) — multi-region E2E stack
+- [`docs/runbooks`](./docs/runbooks) — operational runbooks
+- [`Examples/`](./Examples) — example apps (todo, grocery list)
+- Docs site (local): `http://localhost:4321` after `docker compose up`
 
 ## Project status
 
-Initial open-source release (v0.1.0). The data plane is production-tested by the managed offering. Public APIs and the MCP tool surface are stabilizing; the OSS distribution is new — report self-host issues and we will tighten docs and defaults from feedback.
+Latest release: **v0.2.0** (2026-05-25) — adds the KV store across SDK / REST / CLI / MCP. The data plane is production-tested by the managed offering; the OSS distribution is young — please file self-host issues and we'll tighten docs and defaults from feedback. See [`CHANGELOG.md`](./CHANGELOG.md) for the full history.
+
+## Community & support
+
+- **[Discord](https://discord.gg/eZ7PT68uP)** — chat with the team and other builders
+- **[GitHub Issues](https://github.com/butterbase-ai/butterbase-oss/issues)** — bug reports, feature requests
+- **Email** — [yuki@butterbase.ai](mailto:yuki@butterbase.ai) for direct contact
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Read the scope section before PRs that touch billing, quota math, or upstream router adapters.
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md). The boundary between OSS and the managed offering is intentional — please read the scope section before opening a PR that touches billing, quota math, or upstream router adapters.
 
 ## Security
 
@@ -156,3 +272,19 @@ See [`SECURITY.md`](./SECURITY.md). Report vulnerabilities to `security@butterba
 ## License
 
 [Apache-2.0](./LICENSE). Copyright 2026 NetGPT Inc.
+
+## Contributors
+
+<a href="https://github.com/butterbase-ai/butterbase-oss/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=butterbase-ai/butterbase-oss" alt="Contributors" />
+</a>
+
+## Star history
+
+<a href="https://www.star-history.com/#butterbase-ai/butterbase-oss&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase-oss&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase-oss&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=butterbase-ai/butterbase-oss&type=Date" />
+  </picture>
+</a>
