@@ -19,6 +19,7 @@ import {
   deleteSnapshot,
   deleteBlob,
   wipeRepo,
+  sumRepoBlobBytes,
 } from '../services/repo-storage.js';
 import { planRetention } from '../services/repo-retention.js';
 import { listActiveCloneSnapshotIdsForApp } from '../services/clone-jobs.js';
@@ -57,6 +58,26 @@ export async function repoRoutes(app: FastifyInstance) {
           }));
         }
         throw e;
+      }
+
+      // Check per-app total storage quota (storage_config.total_size_limit).
+      const runtimeDbQuota = getRuntimeDbPool(config.runtimeDb, ctx.region);
+      const cfgRes = await runtimeDbQuota.query<{ storage_config: { total_size_limit?: number } | null }>(
+        `SELECT storage_config FROM apps WHERE id = $1`,
+        [ctx.appId],
+      );
+      const totalSizeLimit = cfgRes.rows[0]?.storage_config?.total_size_limit;
+      if (totalSizeLimit !== undefined && totalSizeLimit !== null) {
+        const currentBytes = await sumRepoBlobBytes(ctx.appId);
+        const manifestBytes = manifest.totalBytes;
+        if (currentBytes + manifestBytes > totalSizeLimit) {
+          return reply.code(413).send({
+            error: 'storage_quota_exceeded',
+            current_bytes: currentBytes,
+            limit_bytes: totalSizeLimit,
+            manifest_bytes: manifestBytes,
+          });
+        }
       }
 
       const distinct = [...blobsReferenced(manifest.files)];

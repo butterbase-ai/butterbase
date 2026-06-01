@@ -216,6 +216,25 @@ export async function wipeRepo(appId: string): Promise<void> {
   } while (token);
 }
 
+/** Sum the sizes of all deduplicated blobs stored for an app in S3. */
+export async function sumRepoBlobBytes(appId: string): Promise<number> {
+  const blobsPrefix = `${appId}/_repo/blobs/`;
+  let total = 0;
+  let token: string | undefined;
+  do {
+    const res = await internalClient.send(new ListObjectsV2Command({
+      Bucket: config.s3.bucket,
+      Prefix: blobsPrefix,
+      ContinuationToken: token,
+    }));
+    for (const obj of res.Contents ?? []) {
+      total += obj.Size ?? 0;
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return total;
+}
+
 /** Server-side S3 copy. Use when src and dst are in the same region (same bucket, different prefix). */
 export async function copyBlobSameRegion(srcAppId: string, dstAppId: string, sha256: string): Promise<void> {
   await internalClient.send(new CopyObjectCommand({
