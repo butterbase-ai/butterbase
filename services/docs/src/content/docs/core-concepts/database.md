@@ -257,9 +257,39 @@ Use `_seed: true` to mark a table as containing seed data — rows that should b
 }
 ```
 
-The marker persists across schema apply/introspect cycles. Use it on lookup tables, reference data, default roles, or example rows so your templates are ready when they need them.
+The marker persists across schema apply/introspect cycles. Use it on lookup tables, reference data, default roles, or example rows so clones of your app arrive with the data they need pre-populated.
 
-**Note:** Currently the marker is forward-compatible only — it does not yet trigger automatic row copying during template clone. That capability will arrive in a future release. Mark your seed tables now to prepare for when row copying becomes active.
+When someone clones your app, the rows in every seed-marked table are copied into the new app's database. Tables without `_seed: true` are cloned with their schema only — no rows are copied.
+
+## What a clone copies
+
+When someone clones your app, the new app gets:
+
+- Your database schema (tables, columns, indexes).
+- Your access rules (row-level security policies).
+- Your function code.
+- Your repo files (latest snapshot at the time of clone).
+- Your non-secret configuration (storage settings, allowed origins, OAuth provider and URLs, AI model defaults).
+- Rows in tables you marked with `_seed: true`.
+
+## What stays with you
+
+The cloned app does **not** inherit:
+
+- Your end-user accounts or sessions.
+- OAuth client credentials.
+- Function environment variables.
+- Bring-your-own-key (BYOK) AI provider keys.
+- Custom domains.
+- Billing.
+- Function invocation history.
+- Audit logs.
+
+The clone owner must configure these themselves after the clone completes.
+
+## Clone regions
+
+Clones can target any of the [supported regions](/core-concepts/regions/). Cross-region clones may take a little longer because repo files are copied across regions before the new app is ready.
 
 ## Dry run (preview changes)
 
