@@ -68,6 +68,11 @@ export async function cloneCommand(
   if (!final) return;
 
   ora().succeed(`Cloned to app ${final.dest_app_id}`);
+  if (final.warnings?.length) {
+    for (const w of final.warnings) {
+      console.log(chalk.yellow(`warning: ${w}`));
+    }
+  }
 
   // Init + pull into target dir.
   const dir = targetDir ?? final.dest_app_id!;
@@ -82,7 +87,7 @@ export async function cloneCommand(
   }
 
   if (opts.json) {
-    console.log(JSON.stringify({ job_id: final.job_id, dest_app_id: final.dest_app_id, target_dir: path.resolve(dir) }, null, 2));
+    console.log(JSON.stringify({ job_id: final.job_id, dest_app_id: final.dest_app_id, target_dir: path.resolve(dir), warnings: final.warnings }, null, 2));
   } else {
     console.log(chalk.green(`✓ Cloned ${sourceAppId} → ${final.dest_app_id} into ${path.resolve(dir)}`));
   }
@@ -108,6 +113,11 @@ export async function cloneRetryCommand(
   if (!final) return;
 
   ora().succeed(`Cloned to app ${final.dest_app_id}`);
+  if (final.warnings?.length) {
+    for (const w of final.warnings) {
+      console.log(chalk.yellow(`warning: ${w}`));
+    }
+  }
 
   // Init + pull into target dir.
   const dir = targetDir ?? final.dest_app_id!;
@@ -122,7 +132,7 @@ export async function cloneRetryCommand(
   }
 
   if (opts.json) {
-    console.log(JSON.stringify({ job_id: final.job_id, dest_app_id: final.dest_app_id, target_dir: path.resolve(dir) }, null, 2));
+    console.log(JSON.stringify({ job_id: final.job_id, dest_app_id: final.dest_app_id, target_dir: path.resolve(dir), warnings: final.warnings }, null, 2));
   } else {
     console.log(chalk.green(`✓ Retried clone job ${jobId} → ${final.dest_app_id} into ${path.resolve(dir)}`));
   }

@@ -27,6 +27,29 @@ export interface CloneJob {
   error_message: string | null;
   created_at: string;
   completed_at: string | null;
+  warnings: string[];
+}
+
+export interface TemplateRow {
+  app_id: string;
+  name: string;
+  region: string;
+  owner_id: string;
+  owner_display_name: string | null;
+  created_at: string;
+  fork_count: number;
+  has_repo: boolean;
+  schema_summary: {
+    table_count: number;
+    function_count: number;
+  };
+}
+
+export interface ListTemplatesResponse {
+  items: TemplateRow[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export const repoApi = {
@@ -65,6 +88,16 @@ export const cloneApi = {
   },
   retry(jobId: string) {
     return apiPost<{ job_id: string; status: string }>(`/v1/clone-jobs/${jobId}/retry`, {});
+  },
+  list(opts: { q?: string; sort?: 'recent' | 'popular'; region?: string; limit?: number; offset?: number } = {}) {
+    const params = new URLSearchParams();
+    if (opts.q) params.set('q', opts.q);
+    if (opts.sort) params.set('sort', opts.sort);
+    if (opts.region) params.set('region', opts.region);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset !== undefined) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    return apiGet<ListTemplatesResponse>(`/v1/templates${qs ? `?${qs}` : ''}`);
   },
 };
 
