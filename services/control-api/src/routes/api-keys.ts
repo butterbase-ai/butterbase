@@ -27,11 +27,12 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       }));
     }
     if (scope !== undefined && scope !== 'app' && scope !== 'substrate' && scope !== 'both') {
-      return reply.code(400).send({
-        error: 'INVALID_SCOPE',
+      return reply.code(400).send(createAgentError({
+        code: 'VALIDATION_INVALID_SCOPE',
         message: "scope must be 'app', 'substrate', or 'both'",
         remediation: "Omit the scope field for an app key (default), set 'substrate' for a substrate-only key, or 'both' for a single key that works on both surfaces.",
-      });
+        documentation_url: getDocUrl('VALIDATION_INVALID_SCOPE'),
+      }));
     }
 
     const result = await ApiKeyService.generateApiKey(

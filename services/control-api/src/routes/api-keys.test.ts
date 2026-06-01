@@ -83,6 +83,6 @@ describe('API Key Routes', () => {
       payload: { name: 'bad', scope: 'admin' },
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toBe('INVALID_SCOPE');
+    expect(res.json().error.code).toBe('VALIDATION_INVALID_SCOPE');
   });
 });
