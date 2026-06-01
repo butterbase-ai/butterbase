@@ -281,6 +281,57 @@ export async function pushSnapshot(
 }
 
 // ---------------------------------------------------------------------------
+// pushFileSnapshot — push a snapshot with a specific file path
+// ---------------------------------------------------------------------------
+
+/**
+ * Like pushSnapshot but uses a caller-supplied file path instead of 'README.md'.
+ * Returns the snapshot_id assigned by the server.
+ *
+ * Useful for tests that need to verify a specific file's sha256 in the manifest
+ * (e.g. proving a pinned snapshot contains 'a.txt' with known content).
+ */
+export async function pushFileSnapshot(
+  apiKey: string,
+  appId: string,
+  filePath: string,
+  fileBody: string,
+): Promise<string> {
+  const sha256 = createHash('sha256').update(fileBody).digest('hex');
+  const size = Buffer.byteLength(fileBody, 'utf8');
+  const manifestBody = { files: [{ path: filePath, sha256, size }] };
+
+  const prep = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/prepare`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify(manifestBody),
+  });
+  if (!prep.ok) throw new Error(`pushFileSnapshot prepare failed: ${prep.status} ${await prep.text()}`);
+  const pj = await prep.json() as {
+    snapshot_id: string;
+    missing_blobs: { sha256: string; uploadUrl: string }[];
+  };
+
+  for (const mb of pj.missing_blobs) {
+    const put = await fetch(mb.uploadUrl, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: fileBody,
+    });
+    if (!put.ok) throw new Error(`pushFileSnapshot blob upload failed: ${put.status} ${await put.text()}`);
+  }
+
+  const commit = await fetch(`${API_URL}/v1/${appId}/repo/snapshots/commit`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ manifest: manifestBody }),
+  });
+  if (!commit.ok) throw new Error(`pushFileSnapshot commit failed: ${commit.status} ${await commit.text()}`);
+  const cj = await commit.json() as { snapshot_id: string };
+  return cj.snapshot_id;
+}
+
+// ---------------------------------------------------------------------------
 // insertRowsAsOwner — POST rows via the auto-API as the app owner
 // ---------------------------------------------------------------------------
 
