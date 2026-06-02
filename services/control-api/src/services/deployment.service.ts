@@ -733,6 +733,20 @@ export async function deployArtifact(
       ? await deployViaWfp(ctx)
       : await deployViaPages(ctx);
 
+    // --- Persist artifact slot for clone replay ---
+    // Once the platform has accepted the bundle (no throw from deployVia*),
+    // overwrite the per-app artifact slot with the exact bytes that were
+    // published. The clone worker copies this object verbatim onto the dest
+    // so cloned apps get byte-for-byte identical frontends. One slot per
+    // app (overwritten on every deploy) — storage stays bounded. Best-effort:
+    // failure to persist does NOT roll back the deploy, since the live edge
+    // is already serving the new artifact.
+    try {
+      await R2.putObject(R2.appArtifactKey(appId), zipBuffer, 'application/zip');
+    } catch (err) {
+      console.error(`${tag} Failed to persist app-artifact slot (deploy itself succeeded):`, err);
+    }
+
     // --- Update deployment record (app_deployments is runtime-tier) ---
     console.log(`${tag} Step 5/5: Updating DB…`);
     await runtimePool.query(

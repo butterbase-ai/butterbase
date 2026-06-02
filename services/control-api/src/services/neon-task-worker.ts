@@ -20,7 +20,7 @@ import {
 } from './repo-storage.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding } from './clone-replay.js';
+import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding, replayFrontend } from './clone-replay.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
 
@@ -670,6 +670,25 @@ async function executeClone(
         { destAppId: resolvedDestAppId, warnings: hookResult.warnings.length },
         '[clone] auth_hook_function binding step complete',
       );
+
+      // Step 7: replay the source's most recent published frontend by copying
+      // its persisted artifact slot (app-artifact/{appId}.zip) onto the dest
+      // and re-publishing through the same pipeline. Best-effort: a failure
+      // here records a warning but does not fail the broader clone — the
+      // backend is fully cloned at this point, and the user can re-publish
+      // the frontend manually if needed.
+      scope.setTag('step', 'replaying_frontend');
+      const frontendResult = await replayFrontend(
+        controlDb,
+        destRuntimePool,
+        job.source_app_id,
+        resolvedDestAppId,
+        job.requested_by_user_id,
+        logger,
+      );
+      if (frontendResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, frontendResult.warnings);
+      }
 
       scope.setTag('step', 'finalizing');
 
