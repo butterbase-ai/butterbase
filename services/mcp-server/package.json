@@ -1,6 +1,6 @@
 {
   "name": "@butterbase/mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Butterbase MCP server — manage schemas, auth, functions, storage, RAG, realtime, and deploys on Butterbase from any MCP-capable client.",
   "license": "Apache-2.0",
   "homepage": "https://butterbase.ai",
