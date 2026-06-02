@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import prompts from 'prompts';
-import { initApp, listApps, deleteApp, pauseApp } from '../lib/api-client.js';
+import { initApp, listApps, deleteApp, pauseApp, apiPost, apiDelete } from '../lib/api-client.js';
 import { setCurrentAppId, getCurrentAppId } from '../lib/config.js';
 
 export async function appsListCommand() {
@@ -139,6 +139,46 @@ export async function appsResumeCommand(appId: string) {
     console.log(chalk.green('▶  Data-plane traffic restored.'));
   } catch (error) {
     spinner.fail('Failed to resume app');
+    console.error(chalk.red((error as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function appsLinkSubstrateCommand(appId: string) {
+  if (!appId) appId = (await getCurrentAppId()) || '';
+  if (!appId) {
+    console.log(chalk.red('✗ App ID is required'));
+    console.log(chalk.gray('Usage: butterbase apps link-substrate <app-id>'));
+    process.exit(1);
+  }
+
+  const spinner = ora(`Linking ${appId} to substrate...`).start();
+  try {
+    await apiPost(`/v1/me/apps/${appId}/substrate-link`, {});
+    spinner.succeed(`Linked ${appId} to substrate`);
+    console.log(chalk.gray('  Deployed functions now receive ctx.substrate.'));
+    console.log(chalk.gray(`  Unlink with: butterbase apps unlink-substrate ${appId}`));
+  } catch (error) {
+    spinner.fail('Failed to link app to substrate');
+    console.error(chalk.red((error as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function appsUnlinkSubstrateCommand(appId: string) {
+  if (!appId) appId = (await getCurrentAppId()) || '';
+  if (!appId) {
+    console.log(chalk.red('✗ App ID is required'));
+    console.log(chalk.gray('Usage: butterbase apps unlink-substrate <app-id>'));
+    process.exit(1);
+  }
+
+  const spinner = ora(`Unlinking ${appId} from substrate...`).start();
+  try {
+    await apiDelete(`/v1/me/apps/${appId}/substrate-link`);
+    spinner.succeed(`Unlinked ${appId} from substrate`);
+  } catch (error) {
+    spinner.fail('Failed to unlink app from substrate');
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

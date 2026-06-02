@@ -20,6 +20,8 @@ Actions:
   - "get_clone_job":      Look up the status of a previously-started clone job. Returns { status, dest_app_id?, error_message? }.
   - "find_templates":     Search public templates by name, region, sort order, and pagination. Returns paginated list of public app templates.
   - "set_clone_webhook":  Set or clear a webhook that fires when someone clones this app. Pass webhook_url + webhook_secret to configure, or clear_webhook: true to remove.
+  - "link_substrate":     Link this app to the caller's substrate. Once linked, the app's deployed functions receive ctx.substrate and its actions/entities flow into the caller's substrate ledger.
+  - "unlink_substrate":   Unlink this app from substrate. ctx.substrate stops being injected; in-flight actions are unaffected.
 
 Parameters by action:
   list:               { action: "list" }
@@ -34,12 +36,14 @@ Parameters by action:
   get_clone_job:      { action: "get_clone_job", job_id }
   find_templates:     { action: "find_templates", q?, region?, sort?, limit?, offset? }
   set_clone_webhook:  { action: "set_clone_webhook", app_id, webhook_url, webhook_secret } or { action: "set_clone_webhook", app_id, clear_webhook: true }
+  link_substrate:     { action: "link_substrate", app_id }
+  unlink_substrate:   { action: "unlink_substrate", app_id }
 
 Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -168,6 +172,18 @@ Common errors:
           const suffix = params.toString() ? `?${params.toString()}` : '';
           const res = await apiGet(`/v1/templates${suffix}`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'link_substrate': {
+          const err = need(args.app_id, '"app_id" is required for this action.');
+          if (err) return err;
+          const result = await apiPost(`/v1/me/apps/${args.app_id}/substrate-link`, {});
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'unlink_substrate': {
+          const err = need(args.app_id, '"app_id" is required for this action.');
+          if (err) return err;
+          const result = await apiDelete(`/v1/me/apps/${args.app_id}/substrate-link`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'set_clone_webhook': {
           const err = need(args.app_id, '"app_id" is required for this action.');

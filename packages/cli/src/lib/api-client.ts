@@ -8,6 +8,55 @@ export interface ApiError {
 }
 
 /**
+ * fetch() wrapper that turns connection failures and unparseable bodies into
+ * actionable errors. A 0-byte ECONNREFUSED used to surface as
+ * "Invalid or revoked API key" because res.json() threw before the
+ * status-based error mapper ran.
+ */
+async function fetchJson(url: string, init?: RequestInit): Promise<{ status: number; body: any }> {
+  let res: Response;
+  try {
+    res = await fetch(url, init);
+  } catch (err) {
+    const cause = (err as any)?.cause;
+    const code: string | undefined = cause?.code ?? (err as any)?.code;
+    const origin = safeOrigin(url);
+    const hint = isLocalOrigin(origin)
+      ? ` Run \`butterbase config set endpoint https://api.butterbase.ai\` to point at the hosted platform.`
+      : '';
+    if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT' || code === 'EAI_AGAIN') {
+      throw new Error(`Could not reach ${origin} (${code}).${hint}`);
+    }
+    throw new Error(`Network error reaching ${origin}: ${(err as Error)?.message ?? String(err)}`);
+  }
+
+  if (res.status === 204) return { status: 204, body: {} };
+
+  const text = await res.text();
+  if (!text) return { status: res.status, body: {} };
+  try {
+    return { status: res.status, body: JSON.parse(text) };
+  } catch {
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} from ${safeOrigin(url)} (non-JSON response: ${truncate(text, 200)})`);
+    }
+    throw new Error(`Unexpected non-JSON response from ${safeOrigin(url)}: ${truncate(text, 200)}`);
+  }
+}
+
+function safeOrigin(url: string): string {
+  try { return new URL(url).origin; } catch { return url; }
+}
+
+function isLocalOrigin(origin: string): boolean {
+  return /^(https?:\/\/)(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|$)/i.test(origin);
+}
+
+function truncate(s: string, n: number): string {
+  return s.length <= n ? s : s.slice(0, n) + '…';
+}
+
+/**
  * Get authorization headers
  */
 async function getHeaders(): Promise<HeadersInit> {
@@ -45,11 +94,10 @@ export async function apiGet<T>(path: string): Promise<T> {
   const baseUrl = await getBaseUrl();
   const headers = await getHeaders();
 
-  const res = await fetch(`${baseUrl}${path}`, { headers });
-  const body: any = await res.json();
+  const { status, body } = await fetchJson(`${baseUrl}${path}`, { headers });
 
-  if (!res.ok) {
-    throw parseApiError(res.status, body);
+  if (status < 200 || status >= 300) {
+    throw parseApiError(status, body);
   }
 
   return body as T;
@@ -62,16 +110,14 @@ export async function apiPost<T>(path: string, data: unknown): Promise<T> {
   const baseUrl = await getBaseUrl();
   const headers = await getHeaders();
 
-  const res = await fetch(`${baseUrl}${path}`, {
+  const { status, body } = await fetchJson(`${baseUrl}${path}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(data),
   });
 
-  const body: any = await res.json();
-
-  if (!res.ok) {
-    throw parseApiError(res.status, body);
+  if (status < 200 || status >= 300) {
+    throw parseApiError(status, body);
   }
 
   return body as T;
@@ -84,16 +130,14 @@ export async function apiPatch<T>(path: string, data: unknown): Promise<T> {
   const baseUrl = await getBaseUrl();
   const headers = await getHeaders();
 
-  const res = await fetch(`${baseUrl}${path}`, {
+  const { status, body } = await fetchJson(`${baseUrl}${path}`, {
     method: 'PATCH',
     headers,
     body: JSON.stringify(data),
   });
 
-  const body: any = await res.json();
-
-  if (!res.ok) {
-    throw parseApiError(res.status, body);
+  if (status < 200 || status >= 300) {
+    throw parseApiError(status, body);
   }
 
   return body as T;
@@ -108,20 +152,15 @@ export async function apiDelete<T>(path: string): Promise<T> {
   // DELETE has no body — remove Content-Type to avoid Fastify's JSON parser rejecting an empty body
   delete (headers as Record<string, string>)['Content-Type'];
 
-  const res = await fetch(`${baseUrl}${path}`, {
+  const { status, body } = await fetchJson(`${baseUrl}${path}`, {
     method: 'DELETE',
     headers,
   });
 
-  // Handle 204 No Content
-  if (res.status === 204) {
-    return {} as T;
-  }
+  if (status === 204) return {} as T;
 
-  const body: any = await res.json();
-
-  if (!res.ok) {
-    throw parseApiError(res.status, body);
+  if (status < 200 || status >= 300) {
+    throw parseApiError(status, body);
   }
 
   return body as T;
@@ -215,17 +254,12 @@ export async function apiFetch<T = unknown>(method: string, path: string, data?:
     delete (headers as Record<string, string>)['Content-Type'];
   }
 
-  const res = await fetch(`${baseUrl}${path}`, init);
+  const { status, body } = await fetchJson(`${baseUrl}${path}`, init);
 
-  // Handle 204 No Content
-  if (res.status === 204) {
-    return {} as T;
-  }
+  if (status === 204) return {} as T;
 
-  const body: any = await res.json();
-
-  if (!res.ok) {
-    throw parseApiError(res.status, body);
+  if (status < 200 || status >= 300) {
+    throw parseApiError(status, body);
   }
 
   return body as T;
@@ -238,16 +272,14 @@ export async function apiPut<T>(path: string, data: unknown): Promise<T> {
   const baseUrl = await getBaseUrl();
   const headers = await getHeaders();
 
-  const res = await fetch(`${baseUrl}${path}`, {
+  const { status, body } = await fetchJson(`${baseUrl}${path}`, {
     method: 'PUT',
     headers,
     body: JSON.stringify(data),
   });
 
-  const body: any = await res.json();
-
-  if (!res.ok) {
-    throw parseApiError(res.status, body);
+  if (status < 200 || status >= 300) {
+    throw parseApiError(status, body);
   }
 
   return body as T;

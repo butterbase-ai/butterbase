@@ -2,6 +2,8 @@ import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
 
+export const DEFAULT_ENDPOINT = 'https://api.butterbase.ai';
+
 export interface ButterbaseConfig {
   endpoint: string;
   apiKey?: string;
@@ -45,7 +47,7 @@ export async function loadConfig(): Promise<ButterbaseConfig> {
 
   // Return default config
   return {
-    endpoint: 'https://api.butterbase.ai',
+    endpoint: DEFAULT_ENDPOINT,
   };
 }
 
@@ -84,6 +86,22 @@ export async function saveProjectConfig(config: Partial<ButterbaseConfig>): Prom
   await fs.writeJson(PROJECT_CONFIG_FILE, config, { spaces: 2 });
 }
 
+let localhostWarned = false;
+
+function warnIfLocalEndpoint(endpoint: string | undefined): void {
+  if (localhostWarned || !endpoint) return;
+  try {
+    const h = new URL(endpoint).hostname;
+    if (h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0') {
+      localhostWarned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[butterbase] endpoint is ${endpoint} (local). Run \`butterbase config set endpoint ${DEFAULT_ENDPOINT}\` to use the hosted platform.`
+      );
+    }
+  } catch {}
+}
+
 /**
  * Get merged configuration (project overrides global)
  */
@@ -91,11 +109,9 @@ export async function getMergedConfig(): Promise<ButterbaseConfig> {
   const globalConfig = await loadConfig();
   const projectConfig = await loadProjectConfig();
 
-  if (projectConfig) {
-    return { ...globalConfig, ...projectConfig };
-  }
-
-  return globalConfig;
+  const merged = projectConfig ? { ...globalConfig, ...projectConfig } : globalConfig;
+  warnIfLocalEndpoint(merged.endpoint);
+  return merged;
 }
 
 /**
@@ -126,7 +142,7 @@ export async function getApiKey(): Promise<string | undefined> {
  */
 export async function getApiUrl(): Promise<string> {
   const config = await getMergedConfig();
-  return config.endpoint ?? 'https://api.butterbase.ai';
+  return config.endpoint ?? DEFAULT_ENDPOINT;
 }
 
 /** Read the per-folder pinned snapshot id, or null when not bound or never synced. */

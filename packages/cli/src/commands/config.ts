@@ -1,9 +1,25 @@
 import prompts from 'prompts';
 import chalk from 'chalk';
-import { updateConfig, loadConfig } from '../lib/config.js';
+import { updateConfig, loadConfig, saveConfig, DEFAULT_ENDPOINT } from '../lib/config.js';
+
+function isLocalEndpoint(endpoint: string | undefined): boolean {
+  if (!endpoint) return false;
+  try {
+    const h = new URL(endpoint).hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0';
+  } catch { return false; }
+}
 
 export async function loginCommand() {
   console.log(chalk.blue('🔐 Butterbase Login\n'));
+
+  const existing = await loadConfig();
+  const resetEndpoint = isLocalEndpoint(existing.endpoint);
+  if (resetEndpoint) {
+    console.log(chalk.yellow(
+      `Your saved endpoint is ${existing.endpoint} (local). Resetting to ${DEFAULT_ENDPOINT} for login.`
+    ));
+  }
 
   const { apiKey } = await prompts({
     type: 'password',
@@ -17,7 +33,11 @@ export async function loginCommand() {
     process.exit(0);
   }
 
-  await updateConfig('apiKey', apiKey);
+  if (resetEndpoint) {
+    await saveConfig({ ...existing, endpoint: DEFAULT_ENDPOINT, apiKey });
+  } else {
+    await updateConfig('apiKey', apiKey);
+  }
 
   console.log(chalk.green('✓ Successfully logged in!'));
   console.log(chalk.gray(`Config saved to ~/.butterbase/config.json`));

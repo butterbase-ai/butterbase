@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import chalk from 'chalk';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { renderError } from '../src/lib/errors.js';
 import { initCommand } from '../src/commands/init.js';
 import { loginCommand, logoutCommand, configGetCommand, configSetCommand } from '../src/commands/config.js';
-import { appsListCommand, appsCreateCommand, appsUseCommand, appsDeleteCommand, appsPauseCommand, appsResumeCommand } from '../src/commands/apps.js';
+import { appsListCommand, appsCreateCommand, appsUseCommand, appsDeleteCommand, appsPauseCommand, appsResumeCommand, appsLinkSubstrateCommand, appsUnlinkSubstrateCommand } from '../src/commands/apps.js';
 import { schemaGetCommand, schemaApplyCommand } from '../src/commands/schema.js';
 import { functionsListCommand, functionsDeployCommand, functionsLogsCommand, functionsDeleteCommand, functionsInvokeCommand, functionsEnvSetCommand, functionsEnvListCommand } from '../src/commands/functions.js';
 import { storageListCommand, storageUploadCommand, storageDeleteCommand, storageConfigCommand } from '../src/commands/storage.js';
@@ -134,12 +137,24 @@ import { visibilityCommand } from '../src/commands/visibility.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
 import { templatesCommand } from '../src/commands/templates.js';
 
+function resolveVersion(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  // Compiled: dist/bin/butterbase.js → ../../package.json
+  // Source (tsx): bin/butterbase.ts → ../package.json
+  for (const rel of ['../package.json', '../../package.json']) {
+    try {
+      return JSON.parse(readFileSync(join(here, rel), 'utf8')).version;
+    } catch {}
+  }
+  return '0.0.0-unknown';
+}
+
 const program = new Command();
 
 program
   .name('butterbase')
   .description('Butterbase CLI - Backend as a Service')
-  .version('0.1.1');
+  .version(resolveVersion());
 
 // Init
 program
@@ -204,6 +219,16 @@ apps
   .command('resume [app-id]')
   .description('Resume a paused app — restore data-plane traffic')
   .action(appsResumeCommand);
+
+apps
+  .command('link-substrate [app-id]')
+  .description('Link this app to your substrate — wires ctx.substrate into deployed functions')
+  .action(appsLinkSubstrateCommand);
+
+apps
+  .command('unlink-substrate [app-id]')
+  .description('Unlink this app from your substrate')
+  .action(appsUnlinkSubstrateCommand);
 
 const appsConfig = apps.command('config').description('Read or update the app\'s server-side config');
 
