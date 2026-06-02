@@ -1,6 +1,6 @@
 import type { IntrospectedSchema } from './schema-introspector.js';
 import type { SchemaDSL } from './schema-validator.js';
-import { normalizeFKRef } from './schema-validator.js';
+import { normalizeFKRef, normalizeDefault } from './schema-validator.js';
 
 export interface DDLStatement {
   sql: string;
@@ -197,8 +197,13 @@ export function diffSchema(
         }
       }
 
-      // Default change
-      if (desiredCol.default !== undefined && desiredCol.default !== currentCol.default) {
+      // Default change. Compare normalized forms so DSL `'pending'` matches
+      // introspected `'pending'::text` (Postgres canonicalization), but emit
+      // the raw desired value so PG parses literals correctly.
+      if (
+        desiredCol.default !== undefined &&
+        normalizeDefault(desiredCol.default) !== normalizeDefault(currentCol.default)
+      ) {
         statements.push({
           sql: `ALTER TABLE "${tableName}" ALTER COLUMN "${colName}" SET DEFAULT ${desiredCol.default}`,
           description: `Change default of "${tableName}"."${colName}"`,

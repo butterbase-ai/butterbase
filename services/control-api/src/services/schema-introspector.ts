@@ -220,11 +220,12 @@ export async function introspectSchema(pool: pg.Pool): Promise<IntrospectedSchem
       }
 
       if (col.column_default !== null) {
-        let def = col.column_default;
-        // Clean up Postgres default syntax
-        def = def.replace(/^'(.*)'::.*$/, '$1');
-        if (def.startsWith('nextval(')) continue; // skip serial sequences
-        info.default = def;
+        // Skip SERIAL/IDENTITY sequence defaults — recreated by the dest's own DDL.
+        if (col.column_default.startsWith('nextval(')) continue;
+        // Store the raw Postgres-canonical expression (e.g. 'pending'::text).
+        // It must be valid as-is when re-emitted in CREATE TABLE DDL; the differ
+        // normalizes for equality comparison via normalizeDefault.
+        info.default = col.column_default;
       }
 
       table.columns[col.column_name] = info;
