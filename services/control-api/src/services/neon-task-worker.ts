@@ -459,13 +459,55 @@ async function executeClone(
       scope.setTag('step', 'provisioning');
 
       // 1. Provision a fresh dest app via the existing path (mirrors init.ts:196-244).
-      //    On retry, job.dest_app_id is already set from the prior attempt — reuse it
-      //    and skip provision entirely to avoid creating a second orphaned app row +
-      //    Neon database.
+      //    On retry, job.dest_app_id is already set from the prior attempt — reuse the
+      //    ID to avoid creating a second orphaned app row + Neon database, but consult
+      //    apps.provisioning_status to decide whether provisioning actually completed.
+      //    Treating dest_app_id as proof of provisioning is unsafe: provisioning could
+      //    have errored mid-flight (3D000, Neon outage, network blip), and resuming
+      //    past it leaves waitForDestReady to bail forever on the stale 'failed' status.
       if (job.dest_app_id) {
-        // Resume from a prior in-flight attempt: dest app already exists.
         destAppId = job.dest_app_id;
-        logger.info({ jobId, destAppId }, '[clone] resuming from prior attempt; skipping provision');
+        const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+        const statusRow = await destRuntimePool.query<{ provisioning_status: string }>(
+          `SELECT provisioning_status FROM apps WHERE id = $1`,
+          [destAppId],
+        );
+        const ps = statusRow.rows[0]?.provisioning_status;
+
+        if (ps === 'ready') {
+          // Prior provision completed — nothing to redo.
+          logger.info({ jobId, destAppId }, '[clone] resuming from prior attempt; dest already provisioned');
+        } else if (ps === 'failed' || ps === undefined) {
+          // Prior provision errored or the apps row went missing. Reset the
+          // marker and re-run provisionAppBackground. With createDatabase
+          // now blocking on waitUntilQueryable (neon-client.ts), the next
+          // attempt won't lose the same propagation race.
+          logger.warn(
+            { jobId, destAppId, priorStatus: ps },
+            '[clone] dest provisioning incomplete; re-provisioning',
+          );
+          await destRuntimePool.query(
+            `UPDATE apps
+                SET provisioning_status = 'provisioning',
+                    provisioning_error  = NULL,
+                    updated_at          = now()
+              WHERE id = $1`,
+            [destAppId],
+          ).catch((err) => {
+            logger.warn({ err, destAppId }, '[clone] failed to reset provisioning_status; continuing');
+          });
+          provisionAppBackground(job.dest_region, controlDb, dataPlaneDb, destAppId).catch((err) => {
+            logger.error({ err, destAppId }, '[clone] provisionAppBackground rejected on re-provision');
+          });
+        } else {
+          // 'provisioning' — a prior attempt is still mid-flight in background,
+          // or a concurrent retry is racing. Fall through to waitForDestReady,
+          // which polls to a terminal state.
+          logger.info(
+            { jobId, destAppId, priorStatus: ps },
+            '[clone] resuming from prior attempt; dest provisioning in progress',
+          );
+        }
       } else {
         destAppId = generateAppId();
         const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
