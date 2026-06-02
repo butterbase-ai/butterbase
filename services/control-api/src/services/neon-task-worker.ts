@@ -749,16 +749,32 @@ async function executeClone(
       logger.info({ jobId, destAppId: resolvedDestAppId }, '[clone] completed');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Best-effort failure marker; swallow secondary errors so we still rethrow the original.
-      await setCloneJobStatus(controlDb, jobId, { status: 'failed', error_message: msg }).catch(() => {});
+      // The neon-task queue retries up to task.max_attempts (line 184). If we mark
+      // the clone job 'failed' on every throw, the guard at line 435 short-circuits
+      // every retry attempt with "job in terminal status; skipping". Only mark the
+      // clone job failed once the task has truly exhausted retries; on transient
+      // failures, leave status='processing' so the requeued task can resume.
+      const isPermanent = task.attempts >= task.max_attempts;
 
-      // Emit failed audit event on source app. Wrap in catch so we don't compound the original error.
-      await insertCloneAuditLog(controlDb, {
-        appId: job.source_app_id,
-        userId: job.requested_by_user_id,
-        eventType: 'template_clone_failed',
-        metadata: { job_id: jobId, dest_app_id: destAppId ?? null, dest_region: job.dest_region, error: msg },
-      }).catch((auditErr) => logger.error({ auditErr }, '[clone] audit log failed event insert failed'));
+      if (isPermanent) {
+        // Best-effort failure marker; swallow secondary errors so we still rethrow the original.
+        await setCloneJobStatus(controlDb, jobId, { status: 'failed', error_message: msg }).catch(() => {});
+
+        // Emit failed audit event on source app. Wrap in catch so we don't compound the original error.
+        await insertCloneAuditLog(controlDb, {
+          appId: job.source_app_id,
+          userId: job.requested_by_user_id,
+          eventType: 'template_clone_failed',
+          metadata: { job_id: jobId, dest_app_id: destAppId ?? null, dest_region: job.dest_region, error: msg },
+        }).catch((auditErr) => logger.error({ auditErr }, '[clone] audit log failed event insert failed'));
+      } else {
+        // Surface the last error to the user but keep the job alive for the next attempt.
+        await setCloneJobStatus(controlDb, jobId, { error_message: msg }).catch(() => {});
+        logger.warn(
+          { jobId, attempt: task.attempts, maxAttempts: task.max_attempts, error: msg },
+          '[clone] transient failure, will retry',
+        );
+      }
 
       throw err; // re-throw so the neon-task queue applies its retry/fail logic
     }

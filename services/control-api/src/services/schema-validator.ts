@@ -86,6 +86,19 @@ export interface NormalizedFKRef {
   onUpdate: string;
 }
 
+// Normalize a column DEFAULT expression for equality comparison only.
+// Postgres canonicalizes `DEFAULT 'pending'` to `'pending'::text` in pg_attrdef,
+// so a DSL-authored `default: "'pending'"` won't string-equal the introspected
+// form. Strip a single outer string-literal cast on both sides before comparing.
+// NEVER use the return value to emit DDL — use the raw value so Postgres parses
+// it correctly.
+export function normalizeDefault(d: string | undefined): string | undefined {
+  if (d === undefined) return undefined;
+  const trimmed = d.trim();
+  const m = trimmed.match(/^'((?:[^']|'')*)'::[A-Za-z_][\w\s"()[\]]*$/);
+  return m ? `'${m[1]}'` : trimmed;
+}
+
 export function normalizeFKRef(ref: string | ForeignKeyRef): NormalizedFKRef {
   if (typeof ref === 'string') {
     const [table, column] = ref.split('.');
