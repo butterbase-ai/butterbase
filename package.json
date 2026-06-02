@@ -25,7 +25,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@butterbase/cli": "^0.3.0",
+    "@butterbase/cli": "^0.4.0",
     "pg": "^8.20.0"
   },
   "devDependencies": {
