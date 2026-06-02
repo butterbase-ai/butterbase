@@ -12,13 +12,17 @@ import { requireUserId } from '../utils/require-auth.js';
 import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
+import {
+  chatCompletionRequestSchema as chatCompletionSchema,
+  embeddingRequestSchema,
+} from '../services/ai-router/schemas.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
-import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
+import type { RouterAdapter, ChatCompletionRequest, EmbeddingRequest } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 
 export async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promise<{
@@ -88,29 +92,11 @@ const aiConfigSchema = z.object({
   allowedModels: z.array(z.string()).optional(),
 });
 
-const embeddingSchema = z.object({
+// App-scoped embedding schema: makes model optional since it can be resolved
+// from app config or platform defaults (unlike the gateway which requires it).
+const embeddingSchema = embeddingRequestSchema.extend({
   model: z.string().optional(),
-  input: z.union([z.string(), z.array(z.string())]),
-  encoding_format: z.enum(['float', 'base64']).optional(),
 });
-
-const contentPartSchema = z.union([
-  z.object({ type: z.literal('text'), text: z.string() }),
-  z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.string().optional() }) }),
-  z.object({ type: z.literal('video_url'), video_url: z.object({ url: z.string() }) }),
-  z.object({ type: z.string() }).passthrough(),
-]);
-
-const chatCompletionSchema = z.object({
-  model: z.string().optional(),
-  messages: z.array(z.object({
-    role: z.string(),
-    content: z.union([z.string(), z.array(contentPartSchema)]),
-  })),
-  stream: z.boolean().optional(),
-  max_tokens: z.number().int().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-}).passthrough();
 
 export async function aiConfigRoutes(app: FastifyInstance) {
   const adapters = await buildAdapters();
@@ -254,7 +240,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     const ownerId = authz.ownerId;
 
     try {
-      const body = chatCompletionSchema.parse(request.body);
+      const body = chatCompletionSchema.parse(request.body) as ChatCompletionRequest;
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {
@@ -384,7 +370,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     const ownerId = authz.ownerId;
 
     try {
-      const body = embeddingSchema.parse(request.body);
+      const body = embeddingSchema.parse(request.body) as EmbeddingRequest;
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {
