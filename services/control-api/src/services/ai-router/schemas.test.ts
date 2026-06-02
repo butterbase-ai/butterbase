@@ -97,6 +97,12 @@ describe('messageSchema — assistant', () => {
       messageSchema.parse({ role: 'assistant', content: null, tool_calls: [] }),
     ).toThrow(/tool_calls/i);
   });
+
+  it('preserves refusal field on assistant message', () => {
+    const msg = { role: 'assistant', content: 'I cannot help with that.', refusal: 'safety_policy' };
+    const parsed = messageSchema.parse(msg);
+    expect(parsed).toMatchObject({ role: 'assistant', refusal: 'safety_policy' });
+  });
 });
 
 describe('messageSchema — tool', () => {
