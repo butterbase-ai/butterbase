@@ -389,6 +389,141 @@ describe('Fix 3 — onSend hook rewrites Butterbase 401 to OpenAI shape', () => 
   });
 });
 
+// ---------- Fix 5: tool-calling round-trip ----------
+
+describe('POST /v1/chat/completions — tool-calling round trip', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('accepts an assistant(tool_calls) → tool → user 3-turn body and forwards intact', async () => {
+    const app = await buildTestApp({
+      userId: 'u_test',
+      authMethod: 'api_key',
+      scopes: ['ai:gateway'],
+    });
+
+    mockRouteChatCompletion.mockResolvedValueOnce({
+      status: 200,
+      body: { id: 'cmpl_1', choices: [{ message: { role: 'assistant', content: 'It is 18C.' } }] },
+      usage: { promptTokens: 10, completionTokens: 5, totalCost: 0.0001 },
+      providerCostUsd: 0.0001,
+    });
+
+    const body = {
+      model: 'openai/gpt-4o-mini',
+      messages: [
+        { role: 'user', content: 'Weather in Paris? Use the tool.' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'c1', content: '{"temp_c":18}' },
+      ],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            description: 'Get current weather',
+            parameters: {
+              type: 'object',
+              properties: { city: { type: 'string' } },
+              required: ['city'],
+            },
+          },
+        },
+      ],
+      tool_choice: 'auto',
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: body,
+    });
+
+    expect(res.statusCode).toBe(200);
+
+    expect(mockRouteChatCompletion).toHaveBeenCalledTimes(1);
+    const forwarded = mockRouteChatCompletion.mock.calls[0][1] as {
+      messages: Array<Record<string, unknown>>;
+      tools?: unknown[];
+      tool_choice?: unknown;
+    };
+    expect(forwarded.messages).toHaveLength(3);
+    expect(forwarded.messages[1]).toMatchObject({
+      role: 'assistant',
+      content: null,
+    });
+    expect(
+      (forwarded.messages[1] as { tool_calls?: unknown[] }).tool_calls,
+    ).toHaveLength(1);
+    expect(forwarded.messages[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'c1',
+    });
+    expect(forwarded.tools).toHaveLength(1);
+    expect(forwarded.tool_choice).toBe('auto');
+
+    await app.close();
+  });
+
+  it('rejects assistant content:null without tool_calls (400)', async () => {
+    const app = await buildTestApp({
+      userId: 'u_test',
+      authMethod: 'api_key',
+      scopes: ['ai:gateway'],
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'openai/gpt-4o-mini',
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: null },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockRouteChatCompletion).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('rejects tool message missing tool_call_id (400)', async () => {
+    const app = await buildTestApp({
+      userId: 'u_test',
+      authMethod: 'api_key',
+      scopes: ['ai:gateway'],
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'openai/gpt-4o-mini',
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'tool', content: '{}' },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+});
+
 // ---------- Fix 4: GET /v1/models happy path ----------
 
 describe('GET /v1/models happy path', () => {
