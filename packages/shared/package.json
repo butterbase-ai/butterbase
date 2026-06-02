@@ -1,12 +1,12 @@
 {
   "name": "@butterbase/shared",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared types and constants for Butterbase packages",
   "license": "Apache-2.0",
   "homepage": "https://butterbase.ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NetGPT-Inc/butterbase-oss",
+    "url": "https://github.com/butterbase-ai/butterbase",
     "directory": "packages/shared"
   },
   "type": "module",

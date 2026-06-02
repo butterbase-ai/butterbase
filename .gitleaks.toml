@@ -1,4 +1,4 @@
-# Gitleaks config for butterbase-oss.
+# Gitleaks config for butterbase.
 # Extends the default ruleset and adds an allowlist for known false positives
 # (test fixtures, documentation examples).
 

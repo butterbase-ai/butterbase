@@ -10,7 +10,7 @@ supported_assistants:
   - windsurf
   - codex-cli
 homepage: https://butterbase.ai
-repository: https://github.com/butterbase-ai/butterbase-oss
+repository: https://github.com/butterbase-ai/butterbase
 mcp:
   npm_package: "@butterbase/mcp"
   hosted_endpoint: https://api.butterbase.ai/mcp

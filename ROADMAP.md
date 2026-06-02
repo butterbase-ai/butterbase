@@ -6,9 +6,9 @@ the community.
 
 ## Where to share input
 
-- **Feature requests** — open a [Feature request issue](https://github.com/NetGPT-Inc/butterbase-oss/issues/new?template=feature.yml).
-- **Questions / show-and-tell** — start a [Discussion](https://github.com/NetGPT-Inc/butterbase-oss/discussions).
-- **Bugs** — open a [Bug report](https://github.com/NetGPT-Inc/butterbase-oss/issues/new?template=bug.yml).
+- **Feature requests** — open a [Feature request issue](https://github.com/butterbase-ai/butterbase/issues/new?template=feature.yml).
+- **Questions / show-and-tell** — start a [Discussion](https://github.com/butterbase-ai/butterbase/discussions).
+- **Bugs** — open a [Bug report](https://github.com/butterbase-ai/butterbase/issues/new?template=bug.yml).
 
 ## Now (in flight)
 

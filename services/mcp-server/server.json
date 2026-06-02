@@ -4,7 +4,7 @@
   "description": "Butterbase MCP server — manage your backend: schemas, auth, functions, storage, RAG, deploys.",
   "version": "1.0.0",
   "repository": {
-    "url": "https://github.com/butterbase-ai/butterbase-oss",
+    "url": "https://github.com/butterbase-ai/butterbase",
     "source": "github",
     "subfolder": "services/mcp-server"
   },

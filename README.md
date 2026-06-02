@@ -6,12 +6,12 @@
 
 <p align="center">
   <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
-  <a href="https://github.com/butterbase-ai/butterbase-oss/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/butterbase-ai/butterbase-oss?style=social"></a>
-  <a href="https://github.com/butterbase-ai/butterbase-oss/network/members"><img alt="GitHub forks" src="https://img.shields.io/github/forks/butterbase-ai/butterbase-oss?style=social"></a>
+  <a href="https://github.com/butterbase-ai/butterbase/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/butterbase-ai/butterbase?style=social"></a>
+  <a href="https://github.com/butterbase-ai/butterbase/network/members"><img alt="GitHub forks" src="https://img.shields.io/github/forks/butterbase-ai/butterbase?style=social"></a>
   <br/>
-  <a href="https://github.com/butterbase-ai/butterbase-oss/issues"><img alt="GitHub issues" src="https://img.shields.io/github/issues/butterbase-ai/butterbase-oss"></a>
-  <a href="https://github.com/butterbase-ai/butterbase-oss/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/butterbase-ai/butterbase-oss"></a>
-  <a href="https://github.com/butterbase-ai/butterbase-oss/releases"><img alt="Release" src="https://img.shields.io/github/v/release/butterbase-ai/butterbase-oss?include_prereleases&sort=semver"></a>
+  <a href="https://github.com/butterbase-ai/butterbase/issues"><img alt="GitHub issues" src="https://img.shields.io/github/issues/butterbase-ai/butterbase"></a>
+  <a href="https://github.com/butterbase-ai/butterbase/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/butterbase-ai/butterbase"></a>
+  <a href="https://github.com/butterbase-ai/butterbase/releases"><img alt="Release" src="https://img.shields.io/github/v/release/butterbase-ai/butterbase?include_prereleases&sort=semver"></a>
   <a href="https://discord.gg/eZ7PT68uP"><img alt="Discord" src="https://img.shields.io/discord/1495105159469207702?logo=discord&logoColor=white&label=Discord&color=5865F2"></a>
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white">
   <img alt="Postgres" src="https://img.shields.io/badge/Postgres-336791?logo=postgresql&logoColor=white">
@@ -81,8 +81,8 @@ When you self-host, the AI gateway runs without upstream router adapters, billin
 The Claude Code plugin containing skills (`packages/plugin`) is a git submodule ([butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)). A plain clone leaves `packages/plugin/` empty and `npm install` silently skips that workspace.
 
 ```bash
-git clone --recurse-submodules https://github.com/butterbase-ai/butterbase-oss.git
-cd butterbase-oss
+git clone --recurse-submodules https://github.com/butterbase-ai/butterbase.git
+cd butterbase
 ```
 
 If you already cloned without submodules:
@@ -258,7 +258,7 @@ Latest release: **v0.2.0** (2026-05-25) — adds the KV store across SDK / REST 
 ## Community & support
 
 - **[Discord](https://discord.gg/eZ7PT68uP)** — chat with the team and other builders
-- **[GitHub Issues](https://github.com/butterbase-ai/butterbase-oss/issues)** — bug reports, feature requests
+- **[GitHub Issues](https://github.com/butterbase-ai/butterbase/issues)** — bug reports, feature requests
 - **Email** — [yuki@butterbase.ai](mailto:yuki@butterbase.ai) for direct contact
 
 ## Contributing
@@ -275,16 +275,16 @@ See [`SECURITY.md`](./SECURITY.md). Report vulnerabilities to `security@butterba
 
 ## Contributors
 
-<a href="https://github.com/butterbase-ai/butterbase-oss/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=butterbase-ai/butterbase-oss" alt="Contributors" />
+<a href="https://github.com/butterbase-ai/butterbase/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=butterbase-ai/butterbase" alt="Contributors" />
 </a>
 
 ## Star history
 
-<a href="https://www.star-history.com/#butterbase-ai/butterbase-oss&Date">
+<a href="https://www.star-history.com/#butterbase-ai/butterbase&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase-oss&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase-oss&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=butterbase-ai/butterbase-oss&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=butterbase-ai/butterbase&type=Date" />
   </picture>
 </a>

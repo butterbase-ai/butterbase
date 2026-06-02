@@ -15,8 +15,8 @@ Optional for E2E / move-app tests: `libpq` (`pg_dump`, `psql`) — see [`docs/ru
 ## 1. Get the code
 
 ```bash
-git clone --recurse-submodules https://github.com/NetGPT-Inc/butterbase-oss.git
-cd butterbase-oss
+git clone --recurse-submodules https://github.com/butterbase-ai/butterbase.git
+cd butterbase
 git submodule update --init --recursive   # if you forgot --recurse-submodules
 npm ci
 ```
@@ -341,4 +341,4 @@ In OSS mode, control-api logs: `No cloud overlays found, running in OSS mode (No
 - Read MCP tool docs via the butterbase MCP server or `services/mcp-server/src/docs/user-documentation.ts`.
 - Production deploy patterns: [`docs/runbooks`](./docs/runbooks), [`SECURITY.md`](./SECURITY.md).
 
-For issues, open a [bug report](https://github.com/NetGPT-Inc/butterbase-oss/issues/new?template=bug.yml) with `docker compose ps` and relevant logs.
+For issues, open a [bug report](https://github.com/butterbase-ai/butterbase/issues/new?template=bug.yml) with `docker compose ps` and relevant logs.

@@ -32,8 +32,8 @@ If you have an idea that touches the boundary, please open an issue first to tal
 Requirements: Docker, Node 22+, npm. Full walkthrough: [`SETUP.md`](./SETUP.md).
 
 ```bash
-git clone --recurse-submodules https://github.com/NetGPT-Inc/butterbase-oss.git
-cd butterbase-oss
+git clone --recurse-submodules https://github.com/butterbase-ai/butterbase.git
+cd butterbase
 git submodule update --init --recursive   # if plugin/ is empty
 npm ci
 cp .env.example .env
