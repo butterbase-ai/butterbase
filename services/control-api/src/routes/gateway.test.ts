@@ -520,6 +520,7 @@ describe('POST /v1/chat/completions — tool-calling round trip', () => {
     });
 
     expect(res.statusCode).toBe(400);
+    expect(mockRouteChatCompletion).not.toHaveBeenCalled();
     await app.close();
   });
 });

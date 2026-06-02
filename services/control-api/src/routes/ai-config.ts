@@ -13,7 +13,7 @@ import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js'
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
 import {
-  chatCompletionRequestSchema as chatCompletionSchema,
+  chatCompletionRequestSchema,
   embeddingRequestSchema,
 } from '../services/ai-router/schemas.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
@@ -92,8 +92,11 @@ const aiConfigSchema = z.object({
   allowedModels: z.array(z.string()).optional(),
 });
 
-// App-scoped embedding schema: makes model optional since it can be resolved
-// from app config or platform defaults (unlike the gateway which requires it).
+// App-scoped routes default `model` from app config / platform default; loosen
+// the required `model` field on the shared schema accordingly.
+const chatCompletionSchema = chatCompletionRequestSchema.extend({
+  model: z.string().optional(),
+});
 const embeddingSchema = embeddingRequestSchema.extend({
   model: z.string().optional(),
 });
