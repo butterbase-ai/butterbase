@@ -240,7 +240,110 @@ export async function createDatabase(
   });
 
   const data = await res.json() as { database: NeonDatabase };
+
+  // Block until the new DB actually answers a SELECT 1. Neon's REST API
+  // returns 200 once the control-plane has accepted the database, but the
+  // data-plane endpoint can take a few seconds to propagate. Without this
+  // wait, the very next caller (grantSchemaPrivileges, runMigrations, etc.)
+  // races against propagation and surfaces a Postgres 3D000 "database does
+  // not exist" error. Centralizing the readiness check here means downstream
+  // code can assume the DB is queryable the moment createDatabase returns.
+  await waitUntilQueryable(projectId, dbName, ownerName);
+
   return data.database;
+}
+
+// ---------------------------------------------------------------------------
+// Neon DB readiness probe
+// ---------------------------------------------------------------------------
+
+/** Postgres/connection error codes that indicate Neon is still propagating
+ *  or the compute is mid-cold-start — safe to retry against. Anything else
+ *  is a real error and should bubble up immediately. */
+const READINESS_RETRYABLE_CODES = new Set<string>([
+  '3D000',           // database does not exist yet (async create still in progress)
+  '08006', '08001',  // connection failure / unable to establish
+  '57P01',           // admin shutdown (compute restart)
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+]);
+
+const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
+const DEFAULT_READINESS_BACKOFFS_MS = [200, 500, 1000, 2000, 4000, 8000];
+
+export interface WaitOptions {
+  /** Connection probe — replaceable for unit tests. Production uses a real
+   *  pg.Pool. The probe should resolve on success and throw a `pg`-shaped
+   *  Error (with a `.code` property) on retryable failure. */
+  probe?: (connectionUri: string) => Promise<void>;
+  timeoutMs?: number;
+  backoffsMs?: number[];
+}
+
+async function defaultProbe(connectionUri: string): Promise<void> {
+  const pool = new pg.Pool({
+    connectionString: connectionUri,
+    max: 1,
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 5_000,
+  });
+  try {
+    await pool.query('SELECT 1');
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+/**
+ * Public entry point: resolve a connection string for the new DB and block
+ * until it accepts a trivial query. Throws on overall timeout — at that
+ * point it's not a race, it's a Neon incident and should page someone.
+ */
+export async function waitUntilQueryable(
+  projectId: string,
+  dbName: string,
+  ownerName: string,
+  opts: WaitOptions = {},
+): Promise<void> {
+  const { connectionUri } = await getConnectionString(projectId, dbName, ownerName);
+  await waitUntilUriQueryable(connectionUri, dbName, opts);
+}
+
+/**
+ * Inner: retry-with-backoff a probe against a known connection string.
+ * Exported so unit tests can drive the loop with a stubbed probe without
+ * also having to mock the Neon REST API behind getConnectionString.
+ */
+export async function waitUntilUriQueryable(
+  connectionUri: string,
+  dbName: string,
+  opts: WaitOptions = {},
+): Promise<void> {
+  const probe = opts.probe ?? defaultProbe;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const backoffsMs = opts.backoffsMs ?? DEFAULT_READINESS_BACKOFFS_MS;
+  const start = Date.now();
+  let attempt = 0;
+  while (true) {
+    try {
+      await probe(connectionUri);
+      return;
+    } catch (err) {
+      const code = err instanceof Error && 'code' in err
+        ? (err as { code: string }).code
+        : undefined;
+      if (!code || !READINESS_RETRYABLE_CODES.has(code)) throw err;
+      if (Date.now() - start >= timeoutMs) {
+        throw new Error(
+          `Neon database "${dbName}" not queryable after ${timeoutMs}ms ` +
+          `(last code: ${code}); likely a Neon control-plane → data-plane ` +
+          `propagation incident.`,
+        );
+      }
+      const delay = backoffsMs[Math.min(attempt, backoffsMs.length - 1)];
+      await new Promise((resolve) => globalThis.setTimeout(resolve, delay));
+      attempt++;
+    }
+  }
 }
 
 export async function deleteDatabase(
