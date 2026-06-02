@@ -2,6 +2,12 @@
 import { createDecipheriv } from "node:crypto";
 import { Buffer } from "node:buffer";
 
+// Pin the GCM authentication tag to 16 bytes. Without an explicit length,
+// node:crypto will accept any tag from 4 to 16 bytes on decrypt, which lets
+// a forged ciphertext-with-truncated-tag pass auth at 2^32 work instead of
+// 2^128 (CWE-310 / OWASP-A02:2021).
+const GCM_AUTH_TAG_BYTES = 16;
+
 /**
  * Decrypt AES-256-GCM encrypted data
  * Format: base64(iv):base64(ciphertext):base64(authTag)
@@ -19,11 +25,19 @@ export function decrypt(encrypted: string, key: string): string {
   const ciphertext = Buffer.from(ciphertextBase64, "base64");
   const authTag = Buffer.from(authTagBase64, "base64");
 
+  if (authTag.length !== GCM_AUTH_TAG_BYTES) {
+    throw new Error(
+      `Invalid GCM auth tag length: expected ${GCM_AUTH_TAG_BYTES} bytes, got ${authTag.length}`,
+    );
+  }
+
   // Convert hex key to buffer
   const keyBuffer = Buffer.from(key, "hex");
 
   // Create decipher
-  const decipher = createDecipheriv("aes-256-gcm", keyBuffer, iv);
+  const decipher = createDecipheriv("aes-256-gcm", keyBuffer, iv, {
+    authTagLength: GCM_AUTH_TAG_BYTES,
+  });
   decipher.setAuthTag(authTag);
 
   // Decrypt
