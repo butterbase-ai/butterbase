@@ -1,4 +1,8 @@
 import type { RouterName } from '../normalize.js';
+import type {
+  ChatCompletionRequest as SchemaChatCompletionRequest,
+  EmbeddingRequest as SchemaEmbeddingRequest,
+} from '../schemas.js';
 
 export type Modality = 'chat' | 'embedding' | 'image' | 'video' | 'audio';
 
@@ -19,20 +23,13 @@ export interface UpstreamModel {
   rawPricing?: unknown;
 }
 
-export interface ChatCompletionRequest {
-  model: string; // canonical id; adapter translates to upstream id
-  messages: Array<{ role: string; content: string | unknown[] }>;
-  stream?: boolean;
-  max_tokens?: number;
-  temperature?: number;
-  [key: string]: unknown;
-}
-
-export interface EmbeddingRequest {
-  model: string;
-  input: string | string[];
-  encoding_format?: 'float' | 'base64';
-}
+/**
+ * Adapter-facing request type — `z.infer<typeof chatCompletionRequestSchema>`.
+ * The validator is the single source of truth, so any field the gateway
+ * accepts is a field adapters can read.
+ */
+export type ChatCompletionRequest = SchemaChatCompletionRequest;
+export type EmbeddingRequest = SchemaEmbeddingRequest;
 
 export interface VideoGenerationRequest {
   model: string; // canonical id; adapter translates to upstream id

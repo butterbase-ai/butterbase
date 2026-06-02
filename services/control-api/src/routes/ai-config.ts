@@ -22,7 +22,7 @@ import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
-import type { RouterAdapter, ChatCompletionRequest, EmbeddingRequest } from '../services/ai-router/adapters/types.js';
+import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 
 export async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promise<{
@@ -240,7 +240,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     const ownerId = authz.ownerId;
 
     try {
-      const body = chatCompletionSchema.parse(request.body) as ChatCompletionRequest;
+      const body = chatCompletionSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {
@@ -370,7 +370,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     const ownerId = authz.ownerId;
 
     try {
-      const body = embeddingSchema.parse(request.body) as EmbeddingRequest;
+      const body = embeddingSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {

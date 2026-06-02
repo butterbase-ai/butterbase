@@ -11,7 +11,7 @@ import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../serv
 import { rankRoutersForModel } from '../services/ai-router/select.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
-import type { RouterAdapter, ChatCompletionRequest, EmbeddingRequest } from '../services/ai-router/adapters/types.js';
+import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 import {
@@ -133,7 +133,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
   app.post('/v1/chat/completions', async (request, reply) => {
     try {
       const user = resolveGatewayUser(request);
-      const body = chatCompletionSchema.parse(request.body) as ChatCompletionRequest;
+      const body = chatCompletionSchema.parse(request.body);
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const result = await routeChatCompletion(
         {
@@ -172,7 +172,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
   app.post('/v1/embeddings', async (request, reply) => {
     try {
       const user = resolveGatewayUser(request);
-      const body = embeddingSchema.parse(request.body) as EmbeddingRequest;
+      const body = embeddingSchema.parse(request.body);
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const result = await routeEmbedding(
         {
