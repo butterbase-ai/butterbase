@@ -230,16 +230,33 @@ export async function createDatabase(
   projectId: string,
   dbName: string,
   ownerName: string
-): Promise<NeonDatabase> {
+): Promise<NeonDatabase | null> {
   const branchId = await getDefaultBranchId(projectId);
-  const res = await neonFetch(`/projects/${projectId}/branches/${branchId}/databases`, {
-    method: 'POST',
-    body: JSON.stringify({
-      database: { name: dbName, owner_name: ownerName },
-    }),
-  });
 
-  const data = await res.json() as { database: NeonDatabase };
+  let data: { database: NeonDatabase } | null = null;
+  try {
+    const res = await neonFetch(`/projects/${projectId}/branches/${branchId}/databases`, {
+      method: 'POST',
+      body: JSON.stringify({
+        database: { name: dbName, owner_name: ownerName },
+      }),
+    });
+    data = await res.json() as { database: NeonDatabase };
+  } catch (err) {
+    // Idempotency: a prior provisioning attempt may have created the DB on
+    // Neon but failed downstream (grantSchemaPrivileges, migrations, etc.),
+    // leaving apps.provisioning_status='failed' and the dest app stuck. The
+    // retry-resume path calls us again with the same dbName; Neon answers
+    // 409 DATABASE_ALREADY_EXISTS. Treat that as success and fall through
+    // to waitUntilQueryable — the DB is already there, we just need to
+    // confirm it's reachable.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('DATABASE_ALREADY_EXISTS') || /Neon API error 409\b/.test(msg)) {
+      // data stays null; caller can't depend on the freshly-created row.
+    } else {
+      throw err;
+    }
+  }
 
   // Block until the new DB actually answers a SELECT 1. Neon's REST API
   // returns 200 once the control-plane has accepted the database, but the
@@ -250,7 +267,7 @@ export async function createDatabase(
   // code can assume the DB is queryable the moment createDatabase returns.
   await waitUntilQueryable(projectId, dbName, ownerName);
 
-  return data.database;
+  return data?.database ?? null;
 }
 
 // ---------------------------------------------------------------------------
