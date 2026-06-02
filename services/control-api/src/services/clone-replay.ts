@@ -13,6 +13,8 @@ import { diffSchema } from './schema-differ.js';
 import { applyMigration } from './schema-applier.js';
 import type { SchemaDSL } from './schema-validator.js';
 import { introspectRls } from './rls-introspector.js';
+import * as R2 from './r2.js';
+import * as DeploymentService from './deployment.service.js';
 
 export interface ReplayLogger {
   info(obj: unknown, msg?: string): void;
@@ -672,5 +674,80 @@ export async function replayNonSecretConfig(
   await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
   await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
   await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  return { warnings };
+}
+
+// ---------------------------------------------------------------------------
+// replayFrontend — step 7
+// ---------------------------------------------------------------------------
+
+/**
+ * Replay the source app's most recent published frontend onto the dest by
+ * copying the persisted artifact slot from R2 and running it through the
+ * standard publish pipeline against the dest's CF Pages project.
+ *
+ * Storage model: every successful deploy overwrites `app-artifact/{appId}.zip`
+ * with the byte-for-byte published bundle (see deployArtifact). Clones copy
+ * that object and re-publish — dest gets the same edge content as source.
+ *
+ * No-op (with a clear log) when the source has no persisted artifact, e.g.
+ * apps that have never deployed a frontend. The CF Pages project gets
+ * provisioned lazily inside deployViaPages on first publish, so no separate
+ * project-create step is needed here.
+ *
+ * Soft-fails: errors are recorded as warnings and the broader clone job
+ * is allowed to complete (the schema/RLS/functions/etc. are already done;
+ * the user can re-publish their frontend manually).
+ */
+export async function replayFrontend(
+  controlDb: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  userId: string,
+  logger: ReplayLogger,
+): Promise<{ warnings: string[] }> {
+  const warnings: string[] = [];
+
+  try {
+    const srcKey = R2.appArtifactKey(sourceAppId);
+    const dstKey = R2.appArtifactKey(destAppId);
+
+    const head = await R2.head(srcKey);
+    if (!head.exists) {
+      logger.info(
+        { sourceAppId, destAppId },
+        '[clone] source has no persisted frontend artifact; skipping frontend replay',
+      );
+      return { warnings };
+    }
+
+    await R2.copyObject(srcKey, dstKey);
+
+    // app_deployments is runtime-tier (per-region). r2_object_key points at
+    // the persistent slot, NOT a transient source/{id}.zip — runDeploymentPipeline
+    // would delete the key on success, which is why we bypass it and call
+    // deployArtifact directly below.
+    const dep = await destRuntimePool.query<{ id: string }>(
+      `INSERT INTO app_deployments (app_id, framework, status, deployed_by, r2_object_key)
+       VALUES ($1, 'other', 'UPLOADING', $2, $3)
+       RETURNING id`,
+      [destAppId, userId, dstKey],
+    );
+    const deploymentId = dep.rows[0].id;
+
+    const buffer = await R2.getObjectAsBuffer(dstKey);
+    await DeploymentService.deployArtifact(controlDb, deploymentId, buffer);
+
+    logger.info(
+      { destAppId, deploymentId, bytes: head.contentLength },
+      '[clone] frontend replayed',
+    );
+  } catch (err) {
+    const msg = `frontend replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] frontend replay failed; continuing');
+  }
+
   return { warnings };
 }

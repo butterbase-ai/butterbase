@@ -1,5 +1,5 @@
 // services/control-api/src/services/r2.ts
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config.js';
 
@@ -241,6 +241,15 @@ const BUILD_KEY_PREFIXES = {
   cache: (appId: string, lockHash: string) => `cache/${appId}/${lockHash}.tar`,
 };
 
+/**
+ * Persistent per-app artifact slot. One key per app — overwritten on each
+ * successful deploy. Used by the clone worker to byte-for-byte replay a
+ * source app's most recent frontend onto the dest.
+ */
+export function appArtifactKey(appId: string): string {
+  return `app-artifact/${appId}.zip`;
+}
+
 export function buildKeys(deploymentId: string, appId: string, lockfileHash: string) {
   return {
     source: BUILD_KEY_PREFIXES.source(deploymentId),
@@ -316,6 +325,56 @@ export async function deleteObject(objectKey: string): Promise<void> {
     throw new R2Error(
       `Failed to delete object: ${error instanceof Error ? error.message : 'Unknown error'}`,
       'DELETE_FAILED'
+    );
+  }
+}
+
+/**
+ * Write a buffer to R2 at the given key. Overwrites any existing object.
+ * Used for the persistent per-app artifact slot (see appArtifactKey).
+ */
+export async function putObject(
+  key: string,
+  body: Buffer,
+  contentType = 'application/octet-stream',
+): Promise<void> {
+  if (!key || typeof key !== 'string') {
+    throw new R2Error('Invalid object key: must be a non-empty string', 'INVALID_KEY');
+  }
+  try {
+    await r2Client.send(new PutObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    }));
+  } catch (error) {
+    throw new R2Error(
+      `Failed to put object ${key}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'PUT_FAILED',
+    );
+  }
+}
+
+/**
+ * Server-side copy within the same R2 bucket. R2 is globally addressed, so
+ * this also works across butterbase regions without re-fetching the bytes.
+ */
+export async function copyObject(srcKey: string, dstKey: string): Promise<void> {
+  if (!srcKey || !dstKey) {
+    throw new R2Error('copyObject requires non-empty source and destination keys', 'INVALID_KEY');
+  }
+  try {
+    await r2Client.send(new CopyObjectCommand({
+      Bucket: config.s3.bucket,
+      // CopySource expects bucket-prefixed, URL-encoded path
+      CopySource: `${config.s3.bucket}/${encodeURIComponent(srcKey)}`,
+      Key: dstKey,
+    }));
+  } catch (error) {
+    throw new R2Error(
+      `Failed to copy ${srcKey} -> ${dstKey}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      'COPY_FAILED',
     );
   }
 }
