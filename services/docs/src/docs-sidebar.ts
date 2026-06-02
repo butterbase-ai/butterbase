@@ -39,6 +39,7 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
     items: [
       { label: 'TypeScript SDK', slug: 'sdks-and-tools/typescript-sdk' },
       { label: 'CLI', slug: 'sdks-and-tools/cli' },
+      { label: 'CLI: bb repo', slug: 'cli/repo' },
       { label: 'CLI: bb substrate', slug: 'cli/substrate' },
       { label: 'Claude Code Plugin', slug: 'sdks-and-tools/plugin' },
       { label: 'REST API', slug: 'sdks-and-tools/rest-api' },
