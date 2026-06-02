@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { contentPartSchema, toolCallSchema, messageSchema } from './schemas.js';
+import { contentPartSchema, toolCallSchema, messageSchema, chatCompletionRequestSchema, embeddingRequestSchema } from './schemas.js';
 
 describe('contentPartSchema', () => {
   it('accepts a text part', () => {
@@ -131,5 +131,112 @@ describe('messageSchema — legacy function role', () => {
 describe('messageSchema — unknown role', () => {
   it('rejects an unknown role', () => {
     expect(() => messageSchema.parse({ role: 'wizard', content: 'hi' })).toThrow();
+  });
+});
+
+describe('chatCompletionRequestSchema', () => {
+  it('accepts a minimal valid request', () => {
+    const req = {
+      model: 'openai/gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hi' }],
+    };
+    expect(chatCompletionRequestSchema.parse(req)).toMatchObject({
+      model: 'openai/gpt-4o-mini',
+    });
+  });
+
+  it('preserves tools and tool_choice', () => {
+    const req = {
+      model: 'openai/gpt-4o-mini',
+      messages: [{ role: 'user', content: 'weather?' }],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            description: 'Get current weather',
+            parameters: { type: 'object', properties: { city: { type: 'string' } } },
+          },
+        },
+      ],
+      tool_choice: 'auto',
+    };
+    const parsed = chatCompletionRequestSchema.parse(req);
+    expect(parsed.tools).toHaveLength(1);
+    expect(parsed.tool_choice).toBe('auto');
+  });
+
+  it('preserves a named-function tool_choice', () => {
+    const req = {
+      model: 'm',
+      messages: [{ role: 'user', content: 'x' }],
+      tool_choice: { type: 'function', function: { name: 'get_weather' } },
+    };
+    const parsed = chatCompletionRequestSchema.parse(req);
+    expect(parsed.tool_choice).toEqual({
+      type: 'function',
+      function: { name: 'get_weather' },
+    });
+  });
+
+  it('preserves a full tool round-trip message array', () => {
+    const req = {
+      model: 'openai/gpt-4o-mini',
+      messages: [
+        { role: 'user', content: 'Weather in Paris?' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'c1', content: '{"temp_c":18}' },
+      ],
+    };
+    const parsed = chatCompletionRequestSchema.parse(req);
+    expect(parsed.messages).toHaveLength(3);
+    const assistant = parsed.messages[1] as { tool_calls?: unknown[] };
+    expect(assistant.tool_calls).toHaveLength(1);
+    const tool = parsed.messages[2] as { tool_call_id?: string };
+    expect(tool.tool_call_id).toBe('c1');
+  });
+
+  it('passes through unknown top-level fields (e.g. provider)', () => {
+    const req = {
+      model: 'm',
+      messages: [{ role: 'user', content: 'x' }],
+      provider: { order: ['anthropic'], allow_fallbacks: false },
+    };
+    const parsed = chatCompletionRequestSchema.parse(req) as Record<string, unknown>;
+    expect(parsed.provider).toEqual({ order: ['anthropic'], allow_fallbacks: false });
+  });
+
+  it('rejects temperature out of range', () => {
+    expect(() =>
+      chatCompletionRequestSchema.parse({
+        model: 'm',
+        messages: [{ role: 'user', content: 'x' }],
+        temperature: 3,
+      }),
+    ).toThrow();
+  });
+});
+
+describe('embeddingRequestSchema', () => {
+  it('accepts a string input', () => {
+    expect(
+      embeddingRequestSchema.parse({ model: 'text-embedding-3-small', input: 'hi' }),
+    ).toMatchObject({ model: 'text-embedding-3-small' });
+  });
+
+  it('accepts a string-array input', () => {
+    expect(
+      embeddingRequestSchema.parse({ model: 'm', input: ['a', 'b'] }),
+    ).toMatchObject({ input: ['a', 'b'] });
   });
 });

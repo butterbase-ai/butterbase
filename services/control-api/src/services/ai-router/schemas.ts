@@ -104,3 +104,80 @@ export const messageSchema = z
   });
 
 export type Message = z.infer<typeof messageSchema>;
+
+/** OpenAI tool/function declaration (request side, not the call). */
+const toolDeclarationSchema = z.object({
+  type: z.literal('function'),
+  function: z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    parameters: z.record(z.unknown()).optional(),
+  }),
+});
+
+const toolChoiceSchema = z.union([
+  z.literal('auto'),
+  z.literal('none'),
+  z.literal('required'),
+  z.object({
+    type: z.literal('function'),
+    function: z.object({ name: z.string() }),
+  }),
+]);
+
+const responseFormatSchema = z.union([
+  z.object({ type: z.literal('text') }),
+  z.object({ type: z.literal('json_object') }),
+  z.object({
+    type: z.literal('json_schema'),
+    json_schema: z.object({
+      name: z.string(),
+      schema: z.record(z.unknown()),
+      strict: z.boolean().optional(),
+      description: z.string().optional(),
+    }),
+  }),
+]);
+
+/**
+ * Top-level chat completions request schema.
+ *
+ * Outer `.passthrough()` is intentional: it lets provider-specific extensions
+ * such as OpenRouter's `provider` field survive into the upstream call. The
+ * OpenAI surface is enumerated explicitly so each known field is type-checked
+ * and inferred; only genuinely unknown top-level keys ride the passthrough.
+ */
+export const chatCompletionRequestSchema = z
+  .object({
+    model: z.string(),
+    messages: z.array(messageSchema),
+    stream: z.boolean().optional(),
+    stream_options: z
+      .object({ include_usage: z.boolean().optional() })
+      .passthrough()
+      .optional(),
+    max_tokens: z.number().int().optional(),
+    temperature: z.number().min(0).max(2).optional(),
+    top_p: z.number().min(0).max(1).optional(),
+    n: z.number().int().min(1).optional(),
+    stop: z.union([z.string(), z.array(z.string())]).optional(),
+    presence_penalty: z.number().min(-2).max(2).optional(),
+    frequency_penalty: z.number().min(-2).max(2).optional(),
+    logit_bias: z.record(z.number()).optional(),
+    user: z.string().optional(),
+    seed: z.number().int().optional(),
+    response_format: responseFormatSchema.optional(),
+    tools: z.array(toolDeclarationSchema).optional(),
+    tool_choice: toolChoiceSchema.optional(),
+    parallel_tool_calls: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const embeddingRequestSchema = z.object({
+  model: z.string(),
+  input: z.union([z.string(), z.array(z.string())]),
+  encoding_format: z.enum(['float', 'base64']).optional(),
+});
+
+export type ChatCompletionRequest = z.infer<typeof chatCompletionRequestSchema>;
+export type EmbeddingRequest = z.infer<typeof embeddingRequestSchema>;
