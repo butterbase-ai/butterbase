@@ -514,6 +514,23 @@ async function executeClone(
         await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
         await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
+        // Reserve a subdomain for the dest. Mirrors routes/init.ts: derive
+        // from the app name, check global uniqueness against user_app_index,
+        // and append a short random suffix on collision. Required by the
+        // WfP deploy path (deployViaWfp throws "requires app.subdomain"
+        // without it) and by the dashboard's URL display, so we set it at
+        // provision time rather than letting downstream steps re-discover
+        // the gap. Underscores become hyphens to keep the host label DNS-safe.
+        const baseSlug = destName.toLowerCase().replace(/_/g, '-').replace(/[^a-z0-9-]/g, '-');
+        let destSubdomain = baseSlug;
+        const taken = await controlDb.query<{ app_id: string }>(
+          `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
+          [destSubdomain],
+        );
+        if (taken.rows.length > 0) {
+          destSubdomain = `${baseSlug}-${Math.floor(Math.random() * 9000 + 1000)}`;
+        }
+
         // Cross-region index so authorizeRepoRead/Write and other lookups can
         // resolve the dest app's region. Init route does the same step after
         // its insertAppRow; the clone worker is the equivalent caller here.
@@ -521,6 +538,7 @@ async function executeClone(
           userId: job.requested_by_user_id,
           appId: destAppId,
           region: job.dest_region,
+          subdomain: destSubdomain,
           appName: destName,
         }).catch((err) => {
           logger.warn({ err, destAppId }, '[clone] user_app_index add failed; backfill will repair');
@@ -531,14 +549,17 @@ async function executeClone(
         //    a follow-up UPDATE on the dest's home runtime DB.
         //    template_source_region (added by B2 migration) lets the delete handler know
         //    which region pool to target without a fan-out lookup.
+        //    Same UPDATE also writes the reserved subdomain (apps.subdomain is the
+        //    truth source consulted by deployViaWfp / deployViaPages).
         const destRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
         await destRuntimePool.query(
           `UPDATE apps
               SET template_source_app_id = $1,
                   template_source_region  = $2,
+                  subdomain               = $4,
                   updated_at              = now()
             WHERE id = $3`,
-          [job.source_app_id, job.source_region, destAppId],
+          [job.source_app_id, job.source_region, destAppId, destSubdomain],
         );
 
         // Provision DB + run migrations. provisionAppBackground swallows errors
