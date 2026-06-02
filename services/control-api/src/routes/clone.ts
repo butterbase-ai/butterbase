@@ -108,6 +108,32 @@ export function cloneRoutes(app: FastifyInstance) {
       }));
     }
 
+    // Reject if ANY user in ANY region already owns an app with the
+    // requested name. user_app_index is the cross-region platform-tier
+    // projection of (user_id, region, app_name), so a single lookup against
+    // it catches global collisions without fanning out to every regional
+    // runtime DB. We need global uniqueness because the CF Pages project
+    // name is derived from the app name and CF Pages projects share one
+    // account-wide namespace; two apps with the same slug would collide
+    // at frontend-deploy time. Skipped when name is omitted — the worker
+    // will fall back to `Clone of {source}`, which is allowed to repeat
+    // (the source id makes that string globally unique).
+    if (typeof body.name === 'string' && body.name.trim().length > 0) {
+      const requestedName = body.name.trim();
+      const collision = await app.controlDb.query<{ app_id: string }>(
+        `SELECT app_id FROM user_app_index WHERE app_name = $1 LIMIT 1`,
+        [requestedName],
+      );
+      if (collision.rows.length > 0) {
+        return reply.code(409).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: `The app name "${requestedName}" is already taken.`,
+          remediation: 'Pick a different name.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+    }
+
     // Cap simultaneous non-terminal clone jobs per user at 3.
     const inflightResult = await app.controlDb.query<{ c: number }>(
       `SELECT count(*)::int AS c
