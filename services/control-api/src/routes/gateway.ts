@@ -11,35 +11,15 @@ import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../serv
 import { rankRoutersForModel } from '../services/ai-router/select.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
-import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
+import type { RouterAdapter, ChatCompletionRequest, EmbeddingRequest } from '../services/ai-router/adapters/types.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
+import {
+  chatCompletionRequestSchema as chatCompletionSchema,
+  embeddingRequestSchema as embeddingSchema,
+} from '../services/ai-router/schemas.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
-
-const contentPartSchema = z.union([
-  z.object({ type: z.literal('text'), text: z.string() }),
-  z.object({ type: z.literal('image_url'), image_url: z.object({ url: z.string(), detail: z.string().optional() }) }),
-  z.object({ type: z.literal('video_url'), video_url: z.object({ url: z.string() }) }),
-  z.object({ type: z.string() }).passthrough(),
-]);
-
-const chatCompletionSchema = z.object({
-  model: z.string(),
-  messages: z.array(z.object({
-    role: z.string(),
-    content: z.union([z.string(), z.array(contentPartSchema)]),
-  })),
-  stream: z.boolean().optional(),
-  max_tokens: z.number().int().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-}).passthrough();
-
-const embeddingSchema = z.object({
-  model: z.string(),
-  input: z.union([z.string(), z.array(z.string())]),
-  encoding_format: z.enum(['float', 'base64']).optional(),
-});
 
 async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
@@ -153,7 +133,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
   app.post('/v1/chat/completions', async (request, reply) => {
     try {
       const user = resolveGatewayUser(request);
-      const body = chatCompletionSchema.parse(request.body);
+      const body = chatCompletionSchema.parse(request.body) as ChatCompletionRequest;
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const result = await routeChatCompletion(
         {
@@ -192,7 +172,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
   app.post('/v1/embeddings', async (request, reply) => {
     try {
       const user = resolveGatewayUser(request);
-      const body = embeddingSchema.parse(request.body);
+      const body = embeddingSchema.parse(request.body) as EmbeddingRequest;
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const result = await routeEmbedding(
         {
