@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Butterbase Local Frontend (Miniflare)</title>
+    <style>
+      body { font-family: -apple-system, system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; color: #1a1a1a; }
+      h1 { font-size: 1.5rem; }
+      code { background: #f3f3f3; padding: 0.1rem 0.4rem; border-radius: 4px; }
+      pre { background: #f3f3f3; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+      .ok { color: #0a7c3a; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Butterbase static frontend (local Miniflare)</h1>
+    <div id="root">
+      <p>
+        This page is served by the <code>@butterbase/static-frontend-worker</code>
+        package running inside Miniflare locally — the same <code>workerd</code>
+        runtime that serves <code>*.butterbase.dev</code> in production.
+      </p>
+      <p>
+        Drop your SPA's <code>dist/</code> contents into the directory mounted at
+        <code>LOCAL_FRONTEND_ASSETS_DIR</code> and the worker will serve them with
+        the same SPA fallback semantics prod uses.
+      </p>
+      <p class="ok">Path served: <code id="path"></code></p>
+      <p>Try a deep path that doesn't exist — the SPA fallback should return this page with status 200:</p>
+      <pre>curl -sI http://localhost:8787/some/deep/route</pre>
+    </div>
+    <script>
+      document.getElementById('path').textContent = window.location.pathname;
+    </script>
+  </body>
+</html>
