@@ -116,7 +116,7 @@ Apps that don't ship `_redirects` keep the existing default: direct asset lookup
 /foo.html   /foo 301
 ```
 
-**Non-html-extension misses return 404.** A request for `/missing.png`, `/missing.css`, or `/missing.js` that finds no matching file in the bundle returns 404 — not the `index.html` body. Frontend devs see honest network-tab status codes; broken image tags stop masquerading as HTML responses. Extensionless paths (`/history`, `/profile/42`) and `.html`/`.htm` paths still SPA-fallback to home on miss.
+**Non-html-extension misses return 404.** A request for `/missing.png`, `/missing.css`, or `/missing.js` that finds no matching file in the bundle returns 404 — not the `index.html` body. Frontend devs see honest network-tab status codes; broken image tags stop masquerading as HTML responses. Extensionless paths (`/history`, `/profile/42`) and `.html`/`.htm` paths still SPA-fallback to home on miss. This rule applies only when no explicit `200` rewrite rule matches first — for example, a user who ships `/* /index.html 200` will see `/missing.png` return the `index.html` body with status 200, matching Cloudflare Pages semantics.
 
 **`/_redirects` returns 404.** The file is parsed at deploy time and stripped from the uploaded asset bundle. The parsed rules govern routing; the raw file is not served.
 
