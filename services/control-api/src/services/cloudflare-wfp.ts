@@ -27,15 +27,23 @@ function hash32(buf: Buffer): string {
 }
 
 // SPA fallback handled explicitly in-worker: on a non-2xx from the assets
-// binding, rewrite the path to /index.html and retry. This is the CF-canonical
-// SPA pattern and is deterministic across CF runtime variants (we previously
-// tried `not_found_handling: 'single-page-application'` and it threw inside WfP).
+// binding, retry against `/` (which resolves to the home `index.html` under
+// `html_handling: 'auto-trailing-slash'`). This is the CF-canonical SPA
+// pattern and is deterministic across CF runtime variants (we previously
+// tried `not_found_handling: 'single-page-application'` and it threw inside
+// WfP).
 //
 // NOTE: We check `res.ok` (status 200-299) rather than `res.status !== 404`
 // because the Assets binding inside a WfP dispatch namespace may return 307
 // redirects for non-file paths (e.g. /people → 307 Location: /) instead of
-// 404. Catching all non-2xx responses ensures SPA deep-links always resolve to
-// index.html instead of producing unexpected redirects.
+// 404. Catching all non-2xx responses ensures SPA deep-links always resolve
+// to the home document instead of producing unexpected redirects.
+//
+// IMPORTANT: the fallback fetches `/`, NOT `/index.html`. Under
+// `html_handling: 'auto-trailing-slash'`, fetching `/index.html` itself
+// returns a 307 redirect to `/` — the same trap this fallback exists to
+// escape. Fetching `/` returns the home document with status 200 directly.
+// Do not change this back to `/index.html`.
 //
 // MIME workaround: the Assets binding inside a WfP dispatch namespace does not
 // reliably set Content-Type headers. Without a correct Content-Type, browsers
@@ -90,7 +98,7 @@ export default {
       const res = await env.ASSETS.fetch(request);
       if (res.ok) return withMime(request, res);
       const url = new URL(request.url);
-      url.pathname = '/index.html';
+      url.pathname = '/';
       const fallback = await env.ASSETS.fetch(new Request(url.toString(), request));
       return withMime(new Request(url.toString()), fallback);
     } catch (err) {
