@@ -646,6 +646,53 @@ export async function replayAuthHookBinding(
 }
 
 /**
+ * Auto-link the dest app to the cloner's substrate, but only if the source
+ * app was itself substrate-linked. The source's substrate_user_id acts as
+ * the opt-in flag set by the template author: if they linked substrate
+ * before publishing, every cloner inherits substrate access mapped to
+ * their own platform identity (not the template author's). If they didn't,
+ * the dest app starts unlinked and ctx.substrate is omitted inside the
+ * worker until the cloner toggles substrate-link in the dashboard.
+ *
+ * Soft-fails: a failure leaves the dest unlinked and records a warning;
+ * the broader clone is not aborted over an optional capability link.
+ */
+export async function replaySubstrateLink(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  requestedByUserId: string,
+  logger: ReplayLogger,
+): Promise<{ linked: boolean; warnings: string[] }> {
+  const warnings: string[] = [];
+  try {
+    const src = await sourceRuntimePool.query<{ substrate_user_id: string | null }>(
+      `SELECT substrate_user_id FROM apps WHERE id = $1`,
+      [sourceAppId],
+    );
+    if (!src.rows[0]?.substrate_user_id) {
+      return { linked: false, warnings };
+    }
+
+    await destRuntimePool.query(
+      `UPDATE apps SET substrate_user_id = $1, updated_at = now() WHERE id = $2`,
+      [requestedByUserId, destAppId],
+    );
+    logger.info(
+      { destAppId, userId: requestedByUserId },
+      '[clone] substrate auto-linked to cloner (source was substrate-linked)',
+    );
+    return { linked: true, warnings };
+  } catch (err) {
+    const msg = `substrate auto-link failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err, destAppId }, '[clone] substrate auto-link failed; continuing unlinked');
+    return { linked: false, warnings };
+  }
+}
+
+/**
  * Replay all non-secret config from the source app's runtime DB onto the dest
  * app's runtime DB (step 6 of the clone pipeline).
  *

@@ -49,6 +49,8 @@ function makeMetadata(overrides: Partial<FunctionMetadata> & { code: string }): 
     trigger_config: {},
     db_connection_string: null,
     substrate_user_id: null,
+    owner_id: '00000000-0000-0000-0000-0000000000aa',
+    owner_email: null,
     ...overrides,
   } satisfies any;
 }
@@ -208,6 +210,80 @@ describe('worker ctx.substrate bridge', () => {
       // Worker should surface the propose error
       expect(result.success).toBe(false);
       expect(result.error?.message).toMatch(/substrate\.propose failed/);
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  it.skip(
+    // TODO: run when Deno is available
+    'exposes ctx.appOwner with owner_id, substrate_user_id, and email',
+    async () => {
+      const { executeFunction } = await import('../worker-executor.js' as any);
+
+      const metadata = makeMetadata({
+        app_id: 'app_owner_probe',
+        owner_id: '00000000-0000-0000-0000-0000000000aa',
+        owner_email: 'owner@example.com',
+        substrate_user_id: '00000000-0000-0000-0000-0000000000aa',
+        code: `
+          export default async (_req, ctx) => {
+            return new Response(JSON.stringify({
+              user_id: ctx.appOwner.user_id,
+              substrate_user_id: ctx.appOwner.substrate_user_id,
+              email: ctx.appOwner.email,
+            }));
+          };
+        `,
+      });
+
+      const result: any = await executeFunction(
+        metadata,
+        new Request('http://localhost/test'),
+        'caller',
+      );
+
+      expect(result.success).toBe(true);
+      const body = JSON.parse(atob(result.response!.bodyBase64));
+      expect(body.user_id).toBe('00000000-0000-0000-0000-0000000000aa');
+      expect(body.substrate_user_id).toBe('00000000-0000-0000-0000-0000000000aa');
+      expect(body.email).toBe('owner@example.com');
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  it.skip(
+    // TODO: run when Deno is available
+    'ctx.appOwner.substrate_user_id is null and email undefined when unset',
+    async () => {
+      const { executeFunction } = await import('../worker-executor.js' as any);
+
+      const metadata = makeMetadata({
+        app_id: 'app_owner_unlinked',
+        owner_id: '00000000-0000-0000-0000-0000000000bb',
+        owner_email: null,
+        substrate_user_id: null,
+        code: `
+          export default async (_req, ctx) => {
+            return new Response(JSON.stringify({
+              user_id: ctx.appOwner.user_id,
+              substrate_user_id: ctx.appOwner.substrate_user_id,
+              hasEmail: ctx.appOwner.email !== undefined,
+            }));
+          };
+        `,
+      });
+
+      const result: any = await executeFunction(
+        metadata,
+        new Request('http://localhost/test'),
+        'caller',
+      );
+
+      expect(result.success).toBe(true);
+      const body = JSON.parse(atob(result.response!.bodyBase64));
+      expect(body.user_id).toBe('00000000-0000-0000-0000-0000000000bb');
+      expect(body.substrate_user_id).toBeNull();
+      expect(body.hasEmail).toBe(false);
     },
   );
 });
