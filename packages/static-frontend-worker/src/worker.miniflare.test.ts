@@ -257,4 +257,24 @@ describe('static-frontend-worker rule application via Miniflare', () => {
     expect(await res.text()).toBe(V2_USERS_BODY);
     // If the SPA rule had won we would get INDEX_BODY.
   });
+
+  // CF Pages-compatible precedence: real assets win over 200 rewrites.
+  // /new.html exists as a real file. The /* SPA rule MUST NOT swallow it.
+  // Under html_handling: 'auto-trailing-slash', an existing .html file is
+  // 307-redirected to its canonical extensionless form (this is CF Pages's
+  // documented URL canonicalization). The worker forwards that 307 so the
+  // browser ends up at /new with the real file content.
+  it('real asset wins over /* SPA rewrite: /new.html → canonical 307 to /new', async () => {
+    const res = await getRules('/new.html');
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('/new');
+    // If the /* rule had won we would get a 200 with INDEX_BODY.
+  });
+
+  it('the canonical /new path serves the actual file (not the /* SPA fallback)', async () => {
+    const res = await getRules('/new');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(NEW_BODY);
+    // If the /* rule had won we would get INDEX_BODY.
+  });
 });
