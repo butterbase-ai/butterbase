@@ -2,7 +2,7 @@
 
 Per-app static frontend worker source for the Butterbase WfP dispatch namespace.
 
-One copy of the compiled output of `src/worker.ts` is uploaded by `control-api` into the WfP dispatch namespace per customer app (script name = appId). The worker is bound to a Cloudflare Assets binding containing the user's uploaded zip contents and serves them with an in-worker SPA fallback (`/` resolves to home `index.html` under `html_handling: 'auto-trailing-slash'`).
+One copy of the compiled output of `src/worker.ts` is uploaded by `control-api` into the WfP dispatch namespace per customer app (script name = appId). The worker is bound to a Cloudflare Assets binding configured with `html_handling: 'none'` and serves content via an explicit path resolution chain with SPA fallback.
 
 To modify worker behavior: edit `src/worker.ts`, rebuild, redeploy `control-api`.
 
@@ -40,9 +40,9 @@ npm test
 
 Two test files:
 
-1. **`worker.test.ts`** — Native Vitest against a hand-mocked `env.ASSETS`. Fast, deterministic, covers MIME defaults, error handling, the exact PR #33 307 cascade. ~10ms.
+1. **`worker.test.ts`** — Native Vitest against a hand-mocked `env.ASSETS`. Fast, deterministic, covers the resolution chain, SPA fallback, honest 404s for asset-shaped misses, error handling. ~10ms.
 
-2. **`worker.miniflare.test.ts`** — Boots the actual compiled worker against Miniflare 4 (real `workerd` runtime + real Assets binding configured the way prod is). Catches regressions where the hand-mock and real runtime diverge — e.g. if CF changes Assets binding semantics. ~350ms.
+2. **`worker.miniflare.test.ts`** — Boots the actual compiled worker against Miniflare 4 (real `workerd` runtime + real Assets binding configured with `html_handling: 'none'`). Catches regressions where the hand-mock and real runtime diverge. ~350ms.
 
 Note: Miniflare's default routes assets BEFORE the user worker (the standalone Workers Static Assets behavior). In a WfP dispatch namespace, the user worker is the entry point and `env.ASSETS` is just a binding it calls. The test enables `routerConfig.invoke_user_worker_ahead_of_assets: true` to match prod.
 
@@ -59,7 +59,7 @@ Boots Miniflare locally on `http://localhost:8787` serving `./local-assets/`. Cu
 | `LOCAL_FRONTEND_ASSETS_DIR` | `./local-assets` | Path to the dist/ to serve |
 | `LOCAL_FRONTEND_PORT` | `8787` | Bind port |
 | `LOCAL_FRONTEND_HOST` | `0.0.0.0` | `127.0.0.1` for loopback-only |
-| `LOCAL_FRONTEND_HTML_HANDLING` | `auto-trailing-slash` | Mirror prod |
+| `LOCAL_FRONTEND_HTML_HANDLING` | `none` | Mirror prod |
 
 Try:
 
@@ -91,7 +91,7 @@ The container uses `node:22-slim` (debian, not alpine) because `workerd` is link
 
 ## `_redirects` support
 
-Users can ship a `_redirects` file at the root of their `dist/` zip. At deploy time, `services/control-api/src/services/deployment.service.ts:deployViaWfp` parses the file via `parseRedirects` (in this package) and bakes the compiled rule table into the worker as the `BB_REDIRECTS_RULES` plain_text binding. The worker applies rules before asset lookup, first match wins.
+Users can ship a `_redirects` file at the root of their `dist/` zip. At deploy time, `services/control-api/src/services/deployment.service.ts:deployViaWfp` parses the file via `parseRedirects` (in this package) and bakes the compiled rule table into the worker as the `BB_REDIRECTS_RULES` plain_text binding. The `_redirects` file itself is stripped from the uploaded asset bundle at deploy time — probing `/_redirects` returns 404. The worker applies rules before asset lookup, first match wins.
 
 Supported subset (Cloudflare Pages-compatible):
 - Comments (`#`)
@@ -105,7 +105,20 @@ Not yet supported (defer if a customer asks):
 - Query/header matchers (`status=200 country=US`)
 - Force-match `!`
 
-Apps that don't ship `_redirects` keep the existing default: direct asset lookup with SPA fallback to `/` on miss (PR #33). The `BB_*` binding namespace is reserved — user app env vars cannot override it (the deploy-time wire-up sets it after the user's env var loop).
+Apps that don't ship `_redirects` keep the existing default: direct asset lookup with SPA fallback to `/` on miss. The `BB_*` binding namespace is reserved — user app env vars cannot override it (the deploy-time wire-up sets it after the user's env var loop).
+
+### Behavior notes (Phase 5)
+
+**`/index.html` and `/foo.html` serve directly.** With `html_handling: 'none'`, these paths are literal asset hits — the worker returns them with 200. There is no canonical redirect to `/` or `/foo`. Users who want CF Pages-style URL canonicalization can ship a `_redirects` rule:
+
+```
+/index.html / 301
+/foo.html   /foo 301
+```
+
+**Non-html-extension misses return 404.** A request for `/missing.png`, `/missing.css`, or `/missing.js` that finds no matching file in the bundle returns 404 — not the `index.html` body. Frontend devs see honest network-tab status codes; broken image tags stop masquerading as HTML responses. Extensionless paths (`/history`, `/profile/42`) and `.html`/`.htm` paths still SPA-fallback to home on miss. This rule applies only when no explicit `200` rewrite rule matches first — for example, a user who ships `/* /index.html 200` will see `/missing.png` return the `index.html` body with status 200, matching Cloudflare Pages semantics.
+
+**`/_redirects` returns 404.** The file is parsed at deploy time and stripped from the uploaded asset bundle. The parsed rules govern routing; the raw file is not served.
 
 ## Production deployment
 

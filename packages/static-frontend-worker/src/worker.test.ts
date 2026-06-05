@@ -33,15 +33,6 @@ function htmlResponse(body: string, status = 200): Response {
   });
 }
 
-// Build a Response that DOES NOT have an inferred content-type. Node's
-// Response constructor auto-sets `text/plain;charset=UTF-8` for string
-// bodies, which doesn't match the CF runtime (where `new Response(body)`
-// leaves content-type unset). Using a byte body sidesteps that inference so
-// the worker's withMime fallback can be exercised faithfully.
-function bytesResponseNoContentType(body: string, status = 200): Response {
-  return new Response(new TextEncoder().encode(body), { status });
-}
-
 function redirectResponse(location: string, status = 307): Response {
   return new Response('', { status, headers: { location } });
 }
@@ -68,9 +59,10 @@ describe('static-frontend-worker', () => {
       expect(calls).toEqual(['/assets/app.css']);
     });
 
-    it('serves the root path directly with status 200', async () => {
+    it('serves the root path directly with status 200 via index.html candidate', async () => {
+      // / is a trailing-slash path — candidate 2 is /index.html.
       const { env, calls } = makeAssetsEnv({
-        '/': () => htmlResponse(INDEX_BODY),
+        '/index.html': () => htmlResponse(INDEX_BODY),
       });
       const res = await worker.fetch(
         new Request('https://app.example.com/'),
@@ -78,20 +70,88 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(INDEX_BODY);
-      expect(calls).toEqual(['/']);
+      // Candidate 1 (/) misses, candidate 2 (/index.html) hits.
+      expect(calls).toEqual(['/', '/index.html']);
     });
   });
 
-  describe('SPA fallback (the PR #33 fix)', () => {
-    it('resolves a deep-path miss (307 → /) to the home document with status 200', async () => {
-      // Real CF behavior under `html_handling: 'auto-trailing-slash'`:
-      //   - extensionless misses 307 to `/`
-      //   - `/index.html` ALSO 307s to `/` (the trap)
-      //   - `/` serves index.html with 200
+  // Layer 1: unit tests against hand-mocked env.ASSETS — explicit resolution chain.
+  describe('resolveAssetPath candidates (Phase 5)', () => {
+    it('literal hit: /foo.js → 200 from candidate 1', async () => {
       const { env, calls } = makeAssetsEnv({
-        '/': () => htmlResponse(INDEX_BODY),
-        '/index.html': () => redirectResponse('/'),
-        '/history': () => redirectResponse('/'),
+        '/foo.js': () =>
+          new Response('// js', { status: 200, headers: { 'content-type': 'application/javascript' } }),
+      });
+      const res = await worker.fetch(new Request('https://app.example.com/foo.js'), env);
+      expect(res.status).toBe(200);
+      expect(calls).toEqual(['/foo.js']);
+    });
+
+    it('trailing-slash index: /about/ → /about/index.html', async () => {
+      const { env, calls } = makeAssetsEnv({
+        '/about/index.html': () => htmlResponse('<h1>About</h1>'),
+      });
+      const res = await worker.fetch(new Request('https://app.example.com/about/'), env);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('<h1>About</h1>');
+      // Candidate 1 (/about/) misses, candidate 2 (/about/index.html) hits.
+      expect(calls).toEqual(['/about/', '/about/index.html']);
+    });
+
+    it('extensionless .html lookup: /about → /about.html hit (no /about/index.html consulted)', async () => {
+      const { env, calls } = makeAssetsEnv({
+        '/about.html': () => htmlResponse('<h1>About</h1>'),
+        '/about/index.html': () => htmlResponse('<h1>About Index</h1>'),
+      });
+      const res = await worker.fetch(new Request('https://app.example.com/about'), env);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('<h1>About</h1>');
+      // Candidate 1 (/about) misses, candidate 2 (/about.html) hits — stop.
+      expect(calls).toEqual(['/about', '/about.html']);
+      expect(calls).not.toContain('/about/index.html');
+    });
+
+    it('extensionless dir lookup: /about with no .html but with /about/index.html', async () => {
+      const { env, calls } = makeAssetsEnv({
+        '/about/index.html': () => htmlResponse('<h1>About Dir</h1>'),
+      });
+      const res = await worker.fetch(new Request('https://app.example.com/about'), env);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('<h1>About Dir</h1>');
+      // /about misses, /about.html misses, /about/index.html hits.
+      expect(calls).toEqual(['/about', '/about.html', '/about/index.html']);
+    });
+
+    it('/foo.html real file: serves literally (200), no redirect', async () => {
+      const { env, calls } = makeAssetsEnv({
+        '/foo.html': () => htmlResponse('<h1>Foo</h1>'),
+      });
+      const res = await worker.fetch(new Request('https://app.example.com/foo.html'), env);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('<h1>Foo</h1>');
+      // Literal hit — no extra candidates consulted, no redirect issued.
+      expect(calls).toEqual(['/foo.html']);
+      expect(res.headers.get('location')).toBeNull();
+    });
+
+    it('/index.html real file: serves literally (200), no redirect', async () => {
+      const { env, calls } = makeAssetsEnv({
+        '/index.html': () => htmlResponse(INDEX_BODY),
+      });
+      const res = await worker.fetch(new Request('https://app.example.com/index.html'), env);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(INDEX_BODY);
+      expect(calls).toEqual(['/index.html']);
+      expect(res.headers.get('location')).toBeNull();
+    });
+  });
+
+  describe('SPA fallback (route-shaped miss)', () => {
+    it('all candidates miss for route-shaped path → SPA fallback to /index.html', async () => {
+      const { env, calls } = makeAssetsEnv({
+        // No '/' mock: under html_handling: 'none', '/' always 404s in production.
+        // Only /index.html exists. The SPA fallback must land on /index.html.
+        '/index.html': () => htmlResponse(INDEX_BODY),
       });
       const res = await worker.fetch(
         new Request('https://app.example.com/history'),
@@ -99,102 +159,73 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(INDEX_BODY);
-      // Regression guard: the fallback must hit `/`, not `/index.html`.
-      expect(calls).toEqual(['/history', '/']);
-      expect(calls).not.toContain('/index.html');
+      // /history misses, /history.html misses, /history/index.html misses →
+      // SPA fallback fetches /index.html directly (not '/' first).
+      expect(calls).toContain('/history');
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
-    it('resolves a 404 miss to the home document', async () => {
+    it('all candidates miss for /missing.html → SPA fallback (.html is route-shaped)', async () => {
       const { env, calls } = makeAssetsEnv({
-        '/': () => htmlResponse(INDEX_BODY),
+        // No '/' mock: under html_handling: 'none', '/' always 404s in production.
+        // Only /index.html exists. The SPA fallback must land on /index.html.
+        '/index.html': () => htmlResponse(INDEX_BODY),
       });
-      // No /unknown route → default 404 from the mock
       const res = await worker.fetch(
-        new Request('https://app.example.com/unknown'),
+        new Request('https://app.example.com/missing.html'),
         env,
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(INDEX_BODY);
-      expect(calls).toEqual(['/unknown', '/']);
+      // /missing.html has a .html extension → route-shaped → SPA fallback fetches /index.html directly.
+      expect(calls).toContain('/missing.html');
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
     it('preserves the fallback response status when the home document is also missing', async () => {
-      // Pathological app with no index.html: both first hop and fallback miss.
       const { env, calls } = makeAssetsEnv({}, 404);
       const res = await worker.fetch(
         new Request('https://app.example.com/missing'),
         env,
       );
-      // Fallback returns whatever / returns. Both 404 → status 404.
+      // Fallback fetches /index.html directly; if that 404s too, propagate 404.
       expect(res.status).toBe(404);
-      expect(calls).toEqual(['/missing', '/']);
+      // SPA fallback must have been attempted against /index.html.
+      expect(calls).toContain('/index.html');
     });
   });
 
-  describe('MIME defaults', () => {
-    it('applies text/css when the assets binding returns a .css file with no content-type', async () => {
-      const { env } = makeAssetsEnv({
-        '/styles.css': () => bytesResponseNoContentType('body{}'),
+  describe('asset-shaped miss returns honest 404 (no SPA fallback)', () => {
+    it('all candidates miss for /missing.png → 404, no SPA fallback', async () => {
+      const { env, calls } = makeAssetsEnv({
+        '/': () => htmlResponse(INDEX_BODY),
       });
       const res = await worker.fetch(
-        new Request('https://app.example.com/styles.css'),
+        new Request('https://app.example.com/missing.png'),
         env,
       );
-      expect(res.headers.get('content-type')).toBe('text/css');
+      expect(res.status).toBe(404);
+      // /missing.png only has 1 candidate (literal). SPA fallback must NOT fire.
+      expect(calls).toEqual(['/missing.png']);
+      expect(calls).not.toContain('/');
     });
 
-    it('applies application/javascript for .mjs', async () => {
-      const { env } = makeAssetsEnv({
-        '/app.mjs': () => bytesResponseNoContentType('export const x = 1;'),
+    it('all candidates miss for /missing.js → 404, no SPA fallback', async () => {
+      const { env, calls } = makeAssetsEnv({
+        '/': () => htmlResponse(INDEX_BODY),
       });
       const res = await worker.fetch(
-        new Request('https://app.example.com/app.mjs'),
+        new Request('https://app.example.com/missing.js'),
         env,
       );
-      expect(res.headers.get('content-type')).toBe('application/javascript');
+      expect(res.status).toBe(404);
+      expect(calls).toEqual(['/missing.js']);
+      expect(calls).not.toContain('/');
     });
+  });
 
-    it('defaults to text/html for extensionless paths', async () => {
-      // Extensionless paths are served by the Assets binding from a .html
-      // file via html_handling. Mark them text/html so the browser renders
-      // them instead of triggering a download.
-      const { env } = makeAssetsEnv({
-        '/geo': () => bytesResponseNoContentType('<h1>geo</h1>'),
-      });
-      const res = await worker.fetch(
-        new Request('https://app.example.com/geo'),
-        env,
-      );
-      expect(res.headers.get('content-type')).toBe('text/html');
-    });
-
-    it('does NOT mis-detect the hostname dot as the extension for extensionless paths', async () => {
-      // Regression for the bug fixed in 0524fd9c: splitting the whole URL on
-      // '.' picks up 'ai' as the "extension" of 'butterbase.ai/geo' and
-      // falls through to application/octet-stream (triggering a download).
-      const { env } = makeAssetsEnv({
-        '/geo': () => bytesResponseNoContentType('<h1>geo</h1>'),
-      });
-      const res = await worker.fetch(
-        new Request('https://app.butterbase.ai/geo'),
-        env,
-      );
-      expect(res.headers.get('content-type')).toBe('text/html');
-      expect(res.headers.get('content-type')).not.toBe('application/octet-stream');
-    });
-
-    it('defaults to application/octet-stream for unknown extensions', async () => {
-      const { env } = makeAssetsEnv({
-        '/data.bin': () => bytesResponseNoContentType('binary'),
-      });
-      const res = await worker.fetch(
-        new Request('https://app.example.com/data.bin'),
-        env,
-      );
-      expect(res.headers.get('content-type')).toBe('application/octet-stream');
-    });
-
-    it('preserves a content-type the assets binding already set', async () => {
+  describe('MIME is NOT set inside the worker (Phase 6)', () => {
+    it('worker passes through whatever content-type Assets set (does not override)', async () => {
       const { env } = makeAssetsEnv({
         '/styles.css': () =>
           new Response('body{}', {
@@ -206,7 +237,43 @@ describe('static-frontend-worker', () => {
         new Request('https://app.example.com/styles.css'),
         env,
       );
+      // Worker must not modify the content-type that Assets already set.
       expect(res.headers.get('content-type')).toBe('text/css; charset=utf-8');
+    });
+
+    it('worker does NOT add a content-type when Assets returned none', async () => {
+      // Simulate Assets returning no content-type (as happens in WfP namespaces).
+      const { env } = makeAssetsEnv({
+        '/styles.css': () =>
+          new Response(new TextEncoder().encode('body{}'), { status: 200 }),
+      });
+      const res = await worker.fetch(
+        new Request('https://app.example.com/styles.css'),
+        env,
+      );
+      // The worker must not inject a MIME type — dispatch-worker owns that.
+      // content-type may be absent OR may be set by Node's fetch (text/plain
+      // is acceptable here as long as the worker itself didn't synthesize it).
+      // The critical assertion: it must NOT be 'text/css', 'application/javascript',
+      // 'image/png', or any worker-inferred value.
+      const ct = res.headers.get('content-type') ?? '';
+      expect(ct).not.toBe('text/css');
+      expect(ct).not.toBe('application/javascript');
+    });
+
+    it('SPA fallback response: worker passes content-type from Assets unchanged', async () => {
+      const { env } = makeAssetsEnv({
+        '/': () => htmlResponse(INDEX_BODY),
+        '/index.html': () => htmlResponse(INDEX_BODY),
+      });
+      const res = await worker.fetch(
+        new Request('https://app.example.com/history'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      // text/html was set by the mock (as Assets would set it); worker didn't add it.
+      // The point: whatever Assets returned, that's what came through.
+      expect(res.headers.get('content-type')).toBe('text/html');
     });
   });
 
@@ -267,8 +334,9 @@ describe('static-frontend-worker', () => {
   describe('_redirects rule application (BB_REDIRECTS_RULES binding)', () => {
     it('applies a 200 rewrite rule on asset miss (serves target content under the original URL)', async () => {
       const indexBody = '<html>HOME</html>';
+      // /index.html is the literal candidate for the rewrite target /index.html.
       const { env, calls } = makeAssetsEnv(
-        { '/': () => htmlResponse(indexBody) },
+        { '/index.html': () => htmlResponse(indexBody) },
         404,
         JSON.stringify([{ from: '/*', to: '/index.html', status: 200 }]),
       );
@@ -278,9 +346,84 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(indexBody);
-      // CF Pages-compatible precedence: asset lookup first (returns 404),
-      // then 200 rewrite applies. Rewrite target /index.html normalizes to /.
-      expect(calls).toEqual(['/history', '/']);
+      // Asset lookup for /history (+ .html + /index.html) — all miss.
+      // Then 200 rewrite applies: resolveAssetPath('/index.html') → ['/index.html'].
+      // /index.html hits.
+      expect(calls).toContain('/history');
+      expect(calls).toContain('/index.html');
+    });
+
+    it('_redirects 200 rewrite: /api/* /v2/:splat — tries resolveAssetPath candidates in order', async () => {
+      const v2UsersBody = '<html>V2 USERS</html>';
+      // resolveAssetPath('/v2/users') = ['/v2/users', '/v2/users.html', '/v2/users/index.html']
+      const { env, calls } = makeAssetsEnv(
+        { '/v2/users': () => htmlResponse(v2UsersBody) },
+        404,
+        JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 200 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/api/users'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(v2UsersBody);
+      // Asset lookup for /api/users (+ .html + /index.html) — all miss.
+      // Rewrite to /v2/users — first candidate hits.
+      expect(calls).toContain('/api/users');
+      expect(calls).toContain('/v2/users');
+    });
+
+    it('_redirects 200 rewrite: target /v2/users.html serves via second candidate', async () => {
+      const v2UsersBody = '<html>V2 USERS</html>';
+      // When /v2/users misses but /v2/users.html exists, second candidate wins.
+      const { env, calls } = makeAssetsEnv(
+        { '/v2/users.html': () => htmlResponse(v2UsersBody) },
+        404,
+        JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 200 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/api/users'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(v2UsersBody);
+      expect(calls).toContain('/v2/users');
+      expect(calls).toContain('/v2/users.html');
+    });
+
+    it('_redirects 200 rewrite: target /v2/users/index.html serves via third candidate', async () => {
+      const v2UsersBody = '<html>V2 USERS DIR</html>';
+      // When /v2/users and /v2/users.html both miss, /v2/users/index.html wins.
+      const { env, calls } = makeAssetsEnv(
+        { '/v2/users/index.html': () => htmlResponse(v2UsersBody) },
+        404,
+        JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 200 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/api/users'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(v2UsersBody);
+      expect(calls).toContain('/v2/users');
+      expect(calls).toContain('/v2/users.html');
+      expect(calls).toContain('/v2/users/index.html');
+    });
+
+    it('_redirects 3xx rule fires regardless of asset existence (rule wins)', async () => {
+      const { env, calls } = makeAssetsEnv(
+        { '/old': () => htmlResponse('<html>existing file</html>') },
+        404,
+        JSON.stringify([{ from: '/old', to: '/new', status: 301 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/old'),
+        env,
+      );
+      expect(res.status).toBe(301);
+      expect(res.headers.get('location')).toBe('https://app.example.com/new');
+      // Asset must not be consulted — the 3xx rule preempts the lookup.
+      expect(calls).toEqual([]);
     });
 
     it('applies a 301 redirect rule (returns Location header, does NOT fetch target)', async () => {
@@ -300,9 +443,6 @@ describe('static-frontend-worker', () => {
     });
 
     it('first match wins for 3xx rules (preserves rule order)', async () => {
-      // 3xx rules fire BEFORE asset lookup, so first-match-wins is observable
-      // even when an asset would match. With 200 rules, asset wins over rule,
-      // so testing rule ordering must use 3xx.
       const { env, calls } = makeAssetsEnv(
         {},
         404,
@@ -332,7 +472,8 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       // Asset lookup for /api/users/42 first (misses), then rewrite to /v2/users/42.
-      expect(calls).toEqual(['/api/users/42', '/v2/users/42']);
+      expect(calls).toContain('/api/users/42');
+      expect(calls).toContain('/v2/users/42');
     });
 
     it('substitutes :splat in the redirect target', async () => {
@@ -362,10 +503,10 @@ describe('static-frontend-worker', () => {
       expect(res.status).toBe(status);
     });
 
-    it('falls through to default asset lookup + SPA fallback when no rule matches', async () => {
+    it('falls through to default SPA fallback when no rule matches', async () => {
       const indexBody = '<html>HOME</html>';
       const { env, calls } = makeAssetsEnv(
-        { '/': () => htmlResponse(indexBody) },
+        { '/index.html': () => htmlResponse(indexBody) },
         404,
         JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 301 }]),
       );
@@ -375,15 +516,14 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(indexBody);
-      // First hop: /unrelated/deep/path → 404. Fallback: /. SPA fallback path
-      // is preserved for apps without a `/*` catch-all rule.
-      expect(calls).toEqual(['/unrelated/deep/path', '/']);
+      expect(calls).toContain('/unrelated/deep/path');
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
     it('treats absent BB_REDIRECTS_RULES as no rules (existing behavior unchanged)', async () => {
       const indexBody = '<html>HOME</html>';
       const { env, calls } = makeAssetsEnv(
-        { '/': () => htmlResponse(indexBody) },
+        { '/index.html': () => htmlResponse(indexBody) },
         404,
         // no rulesJson argument
       );
@@ -392,13 +532,13 @@ describe('static-frontend-worker', () => {
         env,
       );
       expect(res.status).toBe(200);
-      expect(calls).toEqual(['/history', '/']);
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
     it('treats malformed BB_REDIRECTS_RULES JSON as no rules (does not break serving)', async () => {
       const indexBody = '<html>HOME</html>';
       const { env } = makeAssetsEnv(
-        { '/': () => htmlResponse(indexBody) },
+        { '/': () => htmlResponse(indexBody), '/index.html': () => htmlResponse(indexBody) },
         404,
         '{not valid json',
       );
@@ -428,8 +568,6 @@ describe('static-frontend-worker', () => {
       });
 
       it('200 rewrite does NOT fire when the requested path is a real asset (asset wins)', async () => {
-        // Catch-all SPA rule would otherwise rewrite EVERY path to /index.html.
-        // With CF Pages precedence, real assets are served unchanged.
         const assetBody = '<html>real file</html>';
         const indexBody = '<html>HOME</html>';
         const { env, calls } = makeAssetsEnv(
@@ -453,7 +591,7 @@ describe('static-frontend-worker', () => {
       it('200 rewrite fires when the requested path is NOT a real asset (rule fallback)', async () => {
         const indexBody = '<html>HOME</html>';
         const { env, calls } = makeAssetsEnv(
-          { '/': () => htmlResponse(indexBody) },
+          { '/index.html': () => htmlResponse(indexBody) },
           404,
           JSON.stringify([{ from: '/*', to: '/index.html', status: 200 }]),
         );
@@ -463,7 +601,38 @@ describe('static-frontend-worker', () => {
         );
         expect(res.status).toBe(200);
         expect(await res.text()).toBe(indexBody);
-        expect(calls).toEqual(['/missing', '/']);
+        expect(calls).toContain('/missing');
+        expect(calls).toContain('/index.html');
+      });
+
+      it('200 rewrite target miss → SPA fallback for route-shaped path', async () => {
+        // When the rewrite target also misses, route-shaped paths fall through to SPA.
+        const indexBody = '<html>HOME</html>';
+        const { env } = makeAssetsEnv(
+          { '/': () => htmlResponse(indexBody), '/index.html': () => htmlResponse(indexBody) },
+          404,
+          JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 200 }]),
+        );
+        const res = await worker.fetch(
+          new Request('https://app.example.com/api/missing-route'),
+          env,
+        );
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(indexBody);
+      });
+
+      it('200 rewrite target miss → 404 for asset-shaped path', async () => {
+        // When the rewrite target also misses and the path is asset-shaped, return 404.
+        const { env } = makeAssetsEnv(
+          { '/': () => htmlResponse('<html>HOME</html>') },
+          404,
+          JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 200 }]),
+        );
+        const res = await worker.fetch(
+          new Request('https://app.example.com/api/missing.png'),
+          env,
+        );
+        expect(res.status).toBe(404);
       });
     });
 

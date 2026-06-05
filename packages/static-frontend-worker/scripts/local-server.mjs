@@ -15,12 +15,13 @@
 //   LOCAL_FRONTEND_HOST        Host to bind. Default: 0.0.0.0 (so docker port
 //                              forwarding works; use 127.0.0.1 for native
 //                              loopback-only).
-//   LOCAL_FRONTEND_HTML_HANDLING  auto-trailing-slash (default), drop-trailing-slash,
-//                                 force-trailing-slash, or none.
+//   LOCAL_FRONTEND_HTML_HANDLING  none (default, matches prod), auto-trailing-slash,
+//                                 drop-trailing-slash, or force-trailing-slash.
 import { Miniflare } from 'miniflare';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, readdirSync, symlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { parseRedirects } from '../dist/redirects-parser.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -47,7 +48,7 @@ const port = Number.parseInt(process.env.LOCAL_FRONTEND_PORT || '8787', 10);
 const host = process.env.LOCAL_FRONTEND_HOST || '0.0.0.0';
 const htmlHandling =
   /** @type {"auto-trailing-slash" | "drop-trailing-slash" | "force-trailing-slash" | "none"} */ (
-    process.env.LOCAL_FRONTEND_HTML_HANDLING || 'auto-trailing-slash'
+    process.env.LOCAL_FRONTEND_HTML_HANDLING || 'none'
   );
 
 // Auto-parse `_redirects` from the assets dir if present. Mirrors what
@@ -65,6 +66,20 @@ if (existsSync(redirectsPath)) {
   }
 }
 
+// Strip _redirects from the served assets dir, mirroring deployViaWfp which
+// deletes the file from the upload bundle after parsing so /_redirects → 404
+// in prod. Build a symlink farm excluding _redirects so the local worker sees
+// the same bundle shape without mutating the user's actual dist/.
+let servedDir = assetsDir;
+if (existsSync(redirectsPath)) {
+  const stripped = mkdtempSync(join(tmpdir(), 'bb-local-assets-'));
+  for (const entry of readdirSync(assetsDir)) {
+    if (entry === '_redirects') continue;
+    symlinkSync(join(assetsDir, entry), join(stripped, entry));
+  }
+  servedDir = stripped;
+}
+
 const mf = new Miniflare({
   modules: true,
   script: workerSource,
@@ -76,7 +91,7 @@ const mf = new Miniflare({
     ? { BB_REDIRECTS_RULES: redirectsRulesJson }
     : {},
   assets: {
-    directory: assetsDir,
+    directory: servedDir,
     binding: 'ASSETS',
     assetConfig: {
       html_handling: htmlHandling,

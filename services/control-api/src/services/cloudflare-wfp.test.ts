@@ -101,7 +101,7 @@ describe('deployUserWorker', () => {
     const metadataBlob = (deployInit.body as FormData).get('metadata') as Blob;
     const metadataJson = JSON.parse(await metadataBlob.text());
     expect(metadataJson.main_module).toBe('worker.mjs');
-    expect(metadataJson.assets.config.html_handling).toBe('auto-trailing-slash');
+    expect(metadataJson.assets.config.html_handling).toBe('none');
     expect(metadataJson.assets.jwt).toBe('completion-jwt');
     expect(metadataJson.bindings).toEqual([
       { type: 'assets', name: 'ASSETS' },

@@ -577,6 +577,10 @@ async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
     }
   }
 
+  // Strip _redirects from the upload — parsed rules are baked into BB_REDIRECTS_RULES,
+  // the served copy would be dead weight and would leak routing config.
+  fileMap.delete('/_redirects');
+
   console.log(`${tag} Step 3/5: Deploying ${files.length} files to WfP (script=${appId})…`);
   const wfpStart = Date.now();
   await CloudflareWfp.deployUserWorker({

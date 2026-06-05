@@ -200,6 +200,37 @@ describe('runDeploymentPipeline (WfP branch)', () => {
     expect(allParamsFlat).toContain('READY');
   });
 
+  it('strips /_redirects from the fileMap before calling deployUserWorker', async () => {
+    const zipBuffer = makeZipBuffer({
+      'index.html': '<html>hi</html>',
+      '_redirects': '/old /new 301\n/* /index.html 200\n',
+    });
+    (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
+
+    const db = makeDb({
+      name: 'My App',
+      subdomain: 'myapp',
+      cloudflare_project_name: null,
+      deployment_backend: 'wfp',
+    });
+
+    wireRuntimeDb(db);
+    await runDeploymentPipeline(
+      db as unknown as import('pg').Pool,
+      'app_abc',
+      'dep_redirects',
+      { r2_object_key: 'r2/key', framework: 'react-vite' }
+    );
+
+    expect(CloudflareWfp.deployUserWorker).toHaveBeenCalledTimes(1);
+    const call = (CloudflareWfp.deployUserWorker as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    // _redirects must not appear in the uploaded bundle — it was parsed into
+    // BB_REDIRECTS_RULES and stripped so it doesn't leak routing config.
+    expect(call.files.has('/_redirects')).toBe(false);
+    // But the rest of the files should still be present.
+    expect(call.files.has('/index.html')).toBe(true);
+  });
+
   it('supersedes active app_edge_ssr_deployments rows when WfP static deploy reaches READY', async () => {
     const zipBuffer = makeZipBuffer({
       'index.html': '<html>hi</html>',
