@@ -18,14 +18,18 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "local-assets",
+    "scripts/local-server.mjs"
   ],
   "scripts": {
     "build": "tsc -b --force && node ./scripts/emit-source.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev:serve": "node ./scripts/local-server.mjs"
   },
   "devDependencies": {
+    "miniflare": "^4.20260426.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
   }

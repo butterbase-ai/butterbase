@@ -1,0 +1,91 @@
+#!/usr/bin/env node
+// Boots the static frontend worker locally via Miniflare (the same workerd
+// runtime CF runs in prod). Serves a configurable assets directory with the
+// same html_handling and binding setup the deployed worker uses, so devs can
+// reproduce SPA routing issues without redeploying.
+//
+// Usage (from package root):
+//   npm run dev:serve
+//
+// Env:
+//   LOCAL_FRONTEND_ASSETS_DIR  Path to the dist/ to serve.
+//                              Default: ./local-assets (a sample SPA shipped
+//                              with this package).
+//   LOCAL_FRONTEND_PORT        Port to bind. Default: 8787.
+//   LOCAL_FRONTEND_HOST        Host to bind. Default: 0.0.0.0 (so docker port
+//                              forwarding works; use 127.0.0.1 for native
+//                              loopback-only).
+//   LOCAL_FRONTEND_HTML_HANDLING  auto-trailing-slash (default), drop-trailing-slash,
+//                                 force-trailing-slash, or none.
+import { Miniflare } from 'miniflare';
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const packageRoot = join(here, '..');
+
+const workerJsPath = join(packageRoot, 'dist', 'worker.js');
+if (!existsSync(workerJsPath)) {
+  console.error(
+    `[local-server] dist/worker.js not found at ${workerJsPath}. Run \`npm run build\` first.`,
+  );
+  process.exit(1);
+}
+const workerSource = readFileSync(workerJsPath, 'utf8');
+
+const assetsDir = resolve(
+  process.env.LOCAL_FRONTEND_ASSETS_DIR || join(packageRoot, 'local-assets'),
+);
+if (!existsSync(assetsDir)) {
+  console.error(`[local-server] Assets directory does not exist: ${assetsDir}`);
+  process.exit(1);
+}
+
+const port = Number.parseInt(process.env.LOCAL_FRONTEND_PORT || '8787', 10);
+const host = process.env.LOCAL_FRONTEND_HOST || '0.0.0.0';
+const htmlHandling =
+  /** @type {"auto-trailing-slash" | "drop-trailing-slash" | "force-trailing-slash" | "none"} */ (
+    process.env.LOCAL_FRONTEND_HTML_HANDLING || 'auto-trailing-slash'
+  );
+
+const mf = new Miniflare({
+  modules: true,
+  script: workerSource,
+  host,
+  port,
+  assets: {
+    directory: assetsDir,
+    binding: 'ASSETS',
+    assetConfig: {
+      html_handling: htmlHandling,
+    },
+    // Match prod: in a WfP dispatch namespace the user worker is the entry
+    // point and env.ASSETS is just a binding. Miniflare's default routes
+    // assets ahead of the user worker, which would bypass our SPA fallback.
+    routerConfig: {
+      has_user_worker: true,
+      invoke_user_worker_ahead_of_assets: true,
+    },
+  },
+});
+
+// Trigger initialization so the server is bound before we log readiness.
+await mf.ready;
+
+console.log(`[local-server] static-frontend-worker ready`);
+console.log(`[local-server]   listening:    http://${host}:${port}`);
+console.log(`[local-server]   assets dir:   ${assetsDir}`);
+console.log(`[local-server]   html_handling: ${htmlHandling}`);
+console.log(`[local-server] try:`);
+console.log(`[local-server]   curl -sI http://localhost:${port}/                  # 200 + text/html`);
+console.log(`[local-server]   curl -sI http://localhost:${port}/some/deep/route   # 200 (SPA fallback)`);
+console.log(`[local-server]   curl -sI http://localhost:${port}/about             # 200 (resolves /about.html)`);
+
+const shutdown = async (signal) => {
+  console.log(`[local-server] received ${signal}, shutting down…`);
+  await mf.dispose();
+  process.exit(0);
+};
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
