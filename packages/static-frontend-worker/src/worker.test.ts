@@ -8,6 +8,7 @@ import worker, { type Env } from './worker.js';
 function makeAssetsEnv(
   routes: Record<string, () => Response>,
   defaultStatus = 404,
+  rulesJson?: string,
 ): { env: Env; calls: string[] } {
   const calls: string[] = [];
   const env: Env = {
@@ -20,6 +21,7 @@ function makeAssetsEnv(
         return new Response('', { status: defaultStatus });
       },
     },
+    BB_REDIRECTS_RULES: rulesJson,
   };
   return { env, calls };
 }
@@ -259,6 +261,170 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(500);
       expect(await res.text()).toBe('worker error: string-thrown');
+    });
+  });
+
+  describe('_redirects rule application (BB_REDIRECTS_RULES binding)', () => {
+    it('applies a 200 rewrite rule (serves target content under the original URL)', async () => {
+      const indexBody = '<html>HOME</html>';
+      const { env, calls } = makeAssetsEnv(
+        { '/': () => htmlResponse(indexBody) },
+        404,
+        JSON.stringify([{ from: '/*', to: '/index.html', status: 200 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/history'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(indexBody);
+      // The rewrite target /index.html is special-cased to fetch / instead
+      // (to escape the html_handling 307 trap). No call to /history.
+      expect(calls).toEqual(['/']);
+    });
+
+    it('applies a 301 redirect rule (returns Location header, does NOT fetch target)', async () => {
+      const { env, calls } = makeAssetsEnv(
+        { '/new': () => htmlResponse('<html>new</html>') },
+        404,
+        JSON.stringify([{ from: '/old', to: '/new', status: 301 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/old'),
+        env,
+      );
+      expect(res.status).toBe(301);
+      expect(res.headers.get('location')).toBe('https://app.example.com/new');
+      // A redirect must NOT fetch the target — that's the client's job.
+      expect(calls).toEqual([]);
+    });
+
+    it('first match wins (preserves rule order)', async () => {
+      const indexBody = '<html>HOME</html>';
+      const aboutBody = '<html>ABOUT</html>';
+      const { env } = makeAssetsEnv(
+        {
+          '/': () => htmlResponse(indexBody),
+          '/about.html': () => htmlResponse(aboutBody),
+        },
+        404,
+        JSON.stringify([
+          { from: '/about', to: '/about.html', status: 200 },
+          { from: '/*', to: '/index.html', status: 200 },
+        ]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/about'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(aboutBody);
+    });
+
+    it('substitutes :splat in the rewrite target', async () => {
+      const { env, calls } = makeAssetsEnv(
+        { '/v2/users/42': () => htmlResponse('<html>v2</html>') },
+        404,
+        JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 200 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/api/users/42'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(calls).toEqual(['/v2/users/42']);
+    });
+
+    it('substitutes :splat in the redirect target', async () => {
+      const { env } = makeAssetsEnv(
+        {},
+        404,
+        JSON.stringify([{ from: '/old/*', to: '/new/:splat', status: 301 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/old/users/42'),
+        env,
+      );
+      expect(res.status).toBe(301);
+      expect(res.headers.get('location')).toBe('https://app.example.com/new/users/42');
+    });
+
+    it.each([301, 302, 303, 307, 308])('honors redirect status %i', async (status) => {
+      const { env } = makeAssetsEnv(
+        {},
+        404,
+        JSON.stringify([{ from: '/a', to: '/b', status }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/a'),
+        env,
+      );
+      expect(res.status).toBe(status);
+    });
+
+    it('falls through to default asset lookup + SPA fallback when no rule matches', async () => {
+      const indexBody = '<html>HOME</html>';
+      const { env, calls } = makeAssetsEnv(
+        { '/': () => htmlResponse(indexBody) },
+        404,
+        JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 301 }]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/unrelated/deep/path'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(indexBody);
+      // First hop: /unrelated/deep/path → 404. Fallback: /. SPA fallback path
+      // is preserved for apps without a `/*` catch-all rule.
+      expect(calls).toEqual(['/unrelated/deep/path', '/']);
+    });
+
+    it('treats absent BB_REDIRECTS_RULES as no rules (existing behavior unchanged)', async () => {
+      const indexBody = '<html>HOME</html>';
+      const { env, calls } = makeAssetsEnv(
+        { '/': () => htmlResponse(indexBody) },
+        404,
+        // no rulesJson argument
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/history'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(calls).toEqual(['/history', '/']);
+    });
+
+    it('treats malformed BB_REDIRECTS_RULES JSON as no rules (does not break serving)', async () => {
+      const indexBody = '<html>HOME</html>';
+      const { env } = makeAssetsEnv(
+        { '/': () => htmlResponse(indexBody) },
+        404,
+        '{not valid json',
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/history'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(indexBody);
+    });
+
+    it('discards rule entries with wrong shape and serves with remaining valid rules', async () => {
+      const { env } = makeAssetsEnv(
+        { '/v2/foo': () => htmlResponse('<html>v2</html>') },
+        404,
+        JSON.stringify([
+          { from: 123, to: '/bad', status: 200 }, // wrong type — filtered
+          { from: '/foo', to: '/v2/foo', status: 200 },
+        ]),
+      );
+      const res = await worker.fetch(
+        new Request('https://app.example.com/foo'),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('<html>v2</html>');
     });
   });
 });
