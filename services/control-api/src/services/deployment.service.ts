@@ -13,6 +13,7 @@ import { generateTemplatePage } from './template-page.js';
 import { decrypt } from './crypto.js';
 import { notifyDeploymentFailed } from './failure-notifications.service.js';
 import { probeSpaRouting } from './spa-routing-probe.js';
+import { parseRedirects } from '@butterbase/static-frontend-worker';
 
 export class DeploymentError extends Error {
   constructor(message: string, public readonly code?: string) {
@@ -547,6 +548,31 @@ async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
       throw new DeploymentError(
         `Failed to decrypt env var ${row.key}: ${msg}`,
         'ENV_DECRYPT_FAILED'
+      );
+    }
+  }
+
+  // Parse user-shipped `_redirects` (if any) and bake the rules into a system
+  // binding `BB_REDIRECTS_RULES`. The worker reads this at request time and
+  // applies rules BEFORE asset lookup (see worker.ts). Set after the user env
+  // var loop so a malicious/curious user setting BB_REDIRECTS_RULES via
+  // app_frontend_env_vars cannot override platform behavior.
+  const redirectsFile = files.find(
+    (f) => f.path.replace(/^\/+/, '') === '_redirects',
+  );
+  if (redirectsFile) {
+    const content = redirectsFile.content.toString('utf8');
+    const { rules, warnings } = parseRedirects(content);
+    if (warnings.length > 0) {
+      console.warn(
+        `${tag} Step 3/5: _redirects parsed with ${warnings.length} warning(s):`,
+      );
+      for (const w of warnings) console.warn(`${tag}   ${w}`);
+    }
+    if (rules.length > 0) {
+      envVars.BB_REDIRECTS_RULES = JSON.stringify(rules);
+      console.log(
+        `${tag} Step 3/5: parsed ${rules.length} _redirects rule(s) → BB_REDIRECTS_RULES binding`,
       );
     }
   }

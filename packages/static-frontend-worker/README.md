@@ -89,6 +89,24 @@ docker compose -f docker-compose.local.yml run --rm \
 
 The container uses `node:22-slim` (debian, not alpine) because `workerd` is linked against glibc and crashes with `symbol not found` relocations on musl.
 
+## `_redirects` support
+
+Users can ship a `_redirects` file at the root of their `dist/` zip. At deploy time, `services/control-api/src/services/deployment.service.ts:deployViaWfp` parses the file via `parseRedirects` (in this package) and bakes the compiled rule table into the worker as the `BB_REDIRECTS_RULES` plain_text binding. The worker applies rules before asset lookup, first match wins.
+
+Supported subset (Cloudflare Pages-compatible):
+- Comments (`#`)
+- Blank lines
+- `<from> <to> [status]` (default status `301`)
+- Splat patterns: `from` may end with `/*`, `to` may reference `:splat`
+- Status codes: `200` (rewrite — serve target content under the original URL), `301`/`302`/`303`/`307`/`308` (redirect — `Location` header)
+
+Not yet supported (defer if a customer asks):
+- Named placeholders (`:id`)
+- Query/header matchers (`status=200 country=US`)
+- Force-match `!`
+
+Apps that don't ship `_redirects` keep the existing default: direct asset lookup with SPA fallback to `/` on miss (PR #33). The `BB_*` binding namespace is reserved — user app env vars cannot override it (the deploy-time wire-up sets it after the user's env var loop).
+
 ## Production deployment
 
 This package's `WORKER_SOURCE` is uploaded to the WfP dispatch namespace as `worker.mjs` by `services/control-api/src/services/cloudflare-wfp.ts:deployUserWorker`. After upload, `services/control-api/src/services/deployment.service.ts:deployViaWfp` runs the SPA routing probe (PR #36) against the live URL and fails the deploy with `SPA_ROUTING_PROBE_FAILED` if the worker's fallback isn't resolving deep paths to 200 + text/html. Both layers together close the bug-via-user-complaint path.

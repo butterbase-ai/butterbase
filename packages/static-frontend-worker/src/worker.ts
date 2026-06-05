@@ -34,6 +34,90 @@
 
 export interface Env {
   ASSETS: { fetch(req: Request): Promise<Response> };
+  /**
+   * Compiled `_redirects` rules, JSON-encoded. Populated by control-api at
+   * deploy time from the user's `dist/_redirects` file (if shipped). When
+   * unset/empty, the worker behaves as before: direct asset lookup with
+   * SPA fallback to `/`.
+   *
+   * Format: `[{from, to, status}, ...]` matching RedirectRule from
+   * ./redirects-parser.ts. Rules are applied in order; first match wins.
+   * Status 200 = rewrite (serve target's content under the original URL),
+   * 3xx = redirect (return Location header). Parsing happens at deploy
+   * time so the runtime is minimal — see redirects-parser.ts.
+   */
+  BB_REDIRECTS_RULES?: string;
+}
+
+interface RedirectRule {
+  from: string;
+  to: string;
+  status: number;
+}
+
+// Cache the parsed rules across invocations within an isolate. The binding is
+// a plain_text string baked at deploy time; it cannot change within a
+// running worker, so reparsing per request would be wasted CPU.
+let cachedRules: RedirectRule[] | null = null;
+let cachedRulesSource: string | undefined;
+
+function loadRules(env: Env): RedirectRule[] {
+  const source = env.BB_REDIRECTS_RULES;
+  if (source === cachedRulesSource && cachedRules !== null) return cachedRules;
+  cachedRulesSource = source;
+  if (!source) {
+    cachedRules = [];
+    return cachedRules;
+  }
+  try {
+    const parsed = JSON.parse(source);
+    if (Array.isArray(parsed)) {
+      cachedRules = parsed.filter(
+        (r: unknown): r is RedirectRule =>
+          typeof r === 'object' &&
+          r !== null &&
+          typeof (r as RedirectRule).from === 'string' &&
+          typeof (r as RedirectRule).to === 'string' &&
+          typeof (r as RedirectRule).status === 'number',
+      );
+      return cachedRules;
+    }
+  } catch {
+    // Fall through. A malformed binding should not break asset serving;
+    // the worker continues without rules.
+  }
+  cachedRules = [];
+  return cachedRules;
+}
+
+function matchRule(path: string, rule: RedirectRule): string | null {
+  if (rule.from.endsWith('/*')) {
+    const prefix = rule.from.slice(0, -2);
+    if (path === prefix || path.startsWith(prefix + '/') || prefix === '') {
+      let splat: string;
+      if (prefix === '') {
+        splat = path.replace(/^\/+/, '');
+      } else if (path === prefix) {
+        splat = '';
+      } else {
+        splat = path.slice(prefix.length + 1);
+      }
+      return rule.to.replace(/:splat/g, splat);
+    }
+    return null;
+  }
+  return path === rule.from ? rule.to : null;
+}
+
+function findMatch(
+  path: string,
+  rules: RedirectRule[],
+): { rule: RedirectRule; resolvedTo: string } | null {
+  for (const rule of rules) {
+    const resolvedTo = matchRule(path, rule);
+    if (resolvedTo !== null) return { rule, resolvedTo };
+  }
+  return null;
 }
 
 const MIME: Record<string, string> = {
@@ -86,12 +170,47 @@ function withMime(req: Request, res: Response): Response {
 const handler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
+      const url = new URL(request.url);
+      const rules = loadRules(env);
+
+      // Apply _redirects rules BEFORE the asset lookup. First match wins.
+      // Status 200 = internal rewrite (fetch the target, return its content
+      // under the original URL). 3xx = client-visible redirect.
+      if (rules.length > 0) {
+        const match = findMatch(url.pathname, rules);
+        if (match) {
+          const target = match.resolvedTo;
+          if (match.rule.status >= 300 && match.rule.status < 400) {
+            return Response.redirect(
+              new URL(target, url).toString(),
+              match.rule.status,
+            );
+          }
+          // 200 rewrite: fetch target from assets under the original URL.
+          // Special case: a rewrite to `/index.html` retargets to `/` because
+          // `html_handling: 'auto-trailing-slash'` returns a 307 → / for
+          // `/index.html` itself, which would defeat the rewrite. Fetching
+          // `/` serves the same content via the trailing-slash resolution.
+          const fetchPath = target === '/index.html' ? '/' : target;
+          const fetchUrl = new URL(fetchPath, url);
+          const rewritten = await env.ASSETS.fetch(
+            new Request(fetchUrl.toString(), request),
+          );
+          return withMime(new Request(fetchUrl.toString()), rewritten);
+        }
+      }
+
+      // No matching rule (or no rules at all) → original behavior: direct
+      // asset lookup, with SPA fallback to `/` on non-2xx. This preserves the
+      // PR #33 fix for apps that don't ship a `_redirects` file.
       const res = await env.ASSETS.fetch(request);
       if (res.ok) return withMime(request, res);
-      const url = new URL(request.url);
-      url.pathname = '/';
-      const fallback = await env.ASSETS.fetch(new Request(url.toString(), request));
-      return withMime(new Request(url.toString()), fallback);
+      const fallbackUrl = new URL(request.url);
+      fallbackUrl.pathname = '/';
+      const fallback = await env.ASSETS.fetch(
+        new Request(fallbackUrl.toString(), request),
+      );
+      return withMime(new Request(fallbackUrl.toString()), fallback);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return new Response('worker error: ' + message, { status: 500 });
