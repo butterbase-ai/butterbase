@@ -17,6 +17,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1021.0",
     "@butterbase/mcp-server": "file:../mcp-server",
     "@butterbase/shared": "file:../../packages/shared",
+    "@butterbase/static-frontend-worker": "file:../../packages/static-frontend-worker",
     "@composio/core": "^0.6.10",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.2.0",

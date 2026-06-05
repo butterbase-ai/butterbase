@@ -24,6 +24,7 @@ import {
   deployDoWorker,
   deleteDoWorker,
 } from './cloudflare-wfp.js';
+import { WORKER_SOURCE } from '@butterbase/static-frontend-worker';
 
 const fetchMock = vi.fn();
 beforeEach(() => {
@@ -91,6 +92,10 @@ describe('deployUserWorker', () => {
     const workerPart = (deployInit.body as FormData).get('worker.mjs') as File;
     expect(workerPart).toBeDefined();
     expect((workerPart as any).name).toBe('worker.mjs');
+    // The uploaded worker source must be the @butterbase/static-frontend-worker
+    // package's WORKER_SOURCE verbatim — that's the integration contract.
+    // Behavior of the worker itself is tested in that package.
+    expect(await workerPart.text()).toBe(WORKER_SOURCE);
 
     // Verify metadata part contains completion JWT + plain_text binding
     const metadataBlob = (deployInit.body as FormData).get('metadata') as Blob;
@@ -141,110 +146,10 @@ describe('deployUserWorker', () => {
   });
 });
 
-describe('STATIC_FALLBACK_WORKER_JS (SPA fallback behavior)', () => {
-  // Extract the inlined worker script via a deploy invocation. The script lives
-  // as a module-private template literal in cloudflare-wfp.ts, so we read it
-  // from the FormData that deployUserWorker uploads to CF.
-  async function extractStaticFallbackScript(): Promise<string> {
-    fetchMock
-      .mockResolvedValueOnce(okText({ jwt: 'session-jwt' }))
-      .mockResolvedValueOnce(okText({ id: 'script-id' }));
-    await deployUserWorker({
-      scriptName: 'app_extract',
-      files: new Map(),
-      envVars: {},
-    });
-    const deployForm = (fetchMock.mock.calls[1][1] as RequestInit).body as FormData;
-    return await (deployForm.get('worker.mjs') as File).text();
-  }
-
-  // Instantiate the worker handler from the module source. The script uses
-  // `export default { ... }`, which `new Function` cannot host directly — swap
-  // it for an `exports.default` assignment and evaluate.
-  function instantiate(script: string): { fetch: (req: Request, env: unknown) => Promise<Response> } {
-    const moduleCode = script.replace(/export\s+default\s*/m, 'exports.default = ');
-    const exports: { default?: { fetch: (req: Request, env: unknown) => Promise<Response> } } = {};
-    new Function('exports', moduleCode)(exports);
-    if (!exports.default) throw new Error('worker script did not assign exports.default');
-    return exports.default;
-  }
-
-  it('source does NOT fall back to `/index.html` (regression guard for the html_handling 307 trap)', async () => {
-    const script = await extractStaticFallbackScript();
-    // Tripwire: under `html_handling: 'auto-trailing-slash'`, fetching
-    // /index.html via the Assets binding 307s to /. A fallback that targets
-    // /index.html re-enters the trap. Future maintainers must not regress.
-    expect(script).not.toMatch(/url\.pathname\s*=\s*['"]\/index\.html['"]/);
-    expect(script).toMatch(/url\.pathname\s*=\s*['"]\/['"]/);
-  });
-
-  it('resolves a deep-path miss to the home document with status 200 (not a 307 to /)', async () => {
-    const script = await extractStaticFallbackScript();
-    const handler = instantiate(script);
-
-    const indexBody = '<!doctype html><html><body><div id="root"></div></body></html>';
-    const assetsCalls: string[] = [];
-    const env = {
-      ASSETS: {
-        fetch: async (req: Request): Promise<Response> => {
-          const path = new URL(req.url).pathname;
-          assetsCalls.push(path);
-          // Emulate real CF behavior under html_handling: 'auto-trailing-slash':
-          //   - `/` serves index.html with 200
-          //   - `/index.html` 307s to `/` (the bug this fallback must escape)
-          //   - extensionless misses (e.g. `/history`) 307 to `/`
-          if (path === '/') {
-            return new Response(indexBody, {
-              status: 200,
-              headers: { 'content-type': 'text/html' },
-            });
-          }
-          return new Response('', { status: 307, headers: { location: '/' } });
-        },
-      },
-    };
-
-    const res = await handler.fetch(
-      new Request('https://app.example.com/history'),
-      env,
-    );
-
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(indexBody);
-    // First hop hits /history (307), fallback hops to / (200). /index.html
-    // must NOT appear — that path is the broken one.
-    expect(assetsCalls).toEqual(['/history', '/']);
-    expect(assetsCalls).not.toContain('/index.html');
-  });
-
-  it('serves a real asset directly without entering the fallback path', async () => {
-    const script = await extractStaticFallbackScript();
-    const handler = instantiate(script);
-
-    const cssBody = 'body { color: red; }';
-    const assetsCalls: string[] = [];
-    const env = {
-      ASSETS: {
-        fetch: async (req: Request): Promise<Response> => {
-          assetsCalls.push(new URL(req.url).pathname);
-          return new Response(cssBody, {
-            status: 200,
-            headers: { 'content-type': 'text/css' },
-          });
-        },
-      },
-    };
-
-    const res = await handler.fetch(
-      new Request('https://app.example.com/assets/app.css'),
-      env,
-    );
-
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(cssBody);
-    expect(assetsCalls).toEqual(['/assets/app.css']);
-  });
-});
+// Behavior tests for the worker source itself live alongside the worker in
+// packages/static-frontend-worker/src/worker.test.ts. The integration here is
+// just that deployUserWorker uploads the package's WORKER_SOURCE constant
+// verbatim, covered by the `deployUserWorker` test above.
 
 describe('deployUserWorkerWithScript', () => {
   it('uploads worker.mjs with the provided script and appends each additionalModule as a separate form-part', async () => {
