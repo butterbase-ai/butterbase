@@ -63,6 +63,27 @@ async function fetchKvFunctionKey(appId: string): Promise<string | null> {
     return null;
   }
 }
+
+// Cross-plane: platform_users lives in the control DB, not the runtime DB,
+// so the email is fetched via an internal HTTP endpoint. Best-effort: a
+// failure leaves ctx.appOwner.email undefined; ctx.appOwner.user_id stays
+// available either way.
+async function fetchOwnerEmail(ownerId: string): Promise<string | null> {
+  const base = Deno.env.get('CONTROL_API_URL');
+  const secret = Deno.env.get('BUTTERBASE_INTERNAL_SECRET');
+  if (!base || !secret) return null;
+  try {
+    const res = await fetch(`${base}/v1/internal/platform-users/${ownerId}/email`, {
+      headers: { 'x-butterbase-internal-secret': secret },
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    return j.email ?? null;
+  } catch (err) {
+    console.warn('[function-loader] failed to fetch owner email', err);
+    return null;
+  }
+}
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_CACHE_SIZE = 1000;
 
@@ -78,6 +99,8 @@ export interface FunctionMetadata {
   trigger_config: any;
   db_connection_string: string | null;
   substrate_user_id: string | null;
+  owner_id: string;
+  owner_email: string | null;
 }
 
 interface CacheEntry {
@@ -164,7 +187,7 @@ export async function loadFunction(
 
     // Check if app database is provisioned
     const appCheck = await client.queryObject(
-      `SELECT db_provisioned, substrate_user_id FROM apps WHERE id = $1`,
+      `SELECT db_provisioned, substrate_user_id, owner_id FROM apps WHERE id = $1`,
       [appId]
     );
 
@@ -206,6 +229,9 @@ export async function loadFunction(
 
     const dbConnectionString = connResult.rows[0].connection_string;
 
+    const ownerId = appCheck.rows[0]?.owner_id as string;
+    const ownerEmail = ownerId ? await fetchOwnerEmail(ownerId) : null;
+
     const metadata: FunctionMetadata = {
       id: row.id,
       app_id: row.app_id,
@@ -218,6 +244,8 @@ export async function loadFunction(
       trigger_config: row.trigger_config,
       db_connection_string: dbConnectionString,
       substrate_user_id: appCheck.rows[0]?.substrate_user_id ?? null,
+      owner_id: ownerId,
+      owner_email: ownerEmail,
     };
 
     // Add to cache (LRU eviction if full)

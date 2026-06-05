@@ -451,6 +451,11 @@ function buildWorkerCode(
         BUTTERBASE_API_URL: Deno.env.get("API_BASE_URL") || "http://localhost:4000",
       })},
       user: ${context.userId ? `{ id: "${context.userId}" }` : "null"},
+      appOwner: {
+        user_id: ${JSON.stringify(metadata.owner_id)},
+        substrate_user_id: ${metadata.substrate_user_id ? JSON.stringify(metadata.substrate_user_id) : 'null'},
+        email: ${metadata.owner_email ? JSON.stringify(metadata.owner_email) : 'undefined'},
+      },
       idempotency: db ? {
         // Atomically claim a key. Returns true if newly claimed (caller should
         // proceed), false if the key was already processed (caller should treat

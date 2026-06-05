@@ -63,6 +63,7 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 - Environment variables via `ctx.env.VAR_NAME`
 - Database access via `ctx.db.query(sql)`
 - User info via `ctx.user` (when invoked with end-user JWT)
+- App-owner identity via `ctx.appOwner` — see "Identifying the app owner" below
 - Console output (`console.log`, `console.info`, `console.warn`, `console.error`, `console.debug`) — captured and visible in invocation logs
 - Network access
 - Webhook idempotency via `ctx.idempotency.claim(key)` — see "Idempotent webhook handlers" below
@@ -124,6 +125,63 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
   });
 }
 ```
+
+## Identifying the app owner with ctx.appOwner
+
+`ctx.appOwner` exposes the identity of the operator who owns this app instance — the person who created or cloned it. It is always present, regardless of how the function was invoked:
+
+```typescript
+ctx.appOwner = {
+  user_id: string,              // platform user id of the owner
+  substrate_user_id: string | null,  // null when the app is not substrate-linked
+  email: string | undefined,    // owner's email; undefined if the lookup failed
+}
+```
+
+This is distinct from `ctx.user`, which describes the **end-user** signing into the app via its own auth system. `ctx.user.sub` and `ctx.appOwner.user_id` come from different namespaces and will not match — use `email` to bridge them when needed.
+
+### Owner-bypass allowlists
+
+The canonical use case is letting the operator into their own cloned app before they've seeded an allowlist table:
+
+```typescript
+export default async function handler(req: Request, ctx: any): Promise<Response> {
+  if (!ctx.user?.email) return new Response('Unauthorized', { status: 401 });
+
+  const isOwner = ctx.appOwner?.email
+    && ctx.user.email.toLowerCase() === ctx.appOwner.email.toLowerCase();
+
+  if (!isOwner) {
+    const allowed = await ctx.db.query(
+      'SELECT 1 FROM app_allowlist WHERE email = $1',
+      [ctx.user.email],
+    );
+    if (allowed.rows.length === 0) return new Response('Forbidden', { status: 403 });
+  }
+
+  // ...continue
+}
+```
+
+Because `email` comparison crosses two auth systems, only trust it when the end-user auth provider returns a **verified** email. An auth flow that lets users self-claim arbitrary emails would let an attacker grant themselves owner status by signing up as the operator's address.
+
+### Attribution and onboarding
+
+```typescript
+// Stamp the operator on a record:
+await ctx.db.query(
+  'INSERT INTO projects (name, created_by_owner) VALUES ($1, $2)',
+  [name, ctx.appOwner.user_id],
+);
+```
+
+### Substrate linkage
+
+`ctx.appOwner.substrate_user_id` mirrors the same value the substrate bridge uses to authorize `ctx.substrate.*` calls. If it is `null`, `ctx.substrate` is omitted entirely — the app has not been linked to the owner's substrate. Link from the dashboard, or clone a template whose source was already linked (linkage is auto-inherited to the new owner on clone).
+
+### Caching
+
+Owner identity is cached with the function metadata for up to 5 minutes. After ownership transfer or a substrate-link toggle, `ctx.appOwner` may reflect the old state until the next refresh.
 
 ## Using environment variables
 
