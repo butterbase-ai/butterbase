@@ -513,4 +513,14 @@ describe('mixed fixture (static pages + redirects + SPA catch-all)', () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe(INDEX_BODY);
   });
+
+  it('/missing.png is rewritten to /index.html when /* /index.html 200 catches it (rewrite fires before asset-shape gate)', async () => {
+    // The asset-shape gate (non-html-extension → 404) only runs when no 200
+    // rewrite rule matches. Here /* /index.html 200 matches first, so the
+    // worker returns the SPA shell with status 200 — identical to CF Pages
+    // behavior when the user ships this catch-all rule.
+    const res = await getMixed('/missing.png');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(INDEX_BODY);
+  });
 });
