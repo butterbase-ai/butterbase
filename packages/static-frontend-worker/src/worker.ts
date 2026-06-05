@@ -90,6 +90,59 @@ function loadRules(env: Env): RedirectRule[] {
   return cachedRules;
 }
 
+// Translate a rewrite target to the form Assets actually serves with 200 under
+// `html_handling: 'auto-trailing-slash'`. The Assets binding 307-redirects any
+// .html path to its canonical extensionless form; if a rewrite asks for
+// /foo.html and we forward Assets's 307, the rewrite is broken (client sees
+// the 307). Normalizing here means the worker fetches the form Assets returns
+// 200 for, and we serve that content under the original request URL.
+function normalizeRewriteTarget(target: string): string {
+  // Don't rewrite cross-origin targets (e.g. external URLs that snuck into a
+  // 200 rule — though those are nonsensical, defend in depth).
+  if (/^https?:\/\//i.test(target)) return target;
+  if (target.endsWith('/index.html')) {
+    // /foo/index.html → /foo/   ;   /index.html → /
+    return target.slice(0, -'index.html'.length);
+  }
+  if (target.endsWith('.html')) {
+    return target.slice(0, -'.html'.length);
+  }
+  return target;
+}
+
+// Decide whether an Assets binding response represents a "miss" (no file at
+// the requested path) vs a hit. Hits include both literal 2xx responses AND
+// canonical 3xx redirects that `html_handling: 'auto-trailing-slash'` issues
+// for existing .html / index.html files:
+//
+//   /foo.html        → 307 Location: /foo            (canonical, asset exists)
+//   /foo/index.html  → 307 Location: /foo/           (canonical, asset exists)
+//   /index.html      → 307 Location: /               (canonical, asset exists)
+//   /missing.html    → 404                            (true miss)
+//   /missing         → 307 Location: /   (WfP only)   (miss-fallback)
+//
+// We distinguish hit-vs-miss for 3xx responses by comparing the actual
+// Location header to the expected canonical form of the requested path. Any
+// 3xx whose Location does NOT match the canonical form is a miss-fallback
+// (the WfP dispatch-namespace quirk PR #33 worked around).
+function looksLikeAssetMiss(res: Response, requestPath: string): boolean {
+  if (res.status === 404) return true;
+  if (res.status >= 300 && res.status < 400) {
+    const loc = res.headers.get('location') ?? '';
+    let expectedCanonical: string | null = null;
+    if (requestPath.endsWith('/index.html')) {
+      expectedCanonical = requestPath.slice(0, -'index.html'.length);
+    } else if (requestPath.endsWith('.html')) {
+      expectedCanonical = requestPath.slice(0, -'.html'.length);
+    }
+    if (expectedCanonical !== null && loc === expectedCanonical) {
+      return false; // canonical redirect = asset exists
+    }
+    return true; // miss-fallback redirect
+  }
+  return false; // 2xx — asset hit
+}
+
 function matchRule(path: string, rule: RedirectRule): string | null {
   if (rule.from.endsWith('/*')) {
     const prefix = rule.from.slice(0, -2);
@@ -172,39 +225,53 @@ const handler = {
     try {
       const url = new URL(request.url);
       const rules = loadRules(env);
+      const match = rules.length > 0 ? findMatch(url.pathname, rules) : null;
 
-      // Apply _redirects rules BEFORE the asset lookup. First match wins.
-      // Status 200 = internal rewrite (fetch the target, return its content
-      // under the original URL). 3xx = client-visible redirect.
-      if (rules.length > 0) {
-        const match = findMatch(url.pathname, rules);
-        if (match) {
-          const target = match.resolvedTo;
-          if (match.rule.status >= 300 && match.rule.status < 400) {
-            return Response.redirect(
-              new URL(target, url).toString(),
-              match.rule.status,
-            );
-          }
-          // 200 rewrite: fetch target from assets under the original URL.
-          // Special case: a rewrite to `/index.html` retargets to `/` because
-          // `html_handling: 'auto-trailing-slash'` returns a 307 → / for
-          // `/index.html` itself, which would defeat the rewrite. Fetching
-          // `/` serves the same content via the trailing-slash resolution.
-          const fetchPath = target === '/index.html' ? '/' : target;
-          const fetchUrl = new URL(fetchPath, url);
-          const rewritten = await env.ASSETS.fetch(
-            new Request(fetchUrl.toString(), request),
-          );
-          return withMime(new Request(fetchUrl.toString()), rewritten);
-        }
+      // Cloudflare Pages-compatible precedence:
+      //   1. 3xx redirect rules ALWAYS win, even if the path is a real file.
+      //      (`/old /new 301` fires even when /old exists.)
+      //   2. Real assets win over 200 rewrites — try the asset binding next.
+      //      A 200 rewrite is a fallback that only fires on asset miss.
+      //   3. 200 rewrites apply only after the asset lookup misses.
+      //   4. No rule + asset miss → preserve PR #33 SPA fallback to `/`
+      //      (this is the default behavior for apps that don't ship a
+      //      _redirects file; keeping it ensures purely-additive semantics).
+
+      // (1) 3xx redirects: fire unconditionally.
+      if (match && match.rule.status >= 300 && match.rule.status < 400) {
+        return Response.redirect(
+          new URL(match.resolvedTo, url).toString(),
+          match.rule.status,
+        );
       }
 
-      // No matching rule (or no rules at all) → original behavior: direct
-      // asset lookup, with SPA fallback to `/` on non-2xx. This preserves the
-      // PR #33 fix for apps that don't ship a `_redirects` file.
+      // (2) Asset lookup. If the asset exists, serve it — real files win
+      // over 200 rewrites (matches Cloudflare Pages behavior). "Exists"
+      // includes canonical 3xx redirects that html_handling issues for
+      // existing .html / index.html files; those are forwarded so the
+      // browser sees the canonical URL (the documented CF Pages behavior).
       const res = await env.ASSETS.fetch(request);
-      if (res.ok) return withMime(request, res);
+      if (!looksLikeAssetMiss(res, url.pathname)) return withMime(request, res);
+
+      // (3) Asset miss + 200 rewrite matched → apply rewrite.
+      // `html_handling: 'auto-trailing-slash'` canonicalizes any .html path
+      // away: /foo.html → 307 /foo, /foo/index.html → 307 /foo/, /index.html
+      // → 307 /. Fetching the .html target literally would defeat the
+      // rewrite (the worker would forward the 307). normalizeRewriteTarget
+      // strips .html / index.html so the resolved path round-trips through
+      // Assets's trailing-slash resolution and returns 200.
+      if (match && match.rule.status === 200) {
+        const fetchPath = normalizeRewriteTarget(match.resolvedTo);
+        const fetchUrl = new URL(fetchPath, url);
+        const rewritten = await env.ASSETS.fetch(
+          new Request(fetchUrl.toString(), request),
+        );
+        return withMime(new Request(fetchUrl.toString()), rewritten);
+      }
+
+      // (4) No matching rule and asset miss → default SPA fallback to `/`.
+      // Preserves the PR #33 fix for apps that don't ship a `_redirects`
+      // file (and for apps that ship one without a catch-all).
       const fallbackUrl = new URL(request.url);
       fallbackUrl.pathname = '/';
       const fallback = await env.ASSETS.fetch(

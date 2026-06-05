@@ -265,7 +265,7 @@ describe('static-frontend-worker', () => {
   });
 
   describe('_redirects rule application (BB_REDIRECTS_RULES binding)', () => {
-    it('applies a 200 rewrite rule (serves target content under the original URL)', async () => {
+    it('applies a 200 rewrite rule on asset miss (serves target content under the original URL)', async () => {
       const indexBody = '<html>HOME</html>';
       const { env, calls } = makeAssetsEnv(
         { '/': () => htmlResponse(indexBody) },
@@ -278,9 +278,9 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(indexBody);
-      // The rewrite target /index.html is special-cased to fetch / instead
-      // (to escape the html_handling 307 trap). No call to /history.
-      expect(calls).toEqual(['/']);
+      // CF Pages-compatible precedence: asset lookup first (returns 404),
+      // then 200 rewrite applies. Rewrite target /index.html normalizes to /.
+      expect(calls).toEqual(['/history', '/']);
     });
 
     it('applies a 301 redirect rule (returns Location header, does NOT fetch target)', async () => {
@@ -299,26 +299,25 @@ describe('static-frontend-worker', () => {
       expect(calls).toEqual([]);
     });
 
-    it('first match wins (preserves rule order)', async () => {
-      const indexBody = '<html>HOME</html>';
-      const aboutBody = '<html>ABOUT</html>';
-      const { env } = makeAssetsEnv(
-        {
-          '/': () => htmlResponse(indexBody),
-          '/about.html': () => htmlResponse(aboutBody),
-        },
+    it('first match wins for 3xx rules (preserves rule order)', async () => {
+      // 3xx rules fire BEFORE asset lookup, so first-match-wins is observable
+      // even when an asset would match. With 200 rules, asset wins over rule,
+      // so testing rule ordering must use 3xx.
+      const { env, calls } = makeAssetsEnv(
+        {},
         404,
         JSON.stringify([
-          { from: '/about', to: '/about.html', status: 200 },
-          { from: '/*', to: '/index.html', status: 200 },
+          { from: '/foo', to: '/specific', status: 301 },
+          { from: '/*', to: '/catchall', status: 301 },
         ]),
       );
       const res = await worker.fetch(
-        new Request('https://app.example.com/about'),
+        new Request('https://app.example.com/foo'),
         env,
       );
-      expect(res.status).toBe(200);
-      expect(await res.text()).toBe(aboutBody);
+      expect(res.status).toBe(301);
+      expect(res.headers.get('location')).toBe('https://app.example.com/specific');
+      expect(calls).toEqual([]);
     });
 
     it('substitutes :splat in the rewrite target', async () => {
@@ -332,7 +331,8 @@ describe('static-frontend-worker', () => {
         env,
       );
       expect(res.status).toBe(200);
-      expect(calls).toEqual(['/v2/users/42']);
+      // Asset lookup for /api/users/42 first (misses), then rewrite to /v2/users/42.
+      expect(calls).toEqual(['/api/users/42', '/v2/users/42']);
     });
 
     it('substitutes :splat in the redirect target', async () => {
@@ -408,6 +408,63 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(indexBody);
+    });
+
+    describe('CF Pages-compatible precedence (assets vs rules)', () => {
+      it('3xx rule fires even when the requested path is a real asset (rule wins)', async () => {
+        const { env, calls } = makeAssetsEnv(
+          { '/old': () => htmlResponse('<html>existing file</html>') },
+          404,
+          JSON.stringify([{ from: '/old', to: '/new', status: 301 }]),
+        );
+        const res = await worker.fetch(
+          new Request('https://app.example.com/old'),
+          env,
+        );
+        expect(res.status).toBe(301);
+        expect(res.headers.get('location')).toBe('https://app.example.com/new');
+        // Asset must not be consulted — the 3xx rule preempts the lookup.
+        expect(calls).toEqual([]);
+      });
+
+      it('200 rewrite does NOT fire when the requested path is a real asset (asset wins)', async () => {
+        // Catch-all SPA rule would otherwise rewrite EVERY path to /index.html.
+        // With CF Pages precedence, real assets are served unchanged.
+        const assetBody = '<html>real file</html>';
+        const indexBody = '<html>HOME</html>';
+        const { env, calls } = makeAssetsEnv(
+          {
+            '/new.html': () => htmlResponse(assetBody),
+            '/': () => htmlResponse(indexBody),
+          },
+          404,
+          JSON.stringify([{ from: '/*', to: '/index.html', status: 200 }]),
+        );
+        const res = await worker.fetch(
+          new Request('https://app.example.com/new.html'),
+          env,
+        );
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(assetBody);
+        // Asset served directly. No rewrite applied.
+        expect(calls).toEqual(['/new.html']);
+      });
+
+      it('200 rewrite fires when the requested path is NOT a real asset (rule fallback)', async () => {
+        const indexBody = '<html>HOME</html>';
+        const { env, calls } = makeAssetsEnv(
+          { '/': () => htmlResponse(indexBody) },
+          404,
+          JSON.stringify([{ from: '/*', to: '/index.html', status: 200 }]),
+        );
+        const res = await worker.fetch(
+          new Request('https://app.example.com/missing'),
+          env,
+        );
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(indexBody);
+        expect(calls).toEqual(['/missing', '/']);
+      });
     });
 
     it('discards rule entries with wrong shape and serves with remaining valid rules', async () => {
