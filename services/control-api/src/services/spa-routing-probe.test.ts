@@ -100,14 +100,15 @@ describe('probeSpaRouting', () => {
       .fn()
       .mockResolvedValueOnce(new Response('', { status: 404 })) // dispatcher hasn't seen new script yet
       .mockResolvedValueOnce(new Response('', { status: 404 })) // still propagating
-      .mockResolvedValueOnce(html200()); // ok on 3rd try
+      .mockResolvedValueOnce(html200()) // ok on 3rd try (deep-path probe passes)
+      .mockResolvedValueOnce(html200()); // /index.html second probe
     const result = await probeSpaRouting('https://app.example.com', {
       fetchImpl: fetchMock,
       sleep: noSleep,
       retries: 2,
     });
     expect(result.ok).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it('reports the LAST failure when all retries fail', async () => {
@@ -174,5 +175,89 @@ describe('probeSpaRouting', () => {
     expect(sleepMock.mock.invocationCallOrder[0]).toBeLessThan(
       fetchMock.mock.invocationCallOrder[0],
     );
+  });
+
+  describe('/index.html second probe', () => {
+    it('overall probe passes when deep-path and /index.html both return 200 + text/html', async () => {
+      // First call: random deep-path probe; second call: /index.html probe.
+      const fetchMock = vi.fn().mockResolvedValue(html200());
+      const result = await probeSpaRouting('https://app.example.com', {
+        fetchImpl: fetchMock,
+        sleep: noSleep,
+        retries: 0,
+      });
+      expect(result.ok).toBe(true);
+      // Two fetches should have been made: deep-path + /index.html
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+      expect(urls[0]).toMatch(/__bb_route_probe_/);
+      expect(urls[1]).toBe('https://app.example.com/index.html');
+    });
+
+    it('fails with INDEX_HTML_PROBE_FAILED when /index.html returns 404', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(html200()) // deep-path succeeds
+        .mockResolvedValueOnce(new Response('', { status: 404 })); // /index.html 404
+      const result = await probeSpaRouting('https://app.example.com', {
+        fetchImpl: fetchMock,
+        sleep: noSleep,
+        retries: 0,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe('INDEX_HTML_PROBE_FAILED');
+        expect(result.status).toBe(404);
+      }
+    });
+
+    it('fails with INDEX_HTML_PROBE_FAILED when /index.html returns non-text/html content-type', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(html200()) // deep-path succeeds
+        .mockResolvedValueOnce(
+          new Response('{"oops":1}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      const result = await probeSpaRouting('https://app.example.com', {
+        fetchImpl: fetchMock,
+        sleep: noSleep,
+        retries: 0,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe('INDEX_HTML_PROBE_FAILED');
+        expect(result.reason).toMatch(/expected content-type text\/html/);
+      }
+    });
+
+    it('does not run /index.html probe if the deep-path probe already fails', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('', { status: 404 })); // deep-path fails
+      const result = await probeSpaRouting('https://app.example.com', {
+        fetchImpl: fetchMock,
+        sleep: noSleep,
+        retries: 0,
+      });
+      expect(result.ok).toBe(false);
+      // Only one fetch — /index.html probe is skipped when deep-path fails.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('strips a trailing slash from deploymentUrl before appending /index.html', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(html200());
+      await probeSpaRouting('https://app.example.com/', {
+        fetchImpl: fetchMock,
+        sleep: noSleep,
+        retries: 0,
+      });
+      const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+      expect(urls[1]).toBe('https://app.example.com/index.html');
+      // Ensure no double-slash in the path portion (after the protocol)
+      expect(urls[1].replace('https://', '')).not.toMatch(/\/\//);
+    });
   });
 });

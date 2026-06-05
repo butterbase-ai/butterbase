@@ -33,7 +33,7 @@ export interface ProbeOptions {
 
 export type ProbeResult =
   | { ok: true; status: number; contentType: string }
-  | { ok: false; reason: string; status?: number; contentType?: string | null };
+  | { ok: false; reason: string; code?: string; status?: number; contentType?: string | null };
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -63,8 +63,31 @@ export async function probeSpaRouting(
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) await sleep(retryDelayMs);
     lastResult = await singleAttempt(fetchImpl, url, timeoutMs);
-    if (lastResult.ok) return lastResult;
+    if (lastResult.ok) break;
   }
+  if (!lastResult.ok) return lastResult;
+
+  // Second probe: GET /index.html and assert 200 + text/html.
+  // This catches "the worker can't find index.html at all" regardless of framework —
+  // a universal sanity check that complements the random-deep-path SPA-fallback probe.
+  const indexUrl = deploymentUrl.replace(/\/+$/, '') + '/index.html';
+  let indexResult: ProbeResult = { ok: false, reason: 'no attempts made' };
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await sleep(retryDelayMs);
+    indexResult = await singleAttempt(fetchImpl, indexUrl, timeoutMs);
+    if (indexResult.ok) break;
+  }
+  if (!indexResult.ok) {
+    return {
+      ok: false,
+      code: 'INDEX_HTML_PROBE_FAILED',
+      reason: indexResult.reason,
+      status: indexResult.status,
+      contentType: indexResult.contentType,
+    };
+  }
+
   return lastResult;
 }
 
