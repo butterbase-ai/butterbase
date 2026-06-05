@@ -190,21 +190,15 @@ const handler = {
       // (4 & 5) All candidates missed. Route-shaped paths get SPA fallback;
       // asset-shaped paths (binary extensions) return an honest 404.
       if (isRouteLikeRequest(url.pathname)) {
-        // SPA fallback: resolve `/` via the same candidate chain, which tries
-        // `/` then `/index.html` (trailing-slash candidate 2). Under
-        // html_handling: 'none' the Assets binding returns 404 for `/` since
-        // only `/index.html` exists; the candidate chain handles that correctly.
-        const fallbackCandidates = resolveAssetPath('/');
-        for (const candidate of fallbackCandidates) {
-          const fallbackUrl = new URL(request.url);
-          fallbackUrl.pathname = candidate;
-          const fallback = await env.ASSETS.fetch(
-            new Request(fallbackUrl.toString(), request),
-          );
-          if (fallback.ok) return fallback;
-          lastAssetRes = fallback;
-        }
-        // If even / and /index.html miss, return the last response as-is.
+        // SPA fallback: fetch /index.html directly. Under html_handling: 'none',
+        // '/' always 404s (no literal file named '/'); skipping it saves a
+        // guaranteed-miss round-trip on every SPA miss.
+        const spaUrl = new URL(request.url);
+        spaUrl.pathname = '/index.html';
+        const fallback = await env.ASSETS.fetch(new Request(spaUrl.toString(), request));
+        if (fallback.ok) return fallback;
+        lastAssetRes = fallback;
+        // If /index.html also misses, return the last response as-is.
         return lastAssetRes ?? new Response('', { status: 404 });
       }
 

@@ -147,9 +147,10 @@ describe('static-frontend-worker', () => {
   });
 
   describe('SPA fallback (route-shaped miss)', () => {
-    it('all candidates miss for route-shaped path → SPA fallback to /', async () => {
+    it('all candidates miss for route-shaped path → SPA fallback to /index.html', async () => {
       const { env, calls } = makeAssetsEnv({
-        '/': () => htmlResponse(INDEX_BODY),
+        // No '/' mock: under html_handling: 'none', '/' always 404s in production.
+        // Only /index.html exists. The SPA fallback must land on /index.html.
         '/index.html': () => htmlResponse(INDEX_BODY),
       });
       const res = await worker.fetch(
@@ -159,14 +160,15 @@ describe('static-frontend-worker', () => {
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(INDEX_BODY);
       // /history misses, /history.html misses, /history/index.html misses →
-      // SPA fallback to / which returns the home document.
+      // SPA fallback fetches /index.html directly (not '/' first).
       expect(calls).toContain('/history');
-      expect(calls[calls.length - 1]).toBe('/');
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
     it('all candidates miss for /missing.html → SPA fallback (.html is route-shaped)', async () => {
       const { env, calls } = makeAssetsEnv({
-        '/': () => htmlResponse(INDEX_BODY),
+        // No '/' mock: under html_handling: 'none', '/' always 404s in production.
+        // Only /index.html exists. The SPA fallback must land on /index.html.
         '/index.html': () => htmlResponse(INDEX_BODY),
       });
       const res = await worker.fetch(
@@ -175,9 +177,9 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(INDEX_BODY);
-      // /missing.html has a .html extension → route-shaped → SPA fallback.
+      // /missing.html has a .html extension → route-shaped → SPA fallback fetches /index.html directly.
       expect(calls).toContain('/missing.html');
-      expect(calls[calls.length - 1]).toBe('/');
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
     it('preserves the fallback response status when the home document is also missing', async () => {
@@ -186,11 +188,10 @@ describe('static-frontend-worker', () => {
         new Request('https://app.example.com/missing'),
         env,
       );
-      // Fallback tries / then /index.html (the resolveAssetPath candidates for /).
-      // Both 404 → status 404.
+      // Fallback fetches /index.html directly; if that 404s too, propagate 404.
       expect(res.status).toBe(404);
-      // SPA fallback must have been attempted.
-      expect(calls).toContain('/');
+      // SPA fallback must have been attempted against /index.html.
+      expect(calls).toContain('/index.html');
     });
   });
 
@@ -505,7 +506,7 @@ describe('static-frontend-worker', () => {
     it('falls through to default SPA fallback when no rule matches', async () => {
       const indexBody = '<html>HOME</html>';
       const { env, calls } = makeAssetsEnv(
-        { '/': () => htmlResponse(indexBody), '/index.html': () => htmlResponse(indexBody) },
+        { '/index.html': () => htmlResponse(indexBody) },
         404,
         JSON.stringify([{ from: '/api/*', to: '/v2/:splat', status: 301 }]),
       );
@@ -516,13 +517,13 @@ describe('static-frontend-worker', () => {
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(indexBody);
       expect(calls).toContain('/unrelated/deep/path');
-      expect(calls[calls.length - 1]).toBe('/');
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
     it('treats absent BB_REDIRECTS_RULES as no rules (existing behavior unchanged)', async () => {
       const indexBody = '<html>HOME</html>';
       const { env, calls } = makeAssetsEnv(
-        { '/': () => htmlResponse(indexBody), '/index.html': () => htmlResponse(indexBody) },
+        { '/index.html': () => htmlResponse(indexBody) },
         404,
         // no rulesJson argument
       );
@@ -531,7 +532,7 @@ describe('static-frontend-worker', () => {
         env,
       );
       expect(res.status).toBe(200);
-      expect(calls[calls.length - 1]).toBe('/');
+      expect(calls[calls.length - 1]).toBe('/index.html');
     });
 
     it('treats malformed BB_REDIRECTS_RULES JSON as no rules (does not break serving)', async () => {
