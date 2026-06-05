@@ -12,6 +12,7 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { generateTemplatePage } from './template-page.js';
 import { decrypt } from './crypto.js';
 import { notifyDeploymentFailed } from './failure-notifications.service.js';
+import { probeSpaRouting } from './spa-routing-probe.js';
 
 export class DeploymentError extends Error {
   constructor(message: string, public readonly code?: string) {
@@ -574,6 +575,32 @@ async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
   }
 
   const url = `https://${app.subdomain}.${config.subdomain.baseDomain}`;
+
+  // Step 5/5: Probe SPA routing on the live URL. Catches any future regression
+  // of the html_handling 307 trap (PR #33) at the deploy boundary instead of
+  // via user complaint. The probe hits a random deep path and asserts the
+  // worker's SPA fallback resolves it to 200 + text/html. Skipped only when
+  // explicitly disabled via env (e.g. for offline/staging environments where
+  // the URL isn't reachable from control-api).
+  if (process.env.SPA_ROUTING_PROBE_DISABLED !== 'true') {
+    console.log(`${tag} Step 5/5: Probing SPA routing at ${url}…`);
+    const probeStart = Date.now();
+    const result = await probeSpaRouting(url);
+    if (!result.ok) {
+      console.error(
+        `${tag} Step 5/5: SPA routing probe FAILED after ${Date.now() - probeStart}ms: ${result.reason}`,
+      );
+      throw new DeploymentError(
+        `SPA routing probe failed: ${result.reason}. The worker is uploaded but deep paths are not resolving to index.html. ` +
+          `This usually means the in-worker SPA fallback or html_handling config is broken. ` +
+          `Investigate before redeploying.`,
+        'SPA_ROUTING_PROBE_FAILED',
+      );
+    }
+    console.log(`${tag} Step 5/5: SPA routing probe OK in ${Date.now() - probeStart}ms`);
+  } else {
+    console.log(`${tag} Step 5/5: SPA routing probe skipped (SPA_ROUTING_PROBE_DISABLED=true)`);
+  }
 
   return {
     url,
