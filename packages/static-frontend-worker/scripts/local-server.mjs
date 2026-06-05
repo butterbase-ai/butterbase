@@ -21,6 +21,7 @@ import { Miniflare } from 'miniflare';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { parseRedirects } from '../dist/redirects-parser.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageRoot = join(here, '..');
@@ -49,11 +50,31 @@ const htmlHandling =
     process.env.LOCAL_FRONTEND_HTML_HANDLING || 'auto-trailing-slash'
   );
 
+// Auto-parse `_redirects` from the assets dir if present. Mirrors what
+// control-api does at deploy time (see services/control-api/src/services/
+// deployment.service.ts:deployViaWfp) so the local dev experience matches
+// production.
+let redirectsRulesJson = '';
+const redirectsPath = join(assetsDir, '_redirects');
+if (existsSync(redirectsPath)) {
+  const text = readFileSync(redirectsPath, 'utf8');
+  const { rules, warnings } = parseRedirects(text);
+  for (const w of warnings) console.warn(`[local-server] _redirects: ${w}`);
+  if (rules.length > 0) {
+    redirectsRulesJson = JSON.stringify(rules);
+  }
+}
+
 const mf = new Miniflare({
   modules: true,
   script: workerSource,
   host,
   port,
+  // BB_REDIRECTS_RULES is a plain_text binding in prod; mirror that exactly so
+  // the worker reads it the same way locally.
+  bindings: redirectsRulesJson
+    ? { BB_REDIRECTS_RULES: redirectsRulesJson }
+    : {},
   assets: {
     directory: assetsDir,
     binding: 'ASSETS',
@@ -77,6 +98,12 @@ console.log(`[local-server] static-frontend-worker ready`);
 console.log(`[local-server]   listening:    http://${host}:${port}`);
 console.log(`[local-server]   assets dir:   ${assetsDir}`);
 console.log(`[local-server]   html_handling: ${htmlHandling}`);
+if (redirectsRulesJson) {
+  const ruleCount = JSON.parse(redirectsRulesJson).length;
+  console.log(`[local-server]   _redirects:   ${ruleCount} rule(s) loaded`);
+} else {
+  console.log(`[local-server]   _redirects:   (none)`);
+}
 console.log(`[local-server] try:`);
 console.log(`[local-server]   curl -sI http://localhost:${port}/                  # 200 + text/html`);
 console.log(`[local-server]   curl -sI http://localhost:${port}/some/deep/route   # 200 (SPA fallback)`);

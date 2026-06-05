@@ -302,10 +302,13 @@ describe('static-frontend-worker', () => {
     it('first match wins (preserves rule order)', async () => {
       const indexBody = '<html>HOME</html>';
       const aboutBody = '<html>ABOUT</html>';
-      const { env } = makeAssetsEnv(
+      // Mock both /about (normalized) and /about.html (original) since the
+      // worker normalizes .html rewrite targets to escape the html_handling
+      // 307 trap. Either should serve, but the worker will fetch /about.
+      const { env, calls } = makeAssetsEnv(
         {
           '/': () => htmlResponse(indexBody),
-          '/about.html': () => htmlResponse(aboutBody),
+          '/about': () => htmlResponse(aboutBody),
         },
         404,
         JSON.stringify([
@@ -319,6 +322,8 @@ describe('static-frontend-worker', () => {
       );
       expect(res.status).toBe(200);
       expect(await res.text()).toBe(aboutBody);
+      // Worker should have normalized /about.html → /about. No call to /index.html.
+      expect(calls).toEqual(['/about']);
     });
 
     it('substitutes :splat in the rewrite target', async () => {

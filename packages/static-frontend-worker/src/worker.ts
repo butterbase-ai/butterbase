@@ -90,6 +90,26 @@ function loadRules(env: Env): RedirectRule[] {
   return cachedRules;
 }
 
+// Translate a rewrite target to the form Assets actually serves with 200 under
+// `html_handling: 'auto-trailing-slash'`. The Assets binding 307-redirects any
+// .html path to its canonical extensionless form; if a rewrite asks for
+// /foo.html and we forward Assets's 307, the rewrite is broken (client sees
+// the 307). Normalizing here means the worker fetches the form Assets returns
+// 200 for, and we serve that content under the original request URL.
+function normalizeRewriteTarget(target: string): string {
+  // Don't rewrite cross-origin targets (e.g. external URLs that snuck into a
+  // 200 rule — though those are nonsensical, defend in depth).
+  if (/^https?:\/\//i.test(target)) return target;
+  if (target.endsWith('/index.html')) {
+    // /foo/index.html → /foo/   ;   /index.html → /
+    return target.slice(0, -'index.html'.length);
+  }
+  if (target.endsWith('.html')) {
+    return target.slice(0, -'.html'.length);
+  }
+  return target;
+}
+
 function matchRule(path: string, rule: RedirectRule): string | null {
   if (rule.from.endsWith('/*')) {
     const prefix = rule.from.slice(0, -2);
@@ -187,11 +207,14 @@ const handler = {
             );
           }
           // 200 rewrite: fetch target from assets under the original URL.
-          // Special case: a rewrite to `/index.html` retargets to `/` because
-          // `html_handling: 'auto-trailing-slash'` returns a 307 → / for
-          // `/index.html` itself, which would defeat the rewrite. Fetching
-          // `/` serves the same content via the trailing-slash resolution.
-          const fetchPath = target === '/index.html' ? '/' : target;
+          // `html_handling: 'auto-trailing-slash'` canonicalizes any .html
+          // path away: `/foo.html` → 307 `/foo`, `/foo/index.html` → 307
+          // `/foo/`, `/index.html` → 307 `/`. Fetching the .html target
+          // literally would defeat the rewrite (the worker would return the
+          // 307 to the client). Strip .html / .../index.html so the resolved
+          // path round-trips through Assets's trailing-slash resolution and
+          // returns 200 with the file content.
+          const fetchPath = normalizeRewriteTarget(target);
           const fetchUrl = new URL(fetchPath, url);
           const rewritten = await env.ASSETS.fetch(
             new Request(fetchUrl.toString(), request),

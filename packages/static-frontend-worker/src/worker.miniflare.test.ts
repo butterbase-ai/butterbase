@@ -156,3 +156,105 @@ describe('static-frontend-worker via Miniflare (real workerd)', () => {
     });
   });
 });
+
+// Second Miniflare instance with a BB_REDIRECTS_RULES binding configured.
+// Validates the END-TO-END rule application path against real workerd,
+// not the hand-mocked env.ASSETS in worker.test.ts.
+describe('static-frontend-worker rule application via Miniflare', () => {
+  let mfRules: Miniflare;
+  let baseUrlRules: URL;
+  let rulesAssetsDir: string;
+
+  const NEW_BODY = '<!doctype html><h1>NEW</h1>';
+  const V2_USERS_BODY = '<!doctype html><h1>V2 USERS</h1>';
+  const RULES = [
+    { from: '/old', to: '/new.html', status: 301 },
+    { from: '/api/*', to: '/v2/:splat', status: 200 },
+    { from: '/go-google', to: 'https://google.com', status: 302 },
+    { from: '/*', to: '/index.html', status: 200 },
+  ];
+
+  beforeAll(async () => {
+    const workerSource = readFileSync(workerJsPath, 'utf8');
+
+    rulesAssetsDir = mkdtempSync(join(tmpdir(), 'bb-mf-rules-'));
+    writeFileSync(join(rulesAssetsDir, 'index.html'), INDEX_BODY);
+    writeFileSync(join(rulesAssetsDir, 'new.html'), NEW_BODY);
+    mkdirSync(join(rulesAssetsDir, 'v2'), { recursive: true });
+    writeFileSync(join(rulesAssetsDir, 'v2', 'users.html'), V2_USERS_BODY);
+
+    mfRules = new Miniflare({
+      modules: true,
+      script: workerSource,
+      host: '127.0.0.1',
+      port: 0,
+      bindings: { BB_REDIRECTS_RULES: JSON.stringify(RULES) },
+      assets: {
+        directory: rulesAssetsDir,
+        binding: 'ASSETS',
+        assetConfig: { html_handling: 'auto-trailing-slash' },
+        routerConfig: {
+          has_user_worker: true,
+          invoke_user_worker_ahead_of_assets: true,
+        },
+      },
+    });
+    baseUrlRules = await mfRules.ready;
+  }, 30_000);
+
+  afterAll(async () => {
+    if (mfRules) await mfRules.dispose();
+    if (rulesAssetsDir) rmSync(rulesAssetsDir, { recursive: true, force: true });
+  });
+
+  async function getRules(path: string): Promise<Response> {
+    return await mfRules.dispatchFetch(new URL(path, baseUrlRules).toString(), {
+      redirect: 'manual',
+    });
+  }
+
+  it('applies a 301 redirect: /old → 301 Location: /new.html', async () => {
+    const res = await getRules('/old');
+    expect(res.status).toBe(301);
+    expect(res.headers.get('location')).toBe(
+      new URL('/new.html', baseUrlRules).toString(),
+    );
+  });
+
+  it('applies a 200 rewrite with :splat substitution: /api/users.html serves /v2/users.html content', async () => {
+    const res = await getRules('/api/users.html');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(V2_USERS_BODY);
+  });
+
+  it('applies a 302 redirect to an external URL: /go-google → 302 https://google.com', async () => {
+    const res = await getRules('/go-google');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe('https://google.com');
+  });
+
+  it('catch-all SPA rule /* → /index.html serves home for unmatched deep paths', async () => {
+    const res = await getRules('/some/deep/route');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(INDEX_BODY);
+  });
+
+  it('catch-all SPA rule still routes the exact home path to index', async () => {
+    const res = await getRules('/');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(INDEX_BODY);
+  });
+
+  it('first match wins: /old → redirect (not the /* SPA rule)', async () => {
+    const res = await getRules('/old');
+    expect(res.status).toBe(301);
+    // If the SPA rule had won we would get 200 + INDEX_BODY.
+  });
+
+  it('first match wins: /api/users.html → rewrite (not the /* SPA rule)', async () => {
+    const res = await getRules('/api/users.html');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(V2_USERS_BODY);
+    // If the SPA rule had won we would get INDEX_BODY.
+  });
+});
