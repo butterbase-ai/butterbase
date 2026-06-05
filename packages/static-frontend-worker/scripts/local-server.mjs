@@ -15,8 +15,8 @@
 //   LOCAL_FRONTEND_HOST        Host to bind. Default: 0.0.0.0 (so docker port
 //                              forwarding works; use 127.0.0.1 for native
 //                              loopback-only).
-//   LOCAL_FRONTEND_HTML_HANDLING  auto-trailing-slash (default), drop-trailing-slash,
-//                                 force-trailing-slash, or none.
+//   LOCAL_FRONTEND_HTML_HANDLING  none (default, matches prod), auto-trailing-slash,
+//                                 drop-trailing-slash, or force-trailing-slash.
 import { Miniflare } from 'miniflare';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -47,7 +47,7 @@ const port = Number.parseInt(process.env.LOCAL_FRONTEND_PORT || '8787', 10);
 const host = process.env.LOCAL_FRONTEND_HOST || '0.0.0.0';
 const htmlHandling =
   /** @type {"auto-trailing-slash" | "drop-trailing-slash" | "force-trailing-slash" | "none"} */ (
-    process.env.LOCAL_FRONTEND_HTML_HANDLING || 'auto-trailing-slash'
+    process.env.LOCAL_FRONTEND_HTML_HANDLING || 'none'
   );
 
 // Auto-parse `_redirects` from the assets dir if present. Mirrors what
