@@ -87,7 +87,7 @@ export async function deployUserWorkerWithScript(
     assets: {
       jwt: completionToken,
       config: {
-        html_handling: 'auto-trailing-slash',
+        html_handling: 'none',
       },
     },
     bindings: [
