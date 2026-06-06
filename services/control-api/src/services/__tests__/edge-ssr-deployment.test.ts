@@ -166,7 +166,7 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     // deployUserWorkerWithScript called exactly once with correct shape
     expect(CloudflareWfp.deployUserWorkerWithScript).toHaveBeenCalledTimes(1);
     const args = (CloudflareWfp.deployUserWorkerWithScript as ReturnType<typeof vi.fn>).mock.calls[0];
-    const [input, scriptStr, additionalModules] = args;
+    const [input, scriptStr, additionalModules, compatFlags, htmlHandling] = args;
     expect(input.scriptName).toBe('app_abc');
     expect(input.files).toBeInstanceOf(Map);
     expect(input.files.size).toBe(2);
@@ -175,6 +175,11 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     expect(scriptStr).toBe(workerSrc);
     expect(additionalModules).toBeInstanceOf(Map);
     expect(additionalModules.size).toBe(0);
+    // Edge SSR needs nodejs_compat + auto-trailing-slash so env.ASSETS.fetch('/')
+    // resolves to /index.html for prerendered pages (next-on-pages has no
+    // resolution chain of its own, unlike the static-frontend-worker).
+    expect(compatFlags).toEqual(['nodejs_compat']);
+    expect(htmlHandling).toBe('auto-trailing-slash');
 
     expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local');
 

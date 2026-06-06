@@ -613,11 +613,17 @@ export async function deployArtifact(
     // (node:buffer, node:async_hooks, etc.), so the script needs the
     // nodejs_compat flag at deploy time. Without it, Cloudflare serves the
     // built-in /cdn-cgi/errors/no-nodejs_compat.html page for every request.
+    //
+    // html_handling: 'auto-trailing-slash' is required so env.ASSETS.fetch('/')
+    // resolves to /index.html for prerendered pages. The static-frontend-worker
+    // uses 'none' because it implements its own candidate-resolution chain;
+    // next-on-pages has no such chain and relies on CF's auto handling.
     await CloudflareWfp.deployUserWorkerWithScript(
       { scriptName: appId, files: assetMap, envVars },
       workerScript.toString('utf-8'),
       additionalModules,
-      ['nodejs_compat']
+      ['nodejs_compat'],
+      'auto-trailing-slash'
     );
     console.log(`${tag} Step 3/6: WfP deploy completed in ${Date.now() - wfpStart}ms`);
 

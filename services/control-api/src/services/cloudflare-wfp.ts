@@ -33,11 +33,18 @@ function hash32(buf: Buffer): string {
 // to the WfP dispatch namespace verbatim. To modify worker behavior, edit
 // packages/static-frontend-worker/src/worker.ts and rebuild.
 
+export type AssetsHtmlHandling =
+  | 'none'
+  | 'auto-trailing-slash'
+  | 'drop-trailing-slash'
+  | 'force-trailing-slash';
+
 export async function deployUserWorkerWithScript(
   input: DeployInput,
   workerScript: string,
   additionalModules?: Map<string, Buffer>,
   compatibilityFlags?: string[],
+  htmlHandling: AssetsHtmlHandling = 'none',
 ): Promise<void> {
   const { scriptName, files, envVars } = input;
 
@@ -87,7 +94,7 @@ export async function deployUserWorkerWithScript(
     assets: {
       jwt: completionToken,
       config: {
-        html_handling: 'none',
+        html_handling: htmlHandling,
       },
     },
     bindings: [
