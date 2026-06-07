@@ -18,6 +18,7 @@ import {
   chatCompletionRequestSchema as chatCompletionSchema,
   embeddingRequestSchema as embeddingSchema,
 } from '../services/ai-router/schemas.js';
+import { logAuditEvent } from '../services/audit/audit-events-service.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
@@ -107,6 +108,57 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
   return reply.code(500).send(openaiError('Internal error', 'api_error', 'internal_error'));
 }
 
+interface GatewayAuditContext {
+  endpoint: 'chat.completions' | 'embeddings';
+  model?: string;
+  appId: string;
+  userId: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+  startedAt: number;
+}
+
+function emitGatewayEvent(
+  app: FastifyInstance,
+  ctx: GatewayAuditContext,
+  outcome:
+    | { success: true; status: number; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null; stream?: boolean }
+    | { success: false; errorMessage: string; errorCode?: string; status?: number }
+): void {
+  // Fire-and-forget; logAuditEvent itself swallows DB errors.
+  void logAuditEvent(app.controlDb, {
+    appId: ctx.appId,
+    category: 'ai',
+    eventType: 'ai_gateway.invoke',
+    action: 'invoke',
+    resourceType: 'ai_request',
+    resourceId: ctx.model,
+    actorType: 'platform_user',
+    actorId: ctx.userId,
+    eventData: {
+      endpoint: ctx.endpoint,
+      model: ctx.model ?? null,
+      duration_ms: Date.now() - ctx.startedAt,
+      ...(outcome.success
+        ? {
+            status: outcome.status,
+            stream: outcome.stream ?? false,
+            prompt_tokens: outcome.usage?.prompt_tokens ?? null,
+            completion_tokens: outcome.usage?.completion_tokens ?? null,
+            total_tokens: outcome.usage?.total_tokens ?? null,
+          }
+        : {
+            status: outcome.status ?? null,
+            error_code: outcome.errorCode ?? null,
+          }),
+    },
+    ipAddress: ctx.ipAddress,
+    userAgent: ctx.userAgent,
+    success: outcome.success,
+    errorMessage: outcome.success ? null : outcome.errorMessage,
+  });
+}
+
 export async function gatewayRoutes(app: FastifyInstance) {
   const adapters = await buildAdapters();
 
@@ -131,9 +183,20 @@ export async function gatewayRoutes(app: FastifyInstance) {
   });
 
   app.post('/v1/chat/completions', async (request, reply) => {
+    const startedAt = Date.now();
+    let auditCtx: GatewayAuditContext | null = null;
     try {
       const user = resolveGatewayUser(request);
       const body = chatCompletionSchema.parse(request.body);
+      auditCtx = {
+        endpoint: 'chat.completions',
+        model: body.model,
+        appId: request.auth.appId ?? '_platform',
+        userId: user.userId,
+        ipAddress: request.ip ?? null,
+        userAgent: request.headers['user-agent'] ?? null,
+        startedAt,
+      };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const result = await routeChatCompletion(
         {
@@ -161,18 +224,41 @@ export async function gatewayRoutes(app: FastifyInstance) {
           reply.raw.write(value);
         }
         reply.raw.end();
+        emitGatewayEvent(app, auditCtx, { success: true, status: result.status, stream: true });
         return;
       }
+      const usage = (result.body as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } } | undefined)?.usage ?? null;
+      emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage, stream: false });
       return reply.code(result.status).send(result.body);
     } catch (err) {
+      if (auditCtx) {
+        const e = err as { message?: string; gatewayCode?: string; code?: string; statusCode?: number; gatewayStatus?: number };
+        emitGatewayEvent(app, auditCtx, {
+          success: false,
+          errorMessage: e.message ?? 'unknown',
+          errorCode: e.gatewayCode ?? e.code ?? 'error',
+          status: e.gatewayStatus ?? e.statusCode,
+        });
+      }
       return handleRouterError(reply, err);
     }
   });
 
   app.post('/v1/embeddings', async (request, reply) => {
+    const startedAt = Date.now();
+    let auditCtx: GatewayAuditContext | null = null;
     try {
       const user = resolveGatewayUser(request);
       const body = embeddingSchema.parse(request.body);
+      auditCtx = {
+        endpoint: 'embeddings',
+        model: body.model,
+        appId: request.auth.appId ?? '_platform',
+        userId: user.userId,
+        ipAddress: request.ip ?? null,
+        userAgent: request.headers['user-agent'] ?? null,
+        startedAt,
+      };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const result = await routeEmbedding(
         {
@@ -187,8 +273,19 @@ export async function gatewayRoutes(app: FastifyInstance) {
         },
         body,
       );
+      const usage = (result.body as { usage?: { prompt_tokens?: number; total_tokens?: number } } | undefined)?.usage ?? null;
+      emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage, stream: false });
       return reply.code(result.status).send(result.body);
     } catch (err) {
+      if (auditCtx) {
+        const e = err as { message?: string; gatewayCode?: string; code?: string; statusCode?: number; gatewayStatus?: number };
+        emitGatewayEvent(app, auditCtx, {
+          success: false,
+          errorMessage: e.message ?? 'unknown',
+          errorCode: e.gatewayCode ?? e.code ?? 'error',
+          status: e.gatewayStatus ?? e.statusCode,
+        });
+      }
       return handleRouterError(reply, err);
     }
   });
