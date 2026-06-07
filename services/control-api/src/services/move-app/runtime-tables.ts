@@ -56,14 +56,44 @@ export const MOVE_APP_RUNTIME_TABLES = [
   'app_deployments',
   'usage_meters',
 
-  // Agents (per-app; child tables agent_checkpoints/agent_run_events/agent_usage/
-  // agent_webhook_deliveries reference agent_runs via run_id without app_id and
-  // are not copied — in-flight run state is lost on move v1, cascade-cleared
-  // when archived agent_runs rows are eventually purged).
+  // Agents — parent tables that carry app_id directly.
+  // Child tables that reference agent_runs(id) are listed in
+  // MOVE_APP_RUNTIME_CHILD_TABLES and copied in a follow-up pass.
   'agents',
   'agent_mcp_servers',
   'agent_runs',
   'agent_tool_audits',
+] as const;
+
+/**
+ * Per-app runtime tables that don't carry app_id directly but FK into a parent
+ * in MOVE_APP_RUNTIME_TABLES. Copied by step-copy-runtime in a second pass,
+ * filtered by `parent_fk IN (SELECT id FROM parent WHERE app_id=$1
+ *   AND (archived_after_move IS NULL OR archived_after_move=$migration_id))`
+ * so we catch rows whose parent was already archived in this same migration.
+ *
+ * Every entry's child table must have an `archived_after_move uuid` column
+ * (added by migration 021 for the four current entries); source-side rows are
+ * tagged at the end of the per-table copy so a re-run is idempotent.
+ *
+ * The boot-time audit in runtime-table-audit.ts asserts that every table in
+ * the runtime DB with a FK to a registered parent's PK is in either this list
+ * or MOVE_APP_EXCLUDED_CHILD.
+ */
+export interface MoveAppChildTable {
+  /** Child table name. */
+  table: string;
+  /** Parent table name (must appear in MOVE_APP_RUNTIME_TABLES). */
+  parent: string;
+  /** Column on the child that references parent's primary key. */
+  parent_fk: string;
+}
+
+export const MOVE_APP_RUNTIME_CHILD_TABLES: readonly MoveAppChildTable[] = [
+  { table: 'agent_checkpoints',        parent: 'agent_runs', parent_fk: 'run_id' },
+  { table: 'agent_run_events',         parent: 'agent_runs', parent_fk: 'run_id' },
+  { table: 'agent_usage',              parent: 'agent_runs', parent_fk: 'run_id' },
+  { table: 'agent_webhook_deliveries', parent: 'agent_runs', parent_fk: 'run_id' },
 ] as const;
 
 /**
@@ -95,3 +125,13 @@ export const TABLE_PK_OVERRIDES: Record<string, string> = {
   app_do_deploy_state: 'app_id',
   oauth_states: 'state',
 };
+
+/**
+ * Child tables (FK-linked to a registered parent) that are deliberately NOT
+ * moved by the saga. The boot audit requires every FK-to-parent-PK table to
+ * be either here or in MOVE_APP_RUNTIME_CHILD_TABLES.
+ *
+ * Currently empty — every FK-to-parent table is moved. Add an entry here only
+ * with a reason and an owning issue.
+ */
+export const MOVE_APP_EXCLUDED_CHILD: Record<string, string> = {};

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { executeCopyRuntime } from './step-copy-runtime.js';
-import { MOVE_APP_RUNTIME_TABLES } from './runtime-tables.js';
+import { MOVE_APP_RUNTIME_TABLES, MOVE_APP_RUNTIME_CHILD_TABLES } from './runtime-tables.js';
 
 describe('executeCopyRuntime', () => {
   it('copies every runtime table and tags source rows', async () => {
@@ -19,7 +19,14 @@ describe('executeCopyRuntime', () => {
     const m: any = { id: 'mig-1', app_id: 'a', source_region: 'us-east-1', dest_region: 'eu-west-1', current_step: 'copying_runtime', dest_resources: {} };
     const res = await executeCopyRuntime(ctx, m);
     expect(res.next).toBe('flipping_routing');
-    expect(res.patch.copied_tables.length).toBeGreaterThanOrEqual(MOVE_APP_RUNTIME_TABLES.length);
+    expect(res.patch.copied_tables.length).toBeGreaterThanOrEqual(
+      MOVE_APP_RUNTIME_TABLES.length + MOVE_APP_RUNTIME_CHILD_TABLES.length,
+    );
+    // All child tables must end up in copied_tables — guards against silent
+    // regression of the agent-runs child-tables pass.
+    for (const c of MOVE_APP_RUNTIME_CHILD_TABLES) {
+      expect(res.patch.copied_tables).toContain(c.table);
+    }
   });
 
   it('skips tables already in copied_tables', async () => {
@@ -34,7 +41,12 @@ describe('executeCopyRuntime', () => {
     const m: any = {
       id: 'mig-1', app_id: 'a', source_region: 'us-east-1', dest_region: 'eu-west-1',
       current_step: 'copying_runtime',
-      dest_resources: { copied_tables: [...MOVE_APP_RUNTIME_TABLES] },
+      dest_resources: {
+        copied_tables: [
+          ...MOVE_APP_RUNTIME_TABLES,
+          ...MOVE_APP_RUNTIME_CHILD_TABLES.map((c) => c.table),
+        ],
+      },
     };
     const res = await executeCopyRuntime(ctx, m);
     expect(source.query).not.toHaveBeenCalled();
