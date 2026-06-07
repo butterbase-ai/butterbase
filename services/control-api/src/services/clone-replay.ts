@@ -225,14 +225,17 @@ export async function replayRls(
 
 /**
  * Copy non-deleted app_functions rows from the source app's runtime DB into
- * the dest app's runtime DB.
+ * the dest app's runtime DB, then mirror each function's function_triggers
+ * rows across.
  *
- * Behavior-defining columns (name, code, description, trigger_type,
- * trigger_config, timeout_ms, memory_limit_mb, agent_tool,
- * agent_tool_description, agent_tool_mode, agent_tool_exposed_to) are copied
- * verbatim.  Runtime-stat columns (invocation_count, error_count, etc.) are
- * left at their defaults.  encrypted_env_vars is intentionally blanked (NULL)
- * per the secrets allowlist policy.
+ * Behavior-defining columns on app_functions (name, code, description,
+ * timeout_ms, memory_limit_mb, agent_tool, agent_tool_description,
+ * agent_tool_mode, agent_tool_exposed_to) are copied verbatim.  Triggers
+ * live in a child table after the function_triggers cutover; this function
+ * re-inserts them under the new dest function id.  Runtime-stat columns
+ * (invocation_count, error_count, etc.) are left at their defaults.
+ * encrypted_env_vars is intentionally blanked (NULL) per the secrets
+ * allowlist policy.
  *
  * Soft-fails per function: an insert error is recorded as a warning and the
  * clone continues with the next function.
@@ -256,9 +259,19 @@ export async function replayFunctions(
   requestedByUserId: string,
   logger: ReplayLogger,
 ): Promise<{ count: number; warnings: string[] }> {
-  const src = await sourceRuntimePool.query(
-    `SELECT name, code, description,
-            trigger_type, trigger_config,
+  const src = await sourceRuntimePool.query<{
+    id: string;
+    name: string;
+    code: string;
+    description: string | null;
+    timeout_ms: number;
+    memory_limit_mb: number;
+    agent_tool: boolean;
+    agent_tool_description: string | null;
+    agent_tool_mode: string | null;
+    agent_tool_exposed_to: string | null;
+  }>(
+    `SELECT id, name, code, description,
             timeout_ms, memory_limit_mb,
             agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to
        FROM app_functions
@@ -271,11 +284,10 @@ export async function replayFunctions(
 
   for (const f of src.rows) {
     try {
-      await destRuntimePool.query(
+      const ins = await destRuntimePool.query<{ id: string }>(
         `INSERT INTO app_functions (
            id, app_id,
            name, code, description,
-           trigger_type, trigger_config,
            timeout_ms, memory_limit_mb,
            agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
            encrypted_env_vars,
@@ -284,21 +296,46 @@ export async function replayFunctions(
            gen_random_uuid(), $1,
            $2, $3, $4,
            $5, $6,
-           $7, $8,
-           $9, $10, $11, $12,
+           $7, $8, $9, $10,
            NULL,
-           $13, now()
+           $11, now()
          )
-         ON CONFLICT (app_id, name) DO NOTHING`,
+         ON CONFLICT (app_id, name) DO NOTHING
+         RETURNING id`,
         [
           destAppId,
           f.name, f.code, f.description,
-          f.trigger_type, f.trigger_config,
           f.timeout_ms, f.memory_limit_mb,
           f.agent_tool, f.agent_tool_description, f.agent_tool_mode, f.agent_tool_exposed_to,
           requestedByUserId,
         ],
       );
+
+      // ON CONFLICT DO NOTHING returns no rows when a row already existed —
+      // leave its triggers alone in that case.
+      const destFnId = ins.rows[0]?.id;
+      if (destFnId) {
+        // Copy function_triggers from source to dest.  Source rows reference
+        // the source function id; rewrite to the dest function + dest app id.
+        const trigSrc = await sourceRuntimePool.query<{
+          trigger_type: string;
+          trigger_config: unknown;
+          enabled: boolean;
+        }>(
+          `SELECT trigger_type, trigger_config, enabled
+             FROM function_triggers WHERE function_id = $1`,
+          [f.id],
+        );
+        for (const t of trigSrc.rows) {
+          await destRuntimePool.query(
+            `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (function_id, trigger_type) DO NOTHING`,
+            [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
+          );
+        }
+      }
+
       inserted++;
     } catch (err) {
       const msg = `Function ${f.name} replay failed: ${(err as Error).message}`;
