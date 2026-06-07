@@ -21,6 +21,30 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-06-08',
+    category: 'ai',
+    title: 'Agents',
+    description: 'Define multi-step LLM agents as a graph spec — LLM nodes, tool nodes, edges, limits — and run them with checkpointed state, SSE/WebSocket streaming, idempotency, human-in-the-loop approvals for write tools, and per-IP / per-user / per-app rate limits. Authored from the dashboard, CLI (`butterbase agents`), MCP, or REST.',
+    href: '/core-concepts/agents/',
+    icon: '🤖',
+  },
+  {
+    date: '2026-06-08',
+    category: 'functions',
+    title: 'Functions as agent tools',
+    description: 'Mark any serverless function as `agent_tool: true` with a description, mode (`read_only` or `read_write`), and exposure (`developer_only` or `end_user`). Agents call it directly; read-write tools pause the run for human approval before mutating.',
+    href: '/core-concepts/functions/#functions-as-agent-tools',
+    icon: '🛠️',
+  },
+  {
+    date: '2026-06-08',
+    category: 'functions',
+    title: 'Multi-trigger functions',
+    description: 'A single function can now declare multiple triggers — an HTTP endpoint plus a daily cron, an S3 upload plus a webhook. New trigger types `s3_upload` and `webhook` join `http`, `cron`, and `websocket`. Dashboard editor supports add/remove per type.',
+    href: '/core-concepts/functions/#trigger-types',
+    icon: '⚡',
+  },
+  {
     date: '2026-06-01',
     category: 'tooling',
     title: 'App Templates',
