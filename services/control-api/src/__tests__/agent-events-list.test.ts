@@ -1,13 +1,17 @@
-// Must be set before any service module that reads AUTH_ENCRYPTION_KEY is loaded.
 process.env.AUTH_ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+import {
+  installAgentTestMocks, seedTestApp, cleanupTestApp,
+  closeTestPool, TEST_USER_ID,
+} from './agent-test-helpers.js';
+installAgentTestMocks();
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify from 'fastify';
 import { databasePlugin } from '../plugins/database.js';
-import { initRoutes } from '../routes/init.js';
 import { agentsRoutes } from '../routes/agents.js';
 
-const OWNER_ID = '00000000-0000-0000-0000-000000000401';
+const OWNER_ID = TEST_USER_ID;
 const OTHER_ID = '00000000-0000-0000-0000-000000000402';
 
 const app = Fastify({ logger: false });
@@ -49,33 +53,10 @@ beforeAll(async () => {
     };
     done();
   });
-  app.register(initRoutes);
   app.register(agentsRoutes);
   await app.ready();
 
-  // Ensure both test users exist
-  await app.controlDb.query(
-    `INSERT INTO platform_users (id, email, created_at)
-     VALUES ($1, 'events-list-owner@example.com', now())
-     ON CONFLICT (id) DO NOTHING`,
-    [OWNER_ID],
-  );
-  await app.controlDb.query(
-    `INSERT INTO platform_users (id, email, created_at)
-     VALUES ($1, 'events-list-other@example.com', now())
-     ON CONFLICT (id) DO NOTHING`,
-    [OTHER_ID],
-  );
-
-  // Clean up old test apps for this user to avoid project limits
-  await app.controlDb.query(`DELETE FROM apps WHERE owner_id = $1`, [OWNER_ID]);
-
-  const initRes = await app.inject({
-    method: 'POST',
-    url: '/init',
-    payload: { name: `events-list-test-${Date.now()}` },
-  });
-  appId = initRes.json().app_id;
+  appId = await seedTestApp({ prefix: 'events' });
   agentName = 'my-agent';
 
   await app.inject({
@@ -87,6 +68,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.close();
+  await cleanupTestApp(appId);
+  await closeTestPool();
 });
 
 /** Create a run directly in the DB. */

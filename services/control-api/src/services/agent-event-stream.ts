@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
 import { Redis } from 'ioredis';
 
@@ -103,7 +103,7 @@ export async function streamEvents(opts: StreamOpts): Promise<() => Promise<void
  * Caller must have already verified auth before calling this.
  */
 export async function streamRunEventsAsSse(
-  app: FastifyInstance,
+  runtimeDb: Pool,
   request: FastifyRequest,
   reply: FastifyReply,
   runId: string,
@@ -115,7 +115,7 @@ export async function streamRunEventsAsSse(
   reply.raw.flushHeaders();
 
   const stop = await streamEvents({
-    db: app.controlDb,
+    db: runtimeDb,
     runId,
     sinceSeq,
     onEvent: (e: AgentEvent) => {
@@ -137,13 +137,13 @@ export async function streamRunEventsAsSse(
  * Accepts either a raw WebSocket or the @fastify/websocket connection wrapper.
  */
 export async function streamRunEventsToWebSocket(
-  app: FastifyInstance,
+  runtimeDb: Pool,
   socket: { readyState: number; OPEN: number; send(data: string): void; close(code?: number): void; on(event: string, cb: () => void): void },
   runId: string,
   sinceSeq: number,
 ): Promise<void> {
   const stop = await streamEvents({
-    db: app.controlDb,
+    db: runtimeDb,
     runId,
     sinceSeq,
     onEvent: (e: AgentEvent) => {

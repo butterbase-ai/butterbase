@@ -1,13 +1,16 @@
-// Must be set before any service module that reads AUTH_ENCRYPTION_KEY is loaded.
 process.env.AUTH_ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+import {
+  installAgentTestMocks, seedTestApp, cleanupTestApp,
+  closeTestPool, TEST_USER_ID,
+} from './agent-test-helpers.js';
+installAgentTestMocks();
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify from 'fastify';
 import { databasePlugin } from '../plugins/database.js';
-import { initRoutes } from '../routes/init.js';
 import { agentsRoutes, setRuntimeClient } from '../routes/agents.js';
 
-// Mock the actual runtime client so we never make real HTTP calls.
 vi.mock('../services/agent-runtime-client.js', () => ({
   startRun: vi.fn(async (_runId: string) => undefined),
   cancelRun: vi.fn(async (_runId: string) => undefined),
@@ -15,7 +18,7 @@ vi.mock('../services/agent-runtime-client.js', () => ({
   AgentRuntimeError: class extends Error {},
 }));
 
-const OWNER_ID = '00000000-0000-0000-0000-000000000301';
+const OWNER_ID = TEST_USER_ID;
 const OTHER_ID = '00000000-0000-0000-0000-000000000302';
 
 const app = Fastify({ logger: false });
@@ -57,33 +60,10 @@ beforeAll(async () => {
     };
     done();
   });
-  app.register(initRoutes);
   app.register(agentsRoutes);
   await app.ready();
 
-  // Ensure both test users exist
-  await app.controlDb.query(
-    `INSERT INTO platform_users (id, email, created_at)
-     VALUES ($1, 'cancel-resume-owner@example.com', now())
-     ON CONFLICT (id) DO NOTHING`,
-    [OWNER_ID],
-  );
-  await app.controlDb.query(
-    `INSERT INTO platform_users (id, email, created_at)
-     VALUES ($1, 'cancel-resume-other@example.com', now())
-     ON CONFLICT (id) DO NOTHING`,
-    [OTHER_ID],
-  );
-
-  // Clean up old test apps for this user to avoid project limits
-  await app.controlDb.query(`DELETE FROM apps WHERE owner_id = $1`, [OWNER_ID]);
-
-  const initRes = await app.inject({
-    method: 'POST',
-    url: '/init',
-    payload: { name: `cancel-resume-test-${Date.now()}` },
-  });
-  appId = initRes.json().app_id;
+  appId = await seedTestApp({ prefix: 'cancel' });
   agentName = 'my-agent';
 
   await app.inject({
@@ -96,6 +76,8 @@ beforeAll(async () => {
 afterAll(async () => {
   setRuntimeClient(undefined);
   await app.close();
+  await cleanupTestApp(appId);
+  await closeTestPool();
 });
 
 /** Create a run directly in the DB with an arbitrary status. */

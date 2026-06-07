@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { Pool } from 'pg';
 import { z } from 'zod';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
 import { getAgent } from '../services/agents-service.js';
@@ -16,6 +17,33 @@ import { getRedisClient } from '../services/redis.js';
 import { mintEndUserStreamToken, verifyEndUserStreamToken } from '../services/agent-stream-tokens.js';
 import { getOrCreateSigningKey } from '../services/auth/signing-key-service.js';
 import { streamRunEventsAsSse, streamRunEventsToWebSocket } from '../services/agent-event-stream.js';
+import { getRuntimeDbForApp } from '../services/region-resolver.js';
+
+/**
+ * Resolves the regional runtime-plane pool for an app. The agent_* tables and
+ * apps itself live in runtime-plane (Phase 2). getRuntimeDbForApp throws
+ * typed errors for "app not found" / "still provisioning" — surface as 404 /
+ * 503 instead of bubbling as INTERNAL_ERROR.
+ */
+async function resolveRuntime(
+  app: FastifyInstance,
+  appId: string,
+): Promise<
+  | { ok: true; runtimeDb: Pool }
+  | { ok: false; code: number; error: string }
+> {
+  try {
+    const runtimeDb = await getRuntimeDbForApp(app.controlDb, appId);
+    return { ok: true, runtimeDb };
+  } catch (err: any) {
+    const code: string = err?.code ?? err?.name ?? '';
+    if (code === 'APP_NOT_FOUND') return { ok: false, code: 404, error: 'App not found' };
+    if (code === 'APP_PROVISIONING') {
+      return { ok: false, code: 503, error: 'App database is still being provisioned' };
+    }
+    throw err;
+  }
+}
 
 /** Represents an end-user caller resolved from the public auth header. */
 interface PublicCaller {
@@ -40,6 +68,7 @@ type ResolveResult =
  */
 async function resolvePublicCaller(
   app: FastifyInstance,
+  runtimeDb: Pool,
   request: FastifyRequest,
   appId: string,
   agentVisibility: string,
@@ -54,6 +83,8 @@ async function resolvePublicCaller(
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
     try {
+      // verifyEndUserJwt reads app_signing_keys via getRuntimeDbForApp itself
+      // — pass controlDb so the cache stays a single-pool concern.
       const claims = await verifyEndUserJwt(app.controlDb, appId, token);
       return { ok: true, kind: 'end_user', userId: claims.sub ?? null, ip };
     } catch {
@@ -66,7 +97,7 @@ async function resolvePublicCaller(
     if (agentVisibility !== 'public') {
       return { ok: false, code: 403, error: 'Agent is not publicly invocable' };
     }
-    const r = await app.controlDb.query(
+    const r = await runtimeDb.query(
       'SELECT 1 FROM apps WHERE id = $1 AND anon_key = $2',
       [appId, anonKey],
     );
@@ -91,16 +122,55 @@ export const runCreateBody = z.object({
 
 /**
  * Public-route plugin for end-user agent invocation.
+ *
+ * All handlers resolve the regional runtime-plane pool at entry. The agent_*,
+ * agent_runs, agent_run_events, apps tables live there (Phase 2). Calls that
+ * route internally — verifyEndUserJwt + getOrCreateSigningKey — keep
+ * app.controlDb because they look up runtime themselves via getRuntimeDbForApp.
  */
 export async function agentPublicRoutes(app: FastifyInstance) {
+  function sameCallerOrReject(
+    run: { caller_kind: string; caller_user_id: string | null },
+    caller: PublicCaller,
+  ): { ok: true } | { ok: false; code: number; error: string } {
+    if (run.caller_kind !== 'end_user') {
+      return { ok: false, code: 403, error: 'Run not invoked by end-user' };
+    }
+    if (run.caller_user_id == null) {
+      return { ok: false, code: 403, error: 'Anon runs cannot be modified from public path' };
+    }
+    if (run.caller_user_id !== caller.userId) {
+      return { ok: false, code: 403, error: 'Caller mismatch' };
+    }
+    return { ok: true };
+  }
+
+  async function loadRunForReadAccess(
+    runtimeDb: Pool, appId: string, runId: string, caller: PublicCaller,
+  ) {
+    const run = await getRunById(runtimeDb, appId, runId);
+    if (!run) return { ok: false as const, code: 404, error: 'Run not found' };
+    if (run.caller_kind !== 'end_user') {
+      return { ok: false as const, code: 404, error: 'Run not found' };
+    }
+    if (run.caller_user_id == null && caller.userId == null) return { ok: true as const, run };
+    if (run.caller_user_id === caller.userId) return { ok: true as const, run };
+    return { ok: false as const, code: 403, error: 'Caller mismatch' };
+  }
+
+  // ── POST /v1/:appId/public/agents/:name/runs ─────────────────────────────
+
   app.post('/v1/:appId/public/agents/:name/runs', async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
+    const ctx = await resolveRuntime(app, appId);
+    if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
+    const { runtimeDb } = ctx;
 
-    const agent = await getAgent(app.controlDb, appId, name);
+    const agent = await getAgent(runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
     if (agent.status !== 'active') return reply.code(400).send({ error: 'Agent is disabled' });
 
-    const authed = await resolvePublicCaller(app, request, appId, agent.visibility);
+    const authed = await resolvePublicCaller(app, runtimeDb, request, appId, agent.visibility);
     if (!authed.ok) return reply.code(authed.code).send({ error: authed.error });
 
     const parsed = runCreateBody.safeParse(request.body);
@@ -108,17 +178,15 @@ export async function agentPublicRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Invalid body', issues: parsed.error.issues });
     }
 
-    // Idempotency 409 (same logic as owner route).
     const newHash = payloadHashBuf(parsed.data.input);
     if (parsed.data.idempotency_key) {
       const existing = await findRunByIdempotencyKey(
-        app.controlDb, appId, parsed.data.idempotency_key,
+        runtimeDb, appId, parsed.data.idempotency_key,
       );
       if (existing) {
         const sameHash = existing.payload_hash != null
           && Buffer.compare(existing.payload_hash, newHash) === 0;
         if (sameHash) {
-          // Mint fresh stream token for the existing run.
           const pk = (await getOrCreateSigningKey(app.controlDb, appId)).privateKey;
           const tok = await mintEndUserStreamToken(
             pk, appId, existing.id, authed.userId, 15 * 60,
@@ -135,10 +203,9 @@ export async function agentPublicRoutes(app: FastifyInstance) {
       }
     }
 
-    // Rate limit / budget check.
     const redis = getRedisClient();
     const decision = await applyAllLimits(
-      redis, app.controlDb, agent,
+      redis, runtimeDb, agent,
       { userId: authed.userId, ip: authed.ip },
     );
     if (!decision.allowed) {
@@ -156,7 +223,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
       });
     }
 
-    const run = await createRun(app.controlDb, appId, agent.id, {
+    const run = await createRun(runtimeDb, appId, agent.id, {
       caller_kind: 'end_user',
       caller_user_id: authed.userId ?? undefined,
       caller_ip: authed.ip ?? undefined,
@@ -170,7 +237,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
       await startRunRemote(run.id);
     } catch (err) {
       app.log.error({ err, runId: run.id }, 'agent-runtime start failed (public)');
-      await app.controlDb.query(
+      await runtimeDb.query(
         `UPDATE agent_runs SET status='failed', error=$2::jsonb, finished_at=now()
           WHERE id=$1 AND status='queued'`,
         [run.id, JSON.stringify({
@@ -184,7 +251,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     const tok = await mintEndUserStreamToken(
       pk, appId, run.id, authed.userId, 15 * 60,
     );
-    const final = await getRunById(app.controlDb, appId, run.id);
+    const final = await getRunById(runtimeDb, appId, run.id);
     return reply.code(202).send({
       run_id: run.id,
       status: final?.status ?? 'queued',
@@ -193,53 +260,24 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     });
   });
 
-  // ── Helpers for run lifecycle endpoints ──────────────────────────────────
-
-  function sameCallerOrReject(
-    run: { caller_kind: string; caller_user_id: string | null },
-    caller: PublicCaller,
-  ): { ok: true } | { ok: false; code: number; error: string } {
-    if (run.caller_kind !== 'end_user') {
-      return { ok: false, code: 403, error: 'Run not invoked by end-user' };
-    }
-    // Anon-started runs can't be cancelled/resumed from the public path.
-    if (run.caller_user_id == null) {
-      return { ok: false, code: 403, error: 'Anon runs cannot be modified from public path' };
-    }
-    if (run.caller_user_id !== caller.userId) {
-      return { ok: false, code: 403, error: 'Caller mismatch' };
-    }
-    return { ok: true };
-  }
-
-  async function loadRunForReadAccess(
-    appId: string, runId: string, caller: PublicCaller,
-  ) {
-    const run = await getRunById(app.controlDb, appId, runId);
-    if (!run) return { ok: false as const, code: 404, error: 'Run not found' };
-    if (run.caller_kind !== 'end_user') {
-      return { ok: false as const, code: 404, error: 'Run not found' };
-    }
-    // Read access: anon-anon allowed; otherwise same caller_user_id required.
-    if (run.caller_user_id == null && caller.userId == null) return { ok: true as const, run };
-    if (run.caller_user_id === caller.userId) return { ok: true as const, run };
-    return { ok: false as const, code: 403, error: 'Caller mismatch' };
-  }
-
   // ── GET /v1/:appId/public/runs/:id ───────────────────────────────────────
 
   app.get('/v1/:appId/public/runs/:id', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
-    const r = await app.controlDb.query(
+    const ctx = await resolveRuntime(app, appId);
+    if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
+    const { runtimeDb } = ctx;
+
+    const r = await runtimeDb.query(
       'SELECT a.visibility FROM agent_runs r JOIN agents a ON r.agent_id = a.id WHERE r.id = $1 AND r.app_id = $2',
       [id, appId],
     );
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Run not found' });
-    const authed = await resolvePublicCaller(app, request, appId, r.rows[0].visibility);
+    const authed = await resolvePublicCaller(app, runtimeDb, request, appId, r.rows[0].visibility);
     if (!authed.ok) return reply.code(authed.code).send({ error: authed.error });
 
     const caller: PublicCaller = { kind: authed.kind, userId: authed.userId, ip: authed.ip };
-    const access = await loadRunForReadAccess(appId, id, caller);
+    const access = await loadRunForReadAccess(runtimeDb, appId, id, caller);
     if (!access.ok) return reply.code(access.code).send({ error: access.error });
     return reply.code(200).send({ run: access.run });
   });
@@ -248,15 +286,19 @@ export async function agentPublicRoutes(app: FastifyInstance) {
 
   app.post('/v1/:appId/public/runs/:id/cancel', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
-    const r = await app.controlDb.query(
+    const ctx = await resolveRuntime(app, appId);
+    if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
+    const { runtimeDb } = ctx;
+
+    const r = await runtimeDb.query(
       'SELECT a.visibility FROM agent_runs r JOIN agents a ON r.agent_id = a.id WHERE r.id = $1 AND r.app_id = $2',
       [id, appId],
     );
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Run not found' });
-    const authed = await resolvePublicCaller(app, request, appId, r.rows[0].visibility);
+    const authed = await resolvePublicCaller(app, runtimeDb, request, appId, r.rows[0].visibility);
     if (!authed.ok) return reply.code(authed.code).send({ error: authed.error });
 
-    const run = await getRunById(app.controlDb, appId, id);
+    const run = await getRunById(runtimeDb, appId, id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     const caller: PublicCaller = { kind: authed.kind, userId: authed.userId, ip: authed.ip };
     const match = sameCallerOrReject(run, caller);
@@ -272,15 +314,19 @@ export async function agentPublicRoutes(app: FastifyInstance) {
 
   app.post('/v1/:appId/public/runs/:id/resume', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
-    const r = await app.controlDb.query(
+    const ctx = await resolveRuntime(app, appId);
+    if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
+    const { runtimeDb } = ctx;
+
+    const r = await runtimeDb.query(
       'SELECT a.visibility FROM agent_runs r JOIN agents a ON r.agent_id = a.id WHERE r.id = $1 AND r.app_id = $2',
       [id, appId],
     );
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Run not found' });
-    const authed = await resolvePublicCaller(app, request, appId, r.rows[0].visibility);
+    const authed = await resolvePublicCaller(app, runtimeDb, request, appId, r.rows[0].visibility);
     if (!authed.ok) return reply.code(authed.code).send({ error: authed.error });
 
-    const run = await getRunById(app.controlDb, appId, id);
+    const run = await getRunById(runtimeDb, appId, id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     const caller: PublicCaller = { kind: authed.kind, userId: authed.userId, ip: authed.ip };
     const match = sameCallerOrReject(run, caller);
@@ -298,20 +344,24 @@ export async function agentPublicRoutes(app: FastifyInstance) {
 
   app.get('/v1/:appId/public/runs/:id/events.json', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
-    const r = await app.controlDb.query(
+    const ctx = await resolveRuntime(app, appId);
+    if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
+    const { runtimeDb } = ctx;
+
+    const r = await runtimeDb.query(
       'SELECT a.visibility FROM agent_runs r JOIN agents a ON r.agent_id = a.id WHERE r.id = $1',
       [id],
     );
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Run not found' });
-    const authed = await resolvePublicCaller(app, request, appId, r.rows[0].visibility);
+    const authed = await resolvePublicCaller(app, runtimeDb, request, appId, r.rows[0].visibility);
     if (!authed.ok) return reply.code(authed.code).send({ error: authed.error });
     const caller: PublicCaller = { kind: authed.kind, userId: authed.userId, ip: authed.ip };
-    const access = await loadRunForReadAccess(appId, id, caller);
+    const access = await loadRunForReadAccess(runtimeDb, appId, id, caller);
     if (!access.ok) return reply.code(access.code).send({ error: access.error });
 
     const sinceSeq = Number((request.query as { since_seq?: string }).since_seq ?? 0);
     const limit = Math.min(Number((request.query as { limit?: string }).limit ?? 100), 500);
-    const ev = await app.controlDb.query(
+    const ev = await runtimeDb.query(
       `SELECT seq, type, payload, created_at FROM agent_run_events
         WHERE run_id = $1::uuid AND seq > $2 ORDER BY seq LIMIT $3`,
       [id, sinceSeq, limit],
@@ -323,15 +373,19 @@ export async function agentPublicRoutes(app: FastifyInstance) {
 
   app.post('/v1/:appId/public/runs/:id/stream-token', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
-    const r = await app.controlDb.query(
+    const ctx = await resolveRuntime(app, appId);
+    if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
+    const { runtimeDb } = ctx;
+
+    const r = await runtimeDb.query(
       'SELECT a.visibility FROM agent_runs r JOIN agents a ON r.agent_id = a.id WHERE r.id = $1',
       [id],
     );
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Run not found' });
-    const authed = await resolvePublicCaller(app, request, appId, r.rows[0].visibility);
+    const authed = await resolvePublicCaller(app, runtimeDb, request, appId, r.rows[0].visibility);
     if (!authed.ok) return reply.code(authed.code).send({ error: authed.error });
     const caller: PublicCaller = { kind: authed.kind, userId: authed.userId, ip: authed.ip };
-    const access = await loadRunForReadAccess(appId, id, caller);
+    const access = await loadRunForReadAccess(runtimeDb, appId, id, caller);
     if (!access.ok) return reply.code(access.code).send({ error: access.error });
 
     const pk = (await getOrCreateSigningKey(app.controlDb, appId)).privateKey;
@@ -346,6 +400,10 @@ export async function agentPublicRoutes(app: FastifyInstance) {
 
   app.get('/v1/:appId/public/runs/:id/events', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
+    const ctx = await resolveRuntime(app, appId);
+    if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
+    const { runtimeDb } = ctx;
+
     const token = (request.query as { token?: string }).token;
     if (!token) return reply.code(401).send({ error: 'Missing token' });
     const pk = (await getOrCreateSigningKey(app.controlDb, appId)).privateKey;
@@ -355,8 +413,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: 'Invalid stream token' });
     }
     const sinceSeq = Number((request.query as { since_seq?: string }).since_seq ?? 0);
-    await streamRunEventsAsSse(app, request, reply, id, sinceSeq);
-    // Do not return — connection stays open.
+    await streamRunEventsAsSse(runtimeDb, request, reply, id, sinceSeq);
   });
 
   // ── GET /v1/:appId/public/runs/:id/events/ws (WebSocket) ─────────────────
@@ -366,6 +423,13 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     { websocket: true } as Parameters<typeof app.get>[1],
     async (socket, request) => {
       const { appId, id } = request.params as { appId: string; id: string };
+      const ctx = await resolveRuntime(app, appId);
+      if (!ctx.ok) {
+        socket.close(4404, ctx.error);
+        return;
+      }
+      const { runtimeDb } = ctx;
+
       const token = (request.query as { token?: string }).token;
       if (!token) {
         socket.close(4401, 'missing token');
@@ -379,7 +443,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
         return;
       }
       const sinceSeq = Number((request.query as { since_seq?: string }).since_seq ?? 0);
-      await streamRunEventsToWebSocket(app, socket, id, sinceSeq);
+      await streamRunEventsToWebSocket(runtimeDb, socket, id, sinceSeq);
     },
   );
 }

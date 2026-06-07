@@ -1,20 +1,20 @@
-// Must be set before any service module that reads AUTH_ENCRYPTION_KEY is loaded.
-// AES-256-GCM requires a 64-char hex string (32 bytes).
 process.env.AUTH_ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+import {
+  installAgentTestMocks, seedTestApp, cleanupTestApp,
+  getTestPool, closeTestPool, TEST_USER_ID,
+} from './agent-test-helpers.js';
+installAgentTestMocks();
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify from 'fastify';
 import { databasePlugin } from '../plugins/database.js';
-import { initRoutes } from '../routes/init.js';
 import { agentsRoutes, setProbeFn, setRuntimeClient } from '../routes/agents.js';
-
-const TEST_USER_ID = '00000000-0000-0000-0000-000000000001';
 
 const app = Fastify({ logger: false });
 let appId: string;
 
 beforeAll(async () => {
-  // Stub the runtime client so startRun doesn't call the real agent-runtime service.
   setRuntimeClient({
     startRun: async () => {},
     cancelRun: async () => {},
@@ -22,7 +22,6 @@ beforeAll(async () => {
   });
 
   app.register(databasePlugin);
-  // Inject auth context via onRequest hook (same pattern as test-helpers/build-app.ts)
   app.addHook('onRequest', (req, _reply, done) => {
     const u = req.headers['x-test-user-id'];
     req.auth = {
@@ -32,28 +31,16 @@ beforeAll(async () => {
     };
     done();
   });
-  app.register(initRoutes);
   app.register(agentsRoutes);
   await app.ready();
 
-  // Ensure test user exists in the control DB
-  await app.controlDb.query(
-    `INSERT INTO platform_users (id, email, created_at)
-     VALUES ($1, 'agents-test@example.com', now())
-     ON CONFLICT (id) DO NOTHING`,
-    [TEST_USER_ID],
-  );
-
-  const res = await app.inject({
-    method: 'POST',
-    url: '/init',
-    payload: { name: `agents-test-${Date.now()}` },
-  });
-  appId = res.json().app_id;
+  appId = await seedTestApp({ prefix: 'agents' });
 });
 
 afterAll(async () => {
   await app.close();
+  await cleanupTestApp(appId);
+  await closeTestPool();
 });
 
 const validSpec = {
