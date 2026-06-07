@@ -800,3 +800,24 @@ export async function getOrder(appId: string, orderId: string) {
 export async function setAppVisibility(appId: string, body: { visibility: 'public' | 'private'; listed?: boolean }) {
   return apiPatch(`/v1/${appId}/config/visibility`, body);
 }
+
+// — Agent wrappers —
+export async function listAgents(appId: string) {
+  return apiGet<{ agents: any[] }>(`/v1/${appId}/agents`);
+}
+
+export async function getAgent(appId: string, name: string) {
+  return apiGet<any>(`/v1/${appId}/agents/${encodeURIComponent(name)}`);
+}
+
+export async function createAgent(appId: string, spec: Record<string, unknown>) {
+  return apiPost<any>(`/v1/${appId}/agents`, spec);
+}
+
+export async function updateAgent(appId: string, name: string, body: Record<string, unknown>) {
+  return apiPatch<any>(`/v1/${appId}/agents/${encodeURIComponent(name)}`, body);
+}
+
+export async function deleteAgent(appId: string, name: string) {
+  return apiDelete<void>(`/v1/${appId}/agents/${encodeURIComponent(name)}`);
+}

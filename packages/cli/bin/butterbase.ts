@@ -134,6 +134,13 @@ import {
   repoStatusCommand, repoLogCommand, repoWipeCommand,
 } from '../src/commands/repo.js';
 import { visibilityCommand } from '../src/commands/visibility.js';
+import {
+  agentsListCommand,
+  agentsGetCommand,
+  agentsCreateCommand,
+  agentsUpdateCommand,
+  agentsDeleteCommand,
+} from '../src/commands/agents.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
 import { templatesCommand } from '../src/commands/templates.js';
 
@@ -1500,6 +1507,37 @@ program
   .option('--unlisted', 'Hide from /v1/templates (public only)')
   .option('--json', 'Output raw JSON')
   .action((mode, opts) => visibilityCommand(mode as 'public' | 'private', opts));
+
+// Agents
+const agents = program.command('agents').description('Manage agents');
+
+agents
+  .command('list <app>')
+  .description('List agents for an app')
+  .action(agentsListCommand);
+
+agents
+  .command('get <app> <name>')
+  .description('Get a specific agent')
+  .action(agentsGetCommand);
+
+agents
+  .command('create <app>')
+  .description('Create an agent from a spec file')
+  .requiredOption('--file <path>', 'Path to agent spec JSON file')
+  .action(agentsCreateCommand);
+
+agents
+  .command('update <app> <name>')
+  .description('Update an agent from a spec file')
+  .requiredOption('--file <path>', 'Path to agent spec JSON file')
+  .action(agentsUpdateCommand);
+
+agents
+  .command('delete <app> <name>')
+  .description('Delete an agent')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .action(agentsDeleteCommand);
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {
