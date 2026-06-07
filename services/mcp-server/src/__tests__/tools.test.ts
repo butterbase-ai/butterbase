@@ -108,7 +108,7 @@ describe('MCP Server Tools', () => {
     const actions = (tool!.inputSchema as unknown as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'list', 'pause', 'secure', 'set_visibility', 'update_access_mode', 'update_cors',
+      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'link_substrate', 'list', 'pause', 'secure', 'set_clone_webhook', 'set_visibility', 'unlink_substrate', 'update_access_mode', 'update_cors',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [

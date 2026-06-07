@@ -80,6 +80,13 @@ vi.mock('../failure-notifications.service.js', () => ({
   notifyDeploymentFailed: vi.fn(() => Promise.resolve()),
 }));
 
+// deployment.service now resolves the runtime pool via getRuntimeDbForApp(db, appId).
+// Return the supplied db so existing db.query assertions keep working.
+vi.mock('../region-resolver.js', () => ({
+  getRuntimeDbForApp: vi.fn(async (db: unknown) => db),
+  resolveAppHomeRegion: vi.fn(async () => 'local'),
+}));
+
 import * as R2 from '../r2.js';
 import * as CloudflarePages from '../cloudflare-pages.js';
 import * as CloudflareWfp from '../cloudflare-wfp.js';
@@ -111,6 +118,11 @@ function makeDb(appRow: Record<string, unknown>, envVarRows: Array<{ key: string
       }
       if (normalized.includes('from app_deployments') && normalized.includes('order by created_at desc')) {
         return { rows: [] };
+      }
+      // deployArtifact() rediscovers (app_id, framework) by scanning each runtime
+      // region for a matching deployment row. All tests use app_abc + react-vite.
+      if (normalized.includes('select app_id, framework from app_deployments')) {
+        return { rows: [{ app_id: 'app_abc', framework: 'react-vite' }] };
       }
       // Phase 2: cleanupOldDeployments first queries apps for owner_id on runtimePool,
       // then queries platform_users JOIN plans on controlPool.
@@ -156,6 +168,7 @@ describe('runDeploymentPipeline (WfP branch)', () => {
         subdomain: 'myapp',
         cloudflare_project_name: null,
         deployment_backend: 'wfp',
+        region: 'local',
       },
       [{ key: 'VITE_API_URL', encrypted_value: encryptedVal }]
     );
@@ -339,7 +352,7 @@ describe('deployTemplatePage', () => {
       query: vi.fn().mockImplementation((sql: string) => {
         if (/FROM apps WHERE id/i.test(sql)) {
           return Promise.resolve({
-            rows: [{ deployment_backend: 'wfp' }],
+            rows: [{ deployment_backend: 'wfp', region: 'local' }],
           });
         }
         if (/INSERT INTO app_deployments/i.test(sql)) {

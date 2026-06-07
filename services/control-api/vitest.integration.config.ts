@@ -1,15 +1,11 @@
 import { defineConfig } from 'vitest/config';
 
-// Default config runs only unit tests (no real DB / Redis required).
-// Integration tests live in vitest.integration.config.ts and need the
-// e2e:bootstrap docker stack.
+// Integration tests — require the e2e:bootstrap docker stack
+// (control-plane-db, data-plane-db, runtime-plane-db, redis, localstack).
+// Run with `npm run test:integration` from this workspace, or
+// `npm run e2e:bootstrap && npm run test:integration` from the repo root.
 export default defineConfig({
   test: {
-    // Run all test files in a single worker to prevent parallel DB collisions.
-    // Hackathon tests insert rows with is_active=true, which hits the
-    // hackathons_only_one_active unique partial index. singleFork serialises
-    // all spec files so only one is running against the shared control DB at
-    // a time.
     pool: 'forks',
     poolOptions: {
       forks: {
@@ -18,10 +14,7 @@ export default defineConfig({
     },
     testTimeout: 30000,
     hookTimeout: 30000,
-    exclude: [
-      '**/node_modules/**',
-      '**/dist/**',
-      // Integration tests — require live Postgres / Redis. Run via `npm run test:integration`.
+    include: [
       'src/__tests__/auto-api.test.ts',
       'src/__tests__/fn-gateway.test.ts',
       'src/__tests__/health.test.ts',
