@@ -7,10 +7,11 @@ interface ListFunctionsResponse {
     id: string;
     name: string;
     description?: string;
-    trigger: {
+    triggers: Array<{
       type: string;
       config: any;
-    };
+      enabled?: boolean;
+    }>;
     url?: string;
     status: string;
     deployedAt: string;

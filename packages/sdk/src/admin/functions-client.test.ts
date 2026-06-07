@@ -20,11 +20,15 @@ describe('Functions admin types', () => {
     expect(s.invocationCount).toBe(10);
   });
 
-  it('FunctionDetails.trigger is the same object shape', () => {
+  it('FunctionDetails.triggers is an array of trigger objects', () => {
     const d: FunctionDetails = {
-      id: 'f', name: 'n', trigger: { type: 'http', config: { auth: 'required' } },
+      id: 'f', name: 'n', triggers: [
+        { type: 'http', config: { auth: 'required' } },
+        { type: 'cron', config: { schedule: '0 9 * * *' } },
+      ],
     };
-    expect(d.trigger?.type).toBe('http');
+    expect(d.triggers?.[0]?.type).toBe('http');
+    expect(d.triggers?.[1]?.type).toBe('cron');
   });
 });
 

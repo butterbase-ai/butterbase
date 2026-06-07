@@ -148,7 +148,7 @@ export interface FunctionSummary {
   description?: string;
   url?: string;
   status?: string;
-  trigger?: FunctionTrigger;
+  triggers?: FunctionTrigger[];
   deployedAt?: string;
   lastInvoked?: string;
   lastStatus?: string;

@@ -33,7 +33,10 @@ export async function functionsListCommand(options: { app?: string }) {
     console.log(chalk.blue('\nDeployed functions:\n'));
     for (const func of response.functions) {
       console.log(chalk.bold(func.name));
-      console.log(chalk.gray(`  Trigger: ${func.trigger?.type ?? func.trigger_type}`));
+      const triggerTypes = Array.isArray(func.triggers)
+        ? func.triggers.map((t: { type: string }) => t.type).join(', ')
+        : (func.trigger?.type ?? func.trigger_type ?? '—');
+      console.log(chalk.gray(`  Triggers: ${triggerTypes}`));
       if (func.description) {
         console.log(chalk.gray(`  Description: ${func.description}`));
       }

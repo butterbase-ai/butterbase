@@ -125,6 +125,10 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
       timeoutMs: z.number().optional().describe('Execution timeout in milliseconds (default: 30000)'),
       memoryLimitMb: z.number().optional().describe('Memory limit in MB (default: 128)'),
       trigger: z.object({
+        type: z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']).describe('Trigger type'),
+        config: z.any().describe('Trigger-specific config (see triggers param for shape).'),
+      }).optional().describe('Single-trigger shorthand. Prefer `triggers` for new code; this is kept for back-compat.'),
+      triggers: z.array(z.object({
         type: z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']).describe('Trigger type: http, cron, s3_upload, webhook, or websocket'),
         config: z.any().describe(`Trigger-specific configuration:
 - http: { method?: string, path?: string, auth?: 'required'|'optional'|'none' }
@@ -132,10 +136,11 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
   * Set auth: 'none' ONLY for intentionally public endpoints. Inside such a function, ctx.db runs
     as butterbase_service (RLS bypassed), so guard every DB access manually or hand-check ctx.user.
 - cron: { schedule: string (cron expression like "0 9 * * *"), timezone?: string (default: UTC) }
-- s3_upload: { prefix?: string, contentTypes?: string[] } [PLACEHOLDER - not yet implemented]
-- webhook: { secret?: string, provider?: 'stripe'|'github'|'custom' } [PLACEHOLDER - not yet implemented]
-- websocket: { event: string } Trigger when clients send matching event via realtime WebSocket`),
-      }).optional().describe('Trigger configuration'),
+- s3_upload: { bucket: string, prefix?: string, contentTypes?: string[] }
+- webhook: { secret_required?: boolean, allowed_sources?: string }
+- websocket: {} Trigger on incoming WebSocket frames`),
+        enabled: z.boolean().optional().describe('Default true.'),
+      })).min(1).optional().describe('Canonical multi-trigger array. At most one trigger per type.'),
     },
     {
       title: 'Deploy Function',
@@ -145,7 +150,7 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
       openWorldHint: true,
     },
     async (args) => {
-      const { app_id, name, code, description, envVars, timeoutMs, memoryLimitMb, trigger } = args;
+      const { app_id, name, code, description, envVars, timeoutMs, memoryLimitMb, trigger, triggers } = args;
 
       const result = await apiPost(`/v1/${app_id}/functions`, {
         name,
@@ -154,7 +159,8 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
         envVars,
         timeoutMs,
         memoryLimitMb,
-        trigger,
+        ...(triggers ? { triggers } : {}),
+        ...(!triggers && trigger ? { trigger } : {}),
       });
 
       return {
