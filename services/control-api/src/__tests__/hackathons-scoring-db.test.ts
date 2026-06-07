@@ -81,10 +81,16 @@ async function seedFeatures(appId: string) {
   );
   // 3 functions (cap 5 → 3/5 = 0.6)
   for (let i = 0; i < 3; i++) {
-    await runtimeDb.query(
-      `INSERT INTO app_functions (id, app_id, name, code, trigger_type)
-       VALUES (gen_random_uuid(), $1, $2, 'export default () => {}', 'http')`,
+    const fnRow = await runtimeDb.query<{ id: string }>(
+      `INSERT INTO app_functions (id, app_id, name, code)
+       VALUES (gen_random_uuid(), $1, $2, 'export default () => {}')
+       RETURNING id`,
       [appId, `fn_${i}`],
+    );
+    await runtimeDb.query(
+      `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
+       VALUES ($1, $2, 'http', '{}'::jsonb, true)`,
+      [fnRow.rows[0].id, appId],
     );
   }
   // 2 app_users (cap 5 → 2/5 = 0.4)

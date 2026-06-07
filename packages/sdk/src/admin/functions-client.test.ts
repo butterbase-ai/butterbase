@@ -20,11 +20,15 @@ describe('Functions admin types', () => {
     expect(s.invocationCount).toBe(10);
   });
 
-  it('FunctionDetails.trigger is the same object shape', () => {
+  it('FunctionDetails.triggers is an array of trigger objects', () => {
     const d: FunctionDetails = {
-      id: 'f', name: 'n', trigger: { type: 'http', config: { auth: 'required' } },
+      id: 'f', name: 'n', triggers: [
+        { type: 'http', config: { auth: 'required' } },
+        { type: 'cron', config: { schedule: '0 9 * * *' } },
+      ],
     };
-    expect(d.trigger?.type).toBe('http');
+    expect(d.triggers?.[0]?.type).toBe('http');
+    expect(d.triggers?.[1]?.type).toBe('cron');
   });
 });
 
@@ -57,6 +61,59 @@ describe('AdminFunctionsClient.deploy', () => {
       timeoutMs: 9000,
       memoryLimitMb: 256,
       trigger: { type: 'cron', config: { schedule: '*/5 * * * *' } },
+    });
+  });
+});
+
+describe('Agent tool fields', () => {
+  it('DeployFunctionParams accepts the 4 agent_tool fields', () => {
+    const params: DeployFunctionParams = {
+      name: 'lookup',
+      code: '',
+      agent_tool: true,
+      agent_tool_description: 'Look a customer up by email',
+      agent_tool_mode: 'read_only',
+      agent_tool_exposed_to: 'end_user',
+    };
+    expect(params.agent_tool).toBe(true);
+    expect(params.agent_tool_mode).toBe('read_only');
+  });
+
+  it('FunctionSummary returns agent_tool fields from the API', () => {
+    const s: FunctionSummary = {
+      id: 'f', name: 'n',
+      agent_tool: true,
+      agent_tool_description: 'desc',
+      agent_tool_mode: 'read_write',
+      agent_tool_exposed_to: 'developer_only',
+    };
+    expect(s.agent_tool).toBe(true);
+    expect(s.agent_tool_exposed_to).toBe('developer_only');
+  });
+
+  it('AdminFunctionsClient.deploy forwards agent_tool fields', async () => {
+    const calls: any[] = [];
+    const fakeClient: any = {
+      appId: 'app_x',
+      request: (method: string, path: string, body: any) => {
+        calls.push({ method, path, body });
+        return Promise.resolve({ id: '1', name: 'fn' });
+      },
+    };
+    const c = new AdminFunctionsClient(fakeClient);
+    await c.deploy({
+      name: 'fn',
+      code: 'export default {}',
+      agent_tool: true,
+      agent_tool_description: 'Look up a customer',
+      agent_tool_mode: 'read_only',
+      agent_tool_exposed_to: 'end_user',
+    });
+    expect(calls[0].body).toMatchObject({
+      agent_tool: true,
+      agent_tool_description: 'Look up a customer',
+      agent_tool_mode: 'read_only',
+      agent_tool_exposed_to: 'end_user',
     });
   });
 });

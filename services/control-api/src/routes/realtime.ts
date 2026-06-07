@@ -71,8 +71,10 @@ async function handleWebSocketEvent(
     if (!cached || cached.expires < Date.now()) {
       const runtimePool = await getRuntimeDbForApp(fastify.controlDb, appId);
       const result = await runtimePool.query<{ name: string; trigger_config: { event?: string } }>(
-        `SELECT name, trigger_config FROM app_functions
-         WHERE app_id = $1 AND trigger_type = 'websocket'`,
+        `SELECT f.name, ft.trigger_config
+           FROM function_triggers ft
+           JOIN app_functions f ON f.id = ft.function_id AND f.deleted_at IS NULL
+          WHERE ft.app_id = $1 AND ft.trigger_type = 'websocket' AND ft.enabled`,
         [appId]
       );
       const functions = new Map<string, string>();

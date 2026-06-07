@@ -20,8 +20,46 @@ import { RESOURCE_NOT_FOUND, VALIDATION_TABLE_NOT_FOUND, VALIDATION_INVALID_SCHE
 import { config } from '../config.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
+import { decrypt } from '../services/crypto.js';
+import { verifyStripe, verifyGithub, verifyCustomHmac } from '../services/webhook-verifiers.js';
+import { getRedisClient } from '../services/redis.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type WebhookInvocationStatus = 'completed' | 'rejected' | 'skipped_duplicate';
+
+async function recordWebhookInvocation(
+  runtimeDb: Pool,
+  args: {
+    functionId: string;
+    appId: string;
+    status: WebhookInvocationStatus;
+    statusCode: number;
+    durationMs?: number;
+    startedAt?: Date;
+    errorMessage?: string | null;
+    sourceEventId?: string | null;
+  },
+): Promise<void> {
+  try {
+    await runtimeDb.query(
+      `INSERT INTO function_invocations
+        (function_id, app_id, method, path, status_code, duration_ms,
+         error_message, started_at, completed_at, trigger_type, status, source_event_id)
+       VALUES ($1, $2, 'POST', $3, $4, $5, $6, $7, now(), 'webhook', $8, $9)
+       ON CONFLICT (function_id, source_event_id) WHERE source_event_id IS NOT NULL DO NOTHING`,
+      [
+        args.functionId, args.appId,
+        `/webhook/${args.functionId}`, args.statusCode,
+        args.durationMs ?? 0, args.errorMessage ?? null,
+        args.startedAt ?? new Date(), args.status,
+        args.sourceEventId ?? null,
+      ],
+    );
+  } catch (err) {
+    console.warn('failed to record webhook invocation', err);
+  }
+}
 
 const AUTH_REQUIRED_ERROR = createAgentError({
   code: 'AUTH_REQUIRED',
@@ -155,23 +193,175 @@ function pausedReply(reply: any, error: AppPausedError) {
 }
 
 export async function autoApiRoutes(app: FastifyInstance) {
-  // WEBHOOK TRIGGER ROUTE (PLACEHOLDER)
-  app.post('/v1/:appId/webhook/:functionName', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
-    const { appId, functionName } = request.params as { appId: string; functionName: string };
+  // WEBHOOK TRIGGER ROUTE — scoped so the raw-body parser only applies here.
+  // Signature verification (Stripe/GitHub/HMAC) needs the exact bytes the
+  // caller sent; Fastify's default JSON parser would re-serialize and break
+  // the HMAC.
+  app.register(async function webhookScope(scope) {
+    scope.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => {
+      done(null, body);
+    });
 
-    // TODO: Verify webhook signature if configured
-    // TODO: Validate function exists and has webhook trigger
-    // TODO: Forward to Deno runtime with webhook payload
+    scope.post('/v1/:appId/webhook/:functionName', {
+      config: { public: true, requiresAppRegion: true, migrationGuard: true },
+    }, async (request, reply) => {
+      const { appId, functionName } = request.params as { appId: string; functionName: string };
+      const rawBody: Buffer = request.body instanceof Buffer ? request.body : Buffer.from('');
+      const runtimeDb = await getRuntimeDbForApp(app.controlDb, appId);
 
-    app.log.info({ appId, functionName }, '[PLACEHOLDER] Webhook received');
+      // 1. Paused kill-switch + function/trigger lookup in one query.
+      const lookup = await runtimeDb.query<{
+        paused: boolean;
+        paused_reason: string | null;
+        function_id: string | null;
+        trigger_config: {
+          provider: 'stripe' | 'github' | 'custom';
+          secret: string;
+          signature_header?: string;
+          tolerance_seconds?: number;
+          idempotency_key_header?: string;
+        } | null;
+      }>(
+        `SELECT a.paused, a.paused_reason,
+                f.id AS function_id,
+                ft.trigger_config
+         FROM apps a
+         LEFT JOIN app_functions f ON f.app_id = a.id AND f.name = $2 AND f.deleted_at IS NULL
+         LEFT JOIN function_triggers ft ON ft.function_id = f.id
+           AND ft.trigger_type = 'webhook' AND ft.enabled = true
+         WHERE a.id = $1`,
+        [appId, functionName],
+      );
+      const meta = lookup.rows[0];
+      if (meta?.paused) {
+        return pausedReply(reply, new AppPausedError(appId, meta.paused_reason ?? null));
+      }
+      if (!meta?.function_id || !meta.trigger_config) {
+        return reply.status(404).send(createAgentError({
+          code: RESOURCE_NOT_FOUND,
+          message: 'Webhook function not found',
+          remediation: 'Verify the function name and that it has a webhook trigger.',
+          documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+        }));
+      }
+      const functionId = meta.function_id;
+      const cfg = meta.trigger_config;
 
-    return reply.status(501).send(createAgentError({
-      code: 'STATE_INVALID_TRANSITION',
-      message: 'Webhook triggers not yet implemented',
-      remediation: 'This feature will be available in a future release. Use HTTP triggers for now.',
-      documentation_url: getDocUrl('STATE_INVALID_TRANSITION'),
-      details: { appId, functionName }
-    }));
+      // 2. Idempotency dedupe (best-effort) — if the trigger config names a
+      // header, SETNX on Redis with a 24h TTL; duplicates short-circuit.
+      let sourceEventId: string | null = null;
+      if (cfg.idempotency_key_header) {
+        const key = request.headers[cfg.idempotency_key_header.toLowerCase()];
+        if (typeof key === 'string' && key.length > 0) {
+          sourceEventId = key;
+          try {
+            const redis = getRedisClient();
+            const redisKey = `webhook:idemp:${functionId}:${key}`;
+            const setResult = await redis.set(redisKey, '1', 'EX', 60 * 60 * 24, 'NX');
+            if (setResult === null) {
+              await recordWebhookInvocation(runtimeDb, {
+                functionId, appId,
+                status: 'skipped_duplicate',
+                statusCode: 200,
+                sourceEventId,
+              });
+              request.log.info({ scope: 'webhook', appId, functionName, source_event_id: sourceEventId }, 'webhook duplicate dropped');
+              return reply
+                .status(200)
+                .header('x-butterbase-duplicate', 'true')
+                .send({ ok: true, duplicate: true });
+            }
+          } catch (err) {
+            // Redis down — proceed without dedupe, but log it.
+            request.log.warn({ err, appId, functionName }, 'webhook idempotency dedupe failed, proceeding without it');
+          }
+        }
+      }
+
+      // 3. Decrypt the stored secret.
+      let secret: string;
+      try {
+        secret = decrypt(cfg.secret, process.env.AUTH_ENCRYPTION_KEY!);
+      } catch (err) {
+        request.log.error({ err, appId, functionName }, 'webhook secret decryption failed');
+        return reply.status(500).send({ error: 'webhook configuration invalid' });
+      }
+
+      // 4. Verify signature based on provider.
+      let verifyResult;
+      if (cfg.provider === 'stripe') {
+        verifyResult = verifyStripe(
+          rawBody,
+          request.headers['stripe-signature'] as string | undefined,
+          secret,
+          cfg.tolerance_seconds ?? 300,
+        );
+      } else if (cfg.provider === 'github') {
+        verifyResult = verifyGithub(
+          rawBody,
+          request.headers['x-hub-signature-256'] as string | undefined,
+          secret,
+        );
+      } else {
+        const headerName = (cfg.signature_header ?? 'x-signature').toLowerCase();
+        verifyResult = verifyCustomHmac(
+          rawBody,
+          request.headers[headerName] as string | undefined,
+          secret,
+        );
+      }
+
+      if (!verifyResult.ok) {
+        await recordWebhookInvocation(runtimeDb, {
+          functionId, appId,
+          status: 'rejected',
+          errorMessage: `signature verification failed: ${verifyResult.reason}`,
+          statusCode: 401,
+          sourceEventId,
+        });
+        request.log.info({ scope: 'webhook', appId, functionName, provider: cfg.provider, reason: verifyResult.reason }, 'webhook signature rejected');
+        return reply.status(401).send({ error: 'signature verification failed' });
+      }
+
+      // 5. Forward to Deno runtime.
+      const startedAt = new Date();
+      const startTime = Date.now();
+      const runtimeResponse = await fetch(
+        `${config.runtimeUrl}/execute/${appId}/${functionName}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': (request.headers['content-type'] as string | undefined) ?? 'application/json',
+            'x-app-id': appId,
+            'x-trigger-type': 'webhook',
+            'x-webhook-provider': cfg.provider,
+          },
+          body: rawBody as BodyInit,
+        },
+      );
+      const durationMs = Date.now() - startTime;
+      const responseBody = await runtimeResponse.text();
+
+      // 6. Record invocation.
+      await recordWebhookInvocation(runtimeDb, {
+        functionId, appId,
+        status: 'completed',
+        statusCode: runtimeResponse.status,
+        durationMs,
+        startedAt,
+        errorMessage: runtimeResponse.ok ? null : responseBody.slice(0, 4000),
+        sourceEventId,
+      });
+      request.log.info({
+        scope: 'webhook', appId, functionName, provider: cfg.provider,
+        status_code: runtimeResponse.status, duration_ms: durationMs,
+      }, 'webhook forwarded');
+
+      return reply
+        .status(runtimeResponse.status)
+        .header('content-type', runtimeResponse.headers.get('content-type') ?? 'application/json')
+        .send(responseBody);
+    });
   });
 
   // FUNCTION EXECUTION — ALL /v1/:app_id/fn/:functionName
@@ -182,19 +372,25 @@ export async function autoApiRoutes(app: FastifyInstance) {
     let userId: string | undefined;
 
     try {
-      // Pause kill-switch + per-function auth lookup in one round-trip.
-      // Reads from the app's home runtime DB (apps + app_functions live together).
+      // Pause kill-switch + per-function HTTP-trigger auth lookup in one
+      // round-trip. Reads from the app's home runtime DB (apps,
+      // app_functions, and function_triggers all live there together).
+      // Joining ONLY the HTTP trigger means non-HTTP-trigger functions show
+      // `trigger_config IS NULL` here, which short-circuits the auth check
+      // below — preserves pre-cutover behavior where `trigger_type !== 'http'`
+      // skipped the check.
       const runtimeDb = await getRuntimeDbForApp(app.controlDb, app_id);
       const metaCheck = await runtimeDb.query<{
         paused: boolean;
         paused_reason: string | null;
-        trigger_type: string | null;
         trigger_config: { auth?: 'required' | 'optional' | 'none' } | null;
       }>(
-        `SELECT a.paused, a.paused_reason, f.trigger_type, f.trigger_config
+        `SELECT a.paused, a.paused_reason, ft.trigger_config
          FROM apps a
          LEFT JOIN app_functions f
            ON f.app_id = a.id AND f.name = $2 AND f.deleted_at IS NULL
+         LEFT JOIN function_triggers ft
+           ON ft.function_id = f.id AND ft.trigger_type = 'http' AND ft.enabled
          WHERE a.id = $1`,
         [app_id, functionName]
       );
@@ -219,13 +415,12 @@ export async function autoApiRoutes(app: FastifyInstance) {
       }
 
       // Enforce per-function auth requirement BEFORE forwarding to runtime.
-      // Only acts when the function explicitly stores auth:'required' — legacy
-      // deploys with empty config or auth:'none' keep existing behavior.
-      // If the function row is missing here, fall through and let the runtime
-      // return its own 404 so error semantics stay consistent.
-      if (meta?.trigger_type === 'http'
-          && meta.trigger_config?.auth === 'required'
-          && !userId) {
+      // Only acts when the HTTP trigger explicitly stores auth:'required' —
+      // legacy deploys with empty config or auth:'none' keep existing
+      // behavior. If the function row OR its http trigger is missing,
+      // trigger_config is NULL and we fall through; let the runtime return
+      // its own 404 / 405 so error semantics stay consistent.
+      if (meta?.trigger_config?.auth === 'required' && !userId) {
         return reply.code(401).send(AUTH_REQUIRED_ERROR);
       }
 

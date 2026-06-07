@@ -125,6 +125,10 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
       timeoutMs: z.number().optional().describe('Execution timeout in milliseconds (default: 30000)'),
       memoryLimitMb: z.number().optional().describe('Memory limit in MB (default: 128)'),
       trigger: z.object({
+        type: z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']).describe('Trigger type'),
+        config: z.any().describe('Trigger-specific config (see triggers param for shape).'),
+      }).optional().describe('Single-trigger shorthand. Prefer `triggers` for new code; this is kept for back-compat.'),
+      triggers: z.array(z.object({
         type: z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']).describe('Trigger type: http, cron, s3_upload, webhook, or websocket'),
         config: z.any().describe(`Trigger-specific configuration:
 - http: { method?: string, path?: string, auth?: 'required'|'optional'|'none' }
@@ -132,10 +136,26 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
   * Set auth: 'none' ONLY for intentionally public endpoints. Inside such a function, ctx.db runs
     as butterbase_service (RLS bypassed), so guard every DB access manually or hand-check ctx.user.
 - cron: { schedule: string (cron expression like "0 9 * * *"), timezone?: string (default: UTC) }
-- s3_upload: { prefix?: string, contentTypes?: string[] } [PLACEHOLDER - not yet implemented]
-- webhook: { secret?: string, provider?: 'stripe'|'github'|'custom' } [PLACEHOLDER - not yet implemented]
-- websocket: { event: string } Trigger when clients send matching event via realtime WebSocket`),
-      }).optional().describe('Trigger configuration'),
+- s3_upload: { bucket: string, prefix?: string, contentTypes?: string[] }
+- webhook: { secret_required?: boolean, allowed_sources?: string }
+- websocket: {} Trigger on incoming WebSocket frames`),
+        enabled: z.boolean().optional().describe('Default true.'),
+      })).min(1).optional().describe('Canonical multi-trigger array. At most one trigger per type.'),
+      agent_tool: z.boolean().optional().describe(
+        'When true, this function is exposed to agents in this app as a tool. ' +
+        'Agents must still list its name under their graph_spec.tools.functions[] to call it.'
+      ),
+      agent_tool_description: z.string().max(500).optional().describe(
+        'Short imperative description shown to the LLM (max 500 chars). ' +
+        'Required for any function the model is expected to choose intelligently.'
+      ),
+      agent_tool_mode: z.enum(['read_only', 'read_write']).optional().describe(
+        'read_only (default) | read_write. read_write tools require human approval per call (HITL).'
+      ),
+      agent_tool_exposed_to: z.enum(['developer_only', 'end_user']).optional().describe(
+        'developer_only (default) — only dashboard/CLI test runs can call it. ' +
+        'end_user — also callable by public agent invocations.'
+      ),
     },
     {
       title: 'Deploy Function',
@@ -145,7 +165,11 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
       openWorldHint: true,
     },
     async (args) => {
-      const { app_id, name, code, description, envVars, timeoutMs, memoryLimitMb, trigger } = args;
+      const {
+        app_id, name, code, description, envVars, timeoutMs, memoryLimitMb,
+        trigger, triggers,
+        agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
+      } = args;
 
       const result = await apiPost(`/v1/${app_id}/functions`, {
         name,
@@ -154,7 +178,12 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
         envVars,
         timeoutMs,
         memoryLimitMb,
-        trigger,
+        ...(triggers ? { triggers } : {}),
+        ...(!triggers && trigger ? { trigger } : {}),
+        ...(agent_tool !== undefined ? { agent_tool } : {}),
+        ...(agent_tool_description !== undefined ? { agent_tool_description } : {}),
+        ...(agent_tool_mode !== undefined ? { agent_tool_mode } : {}),
+        ...(agent_tool_exposed_to !== undefined ? { agent_tool_exposed_to } : {}),
       });
 
       return {

@@ -106,7 +106,7 @@ butterbase schema get --app app_abc123
 ## Functions
 
 ```bash
-# List deployed functions
+# List deployed functions (also prints trigger types and 🤖 marker if exposed as agent tool)
 butterbase functions list
 
 # Deploy function
@@ -116,7 +116,16 @@ butterbase functions deploy ./functions/hello.ts
 butterbase functions deploy ./functions/hello.ts --name my-function
 
 # Deploy cron function
-butterbase functions deploy ./functions/cleanup.ts --trigger cron
+butterbase functions deploy ./functions/cleanup.ts \
+  --trigger cron \
+  --trigger-config '{"schedule":"*/5 * * * *"}'
+
+# Expose a function to agents as a tool
+butterbase functions deploy ./functions/lookup_account.ts \
+  --agent-tool \
+  --agent-tool-description "Look up a customer by email." \
+  --agent-tool-mode read_only \
+  --agent-tool-exposed-to developer_only
 
 # View logs
 butterbase functions logs my-function
@@ -129,6 +138,36 @@ butterbase functions logs my-function --limit 50
 ```
 
 Log output shows timestamp, method, status code, duration, and errors for each invocation. If the function used `console.log/info/warn/error/debug`, the captured output appears indented under each log entry.
+
+**Trigger types**: `http` (default), `cron`, `s3_upload`, `webhook`, `websocket`. Multi-trigger functions are deployable via the dashboard or by POSTing a `triggers: [...]` array to the REST API; the CLI's `--trigger` flag covers the single-trigger case.
+
+**Agent tool flags**: `--agent-tool-mode` accepts `read_only` (default, no approval needed) or `read_write` (each call pauses the agent run for human approval). `--agent-tool-exposed-to` accepts `developer_only` (default) or `end_user`.
+
+## Agents
+
+```bash
+# List agents
+butterbase agents list
+
+# Show one agent
+butterbase agents get my-agent
+
+# Create an agent from a graph_spec.json file
+butterbase agents create \
+  --name my-agent \
+  --display-name "My agent" \
+  --default-model anthropic/claude-3.5-sonnet \
+  --spec ./agent-spec.json
+
+# Update fields (status, default_model, graph_spec)
+butterbase agents update my-agent --status disabled
+butterbase agents update my-agent --spec ./agent-spec.json
+
+# Delete an agent
+butterbase agents delete my-agent
+```
+
+See [Agents](/core-concepts/agents/) for graph_spec authoring and the [Agents quickstart](/getting-started/agents-quickstart/) for an end-to-end walkthrough.
 
 ## Storage
 

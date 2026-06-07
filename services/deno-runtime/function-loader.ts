@@ -74,8 +74,6 @@ export interface FunctionMetadata {
   env_vars: Record<string, string>;
   timeout_ms: number;
   memory_limit_mb: number;
-  trigger_type: string;
-  trigger_config: any;
   db_connection_string: string | null;
   substrate_user_id: string | null;
 }
@@ -148,7 +146,7 @@ export async function loadFunction(
     const result = await client.queryObject(
       `SELECT
         id, app_id, name, code, encrypted_env_vars,
-        timeout_ms, memory_limit_mb, trigger_type, trigger_config,
+        timeout_ms, memory_limit_mb,
         deployed_at
        FROM app_functions
        WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
@@ -214,8 +212,6 @@ export async function loadFunction(
       env_vars: envVars,
       timeout_ms: row.timeout_ms,
       memory_limit_mb: row.memory_limit_mb,
-      trigger_type: row.trigger_type,
-      trigger_config: row.trigger_config,
       db_connection_string: dbConnectionString,
       substrate_user_id: appCheck.rows[0]?.substrate_user_id ?? null,
     };

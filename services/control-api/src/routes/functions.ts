@@ -12,6 +12,14 @@ import { requireUserId } from '../utils/require-auth.js';
 import { incrementUsage } from '../services/usage-metering.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 
+const triggerEnum = z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']);
+
+const triggerInputSchema = z.object({
+  type: triggerEnum,
+  config: z.any().default({}),
+  enabled: z.boolean().default(true),
+});
+
 const deployFunctionSchema = z.object({
   name: z.string().min(1).max(100),
   code: z.string().min(1),
@@ -19,11 +27,56 @@ const deployFunctionSchema = z.object({
   envVars: z.record(z.string()).optional(),
   timeoutMs: z.number().int().positive().optional(),
   memoryLimitMb: z.number().int().positive().optional(),
-  trigger: z.object({
-    type: z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']),
-    config: z.any(),
-  }).optional(),
+  // Canonical multi-trigger shape. At most one trigger per type (DB unique index).
+  triggers: z.array(triggerInputSchema).min(1).optional(),
+  // Legacy single-trigger field — accepted for backward compatibility and
+  // shimmed to a 1-element triggers array. Omitting both also works and
+  // defaults to a single http trigger (matches pre-cutover behavior).
+  trigger: z.object({ type: triggerEnum, config: z.any().default({}) }).optional(),
+  agent_tool: z.boolean().default(false),
+  agent_tool_description: z.string().max(500).optional(),
+  agent_tool_mode: z.enum(['read_only', 'read_write']).default('read_only'),
+  agent_tool_exposed_to: z.enum(['developer_only', 'end_user']).default('developer_only'),
 });
+
+type TriggerInput = z.infer<typeof triggerInputSchema>;
+
+function normalizeTriggers(body: z.infer<typeof deployFunctionSchema>): TriggerInput[] {
+  if (body.triggers) return body.triggers;
+  if (body.trigger) {
+    return [{ type: body.trigger.type, config: body.trigger.config ?? {}, enabled: true }];
+  }
+  // Pre-cutover default: a missing trigger meant http.
+  return [{ type: 'http', config: {}, enabled: true }];
+}
+
+// Secure-by-default for HTTP: if a deploy doesn't explicitly set auth, require it.
+// Stored at deploy time (not inferred at invoke time) so existing rows stay
+// untouched and explicit { auth: 'none' } / 'optional' is preserved.
+function applyHttpAuthDefault(t: TriggerInput): TriggerInput {
+  if (t.type !== 'http') return t;
+  const cfg = (t.config ?? {}) as Record<string, unknown>;
+  if (cfg.auth === undefined) return { ...t, config: { ...cfg, auth: 'required' } };
+  return t;
+}
+
+function encryptWebhookSecret(t: TriggerInput): TriggerInput {
+  if (t.type !== 'webhook') return t;
+  const cfg = (t.config ?? {}) as Record<string, unknown>;
+  if (typeof cfg.secret === 'string' && cfg.secret.length > 0) {
+    return { ...t, config: { ...cfg, secret: encrypt(cfg.secret, process.env.AUTH_ENCRYPTION_KEY!) } };
+  }
+  return t;
+}
+
+function redactTriggerConfig(type: string, cfg: unknown): unknown {
+  if (!cfg || typeof cfg !== 'object') return cfg;
+  if (type === 'webhook') {
+    const c = cfg as Record<string, unknown>;
+    if (typeof c.secret === 'string') return { ...c, secret: '***' };
+  }
+  return cfg;
+}
 
 export async function registerFunctionRoutes(fastify: FastifyInstance) {
   const { controlDb } = fastify;
@@ -34,10 +87,19 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
   // Deploy or update a function
   fastify.post('/v1/:appId/functions', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    const body = deployFunctionSchema.parse(request.body);
+    const parsed = deployFunctionSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        remediation: 'Check the request body against the function deployment schema.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    const body = parsed.data;
 
     // Validate app ownership
-    const app = await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
 
     // Check if handler function is exported (Deno will validate actual syntax)
     if (!body.code.includes('export') || !body.code.includes('handler')) {
@@ -65,51 +127,86 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       ? encrypt(JSON.stringify(body.envVars), process.env.AUTH_ENCRYPTION_KEY!)
       : null;
 
-    // Secure-by-default: new HTTP functions require JWT unless caller opts out.
-    // Stored at deploy time (not inferred at invoke time) so existing rows are
-    // unaffected and explicit { auth: 'none' } / 'optional' is preserved.
-    const triggerType = body.trigger?.type || 'http';
-    const triggerConfigInput = (body.trigger?.config ?? {}) as Record<string, unknown>;
-    const triggerConfig = triggerType === 'http' && triggerConfigInput.auth === undefined
-      ? { ...triggerConfigInput, auth: 'required' }
-      : triggerConfigInput;
+    // Normalize, apply HTTP-auth default, encrypt webhook secrets.
+    const triggers = normalizeTriggers(body).map(applyHttpAuthDefault).map(encryptWebhookSecret);
 
-    // Upsert function
-    const result = await (await runtimeDb(appId)).query(
-      `INSERT INTO app_functions (
-        app_id, name, code, description, encrypted_env_vars,
-        timeout_ms, memory_limit_mb, trigger_type, trigger_config,
-        deployed_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      ON CONFLICT (app_id, name)
-      DO UPDATE SET
-        code = $3,
-        description = COALESCE($4, app_functions.description),
-        encrypted_env_vars = COALESCE($5, app_functions.encrypted_env_vars),
-        timeout_ms = COALESCE($6, app_functions.timeout_ms),
-        memory_limit_mb = COALESCE($7, app_functions.memory_limit_mb),
-        trigger_type = COALESCE($8, app_functions.trigger_type),
-        trigger_config = COALESCE($9, app_functions.trigger_config),
-        deployed_at = now(),
-        deployed_by = $10,
-        deleted_at = NULL,
-        updated_at = now()
-      RETURNING id, name, deployed_at`,
-      [
-        appId,
-        body.name,
-        body.code,
-        body.description || null,
-        encryptedEnvVars,
-        body.timeoutMs || 30000,
-        body.memoryLimitMb || 128,
-        triggerType,
-        JSON.stringify(triggerConfig),
-        requireUserId(request),
-      ]
-    );
+    // Reject duplicate trigger types up front (also enforced by DB unique index).
+    const seen = new Set<string>();
+    for (const t of triggers) {
+      if (seen.has(t.type)) {
+        return reply.status(400).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: `Duplicate trigger type '${t.type}' — at most one trigger of each type per function.`,
+          remediation: 'Combine the configs into a single trigger entry.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+      seen.add(t.type);
+    }
 
-    const fn = result.rows[0];
+    // Upsert function row + replace its triggers in one transaction on the
+    // runtime pool. app_functions and function_triggers both live in
+    // runtime-plane, so a single connection covers both.
+    const runtimePool = await runtimeDb(appId);
+    const client = await runtimePool.connect();
+    let fnResult: import('pg').QueryResult<{ id: string; name: string; deployed_at: Date }>;
+    try {
+      await client.query('BEGIN');
+
+      fnResult = await client.query(
+        `INSERT INTO app_functions (
+          app_id, name, code, description, encrypted_env_vars,
+          timeout_ms, memory_limit_mb, deployed_by,
+          agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (app_id, name)
+        DO UPDATE SET
+          code = $3,
+          description = COALESCE($4, app_functions.description),
+          encrypted_env_vars = COALESCE($5, app_functions.encrypted_env_vars),
+          timeout_ms = COALESCE($6, app_functions.timeout_ms),
+          memory_limit_mb = COALESCE($7, app_functions.memory_limit_mb),
+          deployed_at = now(),
+          deployed_by = $8,
+          deleted_at = NULL,
+          updated_at = now(),
+          agent_tool = $9,
+          agent_tool_description = COALESCE($10, app_functions.agent_tool_description),
+          agent_tool_mode = $11,
+          agent_tool_exposed_to = $12
+        RETURNING id, name, deployed_at`,
+        [
+          appId, body.name, body.code, body.description ?? null, encryptedEnvVars,
+          body.timeoutMs ?? 30000, body.memoryLimitMb ?? 128, requireUserId(request),
+          body.agent_tool, body.agent_tool_description ?? null,
+          body.agent_tool_mode, body.agent_tool_exposed_to,
+        ],
+      );
+
+      const fnId = fnResult.rows[0].id;
+
+      // Replace triggers wholesale: simpler than per-row diffing and matches
+      // the "deploy" semantics — the request fully describes the function's
+      // triggers.
+      await client.query(`DELETE FROM function_triggers WHERE function_id = $1`, [fnId]);
+
+      for (const t of triggers) {
+        await client.query(
+          `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [fnId, appId, t.type, JSON.stringify(t.config ?? {}), t.enabled],
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    const fn = fnResult.rows[0];
 
     // Invalidate Deno cache with retry
     const invalidationResult = await invalidateFunctionCache(appId, body.name);
@@ -131,16 +228,18 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       resourceId: body.name,
       eventData: {
         function_id: fn.id,
-        trigger_type: triggerType,
+        trigger_types: triggers.map((t) => t.type),
         env_var_keys: body.envVars ? Object.keys(body.envVars) : [],
       },
       success: true,
     });
 
+    const httpTrigger = triggers.find((t) => t.type === 'http');
     return reply.send({
       id: fn.id,
       name: fn.name,
-      url: `${config.apiBaseUrl}/v1/${appId}/fn/${body.name}`,
+      url: httpTrigger ? `${config.apiBaseUrl}/v1/${appId}/fn/${body.name}` : null,
+      triggers: triggers.map((t) => ({ type: t.type, enabled: t.enabled })),
       deployedAt: fn.deployed_at,
       cacheInvalidation: {
         success: invalidationResult.success,
@@ -244,12 +343,22 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT
-        f.id, f.name, f.description, f.trigger_type, f.trigger_config,
+        f.id, f.name, f.description,
         f.deployed_at, f.last_invoked_at, f.last_status_code,
         f.invocation_count AS invocation_count_total,
+        f.agent_tool, f.agent_tool_description, f.agent_tool_mode, f.agent_tool_exposed_to,
         COALESCE(stats.invocation_count_24h, 0) AS invocation_count_24h,
         COALESCE(stats.error_count_24h, 0) AS error_count_24h,
-        stats.avg_duration_24h
+        stats.avg_duration_24h,
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+             'type', ft.trigger_type,
+             'config', ft.trigger_config,
+             'enabled', ft.enabled
+           ) ORDER BY ft.trigger_type)
+           FROM function_triggers ft WHERE ft.function_id = f.id),
+          '[]'::json
+        ) AS triggers
        FROM app_functions f
        LEFT JOIN LATERAL (
          SELECT
@@ -269,15 +378,15 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       const invocations24h = parseInt(row.invocation_count_24h);
       const errors24h = parseInt(row.error_count_24h);
       const errorRate = invocations24h > 0 ? errors24h / invocations24h : 0;
+      const triggers = (row.triggers as Array<{ type: string; config: unknown; enabled: boolean }>)
+        .map((t) => ({ ...t, config: redactTriggerConfig(t.type, t.config) }));
+      const httpTrigger = triggers.find((t) => t.type === 'http');
       return {
         id: row.id,
         name: row.name,
         description: row.description,
-        trigger: {
-          type: row.trigger_type,
-          config: row.trigger_config,
-        },
-        url: row.trigger_type === 'http' ? `${config.apiBaseUrl}/v1/${appId}/fn/${row.name}` : null,
+        triggers,
+        url: httpTrigger ? `${config.apiBaseUrl}/v1/${appId}/fn/${row.name}` : null,
         status: errorRate > 0.1 ? 'error' : 'active',
         deployedAt: row.deployed_at,
         lastInvoked: row.last_invoked_at,
@@ -285,6 +394,10 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
         invocationCount: parseInt(row.invocation_count_total),
         errorRate,
         avgDuration: parseFloat(row.avg_duration_24h) || 0,
+        agent_tool: row.agent_tool,
+        agent_tool_description: row.agent_tool_description,
+        agent_tool_mode: row.agent_tool_mode,
+        agent_tool_exposed_to: row.agent_tool_exposed_to,
       };
     });
 
@@ -298,7 +411,18 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
 
     const result = await (await runtimeDb(appId)).query(
-      `SELECT * FROM app_functions WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
+      `SELECT f.*,
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+             'type', ft.trigger_type,
+             'config', ft.trigger_config,
+             'enabled', ft.enabled
+           ) ORDER BY ft.trigger_type)
+           FROM function_triggers ft WHERE ft.function_id = f.id),
+          '[]'::json
+        ) AS triggers
+       FROM app_functions f
+       WHERE f.app_id = $1 AND f.name = $2 AND f.deleted_at IS NULL`,
       [appId, name]
     );
 
@@ -312,15 +436,14 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     }
 
     const fn = result.rows[0];
+    const triggers = (fn.triggers as Array<{ type: string; config: unknown; enabled: boolean }>)
+      .map((t) => ({ ...t, config: redactTriggerConfig(t.type, t.config) }));
     return reply.send({
       id: fn.id,
       name: fn.name,
       description: fn.description,
       code: fn.code,
-      trigger: {
-        type: fn.trigger_type,
-        config: fn.trigger_config,
-      },
+      triggers,
       timeoutMs: fn.timeout_ms,
       memoryLimitMb: fn.memory_limit_mb,
       deployedAt: fn.deployed_at,
@@ -328,6 +451,10 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       invocationCount: parseInt(fn.invocation_count),
       errorCount: parseInt(fn.error_count),
       avgDuration: parseFloat(fn.avg_duration_ms) || 0,
+      agent_tool: fn.agent_tool,
+      agent_tool_description: fn.agent_tool_description,
+      agent_tool_mode: fn.agent_tool_mode,
+      agent_tool_exposed_to: fn.agent_tool_exposed_to,
     });
   });
 
@@ -480,7 +607,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       FROM function_invocations
       WHERE function_id = $1
     `;
-    const params: any[] = [functionId];
+    const params: unknown[] = [functionId];
 
     if (since) {
       params.push(since);

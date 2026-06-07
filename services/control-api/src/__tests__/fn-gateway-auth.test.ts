@@ -17,12 +17,13 @@ vi.mock('../config.js', async (importOriginal) => {
   };
 });
 
-// Control what the runtime DB returns for the apps + app_functions join.
+// Control what the runtime DB returns for the apps + app_functions +
+// function_triggers join. After the function_triggers cutover, auto-api joins
+// ONLY the http trigger row and reads its trigger_config; a null
+// trigger_config means "no http trigger" (function missing or non-http only).
 let triggerConfig: { auth?: 'required' | 'optional' | 'none' } | null = null;
 const runtimeQuery = vi.fn(async (_sql: string, _params: unknown[]) => ({
-  rows: triggerConfig === null
-    ? [{ paused: false, paused_reason: null, trigger_type: null, trigger_config: null }]
-    : [{ paused: false, paused_reason: null, trigger_type: 'http', trigger_config: triggerConfig }],
+  rows: [{ paused: false, paused_reason: null, trigger_config: triggerConfig }],
 }));
 vi.mock('../services/region-resolver.js', () => ({
   getRuntimeDbForApp: vi.fn(async () => ({ query: runtimeQuery })),

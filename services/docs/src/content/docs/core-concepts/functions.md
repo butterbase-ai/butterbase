@@ -33,15 +33,44 @@ Authorization: Bearer {token}
 - `envVars` — Key-value pairs for environment variables (encrypted at rest)
 - `timeoutMs` — Max execution time (default: 30000, max: 300000)
 - `memoryLimitMb` — Memory limit (default: 128, range: 64-1024)
-- `trigger` — How the function is invoked
+- `triggers` — Array of one or more triggers describing how the function is invoked (`trigger` singular is also accepted and normalized to a 1-element array).
+- `agent_tool` — Set `true` to expose this function to agents in this app as a callable tool. See [Agents](/core-concepts/agents/).
 
 ## Trigger types
 
+A function can have **multiple triggers** — for example an HTTP endpoint plus a daily cron — by listing them in the `triggers` array. At most one trigger of each type per function.
+
 | Type | Description | Config |
 |------|-------------|--------|
-| `http` | Called via HTTP requests (default) | `{}` |
-| `cron` | Runs on a schedule | `{"schedule": "*/5 * * * *"}` |
-| `websocket` | Fires on custom WebSocket events | `{"event": "event_name"}` |
+| `http` | Called via HTTP request | `{ "method"?, "path"?, "auth"?: "required" \| "optional" \| "none" }` |
+| `cron` | Runs on a schedule | `{ "schedule": "*/5 * * * *", "timezone"?: "UTC" }` |
+| `s3_upload` | Fires when an object lands in a bucket | `{ "bucket": "name", "prefix"?: "uploads/", "contentTypes"?: ["image/*"] }` |
+| `webhook` | Generates a signed webhook URL the platform routes to your handler | `{ "secret_required"?: true, "allowed_sources"?: "github,stripe" }` |
+| `websocket` | Invoked on incoming realtime WebSocket frames | `{}` |
+
+```json
+"triggers": [
+  { "type": "http", "config": { "auth": "required" } },
+  { "type": "cron", "config": { "schedule": "0 9 * * *" } }
+]
+```
+
+## Functions as agent tools
+
+Set `agent_tool: true` on a function to expose it as a tool any [agent](/core-concepts/agents/) in this app can call. The agent runtime reads `agent_tool_description` to decide when to call the tool, and respects `agent_tool_mode` (`read_only` runs without approval; `read_write` pauses the run for a human to approve).
+
+```json
+{
+  "name": "lookup_account",
+  "code": "...",
+  "agent_tool": true,
+  "agent_tool_description": "Look up a customer by email.",
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}
+```
+
+Agents must still list the function name in their graph spec's `tools.functions` array. The dashboard agent editor warns you when a referenced function does not exist or does not have `agent_tool: true`.
 
 ## Writing functions
 
