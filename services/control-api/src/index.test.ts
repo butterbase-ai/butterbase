@@ -35,8 +35,10 @@ describe('assertE2EBypassesNotInProduction', () => {
       NODE_ENV: 'production',
       BUTTERBASE_E2E: '1',
     };
-    const { buildApp } = await import('./index.js');
-    await expect(buildApp()).rejects.toThrow(/BUTTERBASE_E2E.*production/i);
+    // index.ts has a top-level entry-point gate that calls buildApp() at import
+    // time whenever NODE_ENV !== 'test'. The guard throws there, so we assert
+    // on the dynamic import itself.
+    await expect(import('./index.js')).rejects.toThrow(/BUTTERBASE_E2E.*production/i);
   });
 
   it('throws when KV_LOCAL_FILE set in production', async () => {
@@ -45,7 +47,6 @@ describe('assertE2EBypassesNotInProduction', () => {
       NODE_ENV: 'production',
       KV_LOCAL_FILE: '/tmp/anything.json',
     };
-    const { buildApp } = await import('./index.js');
-    await expect(buildApp()).rejects.toThrow(/KV_LOCAL_FILE.*production/i);
+    await expect(import('./index.js')).rejects.toThrow(/KV_LOCAL_FILE.*production/i);
   });
 });

@@ -23,6 +23,13 @@ vi.mock('../runtime-db.js', () => ({
   getRuntimeDbPool: vi.fn(() => mockRuntimeDb),
 }));
 
+// fetchAndUpsert resolves the per-app runtime pool via region-resolver.
+// Forward to the mock runtime db so its query.mock.calls capture the upserts.
+vi.mock('../region-resolver.js', () => ({
+  getRuntimeDbForApp: vi.fn(async () => mockRuntimeDb),
+  resolveAppHomeRegion: vi.fn(async () => 'us-east-1'),
+}));
+
 import { runAnalyticsPullerOnce } from '../cf-analytics-puller.js';
 
 function makeMockDb() {

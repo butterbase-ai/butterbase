@@ -6,6 +6,16 @@ vi.mock('../runtime-db.js', () => ({
   getRuntimeDbPool: vi.fn(),
 }));
 
+// executeProvision uses getRuntimeDbForApp(controlDb, appId) to reach the
+// app's home-region runtime pool. Forward to the shared holder that the
+// tests wire via setMockRuntimePool, so existing per-test query queues drive
+// the in-app code unchanged.
+const runtimePoolHolder = vi.hoisted(() => ({ value: null as unknown }));
+vi.mock('../region-resolver.js', () => ({
+  getRuntimeDbForApp: vi.fn(async () => runtimePoolHolder.value),
+  resolveAppHomeRegion: vi.fn(async () => 'us-east-1'),
+}));
+
 vi.mock('../neon-client.js', () => ({
   withNeonProjectLock: vi.fn(async (_projectId: string, fn: () => Promise<void>) => fn()),
   ensureRoleExists: vi.fn().mockResolvedValue(undefined),
@@ -38,8 +48,14 @@ vi.mock('../failure-notifications.service.js', () => ({
   notifyProvisioningFailed: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../../config.js', () => ({
-  config: {
+// neon-task-worker transitively imports repo-storage, quota-enforcement,
+// cloudflare-client, etc., each of which reads its own config.<section> at
+// module-load time. Rather than enumerate every section, wrap the explicit
+// stubs in a Proxy that returns a permissive empty object for anything else.
+// Defined inside the mock factory because vi.mock is hoisted above any const
+// declarations in the test file.
+vi.mock('../../config.js', () => {
+  const configStub: Record<string, unknown> = {
     neon: {
       enabled: true,
       databaseOwner: 'owner_role',
@@ -48,9 +64,21 @@ vi.mock('../../config.js', () => ({
     runtimeDb: { urlsByRegion: { 'us-east-1': 'postgres://runtime' } },
     dataPlaneDb: { user: 'dev', password: 'dev' },
     pgbouncer: { host: 'localhost', port: 5432 },
-  },
-  assertRegionConfig: vi.fn(() => ({ instanceRegion: 'us-east-1', regions: ['us-east-1'] })),
-}));
+    s3: { accessKeyId: '', secretAccessKey: '', region: 'auto', endpoint: 'https://s3.example.com', forcePathStyle: false },
+    ses: { accessKeyId: '', secretAccessKey: '', region: 'us-east-1', fromAddress: 'noreply@example.com' },
+    cloudflare: { enabled: false, accountId: 'acct_test', apiToken: 'tok_test' },
+  };
+  const permissive = new Proxy(configStub, {
+    get(target, prop) {
+      if (prop in target) return target[prop as string];
+      return {};
+    },
+  });
+  return {
+    config: permissive,
+    assertRegionConfig: vi.fn(() => ({ instanceRegion: 'us-east-1', regions: ['us-east-1'] })),
+  };
+});
 
 // --- Imports after mocks ---
 import { startNeonTaskWorker } from '../neon-task-worker.js';
@@ -84,24 +112,22 @@ describe('neon-task-worker: executeProvision uses per-region data project', () =
   });
 
   it('calls getDataProjectIdForRegion with the region from apps table', async () => {
-    // runtimePool.query call sequence for executeProvision:
-    //   1. SELECT region FROM apps WHERE id = $1  → { rows: [{ region: 'us-east-1' }] }
-    //   2. INSERT INTO app_db_connections ...      → { rows: [] }
-    //   3. UPDATE apps SET db_provisioned ...      → { rows: [] }
+    // neon_tasks is a per-region runtime-tier table now, so BOTH stale recovery
+    // and claim queries go to runtimePool. Plus the apps-region lookup +
+    // INSERT/UPDATE in executeProvision use the same per-app runtimePool (we
+    // forward getRuntimeDbForApp to the same mock pool below).
+    //
+    // runtimePool.query call sequence:
+    //   1. recoverStaleTasks: reset UPDATE      → { rows: [], rowCount: 0 }
+    //   2. recoverStaleTasks: fail UPDATE       → { rows: [], rowCount: 0 }
+    //   3. processNextTask: claim UPDATE        → task row
+    //   4. executeProvision: SELECT region      → { rows: [{ region }] }
+    //   5. executeProvision: INSERT app_db_connections
+    //   6. executeProvision: UPDATE apps SET db_provisioned
+    //   7. processNextTask: mark completed
     const runtimePool = makeMockPool([
-      { rows: [{ region: REGION }] },  // region lookup
-      { rows: [] },                    // INSERT app_db_connections
-      { rows: [] },                    // UPDATE apps
-    ]);
-
-    // controlDb.query sequence:
-    //   1. stale recovery reset UPDATE       → { rows: [], rowCount: 0 }
-    //   2. stale recovery fail UPDATE        → { rows: [], rowCount: 0 }
-    //   3. claim task UPDATE ... RETURNING   → task row
-    //   4. mark completed UPDATE             → { rows: [] }
-    const controlDb = makeMockPool([
-      { rows: [], rowCount: 0 },  // stale recovery: reset
-      { rows: [], rowCount: 0 },  // stale recovery: fail
+      { rows: [], rowCount: 0 },
+      { rows: [], rowCount: 0 },
       {
         rows: [{
           id: 1,
@@ -117,11 +143,19 @@ describe('neon-task-worker: executeProvision uses per-region data project', () =
         }],
         rowCount: 1,
       },
-      { rows: [], rowCount: 1 },  // mark completed
+      { rows: [{ region: REGION }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [], rowCount: 1 },
     ]);
+
+    // controlDb is now barely used (only as the first arg to getRuntimeDbForApp,
+    // which we mock); an empty pool is fine.
+    const controlDb = makeMockPool();
 
     const dataPlaneDb = makeMockPool();
     (getRuntimeDbPool as any).mockReturnValue(runtimePool);
+    runtimePoolHolder.value = runtimePool;
 
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -143,16 +177,17 @@ describe('neon-task-worker: executeProvision uses per-region data project', () =
   });
 
   it('throws and logs task failure when app is not found in apps table', async () => {
-    // runtimePool returns empty rows — app not found
+    // runtimePool.query sequence (same call sites as above, but the region
+    // lookup returns no rows, so executeProvision throws and the worker
+    // logs + writes a retry update instead of mark-completed):
+    //   1. recoverStaleTasks: reset
+    //   2. recoverStaleTasks: fail
+    //   3. processNextTask: claim task
+    //   4. executeProvision: SELECT region → empty → throw
+    //   5. retry/backoff UPDATE
     const emptyRuntimePool = makeMockPool([
-      { rows: [] }, // no app found for region lookup
-    ]);
-    (getRuntimeDbPool as any).mockReturnValue(emptyRuntimePool);
-
-    // controlDb: stale recovery (2 queries) + claim task + retry update (backoff)
-    const controlDb = makeMockPool([
-      { rows: [], rowCount: 0 },  // stale recovery: reset
-      { rows: [], rowCount: 0 },  // stale recovery: fail
+      { rows: [], rowCount: 0 },
+      { rows: [], rowCount: 0 },
       {
         rows: [{
           id: 2,
@@ -168,8 +203,13 @@ describe('neon-task-worker: executeProvision uses per-region data project', () =
         }],
         rowCount: 1,
       },
-      { rows: [], rowCount: 1 },  // retry update (backoff)
+      { rows: [] },               // SELECT region → empty
+      { rows: [], rowCount: 1 },  // retry/backoff UPDATE
     ]);
+    (getRuntimeDbPool as any).mockReturnValue(emptyRuntimePool);
+    runtimePoolHolder.value = emptyRuntimePool;
+
+    const controlDb = makeMockPool();
 
     const dataPlaneDb = makeMockPool();
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
