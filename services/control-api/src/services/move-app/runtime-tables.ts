@@ -55,6 +55,15 @@ export const MOVE_APP_RUNTIME_TABLES = [
   // Deployment + billing history (per-app, follow the app on move)
   'app_deployments',
   'usage_meters',
+
+  // Agents (per-app; child tables agent_checkpoints/agent_run_events/agent_usage/
+  // agent_webhook_deliveries reference agent_runs via run_id without app_id and
+  // are not copied — in-flight run state is lost on move v1, cascade-cleared
+  // when archived agent_runs rows are eventually purged).
+  'agents',
+  'agent_mcp_servers',
+  'agent_runs',
+  'agent_tool_audits',
 ] as const;
 
 /**
@@ -76,15 +85,6 @@ export const MOVE_APP_EXCLUDED: Record<string, string> = {
   neon_tasks: 'per-region Neon API queue; dest neon-task-worker re-provisions on move',
   rag_ingestion_queue: 'per-region RAG ingestion queue; pending tasks lost on move (acceptable v1)',
 
-  // Out of scope (agents branch never landed):
-  agents: 'agents branch not implemented; treat as system-wide for v1',
-  agent_checkpoints: 'see agents',
-  agent_mcp_servers: 'see agents',
-  agent_run_events: 'see agents',
-  agent_runs: 'see agents',
-  agent_tool_audits: 'see agents',
-  agent_usage: 'see agents',
-  agent_webhook_deliveries: 'see agents',
 };
 
 /**
