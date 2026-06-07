@@ -195,7 +195,12 @@ export async function deployFunction(appId: string, data: {
   envVars?: Record<string, string>;
   timeoutMs?: number;
   memoryLimitMb?: number;
-  trigger: { type: string; config?: any };
+  trigger?: { type: string; config?: any };
+  triggers?: Array<{ type: string; config?: any; enabled?: boolean }>;
+  agent_tool?: boolean;
+  agent_tool_description?: string;
+  agent_tool_mode?: 'read_only' | 'read_write';
+  agent_tool_exposed_to?: 'developer_only' | 'end_user';
 }) {
   return apiPost(`/v1/${appId}/functions`, data);
 }

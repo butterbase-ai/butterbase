@@ -379,6 +379,10 @@ functions
   .option('--env <kv>', 'Env var as KEY=value (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
   .option('--timeout-ms <n>', 'Per-invocation timeout (ms)', parseInt)
   .option('--memory-mb <n>', 'Memory limit (MB)', parseInt)
+  .option('--agent-tool', 'Expose this function to agents as a tool')
+  .option('--agent-tool-description <desc>', 'Description shown to the LLM when this function is exposed as an agent tool')
+  .option('--agent-tool-mode <mode>', 'read_only (default) | read_write (read_write requires HITL approval)')
+  .option('--agent-tool-exposed-to <scope>', 'developer_only (default) | end_user')
   .action(functionsDeployCommand);
 
 functions

@@ -20,6 +20,10 @@ interface ListFunctionsResponse {
     invocationCount: number;
     errorRate: number;
     avgDuration: number;
+    agent_tool?: boolean;
+    agent_tool_description?: string | null;
+    agent_tool_mode?: 'read_only' | 'read_write' | null;
+    agent_tool_exposed_to?: 'developer_only' | 'end_user' | null;
   }>;
 }
 
