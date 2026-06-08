@@ -322,27 +322,20 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
     }
 
     case 'function_failed': {
-      const count = data.errorCount || '1';
-      const tier = data.thresholdTier || '1';
-      const next = nextThresholdLabel(tier);
+      const streak = data.streakLen || '3';
       const fn = data.functionName || 'a function';
       const app = data.appName || data.appId || 'your app';
       const logsUrl = `${dashboardUrl}/apps/${data.appId}/functions/${data.functionName}/logs`;
-      const lines = [
-        `"${fn}" in ${app} has failed ${count}× today.`,
+      return [
+        `"${fn}" in ${app} has failed ${streak} times in a row.`,
         '',
         `Open logs: ${logsUrl}`,
         '',
         'Most recent error:',
         truncateError(data.errorMessage || '(no message captured)'),
         '',
-      ];
-      if (next) {
-        lines.push(`We'll only email again if this function hits ${next} failures today — fix it whenever you have a minute.`);
-      } else {
-        lines.push(`This is the highest alert tier — no more emails for this function today.`);
-      }
-      return lines.join('\n');
+        `We'll only email again after a successful run, then another 3 consecutive failures.`,
+      ].join('\n');
     }
 
     case 'auth_hook_failed':
@@ -475,15 +468,6 @@ export async function sendSuggestionNotification(
   }
 }
 
-function nextThresholdLabel(currentTier: string): string | null {
-  switch (currentTier) {
-    case '1': return '10';
-    case '10': return '100';
-    case '100': return '1000';
-    default: return null;
-  }
-}
-
 const ERROR_SNIPPET_MAX = 500;
 function truncateError(msg: string): string {
   if (msg.length <= ERROR_SNIPPET_MAX) return msg;
@@ -576,17 +560,13 @@ ${section('Deployments', deployRows)}
   }
 
   if (template === 'function_failed') {
-    const count = data.errorCount || '1';
-    const tier = data.thresholdTier || '1';
-    const next = nextThresholdLabel(tier);
+    const streak = data.streakLen || '3';
     const fn = data.functionName || 'a function';
     const app = data.appName || data.appId || 'your app';
     const errorMsg = truncateError(data.errorMessage || '(no message captured)');
     const logsUrl = `${dashboardUrl}/apps/${data.appId}/functions/${data.functionName}/logs`;
 
-    const tierNote = next
-      ? `We'll only email again if this function hits ${escapeHtml(next)} failures today &mdash; fix it whenever you have a minute.`
-      : `This is the highest alert tier &mdash; no more emails for this function today.`;
+    const reArmNote = `We&rsquo;ll only email again after a successful run, then another 3 consecutive failures.`;
 
     // Inline action links — rendered only when tokens are supplied. Keeps
     // the buttons absent in test/dev callers that bypass the failure-notifier.
@@ -608,16 +588,16 @@ ${section('Deployments', deployRows)}
 
     const content = `
 <h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">
-&ldquo;${escapeHtml(fn)}&rdquo; failed ${escapeHtml(count)}&times; today
+&ldquo;${escapeHtml(fn)}&rdquo; failed ${escapeHtml(streak)} times in a row
 </h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#737373;">in ${escapeHtml(app)}</p>
 ${renderButton({ href: logsUrl, label: 'Open function logs' })}
 <p style="margin:32px 0 8px 0;font-size:13px;font-weight:600;color:#0a0a0a;">Most recent error</p>
 <pre style="margin:0;padding:16px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:#0a0a0a;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;">${escapeHtml(errorMsg)}</pre>
-<p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.5;">${tierNote}</p>${actionsBlock}`;
+<p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.5;">${reArmNote}</p>${actionsBlock}`;
 
     return renderEmailLayout({
-      preheader: `"${fn}" failed ${count}× today in ${app}. Open logs to investigate.`,
+      preheader: `"${fn}" failed ${streak} times in a row in ${app}. Open logs to investigate.`,
       content,
     });
   }
@@ -637,8 +617,8 @@ export function buildBillingEmailSubject(
   if (template === 'function_failed') {
     const app = data.appName || data.appId || 'your app';
     const fn = data.functionName || 'a function';
-    const count = data.errorCount || '1';
-    return `[${app}] "${fn}" failed ${count}× today`;
+    const streak = data.streakLen || '3';
+    return `[${app}] "${fn}" failed ${streak} times in a row`;
   }
   if (template === 'weekly_digest') {
     const total = digestTotalCount(data);

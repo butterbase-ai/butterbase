@@ -4,7 +4,7 @@ exports[`function_failed HTML body > renders an HTML variant alongside the text 
 "<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Butterbase</title></head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0a0a0a;">
-<div style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;overflow:hidden;opacity:0;color:transparent;">&quot;capture-lead&quot; failed 10× today in pantry. Open logs to investigate.</div>
+<div style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;overflow:hidden;opacity:0;color:transparent;">&quot;capture-lead&quot; failed 3 times in a row in pantry. Open logs to investigate.</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;">
 <tr><td align="center" style="padding:32px 16px;">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;">
@@ -13,7 +13,7 @@ exports[`function_failed HTML body > renders an HTML variant alongside the text 
 </td></tr>
 <tr><td style="padding:32px;">
 <h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">
-&ldquo;capture-lead&rdquo; failed 10&times; today
+&ldquo;capture-lead&rdquo; failed 3 times in a row
 </h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#737373;">in pantry</p>
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0;"><tr><td style="border-radius:8px;background:#0a0a0a;">
@@ -21,7 +21,7 @@ exports[`function_failed HTML body > renders an HTML variant alongside the text 
 </td></tr></table>
 <p style="margin:32px 0 8px 0;font-size:13px;font-weight:600;color:#0a0a0a;">Most recent error</p>
 <pre style="margin:0;padding:16px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:#0a0a0a;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;">TypeError: Cannot read properties of undefined (reading &#39;rows&#39;)</pre>
-<p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.5;">We'll only email again if this function hits 100 failures today &mdash; fix it whenever you have a minute.</p></td></tr>
+<p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.5;">We&rsquo;ll only email again after a successful run, then another 3 consecutive failures.</p></td></tr>
 <tr><td style="padding:20px 32px;background:#fafafa;border-top:1px solid #f0f0f0;font-size:12px;color:#737373;line-height:1.5;">
 You're receiving this because you own a Butterbase app. <a href="https://dashboard.butterbase.ai/settings/notifications" style="color:#737373;text-decoration:underline;">Manage notifications</a>
 </td></tr>
@@ -31,54 +31,28 @@ You're receiving this because you own a Butterbase app. <a href="https://dashboa
 </body></html>"
 `;
 
-exports[`function_failed email > body at tier 1 leads with logs link and reframes the tier note 1`] = `
-""capture-lead" in pantry has failed 1× today.
+exports[`function_failed email > body at streak 3 leads with logs link and trails with re-arm note 1`] = `
+""capture-lead" in pantry has failed 3 times in a row.
 
 Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead/logs
 
 Most recent error:
 TypeError: Cannot read properties of undefined (reading 'rows')
 
-We'll only email again if this function hits 10 failures today — fix it whenever you have a minute."
+We'll only email again after a successful run, then another 3 consecutive failures."
 `;
 
-exports[`function_failed email > body at tier 10 leads with logs link and reframes the tier note 1`] = `
-""capture-lead" in pantry has failed 10× today.
+exports[`function_failed email > body at streak 7 leads with logs link and trails with re-arm note 1`] = `
+""capture-lead" in pantry has failed 7 times in a row.
 
 Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead/logs
 
 Most recent error:
 TypeError: Cannot read properties of undefined (reading 'rows')
 
-We'll only email again if this function hits 100 failures today — fix it whenever you have a minute."
+We'll only email again after a successful run, then another 3 consecutive failures."
 `;
 
-exports[`function_failed email > body at tier 100 leads with logs link and reframes the tier note 1`] = `
-""capture-lead" in pantry has failed 100× today.
+exports[`function_failed email > subject at streak 3 surfaces app, function, streak length 1`] = `"[pantry] "capture-lead" failed 3 times in a row"`;
 
-Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead/logs
-
-Most recent error:
-TypeError: Cannot read properties of undefined (reading 'rows')
-
-We'll only email again if this function hits 1000 failures today — fix it whenever you have a minute."
-`;
-
-exports[`function_failed email > body at tier 1000 leads with logs link and reframes the tier note 1`] = `
-""capture-lead" in pantry has failed 1000× today.
-
-Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead/logs
-
-Most recent error:
-TypeError: Cannot read properties of undefined (reading 'rows')
-
-This is the highest alert tier — no more emails for this function today."
-`;
-
-exports[`function_failed email > subject at tier 1 surfaces app, function, count 1`] = `"[pantry] "capture-lead" failed 1× today"`;
-
-exports[`function_failed email > subject at tier 10 surfaces app, function, count 1`] = `"[pantry] "capture-lead" failed 10× today"`;
-
-exports[`function_failed email > subject at tier 100 surfaces app, function, count 1`] = `"[pantry] "capture-lead" failed 100× today"`;
-
-exports[`function_failed email > subject at tier 1000 surfaces app, function, count 1`] = `"[pantry] "capture-lead" failed 1000× today"`;
+exports[`function_failed email > subject at streak 7 surfaces app, function, streak length 1`] = `"[pantry] "capture-lead" failed 7 times in a row"`;

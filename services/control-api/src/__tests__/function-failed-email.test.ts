@@ -1,8 +1,9 @@
-// Snapshot the function_failed billing-email subject + body across the four
-// threshold tiers (1, 10, 100, 1000). These are user-facing strings — the
+// Snapshot the function_failed billing-email subject + body for the
+// streak-based notification model. These are user-facing strings — the
 // snapshot is the spec. If the wording changes, update the snapshot and
 // review the diff against the UX intent: the subject must surface app +
-// function + count, and the body must lead with the logs link, not bury it.
+// function + streak length, and the body must lead with the logs link,
+// not bury it.
 import { describe, it, expect } from 'vitest';
 import {
   buildBillingEmailSubject,
@@ -19,32 +20,30 @@ const baseData = {
 };
 
 describe('function_failed email', () => {
-  for (const tier of ['1', '10', '100', '1000']) {
-    it(`subject at tier ${tier} surfaces app, function, count`, () => {
+  for (const streak of ['3', '7']) {
+    it(`subject at streak ${streak} surfaces app, function, streak length`, () => {
       const subject = buildBillingEmailSubject('function_failed', {
         ...baseData,
-        thresholdTier: tier,
-        errorCount: tier,
+        streakLen: streak,
       });
       expect(subject).toMatchSnapshot();
       // Hard invariants — if any of these regress, the inbox becomes useless:
       expect(subject).toContain('pantry');
       expect(subject).toContain('capture-lead');
-      expect(subject).toContain(tier);
+      expect(subject).toContain(streak);
     });
 
-    it(`body at tier ${tier} leads with logs link and reframes the tier note`, () => {
+    it(`body at streak ${streak} leads with logs link and trails with re-arm note`, () => {
       const body = buildBillingEmailBody('function_failed', {
         ...baseData,
-        thresholdTier: tier,
-        errorCount: tier,
+        streakLen: streak,
       });
       expect(body).toMatchSnapshot();
-      // Logs link must come BEFORE the threshold-tier disclaimer.
+      // Logs link must come BEFORE the re-arm disclaimer.
       const logsIdx = body.indexOf('Open logs:');
-      const tierIdx = body.search(/We'll only email again|This is the highest/);
+      const reArmIdx = body.indexOf("We'll only email again");
       expect(logsIdx).toBeGreaterThan(-1);
-      expect(tierIdx).toBeGreaterThan(logsIdx);
+      expect(reArmIdx).toBeGreaterThan(logsIdx);
     });
   }
 
@@ -52,8 +51,7 @@ describe('function_failed email', () => {
     const huge = 'X'.repeat(2000);
     const body = buildBillingEmailBody('function_failed', {
       ...baseData,
-      thresholdTier: '10',
-      errorCount: '10',
+      streakLen: '3',
       errorMessage: huge,
     });
     expect(body).toContain('X'.repeat(500) + '…');
@@ -63,8 +61,7 @@ describe('function_failed email', () => {
   it('falls back gracefully when error message is missing', () => {
     const body = buildBillingEmailBody('function_failed', {
       ...baseData,
-      thresholdTier: '1',
-      errorCount: '1',
+      streakLen: '3',
       errorMessage: '',
     });
     expect(body).toContain('(no message captured)');
@@ -74,8 +71,7 @@ describe('function_failed email', () => {
     const subject = buildBillingEmailSubject('function_failed', {
       ...baseData,
       appName: '',
-      thresholdTier: '1',
-      errorCount: '1',
+      streakLen: '3',
     });
     expect(subject).toContain('[app_test001]');
   });
@@ -90,21 +86,18 @@ describe('function_failed HTML body', () => {
   it('renders an HTML variant alongside the text body', () => {
     const html = buildBillingEmailHtml('function_failed', {
       ...baseData,
-      thresholdTier: '10',
-      errorCount: '10',
+      streakLen: '3',
     });
     expect(html).not.toBeNull();
     expect(html).toMatchSnapshot();
   });
 
-  it('renders a final-tier message at 1000 without "next email" copy', () => {
+  it('renders the re-arm note in the HTML variant', () => {
     const html = buildBillingEmailHtml('function_failed', {
       ...baseData,
-      thresholdTier: '1000',
-      errorCount: '1000',
+      streakLen: '5',
     })!;
-    expect(html).toContain('highest alert tier');
-    expect(html).not.toMatch(/We'll only email again/);
+    expect(html).toContain('only email again after a successful run');
   });
 
   it('escapes HTML in user-controlled fields (XSS guard)', () => {
@@ -113,8 +106,7 @@ describe('function_failed HTML body', () => {
       appName: '<script>alert(1)</script>',
       functionName: 'fn"&<>',
       errorMessage: 'Error: </pre><img src=x onerror=alert(1)>',
-      thresholdTier: '1',
-      errorCount: '1',
+      streakLen: '3',
     })!;
     // None of the dangerous strings survive as live HTML.
     expect(html).not.toContain('<script>alert(1)</script>');
@@ -132,7 +124,7 @@ describe('function_failed HTML body', () => {
   });
 
   it('embeds the same logs URL the text body uses', () => {
-    const data = { ...baseData, thresholdTier: '10', errorCount: '10' };
+    const data = { ...baseData, streakLen: '3' };
     const html = buildBillingEmailHtml('function_failed', data)!;
     const text = buildBillingEmailBody('function_failed', data);
     const textUrl = text.match(/https:\/\/[^\s]+/)![0];
@@ -142,8 +134,7 @@ describe('function_failed HTML body', () => {
   it('includes the Butterbase wordmark with alt-text fallback', () => {
     const html = buildBillingEmailHtml('function_failed', {
       ...baseData,
-      thresholdTier: '1',
-      errorCount: '1',
+      streakLen: '3',
     })!;
     expect(html).toMatch(/<img src="https:\/\/[^"]+\/logo-white\.png" alt="Butterbase"/);
     // Image-blocked clients show alt text — must be styled to render on the

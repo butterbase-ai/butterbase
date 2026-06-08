@@ -15,8 +15,7 @@ import { createActionToken } from './notification-prefs.service.js';
 
 const NOTIF_TTL_SECONDS = 35 * 24 * 60 * 60; // 35 days, mirrors quota notifs
 
-export type FunctionFailureThreshold = 1 | 10 | 100 | 1000;
-export const FUNCTION_FAILURE_THRESHOLDS: FunctionFailureThreshold[] = [1, 10, 100, 1000];
+export const FUNCTION_FAILURE_STREAK_THRESHOLD = 3;
 
 interface OwnerInfo {
   email: string;
@@ -129,9 +128,10 @@ export async function notifyProvisioningFailed(
 
 /**
  * Function failure — called from the failure-notifier scanner once per
- * (app_id, function_id, UTC date, threshold) tier. Dedup is enforced by
- * the scanner; this function just sends the email. The owner-email check
- * is done here so the scanner stays focused on its loop.
+ * consecutive-failure streak (>= FUNCTION_FAILURE_STREAK_THRESHOLD). Dedup
+ * is enforced by the scanner (keyed on the last-success timestamp so the
+ * key rotates after a successful run); this function just sends the email.
+ * The owner-email check is done here so the scanner stays focused on its loop.
  */
 export async function notifyFunctionFailed(
   controlPool: Pool,
@@ -141,8 +141,7 @@ export async function notifyFunctionFailed(
     functionId: string;
     functionName: string;
     errorMessage: string;
-    errorCount: number;
-    thresholdTier: FunctionFailureThreshold;
+    streakLen: number;
   },
   log?: { warn: (payload: Record<string, unknown>, message: string) => void }
 ): Promise<void> {
@@ -185,8 +184,7 @@ export async function notifyFunctionFailed(
       appName: owner.appName,
       functionName: args.functionName,
       errorMessage: args.errorMessage,
-      errorCount: String(args.errorCount),
-      thresholdTier: String(args.thresholdTier),
+      streakLen: String(args.streakLen),
     }, {
       controlPool,
       userId: owner.userId,
