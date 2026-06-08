@@ -50,6 +50,26 @@ export async function getUserByEmail(
 }
 
 /**
+ * Gets a user by email regardless of provider. Use for identity-verification
+ * flows (magic link) where any existing row for this email — Google, GitHub,
+ * password, etc. — should be reused. The unique constraint on
+ * (app_id, email) guarantees at most one such row.
+ */
+export async function getUserByEmailAnyProvider(
+  controlPool: Pool,
+  appId: string,
+  email: string
+): Promise<AppUser | null> {
+  const runtimePool = await getRuntimeDbForApp(controlPool, appId);
+  const result = await runtimePool.query(
+    `SELECT * FROM app_users WHERE app_id = $1 AND email = $2`,
+    [appId, email]
+  );
+
+  return result.rows[0] || null;
+}
+
+/**
  * Gets a user by ID, scoped to a specific app (so we hit the right region's
  * runtime DB).
  */

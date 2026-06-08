@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { apiError } from '../../utils/api-error.js';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import { getUserByEmail, createUser, markEmailVerified, updateLastSignIn } from '../../services/auth/user-service.js';
+import { getUserByEmailAnyProvider, createUser, markEmailVerified, updateLastSignIn } from '../../services/auth/user-service.js';
 import { getOrCreateSigningKey } from '../../services/auth/signing-key-service.js';
 import { signAccessToken, createRefreshToken } from '../../services/auth/token-service.js';
 import { sendMagicLinkEmail } from '../../services/auth/email-service.js';
@@ -63,7 +63,7 @@ export async function magicLinkRoutes(app: FastifyInstance) {
       const appName = appResult.rows[0].name as string | null;
 
       // Get or auto-create user (frictionless signup+login)
-      let user = await getUserByEmail(app.controlDb, app_id, email);
+      let user = await getUserByEmailAnyProvider(app.controlDb, app_id, email);
       let isNewUser = false;
 
       if (!user) {
@@ -73,7 +73,7 @@ export async function magicLinkRoutes(app: FastifyInstance) {
         } catch (err: any) {
           // Handle race condition: concurrent magic-link requests for same email
           if (err.code === '23505') {
-            user = await getUserByEmail(app.controlDb, app_id, email);
+            user = await getUserByEmailAnyProvider(app.controlDb, app_id, email);
           }
           if (!user) throw err;
         }
