@@ -14,11 +14,15 @@ describe('ApiKeyService', () => {
       connectionString: config.controlDb.url,
     });
 
-    // Create test user
+    // Create test user — randomize email/sub so a previous crashed run
+    // (afterAll didn't fire) doesn't poison subsequent runs via the unique
+    // constraint on platform_users.email.
+    const suffix = crypto.randomUUID();
     const result = await pool.query(
       `INSERT INTO platform_users (email, cognito_sub)
-       VALUES ('test@example.com', 'test-sub')
-       RETURNING id`
+       VALUES ($1, $2)
+       RETURNING id`,
+      [`apikey-test-${suffix}@example.com`, `apikey-test-sub-${suffix}`]
     );
     testUserId = result.rows[0].id;
   });
