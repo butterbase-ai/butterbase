@@ -21,6 +21,17 @@ async function provisionStripeCustomer(
   }
 }
 
+// Headers can arrive as string | string[] | undefined. Take the first value,
+// trim, and cap length so a hostile client can't bloat the row.
+function pickHeader(request: FastifyRequest, name: string): string | null {
+  const raw = request.headers[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 2048);
+}
+
 declare module 'fastify' {
   interface FastifyRequest {
     auth: AuthContext;
@@ -166,16 +177,21 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       }
 
       try {
+        // First-touch attribution: only written on INSERT, never overwritten on
+        // conflict — so re-sending the headers after activation is a no-op.
+        const signupSource = pickHeader(request, 'x-signup-source');
+        const signupReferrer = pickHeader(request, 'x-signup-referrer');
+
         // Upsert user into platform_users. We return plan_id from the INSERT
         // itself (DB default 'playground') so the signup-grant path below does
         // not race with provisionStripeCustomer to read it back.
         const result = await fastify.controlDb.query(
-          `INSERT INTO platform_users (cognito_sub, email, email_verified)
-           VALUES ($1, $2, $3)
+          `INSERT INTO platform_users (cognito_sub, email, email_verified, signup_source, signup_referrer)
+           VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (cognito_sub)
            DO UPDATE SET email = $2, email_verified = $3, updated_at = now()
            RETURNING id, stripe_customer_id, plan_id`,
-          [claims.sub, claims.email, claims.email_verified]
+          [claims.sub, claims.email, claims.email_verified, signupSource, signupReferrer]
         );
 
         const userId = result.rows[0].id;
