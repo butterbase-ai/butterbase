@@ -128,8 +128,8 @@ export async function functionsDeployCommand(file: string, options: {
       ...(options.memoryMb !== undefined ? { memoryLimitMb: options.memoryMb } : {}),
       ...(options.agentTool !== undefined ? { agent_tool: options.agentTool } : {}),
       ...(options.agentToolDescription !== undefined ? { agent_tool_description: options.agentToolDescription } : {}),
-      ...(mode ? { agent_tool_mode: mode } : {}),
-      ...(exposed ? { agent_tool_exposed_to: exposed } : {}),
+      ...(mode ? { agent_tool_mode: mode as 'read_only' | 'read_write' } : {}),
+      ...(exposed ? { agent_tool_exposed_to: exposed as 'developer_only' | 'end_user' } : {}),
     });
 
     spinner.succeed(`Deployed function "${functionName}"`);
