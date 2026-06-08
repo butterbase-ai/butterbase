@@ -68,7 +68,11 @@ class Config:
                 "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
             ),
             log_level=os.environ.get("LOG_LEVEL", "info"),
-            internal_service_token=os.environ.get("INTERNAL_SERVICE_TOKEN", ""),
+            internal_service_token=(
+                os.environ.get("INTERNAL_SERVICE_TOKEN")
+                or os.environ.get("BUTTERBASE_INTERNAL_SECRET")
+                or ""
+            ),
             control_api_url=os.environ.get(
                 "CONTROL_API_URL", "http://control-api:4000"
             ),
