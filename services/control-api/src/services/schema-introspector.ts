@@ -321,7 +321,7 @@ function resolveColumnType(col: {
   return typeMap[col.data_type] || col.data_type;
 }
 
-function parseIndexDef(indexdef: string): IndexInfo | null {
+export function parseIndexDef(indexdef: string): IndexInfo | null {
   // Example: CREATE INDEX idx_name ON public.table USING btree (col1, col2)
   // Example: CREATE UNIQUE INDEX idx_name ON public.table USING hnsw (embedding vector_cosine_ops)
   const unique = indexdef.includes('UNIQUE INDEX');
@@ -339,7 +339,15 @@ function parseIndexDef(indexdef: string): IndexInfo | null {
   const parts = colsPart.split(',').map((s) => s.trim());
   for (const part of parts) {
     const tokens = part.split(/\s+/);
-    columns.push(tokens[0]);
+    // pg quotes reserved-word column names in indexdef (e.g. "position"); the
+    // differ re-quotes whatever we store, so strip surrounding quotes here to
+    // avoid emitting `""position""` (parsed by Postgres as an empty identifier).
+    const raw = tokens[0];
+    const name =
+      raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
+        ? raw.slice(1, -1).replace(/""/g, '"')
+        : raw;
+    columns.push(name);
     if (tokens.length > 1 && tokens[1] !== 'ASC' && tokens[1] !== 'DESC') {
       opclass = tokens[1];
     }
