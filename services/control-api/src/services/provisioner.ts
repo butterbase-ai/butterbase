@@ -11,7 +11,6 @@ import {
   APP_ID_ALPHABET,
 } from '@butterbase/shared';
 import type { App, InitResponse } from '@butterbase/shared';
-import { notifyProvisioningFailed } from './failure-notifications.service.js';
 import { KvCredentialsService } from './kv-credentials.js';
 
 const generateId = customAlphabet(APP_ID_ALPHABET, APP_ID_LENGTH);
@@ -211,7 +210,9 @@ export async function provisionAppBackground(
       `UPDATE apps SET provisioning_status = 'failed', provisioning_error = $2, updated_at = now() WHERE id = $1`,
       [appId, genericError]
     ).catch(() => {});
-    notifyProvisioningFailed(controlDb, runtimeDb, { appId, provisioningError: genericError }).catch(() => {});
+    // Don't notify here — the queue worker (neon-task-worker.ts) owns failure notification
+    // and only fires after attempts >= max_attempts. Notifying inline on every transient
+    // failure produces false-alarm emails when the clone/provision task retries successfully.
   }
 }
 
