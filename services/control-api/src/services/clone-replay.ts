@@ -13,8 +13,68 @@ import { diffSchema } from './schema-differ.js';
 import { applyMigration } from './schema-applier.js';
 import type { SchemaDSL } from './schema-validator.js';
 import { introspectRls } from './rls-introspector.js';
+import AdmZip from 'adm-zip';
 import * as R2 from './r2.js';
 import * as DeploymentService from './deployment.service.js';
+
+/**
+ * File extensions inside the published bundle that we treat as text and rewrite.
+ * App IDs are baked into JS at build time (VITE_APP_ID), and occasionally appear
+ * in HTML (<meta>), JSON config, source maps, etc. Everything else (images,
+ * fonts, wasm, .br/.gz precompressed assets) is copied through untouched.
+ */
+const REWRITEABLE_EXTENSIONS = new Set([
+  '.js', '.mjs', '.cjs', '.jsx',
+  '.ts', '.tsx',
+  '.html', '.htm',
+  '.css',
+  '.json', '.map',
+  '.txt', '.xml', '.svg',
+  '.webmanifest',
+]);
+
+/**
+ * Rewrite occurrences of `sourceAppId` to `destAppId` inside text files of a
+ * published frontend zip. App IDs use the `app_` prefix + 14 random alphanumeric
+ * characters (~73 bits of entropy via APP_ID_ALPHABET), so accidental collisions
+ * with unrelated substrings in minified code are negligible.
+ *
+ * Returns the rewritten buffer plus a count of files touched, for logging.
+ */
+function rewriteAppIdInArtifact(
+  buffer: Buffer,
+  sourceAppId: string,
+  destAppId: string,
+): { buffer: Buffer; filesRewritten: number; totalReplacements: number } {
+  const zip = new AdmZip(buffer);
+  let filesRewritten = 0;
+  let totalReplacements = 0;
+
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory) continue;
+    const name = entry.entryName.toLowerCase();
+    const dot = name.lastIndexOf('.');
+    const ext = dot >= 0 ? name.slice(dot) : '';
+    if (!REWRITEABLE_EXTENSIONS.has(ext)) continue;
+
+    const original = entry.getData();
+    // Skip anything that doesn't even mention the source app id — cheap fast path
+    // and also a guard against accidentally re-encoding files that happen to
+    // contain non-UTF-8 bytes (e.g. inlined binary in a .map).
+    if (!original.includes(sourceAppId)) continue;
+
+    const text = original.toString('utf8');
+    // Count occurrences for telemetry; split is cheap enough on bundle-sized strings.
+    const occurrences = text.split(sourceAppId).length - 1;
+    if (occurrences === 0) continue;
+    const rewritten = text.split(sourceAppId).join(destAppId);
+    zip.updateFile(entry, Buffer.from(rewritten, 'utf8'));
+    filesRewritten += 1;
+    totalReplacements += occurrences;
+  }
+
+  return { buffer: zip.toBuffer(), filesRewritten, totalReplacements };
+}
 
 export interface ReplayLogger {
   info(obj: unknown, msg?: string): void;
@@ -725,7 +785,9 @@ export async function replayNonSecretConfig(
  *
  * Storage model: every successful deploy overwrites `app-artifact/{appId}.zip`
  * with the byte-for-byte published bundle (see deployArtifact). Clones copy
- * that object and re-publish — dest gets the same edge content as source.
+ * that object, rewrite occurrences of the source app id inside text files
+ * (JS/HTML/JSON/etc.) to the dest id — so the cloned frontend hits the dest's
+ * API and user pool, not the source's — and re-publish.
  *
  * No-op (with a clear log) when the source has no persisted artifact, e.g.
  * apps that have never deployed a frontend. The CF Pages project gets
@@ -773,11 +835,31 @@ export async function replayFrontend(
     );
     const deploymentId = dep.rows[0].id;
 
-    const buffer = await R2.getObjectAsBuffer(dstKey);
-    await DeploymentService.deployArtifact(controlDb, deploymentId, buffer);
+    const sourceBuffer = await R2.getObjectAsBuffer(dstKey);
+    // The source bundle has `VITE_APP_ID=<sourceAppId>` baked into its JS at
+    // build time. Republishing it byte-for-byte would leave the cloned frontend
+    // calling /auth/<sourceAppId>/..., /v1/<sourceAppId>/..., etc. — hitting
+    // the source app's user pool and data instead of the dest's. Rewrite the
+    // app id inside text files before publishing.
+    const { buffer: rewrittenBuffer, filesRewritten, totalReplacements } =
+      rewriteAppIdInArtifact(sourceBuffer, sourceAppId, destAppId);
+    if (filesRewritten === 0) {
+      logger.warn(
+        { sourceAppId, destAppId },
+        '[clone] frontend artifact had no occurrences of source app id; cloned frontend may still target the source app',
+      );
+    }
+
+    // Persist the rewritten artifact back to the dest's R2 slot so future
+    // resume/redeploy paths read the corrected bundle, not the original copy.
+    if (filesRewritten > 0) {
+      await R2.putObject(dstKey, rewrittenBuffer, 'application/zip');
+    }
+
+    await DeploymentService.deployArtifact(controlDb, deploymentId, rewrittenBuffer);
 
     logger.info(
-      { destAppId, deploymentId, bytes: head.contentLength },
+      { destAppId, deploymentId, bytes: head.contentLength, filesRewritten, totalReplacements },
       '[clone] frontend replayed',
     );
   } catch (err) {
