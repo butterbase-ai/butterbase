@@ -116,7 +116,7 @@ describe('POST /cancel', () => {
 
     expect(res.statusCode).toBe(202);
     expect(res.json()).toMatchObject({ run_id: runId, status: 'cancelling' });
-    expect(cancelFn).toHaveBeenCalledWith(runId);
+    expect(cancelFn).toHaveBeenCalledWith(runId, 'local');
 
     setRuntimeClient(undefined);
   });
@@ -160,7 +160,7 @@ describe('POST /resume', () => {
 
     expect(res.statusCode).toBe(202);
     expect(res.json()).toMatchObject({ run_id: runId, status: 'queued' });
-    expect(resumeFn).toHaveBeenCalledWith(runId, input);
+    expect(resumeFn).toHaveBeenCalledWith(runId, 'local', input);
 
     setRuntimeClient(undefined);
   });

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { apiError } from '../utils/api-error.js';
 import { payloadHashBuf } from '../utils/canonical-json.js';
 import { requireUserId } from '../utils/require-auth.js';
-import { getRuntimeDbForApp } from '../services/region-resolver.js';
+import { getRuntimeDbForApp, resolveAppHomeRegion } from '../services/region-resolver.js';
 import {
   graphSpecSchema,
   agentAccessPatchSchema,
@@ -52,9 +52,9 @@ import {
 } from '../services/agent-runtime-client.js';
 
 type RuntimeClient = {
-  startRun: (runId: string) => Promise<void>;
-  cancelRun: (runId: string) => Promise<void>;
-  resumeRun: (runId: string, input: unknown) => Promise<void>;
+  startRun: (runId: string, region: string) => Promise<void>;
+  cancelRun: (runId: string, region: string) => Promise<void>;
+  resumeRun: (runId: string, region: string, input: unknown) => Promise<void>;
 };
 let _injectedRuntimeClient: RuntimeClient | undefined;
 /** Override the runtime client — for testing only. */
@@ -98,16 +98,20 @@ async function assertOwner(
   appId: string,
   userId: string,
 ): Promise<
-  | { ok: true; runtimeDb: Pool }
+  | { ok: true; runtimeDb: Pool; region: string }
   | { ok: false; code: number; error: string }
 > {
   // apps + agent_* live in runtime-plane (Phase 2). Resolve the regional pool
   // first, then read owner_id from there. getRuntimeDbForApp throws typed
   // errors for "app not found" / "still provisioning" — surface them as 404 /
-  // 503 instead of bubbling as INTERNAL_ERROR.
+  // 503 instead of bubbling as INTERNAL_ERROR. Region is returned so route
+  // handlers can pass it to agent-runtime — both lookups hit the same Redis
+  // cache, so the second call is free.
   let runtimeDb: Pool;
+  let region: string;
   try {
     runtimeDb = await getRuntimeDbForApp(app.controlDb, appId);
+    region = await resolveAppHomeRegion(app.controlDb, appId);
   } catch (err: any) {
     const code: string = err?.code ?? err?.name ?? '';
     if (code === 'APP_NOT_FOUND') return { ok: false, code: 404, error: 'App not found' };
@@ -122,7 +126,7 @@ async function assertOwner(
   );
   if (r.rows.length === 0) return { ok: false, code: 404, error: 'App not found' };
   if (r.rows[0].owner_id !== userId) return { ok: false, code: 403, error: 'Not authorized' };
-  return { ok: true, runtimeDb };
+  return { ok: true, runtimeDb, region };
 }
 
 export async function agentsRoutes(app: FastifyInstance) {
@@ -337,7 +341,7 @@ export async function agentsRoutes(app: FastifyInstance) {
     });
 
     try {
-      await (_injectedRuntimeClient?.startRun ?? startRunRemote)(run.id);
+      await (_injectedRuntimeClient?.startRun ?? startRunRemote)(run.id, own.region);
     } catch (error) {
       app.log.error({ err: error, runId: run.id }, 'agent-runtime start failed');
       await own.runtimeDb.query(
@@ -396,7 +400,7 @@ export async function agentsRoutes(app: FastifyInstance) {
     if (['completed', 'failed', 'cancelled'].includes(run.status)) {
       return reply.code(409).send({ error: `Run already terminal (status: ${run.status})` });
     }
-    await (_injectedRuntimeClient?.cancelRun ?? cancelRunRemote)(run.id);
+    await (_injectedRuntimeClient?.cancelRun ?? cancelRunRemote)(run.id, own.region);
     return reply.code(202).send({ run_id: run.id, status: 'cancelling' });
   });
 
@@ -418,7 +422,7 @@ export async function agentsRoutes(app: FastifyInstance) {
     if (run.status !== 'paused') {
       return reply.code(409).send({ error: `Run is not paused (current status: ${run.status})` });
     }
-    await (_injectedRuntimeClient?.resumeRun ?? resumeRunRemote)(run.id, parsed.data.input);
+    await (_injectedRuntimeClient?.resumeRun ?? resumeRunRemote)(run.id, own.region, parsed.data.input);
     return reply.code(202).send({ run_id: run.id, status: 'queued' });
   });
 

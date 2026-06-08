@@ -106,6 +106,12 @@ export function installAgentTestMocks(): void {
       getRuntimeDbForApp: vi.fn(async (_controlPool: any, _appId: string) => {
         return getTestPool();
       }),
+      // Routes now also call resolveAppHomeRegion to pass ?region=<r> through
+      // to agent-runtime. Tests don't care which region label the runtime
+      // sees, so return a fixed 'local' for everyone.
+      resolveAppHomeRegion: vi.fn(async (_controlPool: any, _appId: string) => {
+        return 'local';
+      }),
     };
   });
 }

@@ -60,27 +60,39 @@ async function runtimePost(
   }
 }
 
-export async function startRun(runId: string): Promise<void> {
+function withRegion(path: string, region: string): string {
+  // Region is appended as a query string so agent-runtime can pick the
+  // correct runtime-plane pool from its app.state.pools dict. A request
+  // can land on any region's machine — the python side does the lookup.
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}region=${encodeURIComponent(region)}`;
+}
+
+export async function startRun(runId: string, region: string): Promise<void> {
   await runtimePost(
-    `/internal/runs/${runId}/start`,
+    withRegion(`/internal/runs/${runId}/start`, region),
     START_RUN_TIMEOUT_MS,
     undefined,
     'agent-runtime start',
   );
 }
 
-export async function cancelRun(runId: string): Promise<void> {
+export async function cancelRun(runId: string, region: string): Promise<void> {
   await runtimePost(
-    `/internal/runs/${runId}/cancel`,
+    withRegion(`/internal/runs/${runId}/cancel`, region),
     CONTROL_OP_TIMEOUT_MS,
     undefined,
     'agent-runtime cancel',
   );
 }
 
-export async function resumeRun(runId: string, input: unknown): Promise<void> {
+export async function resumeRun(
+  runId: string,
+  region: string,
+  input: unknown,
+): Promise<void> {
   await runtimePost(
-    `/internal/runs/${runId}/resume`,
+    withRegion(`/internal/runs/${runId}/resume`, region),
     CONTROL_OP_TIMEOUT_MS,
     { input },
     'agent-runtime resume',

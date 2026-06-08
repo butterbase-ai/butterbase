@@ -17,24 +17,30 @@ import { getRedisClient } from '../services/redis.js';
 import { mintEndUserStreamToken, verifyEndUserStreamToken } from '../services/agent-stream-tokens.js';
 import { getOrCreateSigningKey } from '../services/auth/signing-key-service.js';
 import { streamRunEventsAsSse, streamRunEventsToWebSocket } from '../services/agent-event-stream.js';
-import { getRuntimeDbForApp } from '../services/region-resolver.js';
+import { getRuntimeDbForApp, resolveAppHomeRegion } from '../services/region-resolver.js';
 
 /**
  * Resolves the regional runtime-plane pool for an app. The agent_* tables and
  * apps itself live in runtime-plane (Phase 2). getRuntimeDbForApp throws
  * typed errors for "app not found" / "still provisioning" — surface as 404 /
  * 503 instead of bubbling as INTERNAL_ERROR.
+ *
+ * Also returns the home region so callers can pass it to agent-runtime —
+ * a request can land on any region's machine, and the python side picks
+ * the correct pool from app.state.pools[region]. Both lookups share the
+ * same Redis cache, so this is one round-trip in steady state.
  */
 async function resolveRuntime(
   app: FastifyInstance,
   appId: string,
 ): Promise<
-  | { ok: true; runtimeDb: Pool }
+  | { ok: true; runtimeDb: Pool; region: string }
   | { ok: false; code: number; error: string }
 > {
   try {
     const runtimeDb = await getRuntimeDbForApp(app.controlDb, appId);
-    return { ok: true, runtimeDb };
+    const region = await resolveAppHomeRegion(app.controlDb, appId);
+    return { ok: true, runtimeDb, region };
   } catch (err: any) {
     const code: string = err?.code ?? err?.name ?? '';
     if (code === 'APP_NOT_FOUND') return { ok: false, code: 404, error: 'App not found' };
@@ -164,7 +170,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     const { appId, name } = request.params as { appId: string; name: string };
     const ctx = await resolveRuntime(app, appId);
     if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
-    const { runtimeDb } = ctx;
+    const { runtimeDb, region } = ctx;
 
     const agent = await getAgent(runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
@@ -234,7 +240,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     });
 
     try {
-      await startRunRemote(run.id);
+      await startRunRemote(run.id, region);
     } catch (err) {
       app.log.error({ err, runId: run.id }, 'agent-runtime start failed (public)');
       await runtimeDb.query(
@@ -288,7 +294,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     const { appId, id } = request.params as { appId: string; id: string };
     const ctx = await resolveRuntime(app, appId);
     if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
-    const { runtimeDb } = ctx;
+    const { runtimeDb, region } = ctx;
 
     const r = await runtimeDb.query(
       'SELECT a.visibility FROM agent_runs r JOIN agents a ON r.agent_id = a.id WHERE r.id = $1 AND r.app_id = $2',
@@ -306,7 +312,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     if (['completed', 'failed', 'cancelled'].includes(run.status)) {
       return reply.code(409).send({ error: `Run already terminal (status: ${run.status})` });
     }
-    await cancelRunRemote(run.id);
+    await cancelRunRemote(run.id, region);
     return reply.code(202).send({ run_id: run.id, status: 'cancelling' });
   });
 
@@ -316,7 +322,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     const { appId, id } = request.params as { appId: string; id: string };
     const ctx = await resolveRuntime(app, appId);
     if (!ctx.ok) return reply.code(ctx.code).send({ error: ctx.error });
-    const { runtimeDb } = ctx;
+    const { runtimeDb, region } = ctx;
 
     const r = await runtimeDb.query(
       'SELECT a.visibility FROM agent_runs r JOIN agents a ON r.agent_id = a.id WHERE r.id = $1 AND r.app_id = $2',
@@ -336,7 +342,7 @@ export async function agentPublicRoutes(app: FastifyInstance) {
     }
     const parsed = z.object({ input: z.unknown() }).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid body' });
-    await resumeRunRemote(run.id, parsed.data.input);
+    await resumeRunRemote(run.id, region, parsed.data.input);
     return reply.code(202).send({ run_id: run.id, status: 'queued' });
   });
 

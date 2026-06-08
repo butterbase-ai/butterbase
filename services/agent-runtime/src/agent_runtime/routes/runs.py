@@ -3,13 +3,17 @@
 start  → fire-and-forget (202 immediately).
 resume → re-queue a paused run and fire-and-forget.
 cancel → set cancel_requested=TRUE and publish Redis signal.
+
+All endpoints take a ?region=<region> query string identifying which
+runtime-plane DB the run lives in. control-api resolves the app's
+home region via resolveAppRegion before calling us.
 """
 
 import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Query
 
 from agent_runtime.openrouter import OpenRouterClient
 from agent_runtime.runner import run_agent
@@ -25,10 +29,31 @@ def _auth_check(request: Request) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-async def _run_in_background(app, run_id: str) -> None:
+def _resolve_pool(app, region: str | None):
+    """Pick the runtime pool for *region*. Falls back to the legacy
+    single ``app.state.pool`` (tests, single-region deploys) when no
+    pool dict exists; falls back to the sole pool when there is
+    exactly one and no region was supplied."""
+    pools = getattr(app.state, "pools", None)
+    if pools is None:
+        legacy = getattr(app.state, "pool", None)
+        if legacy is None:
+            raise HTTPException(status_code=500, detail="no runtime pools configured")
+        return legacy
+    if region is None:
+        if len(pools) == 1:
+            return next(iter(pools.values()))
+        raise HTTPException(status_code=400, detail="region query parameter required")
+    pool = pools.get(region)
+    if pool is None:
+        raise HTTPException(status_code=400, detail=f"unknown region '{region}'")
+    return pool
+
+
+async def _run_in_background(app, run_id: str, region: str | None) -> None:
     """Build client (if not overridden), run agent, close client."""
     cfg = app.state.config
-    pool = app.state.pool
+    pool = _resolve_pool(app, region)
     redis = app.state.redis.client
     control_api = getattr(app.state, "control_api", None)
     encryption_key: bytes = getattr(app.state, "encryption_key", b"")
@@ -58,27 +83,37 @@ async def _run_in_background(app, run_id: str) -> None:
             await client.close()
 
 
-def _schedule_run(app, run_id: str) -> asyncio.Task:
-    task = asyncio.create_task(_run_in_background(app, run_id))
+def _schedule_run(app, run_id: str, region: str | None = None) -> asyncio.Task:
+    task = asyncio.create_task(_run_in_background(app, run_id, region))
     app.state.run_tasks.add(task)
     task.add_done_callback(app.state.run_tasks.discard)
     return task
 
 
 @router.post("/internal/runs/{run_id}/start", status_code=202)
-async def start_run(run_id: str, request: Request):
+async def start_run(
+    run_id: str,
+    request: Request,
+    region: str | None = Query(default=None),
+):
     _auth_check(request)
-    _schedule_run(request.app, run_id)
+    # Validate region up front so we 400 before scheduling background work.
+    _resolve_pool(request.app, region)
+    _schedule_run(request.app, run_id, region)
     return {"run_id": run_id, "status": "queued"}
 
 
 @router.post("/internal/runs/{run_id}/resume", status_code=202)
-async def resume_run(run_id: str, request: Request):
+async def resume_run(
+    run_id: str,
+    request: Request,
+    region: str | None = Query(default=None),
+):
     _auth_check(request)
     body: dict = await request.json()
     resume_input = body.get("input")
 
-    pool = request.app.state.pool
+    pool = _resolve_pool(request.app, region)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -95,15 +130,19 @@ async def resume_run(run_id: str, request: Request):
     if row is None:
         raise HTTPException(status_code=404, detail="run not paused")
 
-    _schedule_run(request.app, run_id)
+    _schedule_run(request.app, run_id, region)
     return {"run_id": run_id, "status": "queued"}
 
 
 @router.post("/internal/runs/{run_id}/cancel", status_code=202)
-async def cancel_run(run_id: str, request: Request):
+async def cancel_run(
+    run_id: str,
+    request: Request,
+    region: str | None = Query(default=None),
+):
     _auth_check(request)
 
-    pool = request.app.state.pool
+    pool = _resolve_pool(request.app, region)
     redis = request.app.state.redis.client
 
     async with pool.acquire() as conn:

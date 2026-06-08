@@ -20,13 +20,16 @@ PG_DSN = os.environ.get(
 
 @pytest.fixture(autouse=True)
 def _stub_env(monkeypatch):
-    monkeypatch.setenv(
-        "CONTROL_PLANE_URL",
-        os.environ.get(
-            "CONTROL_PLANE_URL_TEST",
-            "postgres://postgres:postgres@localhost:5432/butterbase_control_test",
-        ),
+    test_url = os.environ.get(
+        "CONTROL_PLANE_URL_TEST",
+        "postgres://postgres:postgres@localhost:5432/butterbase_control_test",
     )
+    # Drive the new multi-region config path by default; tests that only
+    # care about a single region get one ("local") to keep them simple.
+    monkeypatch.setenv("BUTTERBASE_REGIONS", "local")
+    monkeypatch.setenv("RUNTIME_DB_URL_LOCAL", test_url)
+    # Legacy var kept for tests / code paths that still read it directly.
+    monkeypatch.setenv("CONTROL_PLANE_URL", test_url)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
 
 
@@ -37,6 +40,15 @@ async def pg_pool():
         yield pool
     finally:
         await pool.close()
+
+
+@pytest.fixture
+async def pg_pools(pg_pool):
+    """Multi-region shape over the same underlying test DB. Tests that
+    want to exercise the {region: pool} contract use this fixture; the
+    single-pool ``pg_pool`` fixture continues to work for tests that
+    don't care about region routing."""
+    yield {"local": pg_pool}
 
 
 @pytest.fixture

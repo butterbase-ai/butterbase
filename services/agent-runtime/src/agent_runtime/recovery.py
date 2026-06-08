@@ -1,6 +1,30 @@
 """Mark stale running runs as queued so they get retried on startup."""
 
+import asyncio
+
 import asyncpg
+
+
+async def recover_all_stale_runs(
+    pools: dict[str, asyncpg.Pool], *, stale_after_seconds: int = 30
+) -> dict[str, list[str]]:
+    """Recover stale runs across every region's pool. Returns a
+    mapping of region -> list of recovered run IDs. Failures in one
+    region don't block the others — the offending region is logged
+    via the raised exception's __cause__ chain but ignored at the
+    aggregate level (lifespan should log and continue)."""
+    regions = list(pools.keys())
+    results = await asyncio.gather(
+        *(recover_stale_runs(pools[r], stale_after_seconds=stale_after_seconds) for r in regions),
+        return_exceptions=True,
+    )
+    out: dict[str, list[str]] = {}
+    for region, result in zip(regions, results):
+        if isinstance(result, BaseException):
+            out[region] = []
+        else:
+            out[region] = result
+    return out
 
 
 async def recover_stale_runs(pool: asyncpg.Pool, *, stale_after_seconds: int = 30) -> list[str]:

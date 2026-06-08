@@ -82,7 +82,7 @@ async def test_start_run_requires_token():
     app = FastAPI()
     app.state.pool = AsyncMock()
     app.state.config = Config(
-        control_plane_url="postgresql://test",
+        pool_urls={"local": "postgresql://test"},
         internal_service_token="t1",
     )
     app.state.run_agent_fn = AsyncMock(return_value=None)
