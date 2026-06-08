@@ -55,6 +55,13 @@ vi.mock('../failure-notifications.service.js', () => ({
   notifyDeploymentFailed: vi.fn(() => Promise.resolve()),
 }));
 
+// runEdgeSsrPipeline resolves the per-app runtime pool via region-resolver.
+// Return the supplied db so the existing mock-db assertions keep working.
+vi.mock('../region-resolver.js', () => ({
+  getRuntimeDbForApp: vi.fn(async (db: unknown) => db),
+  resolveAppHomeRegion: vi.fn(async () => 'local'),
+}));
+
 import * as R2 from '../r2.js';
 import * as CloudflareWfp from '../cloudflare-wfp.js';
 import * as FailureNotifs from '../failure-notifications.service.js';
@@ -102,6 +109,11 @@ function makeDb(args: {
     }
     if (normalized.includes('from app_frontend_env_vars')) {
       return { rows: envVarRows };
+    }
+    // deployArtifact() rediscovers app_id by scanning each runtime region for
+    // a matching deployment row. All tests use app_abc (or app_cancel).
+    if (normalized.includes('select app_id from app_edge_ssr_deployments')) {
+      return { rows: [{ app_id: (appRow as { id?: string }).id ?? 'app_abc' }] };
     }
     return { rows: [] };
   };
@@ -152,7 +164,7 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
 
     const db = makeDb({
-      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp' },
+      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local' },
     });
 
     wireRuntimeDb(db);
@@ -166,7 +178,7 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     // deployUserWorkerWithScript called exactly once with correct shape
     expect(CloudflareWfp.deployUserWorkerWithScript).toHaveBeenCalledTimes(1);
     const args = (CloudflareWfp.deployUserWorkerWithScript as ReturnType<typeof vi.fn>).mock.calls[0];
-    const [input, scriptStr, additionalModules] = args;
+    const [input, scriptStr, additionalModules, compatFlags, htmlHandling] = args;
     expect(input.scriptName).toBe('app_abc');
     expect(input.files).toBeInstanceOf(Map);
     expect(input.files.size).toBe(2);
@@ -175,6 +187,11 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     expect(scriptStr).toBe(workerSrc);
     expect(additionalModules).toBeInstanceOf(Map);
     expect(additionalModules.size).toBe(0);
+    // Edge SSR needs nodejs_compat + auto-trailing-slash so env.ASSETS.fetch('/')
+    // resolves to /index.html for prerendered pages (next-on-pages has no
+    // resolution chain of its own, unlike the static-frontend-worker).
+    expect(compatFlags).toEqual(['nodejs_compat']);
+    expect(htmlHandling).toBe('auto-trailing-slash');
 
     expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local');
 
@@ -204,7 +221,7 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
 
     const db = makeDb({
-      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp' },
+      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local' },
     });
 
     wireRuntimeDb(db);
@@ -247,7 +264,7 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
 
     const db = makeDb({
-      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp' },
+      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local' },
     });
 
     wireRuntimeDb(db);
@@ -285,7 +302,7 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
 
     const db = makeDb({
-      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp' },
+      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local' },
     });
 
     wireRuntimeDb(db);
@@ -346,10 +363,13 @@ describe('runEdgeSsrPipeline — cancel-race guard', () => {
         allQueries.push({ sql, params });
         const normalized = sql.replace(/\s+/g, ' ').toLowerCase();
         if (normalized.includes('from apps') && normalized.includes('where id')) {
-          return { rows: [{ name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp' }] };
+          return { rows: [{ name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local' }] };
         }
         if (normalized.includes('from app_frontend_env_vars')) {
           return { rows: [] };
+        }
+        if (normalized.includes('select app_id from app_edge_ssr_deployments')) {
+          return { rows: [{ app_id: 'app_cancel' }] };
         }
         return { rows: [] };
       }),
@@ -403,7 +423,7 @@ describe('runEdgeSsrPipeline — supersede behavior', () => {
     (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
 
     const db = makeDb({
-      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp' },
+      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local' },
     });
 
     wireRuntimeDb(db);

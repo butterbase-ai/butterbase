@@ -202,6 +202,40 @@ describe('deployUserWorkerWithScript', () => {
     expect(metadataJson.main_module).toBe('worker.mjs');
   });
 
+  it('defaults html_handling to none and forwards the override into CF metadata', async () => {
+    fetchMock
+      .mockResolvedValueOnce(okText({ jwt: 'session-jwt' }))
+      .mockResolvedValueOnce(okText({ id: 'script-id' }))
+      .mockResolvedValueOnce(okText({ jwt: 'session-jwt-2' }))
+      .mockResolvedValueOnce(okText({ id: 'script-id-2' }));
+
+    const script = 'export default { async fetch() { return new Response("x"); } };';
+
+    // Default: 'none' (static-frontend-worker contract — has its own resolution chain)
+    await deployUserWorkerWithScript(
+      { scriptName: 'app_default', files: new Map(), envVars: {} },
+      script,
+    );
+    let metadataJson = JSON.parse(
+      await ((fetchMock.mock.calls[1][1].body as FormData).get('metadata') as Blob).text(),
+    );
+    expect(metadataJson.assets.config.html_handling).toBe('none');
+
+    // Override: 'auto-trailing-slash' (edge-ssr contract — relies on CF to rewrite / -> /index.html)
+    await deployUserWorkerWithScript(
+      { scriptName: 'app_edge', files: new Map(), envVars: {} },
+      script,
+      undefined,
+      ['nodejs_compat'],
+      'auto-trailing-slash',
+    );
+    metadataJson = JSON.parse(
+      await ((fetchMock.mock.calls[3][1].body as FormData).get('metadata') as Blob).text(),
+    );
+    expect(metadataJson.assets.config.html_handling).toBe('auto-trailing-slash');
+    expect(metadataJson.compatibility_flags).toEqual(['nodejs_compat']);
+  });
+
   it('deploys without additionalModules when the parameter is omitted', async () => {
     fetchMock
       .mockResolvedValueOnce(okText({ jwt: 'session-jwt' }))

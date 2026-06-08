@@ -134,6 +134,13 @@ import {
   repoStatusCommand, repoLogCommand, repoWipeCommand,
 } from '../src/commands/repo.js';
 import { visibilityCommand } from '../src/commands/visibility.js';
+import {
+  agentsListCommand,
+  agentsGetCommand,
+  agentsCreateCommand,
+  agentsUpdateCommand,
+  agentsDeleteCommand,
+} from '../src/commands/agents.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
 import { templatesCommand } from '../src/commands/templates.js';
 
@@ -372,6 +379,10 @@ functions
   .option('--env <kv>', 'Env var as KEY=value (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
   .option('--timeout-ms <n>', 'Per-invocation timeout (ms)', parseInt)
   .option('--memory-mb <n>', 'Memory limit (MB)', parseInt)
+  .option('--agent-tool', 'Expose this function to agents as a tool')
+  .option('--agent-tool-description <desc>', 'Description shown to the LLM when this function is exposed as an agent tool')
+  .option('--agent-tool-mode <mode>', 'read_only (default) | read_write (read_write requires HITL approval)')
+  .option('--agent-tool-exposed-to <scope>', 'developer_only (default) | end_user')
   .action(functionsDeployCommand);
 
 functions
@@ -1500,6 +1511,37 @@ program
   .option('--unlisted', 'Hide from /v1/templates (public only)')
   .option('--json', 'Output raw JSON')
   .action((mode, opts) => visibilityCommand(mode as 'public' | 'private', opts));
+
+// Agents
+const agents = program.command('agents').description('Manage agents');
+
+agents
+  .command('list <app>')
+  .description('List agents for an app')
+  .action(agentsListCommand);
+
+agents
+  .command('get <app> <name>')
+  .description('Get a specific agent')
+  .action(agentsGetCommand);
+
+agents
+  .command('create <app>')
+  .description('Create an agent from a spec file')
+  .requiredOption('--file <path>', 'Path to agent spec JSON file')
+  .action(agentsCreateCommand);
+
+agents
+  .command('update <app> <name>')
+  .description('Update an agent from a spec file')
+  .requiredOption('--file <path>', 'Path to agent spec JSON file')
+  .action(agentsUpdateCommand);
+
+agents
+  .command('delete <app> <name>')
+  .description('Delete an agent')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .action(agentsDeleteCommand);
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {

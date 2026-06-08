@@ -586,8 +586,11 @@ export async function adminRoutes(app: FastifyInstance) {
       idx++;
     }
     if (q.trigger_type) {
-      conditions.push(`f.trigger_type = $${idx++}`);
+      conditions.push(`EXISTS (SELECT 1 FROM function_triggers ft
+                                 WHERE ft.function_id = f.id
+                                   AND ft.trigger_type = $${idx} AND ft.enabled)`);
       params.push(q.trigger_type);
+      idx++;
     }
     if (q.errors_only === 'true') {
       conditions.push(`f.error_count > 0`);
@@ -607,7 +610,13 @@ export async function adminRoutes(app: FastifyInstance) {
     const perRegion = await fanOutRuntimeRegions(async (pool) => {
       const [d, c] = await Promise.all([
         pool.query<any>(
-          `SELECT f.id, f.app_id, ap.name AS app_name, f.name, f.trigger_type,
+          `SELECT f.id, f.app_id, ap.name AS app_name, f.name,
+                  COALESCE(
+                    (SELECT array_agg(ft.trigger_type ORDER BY ft.trigger_type)
+                       FROM function_triggers ft
+                      WHERE ft.function_id = f.id AND ft.enabled),
+                    '{}'::text[]
+                  ) AS trigger_types,
                   f.invocation_count::int, f.error_count::int,
                   f.avg_duration_ms::numeric, f.last_invoked_at, f.deployed_at
            FROM app_functions f
@@ -643,6 +652,10 @@ export async function adminRoutes(app: FastifyInstance) {
     return {
       data: mergedRows.slice(offset, offset + limit).map((r: any) => ({
         ...r,
+        // Back-compat single-value field for callers (e.g. admin-dashboard)
+        // that still expect `trigger_type` as a string. `trigger_types` is the
+        // canonical post-cutover field.
+        trigger_type: r.trigger_types?.[0] ?? null,
         avg_duration_ms: r.avg_duration_ms ? parseFloat(r.avg_duration_ms) : 0,
       })),
       total: totalCount,
@@ -1033,7 +1046,13 @@ export async function adminRoutes(app: FastifyInstance) {
         [id]
       ),
       runtimePool.query(
-        `SELECT f.id, f.name, f.trigger_type,
+        `SELECT f.id, f.name,
+                COALESCE(
+                  (SELECT array_agg(ft.trigger_type ORDER BY ft.trigger_type)
+                     FROM function_triggers ft
+                    WHERE ft.function_id = f.id AND ft.enabled),
+                  '{}'::text[]
+                ) AS trigger_types,
                 f.invocation_count::int, f.error_count::int,
                 f.avg_duration_ms::numeric, f.last_invoked_at, f.deployed_at
          FROM app_functions f
@@ -1099,6 +1118,7 @@ export async function adminRoutes(app: FastifyInstance) {
       app: { ...appRow, owner_email: ownerEmail },
       functions: functionsResult.rows.map((r: any) => ({
         ...r,
+        trigger_type: r.trigger_types?.[0] ?? null,
         avg_duration_ms: r.avg_duration_ms ? parseFloat(r.avg_duration_ms) : 0,
       })),
       recentInvocations: invocationsResult.rows,
@@ -1142,7 +1162,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const [fnResult, invocationsResult, errorSummaryResult] = await Promise.all([
       runtimePool.query(
-        `SELECT f.id, f.app_id, ap.name AS app_name, f.name, f.trigger_type,
+        `SELECT f.id, f.app_id, ap.name AS app_name, f.name,
+                COALESCE(
+                  (SELECT array_agg(ft.trigger_type ORDER BY ft.trigger_type)
+                     FROM function_triggers ft
+                    WHERE ft.function_id = f.id AND ft.enabled),
+                  '{}'::text[]
+                ) AS trigger_types,
                 f.invocation_count::int, f.error_count::int,
                 f.avg_duration_ms::numeric, f.last_invoked_at, f.deployed_at
          FROM app_functions f
@@ -1179,6 +1205,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return {
       function: {
         ...fn,
+        trigger_type: fn.trigger_types?.[0] ?? null,
         avg_duration_ms: fn.avg_duration_ms ? parseFloat(fn.avg_duration_ms) : 0,
       },
       recentInvocations: invocationsResult.rows,

@@ -79,7 +79,14 @@ export async function statusCommand(options: { app?: string; json?: boolean }) {
       console.log(chalk.gray('  None deployed'));
     } else {
       for (const f of funcList) {
-        console.log(`  ${chalk.white(f.name)} ${chalk.gray(`(${f.trigger_type || 'http'})`)}`);
+        // After the function_triggers cutover the API returns a `triggers`
+        // array; fall back to the legacy single field for older servers.
+        const types: string[] = Array.isArray(f.triggers)
+          ? f.triggers.map((t: { type: string }) => t.type)
+          : f.trigger_type
+            ? [f.trigger_type]
+            : ['http'];
+        console.log(`  ${chalk.white(f.name)} ${chalk.gray(`(${types.join(', ')})`)}`);
       }
     }
     console.log('');

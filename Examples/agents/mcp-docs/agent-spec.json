@@ -1,0 +1,38 @@
+{
+  "spec_version": "1",
+  "entry": "answer",
+  "nodes": {
+    "answer": {
+      "type": "llm",
+      "model": "anthropic/claude-3.5-sonnet",
+      "system_prompt": "You are a helpful Stripe API expert. Search the Stripe docs MCP before answering. Cite the API endpoint or guide URL you used.",
+      "input_template": "{{ input.question }}",
+      "output_key": "reply",
+      "tools": [
+        { "source": "mcp", "server_id": "REPLACE_WITH_SERVER_ID", "name": "search" }
+      ]
+    },
+    "done": { "type": "end", "output_template": "{{ state.reply }}" }
+  },
+  "edges": [
+    { "from": "answer", "to": "done" }
+  ],
+  "tools": {
+    "builtin": [],
+    "mcp_servers": [
+      {
+        "server_id": "REPLACE_WITH_SERVER_ID",
+        "tools": ["search"],
+        "tool_overrides": {}
+      }
+    ],
+    "functions": []
+  },
+  "limits": {
+    "max_steps": 10,
+    "max_tool_calls": 6,
+    "max_parallel_tools": 2,
+    "timeout_seconds": 180,
+    "human_timeout_seconds": 86400
+  }
+}

@@ -293,17 +293,24 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
           }))
       : [];
 
-    // Query functions; degrade gracefully on failure.
+    // Query functions; degrade gracefully on failure. After the
+    // function_triggers cutover each function can have multiple triggers, so
+    // pick a deterministic representative (lowest type by sort order) to keep
+    // the legacy single-string shape for callers.
     const fnsResult = await pool
-      .query<{ name: string; trigger_type: string }>(
-        `SELECT name, trigger_type FROM app_functions
-         WHERE app_id = $1 AND deleted_at IS NULL
-         ORDER BY name`,
+      .query<{ name: string; trigger_type: string | null }>(
+        `SELECT f.name,
+                (SELECT ft.trigger_type FROM function_triggers ft
+                  WHERE ft.function_id = f.id AND ft.enabled
+                  ORDER BY ft.trigger_type LIMIT 1) AS trigger_type
+           FROM app_functions f
+          WHERE f.app_id = $1 AND f.deleted_at IS NULL
+          ORDER BY f.name`,
         [app_id],
       )
       .catch((err) => {
         app.log.error({ err, app_id }, 'templates-discovery: app_functions query failed, returning empty functions');
-        return { rows: [] as Array<{ name: string; trigger_type: string }> };
+        return { rows: [] as Array<{ name: string; trigger_type: string | null }> };
       });
     const functions = fnsResult.rows;
 

@@ -33,7 +33,15 @@ export async function functionsListCommand(options: { app?: string }) {
     console.log(chalk.blue('\nDeployed functions:\n'));
     for (const func of response.functions) {
       console.log(chalk.bold(func.name));
-      console.log(chalk.gray(`  Trigger: ${func.trigger?.type ?? func.trigger_type}`));
+      const triggerTypes = Array.isArray(func.triggers)
+        ? func.triggers.map((t: { type: string }) => t.type).join(', ')
+        : (func.trigger?.type ?? func.trigger_type ?? '—');
+      console.log(chalk.gray(`  Triggers: ${triggerTypes}`));
+      if (func.agent_tool) {
+        const mode = func.agent_tool_mode ?? 'read_only';
+        const exposed = func.agent_tool_exposed_to ?? 'developer_only';
+        console.log(chalk.gray(`  🤖 Agent tool: ${mode}, exposed=${exposed}`));
+      }
       if (func.description) {
         console.log(chalk.gray(`  Description: ${func.description}`));
       }
@@ -55,6 +63,10 @@ export async function functionsDeployCommand(file: string, options: {
   env?: string[];
   timeoutMs?: number;
   memoryMb?: number;
+  agentTool?: boolean;
+  agentToolDescription?: string;
+  agentToolMode?: string;
+  agentToolExposedTo?: string;
 }) {
   const appId = await requireAppId(options.app);
 
@@ -95,6 +107,17 @@ export async function functionsDeployCommand(file: string, options: {
       }
     }
 
+    const mode = options.agentToolMode;
+    if (mode && mode !== 'read_only' && mode !== 'read_write') {
+      spinner.fail(`Invalid --agent-tool-mode: '${mode}' (expected read_only or read_write)`);
+      process.exit(1);
+    }
+    const exposed = options.agentToolExposedTo;
+    if (exposed && exposed !== 'developer_only' && exposed !== 'end_user') {
+      spinner.fail(`Invalid --agent-tool-exposed-to: '${exposed}' (expected developer_only or end_user)`);
+      process.exit(1);
+    }
+
     await deployFunction(appId, {
       name: functionName,
       code,
@@ -103,6 +126,10 @@ export async function functionsDeployCommand(file: string, options: {
       ...(envVars ? { envVars } : {}),
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(options.memoryMb !== undefined ? { memoryLimitMb: options.memoryMb } : {}),
+      ...(options.agentTool !== undefined ? { agent_tool: options.agentTool } : {}),
+      ...(options.agentToolDescription !== undefined ? { agent_tool_description: options.agentToolDescription } : {}),
+      ...(mode ? { agent_tool_mode: mode } : {}),
+      ...(exposed ? { agent_tool_exposed_to: exposed } : {}),
     });
 
     spinner.succeed(`Deployed function "${functionName}"`);

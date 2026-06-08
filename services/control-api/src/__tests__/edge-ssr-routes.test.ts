@@ -62,6 +62,14 @@ vi.mock('../plugins/database.js', () => ({
   },
 }));
 
+// Route resolves the per-app runtime pool via region-resolver, then runs
+// SELECTs against it. Forward the call to whatever controlDb the test has
+// patched onto `app`, so existing assertions on the patched mockQuery work.
+vi.mock('../services/region-resolver.js', () => ({
+  getRuntimeDbForApp: vi.fn(async (db: unknown) => db),
+  resolveAppHomeRegion: vi.fn(async () => 'local'),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports after mock declarations
 // ---------------------------------------------------------------------------

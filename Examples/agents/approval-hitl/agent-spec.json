@@ -1,0 +1,32 @@
+{
+  "spec_version": "1",
+  "entry": "act",
+  "nodes": {
+    "act": {
+      "type": "llm",
+      "model": "anthropic/claude-3.5-sonnet",
+      "system_prompt": "You are an operations assistant. Parse the user's request, extract the user_id, and call cancel_subscription. After the tool returns, summarize the outcome in one sentence.",
+      "input_template": "{{ input.message }}",
+      "output_key": "reply",
+      "tools": [
+        { "source": "function", "name": "cancel_subscription" }
+      ]
+    },
+    "done": { "type": "end", "output_template": "{{ state.reply }}" }
+  },
+  "edges": [
+    { "from": "act", "to": "done" }
+  ],
+  "tools": {
+    "builtin": [],
+    "mcp_servers": [],
+    "functions": ["cancel_subscription"]
+  },
+  "limits": {
+    "max_steps": 5,
+    "max_tool_calls": 3,
+    "max_parallel_tools": 1,
+    "timeout_seconds": 120,
+    "human_timeout_seconds": 86400
+  }
+}

@@ -1,4 +1,4 @@
-export type AuditCategory = 'auth' | 'admin' | 'function' | 'billing';
+export type AuditCategory = 'auth' | 'admin' | 'function' | 'billing' | 'ai';
 
 export type AuditAction =
   | 'create'

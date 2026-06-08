@@ -45,8 +45,6 @@ function makeMetadata(overrides: Partial<FunctionMetadata> & { code: string }): 
     env_vars: {},
     timeout_ms: 10_000,
     memory_limit_mb: 128,
-    trigger_type: 'http',
-    trigger_config: {},
     db_connection_string: null,
     substrate_user_id: null,
     ...overrides,

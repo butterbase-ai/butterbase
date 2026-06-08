@@ -17,6 +17,13 @@ vi.mock('../services/app-resolver.js', () => ({
   AppNotFoundError: class extends Error {},
 }));
 
+// Route resolves the per-app runtime pool via region-resolver. The stub
+// just returns the controlDb stub so the service mocks below run unchanged.
+vi.mock('../services/region-resolver.js', () => ({
+  getRuntimeDbForApp: vi.fn(async () => ({} as unknown)),
+  resolveAppHomeRegion: vi.fn(async () => 'local'),
+}));
+
 vi.mock('../utils/require-auth.js', () => ({
   requireUserId: vi.fn().mockReturnValue('user_1'),
 }));

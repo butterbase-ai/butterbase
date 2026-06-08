@@ -132,7 +132,21 @@ export interface FunctionTrigger {
   config?: Record<string, unknown>;
 }
 
-export interface DeployFunctionParams {
+export type AgentToolMode = 'read_only' | 'read_write';
+export type AgentToolExposedTo = 'developer_only' | 'end_user';
+
+export interface AgentToolFields {
+  /** When true, the function is exposed to agents as a tool. */
+  agent_tool?: boolean;
+  /** Description shown to the LLM (max 500 chars). */
+  agent_tool_description?: string | null;
+  /** read_only (default) | read_write. read_write requires HITL approval. */
+  agent_tool_mode?: AgentToolMode | null;
+  /** developer_only (default) | end_user. */
+  agent_tool_exposed_to?: AgentToolExposedTo | null;
+}
+
+export interface DeployFunctionParams extends AgentToolFields {
   name: string;
   code: string;
   description?: string;
@@ -140,15 +154,17 @@ export interface DeployFunctionParams {
   timeoutMs?: number;
   memoryLimitMb?: number;
   trigger?: FunctionTrigger;
+  /** Canonical multi-trigger array. At most one trigger per type. */
+  triggers?: FunctionTrigger[];
 }
 
-export interface FunctionSummary {
+export interface FunctionSummary extends AgentToolFields {
   id: string;
   name: string;
   description?: string;
   url?: string;
   status?: string;
-  trigger?: FunctionTrigger;
+  triggers?: FunctionTrigger[];
   deployedAt?: string;
   lastInvoked?: string;
   lastStatus?: string;

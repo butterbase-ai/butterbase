@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
     "clean": "rm -rf packages/*/dist services/*/dist",
     "verify:cascade": "tsx scripts/verify-account-deletion-cascade.ts",
     "migrate:control": "tsx db/control-plane/migrate.ts",
