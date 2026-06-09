@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { randomBytes } from 'crypto';
+import { encrypt } from './crypto.js';
 
 export type CloneJobStatus =
   | 'pending'
@@ -29,6 +30,9 @@ export interface CloneJob {
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
+  pending_env_vars: string | null;       // encrypted JSON blob (AUTH_ENCRYPTION_KEY)
+  auto_mint_requests: { fn_name: string; key: string }[] | null;
+  unfilled_env_vars: Record<string, string[]> | null;
 }
 
 function generateJobId(): string {
@@ -45,15 +49,41 @@ export async function createCloneJob(
     destRegion: string;
     requestedByUserId: string;
     destAppName?: string;
+    pendingEnvVarValues?: Record<string, Record<string, string>>;
+    autoMintRequests?: { fn_name: string; key: string }[];
   },
 ): Promise<CloneJob> {
   const id = generateJobId();
+
+  let pendingEnvVars: string | null = null;
+  if (args.pendingEnvVarValues && Object.keys(args.pendingEnvVarValues).length > 0) {
+    const keyHex = process.env.AUTH_ENCRYPTION_KEY;
+    if (!keyHex) throw new Error('AUTH_ENCRYPTION_KEY not configured');
+    pendingEnvVars = encrypt(JSON.stringify(args.pendingEnvVarValues), keyHex);
+  }
+
+  let autoMintRequests: string | null = null;
+  if (args.autoMintRequests && args.autoMintRequests.length > 0) {
+    autoMintRequests = JSON.stringify(args.autoMintRequests);
+  }
+
   const res = await controlDb.query<CloneJob>(
     `INSERT INTO template_clone_jobs
-       (id, source_app_id, source_snapshot_id, source_region, dest_region, requested_by_user_id, dest_app_name)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (id, source_app_id, source_snapshot_id, source_region, dest_region,
+        requested_by_user_id, dest_app_name, pending_env_vars, auto_mint_requests)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [id, args.sourceAppId, args.sourceSnapshotId, args.sourceRegion, args.destRegion, args.requestedByUserId, args.destAppName ?? null],
+    [
+      id,
+      args.sourceAppId,
+      args.sourceSnapshotId,
+      args.sourceRegion,
+      args.destRegion,
+      args.requestedByUserId,
+      args.destAppName ?? null,
+      pendingEnvVars,
+      autoMintRequests,
+    ],
   );
   return res.rows[0];
 }
