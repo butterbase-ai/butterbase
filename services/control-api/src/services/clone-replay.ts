@@ -946,12 +946,13 @@ export async function replayAuthHookBinding(
  * app's runtime DB (step 6 of the clone pipeline).
  *
  * Subsystems and their blanking rules:
- *   - storage_config (apps.storage_config)      — verbatim
- *   - jwt_config (apps.jwt_config)              — verbatim
- *   - allowed_origins (apps.allowed_origins)    — verbatim
- *   - ai_config (apps.ai_config)                — byokKey BLANKED; rest verbatim
- *   - app_realtime_config (table)               — verbatim
- *   - app_oauth_configs (table)                 — client_id + client_secret_encrypted BLANKED
+ *   - storage_config (apps.storage_config)           — verbatim
+ *   - jwt_config (apps.jwt_config)                   — verbatim
+ *   - allowed_origins (apps.allowed_origins)         — verbatim
+ *   - ai_config (apps.ai_config)                     — byokKey BLANKED; rest verbatim
+ *   - app_realtime_config (table)                    — verbatim
+ *   - app_oauth_configs (table)                      — client_id + client_secret_encrypted BLANKED
+ *   - app_integration_configs (table)                — composio_auth_config_id re-minted per dest app
  *
  * Each subsystem soft-fails independently: an error is pushed to `warnings`
  * and the function continues with the next subsystem.
@@ -970,6 +971,7 @@ export async function replayNonSecretConfig(
   await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
   await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
   await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
   return { warnings };
 }
 
