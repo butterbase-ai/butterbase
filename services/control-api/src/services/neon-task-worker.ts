@@ -21,6 +21,7 @@ import {
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding, replayFrontend } from './clone-replay.js';
+import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
 
@@ -681,6 +682,43 @@ async function executeClone(
       // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
       scope.setTag('step', 'replaying_functions');
       await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
+
+      // Read the staged env vars + auto-mint requests off the clone job row.
+      const cjRow = await controlDb.query<{
+        pending_env_vars: string | null;
+        auto_mint_requests: { fn_name: string; key: string }[] | null;
+      }>(
+        `SELECT pending_env_vars, auto_mint_requests FROM template_clone_jobs WHERE id = $1`,
+        [jobId],
+      );
+      let pendingEnvVarValues: Record<string, Record<string, string>> | undefined;
+      if (cjRow.rows[0]?.pending_env_vars) {
+        const encKey = process.env.AUTH_ENCRYPTION_KEY;
+        if (!encKey) {
+          logger.warn({ jobId }, '[clone] pending_env_vars present but AUTH_ENCRYPTION_KEY missing; skipping env var staging');
+        } else {
+          try {
+            pendingEnvVarValues = JSON.parse(decrypt(cjRow.rows[0].pending_env_vars, encKey)) as Record<string, Record<string, string>>;
+          } catch (err) {
+            logger.warn({ err, jobId }, '[clone] failed to decrypt pending_env_vars; proceeding without staged values');
+          }
+        }
+      }
+      const autoMintRequests = cjRow.rows[0]?.auto_mint_requests ?? undefined;
+
+      // Resolve dest owner id (needed for auto-mint — bb_sk_* is minted under the
+      // dest owner's user_id). One round-trip; cached for the rest of this step.
+      let destAppOwnerId: string | undefined;
+      try {
+        const ownerRow = await destRuntimePool.query<{ owner_id: string }>(
+          `SELECT owner_id FROM apps WHERE id = $1`,
+          [resolvedDestAppId],
+        );
+        destAppOwnerId = ownerRow.rows[0]?.owner_id;
+      } catch (err) {
+        logger.warn({ err, destAppId: resolvedDestAppId }, '[clone] failed to resolve dest owner_id; auto-mint will be skipped');
+      }
+
       const fnResult = await replayFunctions(
         sourceRuntimePool,
         destRuntimePool,
@@ -688,12 +726,39 @@ async function executeClone(
         resolvedDestAppId,
         job.requested_by_user_id,
         logger,
+        {
+          pendingEnvVarValues,
+          autoMintRequests,
+          controlPool: controlDb,
+          destAppOwnerId,
+        },
       );
       if (fnResult.warnings.length > 0) {
         await appendCloneJobWarnings(controlDb, jobId, fnResult.warnings);
       }
+
+      // Persist the post-replay summary + clear transient staging blobs in one UPDATE.
+      // We never want values lingering on the job row past the point they're applied.
+      await controlDb.query(
+        `UPDATE template_clone_jobs
+            SET unfilled_env_vars  = $1::jsonb,
+                pending_env_vars   = NULL,
+                auto_mint_requests = NULL,
+                updated_at         = now()
+          WHERE id = $2`,
+        [JSON.stringify(fnResult.unfilledEnvVars), jobId],
+      ).catch((err) => {
+        // Don't fail the whole clone if this side-effect can't be persisted.
+        logger.warn({ err, jobId }, '[clone] failed to persist unfilled_env_vars summary');
+      });
+
       logger.info(
-        { destAppId: resolvedDestAppId, count: fnResult.count, warnings: fnResult.warnings.length },
+        {
+          destAppId: resolvedDestAppId,
+          count: fnResult.count,
+          warnings: fnResult.warnings.length,
+          unfilledFunctions: Object.keys(fnResult.unfilledEnvVars).length,
+        },
         '[clone] functions replayed',
       );
 
