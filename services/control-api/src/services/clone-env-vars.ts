@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { decrypt } from './crypto.js';
+import { ApiKeyService } from './api-key-service.js';
 
 export interface SourceFnEnvVarKeys {
   fn_name: string;
@@ -78,4 +79,29 @@ export function detectConventions(keys: string[]): DetectedConvention[] {
   return keys
     .filter(k => k in CONVENTIONS)
     .map(k => ({ key: k, convention: CONVENTIONS[k], auto_mintable: true }));
+}
+
+export interface MintedCloneKey {
+  key: string;
+  keyId: string;
+}
+
+/**
+ * Mint a `bb_sk_*` API key for the dest app owner, scoped narrowly to the dest
+ * app's AI gateway. Used when the user opts into auto-mint for the
+ * BUTTERBASE_API_KEY convention. Scope is intentionally limited to
+ * `app:<destAppId>` + `ai:gateway` so a leaked key cannot be repurposed.
+ */
+export async function mintApiKeyForClone(
+  controlPool: pg.Pool,
+  args: { ownerId: string; destAppId: string; fnName: string },
+): Promise<MintedCloneKey> {
+  const result = await ApiKeyService.generateApiKey(
+    controlPool,
+    args.ownerId,
+    `Auto-mint for clone (${args.destAppId}/${args.fnName})`,
+    [`app:${args.destAppId}`, 'ai:gateway'],
+    'app',
+  );
+  return { key: result.key, keyId: result.keyId };
 }

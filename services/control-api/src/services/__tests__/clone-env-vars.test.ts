@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { listSourceEnvVarKeys, detectConventions } from '../clone-env-vars.js';
+import { listSourceEnvVarKeys, detectConventions, mintApiKeyForClone } from '../clone-env-vars.js';
 import { encrypt } from '../crypto.js';
-import { runtimeDb } from '../../__tests__/test-helpers/control-db.js';
+import { runtimeDb, controlDb } from '../../__tests__/test-helpers/control-db.js';
+import { randomUUID } from 'node:crypto';
 
 const RUN_DB_TESTS = process.env.RUN_DB_TESTS === '1';
 const describeDb = RUN_DB_TESTS ? describe : describe.skip;
@@ -62,5 +63,37 @@ describe('detectConventions', () => {
 
   it('returns empty when no known conventions match', () => {
     expect(detectConventions(['OPENAI_KEY', 'STRIPE_SECRET'])).toEqual([]);
+  });
+});
+
+describeDb('mintApiKeyForClone', () => {
+  it('mints a bb_sk_* key scoped to the dest app and owner', async () => {
+    const ownerId = randomUUID();
+    // platform_users has a FK target — seed an owner row first
+    await controlDb.query(
+      `INSERT INTO platform_users (id, email, email_verified) VALUES ($1, $2, true)
+       ON CONFLICT (id) DO NOTHING`,
+      [ownerId, `auto-mint-test-${ownerId}@x.com`],
+    );
+
+    const destAppId = `app_dest_mint_test_${ownerId.slice(0, 8)}`;
+    const { key, keyId } = await mintApiKeyForClone(controlDb, {
+      ownerId,
+      destAppId,
+      fnName: 'agent-chat',
+    });
+    expect(key.startsWith('bb_sk_')).toBe(true);
+
+    const row = await controlDb.query<{ scopes: string[]; name: string; user_id: string }>(
+      `SELECT scopes, name, user_id FROM api_keys WHERE id = $1`,
+      [keyId],
+    );
+    expect(row.rows[0].user_id).toBe(ownerId);
+    expect(row.rows[0].scopes).toEqual(expect.arrayContaining([`app:${destAppId}`, 'ai:gateway']));
+    expect(row.rows[0].name).toContain('agent-chat');
+    expect(row.rows[0].name).toContain('clone');
+
+    await controlDb.query(`DELETE FROM api_keys WHERE id = $1`, [keyId]);
+    await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
   });
 });
