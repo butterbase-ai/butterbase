@@ -4,7 +4,9 @@
 -- All three columns are NULL on legacy rows; the worker treats NULL as "no work".
 
 ALTER TABLE template_clone_jobs
-  ADD COLUMN IF NOT EXISTS pending_env_vars   JSONB,
+  -- TEXT (not JSONB) because the value is opaque AES-256-GCM ciphertext (iv:ct),
+  -- not valid JSON. JSONB would reject the INSERT.
+  ADD COLUMN IF NOT EXISTS pending_env_vars   TEXT,
   ADD COLUMN IF NOT EXISTS auto_mint_requests JSONB,
   ADD COLUMN IF NOT EXISTS unfilled_env_vars  JSONB;
 
