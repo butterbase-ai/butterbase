@@ -16,6 +16,19 @@ import { introspectRls } from './rls-introspector.js';
 import AdmZip from 'adm-zip';
 import * as R2 from './r2.js';
 import * as DeploymentService from './deployment.service.js';
+import { encrypt } from './crypto.js';
+import { listSourceEnvVarKeys, mintApiKeyForClone } from './clone-env-vars.js';
+
+export interface ReplayFunctionsEnvVarOpts {
+  /** Per-function env var values the user supplied at clone-create time. */
+  pendingEnvVarValues?: Record<string, Record<string, string>>;
+  /** Per-function keys to auto-mint a scoped bb_sk_* into. */
+  autoMintRequests?: { fn_name: string; key: string }[];
+  /** Control DB pool — required when autoMintRequests is non-empty. */
+  controlPool?: pg.Pool;
+  /** Dest app owner id — required for auto-mint (key is minted under this user). */
+  destAppOwnerId?: string;
+}
 
 /**
  * File extensions inside the published bundle that we treat as text and rewrite.
@@ -302,7 +315,7 @@ export async function replayRls(
  * re-inserts them under the new dest function id.  Runtime-stat columns
  * (invocation_count, error_count, etc.) are left at their defaults.
  * encrypted_env_vars is intentionally blanked (NULL) per the secrets
- * allowlist policy.
+ * allowlist policy unless `opts` provides values.
  *
  * Soft-fails per function: an insert error is recorded as a warning and the
  * clone continues with the next function.
@@ -316,7 +329,15 @@ export async function replayRls(
  * @param destAppId           - Dest app ID.
  * @param requestedByUserId   - User ID to record as deployed_by on dest rows.
  * @param logger              - Logger compatible with pino's info/warn interface.
- * @returns `{ count, warnings }` — rows successfully inserted and warning strings.
+ * @param opts                - Optional env var staging options. When omitted,
+ *                              behaviour is identical to the pre-opts baseline:
+ *                              encrypted_env_vars is left NULL on all dest rows.
+ *                              `opts.pendingEnvVarValues` supplies user-provided
+ *                              values; `opts.autoMintRequests` triggers bb_sk_*
+ *                              key generation per function/key pair.
+ * @returns `{ count, warnings, unfilledEnvVars }` — rows successfully inserted,
+ *          warning strings, and a map of function name → source env var keys that
+ *          were not covered by either provided values or auto-mint.
  */
 export async function replayFunctions(
   sourceRuntimePool: pg.Pool,
@@ -325,7 +346,8 @@ export async function replayFunctions(
   destAppId: string,
   requestedByUserId: string,
   logger: ReplayLogger,
-): Promise<{ count: number; warnings: string[] }> {
+  opts?: ReplayFunctionsEnvVarOpts,
+): Promise<{ count: number; warnings: string[]; unfilledEnvVars: Record<string, string[]> }> {
   const src = await sourceRuntimePool.query<{
     id: string;
     name: string;
@@ -348,6 +370,19 @@ export async function replayFunctions(
 
   const warnings: string[] = [];
   let inserted = 0;
+  const unfilledEnvVars: Record<string, string[]> = {};
+
+  // Pre-compute "what env vars does each source function need" — we use this
+  // to subtract filled (provided + auto-minted) keys and surface the rest.
+  // Soft-fail: if AUTH_ENCRYPTION_KEY is missing or any source blob fails to
+  // decrypt, fall back to an empty map so the rest of replay still runs.
+  let sourceKeysMap: Map<string, Set<string>> = new Map();
+  try {
+    const sourceKeysByFn = await listSourceEnvVarKeys(sourceRuntimePool, sourceAppId, logger);
+    sourceKeysMap = new Map(sourceKeysByFn.map(f => [f.fn_name, new Set(f.keys)]));
+  } catch (err) {
+    logger.warn({ err }, '[clone] listSourceEnvVarKeys failed; unfilledEnvVars will be empty');
+  }
 
   for (const f of src.rows) {
     try {
@@ -401,6 +436,57 @@ export async function replayFunctions(
             [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
           );
         }
+
+        // --- new: apply env vars ---
+        const provided = opts?.pendingEnvVarValues?.[f.name] ?? {};
+        const merged: Record<string, string> = { ...provided };
+
+        const autoFor = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
+        for (const r of autoFor) {
+          if (!opts?.controlPool || !opts?.destAppOwnerId) {
+            logger.warn(
+              { fn: f.name, key: r.key },
+              '[clone] auto-mint requested but controlPool or destAppOwnerId missing; skipping',
+            );
+            continue;
+          }
+          try {
+            const minted = await mintApiKeyForClone(opts.controlPool, {
+              ownerId: opts.destAppOwnerId,
+              destAppId,
+              fnName: f.name,
+            });
+            merged[r.key] = minted.key;
+          } catch (mintErr) {
+            warnings.push(`Auto-mint failed for ${f.name}/${r.key}: ${(mintErr as Error).message}`);
+            logger.warn({ err: mintErr, fn: f.name, key: r.key }, '[clone] auto-mint failed; continuing');
+          }
+        }
+
+        if (Object.keys(merged).length > 0) {
+          const encKey = process.env.AUTH_ENCRYPTION_KEY;
+          if (!encKey) {
+            warnings.push(`Cannot write env vars for ${f.name}: AUTH_ENCRYPTION_KEY not configured`);
+            logger.warn({ fn: f.name }, '[clone] AUTH_ENCRYPTION_KEY missing; skipping env var write');
+          } else {
+            const enc = encrypt(JSON.stringify(merged), encKey);
+            await destRuntimePool.query(
+              `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
+              [enc, destFnId],
+            );
+          }
+        }
+
+        // --- new: track unfilled ---
+        // Derive filled from `merged` (what actually got written), NOT from
+        // `autoFor` (the request list) — a failed auto-mint must leave its
+        // key in the unfilled set so the dashboard banner shows it.
+        const srcKeys = sourceKeysMap.get(f.name);
+        if (srcKeys) {
+          const filled = new Set(Object.keys(merged));
+          const unfilled = [...srcKeys].filter(k => !filled.has(k));
+          if (unfilled.length > 0) unfilledEnvVars[f.name] = unfilled;
+        }
       }
 
       inserted++;
@@ -411,7 +497,7 @@ export async function replayFunctions(
     }
   }
 
-  return { count: inserted, warnings };
+  return { count: inserted, warnings, unfilledEnvVars };
 }
 
 // ---------------------------------------------------------------------------
