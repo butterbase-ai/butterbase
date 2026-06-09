@@ -601,7 +601,9 @@ describe('Phase 5 A6 — auth_hook_function binding replay', () => {
       },
       body: JSON.stringify({ name: 'cfg-subs-source' }),
     });
-    expect(sourceInitRes.status, await sourceInitRes.clone().text()).toBe(200);
+    if (!sourceInitRes.ok) {
+      throw new Error(`POST /init failed: ${sourceInitRes.status} ${await sourceInitRes.text()}`);
+    }
     const { app_id: sourceAppId } = await sourceInitRes.json() as { app_id: string };
 
     await waitForProvisioning(sourceOwner.apiKey, sourceAppId, 120_000);
