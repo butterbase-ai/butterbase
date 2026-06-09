@@ -20,7 +20,7 @@ import {
 } from './repo-storage.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding, replayFrontend } from './clone-replay.js';
+import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
@@ -797,6 +797,26 @@ async function executeClone(
       logger.info(
         { destAppId: resolvedDestAppId, warnings: hookResult.warnings.length },
         '[clone] auth_hook_function binding step complete',
+      );
+
+      // Step 6c: Replay substrate link — binds dest's apps.substrate_user_id to
+      // the CLONER (not the source owner) so cloned apps using ctx.substrate
+      // don't 403 SUBSTRATE_NOT_LINKED. Runs under the same 'replaying_config'
+      // step tag.
+      const substrateResult = await replaySubstrateLink(
+        sourceRuntimePool,
+        destRuntimePool,
+        job.source_app_id,
+        resolvedDestAppId,
+        job.requested_by_user_id,
+        logger,
+      );
+      if (substrateResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, substrateResult.warnings);
+      }
+      logger.info(
+        { destAppId: resolvedDestAppId, warnings: substrateResult.warnings.length },
+        '[clone] substrate link step complete',
       );
 
       // Step 7: replay the source's most recent published frontend by copying
