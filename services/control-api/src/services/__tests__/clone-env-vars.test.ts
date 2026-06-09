@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { listSourceEnvVarKeys } from '../clone-env-vars.js';
+import { listSourceEnvVarKeys, detectConventions } from '../clone-env-vars.js';
 import { encrypt } from '../crypto.js';
 import { runtimeDb } from '../../__tests__/test-helpers/control-db.js';
 
@@ -50,5 +50,17 @@ describeDb('listSourceEnvVarKeys', () => {
       [appId, ownerId],
     );
     expect(await listSourceEnvVarKeys(runtimeDb, appId)).toEqual([]);
+  });
+});
+
+describe('detectConventions', () => {
+  it('flags BUTTERBASE_API_KEY as auto-mintable', () => {
+    expect(detectConventions(['BUTTERBASE_API_KEY', 'OPENAI_KEY'])).toEqual([
+      { key: 'BUTTERBASE_API_KEY', convention: 'butterbase_api_key', auto_mintable: true },
+    ]);
+  });
+
+  it('returns empty when no known conventions match', () => {
+    expect(detectConventions(['OPENAI_KEY', 'STRIPE_SECRET'])).toEqual([]);
   });
 });

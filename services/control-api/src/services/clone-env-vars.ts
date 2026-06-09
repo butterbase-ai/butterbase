@@ -59,3 +59,23 @@ export async function listSourceEnvVarKeys(
   }
   return out;
 }
+
+export interface DetectedConvention {
+  key: string;
+  convention: 'butterbase_api_key';
+  auto_mintable: boolean;
+}
+
+const CONVENTIONS: Record<string, DetectedConvention['convention']> = {
+  BUTTERBASE_API_KEY: 'butterbase_api_key',
+};
+
+/**
+ * Inspect a list of env var key names and surface platform-recognized conventions
+ * the caller can opt into (e.g. auto-minting a scoped bb_sk_* for BUTTERBASE_API_KEY).
+ */
+export function detectConventions(keys: string[]): DetectedConvention[] {
+  return keys
+    .filter(k => k in CONVENTIONS)
+    .map(k => ({ key: k, convention: CONVENTIONS[k], auto_mintable: true }));
+}
