@@ -201,6 +201,109 @@ describe('Phase 5 A5 — non-secret config replays; secrets blanked', () => {
     ).toBeNull();
   }, 240_000);
 
+  it('replays app_integration_configs onto the dest (or warns if Composio unavailable)', async () => {
+    // 1. Create source app.
+    const sourceOwner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'cfgreplay-intcfg');
+
+    const sourceInitRes = await fetch(`${API_URL}/init`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'cfg-intcfg-source' }),
+    });
+    if (!sourceInitRes.ok) {
+      throw new Error(`POST /init failed: ${sourceInitRes.status} ${await sourceInitRes.text()}`);
+    }
+    const { app_id: sourceAppId } = await sourceInitRes.json() as { app_id: string };
+
+    // 2. Wait for provisioning.
+    await waitForProvisioning(sourceOwner.apiKey, sourceAppId, 120_000);
+
+    // 3. Seed an app_integration_configs row on the source via direct DB write.
+    await queryRuntimeDb(
+      'us-east-1',
+      `INSERT INTO app_integration_configs
+         (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes)
+       VALUES ($1, 'gmail', 'ac_src_should_not_appear_on_dest', 'Source Gmail', true, '["gmail.read"]'::jsonb)
+       ON CONFLICT DO NOTHING`,
+      [sourceAppId],
+    );
+
+    // 4. Mark source public+listed.
+    const patchRes = await fetch(`${API_URL}/v1/${sourceAppId}/config/visibility`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ visibility: 'public', listed: true }),
+    });
+    expect(patchRes.status, await patchRes.clone().text()).toBe(200);
+
+    // 5. Push snapshot.
+    await pushSnapshot(sourceOwner.apiKey, sourceAppId, '# cfg-intcfg source\n');
+
+    // 6. Create a cloner user + start clone.
+    const cloner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'cfgreplay-icln');
+    const cloneRes = await fetch(`${API_URL}/v1/templates/${sourceAppId}/clone`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cloner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'replica-intcfg' }),
+    });
+    expect(cloneRes.status, await cloneRes.clone().text()).toBe(200);
+    const { job_id } = await cloneRes.json() as { job_id: string };
+
+    // 7. Wait for completed / failed.
+    const final = await waitForCloneStep(cloner.apiKey, job_id, ['completed', 'failed'], 180_000);
+    expect(
+      final.status,
+      `Clone job ended with unexpected status: ${JSON.stringify(final)}`,
+    ).toBe('completed');
+
+    const destAppId = final.dest_app_id!;
+
+    // 8. Read the dest's app_integration_configs row for toolkit_slug = 'gmail'.
+    const destIntcfg = await queryRuntimeDb(
+      'us-east-1',
+      `SELECT toolkit_slug, composio_auth_config_id, display_name, enabled
+         FROM app_integration_configs
+        WHERE app_id = $1 AND toolkit_slug = 'gmail'`,
+      [destAppId],
+    );
+
+    if (destIntcfg.rows.length === 0) {
+      // Composio was unavailable in this e2e env — a warning must have been recorded.
+      const jobRow = await controlPool.query(
+        `SELECT warnings FROM template_clone_jobs WHERE id = $1`,
+        [job_id],
+      );
+      const warnings: string[] = jobRow.rows[0]?.warnings ?? [];
+      const integrationWarning = warnings.find((w: string) => /integration/i.test(w));
+      expect(
+        integrationWarning,
+        `Expected a warning matching /integration/i when no dest row was written, got: ${JSON.stringify(warnings)}`,
+      ).toBeTruthy();
+    } else {
+      // Composio was available — row must have been replayed with a fresh auth config id.
+      const row = destIntcfg.rows[0];
+      expect(row.enabled).toBe(true);
+      expect(row.display_name).toBe('Source Gmail');
+      expect(
+        row.composio_auth_config_id,
+        'composio_auth_config_id must not carry over the source value',
+      ).not.toBe('ac_src_should_not_appear_on_dest');
+      expect(
+        row.composio_auth_config_id,
+        'composio_auth_config_id must not be empty on replayed row',
+      ).toBeTruthy();
+    }
+  }, 240_000);
+
   it('allowed_origins copies verbatim', async () => {
     // 1. Create source app.
     const sourceOwner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'cfgreplay-origins');
