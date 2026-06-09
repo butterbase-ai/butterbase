@@ -818,7 +818,7 @@ export async function replayIntegrations(
     return;
   }
 
-  let composio;
+  let composio: ReturnType<typeof getComposioClient>;
   try {
     composio = getComposioClient();
   } catch (err) {
@@ -836,7 +836,7 @@ export async function replayIntegrations(
         type: 'use_composio_managed_auth',
         name: `${destAppId}_${row.toolkit_slug}`,
       });
-      const newAuthConfigId = (authConfig as { id?: string }).id ?? '';
+      const newAuthConfigId = authConfig.id ?? '';
       if (!newAuthConfigId) {
         throw new Error('composio returned empty auth config id');
       }
@@ -865,7 +865,7 @@ export async function replayIntegrations(
   }
 
   logger.info(
-    { destAppId, total: src.rows.length, succeeded },
+    { destAppId, count: src.rows.length, succeeded },
     '[clone] integration configs replayed',
   );
 }
