@@ -161,4 +161,55 @@ describeDb('replayIntegrations', () => {
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
     await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
   });
+
+  it('is idempotent on retry: does not re-mint when dest row already exists', async () => {
+    const ownerId = randomUUID();
+    await controlDb.query(
+      `INSERT INTO platform_users (id, email, email_verified) VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING`,
+      [ownerId, `int-idem-${ownerId}@x.com`],
+    );
+    const srcId = `app_int_idem_src_${ownerId.slice(0, 8)}`;
+    const destId = `app_int_idem_dst_${ownerId.slice(0, 8)}`;
+    for (const id of [srcId, destId]) {
+      await runtimeDb.query(
+        `INSERT INTO apps (id, name, owner_id, db_name, region) VALUES ($1, $1, $2, $1, 'us-east-1')
+         ON CONFLICT (id) DO NOTHING`,
+        [id, ownerId],
+      );
+    }
+    await runtimeDb.query(
+      `INSERT INTO app_integration_configs (app_id, toolkit_slug, composio_auth_config_id, enabled)
+       VALUES ($1, 'gmail', 'ac_src_gmail', true)`,
+      [srcId],
+    );
+
+    let mints = 0;
+    __setComposioClientForTest({
+      authConfigs: {
+        create: async () => {
+          mints += 1;
+          return { id: `ac_test_${mints}` };
+        },
+      },
+    } as any);
+
+    const warnings: string[] = [];
+    await replayIntegrations(runtimeDb, runtimeDb, srcId, destId, warnings, noopLogger);
+    expect(mints).toBe(1);
+
+    // Second run (simulating a clone-job retry) MUST NOT mint a new auth config.
+    await replayIntegrations(runtimeDb, runtimeDb, srcId, destId, warnings, noopLogger);
+    expect(mints).toBe(1);
+    expect(warnings).toEqual([]);
+
+    const rows = await runtimeDb.query(
+      `SELECT composio_auth_config_id FROM app_integration_configs WHERE app_id = $1 AND toolkit_slug = 'gmail'`,
+      [destId],
+    );
+    expect(rows.rows[0].composio_auth_config_id).toBe('ac_test_1');
+
+    await runtimeDb.query(`DELETE FROM app_integration_configs WHERE app_id IN ($1, $2)`, [srcId, destId]);
+    await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
+    await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
+  });
 });

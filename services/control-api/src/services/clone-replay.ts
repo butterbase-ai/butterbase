@@ -831,6 +831,19 @@ export async function replayIntegrations(
   let succeeded = 0;
   for (const row of src.rows) {
     try {
+      // Idempotency: clone jobs retry on transient failure. If a previous run
+      // already minted a Composio auth config for this (dest, toolkit), reuse
+      // it instead of orphaning the old one on Composio's side.
+      const existing = await destRuntimePool.query<{ composio_auth_config_id: string }>(
+        `SELECT composio_auth_config_id FROM app_integration_configs
+          WHERE app_id = $1 AND toolkit_slug = $2 AND enabled = true`,
+        [destAppId, row.toolkit_slug],
+      );
+      if (existing.rows.length > 0 && existing.rows[0].composio_auth_config_id) {
+        succeeded += 1;
+        continue;
+      }
+
       const composioSlug = row.toolkit_slug.toUpperCase().replace(/-/g, '');
       const authConfig = await composio.authConfigs.create(composioSlug, {
         type: 'use_composio_managed_auth',
@@ -841,8 +854,7 @@ export async function replayIntegrations(
         throw new Error('composio returned empty auth config id');
       }
 
-      const scopesJson =
-        typeof row.scopes === 'string' ? row.scopes : JSON.stringify(row.scopes ?? []);
+      const scopesJson = JSON.stringify(row.scopes ?? []);
 
       await destRuntimePool.query(
         `INSERT INTO app_integration_configs
