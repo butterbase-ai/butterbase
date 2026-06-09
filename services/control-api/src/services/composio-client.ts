@@ -79,12 +79,20 @@ export function verifyStateToken(
 // Composio client helpers
 // ==========================================
 
+let __composioOverride: Composio | null = null;
+
+/** Test-only: override the Composio client. Pass `null` to clear. */
+export function __setComposioClientForTest(client: Composio | null): void {
+  __composioOverride = client;
+}
+
 /**
  * Get the platform-level Composio client.
  * One API key for all of Butterbase. User isolation is achieved
  * by namespacing user IDs as `{appId}_{endUserId}`.
  */
-function getComposioClient(): Composio {
+export function getComposioClient(): Composio {
+  if (__composioOverride) return __composioOverride;
   if (!config.composio.apiKey) {
     throw Object.assign(
       new Error('Composio API key not configured. Set COMPOSIO_API_KEY environment variable.'),
