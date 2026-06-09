@@ -18,6 +18,7 @@ import * as R2 from './r2.js';
 import * as DeploymentService from './deployment.service.js';
 import { encrypt } from './crypto.js';
 import { listSourceEnvVarKeys, mintApiKeyForClone } from './clone-env-vars.js';
+import { getComposioClient } from './composio-client.js';
 
 export interface ReplayFunctionsEnvVarOpts {
   /** Per-function env var values the user supplied at clone-create time. */
@@ -772,6 +773,101 @@ async function replayOauthConfigs(
     warnings.push(msg);
     logger.warn({ err }, '[clone] oauth configs replay failed; continuing');
   }
+}
+
+/**
+ * Replay enabled rows of `app_integration_configs` from source → dest.
+ *
+ * Each composio_auth_config_id is bound to the SOURCE app's callback URL on
+ * Composio's side, so we cannot reuse it. Instead, for each enabled source row
+ * we call `composio.authConfigs.create(...)` to mint a fresh auth config
+ * namespaced to the DEST app (`{destAppId}_{toolkit}`), then insert the dest
+ * row with the new id.
+ *
+ * Soft-fail semantics:
+ *   - Composio not configured → 1 warning, return.
+ *   - Per-row Composio/DB error → 1 warning, continue with next row.
+ *   - Disabled source rows are skipped.
+ */
+export async function replayIntegrations(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  warnings: string[],
+  logger: ReplayLogger,
+): Promise<void> {
+  let src: { rows: Array<{ toolkit_slug: string; display_name: string | null; scopes: unknown }> };
+  try {
+    src = await sourceRuntimePool.query(
+      `SELECT toolkit_slug, display_name, scopes
+         FROM app_integration_configs
+        WHERE app_id = $1 AND enabled = true
+        ORDER BY toolkit_slug`,
+      [sourceAppId],
+    );
+  } catch (err) {
+    const msg = `app_integration_configs select failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] integration configs select failed; continuing');
+    return;
+  }
+
+  if (src.rows.length === 0) {
+    logger.info({ destAppId }, '[clone] no integration configs to replay');
+    return;
+  }
+
+  let composio;
+  try {
+    composio = getComposioClient();
+  } catch (err) {
+    const msg = `app_integration_configs replay skipped: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] composio unavailable; integration configs skipped');
+    return;
+  }
+
+  let succeeded = 0;
+  for (const row of src.rows) {
+    try {
+      const composioSlug = row.toolkit_slug.toUpperCase().replace(/-/g, '');
+      const authConfig = await composio.authConfigs.create(composioSlug, {
+        type: 'use_composio_managed_auth',
+        name: `${destAppId}_${row.toolkit_slug}`,
+      });
+      const newAuthConfigId = (authConfig as { id?: string }).id ?? '';
+      if (!newAuthConfigId) {
+        throw new Error('composio returned empty auth config id');
+      }
+
+      const scopesJson =
+        typeof row.scopes === 'string' ? row.scopes : JSON.stringify(row.scopes ?? []);
+
+      await destRuntimePool.query(
+        `INSERT INTO app_integration_configs
+           (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes)
+         VALUES ($1, $2, $3, $4, true, $5::jsonb)
+         ON CONFLICT (app_id, toolkit_slug) DO UPDATE
+           SET composio_auth_config_id = EXCLUDED.composio_auth_config_id,
+               display_name            = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
+               scopes                  = EXCLUDED.scopes,
+               enabled                 = true,
+               updated_at              = now()`,
+        [destAppId, row.toolkit_slug, newAuthConfigId, row.display_name, scopesJson],
+      );
+      succeeded += 1;
+    } catch (err) {
+      const msg = `app_integration_configs row ${row.toolkit_slug} failed: ${(err as Error).message}`;
+      warnings.push(msg);
+      logger.warn({ toolkit: row.toolkit_slug, err }, '[clone] integration row failed; continuing');
+    }
+  }
+
+  logger.info(
+    { destAppId, total: src.rows.length, succeeded },
+    '[clone] integration configs replayed',
+  );
 }
 
 // ---------------------------------------------------------------------------
