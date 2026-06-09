@@ -60,7 +60,13 @@ export function cloneRoutes(app: FastifyInstance) {
     },
   }, async (request, reply) => {
     const { source_app_id } = request.params as { source_app_id: string };
-    const body = (request.body ?? {}) as { name?: string; region?: string; dest_region?: string };
+    const body = (request.body ?? {}) as {
+      name?: string;
+      region?: string;
+      dest_region?: string;
+      env_var_values?: Record<string, Record<string, string>>;
+      auto_mint_api_key?: { fn_name: string; key: string }[];
+    };
     const userId = requireUserId(request);
 
     // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
@@ -151,6 +157,61 @@ export function cloneRoutes(app: FastifyInstance) {
       });
     }
 
+    // Validate env_var_values shape: must be plain object whose values are plain
+    // objects with string values. Reject anything else with a 400 — the caller
+    // likely sent a malformed payload and silent acceptance would persist garbage.
+    if (body.env_var_values !== undefined) {
+      if (typeof body.env_var_values !== 'object' || body.env_var_values === null || Array.isArray(body.env_var_values)) {
+        return reply.code(400).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: 'env_var_values must be an object mapping function names to {key: value} objects.',
+          remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+      for (const [fn, vars] of Object.entries(body.env_var_values)) {
+        if (typeof vars !== 'object' || vars === null || Array.isArray(vars)) {
+          return reply.code(400).send(createAgentError({
+            code: VALIDATION_INVALID_SCHEMA,
+            message: `env_var_values["${fn}"] must be an object of {key: value} strings.`,
+            remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
+            documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+          }));
+        }
+        for (const [k, v] of Object.entries(vars)) {
+          if (typeof v !== 'string') {
+            return reply.code(400).send(createAgentError({
+              code: VALIDATION_INVALID_SCHEMA,
+              message: `env_var_values["${fn}"]["${k}"] must be a string.`,
+              remediation: 'Env var values must be strings.',
+              documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+            }));
+          }
+        }
+      }
+    }
+
+    if (body.auto_mint_api_key !== undefined) {
+      if (!Array.isArray(body.auto_mint_api_key)) {
+        return reply.code(400).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: 'auto_mint_api_key must be an array of {fn_name, key} objects.',
+          remediation: 'Send auto_mint_api_key as [{ fn_name: "fn", key: "BUTTERBASE_API_KEY" }].',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+      for (const r of body.auto_mint_api_key) {
+        if (typeof r?.fn_name !== 'string' || typeof r?.key !== 'string') {
+          return reply.code(400).send(createAgentError({
+            code: VALIDATION_INVALID_SCHEMA,
+            message: 'auto_mint_api_key entries must have string fn_name and key.',
+            remediation: 'Send auto_mint_api_key as [{ fn_name: "fn", key: "BUTTERBASE_API_KEY" }].',
+            documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+          }));
+        }
+      }
+    }
+
     // Accept dest_region (preferred) or the legacy region alias.
     const destRegion = body.dest_region ?? body.region ?? src.region;
     const job = await createCloneJob(app.controlDb, {
@@ -160,6 +221,8 @@ export function cloneRoutes(app: FastifyInstance) {
       destRegion,
       requestedByUserId: userId,
       destAppName: body.name,
+      pendingEnvVarValues: body.env_var_values,
+      autoMintRequests: body.auto_mint_api_key,
     });
 
     await enqueueCloneTask(source_app_id, src.region, job.id);
