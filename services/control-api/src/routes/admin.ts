@@ -430,10 +430,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // ai_usage_logs and apps are per-region runtime tables. Fan out across
     // every region and merge the aggregates by their grouping key.
     const [totalsRows, byModelRows, byRouterRows, byUserRows, byAppRows, dailyRows] = await Promise.all([
-      fanOutQuery<{ requests: number; tokens: string; cost: string }>(
+      fanOutQuery<{ requests: number; tokens: string; cost: string; provider_cost: string; charged_credits: string }>(
         `SELECT count(*)::int AS requests,
                 coalesce(sum(total_tokens),0)::bigint AS tokens,
-                coalesce(sum(cost_usd),0)::numeric AS cost
+                coalesce(sum(cost_usd),0)::numeric AS cost,
+                coalesce(sum(provider_cost_usd),0)::numeric AS provider_cost,
+                coalesce(sum(charged_credits_usd),0)::numeric AS charged_credits
          FROM ai_usage_logs
          WHERE created_at >= current_date - $1::int * interval '1 day'`,
         [days]
@@ -522,6 +524,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const totalRequests = totalsRows.reduce((acc, r) => acc + r.requests, 0);
     const totalTokens = totalsRows.reduce((acc, r) => acc + Number(r.tokens), 0);
     const totalCostUsd = totalsRows.reduce((acc, r) => acc + parseFloat(r.cost), 0);
+    const totalProviderCostUsd = totalsRows.reduce((acc, r) => acc + parseFloat(r.provider_cost ?? '0'), 0);
+    const totalChargedCreditsUsd = totalsRows.reduce((acc, r) => acc + parseFloat(r.charged_credits ?? '0'), 0);
 
     const byModelMerged = mergeBy(byModelRows, ['model', 'provider', 'router']);
     const byModel = byModelMerged.map((r: any) => ({
@@ -552,6 +556,8 @@ export async function adminRoutes(app: FastifyInstance) {
       totalRequests,
       totalTokens,
       totalCostUsd,
+      totalProviderCostUsd,
+      totalChargedCreditsUsd,
       byModel,
       byRouter,
       byUser: byUserMerged.map((r: any) => ({
