@@ -251,6 +251,7 @@ export function cloneRoutes(app: FastifyInstance) {
       retry_count: job.retry_count,
       error_message: job.error_message,
       warnings: (job.warnings ?? []) as string[],
+      unfilled_env_vars: job.unfilled_env_vars ?? null,
       created_at: job.created_at.toISOString(),
       completed_at: job.completed_at?.toISOString() ?? null,
     });
