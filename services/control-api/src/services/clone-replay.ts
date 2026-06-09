@@ -463,27 +463,37 @@ export async function replayFunctions(
           }
         }
 
+        // `filled` tracks keys that actually made it into the dest function row.
+        // Default empty — only populated after a successful UPDATE so a failed
+        // write (missing AUTH_ENCRYPTION_KEY, DB error, failed auto-mint) leaves
+        // its keys in `unfilledEnvVars` for the dashboard banner.
+        let filled = new Set<string>();
         if (Object.keys(merged).length > 0) {
           const encKey = process.env.AUTH_ENCRYPTION_KEY;
           if (!encKey) {
             warnings.push(`Cannot write env vars for ${f.name}: AUTH_ENCRYPTION_KEY not configured`);
             logger.warn({ fn: f.name }, '[clone] AUTH_ENCRYPTION_KEY missing; skipping env var write');
           } else {
-            const enc = encrypt(JSON.stringify(merged), encKey);
-            await destRuntimePool.query(
-              `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
-              [enc, destFnId],
-            );
+            try {
+              const enc = encrypt(JSON.stringify(merged), encKey);
+              await destRuntimePool.query(
+                `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
+                [enc, destFnId],
+              );
+              filled = new Set(Object.keys(merged));
+            } catch (writeErr) {
+              warnings.push(`Failed to write env vars for ${f.name}: ${(writeErr as Error).message}`);
+              logger.warn({ err: writeErr, fn: f.name }, '[clone] env var write failed; keys will remain unfilled');
+            }
           }
         }
 
         // --- new: track unfilled ---
-        // Derive filled from `merged` (what actually got written), NOT from
-        // `autoFor` (the request list) — a failed auto-mint must leave its
-        // key in the unfilled set so the dashboard banner shows it.
+        // Derive filled from what we actually wrote, NOT from `merged` or
+        // `autoFor` — a failed auto-mint, missing encryption key, or DB write
+        // failure must leave the key in the unfilled set.
         const srcKeys = sourceKeysMap.get(f.name);
         if (srcKeys) {
-          const filled = new Set(Object.keys(merged));
           const unfilled = [...srcKeys].filter(k => !filled.has(k));
           if (unfilled.length > 0) unfilledEnvVars[f.name] = unfilled;
         }

@@ -12,9 +12,13 @@ import { RESOURCE_NOT_FOUND, AUTH_INSUFFICIENT_PERMISSIONS } from '@butterbase/s
  * Lists the env vars a caller will need to supply (or accept auto-mint for)
  * before cloning this app. Returns per-function KEY NAMES only (never values).
  *
- * Auth policy mirrors the existing clone POST: source app must be public,
- * OR the caller is the source's owner. Error shape matches clone.ts via
- * createAgentError so callers can use a single error handler across both.
+ * Auth policy: anonymous reads are allowed for PUBLIC apps (env var KEY NAMES
+ * are part of a template's public surface area — values never leave the
+ * server). Private apps require the caller to be the owner. This is
+ * intentionally more permissive than POST /clone, which always requires an
+ * authenticated user — discovery should not need credentials. Error shape
+ * matches clone.ts via createAgentError so callers can use a single error
+ * handler across both.
  */
 export function cloneRoutesPreflight(app: FastifyInstance) {
   app.get<{ Params: { source_app_id: string } }>(
