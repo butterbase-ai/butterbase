@@ -39,6 +39,14 @@ const REWRITEABLE_EXTENSIONS = new Set([
  * characters (~73 bits of entropy via APP_ID_ALPHABET), so accidental collisions
  * with unrelated substrings in minified code are negligible.
  *
+ * Rebuilds the zip from scratch via addFile rather than mutating the input via
+ * updateFile + toBuffer. Source bundles produced by streaming zippers (e.g.
+ * archiver) carry data descriptors per entry; AdmZip 0.5.x's toBuffer doesn't
+ * round-trip those correctly, leaving an EOCD-valid zip whose entries throw
+ * "ADM-ZIP: No descriptor present" the next time anything calls getData().
+ * Re-adding each entry's already-decoded bytes into a fresh AdmZip avoids that
+ * code path and yields a standard zip with sizes/CRCs in the local headers.
+ *
  * Returns the rewritten buffer plus a count of files touched, for logging.
  */
 function rewriteAppIdInArtifact(
@@ -46,34 +54,33 @@ function rewriteAppIdInArtifact(
   sourceAppId: string,
   destAppId: string,
 ): { buffer: Buffer; filesRewritten: number; totalReplacements: number } {
-  const zip = new AdmZip(buffer);
+  const inZip = new AdmZip(buffer);
+  const outZip = new AdmZip();
   let filesRewritten = 0;
   let totalReplacements = 0;
 
-  for (const entry of zip.getEntries()) {
+  for (const entry of inZip.getEntries()) {
     if (entry.isDirectory) continue;
+    const data = entry.getData();
     const name = entry.entryName.toLowerCase();
     const dot = name.lastIndexOf('.');
     const ext = dot >= 0 ? name.slice(dot) : '';
-    if (!REWRITEABLE_EXTENSIONS.has(ext)) continue;
 
-    const original = entry.getData();
-    // Skip anything that doesn't even mention the source app id — cheap fast path
-    // and also a guard against accidentally re-encoding files that happen to
-    // contain non-UTF-8 bytes (e.g. inlined binary in a .map).
-    if (!original.includes(sourceAppId)) continue;
+    let outData = data;
+    if (REWRITEABLE_EXTENSIONS.has(ext) && data.includes(sourceAppId)) {
+      const text = data.toString('utf8');
+      const occurrences = text.split(sourceAppId).length - 1;
+      if (occurrences > 0) {
+        outData = Buffer.from(text.split(sourceAppId).join(destAppId), 'utf8');
+        filesRewritten += 1;
+        totalReplacements += occurrences;
+      }
+    }
 
-    const text = original.toString('utf8');
-    // Count occurrences for telemetry; split is cheap enough on bundle-sized strings.
-    const occurrences = text.split(sourceAppId).length - 1;
-    if (occurrences === 0) continue;
-    const rewritten = text.split(sourceAppId).join(destAppId);
-    zip.updateFile(entry, Buffer.from(rewritten, 'utf8'));
-    filesRewritten += 1;
-    totalReplacements += occurrences;
+    outZip.addFile(entry.entryName, outData);
   }
 
-  return { buffer: zip.toBuffer(), filesRewritten, totalReplacements };
+  return { buffer: outZip.toBuffer(), filesRewritten, totalReplacements };
 }
 
 export interface ReplayLogger {
