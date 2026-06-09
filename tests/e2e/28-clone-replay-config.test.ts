@@ -589,4 +589,67 @@ describe('Phase 5 A6 — auth_hook_function binding replay', () => {
       `Expected a warning mentioning 'ghost-hook', got: ${JSON.stringify(warnings)}`,
     ).toBeTruthy();
   }, 240_000);
+
+  it('replays substrate link binding (binds dest to cloner)', async () => {
+    // 1. Create source app + wait for provisioning.
+    const sourceOwner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'cfgreplay-subs');
+    const sourceInitRes = await fetch(`${API_URL}/init`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'cfg-subs-source' }),
+    });
+    expect(sourceInitRes.status, await sourceInitRes.clone().text()).toBe(200);
+    const { app_id: sourceAppId } = await sourceInitRes.json() as { app_id: string };
+
+    await waitForProvisioning(sourceOwner.apiKey, sourceAppId, 120_000);
+
+    // 2. Manually link the source to its OWNER's substrate (simulating a dashboard click).
+    await queryRuntimeDb(
+      'us-east-1',
+      `UPDATE apps SET substrate_user_id = $1 WHERE id = $2`,
+      [sourceOwner.userId, sourceAppId],
+    );
+
+    // 3. Mark public + listed and push snapshot.
+    const patchRes = await fetch(`${API_URL}/v1/${sourceAppId}/config/visibility`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${sourceOwner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ visibility: 'public', listed: true }),
+    });
+    expect(patchRes.status, await patchRes.clone().text()).toBe(200);
+    await pushSnapshot(sourceOwner.apiKey, sourceAppId, '# cfg-subs source\n');
+
+    // 4. Create a cloner user and start the clone.
+    const cloner = await seedUserAndApp(controlPool, runtimePool, 'us-east-1', 'cfgreplay-subcln');
+    const cloneRes = await fetch(`${API_URL}/v1/templates/${sourceAppId}/clone`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cloner.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'replica-subs' }),
+    });
+    expect(cloneRes.status, await cloneRes.clone().text()).toBe(200);
+    const { job_id } = await cloneRes.json() as { job_id: string };
+
+    const final = await waitForCloneStep(cloner.apiKey, job_id, ['completed', 'failed'], 180_000);
+    expect(final.status).toBe('completed');
+    const destAppId = final.dest_app_id!;
+
+    // 5. Assert: dest's substrate_user_id = cloner's user id (NOT source owner's).
+    const destRow = await queryRuntimeDb(
+      'us-east-1',
+      `SELECT substrate_user_id FROM apps WHERE id = $1`,
+      [destAppId],
+    );
+    const destSubstrateUserId = (destRow.rows[0] as { substrate_user_id: string | null })?.substrate_user_id;
+    expect(destSubstrateUserId, 'dest must be bound to cloner').toBe(cloner.userId);
+    expect(destSubstrateUserId).not.toBe(sourceOwner.userId);
+  }, 240_000);
 });
