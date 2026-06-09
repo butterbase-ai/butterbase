@@ -439,17 +439,24 @@ export async function autoApiRoutes(app: FastifyInstance) {
         // may have already decoded any content-encoding, so the original
         // content-length / content-encoding no longer match what we send. Let
         // undici recompute content-length from the outgoing buffer.
+        // Drop accept-encoding too: Deno's HTTP server honors it and would
+        // pick zstd/br for the response, but undici's fetch here only
+        // auto-decompresses gzip/deflate — anything else arrives as opaque
+        // framed bytes that we'd then forward to the browser mis-labeled.
         if (
           lower === 'host' ||
           lower === 'connection' ||
           lower === 'transfer-encoding' ||
           lower === 'upgrade' ||
           lower === 'content-length' ||
-          lower === 'content-encoding'
+          lower === 'content-encoding' ||
+          lower === 'accept-encoding'
         ) continue;
         if (typeof value === 'string') forwardHeaders[lower] = value;
         else if (Array.isArray(value)) forwardHeaders[lower] = value[0];
       }
+      // Terminate content-coding at this hop: ask the runtime for plaintext bytes.
+      forwardHeaders['accept-encoding'] = 'identity';
       // Platform headers always override whatever the caller sent
       forwardHeaders['x-user-id'] = userId || '';
       forwardHeaders['x-app-id'] = app_id;
@@ -495,15 +502,16 @@ export async function autoApiRoutes(app: FastifyInstance) {
       // Get response as buffer to preserve binary data
       const responseBuffer = Buffer.from(await denoResponse.arrayBuffer());
 
-      // Set headers individually, excluding content-encoding to avoid conflicts
+      // Propagate upstream headers faithfully. We forced accept-encoding:identity
+      // on the request above, so the runtime returns plaintext bytes and any
+      // content-encoding it sets describes reality (not the previous behavior of
+      // unconditionally claiming identity while passing through opaque zstd frames).
+      // Skip content-length only — Fastify recomputes it from the outgoing buffer.
       for (const [key, value] of denoResponse.headers.entries()) {
-        if (key.toLowerCase() !== 'content-encoding' && key.toLowerCase() !== 'content-length') {
+        if (key.toLowerCase() !== 'content-length') {
           reply.header(key, value);
         }
       }
-
-      // Disable Fastify's automatic compression for this response
-      reply.header('content-encoding', 'identity');
 
       return reply
         .status(denoResponse.status)

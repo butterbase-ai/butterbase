@@ -191,3 +191,102 @@ describe('fn gateway – body forwarding', () => {
     expect(init.body).toBeUndefined();
   });
 });
+
+describe('fn gateway – response encoding (regression: zstd-without-header)', () => {
+  const app = Fastify();
+
+  beforeAll(async () => {
+    app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, body, done) => {
+      done(null, body);
+    });
+    app.register(databasePlugin);
+    app.decorate('runtimeDb', ((_region: string) => ({ query: async () => ({ rows: [] }) })) as any);
+    app.register(autoApiRoutes);
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+  });
+
+  // Without this, Deno.serve honors the browser's accept-encoding and picks zstd/br;
+  // undici doesn't decode either, so the gateway would forward opaque framed bytes
+  // to the browser mis-labeled as identity.
+  it('forces accept-encoding: identity on the runtime request (browser zstd not forwarded)', async () => {
+    mockFetch.mockResolvedValueOnce(makeDenoResponse());
+
+    await app.inject({
+      method: 'POST',
+      url: '/v1/app_test001/fn/my-func',
+      headers: {
+        'accept-encoding': 'gzip, deflate, br, zstd',
+        'content-type': 'application/json',
+      },
+      payload: {},
+    });
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers['accept-encoding']).toBe('identity');
+  });
+
+  // The actual bug the gateway was shipping: r.json() throws on the client because
+  // the body is zstd-framed but content-encoding is set to "identity".
+  it('round-trips a JSON response so fetch().then(r => r.json()) parses', async () => {
+    const payload = { entities: [] };
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    );
+
+    const reply = await app.inject({
+      method: 'POST',
+      url: '/v1/app_test001/fn/my-func',
+      headers: { 'content-type': 'application/json' },
+      payload: { type: 'company' },
+    });
+
+    expect(reply.statusCode).toBe(200);
+    const contentEncoding = reply.headers['content-encoding'];
+    // Either absent or 'identity' is fine; anything else means we're claiming
+    // a coding that the bytes don't actually have.
+    if (contentEncoding !== undefined) {
+      expect(contentEncoding).toBe('identity');
+    }
+    expect(reply.headers['content-type']).toMatch(/application\/json/);
+    // The real assertion: the body parses as JSON. Just length > 0 is not enough.
+    expect(JSON.parse(reply.body)).toEqual(payload);
+    // And no zstd magic at the front.
+    const first4 = Buffer.from(reply.rawPayload).subarray(0, 4);
+    expect(first4.equals(Buffer.from([0x28, 0xb5, 0x2f, 0xfd]))).toBe(false);
+  });
+
+  // If a function deliberately returns gzipped bytes with content-encoding:gzip,
+  // we should propagate the header truthfully — not strip it and lie 'identity'.
+  it('propagates upstream content-encoding faithfully when set', async () => {
+    const gzipBytes = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0xde, 0xad, 0xbe, 0xef]);
+    mockFetch.mockResolvedValueOnce(
+      new Response(gzipBytes, {
+        status: 200,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-encoding': 'gzip',
+        },
+      })
+    );
+
+    const reply = await app.inject({
+      method: 'GET',
+      url: '/v1/app_test001/fn/my-func',
+    });
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.headers['content-encoding']).toBe('gzip');
+  });
+});
