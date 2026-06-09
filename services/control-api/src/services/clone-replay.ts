@@ -954,6 +954,73 @@ export async function replayAuthHookBinding(
 }
 
 /**
+ * Replay the source app's substrate link onto the dest — but bind it to the
+ * CLONER's platform user id, not the source owner's. The substrate is per-user
+ * (the substrate ledger lives under the user's id), so copying the source's
+ * `substrate_user_id` verbatim would leak the source owner's substrate to the
+ * cloner. Setting the dest's `substrate_user_id` to the cloner mirrors what the
+ * dashboard does at `POST /v1/me/apps/:id/substrate-link`
+ * (cloud/overlays/control-api-app-substrate.ts:36-39).
+ *
+ * No-op when:
+ *   - Source was never substrate-linked (`apps.substrate_user_id IS NULL`).
+ *   - Dest is already linked to the cloner (idempotent across job retries —
+ *     avoids bumping `updated_at` on every retry).
+ *
+ * @param sourceRuntimePool - Runtime DB pool for the source app's region.
+ * @param destRuntimePool   - Runtime DB pool for the dest app's region.
+ * @param sourceAppId       - Source app ID.
+ * @param destAppId         - Dest app ID.
+ * @param clonerUserId      - Platform user id of the user requesting the clone
+ *                            (= `template_clone_jobs.requested_by_user_id`).
+ * @param logger            - Logger compatible with pino's info/warn interface.
+ * @returns `{ warnings }` — warning strings if the link could not be applied.
+ */
+export async function replaySubstrateLink(
+  sourceRuntimePool: pg.Pool,
+  destRuntimePool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  clonerUserId: string,
+  logger: ReplayLogger,
+): Promise<{ warnings: string[] }> {
+  const warnings: string[] = [];
+
+  try {
+    const src = await sourceRuntimePool.query<{ substrate_user_id: string | null }>(
+      `SELECT substrate_user_id FROM apps WHERE id = $1`,
+      [sourceAppId],
+    );
+    if (!src.rows[0]?.substrate_user_id) {
+      return { warnings };
+    }
+
+    // Idempotency: skip the UPDATE if the dest is already linked to this cloner.
+    // Without this guard, every clone-job retry bumps `updated_at`.
+    const dest = await destRuntimePool.query<{ substrate_user_id: string | null }>(
+      `SELECT substrate_user_id FROM apps WHERE id = $1`,
+      [destAppId],
+    );
+    if (dest.rows[0]?.substrate_user_id === clonerUserId) {
+      logger.info({ destAppId }, '[clone] substrate link already in place; skipping');
+      return { warnings };
+    }
+
+    await destRuntimePool.query(
+      `UPDATE apps SET substrate_user_id = $1, updated_at = now() WHERE id = $2`,
+      [clonerUserId, destAppId],
+    );
+    logger.info({ destAppId, clonerUserId }, '[clone] substrate link replayed (bound to cloner)');
+  } catch (err) {
+    const msg = `substrate_user_id replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] substrate link replay failed; continuing');
+  }
+
+  return { warnings };
+}
+
+/**
  * Replay all non-secret config from the source app's runtime DB onto the dest
  * app's runtime DB (step 6 of the clone pipeline).
  *
