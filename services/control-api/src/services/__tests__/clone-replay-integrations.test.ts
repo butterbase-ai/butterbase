@@ -8,12 +8,11 @@ const RUN_DB_TESTS = process.env.RUN_DB_TESTS === '1';
 const describeDb = RUN_DB_TESTS ? describe : describe.skip;
 const noopLogger = { info() {}, warn() {} };
 
-function fakeComposio(opts: { create?: (slug: string, args: any) => Promise<{ id: string }>; throws?: boolean } = {}) {
+function fakeComposio(opts: { create?: (slug: string, args: unknown) => Promise<{ id: string }> } = {}) {
   let counter = 0;
   return {
     authConfigs: {
-      create: opts.create ?? (async (_slug: string, _args: any) => {
-        if (opts.throws) throw new Error('composio boom');
+      create: opts.create ?? (async (_slug: string, _args: unknown) => {
         counter += 1;
         return { id: `ac_test_${counter}` };
       }),
@@ -64,6 +63,7 @@ describeDb('replayIntegrations', () => {
 
     await runtimeDb.query(`DELETE FROM app_integration_configs WHERE app_id IN ($1, $2)`, [srcId, destId]);
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
+    await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
   });
 
   it('soft-fails when Composio is not configured', async () => {
@@ -110,6 +110,7 @@ describeDb('replayIntegrations', () => {
 
     await runtimeDb.query(`DELETE FROM app_integration_configs WHERE app_id IN ($1, $2)`, [srcId, destId]);
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
+    await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
   });
 
   it('continues past a single failing row', async () => {
@@ -158,5 +159,6 @@ describeDb('replayIntegrations', () => {
 
     await runtimeDb.query(`DELETE FROM app_integration_configs WHERE app_id IN ($1, $2)`, [srcId, destId]);
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
+    await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
   });
 });
