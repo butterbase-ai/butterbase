@@ -108,6 +108,7 @@ export async function getAiUsageSummary(
   totalTokens: number;
   totalCost: number;
   byModel: Record<string, { tokens: number; cost: number; requests: number }>;
+  meetings: Array<{ dimension: string; seconds: number; usd: number }>;
 }> {
   const runtimePool = await getRuntimeDbForApp(db, appId);
 
@@ -140,5 +141,22 @@ export async function getAiUsageSummary(
     totalCost += cost;
   }
 
-  return { totalTokens, totalCost, byModel };
+  // actor_usage_logs (meetings) is also runtime-tier.
+  const meetingsResult = await runtimePool.query<{ dimension: string; total_seconds: string; total_usd: string }>(
+    `SELECT dimension,
+            SUM(seconds)::TEXT AS total_seconds,
+            SUM(usd_charged)::TEXT AS total_usd
+       FROM actor_usage_logs
+      WHERE app_id = $1
+        AND DATE(created_at) >= $2 AND DATE(created_at) <= $3
+      GROUP BY dimension`,
+    [appId, start, end],
+  );
+  const meetings = meetingsResult.rows.map(r => ({
+    dimension: r.dimension,
+    seconds: Number(r.total_seconds ?? 0),
+    usd: Number(r.total_usd ?? 0),
+  }));
+
+  return { totalTokens, totalCost, byModel, meetings };
 }
