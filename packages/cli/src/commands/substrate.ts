@@ -68,6 +68,24 @@ export async function substrateEntitiesGetCommand(id: string, opts: { json?: boo
   } catch (e) { handleAuthError(e); }
 }
 
+export async function substrateArtifactsListCommand(opts: { kind?: string; q?: string; limit?: string; json?: boolean }) {
+  try {
+    const q = qs({ kind: opts.kind, q: opts.q, limit: opts.limit });
+    const res = await apiGet<{ source_artifacts: any[]; total?: number }>(`/v1/me/substrate/source-artifacts${q}`);
+    if (opts.json) { console.log(JSON.stringify(res, null, 2)); return; }
+    for (const a of res.source_artifacts ?? []) {
+      console.log(`${a.id.padEnd(28)} ${a.kind.padEnd(16)} ${a.title}`);
+    }
+  } catch (e) { handleAuthError(e); }
+}
+
+export async function substrateArtifactsGetCommand(id: string, _opts: { json?: boolean }) {
+  try {
+    const res = await apiGet<unknown>(`/v1/me/substrate/source-artifacts/${encodeURIComponent(id)}`);
+    console.log(JSON.stringify(res, null, 2));
+  } catch (e) { handleAuthError(e); }
+}
+
 export async function substrateMemoryCommand(query: string, opts: { limit?: string; json?: boolean }) {
   try {
     const q = qs({ q: query, limit: opts.limit });

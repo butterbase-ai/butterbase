@@ -3406,7 +3406,8 @@ Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require
 | POST   | /v1/me/substrate/actions/{id}/reject | Reject a pending action |
 | GET    | /v1/me/substrate/entities | List / search entities |
 | GET    | /v1/me/substrate/entities/{id} | Fetch one entity |
-| GET    | /v1/me/substrate/memory/search?q=… | Full-text search across decisions/commitments/learnings |
+| GET    | /v1/me/substrate/memory/search?q=… | Full-text search across decisions/commitments/learnings/source_artifacts |
+| GET    | /v1/me/substrate/source-artifacts[…] | List / fetch source artifacts (meeting transcripts, email threads, documents) |
 | GET    | /v1/me/substrate/snapshots?days=N | Daily snapshots |
 | GET\\|POST\\|PUT\\|DELETE | /v1/me/substrate/attention-rules[…] | Attention rule CRUD + preview + enable/disable + firings |
 | GET\\|PUT\\|DELETE | /v1/me/substrate/outbox-targets[…] | Webhook targets per capability |
@@ -3496,7 +3497,36 @@ Server-side clients (with a \`bb_sub_\` key) can skip the ticket exchange and pa
 
 ### CLI
 
-The \`butterbase substrate\` command group mirrors the HTTP surface end-to-end. \`butterbase substrate ledger\`, \`butterbase substrate propose <capability>\`, \`butterbase substrate approve|reject\`, \`butterbase substrate entities list|get|update\`, \`butterbase substrate memory <query>\`, \`butterbase substrate outbox list|cancel|retry\`, \`butterbase substrate rules list|get|create|enable|disable|delete|firings\`, \`butterbase substrate snapshots\`, \`butterbase substrate settings show|yolo on|off\`. All commands accept \`--json\` for scripting. See the [CLI Substrate page](https://docs.butterbase.ai/cli/substrate/) for full syntax.
+The \`butterbase substrate\` command group mirrors the HTTP surface end-to-end. \`butterbase substrate ledger\`, \`butterbase substrate propose <capability>\`, \`butterbase substrate approve|reject\`, \`butterbase substrate entities list|get|update\`, \`butterbase substrate artifacts list|get\`, \`butterbase substrate memory <query>\`, \`butterbase substrate outbox list|cancel|retry\`, \`butterbase substrate rules list|get|create|enable|disable|delete|firings\`, \`butterbase substrate snapshots\`, \`butterbase substrate settings show|yolo on|off\`. All commands accept \`--json\` for scripting. See the [CLI Substrate page](https://docs.butterbase.ai/cli/substrate/) for full syntax.
+
+### MCP
+
+All substrate operations are exposed through a single MCP tool: \`manage_substrate\`. Pass \`{ action, ... }\` where \`action\` selects the operation. There is no per-capability or per-route tool — \`propose_action\`, \`find_entities\`, \`search_memory\`, \`manage_attention_rules\`, \`list_outbox\`, etc. are all collapsed into \`manage_substrate\` actions, mirroring how \`manage_kv\` works for the KV store.
+
+Action groups:
+- **Writes:** \`propose\`, \`approve\`, \`reject\`. All substrate writes (decisions, commitments, learnings, entities, source artifacts) go through \`propose\` with the appropriate \`capability\`.
+- **Ledger:** \`list_actions\`, \`get_action\`.
+- **Entities:** \`find_entities\`, \`get_entity\`.
+- **Source artifacts:** \`list_source_artifacts\`, \`get_source_artifact\`. Writes use \`propose\` with \`capability: "upsert_source_artifact"\`.
+- **Memory:** \`search_memory\` (kinds: \`decisions\`, \`commitments\`, \`learnings\`, \`source_artifacts\`).
+- **Outbox:** \`list_outbox\`, \`retry_outbox\`, \`cancel_outbox\`.
+- **Attention rules:** \`list_rules\`, \`get_rule\`, \`create_rule\`, \`update_rule\`, \`delete_rule\`, \`enable_rule\`, \`disable_rule\`, \`list_rule_firings\`.
+- **Snapshots & settings:** \`snapshots\`, \`get_settings\`, \`set_yolo\`.
+
+Example:
+
+\`\`\`json
+{
+  "tool": "manage_substrate",
+  "action": "propose",
+  "capability": "record_commitment",
+  "payload": {
+    "title": "Ship phase 6 by Friday",
+    "owner_entity_id": "ent_01…",
+    "source_artifact_id": "art_01…"
+  }
+}
+\`\`\`
 
 ### Common errors
 

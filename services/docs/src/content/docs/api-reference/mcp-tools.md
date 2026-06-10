@@ -197,6 +197,97 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 }
 ```
 
+## Substrate
+
+All substrate operations are routed through the single `manage_substrate` MCP tool. Pass `{ action, ... }` where `action` selects the operation. The agent's calling user is implicit — there is no `app_id` and no `substrate_user_id`; every call operates on the substrate that belongs to the caller.
+
+| Tool | Description |
+|------|-------------|
+| `manage_substrate` | Read/write the caller's substrate: propose/approve/reject actions, browse the ledger, look up entities and source artifacts, search memory, manage outbox and attention rules, read snapshots, toggle yolo. See `manage_substrate` actions below. |
+
+### manage_substrate actions
+
+Writes — every substrate write (decisions, commitments, learnings, entities, source artifacts, side-effects) goes through `propose` with the appropriate `capability`.
+
+| Action | Description |
+|--------|-------------|
+| `propose` | Propose an action. Pass `capability`, `payload`, optional `idempotency_key`, optional `dangerously_skip_approval`. Returns `{ action_id, verdict, requires_approval, result? }`. |
+| `approve` | Approve a pending action. Pass `action_id`. |
+| `reject` | Reject a pending action. Pass `action_id`, optional `reason`. |
+
+Action ledger.
+
+| Action | Description |
+|--------|-------------|
+| `list_actions` | List ledger rows. Optional `status` (`proposed` \| `executed` \| `rejected`), `capability`, `source_app_id`, `source_rule_id`, `limit` (1–500, default 100), `before` (ISO timestamp). |
+| `get_action` | Fetch one action by `action_id`. |
+
+Entities.
+
+| Action | Description |
+|--------|-------------|
+| `find_entities` | List/search entities. Optional `type` (`person` \| `company` \| `fund` \| `workspace` \| `team` \| `project` \| `event` \| `agent` \| `self`), `q` (display-name search), `limit` (1–200, default 50). |
+| `get_entity` | Fetch one entity by `entity_id`. |
+
+Source artifacts — durable source material (meeting transcripts, email threads, call recordings, documents) that decisions, commitments, and learnings can link back to.
+
+| Action | Description |
+|--------|-------------|
+| `list_source_artifacts` | List/search artifacts. Optional `kind`, `q` (FTS over title+summary+content), `limit`, `count` (`true` to include `total`). |
+| `get_source_artifact` | Fetch one artifact by `artifact_id`, including its full `content`. |
+
+Memory.
+
+| Action | Description |
+|--------|-------------|
+| `search_memory` | Full-text search across long-form memory. Pass `q`; optional `kinds` (any subset of `decisions`, `commitments`, `learnings`, `source_artifacts` — defaults to all of them), `limit`. |
+
+Outbox.
+
+| Action | Description |
+|--------|-------------|
+| `list_outbox` | List outbox deliveries. Optional `status`, `limit`. |
+| `retry_outbox` | Retry a failed delivery by `outbox_id`. |
+| `cancel_outbox` | Cancel a pending delivery by `outbox_id`. |
+
+Attention rules.
+
+| Action | Description |
+|--------|-------------|
+| `list_rules` | List rules. Optional `enabled` filter. |
+| `get_rule` | Fetch one rule by `rule_id`. |
+| `create_rule` | Create a rule. Pass `rule` (see [Substrate API](./substrate-api.md#attention-rules) for the body shape). |
+| `update_rule` | Update a rule. Pass `rule_id` and `rule`. |
+| `delete_rule` | Delete a rule by `rule_id`. |
+| `enable_rule` | Enable a rule by `rule_id`. |
+| `disable_rule` | Disable a rule by `rule_id`. |
+| `list_rule_firings` | List firings for a rule. Pass `rule_id`; optional `status`, `limit`, `before`. |
+
+Snapshots & settings.
+
+| Action | Description |
+|--------|-------------|
+| `snapshots` | List daily substrate snapshots. Optional `days` (default 7). |
+| `get_settings` | Read per-user toggles (yolo mode, etc.). |
+| `set_yolo` | Toggle yolo mode. Pass `yolo_mode: true \| false`. |
+
+### manage_substrate example
+
+```json
+{
+  "tool": "manage_substrate",
+  "action": "propose",
+  "capability": "upsert_source_artifact",
+  "payload": {
+    "kind": "meeting_transcript",
+    "title": "Weekly product sync — 2026-06-09",
+    "external_system": "fireflies",
+    "external_id": "abc123",
+    "content": "Alice: we should ship phase 6 by Friday…"
+  }
+}
+```
+
 ## Custom Domains
 
 | Tool | Description |

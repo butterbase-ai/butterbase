@@ -113,6 +113,8 @@ import {
   substrateEntitiesListCommand,
   substrateEntitiesGetCommand,
   substrateEntitiesUpdateCommand,
+  substrateArtifactsListCommand,
+  substrateArtifactsGetCommand,
   substrateMemoryCommand,
   substrateOutboxListCommand,
   substrateOutboxCancelCommand,
@@ -1309,10 +1311,28 @@ substrateEntities
   .option('--json', 'Output raw JSON')
   .action((id, opts) => substrateEntitiesUpdateCommand(id, opts));
 
+// substrate artifacts
+const substrateArtifacts = substrate.command('artifacts').description('Manage substrate source artifacts (meeting transcripts, email threads, etc.)');
+
+substrateArtifacts
+  .command('list')
+  .description('List source artifacts (optionally filter or full-text search)')
+  .option('--kind <kind>', 'Filter by kind (meeting_notes, email_thread, call_recording, document, …)')
+  .option('--q <query>', 'Full-text search over title, summary, content')
+  .option('--limit <n>', 'Max rows')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateArtifactsListCommand(opts));
+
+substrateArtifacts
+  .command('get <id>')
+  .description('Get a source artifact by id (returns full content)')
+  .option('--json', 'Output raw JSON')
+  .action((id, opts) => substrateArtifactsGetCommand(id, opts));
+
 // substrate memory
 substrate
   .command('memory <query>')
-  .description('Semantic search over substrate memory')
+  .description('Semantic search over substrate memory (decisions, commitments, learnings, source artifacts)')
   .option('--limit <n>', 'Max results')
   .option('--json', 'Output raw JSON')
   .action((query, opts) => substrateMemoryCommand(query, opts));

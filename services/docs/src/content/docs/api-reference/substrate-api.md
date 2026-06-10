@@ -112,13 +112,63 @@ GET /v1/me/substrate/entities?type=person&q=alice&limit=20&count=true
 | `limit` | int (1–200) | 50 |
 | `count` | `true` to include `total` in response | `false` |
 
+## Source artifacts
+
+Source artifacts are durable, full-text-indexed source material — meeting transcripts, email threads, call recordings, documents — that the substrate extracts decisions, commitments, and learnings from. A commitment can carry a `source_artifact_id` pointing back to the artifact it was extracted from.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | /v1/me/substrate/source-artifacts | List / filter / FTS over artifacts |
+| GET | /v1/me/substrate/source-artifacts/\{artifact_id} | Fetch one artifact (incl. full `content`) |
+
+```
+GET /v1/me/substrate/source-artifacts?kind=meeting_transcript&q=billing&limit=20&count=true
+```
+
+| Query param | Type | Default |
+|---|---|---|
+| `kind` | string | _all_ |
+| `q` | string (FTS over `title + summary + content`) | _none_ |
+| `limit` | int (1–200) | 50 |
+| `count` | `true` to include `total` in response | `false` |
+
+Response:
+
+```json
+{
+  "artifacts": [
+    {
+      "id": "art_01…",
+      "kind": "meeting_transcript",
+      "external_system": "fireflies",
+      "external_id": "abc123",
+      "title": "Weekly product sync — 2026-06-09",
+      "summary": "Reviewed phase 6 scope; Alice owns billing migration.",
+      "url": "https://fireflies.ai/…",
+      "storage_object_id": null,
+      "links": { "entity_ids": ["ent_01…"], "project_tags": ["phase-6"] },
+      "attrs": {},
+      "source_app_id": "app_…",
+      "created_at": "2026-06-09T…",
+      "updated_at": "2026-06-09T…"
+    }
+  ]
+}
+```
+
+`GET /v1/me/substrate/source-artifacts/{artifact_id}` returns the same shape plus the full `content` field.
+
+Artifacts are written via the `upsert_source_artifact` capability through `POST /v1/me/substrate/actions/propose`. Upsert is idempotent: if `id` is omitted, the substrate resolves the row by `(external_system, external_id)`; otherwise it generates an `art_<ulid>`. Artifacts proposed by an installed app are auto-attributed to that app via `source_app_id`.
+
 ## Memory search
 
-Full-text search across `decisions`, `commitments`, `learnings`, and `principles`.
+Full-text search across `decisions`, `commitments`, `learnings`, and `source_artifacts`.
 
 ```
 GET /v1/me/substrate/memory/search?q=billing&kinds=decisions,commitments&limit=20
 ```
+
+`kinds` accepts any subset of `decisions`, `commitments`, `learnings`, `source_artifacts` (comma-separated). Omitting `kinds` searches all of them.
 
 Response:
 
@@ -132,10 +182,27 @@ Response:
       "body_text": "agent memory needs a single source of truth",
       "rank": 0.18,
       "updated_at": "2026-05-31T…"
+    },
+    {
+      "id": "art_01…",
+      "kind": "source_artifact",
+      "title": "Weekly product sync — 2026-06-09",
+      "body_text": "Reviewed phase 6 scope; Alice owns billing migration.",
+      "rank": 0.12,
+      "updated_at": "2026-06-09T…"
     }
   ]
 }
 ```
+
+## Capabilities
+
+A few capabilities accept fields that aren't obvious from their name:
+
+| Capability | Optional fields | Notes |
+|---|---|---|
+| `record_commitment` | `source_artifact_id`, `attrs` | `source_artifact_id` links the commitment back to the artifact it was extracted from (FK to `source_artifacts(id) ON DELETE SET NULL`). `attrs` is a free-form JSON bag for caller metadata. |
+| `upsert_source_artifact` | `id`, `external_system`, `external_id`, `summary`, `content`, `storage_object_id`, `url`, `links`, `attrs` | Required: `kind`, `title`. Idempotent by `(external_system, external_id)` when `id` is omitted. `default_policy='auto'`, `reversible=true`, `yolo_eligible=true`. Returns `{ artifact_id, was_insert, before }`. |
 
 ## Daily snapshots
 

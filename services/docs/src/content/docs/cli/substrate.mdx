@@ -54,9 +54,36 @@ echo '{"display_name":"Renamed"}' > patch.json
 butterbase substrate entities update ent_01H... --patch @patch.json
 ```
 
+## Artifacts
+
+List and fetch source artifacts — meeting transcripts, email threads, call recordings, documents — that the substrate has extracted into durable memory.
+
+### `butterbase substrate artifacts list`
+
+```bash
+butterbase substrate artifacts list --kind meeting_transcript --limit 25
+butterbase substrate artifacts list --q "billing migration" --json | jq '.artifacts[].id'
+```
+
+| Option | Type | Default |
+|---|---|---|
+| `--kind <k>` | string | _all_ |
+| `--q <query>` | string (FTS over title+summary+content) | _none_ |
+| `--limit <n>` | int (1–200) | 50 |
+| `--json` | flag | _table output_ |
+
+### `butterbase substrate artifacts get <id>`
+
+Fetch a single artifact, including its full `content`.
+
+```bash
+butterbase substrate artifacts get art_01H...
+butterbase substrate artifacts get art_01H... --json | jq -r '.content'
+```
+
 ## Memory
 
-Full-text search across decisions, commitments, learnings, and principles.
+Full-text search across decisions, commitments, learnings, and source artifacts.
 
 ```bash
 butterbase substrate memory "OKR planning Q3" --limit 10

@@ -14,6 +14,7 @@ It plugs into Butterbase the same way [Functions](/core-concepts/functions/) and
 | **Entities** | People, companies, projects, agents, etc. — the durable nouns your apps talk about. |
 | **Action ledger** | Every action an agent or app proposed, with who proposed it, the policy verdict, and the result. |
 | **Decisions, commitments, learnings, principles** | Long-form memory rows your agents can search later. |
+| **Source artifacts** | Durable, FTS-indexed source material — meeting transcripts, email threads, call recordings, documents — that decisions, commitments, and learnings can link back to. Provenance for everything else in the substrate. |
 | **Attention rules** | Scheduled rules that run on a snapshot of your substrate and propose actions when their conditions match. |
 | **Outbox targets** | HMAC-signed webhooks that fire when actions execute (e.g. send the email draft to an external system). |
 | **Settings** | Per-user toggles — `yolo_mode` for auto-approval, etc. |
@@ -50,7 +51,17 @@ The available calls are:
 | `propose(capability, payload, opts?)` | Propose an action. Returns `{ action_id, verdict, requires_approval, result? }`. |
 | `getEntity(entity_id)` | Fetch one entity. |
 | `findEntities({ type?, q?, limit? })` | List or search entities. |
-| `searchMemory(query, { kinds?, limit? })` | Full-text search across decisions, commitments, learnings. |
+| `searchMemory(query, { kinds?, limit? })` | Full-text search across decisions, commitments, learnings, and source artifacts. |
+
+### Capabilities at a glance
+
+| Capability | Purpose |
+|---|---|
+| `record_decision` | Write a decision row. Auto-executes. |
+| `record_commitment` | Write a commitment. Accepts an optional `source_artifact_id` to link the commitment back to the meeting / email / document it was extracted from. |
+| `record_learning` | Write a learning. Auto-executes. |
+| `upsert_source_artifact` | Insert or update a source artifact (transcript, email thread, document). Idempotent by `(external_system, external_id)`; reversible; `yolo_eligible`. Use this when an app ingests source material the agent should later be able to cite. |
+| `send_email_draft`, … | Side-effecting capabilities. Always require approval for agent proposers. |
 
 When the function runs on behalf of an app, the proposer is recorded as `kind: 'agent'` and certain side-effect capabilities require human approval even if the user has [`yolo_mode`](#yolo-mode) on.
 
