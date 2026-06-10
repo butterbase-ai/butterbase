@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS app_containers (
                           CHECK (instance_type IN ('dev', 'basic', 'standard')),
     max_instances     INT  NOT NULL DEFAULT 5 CHECK (max_instances BETWEEN 1 AND 10),
     sleep_after_s     INT  NOT NULL DEFAULT 300 CHECK (sleep_after_s BETWEEN 10 AND 3600),
-    port              INT  NOT NULL DEFAULT 8080,
+    port              INT  NOT NULL DEFAULT 8080 CHECK (port BETWEEN 1 AND 65535),
 
     access_mode       TEXT NOT NULL DEFAULT 'service_key'
                           CHECK (access_mode IN ('public', 'authenticated', 'service_key')),
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS app_containers (
     error_message     TEXT,
 
     last_deployed_at  TIMESTAMPTZ,
+    -- platform_users.id; no FK — cross-tier logical reference
     deployed_by       UUID,
 
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
