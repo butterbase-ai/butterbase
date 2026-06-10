@@ -61,6 +61,20 @@ export function parseKvValue(raw, env) {
   return { appId: raw, region: env.BUTTERBASE_REGION };
 }
 
+// Route /_do/* to `${appId}_do`, /_containers/{name}/* to `${appId}_ctr_{name}`
+// (one Worker per container — see docs/containers.md), everything else to the
+// frontend script `appId`. Exported for tests.
+export function resolveTargetScript(pathname, appId) {
+  if (pathname.startsWith('/_do/')) {
+    return { targetScript: `${appId}_do`, missingMessage: 'No Durable Objects deployed for this app.' };
+  }
+  const ctr = pathname.match(/^\/_containers\/([a-z][a-z0-9-]*)(\/|$)/);
+  if (ctr) {
+    return { targetScript: `${appId}_ctr_${ctr[1]}`, missingMessage: `No container "${ctr[1]}" deployed for this app.` };
+  }
+  return { targetScript: appId, missingMessage: 'App not deployed' };
+}
+
 export async function handleRequest(request, env) {
     const baseDomain = env.BASE_DOMAIN || 'butterbase.dev';
 
@@ -109,21 +123,19 @@ export async function handleRequest(request, env) {
     // apps, but Cloudflare Workers cannot trigger Fly's region replay —
     // that header was a no-op that broke cross-region frontend serving.
 
-    // Route /_do/* to the per-app DO worker (script `${appId}_do`); everything
-    // else goes to the frontend worker (script `appId`). The DO script is
+    // Route /_do/* to the per-app DO worker (script `${appId}_do`); /_containers/{name}/*
+    // to the per-container Worker (script `${appId}_ctr_{name}`); everything
+    // else goes to the frontend worker (script `appId`). The DO and container scripts are
     // uploaded by control-api when the user registers their first Durable
-    // Object, so apps without DOs simply won't have it — surface a clear 404
+    // Object or container, so apps without them simply won't have it — surface a clear 404
     // for that case.
-    const isDo = url.pathname.startsWith('/_do/');
-    const targetScript = isDo ? `${appId}_do` : appId;
+    const { targetScript, missingMessage } = resolveTargetScript(url.pathname, appId);
 
     let worker;
     try {
       worker = env.DISPATCHER.get(targetScript);
     } catch (err) {
-      if (isDo) {
-        return new Response('No Durable Objects deployed for this app.', { status: 404 });
-      }
+      if (targetScript !== appId) return new Response(missingMessage, { status: 404 });
       throw err;
     }
 
@@ -133,10 +145,7 @@ export async function handleRequest(request, env) {
       return withMime(request.url, res);
     } catch (err) {
       if (err.message?.includes('Worker not found')) {
-        if (isDo) {
-          return new Response('No Durable Objects deployed for this app.', { status: 404 });
-        }
-        return new Response('App not deployed', { status: 404 });
+        return new Response(missingMessage, { status: 404 });
       }
       throw err;
     }

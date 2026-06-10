@@ -1,22 +1,20 @@
-import { describe, it, expect } from 'vitest';
-import { parseKvValue } from './index.js';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { resolveTargetScript } from './index.js';
 
-describe('parseKvValue', () => {
-  const env = { BUTTERBASE_REGION: 'us-east-1' };
+test('frontend paths route to the app script', () => {
+  assert.equal(resolveTargetScript('/index.html', 'app_x').targetScript, 'app_x');
+});
 
-  it('returns null for missing value', () => {
-    expect(parseKvValue(null, env)).toBeNull();
-  });
+test('/_do/ routes to the DO script', () => {
+  assert.equal(resolveTargetScript('/_do/chat-room/r1', 'app_x').targetScript, 'app_x_do');
+});
 
-  it('parses JSON value', () => {
-    expect(parseKvValue('{"appId":"a","region":"eu-west-1"}', env)).toEqual({ appId: 'a', region: 'eu-west-1' });
-  });
+test('/_containers/{name} routes to the per-container script', () => {
+  assert.equal(resolveTargetScript('/_containers/game-server/r1/play', 'app_x').targetScript, 'app_x_ctr_game-server');
+  assert.equal(resolveTargetScript('/_containers/game-server', 'app_x').targetScript, 'app_x_ctr_game-server');
+});
 
-  it('falls back to local region for JSON without region', () => {
-    expect(parseKvValue('{"appId":"a"}', env)).toEqual({ appId: 'a', region: 'us-east-1' });
-  });
-
-  it('treats legacy string value as local region', () => {
-    expect(parseKvValue('legacy-app-id', env)).toEqual({ appId: 'legacy-app-id', region: 'us-east-1' });
-  });
+test('bad container names fall through to frontend', () => {
+  assert.equal(resolveTargetScript('/_containers/Bad_Name/x', 'app_x').targetScript, 'app_x');
 });
