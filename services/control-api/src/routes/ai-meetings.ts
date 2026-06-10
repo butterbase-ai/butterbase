@@ -173,6 +173,23 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
     }
   });
 
+  app.get('/v1/ai/meetings/_estimate', async (req, reply) => {
+    try {
+      const user = resolveGatewayUser(req);
+      const q = z.object({
+        durationMinutes: z.coerce.number().int().min(1).max(24 * 60),
+        transcript: z.coerce.boolean().default(true),
+      }).parse(req.query);
+      const provider = getActorProvider('meetings');
+      const out = provider.estimateCost({
+        durationMinutes: q.durationMinutes,
+        transcript: q.transcript,
+        markupPct: config.aiRouter.markupPct,
+      });
+      return reply.code(200).send(out);
+    } catch (err) { return handleError(reply, err); }
+  });
+
   // Configure the app's meetings webhook forward URL and (optionally) rotate the signing secret.
   const meetingsWebhookBodySchema = z.object({
     forward_url: z.string().url(),

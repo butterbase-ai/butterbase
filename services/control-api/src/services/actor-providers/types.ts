@@ -60,6 +60,8 @@ export interface ActorProvider {
   get(ctx: ActorTenantContext, botId: string): Promise<ActorBot>;
   stop(ctx: ActorTenantContext, botId: string): Promise<void>;
   list(ctx: ActorTenantContext, req: ListActorBotsRequest): Promise<ListActorBotsResult>;
+  /** Compute the estimated USD cost for a meeting of the given duration. */
+  estimateCost(req: { durationMinutes: number; transcript: boolean; markupPct: number }): { usd: number };
 }
 
 /** Thrown when no adapter is registered for the key. */

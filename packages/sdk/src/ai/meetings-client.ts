@@ -51,4 +51,14 @@ export class MeetingsClient {
       return { data: null, error: error as Error };
     }
   }
+
+  async estimateCost(input: { durationMinutes: number; transcript?: boolean }): Promise<ButterbaseResponse<{ usd: number }>> {
+    try {
+      const qs = new URLSearchParams();
+      qs.set('durationMinutes', String(input.durationMinutes));
+      if (input.transcript !== undefined) qs.set('transcript', String(input.transcript));
+      const data = await this.client.request<{ usd: number }>('GET', `/v1/ai/meetings/_estimate?${qs.toString()}`);
+      return { data, error: null };
+    } catch (error) { return { data: null, error: error as Error }; }
+  }
 }

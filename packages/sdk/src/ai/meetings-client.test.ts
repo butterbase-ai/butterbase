@@ -50,4 +50,11 @@ describe('MeetingsClient', () => {
     expect(data).toBeNull();
     expect(error?.message).toBe('boom');
   });
+
+  it('estimateCost returns markup-applied USD', async () => {
+    const client = fakeClient(async () => ({ usd: 0.075 }));
+    const meet = new MeetingsClient(client);
+    const { data } = await meet.estimateCost({ durationMinutes: 60 });
+    expect(data?.usd).toBe(0.075);
+  });
 });

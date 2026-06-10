@@ -55,7 +55,7 @@ describe('POST /v1/ai/meetings', () => {
       key: 'meetings',
       recordingUsdPerSecond: 0.0001388,
       transcriptionUsdPerSecond: 0.0000416,
-      start, get: vi.fn(), stop: vi.fn(), list: vi.fn(),
+      start, get: vi.fn(), stop: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })),
     } as unknown as ActorProvider);
     const res = await app.inject({
       method: 'POST', url: '/v1/ai/meetings',
@@ -80,7 +80,7 @@ describe('POST /v1/ai/meetings', () => {
       key: 'meetings',
       recordingUsdPerSecond: 0.0001388,
       transcriptionUsdPerSecond: 0.0000416,
-      start, get: vi.fn(), stop: vi.fn(), list: vi.fn(),
+      start, get: vi.fn(), stop: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })),
     } as unknown as ActorProvider);
     const res = await app.inject({
       method: 'POST', url: '/v1/ai/meetings',
@@ -110,7 +110,7 @@ describe('GET /v1/ai/meetings/:id', () => {
       completedAt: '2026-06-11T01:00:00Z', durationSeconds: 3600,
       recordingUrl: 'https://...', transcriptUrl: 'https://...', metadata: {},
     }));
-    const app = buildApp({ key: 'meetings', get, start: vi.fn(), stop: vi.fn(), list: vi.fn() } as unknown as ActorProvider);
+    const app = buildApp({ key: 'meetings', get, start: vi.fn(), stop: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })) } as unknown as ActorProvider);
     const res = await app.inject({ method: 'GET', url: '/v1/ai/meetings/bot_abc' });
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).durationSeconds).toBe(3600);
@@ -120,7 +120,7 @@ describe('GET /v1/ai/meetings/:id', () => {
 describe('DELETE /v1/ai/meetings/:id', () => {
   it('calls provider.stop and returns 204', async () => {
     const stop = vi.fn(async () => {});
-    const app = buildApp({ key: 'meetings', stop, start: vi.fn(), get: vi.fn(), list: vi.fn() } as unknown as ActorProvider);
+    const app = buildApp({ key: 'meetings', stop, start: vi.fn(), get: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })) } as unknown as ActorProvider);
     const res = await app.inject({ method: 'DELETE', url: '/v1/ai/meetings/bot_abc' });
     expect(res.statusCode).toBe(204);
     expect(stop).toHaveBeenCalled();
@@ -132,12 +132,29 @@ describe('GET /v1/ai/meetings', () => {
     const list = vi.fn(async () => ({
       bots: [{ id: 'bot_a', status: 'done' } as any], nextCursor: 'cur1',
     }));
-    const app = buildApp({ key: 'meetings', list, start: vi.fn(), get: vi.fn(), stop: vi.fn() } as unknown as ActorProvider);
+    const app = buildApp({ key: 'meetings', list, start: vi.fn(), get: vi.fn(), stop: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })) } as unknown as ActorProvider);
     const res = await app.inject({ method: 'GET', url: '/v1/ai/meetings?limit=5' });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.bots).toHaveLength(1);
     expect(body.nextCursor).toBe('cur1');
+  });
+});
+
+describe('GET /v1/ai/meetings/_estimate', () => {
+  it('returns usd cost for the given duration', async () => {
+    const estimateCost = vi.fn(() => ({ usd: 0.075 }));
+    const app = buildApp({
+      key: 'meetings',
+      recordingUsdPerSecond: 0.0001388,
+      transcriptionUsdPerSecond: 0.0000416,
+      start: vi.fn(), get: vi.fn(), stop: vi.fn(), list: vi.fn(),
+      estimateCost,
+    } as unknown as ActorProvider);
+    const res = await app.inject({ method: 'GET', url: '/v1/ai/meetings/_estimate?durationMinutes=60' });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ usd: 0.075 });
+    expect(estimateCost).toHaveBeenCalledWith(expect.objectContaining({ durationMinutes: 60 }));
   });
 });
 
