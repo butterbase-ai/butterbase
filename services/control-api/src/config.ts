@@ -74,6 +74,13 @@ export const config = {
     } as const;
   })(),
 
+  meetings: {
+    apiKey: process.env.MEETINGS_API_KEY ?? '',
+    baseUrl: process.env.MEETINGS_BASE_URL ?? 'https://us-east-1.recall.ai',
+    webhookSecret: process.env.MEETINGS_WEBHOOK_SECRET ?? '',
+    internalForwarderSigningSecret: process.env.MEETINGS_FORWARDER_SIGNING_SECRET ?? '',
+  },
+
   /**
    * Platform DB env vars introduced in multi-region Phase 1.
    * In Phase 1, both URLs may point at the same database during initial deployment;
