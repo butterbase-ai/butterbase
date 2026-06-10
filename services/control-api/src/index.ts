@@ -68,6 +68,7 @@ import { startForkCountSweeper } from './services/fork-count-sweeper.js';
 import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
 import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
 import { gatewayRoutes } from './routes/gateway.js';
+import { aiMeetingsRoutes } from './routes/ai-meetings.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
 import dashboardProxyPlugin from './plugins/dashboard-proxy.js';
 import subdomainPlugin from './plugins/subdomain.js';
@@ -518,6 +519,7 @@ try {
 app.register(aiConfigRoutes);
 app.register(aiVideoRoutes);
 app.register(gatewayRoutes);
+app.register(aiMeetingsRoutes);
 app.register(autoRefillRoutes);
 app.register(initRoutes);
 app.register(schemaRoutes);
