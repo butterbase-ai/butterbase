@@ -2,12 +2,20 @@ import type { ButterbaseClient } from '../lib/butterbase-client.js';
 import type { ButterbaseResponse } from '../types/index.js';
 import type { ChatMessage, ChatOptions, ChatCompletion, ChatStreamChunk, AiConfig, AiUsage,
   EmbeddingRequest, EmbeddingResponse, AiModel } from './types.js';
+import { MeetingsClient } from './meetings-client.js';
 
 export class AiClient {
   private client: ButterbaseClient;
 
   constructor(client: ButterbaseClient) {
     this.client = client;
+  }
+
+  private _meetings?: MeetingsClient;
+  /** Meeting bots — start/get/stop/list. Backed by a Butterbase-paid provider; billed per-second against AI credits. */
+  get meetings(): MeetingsClient {
+    if (!this._meetings) this._meetings = new MeetingsClient(this.client);
+    return this._meetings;
   }
 
   /**
