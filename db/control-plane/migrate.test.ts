@@ -60,3 +60,52 @@ describe('applyByScope', () => {
     ).rejects.toThrow(/042_some_migration\.sql/);
   });
 });
+
+import pg from 'pg';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+describe('migrations', () => {
+  it('088_app_meetings_webhooks has correct column schema', async () => {
+    const dbUrl = process.env.TEST_DATABASE_URL;
+    if (!dbUrl) {
+      console.warn('TEST_DATABASE_URL not set, skipping database test');
+      return;
+    }
+
+    const pool = new pg.Pool({ connectionString: dbUrl });
+    const client = await pool.connect();
+    try {
+      // Load and apply the migration
+      const migrationPath = path.join(__dirname, '088_app_meetings_webhooks.sql');
+      const migrationSql = fs.readFileSync(migrationPath, 'utf-8');
+
+      // Skip the @scope comment line and apply the rest
+      const sqlLines = migrationSql.split('\n').filter(line => !line.startsWith('-- @scope'));
+      await client.query(sqlLines.join('\n'));
+
+      // Query the columns from information_schema
+      const { rows } = await client.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'app_meetings_webhooks'
+        ORDER BY ordinal_position
+      `);
+
+      const columnNames = rows.map(row => row.column_name).sort();
+      expect(columnNames).toEqual([
+        'app_id',
+        'created_at',
+        'events',
+        'forward_secret_hash',
+        'forward_url',
+        'updated_at',
+      ]);
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  });
+});
