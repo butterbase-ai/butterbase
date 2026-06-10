@@ -190,6 +190,38 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
     } catch (err) { return handleError(reply, err); }
   });
 
+  // Return the last 100 rows from actor_usage_logs for the given app.
+  app.get<{ Params: { appId: string } }>('/v1/:appId/ai/meetings/usage', async (req, reply) => {
+    const { appId } = req.params;
+    const userId = requireUserId(req);
+    try {
+      const region = await resolveAppHomeRegion((app as any).controlDb, appId);
+      const runtimeDb = await getRuntimeDbForApp((app as any).controlDb, appId);
+      const ownerResult = await runtimeDb.query(
+        'SELECT owner_id FROM apps WHERE id = $1',
+        [appId],
+      );
+      if (ownerResult.rows.length === 0) {
+        return reply.code(404).send({ error: 'App not found' });
+      }
+      if (ownerResult.rows[0].owner_id !== userId) {
+        return reply.code(403).send({ error: 'Not authorized' });
+      }
+      const rows = await runtimeDb.query(
+        `SELECT id, dimension, seconds, usd_charged, created_at
+           FROM actor_usage_logs
+          WHERE app_id = $1
+          ORDER BY created_at DESC
+          LIMIT 100`,
+        [appId],
+      );
+      return reply.code(200).send({ rows: rows.rows });
+    } catch (err) {
+      app.log.error({ err }, '[ai-meetings] usage fetch failed');
+      return reply.code(500).send({ error: 'Internal error' });
+    }
+  });
+
   // Configure the app's meetings webhook forward URL and (optionally) rotate the signing secret.
   const meetingsWebhookBodySchema = z.object({
     forward_url: z.string().url(),

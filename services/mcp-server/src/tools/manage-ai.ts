@@ -34,6 +34,9 @@ Actions:
                        When rotate_secret is true (or no row exists), generates a new signing secret
                        (wsec_…) and returns it once — store it immediately.
                        Returns { ok, app_id, forward_url, secret } where secret is null when not rotated.
+  - usage_meetings    { app_id }
+                       Returns the last 100 rows from actor_usage_logs for the app.
+                       Each row has { id, dimension, seconds, usd_charged, created_at }.
 
 This tool wraps the same /v1/:app_id/chat/completions, /embeddings, /ai/config, /ai/models,
 /ai/usage routes the SDK uses. The "chat" action sets stream: false; for streamed deltas,
@@ -42,7 +45,7 @@ drive the SDK from inside a function or DO.`,
       app_id: z.string().describe('The app ID'),
       action: z.enum([
         'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
-        'submit_video', 'poll_video', 'configure_meetings_webhook',
+        'submit_video', 'poll_video', 'configure_meetings_webhook', 'usage_meetings',
       ]).describe('The action to perform'),
       // chat
       messages: z.array(z.object({
@@ -172,6 +175,10 @@ drive the SDK from inside a function or DO.`,
               forward_url: args.forward_url,
               rotate_secret: args.rotate_secret,
             });
+            break;
+          }
+          case 'usage_meetings': {
+            result = await apiGet(`/v1/${app_id}/ai/meetings/usage`);
             break;
           }
 

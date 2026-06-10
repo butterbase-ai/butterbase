@@ -158,6 +158,29 @@ describe('GET /v1/ai/meetings/_estimate', () => {
   });
 });
 
+describe('GET /v1/:appId/ai/meetings/usage', () => {
+  it('returns last 100 rows from actor_usage_logs', async () => {
+    const app = buildApp();
+    const runtimeDb = {
+      query: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ owner_id: 'u_1' }] })         // ownership check
+        .mockResolvedValueOnce({ rows: [
+          { id: 'log_1', dimension: 'recording', seconds: 3600, usd_charged: '0.5', created_at: '2026-06-11T01:00:00Z' },
+          { id: 'log_2', dimension: 'transcription', seconds: 3600, usd_charged: '0.15', created_at: '2026-06-11T01:00:00Z' },
+        ]}),
+    };
+    const { getRuntimeDbForApp } = await import('../services/region-resolver.js');
+    (getRuntimeDbForApp as ReturnType<typeof vi.fn>).mockResolvedValueOnce(runtimeDb);
+
+    const res = await app.inject({ method: 'GET', url: '/v1/app_1/ai/meetings/usage' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.rows).toHaveLength(2);
+    expect(body.rows[0].dimension).toBe('recording');
+    expect(body.rows[1].dimension).toBe('transcription');
+  });
+});
+
 describe('PUT /v1/:appId/ai/meetings/webhook', () => {
   it('upserts and returns a raw secret when no existing row', async () => {
     const app = buildApp();
