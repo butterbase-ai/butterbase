@@ -97,6 +97,8 @@ export async function registerContainer(
   // ALL writes to app_containers go through this upsert path (ON CONFLICT DO UPDATE) —
   // never a bare INSERT — so that re-creating a previously soft-deleted name clears
   // deleted_at instead of 409ing on the UNIQUE(app_id,name) constraint.
+  // Crash-safety note: a crash between this DEPLOYING upsert and the final READY/ERROR
+  // write leaves a stuck DEPLOYING row; re-running registerContainer self-heals it.
   const upsert = await runtimeDb.query(
     `INSERT INTO app_containers
        (app_id, name, mode, image_id, instance_type, max_instances, sleep_after_s, port, access_mode, status, deployed_by)
@@ -197,8 +199,10 @@ export async function deleteContainer(
     if (!raw.includes('(404)') && !raw.includes('[10007]')) throw wrapCfError(err);
   }
 
+  // Also clear last_deployed_at: the CF script is now gone, so the next registerContainer
+  // must be treated as a first deploy and include migrations.new_sqlite_classes.
   await runtimeDb.query(
-    `UPDATE app_containers SET deleted_at = now(), updated_at = now() WHERE id = $1`,
+    `UPDATE app_containers SET deleted_at = now(), last_deployed_at = NULL, updated_at = now() WHERE id = $1`,
     [row.id],
   );
   if (row.image_id) {
@@ -268,7 +272,8 @@ export async function listContainerEnvVarKeys(runtimeDb: Pool, appId: string, na
   return r.rows.map((x) => x.key);
 }
 
-// Redeploy with the row's current config (env change, etc.). READY rows only.
+// Redeploy with the row's current config (env change, etc.).
+// READY rows only — an in-flight deploy picks up the new value on its own completion path's next deploy.
 async function redeployFromRow(runtimeDb: Pool, controlDb: Pool, appId: string, name: string): Promise<boolean> {
   const row = await getContainer(runtimeDb, appId, name);
   if (!row || row.status !== 'READY' || !row.image_id) return false;
