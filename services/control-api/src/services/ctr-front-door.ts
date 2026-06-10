@@ -13,6 +13,9 @@
  *  `class_name` in the deploy metadata bindings and containers[] blocks. */
 export const CTR_CLASS_NAME = 'CtrFrontDoor';
 
+/** Same rule as do-bundler.ts — module-level so it compiles once. */
+const VALID_NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
 export interface FrontDoorConfig {
   /** URL-facing container name (kebab-case), e.g. 'game-server'. */
   name: string;
@@ -56,6 +59,11 @@ export function toContainerScriptName(appId: string, name: string): string {
  */
 export function buildFrontDoorWorker(cfg: FrontDoorConfig): string {
   const { name, mode, accessMode, port, sleepAfterS, maxInstances } = cfg;
+
+  if (!VALID_NAME_RE.test(name)) {
+    throw new Error(`Invalid container name '${name}': must be lowercase kebab-case`);
+  }
+
   const sleepAfterMs = sleepAfterS * 1000;
 
   // Bake the route config into a JS const literal (mirrors do-bundler's ROUTES).
@@ -97,17 +105,23 @@ export class ${CTR_CLASS_NAME} {
   }
 
   async fetch(req) {
+    // Race-free: DO fetch is single-threaded per instance, so no concurrent start() call can interleave.
     if (!this.container.running) this.container.start();
 
-    // Idle alarm: stop the container after ${sleepAfterS}s of inactivity.
-    // CF also auto-sleeps idle containers platform-side, so this is belt-and-suspenders.
-    this.ctx.storage.setAlarm(Date.now() + ${sleepAfterMs});
+    // Re-arm the idle alarm only when stale (avoids one storage write per request).
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current < Date.now() + ${Math.floor(sleepAfterMs / 2)}) {
+      await this.ctx.storage.setAlarm(Date.now() + ${sleepAfterMs});
+    }
 
+    // The second arg carries method/headers/body from req — do not "simplify" to a manual init or the body is dropped.
     return this.container.getTcpPort(${port}).fetch(req);
   }
 
   async alarm() {
     if (this.container.running) {
+      // NOTE: a quiet-but-open WebSocket past the idle window will be severed here — known M1 limitation;
+      // CF auto-sleep has the same behavior.
       // TO-VERIFY-ON-SPIKE-RERUN: container.stop() is the assumed API;
       // confirm exact method name against a live CF response before relying on it.
       try {
@@ -152,6 +166,7 @@ export default {
 
     const inner = new URL(req.url);
     inner.pathname = innerPath;
+    // The second arg carries method/headers/body from req — do not "simplify" to a manual init or the body is dropped.
     return env.CTR.get(id).fetch(new Request(inner.toString(), req));
   },
 };
