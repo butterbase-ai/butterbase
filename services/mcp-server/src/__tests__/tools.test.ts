@@ -38,6 +38,7 @@ describe('MCP Server Tools', () => {
       'manage_auth_config',
       'manage_auth_users',
       'manage_billing',
+      'manage_container',
       'manage_durable_objects',
       'manage_edge_ssr',
       'manage_frontend',

@@ -28,6 +28,7 @@ import { registerManageRepo } from './tools/manage-repo.js';
 import { registerSubmitHackathonEntry } from './tools/submit-hackathon-entry.js';
 import { registerListPartnerApis } from './tools/list-partner-apis.js';
 import { registerManageDurableObjects } from './tools/manage-durable-objects.js';
+import { registerManageContainers } from './tools/manage-containers.js';
 import { registerManageAi } from './tools/manage-ai.js';
 import { registerBilling } from './tools/billing.js';
 import { registerApiKeys } from './tools/api-keys.js';
@@ -99,6 +100,7 @@ export async function createButterbaseMcpServer() {
   registerManageRepo(server);
   registerSubmitHackathonEntry(server);
   registerManageDurableObjects(server);
+  registerManageContainers(server);
   registerManageAi(server);
   registerBilling(server);
   registerApiKeys(server);
