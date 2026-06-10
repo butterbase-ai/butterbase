@@ -162,7 +162,7 @@ Idempotency: deploy/set_env/delete_env are safe to retry. delete is irreversible
                 `  docker push registry.butterbase.dev/${app_id}/<container-name>:latest`,
                 ``,
                 `The push output shows the sha256 digest — use it as image_digest in action="deploy".`,
-                `The bb_sk_ key must be scoped to this app (manage_api_keys).`,
+                `The bb_sk_ key must belong to this app's owner (keys are user-scoped; create one with manage_api_keys).`,
               ].join('\n'),
             }],
           };
