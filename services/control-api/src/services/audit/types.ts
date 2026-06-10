@@ -27,7 +27,8 @@ export type AuditResourceType =
   | 'rag_document'
   | 'custom_domain'
   | 'durable_object'
-  | 'ai_request';
+  | 'ai_request'
+  | 'container';
 
 export type AuditActorType =
   | 'platform_user'
