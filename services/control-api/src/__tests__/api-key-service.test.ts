@@ -196,7 +196,7 @@ describe('ApiKeyService', () => {
     it('listKeys with no scope returns all non-revoked keys for the user (with scope field)', async () => {
       // migration 073: substrate_user_id must equal user_id for substrate keys
       await seedKey('substrate', scopeUserId);
-      await seedKey('app', null);
+      await seedKey('app', scopeUserId);
       const result = await ApiKeyService.listKeys(pool, scopeUserId);
       expect(result).toHaveLength(2);
       expect(result.map((k: any) => k.scope).sort()).toEqual(['app', 'substrate']);
@@ -204,7 +204,7 @@ describe('ApiKeyService', () => {
 
     it('listKeys with scope=substrate returns only substrate keys', async () => {
       await seedKey('substrate', scopeUserId);
-      await seedKey('app', null);
+      await seedKey('app', scopeUserId);
       const result = await ApiKeyService.listKeys(pool, scopeUserId, 'substrate');
       expect(result).toHaveLength(1);
       expect(result.every((k: any) => k.scope === 'substrate')).toBe(true);
@@ -212,7 +212,7 @@ describe('ApiKeyService', () => {
 
     it('listKeys with scope=app returns only app keys', async () => {
       await seedKey('substrate', scopeUserId);
-      await seedKey('app', null);
+      await seedKey('app', scopeUserId);
       const result = await ApiKeyService.listKeys(pool, scopeUserId, 'app');
       expect(result).toHaveLength(1);
       expect(result.every((k: any) => k.scope === 'app')).toBe(true);

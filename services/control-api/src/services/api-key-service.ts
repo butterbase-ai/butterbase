@@ -37,13 +37,14 @@ export class ApiKeyService {
     scopes: string[] = ['*'],
     scope?: 'app' | 'substrate' | 'both'
   ): Promise<{ key: string; keyId: string; prefix: string; name: string }> {
-    // scope='substrate' emits a bb_sub_-prefixed key bound to the caller's
-    // substrate_user_id. scope='both' emits a bb_sk_-prefixed key that ALSO
-    // carries substrate_user_id — same identity, two access surfaces.
-    // Anything else (default 'app') emits a plain bb_sk_ app key.
+    // scope='substrate' emits a bb_sub_-prefixed substrate-only key. Anything
+    // else (default 'app' or 'both') emits a bb_sk_-prefixed key. Every key —
+    // regardless of scope — carries substrate_user_id = userId, so every
+    // bb_sk_ key works on both the app plane and the caller's substrate. The
+    // 'app' vs 'both' label is informational only; substrate gates check
+    // substrate_user_id, not scope.
     const isSubstrateOnly = scope === 'substrate';
     const isBoth = scope === 'both';
-    const carriesSubstrate = isSubstrateOnly || isBoth;
     const prefix = isSubstrateOnly ? API_KEY_SUBSTRATE_PREFIX : API_KEY_PREFIX;
 
     const randomBytes = crypto.randomBytes(20);
@@ -67,7 +68,7 @@ export class ApiKeyService {
         name,
         scopes,
         dbScope,
-        carriesSubstrate ? userId : null,
+        userId,
       ]
     );
 

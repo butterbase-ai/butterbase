@@ -97,7 +97,7 @@ export async function seedUserAndApp(
   await controlPool.query(
     `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [userId, keyHash, keyPrefix, `${prefix}-key`, ['*'], 'app', null],
+    [userId, keyHash, keyPrefix, `${prefix}-key`, ['*'], 'app', userId],
   );
 
   const appId = `${prefix}-app-${stamp}`;

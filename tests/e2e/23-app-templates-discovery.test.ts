@@ -44,7 +44,7 @@ async function seedUser(): Promise<SeededUser> {
   await controlPool.query(
     `INSERT INTO api_keys (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [userId, keyHash, keyPrefix, 'disc-e2e', ['*'], 'app', null],
+    [userId, keyHash, keyPrefix, 'disc-e2e', ['*'], 'app', userId],
   );
   return { userId, apiKey: fullKey };
 }
