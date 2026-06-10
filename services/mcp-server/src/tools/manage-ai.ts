@@ -29,6 +29,11 @@ Actions:
                        When status is "completed", content_urls contains absolute URLs (same origin
                        as the polling_url) that the caller can fetch() directly using the same
                        Authorization header. Use this to drive your own polling loop.
+  - configure_meetings_webhook  { app_id, forward_url, rotate_secret? }
+                       Upsert the app's meetings webhook forward URL.
+                       When rotate_secret is true (or no row exists), generates a new signing secret
+                       (wsec_…) and returns it once — store it immediately.
+                       Returns { ok, app_id, forward_url, secret } where secret is null when not rotated.
 
 This tool wraps the same /v1/:app_id/chat/completions, /embeddings, /ai/config, /ai/models,
 /ai/usage routes the SDK uses. The "chat" action sets stream: false; for streamed deltas,
@@ -37,7 +42,7 @@ drive the SDK from inside a function or DO.`,
       app_id: z.string().describe('The app ID'),
       action: z.enum([
         'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
-        'submit_video', 'poll_video',
+        'submit_video', 'poll_video', 'configure_meetings_webhook',
       ]).describe('The action to perform'),
       // chat
       messages: z.array(z.object({
@@ -71,6 +76,9 @@ drive the SDK from inside a function or DO.`,
       seed: z.number().int().optional(),
       // poll_video
       job_id: z.string().optional().describe('Required for poll_video'),
+      // configure_meetings_webhook
+      forward_url: z.string().optional().describe('Required for configure_meetings_webhook'),
+      rotate_secret: z.boolean().optional().describe('For configure_meetings_webhook — generate a new signing secret'),
     },
     {
       title: 'Manage AI',
@@ -154,6 +162,16 @@ drive the SDK from inside a function or DO.`,
               return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "poll_video".' }], isError: true as const };
             }
             result = await apiGet(`/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}`);
+            break;
+          }
+          case 'configure_meetings_webhook': {
+            if (!args.forward_url) {
+              return { content: [{ type: 'text' as const, text: 'Error: "forward_url" is required for "configure_meetings_webhook".' }], isError: true as const };
+            }
+            result = await apiPut(`/v1/${app_id}/ai/meetings/webhook`, {
+              forward_url: args.forward_url,
+              rotate_secret: args.rotate_secret,
+            });
             break;
           }
 

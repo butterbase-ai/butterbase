@@ -1,6 +1,7 @@
 // services/control-api/src/routes/ai-meetings.ts
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { randomBytes, createHash } from 'node:crypto';
 import { config } from '../config.js';
 import {
   getActorProvider,
@@ -16,6 +17,8 @@ import {
   startMeetingsRequestSchema, listMeetingsRequestSchema,
 } from '../services/actor-providers/schemas.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
+import { requireUserId } from '../utils/require-auth.js';
+import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
@@ -167,6 +170,79 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
       return reply.send({ available: true });
     } catch {
       return reply.send({ available: false });
+    }
+  });
+
+  // Configure the app's meetings webhook forward URL and (optionally) rotate the signing secret.
+  const meetingsWebhookBodySchema = z.object({
+    forward_url: z.string().url(),
+    rotate_secret: z.boolean().optional(),
+  });
+
+  app.put<{ Params: { appId: string } }>('/v1/:appId/ai/meetings/webhook', async (req, reply) => {
+    const { appId } = req.params;
+    const userId = requireUserId(req);
+
+    try {
+      const body = meetingsWebhookBodySchema.parse(req.body);
+
+      // Verify ownership
+      const region = await resolveAppHomeRegion((app as any).controlDb, appId);
+      const runtimeDb = await getRuntimeDbForApp((app as any).controlDb, appId);
+      const ownerResult = await runtimeDb.query(
+        'SELECT owner_id FROM apps WHERE id = $1',
+        [appId],
+      );
+      if (ownerResult.rows.length === 0) {
+        return reply.code(404).send({ error: 'App not found' });
+      }
+      if (ownerResult.rows[0].owner_id !== userId) {
+        return reply.code(403).send({ error: 'Not authorized' });
+      }
+
+      // Check for existing row
+      const existing: { rows: { forward_secret_hash: string }[] } =
+        await (app as any).controlDb.query(
+          'SELECT forward_secret_hash FROM app_meetings_webhooks WHERE app_id = $1',
+          [appId],
+        );
+
+      let rawSecret: string | null = null;
+      let secretHash: string;
+
+      if (body.rotate_secret || existing.rows.length === 0) {
+        // Generate a new secret: wsec_<base64url(32 random bytes)>
+        const raw = randomBytes(32).toString('base64url');
+        rawSecret = `wsec_${raw}`;
+        // Hash with SHA-256 (salted with app_id) — lightweight, no bcrypt dep needed
+        secretHash = createHash('sha256').update(`${appId}:${rawSecret}`).digest('hex');
+      } else {
+        secretHash = existing.rows[0].forward_secret_hash;
+      }
+
+      // Upsert
+      await (app as any).controlDb.query(
+        `INSERT INTO app_meetings_webhooks (app_id, forward_url, forward_secret_hash, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (app_id) DO UPDATE
+           SET forward_url = EXCLUDED.forward_url,
+               forward_secret_hash = EXCLUDED.forward_secret_hash,
+               updated_at = now()`,
+        [appId, body.forward_url, secretHash],
+      );
+
+      return reply.code(200).send({
+        ok: true,
+        app_id: appId,
+        forward_url: body.forward_url,
+        secret: rawSecret,
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return reply.code(400).send({ error: 'Invalid request', details: err.errors });
+      }
+      app.log.error({ err }, '[ai-meetings] configure webhook failed');
+      return reply.code(500).send({ error: 'Internal error' });
     }
   });
 }

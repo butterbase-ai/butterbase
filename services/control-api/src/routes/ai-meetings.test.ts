@@ -14,6 +14,12 @@ vi.mock('../services/actor-providers/billing.js', () => ({
   settleActorCall: vi.fn(async () => ({ refundedUsd: 0 })),
   FLOOR_LEASE_SECONDS: 300,
 }));
+vi.mock('../services/region-resolver.js', () => ({
+  resolveAppHomeRegion: vi.fn(async () => 'us-east-1'),
+  getRuntimeDbForApp: vi.fn(async () => ({
+    query: vi.fn(async () => ({ rows: [{ owner_id: 'u_1' }] })),
+  })),
+}));
 
 function buildApp(provider?: ActorProvider) {
   _resetRegistryForTests();
@@ -132,5 +138,50 @@ describe('GET /v1/ai/meetings', () => {
     const body = JSON.parse(res.body);
     expect(body.bots).toHaveLength(1);
     expect(body.nextCursor).toBe('cur1');
+  });
+});
+
+describe('PUT /v1/:appId/ai/meetings/webhook', () => {
+  it('upserts and returns a raw secret when no existing row', async () => {
+    const app = buildApp();
+    (app as any).controlDb.query
+      .mockResolvedValueOnce({ rows: [] })   // SELECT existing → empty
+      .mockResolvedValueOnce({ rowCount: 1 }); // INSERT/UPSERT
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/v1/app_1/ai/meetings/webhook',
+      payload: { forward_url: 'https://example.com/wh', rotate_secret: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.ok).toBe(true);
+    expect(body.secret).toMatch(/^wsec_/);
+  });
+
+  it('preserves existing secret when rotate_secret is false', async () => {
+    const app = buildApp();
+    (app as any).controlDb.query
+      .mockResolvedValueOnce({ rows: [{ forward_secret_hash: 'existing-hash' }] }) // SELECT → existing
+      .mockResolvedValueOnce({ rowCount: 1 }); // UPSERT
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/v1/app_1/ai/meetings/webhook',
+      payload: { forward_url: 'https://example.com/wh' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.secret).toBeNull();
+  });
+
+  it('400s when forward_url is not a valid URL', async () => {
+    const app = buildApp();
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/v1/app_1/ai/meetings/webhook',
+      payload: { forward_url: 'not-a-url' },
+    });
+    expect(res.statusCode).toBe(400);
   });
 });
