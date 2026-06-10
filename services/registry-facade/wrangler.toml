@@ -1,0 +1,23 @@
+# services/registry-facade/wrangler.toml
+name = "butterbase-registry-facade"
+main = "src/worker.ts"
+compatibility_date = "2025-01-24"
+
+# Custom domain: registry.butterbase.dev (configure route in CF dashboard or
+# via the route below).
+routes = [{ pattern = "registry.butterbase.dev", custom_domain = true }]
+
+[observability]
+[observability.logs]
+enabled = true
+
+# Plain (non-secret) vars. UPSTREAM_REGISTRY_HOST is the CF managed registry
+# domain (staging: staging.registry.cloudflare.com).
+[vars]
+UPSTREAM_REGISTRY_HOST = "registry.cloudflare.com"
+
+# Secrets via `wrangler secret put`:
+#   CONTROL_API_URL              — e.g. https://api.butterbase.ai
+#   REGISTRY_FACADE_SHARED_SECRET — shared with control-api
+#   CLOUDFLARE_ACCOUNT_ID         — managed-registry namespace owner
+#   CLOUDFLARE_API_TOKEN          — Cloudchamber-scoped: mints registry creds

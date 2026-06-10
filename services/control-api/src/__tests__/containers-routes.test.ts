@@ -251,3 +251,106 @@ describe('POST /internal/registry/image-pushed', () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /internal/registry/auth-check
+//
+// Real api-key model: keys bind to user_id (not app); ownership is resolved via
+// user_app_index. The endpoint echoes the repo's app_id iff the key owner owns
+// that app, else null.
+// ---------------------------------------------------------------------------
+describe('POST /internal/registry/auth-check', () => {
+  const validSecret = 'supersecret123';
+
+  beforeEach(() => {
+    process.env.REGISTRY_FACADE_SHARED_SECRET = validSecret;
+  });
+
+  it('returns 401 when the shared secret is missing/wrong', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/registry/auth-check',
+      headers: { 'x-registry-shared-secret': 'nope' },
+      payload: { key: 'bb_sk_abc', repo: 'app_abc123/game-server' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(controlDbStub.query).not.toHaveBeenCalled();
+  });
+
+  it('returns { app_id: null } for a non bb_sk_ key without querying the db', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/registry/auth-check',
+      headers: { 'x-registry-shared-secret': validSecret },
+      payload: { key: 'bb_sub_xyz', repo: 'app_abc123/game-server' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ app_id: null });
+    expect(controlDbStub.query).not.toHaveBeenCalled();
+  });
+
+  it('echoes the repo app_id when the key owner owns the app', async () => {
+    // 1st query: api_keys lookup -> user_id; 2nd: user_app_index ownership.
+    controlDbStub.query
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user_1' }] })
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/registry/auth-check',
+      headers: { 'x-registry-shared-secret': validSecret },
+      payload: { key: 'bb_sk_realkey', repo: 'app_abc123/game-server' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ app_id: 'app_abc123' });
+    // The key is looked up by SHA-256 hash, never by the raw value.
+    const [keySql, keyParams] = controlDbStub.query.mock.calls[0];
+    expect(keySql).toContain('FROM api_keys');
+    expect(keyParams[0]).not.toContain('bb_sk_realkey');
+  });
+
+  it('returns { app_id: null } when the key owner does not own the repo app', async () => {
+    controlDbStub.query
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user_1' }] })
+      .mockResolvedValueOnce({ rows: [] }); // no ownership row
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/registry/auth-check',
+      headers: { 'x-registry-shared-secret': validSecret },
+      payload: { key: 'bb_sk_realkey', repo: 'app_other/game-server' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ app_id: null });
+  });
+
+  it('returns { app_id: null } for an unknown/revoked key', async () => {
+    controlDbStub.query.mockResolvedValueOnce({ rows: [] }); // api_keys lookup empty
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/registry/auth-check',
+      headers: { 'x-registry-shared-secret': validSecret },
+      payload: { key: 'bb_sk_revoked', repo: 'app_abc123/game-server' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ app_id: null });
+  });
+
+  it('with no repo (the /v2/ probe) returns the owner\'s most recent app', async () => {
+    controlDbStub.query
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user_1' }] })
+      .mockResolvedValueOnce({ rows: [{ app_id: 'app_recent' }] });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/registry/auth-check',
+      headers: { 'x-registry-shared-secret': validSecret },
+      payload: { key: 'bb_sk_realkey' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ app_id: 'app_recent' });
+  });
+});

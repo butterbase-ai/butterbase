@@ -1,4 +1,5 @@
 // services/control-api/src/routes/containers.ts
+import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
@@ -214,6 +215,49 @@ export async function registerContainerRoutes(fastify: FastifyInstance) {
       if (error instanceof Service.ContainerError) return sendContainerError(reply, error);
       throw error;
     }
+  });
+
+  // INTERNAL: registry facade asks "may this bb_sk_ key push to this repo?"
+  //
+  // The api_keys table binds keys to a user_id, NOT to an app (scopes are
+  // '*' / 'ai:gateway', never 'app:<id>' — verified in api-key-service.ts and
+  // db/control-plane/002_api_keys.sql). So we resolve the key's owner, then
+  // confirm that owner owns the repo's app via user_app_index, and echo the
+  // repo's app_id back. A key whose owner does not own the app => { app_id: null }.
+  fastify.post('/internal/registry/auth-check', async (request, reply) => {
+    const secret = request.headers['x-registry-shared-secret'];
+    if (!secret || secret !== process.env.REGISTRY_FACADE_SHARED_SECRET) {
+      return reply.status(401).send({ error: 'unauthorized' });
+    }
+    const { key, repo } = (request.body ?? {}) as { key?: string; repo?: string };
+    if (!key || !key.startsWith('bb_sk_')) return reply.send({ app_id: null });
+
+    const hash = crypto.createHash('sha256').update(key).digest('hex');
+    const keyRow = await controlDb.query(
+      `SELECT user_id FROM api_keys
+       WHERE key_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
+      [hash],
+    );
+    if (keyRow.rows.length === 0) return reply.send({ app_id: null });
+    const userId = keyRow.rows[0].user_id as string;
+
+    // No repo context (the /v2/ version probe): confirm the key is valid and the
+    // owner has at least one app, returning that app_id so the probe succeeds.
+    if (!repo) {
+      const anyApp = await controlDb.query(
+        `SELECT app_id FROM user_app_index WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+        [userId],
+      );
+      return reply.send({ app_id: anyApp.rows[0]?.app_id ?? null });
+    }
+
+    // repo is '{app_id}/{name}' — verify the key's owner owns that app.
+    const appId = repo.split('/')[0];
+    const owned = await controlDb.query(
+      `SELECT 1 FROM user_app_index WHERE app_id = $1 AND user_id = $2`,
+      [appId, userId],
+    );
+    return reply.send({ app_id: owned.rows.length > 0 ? appId : null });
   });
 
   // INTERNAL: registry facade notifies a completed manifest push.
