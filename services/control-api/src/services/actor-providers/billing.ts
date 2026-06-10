@@ -49,15 +49,26 @@ export async function reserveActorCredits(
 export interface SettleActorCallInput {
   leaseId: string;
   actualSeconds: number;
-  usdPerSecond: number;
+  dimensionUsdPerSecond: number;
   markupPct: number;
 }
 
+/**
+ * Settle one dimension of an actor lease. Called once per (lease, dimension)
+ * from the webhook handler — recording on `bot.done`, transcription on
+ * `transcript.done`. `dimensionUsdPerSecond` is the cost rate for THAT
+ * dimension only (e.g. 0.50/3600 for recording), NOT the combined rate
+ * that was used at reservation time.
+ *
+ * Idempotency is enforced upstream by the actor_usage_logs unique
+ * constraint on (actor_id, dimension); callers should only invoke this
+ * after a successful writeActorUsageRow returns true.
+ */
 export async function settleActorCall(
   platformPool: pg.Pool,
   input: SettleActorCallInput,
 ): Promise<{ refundedUsd: number }> {
-  const actualUsd = input.actualSeconds * input.usdPerSecond * (1 + input.markupPct / 100);
+  const actualUsd = input.actualSeconds * input.dimensionUsdPerSecond * (1 + input.markupPct / 100);
   try {
     return await settleLease(platformPool, { leaseId: input.leaseId, actualUsd });
   } catch (err) {

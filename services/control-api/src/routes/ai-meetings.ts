@@ -15,6 +15,7 @@ import { InsufficientCreditsError } from '../services/ai-router/billing-gate.js'
 import {
   startMeetingsRequestSchema, listMeetingsRequestSchema,
 } from '../services/actor-providers/schemas.js';
+import { logAuditEvent } from '../services/audit/audit-events-service.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
@@ -42,7 +43,10 @@ function openaiError(message: string, type: string, code: string, extra?: Record
 function handleError(reply: FastifyReply, err: unknown) {
   if ((err as any).gatewayStatus) {
     const e = err as any;
-    return reply.code(e.gatewayStatus).send(openaiError(e.gatewayCode, 'authentication_error', e.gatewayCode));
+    const type = e.gatewayStatus === 401
+      ? 'authentication_error'
+      : e.gatewayStatus === 403 ? 'permission_error' : 'api_error';
+    return reply.code(e.gatewayStatus).send(openaiError(e.gatewayCode, type, e.gatewayCode));
   }
   if (err instanceof ProviderUnavailableError) {
     return reply.code(501).send(openaiError(err.message, 'api_error', 'provider_unavailable'));
@@ -80,8 +84,42 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
         { appId: user.appId, userId: user.userId, leaseId: handle.leaseId },
         body,
       );
+      void logAuditEvent((app as any).controlDb, {
+        appId: user.appId,
+        category: 'ai',
+        eventType: 'ai_meetings.start',
+        action: 'invoke',
+        resourceType: 'ai_request',
+        resourceId: bot.id,
+        actorType: 'platform_user',
+        actorId: user.userId,
+        eventData: {
+          transcript: body.transcript,
+          recording: body.recording,
+          lease_id: handle.leaseId,
+        },
+        ipAddress: req.ip ?? null,
+        userAgent: req.headers['user-agent'] ?? null,
+        success: true,
+        errorMessage: null,
+      });
       return reply.code(200).send(bot);
     } catch (err) {
+      void logAuditEvent((app as any).controlDb, {
+        appId: req.auth?.appId ?? '_unknown',
+        category: 'ai',
+        eventType: 'ai_meetings.start',
+        action: 'invoke',
+        resourceType: 'ai_request',
+        resourceId: undefined,
+        actorType: 'platform_user',
+        actorId: req.auth?.userId ?? '_unknown',
+        eventData: { error_code: (err as any).code ?? (err as any).gatewayCode ?? 'error' },
+        ipAddress: req.ip ?? null,
+        userAgent: req.headers['user-agent'] ?? null,
+        success: false,
+        errorMessage: (err as any).message ?? 'unknown',
+      });
       return handleError(reply, err);
     }
   });

@@ -66,6 +66,24 @@ describe('POST /v1/ai/meetings', () => {
     );
   });
 
+  // TODO(phase2): when provider.start fails post-lease, settle the lease to zero
+  // to refund credits. Currently the lease leaks until TTL expiry (10min).
+  it('returns 500 when provider.start throws after lease is granted', async () => {
+    const start = vi.fn(async () => { throw new Error('vendor blew up'); });
+    const app = buildApp({
+      key: 'meetings',
+      recordingUsdPerSecond: 0.0001388,
+      transcriptionUsdPerSecond: 0.0000416,
+      start, get: vi.fn(), stop: vi.fn(), list: vi.fn(),
+    } as unknown as ActorProvider);
+    const res = await app.inject({
+      method: 'POST', url: '/v1/ai/meetings',
+      payload: { meetingUrl: 'https://meet.google.com/abc-defg-hij' },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body).error.code).toBe('internal_error');
+  });
+
   it('400s when metadata key starts with bb_', async () => {
     const app = buildApp({ key: 'meetings' } as any);
     const res = await app.inject({

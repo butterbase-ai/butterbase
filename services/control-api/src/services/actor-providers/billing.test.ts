@@ -94,12 +94,12 @@ describe('reserveActorCredits', () => {
 });
 
 describe('settleActorCall', () => {
-  it('charges actualSeconds * usdPerSecond * (1+markup)', async () => {
+  it('charges actualSeconds * dimensionUsdPerSecond * (1+markup)', async () => {
     settleLeaseMock.mockResolvedValueOnce({ refundedUsd: 0.04 });
     const out = await settleActorCall(POOL, {
       leaseId: 'lease_1',
       actualSeconds: 60,
-      usdPerSecond: 0.0001388,
+      dimensionUsdPerSecond: 0.0001388,
       markupPct: 30,
     });
     expect(settleLeaseMock).toHaveBeenCalledWith(POOL, expect.objectContaining({
