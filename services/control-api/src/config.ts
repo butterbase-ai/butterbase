@@ -188,6 +188,8 @@ export const config = {
     dispatchNamespace: process.env.CLOUDFLARE_DISPATCH_NAMESPACE ?? 'bb-frontends',
     subdomainKvId: process.env.CLOUDFLARE_SUBDOMAIN_KV_ID ?? '',
     dispatchWorkerName: process.env.CLOUDFLARE_DISPATCH_WORKER_NAME ?? 'bb-dispatch',
+    containersDispatchNamespace: process.env.CLOUDFLARE_CONTAINERS_DISPATCH_NAMESPACE ?? 'bb-containers',
+    containerRegistryHost: process.env.CLOUDFLARE_CONTAINER_REGISTRY_HOST ?? 'registry.cloudflare.com',
     customHostnameFallbackOrigin: process.env.CLOUDFLARE_CUSTOM_HOSTNAME_FALLBACK ?? 'butterbase.dev',
   },
 
