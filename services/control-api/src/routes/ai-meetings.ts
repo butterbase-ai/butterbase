@@ -1,7 +1,8 @@
 // services/control-api/src/routes/ai-meetings.ts
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { encrypt } from '../services/crypto.js';
 import { config } from '../config.js';
 import {
   getActorProvider,
@@ -24,9 +25,18 @@ const GATEWAY_SCOPE = 'ai:gateway';
 
 interface GatewayUser { userId: string; appId: string; region: string; }
 
-function resolveGatewayUser(req: FastifyRequest): GatewayUser {
-  const { userId, appId, authMethod, scopes } = req.auth;
-  if (!userId || !appId) {
+// appId comes from the URL path (e.g. /v1/:appId/ai/meetings). The route
+// must verify that the authenticated caller owns the app before any
+// provider call. bb_sk_ keys carry userId only (not appId), so wiring the
+// app context through auth.appId is not viable for this surface; the path
+// is the source of truth.
+async function resolveGatewayUser(
+  app: FastifyInstance,
+  req: FastifyRequest,
+  appId: string,
+): Promise<GatewayUser> {
+  const { userId, authMethod, scopes } = req.auth;
+  if (!userId) {
     const e: any = new Error('missing_credentials');
     e.gatewayStatus = 401; e.gatewayCode = 'missing_credentials';
     throw e;
@@ -34,6 +44,21 @@ function resolveGatewayUser(req: FastifyRequest): GatewayUser {
   if (authMethod === 'api_key' && !scopes.includes('*') && !scopes.includes(GATEWAY_SCOPE)) {
     const e: any = new Error('insufficient_scope');
     e.gatewayStatus = 403; e.gatewayCode = 'insufficient_scope';
+    throw e;
+  }
+  const runtimeDb = await getRuntimeDbForApp((app as any).controlDb, appId);
+  const ownerResult = await runtimeDb.query(
+    'SELECT owner_id FROM apps WHERE id = $1',
+    [appId],
+  );
+  if (ownerResult.rows.length === 0) {
+    const e: any = new Error('app_not_found');
+    e.gatewayStatus = 404; e.gatewayCode = 'app_not_found';
+    throw e;
+  }
+  if (ownerResult.rows[0].owner_id !== userId) {
+    const e: any = new Error('not_authorized');
+    e.gatewayStatus = 403; e.gatewayCode = 'not_authorized';
     throw e;
   }
   return { userId, appId, region: config.aiRouter.defaultRegion };
@@ -71,9 +96,9 @@ function handleError(reply: FastifyReply, err: unknown) {
 }
 
 export async function aiMeetingsRoutes(app: FastifyInstance) {
-  app.post('/v1/ai/meetings', async (req, reply) => {
+  app.post<{ Params: { appId: string } }>('/v1/:appId/ai/meetings', async (req, reply) => {
     try {
-      const user = resolveGatewayUser(req);
+      const user = await resolveGatewayUser(app, req, req.params.appId);
       const body = startMeetingsRequestSchema.parse(req.body);
       const provider = getActorProvider('meetings');
       const handle = await reserveActorCredits((app as any).controlDb, {
@@ -109,7 +134,7 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
       return reply.code(200).send(bot);
     } catch (err) {
       void logAuditEvent((app as any).controlDb, {
-        appId: req.auth?.appId ?? '_unknown',
+        appId: req.params.appId ?? '_unknown',
         category: 'ai',
         eventType: 'ai_meetings.start',
         action: 'invoke',
@@ -127,9 +152,9 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get<{ Params: { id: string } }>('/v1/ai/meetings/:id', async (req, reply) => {
+  app.get<{ Params: { appId: string; id: string } }>('/v1/:appId/ai/meetings/:id', async (req, reply) => {
     try {
-      const user = resolveGatewayUser(req);
+      const user = await resolveGatewayUser(app, req, req.params.appId);
       const provider = getActorProvider('meetings');
       const bot = await provider.get(
         { appId: user.appId, userId: user.userId, leaseId: '' },
@@ -139,9 +164,9 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
     } catch (err) { return handleError(reply, err); }
   });
 
-  app.delete<{ Params: { id: string } }>('/v1/ai/meetings/:id', async (req, reply) => {
+  app.delete<{ Params: { appId: string; id: string } }>('/v1/:appId/ai/meetings/:id', async (req, reply) => {
     try {
-      const user = resolveGatewayUser(req);
+      const user = await resolveGatewayUser(app, req, req.params.appId);
       const provider = getActorProvider('meetings');
       await provider.stop(
         { appId: user.appId, userId: user.userId, leaseId: '' },
@@ -151,9 +176,9 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
     } catch (err) { return handleError(reply, err); }
   });
 
-  app.get('/v1/ai/meetings', async (req, reply) => {
+  app.get<{ Params: { appId: string } }>('/v1/:appId/ai/meetings', async (req, reply) => {
     try {
-      const user = resolveGatewayUser(req);
+      const user = await resolveGatewayUser(app, req, req.params.appId);
       const query = listMeetingsRequestSchema.parse(req.query);
       const provider = getActorProvider('meetings');
       const out = await provider.list(
@@ -173,9 +198,9 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get('/v1/ai/meetings/_estimate', async (req, reply) => {
+  app.get<{ Params: { appId: string } }>('/v1/:appId/ai/meetings/_estimate', async (req, reply) => {
     try {
-      const user = resolveGatewayUser(req);
+      await resolveGatewayUser(app, req, req.params.appId);
       const q = z.object({
         durationMinutes: z.coerce.number().int().min(1).max(24 * 60),
         transcript: z.coerce.boolean().default(true),
@@ -249,35 +274,43 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
         return reply.code(403).send({ error: 'Not authorized' });
       }
 
+      const encryptionKey = process.env.AUTH_ENCRYPTION_KEY;
+      if (!encryptionKey) {
+        app.log.error('[ai-meetings] AUTH_ENCRYPTION_KEY not set; cannot persist webhook secret');
+        return reply.code(500).send({ error: 'Server encryption not configured' });
+      }
+
       // Check for existing row
-      const existing: { rows: { forward_secret_hash: string }[] } =
+      const existing: { rows: { forward_secret_encrypted: string }[] } =
         await (app as any).controlDb.query(
-          'SELECT forward_secret_hash FROM app_meetings_webhooks WHERE app_id = $1',
+          'SELECT forward_secret_encrypted FROM app_meetings_webhooks WHERE app_id = $1',
           [appId],
         );
 
       let rawSecret: string | null = null;
-      let secretHash: string;
+      let secretEncrypted: string;
 
       if (body.rotate_secret || existing.rows.length === 0) {
-        // Generate a new secret: wsec_<base64url(32 random bytes)>
+        // Generate a new secret: wsec_<base64url(32 random bytes)>.
+        // We store the AES-256-GCM ciphertext so the forwarder can decrypt
+        // and HMAC-sign outbound payloads with it; receivers verify with the
+        // same raw value handed back here (one-time on create / rotate).
         const raw = randomBytes(32).toString('base64url');
         rawSecret = `wsec_${raw}`;
-        // Hash with SHA-256 (salted with app_id) — lightweight, no bcrypt dep needed
-        secretHash = createHash('sha256').update(`${appId}:${rawSecret}`).digest('hex');
+        secretEncrypted = encrypt(rawSecret, encryptionKey);
       } else {
-        secretHash = existing.rows[0].forward_secret_hash;
+        secretEncrypted = existing.rows[0].forward_secret_encrypted;
       }
 
       // Upsert
       await (app as any).controlDb.query(
-        `INSERT INTO app_meetings_webhooks (app_id, forward_url, forward_secret_hash, updated_at)
+        `INSERT INTO app_meetings_webhooks (app_id, forward_url, forward_secret_encrypted, updated_at)
          VALUES ($1, $2, $3, now())
          ON CONFLICT (app_id) DO UPDATE
            SET forward_url = EXCLUDED.forward_url,
-               forward_secret_hash = EXCLUDED.forward_secret_hash,
+               forward_secret_encrypted = EXCLUDED.forward_secret_encrypted,
                updated_at = now()`,
-        [appId, body.forward_url, secretHash],
+        [appId, body.forward_url, secretEncrypted],
       );
 
       return reply.code(200).send({

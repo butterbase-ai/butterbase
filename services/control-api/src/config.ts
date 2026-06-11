@@ -78,7 +78,10 @@ export const config = {
     apiKey: process.env.MEETINGS_API_KEY ?? '',
     baseUrl: process.env.MEETINGS_BASE_URL ?? 'https://us-east-1.recall.ai',
     webhookSecret: process.env.MEETINGS_WEBHOOK_SECRET ?? '',
-    internalForwarderSigningSecret: process.env.MEETINGS_FORWARDER_SIGNING_SECRET ?? '',
+    // The outbound webhook forwarder signs with each app's per-app secret
+    // (stored AES-256-GCM-encrypted under AUTH_ENCRYPTION_KEY in
+    // app_meetings_webhooks.forward_secret_encrypted), so no service-wide
+    // signing key is required.
   },
 
   /**

@@ -459,6 +459,13 @@ try {
   // @ts-expect-error — path resolved at runtime against the compiled overlay
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
   await overlay.bootstrapCloudOverlays();
+  if (config.meetings?.apiKey) {
+    overlay.bootstrapMeetings({
+      apiKey: config.meetings.apiKey,
+      baseUrl: config.meetings.baseUrl,
+    });
+    app.log.info('ai-meetings provider registered');
+  }
   app.log.info('Cloud overlays loaded');
 } catch (err) {
   app.log.info(
@@ -502,6 +509,23 @@ try {
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/app-billing.js');
   await app.register(overlay.appBillingRoutes);
 } catch { /* OSS mode: no Stripe app billing */ }
+if (config.meetings?.webhookSecret) {
+  try {
+    // @ts-expect-error — overlay path resolved at runtime
+    const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
+    const { getActorProvider } = await import('./services/actor-providers/registry.js');
+    await app.register(overlay.recallWebhookRoute, {
+      secret: config.meetings.webhookSecret,
+      getProvider: () => getActorProvider('meetings'),
+    });
+    app.log.info('ai-meetings webhook route registered');
+  } catch (err) {
+    app.log.info(
+      { err: err instanceof Error ? err.message : err },
+      'ai-meetings webhook overlay not present, skipping',
+    );
+  }
+}
 try {
   // @ts-expect-error — overlay path resolved at runtime
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/substrate/index.js');
