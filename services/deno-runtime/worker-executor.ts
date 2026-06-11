@@ -646,7 +646,7 @@ function buildWorkerCode(
 
       integrations: {
         execute: async (toolName, params) => {
-          const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
+          const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || Deno.env.get("CONTROL_API_URL") || "http://localhost:4000")};
           const serviceKey = ${JSON.stringify(metadata.internal_fn_key || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
           const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
             method: "POST",
@@ -664,7 +664,7 @@ function buildWorkerCode(
         },
         asUser: (userId) => ({
           execute: async (toolName, params) => {
-            const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
+            const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || Deno.env.get("CONTROL_API_URL") || "http://localhost:4000")};
             const serviceKey = ${JSON.stringify(metadata.internal_fn_key || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
             const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
               method: "POST",
