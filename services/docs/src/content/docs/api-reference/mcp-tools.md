@@ -128,6 +128,8 @@ All AI actions are routed through the single `manage_ai` MCP tool. Pass `{ app_i
 | `get_usage` | Aggregate token counts and credit spend over a date window. |
 | `submit_video` | Submit an async video generation job. Pass `model`, `prompt`, optional `duration`, `resolution`, `aspect_ratio`, `generate_audio`, `seed`. Returns `{ job_id, status, polling_url }`. |
 | `poll_video` | Poll a video job's status. Pass `job_id`. Returns the current job state including `content_urls` (absolute) and `charged_credits_usd` when `status === 'completed'`. |
+| `configure_meetings_webhook` | Configure where Butterbase forwards meeting-bot events for this app. Pass `forward_url` and optionally `rotate_secret: true` to mint a fresh signing-secret identifier (returned **once**). The stored hash is used in the `x-bb-key-id` header so your handler can detect post-rotation staleness. |
+| `usage_meetings` | List recent meeting-bot usage rows for this app — `actor_id`, dimension (`recording` or `transcription`), `seconds`, `usd_charged`, `created_at`. Last 100 rows ordered by time desc. |
 
 For the full HTTP request/response shapes and end-to-end video example, see the [AI API reference](./ai-api.md).
 
