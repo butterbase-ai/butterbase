@@ -73,8 +73,13 @@ export async function authorizeAppAiCall(
 
   const { userId, authMethod, scopes, rawToken } = request.auth;
 
-  // 1. Direct ownership (platform JWT or owner-minted API key)
-  if (userId && userId === ownerId) {
+  // 1. Direct ownership (platform JWT or owner-minted API key).
+  // Only platform-credential auth methods can claim owner status by virtue of
+  // userId === ownerId. Restricted-scope auth methods (e.g. function_key,
+  // which carries the owner UUID for downstream attribution but is scoped
+  // only to /integrations/execute) must NOT collect this grant — otherwise
+  // a leaked FSK would drain the owner's AI credits.
+  if (userId && userId === ownerId && (authMethod === 'api_key' || authMethod === 'jwt')) {
     return { ok: true, ownerId, caller: { kind: 'owner' } };
   }
 

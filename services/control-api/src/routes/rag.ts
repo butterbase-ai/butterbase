@@ -49,11 +49,32 @@ interface ResolvedAuth {
   userId: string | null;
 }
 
+/**
+ * Thrown when an auth method that the auth plugin accepted is nonetheless not
+ * valid for this route family. Specifically: function_key carries the owner
+ * UUID for downstream attribution but is scoped to /integrations/execute —
+ * RAG routes must not accept it (otherwise a leaked FSK would let a stranger
+ * read/write the owner's vector store and burn embedding credits).
+ *
+ * Each catch in this file maps this to a 401 with code AUTH_NOT_ACCEPTED_HERE.
+ */
+class AuthNotAcceptedHereError extends Error {
+  constructor(public readonly authMethod: string) {
+    super(`auth method '${authMethod}' is not accepted on RAG routes`);
+    this.name = 'AuthNotAcceptedHereError';
+  }
+}
+
 async function resolveAuth(
   controlDb: Pool,
   appId: string,
   auth: any,
 ): Promise<ResolvedAuth> {
+  // function_key is scoped to /integrations/execute only — reject explicitly
+  // so callers get a clean 401 (not a 500 from the generic throw below).
+  if (auth.authMethod === 'function_key') {
+    throw new AuthNotAcceptedHereError('function_key');
+  }
   if (auth.authMethod === 'end_user_jwt') {
     const endUserClaims = await verifyEndUserJwt(controlDb, appId, auth.rawToken!);
     const resolved = await AppResolver.resolveAppPublic(controlDb, appId);
@@ -218,6 +239,13 @@ export async function ragRoutes(app: FastifyInstance) {
 
         return reply.status(201).send(result);
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error.code === 'DUPLICATE') {
           return reply.status(409).send(createAgentError({
             code: 'RESOURCE_CONFLICT',
@@ -263,6 +291,13 @@ export async function ragRoutes(app: FastifyInstance) {
         });
         return reply.send(collections);
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error instanceof AppNotFoundError) {
           return reply.status(404).send(createAgentError({ code: 'RESOURCE_NOT_FOUND', message: `App not found: ${appId}`, remediation: 'Verify the app_id is correct.' }));
         }
@@ -315,6 +350,13 @@ export async function ragRoutes(app: FastifyInstance) {
         }
         return reply.send(result);
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error instanceof AppNotFoundError) {
           return reply.status(404).send(createAgentError({ code: 'RESOURCE_NOT_FOUND', message: `App not found: ${appId}`, remediation: 'Verify the app_id is correct.' }));
         }
@@ -398,6 +440,13 @@ export async function ragRoutes(app: FastifyInstance) {
 
         return reply.status(204).send();
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error.code === 'NOT_FOUND') {
           return reply.status(404).send(createAgentError({
             code: 'RESOURCE_NOT_FOUND',
@@ -538,6 +587,13 @@ export async function ragRoutes(app: FastifyInstance) {
           collection: name,
         });
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error instanceof AppNotFoundError) {
           return reply.status(404).send(createAgentError({ code: 'RESOURCE_NOT_FOUND', message: `App not found: ${appId}`, remediation: 'Verify the app_id is correct.' }));
         }
@@ -579,6 +635,13 @@ export async function ragRoutes(app: FastifyInstance) {
 
         return reply.send(documents);
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error.code === 'NOT_FOUND') {
           return reply.status(404).send(createAgentError({ code: 'RESOURCE_NOT_FOUND', message: `Collection "${name}" not found`, remediation: 'Use rag_list_collections to see available collections.' }));
         }
@@ -628,6 +691,13 @@ export async function ragRoutes(app: FastifyInstance) {
         }
         return reply.send(document);
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error instanceof AppNotFoundError) {
           return reply.status(404).send(createAgentError({ code: 'RESOURCE_NOT_FOUND', message: `App not found: ${appId}`, remediation: 'Verify the app_id is correct.' }));
         }
@@ -674,6 +744,13 @@ export async function ragRoutes(app: FastifyInstance) {
 
         return reply.status(204).send();
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error.code === 'NOT_FOUND') {
           return reply.status(404).send(createAgentError({ code: 'RESOURCE_NOT_FOUND', message: 'Document not found', remediation: 'Use rag_list_documents to see available documents.' }));
         }
@@ -829,6 +906,13 @@ export async function ragRoutes(app: FastifyInstance) {
 
         return reply.send({ chunks: responseChunks });
       } catch (error: any) {
+        if (error instanceof AuthNotAcceptedHereError) {
+          return reply.status(401).send(createAgentError({
+            code: 'AUTH_REQUIRED',
+            message: `Auth method '${error.authMethod}' is not accepted on RAG routes`,
+            remediation: 'Use an API key, platform JWT, or end-user JWT.',
+          }));
+        }
         if (error instanceof AppNotFoundError) {
           return reply.status(404).send(createAgentError({ code: 'RESOURCE_NOT_FOUND', message: `App not found: ${appId}`, remediation: 'Verify the app_id is correct.' }));
         }
