@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { apiGet, apiPost, apiPut } from '../api-client.js';
+import { apiGet, apiPost, apiPut, apiDelete } from '../api-client.js';
 
 export function registerManageAi(server: McpServer) {
   server.tool(
@@ -29,10 +29,25 @@ Actions:
                        When status is "completed", content_urls contains absolute URLs (same origin
                        as the polling_url) that the caller can fetch() directly using the same
                        Authorization header. Use this to drive your own polling loop.
+  - start_meeting     { app_id, meeting_url, transcript?, recording?, metadata? }
+                       Spawn a meeting bot that joins a Zoom/Meet/Teams/Webex call.
+                       recording: "mp4" (default), "audio_only", or false. transcript defaults to true.
+                       Returns { id, status, ... }. Save id to call get_meeting / stop_meeting later.
+  - get_meeting       { app_id, meeting_id }
+                       Current status + recordingUrl / transcriptUrl (populated when artifacts are ready).
+  - list_meetings     { app_id, status?, limit?, cursor? }
+                       Page through this app's bots. status filters to a lifecycle phase
+                       (joining / waiting_room / in_call / recording / ended / done / fatal).
+  - stop_meeting      { app_id, meeting_id }
+                       Force the bot to leave the call. Returns 204 / no body on success.
+  - estimate_meeting  { app_id, duration_minutes, transcript? }
+                       Predict the USD charge for a hypothetical session at this duration.
   - configure_meetings_webhook  { app_id, forward_url, rotate_secret? }
                        Upsert the app's meetings webhook forward URL.
                        When rotate_secret is true (or no row exists), generates a new signing secret
-                       (wsec_…) and returns it once — store it immediately.
+                       (wsec_…) and returns it once — store it immediately. The secret is the
+                       HMAC-SHA256 key that signs every forwarded event for THIS app — see the
+                       "meetings" topic in butterbase_docs for verification details.
                        Returns { ok, app_id, forward_url, secret } where secret is null when not rotated.
   - usage_meetings    { app_id }
                        Returns the last 100 rows from actor_usage_logs for the app.
@@ -45,7 +60,9 @@ drive the SDK from inside a function or DO.`,
       app_id: z.string().describe('The app ID'),
       action: z.enum([
         'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
-        'submit_video', 'poll_video', 'configure_meetings_webhook', 'usage_meetings',
+        'submit_video', 'poll_video',
+        'start_meeting', 'get_meeting', 'list_meetings', 'stop_meeting', 'estimate_meeting',
+        'configure_meetings_webhook', 'usage_meetings',
       ]).describe('The action to perform'),
       // chat
       messages: z.array(z.object({
@@ -82,6 +99,20 @@ drive the SDK from inside a function or DO.`,
       // configure_meetings_webhook
       forward_url: z.string().optional().describe('Required for configure_meetings_webhook'),
       rotate_secret: z.boolean().optional().describe('For configure_meetings_webhook — generate a new signing secret'),
+      // start_meeting / list_meetings / etc.
+      meeting_url: z.string().optional().describe('Required for start_meeting'),
+      meeting_id: z.string().optional().describe('Required for get_meeting / stop_meeting'),
+      transcript: z.coerce.boolean().optional().describe('For start_meeting / estimate_meeting (default true)'),
+      recording: z.union([z.literal('mp4'), z.literal('audio_only'), z.literal('false'), z.literal(false)]).optional()
+        .describe('For start_meeting: "mp4" (default), "audio_only", or false to skip recording'),
+      metadata: z.record(z.string()).optional()
+        .describe('For start_meeting — arbitrary string→string map; keys may not start with bb_'),
+      status: z.enum(['joining','waiting_room','in_call','recording','ended','done','fatal']).optional()
+        .describe('For list_meetings — filter to one lifecycle phase'),
+      limit: z.coerce.number().int().min(1).max(100).optional().describe('For list_meetings (default 20)'),
+      cursor: z.string().optional().describe('For list_meetings pagination'),
+      duration_minutes: z.coerce.number().int().min(1).max(24 * 60).optional()
+        .describe('Required for estimate_meeting'),
     },
     {
       title: 'Manage AI',
@@ -165,6 +196,52 @@ drive the SDK from inside a function or DO.`,
               return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "poll_video".' }], isError: true as const };
             }
             result = await apiGet(`/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}`);
+            break;
+          }
+          case 'start_meeting': {
+            if (!args.meeting_url) {
+              return { content: [{ type: 'text' as const, text: 'Error: "meeting_url" is required for "start_meeting".' }], isError: true as const };
+            }
+            const recording = args.recording === 'false' ? false : (args.recording ?? 'mp4');
+            result = await apiPost(`/v1/${app_id}/ai/meetings`, {
+              meetingUrl: args.meeting_url,
+              transcript: args.transcript ?? true,
+              recording,
+              metadata: args.metadata,
+            });
+            break;
+          }
+          case 'get_meeting': {
+            if (!args.meeting_id) {
+              return { content: [{ type: 'text' as const, text: 'Error: "meeting_id" is required for "get_meeting".' }], isError: true as const };
+            }
+            result = await apiGet(`/v1/${app_id}/ai/meetings/${encodeURIComponent(args.meeting_id)}`);
+            break;
+          }
+          case 'list_meetings': {
+            const q = new URLSearchParams();
+            if (args.status) q.set('status', args.status);
+            if (args.limit !== undefined) q.set('limit', String(args.limit));
+            if (args.cursor) q.set('cursor', args.cursor);
+            const qs = q.toString();
+            result = await apiGet(`/v1/${app_id}/ai/meetings${qs ? `?${qs}` : ''}`);
+            break;
+          }
+          case 'stop_meeting': {
+            if (!args.meeting_id) {
+              return { content: [{ type: 'text' as const, text: 'Error: "meeting_id" is required for "stop_meeting".' }], isError: true as const };
+            }
+            result = await apiDelete(`/v1/${app_id}/ai/meetings/${encodeURIComponent(args.meeting_id)}`);
+            break;
+          }
+          case 'estimate_meeting': {
+            if (args.duration_minutes === undefined) {
+              return { content: [{ type: 'text' as const, text: 'Error: "duration_minutes" is required for "estimate_meeting".' }], isError: true as const };
+            }
+            const q = new URLSearchParams();
+            q.set('durationMinutes', String(args.duration_minutes));
+            if (args.transcript !== undefined) q.set('transcript', String(args.transcript));
+            result = await apiGet(`/v1/${app_id}/ai/meetings/_estimate?${q.toString()}`);
             break;
           }
           case 'configure_meetings_webhook': {
