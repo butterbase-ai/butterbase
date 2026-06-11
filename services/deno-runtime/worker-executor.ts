@@ -719,6 +719,18 @@ function buildWorkerCode(
         if (!res.ok) throw new Error('substrate.searchMemory failed: ' + res.status);
         return (await res.json()).results;
       },
+      async upsertEntity(payload) {
+        return await this.propose('upsert_entity', payload);
+      },
+      async patchEntity(id, attrs_patch, opts) {
+        return await this.propose('patch_entity', { id, attrs_patch, ...opts });
+      },
+      async deleteEntity(id, reason) {
+        return await this.propose('delete_entity', { id, reason });
+      },
+      async mergeEntities(loser_id, winner_id, reason) {
+        return await this.propose('merge_entities', { loser_id, winner_id, reason });
+      },
     };
     ` : '/* ctx.substrate: substrate_user_id not set — substrate omitted */'}
 
