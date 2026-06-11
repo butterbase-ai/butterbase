@@ -78,6 +78,13 @@ import {
   aiConfigGetCommand,
   aiConfigSetCommand,
   aiUsageCommand,
+  aiMeetingsStartCommand,
+  aiMeetingsGetCommand,
+  aiMeetingsListCommand,
+  aiMeetingsStopCommand,
+  aiMeetingsEstimateCommand,
+  aiMeetingsUsageCommand,
+  aiMeetingsWebhookCommand,
 } from '../src/commands/ai.js';
 import {
   oauthConfigureCommand, oauthListCommand, oauthGetCommand, oauthUpdateCommand, oauthDeleteCommand,
@@ -1010,6 +1017,70 @@ ai
   .option('--json', 'Output raw JSON')
   .action((opts) => aiUsageCommand({
     app: opts.app, startDate: opts.startDate, endDate: opts.endDate, json: opts.json,
+  }));
+
+// ─── ai meetings ────────────────────────────────────────────────────────────
+const aiMeetings = ai.command('meetings').description('Meeting bots that join Zoom/Meet/Teams/Webex calls and return recordings + transcripts');
+
+aiMeetings
+  .command('start <meetingUrl>')
+  .description('Spawn a meeting bot')
+  .option('--app <appId>', 'Override current app')
+  .option('--no-transcript', 'Disable transcription')
+  .option('--recording <mode>', '"mp4" (default), "audio_only", or "false"', 'mp4')
+  .option('--json', 'Output raw JSON')
+  .action((meetingUrl, opts) => aiMeetingsStartCommand(meetingUrl, {
+    app: opts.app, transcript: opts.transcript, recording: opts.recording, json: opts.json,
+  }));
+
+aiMeetings
+  .command('get <meetingId>')
+  .description('Get current status + recording/transcript URLs (when ready)')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((meetingId, opts) => aiMeetingsGetCommand(meetingId, opts));
+
+aiMeetings
+  .command('list')
+  .description('List meeting bots for this app')
+  .option('--app <appId>', 'Override current app')
+  .option('--status <phase>', 'Filter to a lifecycle phase (joining|waiting_room|in_call|recording|ended|done|fatal)')
+  .option('--limit <n>', 'Page size', parseInt)
+  .option('--cursor <s>', 'Pagination cursor')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => aiMeetingsListCommand(opts));
+
+aiMeetings
+  .command('stop <meetingId>')
+  .description('Force a bot to leave its call')
+  .option('--app <appId>', 'Override current app')
+  .action((meetingId, opts) => aiMeetingsStopCommand(meetingId, opts));
+
+aiMeetings
+  .command('estimate <durationMinutes>')
+  .description('Predict the USD charge for a session at the given duration')
+  .option('--app <appId>', 'Override current app')
+  .option('--no-transcript', 'Skip transcription in the estimate')
+  .option('--json', 'Output raw JSON')
+  .action((durationMinutes, opts) => aiMeetingsEstimateCommand({
+    app: opts.app, durationMinutes: parseInt(durationMinutes), transcript: opts.transcript, json: opts.json,
+  }));
+
+aiMeetings
+  .command('usage')
+  .description('Recent actor_usage_logs rows for this app')
+  .option('--app <appId>', 'Override current app')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => aiMeetingsUsageCommand(opts));
+
+aiMeetings
+  .command('webhook <forwardUrl>')
+  .description('Set the forward URL for meeting events. Use --rotate-secret to mint a new signing secret (shown once).')
+  .option('--app <appId>', 'Override current app')
+  .option('--rotate-secret', 'Generate a new wsec_... signing secret')
+  .option('--json', 'Output raw JSON')
+  .action((forwardUrl, opts) => aiMeetingsWebhookCommand(forwardUrl, {
+    app: opts.app, rotateSecret: opts.rotateSecret, json: opts.json,
   }));
 
 // OAuth

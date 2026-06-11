@@ -120,3 +120,126 @@ export async function aiUsageCommand(options: { app?: string; startDate?: string
     process.exit(1);
   }
 }
+
+// ─── Meetings ────────────────────────────────────────────────────────────────
+// Spawn / inspect / stop meeting bots that join Zoom/Meet/Teams/Webex calls
+// and return recordings + transcripts. See butterbase_docs topic "meetings".
+
+import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api-client.js';
+
+export async function aiMeetingsStartCommand(meetingUrl: string, options: { app?: string; transcript?: boolean; recording?: 'mp4' | 'audio_only' | 'false'; json?: boolean }) {
+  const appId = await requireAppId(options.app);
+  const recording = options.recording === 'false' ? false : (options.recording ?? 'mp4');
+  const spinner = ora('Spawning meeting bot...').start();
+  try {
+    const r: any = await apiPost(`/v1/${appId}/ai/meetings`, {
+      meetingUrl, transcript: options.transcript ?? true, recording,
+    });
+    spinner.stop();
+    if (options.json) return console.log(JSON.stringify(r, null, 2));
+    console.log(chalk.green('Bot spawned:'), r.id);
+    console.log(chalk.gray('status:'), r.status);
+  } catch (e) {
+    spinner.fail('Spawn failed');
+    console.error(chalk.red((e as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function aiMeetingsGetCommand(meetingId: string, options: { app?: string; json?: boolean }) {
+  const appId = await requireAppId(options.app);
+  try {
+    const r: any = await apiGet(`/v1/${appId}/ai/meetings/${encodeURIComponent(meetingId)}`);
+    if (options.json) return console.log(JSON.stringify(r, null, 2));
+    console.log(chalk.bold(r.id));
+    console.log('  status:        ', r.status);
+    console.log('  startedAt:     ', r.startedAt ?? '—');
+    console.log('  duration (s):  ', r.durationSeconds ?? '—');
+    if (r.recordingUrl) console.log('  recordingUrl:  ', r.recordingUrl);
+    if (r.transcriptUrl) console.log('  transcriptUrl: ', r.transcriptUrl);
+  } catch (e) {
+    console.error(chalk.red((e as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function aiMeetingsListCommand(options: { app?: string; status?: string; limit?: number; cursor?: string; json?: boolean }) {
+  const appId = await requireAppId(options.app);
+  const q = new URLSearchParams();
+  if (options.status) q.set('status', options.status);
+  if (options.limit !== undefined) q.set('limit', String(options.limit));
+  if (options.cursor) q.set('cursor', options.cursor);
+  const qs = q.toString();
+  try {
+    const r: any = await apiGet(`/v1/${appId}/ai/meetings${qs ? `?${qs}` : ''}`);
+    if (options.json) return console.log(JSON.stringify(r, null, 2));
+    const rows = r.bots ?? r.rows ?? r;
+    for (const b of rows) {
+      console.log(`${b.id}  ${b.status?.padEnd(10) ?? '-'}  ${b.startedAt ?? ''}`);
+    }
+    if (r.nextCursor) console.log(chalk.gray(`-- next cursor: ${r.nextCursor}`));
+  } catch (e) {
+    console.error(chalk.red((e as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function aiMeetingsStopCommand(meetingId: string, options: { app?: string }) {
+  const appId = await requireAppId(options.app);
+  try {
+    await apiDelete(`/v1/${appId}/ai/meetings/${encodeURIComponent(meetingId)}`);
+    console.log(chalk.green('Stopped:'), meetingId);
+  } catch (e) {
+    console.error(chalk.red((e as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function aiMeetingsEstimateCommand(options: { app?: string; durationMinutes: number; transcript?: boolean; json?: boolean }) {
+  const appId = await requireAppId(options.app);
+  const q = new URLSearchParams();
+  q.set('durationMinutes', String(options.durationMinutes));
+  if (options.transcript !== undefined) q.set('transcript', String(options.transcript));
+  try {
+    const r: any = await apiGet(`/v1/${appId}/ai/meetings/_estimate?${q.toString()}`);
+    if (options.json) return console.log(JSON.stringify(r, null, 2));
+    console.log(chalk.bold(`$${(r.usd ?? r).toFixed?.(4) ?? r}`), chalk.gray(`for ${options.durationMinutes}min ${options.transcript === false ? '(no transcript)' : 'with transcript'}`));
+  } catch (e) {
+    console.error(chalk.red((e as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function aiMeetingsUsageCommand(options: { app?: string; json?: boolean }) {
+  const appId = await requireAppId(options.app);
+  try {
+    const r: any = await apiGet(`/v1/${appId}/ai/meetings/usage`);
+    if (options.json) return console.log(JSON.stringify(r, null, 2));
+    for (const row of r.rows ?? []) {
+      console.log(`${row.created_at}  ${row.dimension.padEnd(14)} ${String(row.seconds).padStart(6)}s  $${row.usd_charged}`);
+    }
+  } catch (e) {
+    console.error(chalk.red((e as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function aiMeetingsWebhookCommand(forwardUrl: string, options: { app?: string; rotateSecret?: boolean; json?: boolean }) {
+  const appId = await requireAppId(options.app);
+  try {
+    const r: any = await apiPut(`/v1/${appId}/ai/meetings/webhook`, {
+      forward_url: forwardUrl,
+      rotate_secret: options.rotateSecret ?? false,
+    });
+    if (options.json) return console.log(JSON.stringify(r, null, 2));
+    console.log(chalk.green('Webhook configured.'));
+    console.log(chalk.gray('forward_url:'), r.forward_url);
+    if (r.secret) {
+      console.log(chalk.yellow('\nNew signing secret (shown once — store it now):'));
+      console.log('  ', r.secret);
+    }
+  } catch (e) {
+    console.error(chalk.red((e as Error).message));
+    process.exit(1);
+  }
+}
