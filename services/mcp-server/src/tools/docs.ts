@@ -17,6 +17,7 @@ Available topics:
   - functions: Serverless functions (triggers, context)
   - frontend: Static frontend deployment (upload zip, deploy to live URL)
   - ai: AI model gateway (chat completions, BYOK, usage)
+  - meetings: Meeting bots that join Zoom/Meet/Teams/Webex calls and return recordings + transcripts
   - billing: Your Butterbase plan, usage meters, app-level Stripe Connect (subscriptions and one-time payments)
   - platform: MCP over HTTP, /llms.txt, subdomains, suggestions, rate limits
   - regions: Choosing a region at app creation, moving apps between regions, discovering the live region list

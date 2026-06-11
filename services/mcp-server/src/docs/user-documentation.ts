@@ -13,6 +13,7 @@ export const DOC_TOPICS = [
   'functions',
   'frontend',
   'ai',
+  'meetings',
   'billing',
   'platform',
   'regions',
@@ -2163,6 +2164,319 @@ AI usage cost counts against your plan's AI credits allowance when using the pla
 When Pro plan users exceed their included $10, they are not blocked — overage is billed at $0.10 per credit and an email notification is sent. Free plan users must upgrade to continue using AI after exhausting their $0.10 lifetime allowance.
 `,
 
+  meetings: `## AI Meetings
+
+Spawn a meeting bot that joins a Zoom, Google Meet, Microsoft Teams, or Webex call and records + transcribes it. Billed against the same AI credits allowance as chat/embeddings.
+
+### Spawn a bot
+
+\`\`\`
+POST /v1/{app_id}/ai/meetings
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "meetingUrl": "https://zoom.us/j/12345...",
+  "transcript": true,
+  "recording": "mp4",
+  "metadata": { "session_id": "abc123" }
+}
+\`\`\`
+
+Returns:
+
+\`\`\`json
+{
+  "id": "c086e720-d319-44b8-82d8-3a363f2cd9f4",
+  "status": "joining",
+  "startedAt": "2026-06-11T17:01:29Z",
+  "metadata": { "session_id": "abc123" }
+}
+\`\`\`
+
+| Field | Default | Notes |
+|---|---|---|
+| \`meetingUrl\` | required | Any Zoom / Meet / Teams / Webex meeting URL |
+| \`transcript\` | \`true\` | When \`true\`, the call is transcribed in addition to being recorded |
+| \`recording\` | \`"mp4"\` | \`"mp4"\` for video+audio, \`"audio_only"\` for audio only, \`false\` to skip |
+| \`metadata\` | \`{}\` | Arbitrary string→string map. Keys may not start with \`bb_\` (reserved) |
+
+### Get / list / stop
+
+\`\`\`
+GET    /v1/{app_id}/ai/meetings/{bot_id}     # current status + recording/transcript URLs (when ready)
+GET    /v1/{app_id}/ai/meetings              # list bots (?status=&limit=&cursor=)
+DELETE /v1/{app_id}/ai/meetings/{bot_id}     # force the bot to leave the call
+\`\`\`
+
+Possible \`status\` values: \`joining\`, \`waiting_room\`, \`in_call\`, \`recording\`, \`ended\`, \`done\`, \`fatal\`.
+
+### Cost estimate
+
+\`\`\`
+GET /v1/{app_id}/ai/meetings/_estimate?durationMinutes=30&transcript=true
+\`\`\`
+
+Returns the expected USD charge for a hypothetical session at the given duration.
+
+### Webhooks (event-driven flow)
+
+Configure a per-app forward URL once; Butterbase will then POST events to your URL whenever the bot's lifecycle advances or media is ready.
+
+\`\`\`
+PUT /v1/{app_id}/ai/meetings/webhook
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "forward_url": "https://api.your-app.com/recall/events",
+  "rotate_secret": true
+}
+\`\`\`
+
+Returns:
+
+\`\`\`json
+{
+  "ok": true,
+  "app_id": "app_abc123",
+  "forward_url": "https://api.your-app.com/recall/events",
+  "secret": "wsec_<base64url(32 random bytes)>"
+}
+\`\`\`
+
+Store the \`secret\` — it's only returned on initial create and on \`rotate_secret: true\`.
+
+**Subscribed events** (default):
+
+| Event | Fires when |
+|---|---|
+| \`bot.in_call_recording\` | Bot has joined and started recording |
+| \`bot.done\` | Bot has left the call cleanly; recording is finalised |
+| \`bot.fatal\` | Bot failed terminally |
+| \`recording.done\` | Recording artifact is ready for download |
+| \`transcript.done\` | Transcript artifact is ready for download |
+| \`transcript.failed\` | Transcription failed for this recording |
+
+**Body & headers** delivered to your forward URL:
+
+\`\`\`
+POST /your/configured/path
+content-type: application/json
+x-bb-event: bot.done
+x-bb-signature: v1,<base64 HMAC-SHA256>
+
+{
+  "event": "bot.done",
+  "data": { "bot": { "id": "c086e720-...", "metadata": { ... } }, ... }
+}
+\`\`\`
+
+**Verifying the signature.** Recompute \`base64(HMAC-SHA256(<your_app_secret>, <raw body>))\`, prefix with \`v1,\`, and compare to \`x-bb-signature\` in constant time. The secret is the \`wsec_...\` value Butterbase returned to you on PUT or rotate; it's unique to your app, and the platform stores it AES-256-GCM-encrypted so only your app and the platform ever see the plaintext.
+
+### Webhooks carry IDs, not URLs
+
+The \`recording.done\` and \`transcript.done\` event payloads contain the **recording/transcript ID**, not the download URL — by design, since the URLs are short-lived and re-minted on demand. To get the actual download URL, follow up with:
+
+\`\`\`
+GET /v1/{app_id}/ai/meetings/{bot_id}
+\`\`\`
+
+and read \`recordingUrl\` / \`transcriptUrl\` from the normalized response. Example function handler:
+
+\`\`\`typescript
+export default async function handler(req: Request, ctx: any): Promise<Response> {
+  const event = req.headers.get('x-bb-event');
+  const body = await req.json();
+  const botId = body?.data?.bot?.id;
+
+  if (event === 'recording.done' || event === 'transcript.done' || event === 'bot.done') {
+    const res = await fetch(
+      \`\${ctx.env.BUTTERBASE_API_URL}/v1/\${ctx.env.BUTTERBASE_APP_ID}/ai/meetings/\${botId}\`,
+      { headers: { authorization: \`Bearer \${ctx.env.BUTTERBASE_API_KEY}\` } },
+    );
+    const bot = await res.json();
+    // bot.recordingUrl / bot.transcriptUrl are now populated.
+    await ctx.db.query(
+      'UPDATE meetings SET recording_url=$1, transcript_url=$2 WHERE bot_id=$3',
+      [bot.recordingUrl, bot.transcriptUrl, botId],
+    );
+  }
+  return new Response('ok');
+}
+\`\`\`
+
+### Complete worked example
+
+A minimal app that records every Zoom/Meet/Teams/Webex call and persists the resulting transcript and recording URLs.
+
+**1. Schema** — one table to track each bot's lifecycle:
+
+\`\`\`json
+{
+  "tables": {
+    "meetings": {
+      "columns": {
+        "id":             { "type": "uuid", "primaryKey": true, "default": "gen_random_uuid()" },
+        "bot_id":         { "type": "text", "nullable": false, "unique": true },
+        "meeting_url":    { "type": "text", "nullable": false },
+        "status":         { "type": "text", "nullable": false, "default": "'pending'" },
+        "last_event":     { "type": "text" },
+        "events_count":   { "type": "integer", "nullable": false, "default": "0" },
+        "recording_url":  { "type": "text" },
+        "transcript_url": { "type": "text" },
+        "created_at":     { "type": "timestamptz", "nullable": false, "default": "now()" },
+        "updated_at":     { "type": "timestamptz", "nullable": false, "default": "now()" }
+      },
+      "indexes": { "meetings_bot_id_idx": { "columns": ["bot_id"], "unique": true } }
+    }
+  }
+}
+\`\`\`
+
+**2. Spawn function** — \`POST /fn/spawn-bot\` accepts a meeting URL, asks the meetings primitive to join, and inserts a tracking row:
+
+\`\`\`typescript
+export default async function handler(req: Request, ctx: any): Promise<Response> {
+  const { meetingUrl } = await req.json();
+  const res = await fetch(
+    \`\${ctx.env.BUTTERBASE_API_URL}/v1/\${ctx.env.BUTTERBASE_APP_ID}/ai/meetings\`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: \`Bearer \${ctx.env.BUTTERBASE_API_KEY}\`,
+      },
+      body: JSON.stringify({ meetingUrl, transcript: true, recording: 'mp4' }),
+    },
+  );
+  const bot = await res.json();
+  if (!res.ok) return new Response(JSON.stringify(bot), { status: 502 });
+
+  await ctx.db.query(
+    'INSERT INTO meetings (bot_id, meeting_url, status, last_event) VALUES ($1, $2, $3, $4)',
+    [bot.id, meetingUrl, bot.status ?? 'joining', 'spawn'],
+  );
+  return new Response(JSON.stringify({ bot_id: bot.id, status: bot.status }), {
+    headers: { 'content-type': 'application/json' },
+  });
+}
+\`\`\`
+
+Deploy with \`BUTTERBASE_API_KEY\` set in \`envVars\`. \`BUTTERBASE_API_URL\` and \`BUTTERBASE_APP_ID\` are auto-injected.
+
+**3. Configure the forward webhook** — one PUT, store the \`secret\` in your function's env:
+
+\`\`\`bash
+curl -X PUT https://api.butterbase.ai/v1/{app_id}/ai/meetings/webhook \\
+  -H "authorization: Bearer bb_sk_..." \\
+  -H "content-type: application/json" \\
+  -d '{ "forward_url": "https://api.butterbase.ai/v1/{app_id}/fn/meetings-webhook", "rotate_secret": true }'
+# → { "secret": "wsec_..." }   ← copy this once, set it on the function below
+\`\`\`
+
+**4. Webhook function** — \`POST /fn/meetings-webhook\` verifies the per-app HMAC, follows up with a GET when artifacts are ready, and updates the row:
+
+\`\`\`typescript
+function timingSafeEqual(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
+async function hmacBase64(secret: string, body: string) {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body));
+  return btoa(String.fromCharCode(...new Uint8Array(mac)));
+}
+
+export default async function handler(req: Request, ctx: any): Promise<Response> {
+  const rawBody = await req.text();
+  const event = req.headers.get('x-bb-event') ?? '';
+  const sig = req.headers.get('x-bb-signature') ?? '';
+
+  // wsec_... returned by PUT, stored in envVars.MEETINGS_WEBHOOK_SECRET.
+  const expected = \`v1,\${await hmacBase64(ctx.env.MEETINGS_WEBHOOK_SECRET, rawBody)}\`;
+  if (!timingSafeEqual(expected, sig)) {
+    return new Response('invalid signature', { status: 401 });
+  }
+
+  const payload = JSON.parse(rawBody);
+  const botId = payload?.data?.bot?.id;
+  if (!botId) return new Response('ok');
+
+  let nextStatus: string | null = null;
+  if (event === 'bot.in_call_recording') nextStatus = 'recording';
+  else if (event === 'bot.done') nextStatus = 'done';
+  else if (event === 'bot.fatal') nextStatus = 'fatal';
+
+  let recordingUrl: string | null = null;
+  let transcriptUrl: string | null = null;
+  if (event === 'recording.done' || event === 'transcript.done' || event === 'bot.done') {
+    const res = await fetch(
+      \`\${ctx.env.BUTTERBASE_API_URL}/v1/\${ctx.env.BUTTERBASE_APP_ID}/ai/meetings/\${botId}\`,
+      { headers: { authorization: \`Bearer \${ctx.env.BUTTERBASE_API_KEY}\` } },
+    );
+    if (res.ok) {
+      const bot = await res.json();
+      recordingUrl = bot.recordingUrl ?? null;
+      transcriptUrl = bot.transcriptUrl ?? null;
+    }
+  }
+
+  await ctx.db.query(
+    \`UPDATE meetings
+        SET status = COALESCE($2, status),
+            last_event = $3,
+            recording_url = COALESCE($4, recording_url),
+            transcript_url = COALESCE($5, transcript_url),
+            events_count = events_count + 1,
+            updated_at = now()
+      WHERE bot_id = $1\`,
+    [botId, nextStatus, event, recordingUrl, transcriptUrl],
+  );
+  return new Response(JSON.stringify({ ok: true }));
+}
+\`\`\`
+
+Deploy with \`envVars: { MEETINGS_WEBHOOK_SECRET: 'wsec_...', BUTTERBASE_API_KEY: 'bb_sk_...' }\` and \`trigger: { type: 'http', config: { method: 'POST', path: '/meetings-webhook', auth: 'none' } }\`. \`auth: 'none'\` is correct — the HMAC inside is what authenticates the caller.
+
+**5. Use it**:
+
+\`\`\`bash
+curl -X POST https://{app_id}.api.butterbase.ai/fn/spawn-bot \\
+  -H "content-type: application/json" \\
+  -d '{ "meetingUrl": "https://zoom.us/j/12345..." }'
+# → { "bot_id": "...", "status": "joining" }
+\`\`\`
+
+The bot joins the call. Events arrive on \`meetings-webhook\` as the lifecycle advances, the row is kept current, and \`recording_url\` + \`transcript_url\` populate when Recall finishes processing the artifacts (usually a minute or two after the call ends).
+
+### Usage & billing
+
+\`\`\`
+GET /v1/{app_id}/ai/meetings/usage
+\`\`\`
+
+Returns the last 100 \`actor_usage_logs\` rows for the app — one row per dimension (\`recording\` and, when transcript was enabled, \`transcription\`) per completed session.
+
+Meetings credits are drawn from the same AI credits pool as chat and embeddings. The cost is computed at terminal events (\`bot.done\` / \`bot.fatal\` for recording, \`transcript.done\` for transcription) from actual measured duration, not from the up-front estimate. Up-front, the platform reserves a small lease against your balance and refunds the unused portion on settle — so a failed join refunds in full.
+
+Free / Pro / Enterprise allowances are the same as documented under the \`ai\` topic.
+
+### Availability
+
+\`\`\`
+GET /v1/ai/meetings/_status
+\`\`\`
+
+Returns \`{ "available": true | false }\` for the deployment. Use this if you want your UI to hide the spawn button when the platform is in degraded mode.
+`,
+
   billing: `## Billing & Plans
 
 Butterbase offers three plan tiers. Each plan includes a set of monthly usage allowances. When you exceed a limit on the Free plan, your account is soft-locked until usage drops or you upgrade. Pro plan users can exceed limits with overage charges.
@@ -3559,6 +3873,7 @@ export function getUserDocumentation(topic: DocTopic): string {
       SECTIONS.functions,
       SECTIONS.frontend,
       SECTIONS.ai,
+      SECTIONS.meetings,
       SECTIONS.rag,
       SECTIONS.billing,
       SECTIONS.platform,

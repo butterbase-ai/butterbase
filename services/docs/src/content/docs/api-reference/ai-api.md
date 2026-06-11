@@ -454,3 +454,159 @@ The response contains the plaintext key once — store it immediately. Subsequen
 | `ai:gateway` | Access to `POST /v1/chat/completions`, `POST /v1/embeddings`, and `GET /v1/models`. Nothing else. |
 
 The dashboard at `/api-keys` lists and revokes keys; for now, scoping a key to `ai:gateway` is done by calling `POST /api-keys` directly.
+
+## Meeting bots
+
+`ctx.ai.meetings` lets your app spawn a bot that joins a Zoom, Google Meet, Microsoft Teams, or Webex call, records it, and transcribes the audio. Your app starts a bot via the REST API or SDK, then waits for webhook events to learn when the call ends and the artifacts (recording, transcript) are ready to download. Recordings and transcripts are billed against the app's AI credit balance using the same ledger as chat completions.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /v1/ai/meetings | Start a bot |
+| GET | /v1/ai/meetings/\{bot_id} | Get bot status + artifact URLs |
+| DELETE | /v1/ai/meetings/\{bot_id} | Stop a bot |
+| GET | /v1/ai/meetings | List bots |
+| GET | /v1/ai/meetings/_estimate | Estimate cost up front |
+
+### Start a bot
+
+**Request:**
+
+```json
+POST /v1/ai/meetings
+Authorization: Bearer bb_sk_...
+
+{
+  "meetingUrl": "https://meet.google.com/abc-defg-hij",
+  "transcript": true,
+  "recording": "mp4",
+  "metadata": {
+    "dealId": "d_42"
+  }
+}
+```
+
+**Request fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `meetingUrl` | string | yes | — | Full URL of the meeting to join. |
+| `transcript` | boolean | no | `true` | Whether to generate a transcript. |
+| `recording` | `"mp4" \| "audio_only" \| false` | no | `"mp4"` | Recording format, or `false` to skip recording. |
+| `metadata` | `Record<string, string>` | no | `{}` | Arbitrary key–value pairs stored on the bot. Keys starting with `bb_` are reserved and will be rejected with `400`. |
+
+**Response (201 Created):**
+
+```json
+{
+  "id": "bot_01j9...",
+  "status": "joining",
+  "startedAt": null,
+  "completedAt": null,
+  "durationSeconds": null,
+  "recordingUrl": null,
+  "transcriptUrl": null,
+  "metadata": {
+    "dealId": "d_42"
+  }
+}
+```
+
+The `MeetingBot` shape is the same for all endpoints that return a bot.
+
+### Bot status lifecycle
+
+Bots move through these states in order:
+
+| Status | Meaning |
+|--------|---------|
+| `joining` | Bot is dialing into the meeting. |
+| `waiting_room` | Bot reached the meeting but is held in the waiting room. |
+| `in_call` | Bot has been admitted to the call. |
+| `recording` | Bot is actively recording (and transcribing, if enabled). |
+| `ended` | The call has ended; artifacts are being processed. |
+| `done` | Artifacts are ready. `recordingUrl` and `transcriptUrl` (if applicable) are now populated. |
+| `fatal` | Bot encountered an unrecoverable error. Check `status` for details and the `bot.fatal` webhook. |
+
+### SDK usage
+
+```ts
+import { butterbase } from '@butterbase/sdk';
+
+const bb = butterbase({ apiKey: '...', appId: '...' });
+
+// Start a bot
+const { data: bot, error } = await bb.ai.meetings.start({
+  meetingUrl: 'https://meet.google.com/abc-defg-hij',
+  transcript: true,
+  recording: 'mp4',
+  metadata: { dealId: 'd_42' },
+});
+
+// Later, after the webhook tells you the bot is done:
+const { data: finished } = await bb.ai.meetings.get(bot!.id);
+// finished.recordingUrl + finished.transcriptUrl are now populated
+```
+
+Additional SDK methods:
+
+```ts
+// Stop a bot early
+await bb.ai.meetings.stop(bot!.id);
+
+// List bots with optional filters
+const { data: bots } = await bb.ai.meetings.list({ status: 'done', limit: 20, cursor: '...' });
+
+// Estimate cost before dispatching
+const { data: estimate } = await bb.ai.meetings.estimateCost({ durationMinutes: 60, transcript: true });
+// estimate.usd — projected total charge
+```
+
+### Pricing
+
+Recording: **$0.50/hr + markup**, prorated per second. Transcription: **$0.15/hr + markup**, also prorated per second. Both charges are applied to the app's AI credit balance once the bot reaches `done` status.
+
+Use `GET /v1/ai/meetings/_estimate?durationMinutes=N&transcript=true` to project the charge before dispatching a bot.
+
+### Webhook events
+
+Apps receive forwarded events at the URL configured via `manage_ai`'s `configure_meetings_webhook` action. Butterbase re-signs each forwarded event before delivery.
+
+**Event types:**
+
+| Event | When it fires |
+|-------|---------------|
+| `bot.in_call_recording` | Bot has been admitted and recording has started. |
+| `bot.done` | Bot left the call; recording artifact is available. |
+| `bot.fatal` | Bot failed; check bot status for details. |
+| `recording.done` | Recording artifact is ready to download. |
+| `transcript.done` | Transcript artifact is ready to download. |
+| `transcript.failed` | Transcription failed for this bot. |
+
+**Payload shape:**
+
+```json
+POST <your-forward-url>
+Content-Type: application/json
+x-bb-event: bot.done
+x-bb-signature: v1,<base64>
+x-bb-key-id: <16-char identifier>
+
+{
+  "event": "bot.done",
+  "data": { /* event-specific payload */ }
+}
+```
+
+### Signature & freshness
+
+The `x-bb-signature` header is an HMAC-SHA256 of the raw request body bytes, signed with Butterbase's webhook signing key. A valid signature confirms the event originated from Butterbase's infrastructure. Full per-tenant HMAC verification (where each app has its own signing key) is on the roadmap. For now, verify the request arrived over TLS from a Butterbase-owned origin, and confirm that `x-bb-key-id` matches the first 16 characters of the secret returned on the most recent `rotate_secret` call. If it does not match, the event was signed before your latest key rotation — treat it as stale and drop it.
+
+**Do not trigger side-effects (database writes, downstream calls) on duplicate deliveries.** Use the event payload's `bot.id` combined with the event name as an idempotency key. The upstream delivery service may retry for up to 24 hours.
+
+### Limits
+
+- **Single region.** In v1, bots are spawned from the US East workspace. Latency-sensitive multi-region routing is on the roadmap.
+- **No hard duration cap.** Bots run until the call ends or the app's AI credit balance is exhausted.
+- **Artifact retention.** Recording and transcript artifacts are retained for 7 days after the call ends. Download them before the retention window expires.

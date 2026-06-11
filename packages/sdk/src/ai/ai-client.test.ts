@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { AiClient } from './ai-client';
+import { MeetingsClient } from './meetings-client.js';
 
 describe('AiClient.embed', () => {
   it('posts to /v1/:app/embeddings with the request body', async () => {
@@ -34,5 +35,12 @@ describe('AiClient.listModels', () => {
     };
     await new AiClient(fc).listModels();
     expect(calls[0]).toEqual({ m: 'GET', p: '/v1/app_x/ai/models' });
+  });
+});
+
+describe('AiClient.meetings', () => {
+  it('exposes .meetings as a MeetingsClient', () => {
+    const ai = new AiClient({ appId: 'app_1', request: vi.fn() } as any);
+    expect(ai.meetings).toBeInstanceOf(MeetingsClient);
   });
 });

@@ -74,6 +74,16 @@ export const config = {
     } as const;
   })(),
 
+  meetings: {
+    apiKey: process.env.MEETINGS_API_KEY ?? '',
+    baseUrl: process.env.MEETINGS_BASE_URL ?? 'https://us-east-1.recall.ai',
+    webhookSecret: process.env.MEETINGS_WEBHOOK_SECRET ?? '',
+    // The outbound webhook forwarder signs with each app's per-app secret
+    // (stored AES-256-GCM-encrypted under AUTH_ENCRYPTION_KEY in
+    // app_meetings_webhooks.forward_secret_encrypted), so no service-wide
+    // signing key is required.
+  },
+
   /**
    * Platform DB env vars introduced in multi-region Phase 1.
    * In Phase 1, both URLs may point at the same database during initial deployment;
