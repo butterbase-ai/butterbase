@@ -28,6 +28,7 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'Durable Objects', slug: 'core-concepts/durable-objects' },
       { label: 'Edge SSR Deployment', slug: 'core-concepts/edge-ssr-deployment' },
       { label: 'AI Integration', slug: 'core-concepts/ai-integration' },
+      { label: 'AI Meetings', slug: 'core-concepts/ai-meetings' },
       { label: 'RAG (Native)', slug: 'core-concepts/rag' },
       { label: 'Key-Value Store', slug: 'core-concepts/kv' },
       { label: 'Realtime', slug: 'core-concepts/realtime' },
