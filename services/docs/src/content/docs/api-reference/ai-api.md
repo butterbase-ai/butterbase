@@ -565,7 +565,7 @@ const { data: estimate } = await bb.ai.meetings.estimateCost({ durationMinutes: 
 
 ### Pricing
 
-Recording costs **$0.50 per hour**, prorated per second. Built-in transcription is an additional **$0.15 per hour**, also prorated per second. Both charges are applied to the app's AI credit balance once the bot reaches `done` status. The app's configured `ai_router.markup_pct` (set via `manage_ai`) applies to both dimensions.
+Recording: **$0.50/hr + markup**, prorated per second. Transcription: **$0.15/hr + markup**, also prorated per second. Both charges are applied to the app's AI credit balance once the bot reaches `done` status.
 
 Use `GET /v1/ai/meetings/_estimate?durationMinutes=N&transcript=true` to project the charge before dispatching a bot.
 
