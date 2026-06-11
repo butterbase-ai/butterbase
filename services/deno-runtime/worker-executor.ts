@@ -500,15 +500,16 @@ function buildWorkerCode(
       // a clear TypeError ("Cannot read properties of undefined") rather than a silent failure.
       // The control-api address for local development is http://control-api:4000 (set via CONTROL_API_URL).
       //
-      // SECURITY NOTE: The per-app BUTTERBASE_FUNCTION_SERVICE_KEY is interpolated
-      // into the worker source string below (and at lines ~625 and ~643 for the
-      // integrations bridge). This is consistent with the pre-existing pattern but
-      // means the key value appears in the Blob URL the Deno Worker executes.
-      // V8 stack traces don't include source content, so accidental leak via crash
-      // logs is unlikely. Follow-up: move to a postMessage handshake or worker-startup
-      // fetch from control-api so the key never appears in the worker source.
+      // SECURITY NOTE: The per-app function key is interpolated into the worker
+      // source string below (and at the integrations bridge further down). The
+      // key value appears in the Blob URL the Deno Worker executes, but is NOT
+      // exposed via ctx.env — metadata.internal_fn_key is a sibling field that
+      // user code cannot read by enumerating env. V8 stack traces don't include
+      // source content, so accidental leak via crash logs is unlikely.
+      // Follow-up: move to a postMessage handshake or worker-startup fetch so
+      // the key never appears in the worker source string at all.
       ${(() => {
-        const __fnKey = metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY
+        const __fnKey = metadata.internal_fn_key
           ?? metadata.env_vars?.BUTTERBASE_SERVICE_KEY
           ?? Deno.env.get('BUTTERBASE_FUNCTION_SERVICE_KEY')
           ?? '';
@@ -522,7 +523,7 @@ function buildWorkerCode(
         const __kvBase = ${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL"))};
         const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
         const __kvHeaders = {
-          authorization: "Bearer " + ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
+          authorization: "Bearer " + ${JSON.stringify(metadata.internal_fn_key || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
           "content-type": "application/json",
         };
         async function __kvCall(method, pathSuffix, body) {
@@ -646,7 +647,7 @@ function buildWorkerCode(
       integrations: {
         execute: async (toolName, params) => {
           const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
-          const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
+          const serviceKey = ${JSON.stringify(metadata.internal_fn_key || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
           const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
             method: "POST",
             headers: {
@@ -664,7 +665,7 @@ function buildWorkerCode(
         asUser: (userId) => ({
           execute: async (toolName, params) => {
             const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || "http://localhost:4000")};
-            const serviceKey = ${JSON.stringify(metadata.env_vars?.BUTTERBASE_FUNCTION_SERVICE_KEY || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
+            const serviceKey = ${JSON.stringify(metadata.internal_fn_key || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')};
             const res = await fetch(apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/integrations/execute", {
               method: "POST",
               headers: {
