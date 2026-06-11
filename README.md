@@ -9,10 +9,8 @@
   <a href="https://github.com/butterbase-ai/butterbase/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/butterbase-ai/butterbase?style=social"></a>
   <a href="https://github.com/butterbase-ai/butterbase/network/members"><img alt="GitHub forks" src="https://img.shields.io/github/forks/butterbase-ai/butterbase?style=social"></a>
   <br/>
-  <a href="https://github.com/butterbase-ai/butterbase/issues"><img alt="GitHub issues" src="https://img.shields.io/github/issues/butterbase-ai/butterbase"></a>
-  <a href="https://github.com/butterbase-ai/butterbase/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/butterbase-ai/butterbase"></a>
-  <a href="https://github.com/butterbase-ai/butterbase/releases"><img alt="Release" src="https://img.shields.io/github/v/release/butterbase-ai/butterbase?include_prereleases&sort=semver"></a>
-  <a href="https://discord.gg/eZ7PT68uP"><img alt="Discord" src="https://img.shields.io/discord/1495105159469207702?logo=discord&logoColor=white&label=Discord&color=5865F2"></a>
+  <a href="https://discord.gg/RHxRUJXuu2"><img alt="Join Discord" src="https://img.shields.io/badge/Join-Discord-5865F2?logo=discord&logoColor=white"></a>
+  <a href="https://www.linkedin.com/company/butterbase/?trk=public_profile_following-company_profile-result-card_result-card_title"><img alt="Follow us on LinkedIn" src="https://img.shields.io/badge/Follow-LinkedIn-0A66C2?logo=linkedin&logoColor=white"></a>
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white">
   <img alt="Postgres" src="https://img.shields.io/badge/Postgres-336791?logo=postgresql&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white">
@@ -20,7 +18,8 @@
 
 <p align="center">
   <a href="https://butterbase.ai"><strong>Website</strong></a> ·
-  <a href="https://discord.gg/eZ7PT68uP"><strong>Discord</strong></a> ·
+  <a href="https://discord.gg/RHxRUJXuu2"><strong>Discord</strong></a> ·
+  <a href="https://www.linkedin.com/company/butterbase/?trk=public_profile_following-company_profile-result-card_result-card_title"><strong>LinkedIn</strong></a> ·
   <a href="./SETUP.md"><strong>Self-host</strong></a> ·
   <a href="./docs"><strong>Docs</strong></a> ·
   <a href="./ROADMAP.md"><strong>Roadmap</strong></a> ·
@@ -257,7 +256,8 @@ Latest release: **v0.2.0** (2026-05-25) — adds the KV store across SDK / REST 
 
 ## Community & support
 
-- **[Discord](https://discord.gg/eZ7PT68uP)** — chat with the team and other builders
+- **[Discord](https://discord.gg/RHxRUJXuu2)** — chat with the team and other builders
+- **[LinkedIn](https://www.linkedin.com/company/butterbase/?trk=public_profile_following-company_profile-result-card_result-card_title)** — follow us for product updates and announcements
 - **[GitHub Issues](https://github.com/butterbase-ai/butterbase/issues)** — bug reports, feature requests
 - **Email** — [yuki@butterbase.ai](mailto:yuki@butterbase.ai) for direct contact
 

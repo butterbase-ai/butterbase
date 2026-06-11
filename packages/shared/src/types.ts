@@ -98,11 +98,20 @@ export interface ApiKey {
 
 export interface AuthContext {
   userId: string | null;  // Allow null for anonymous
-  authMethod: 'api_key' | 'jwt' | 'end_user_jwt' | 'anonymous';  // Add anonymous
+  /**
+   * - 'api_key'        — platform bb_sk_* key (user-managed, full app + substrate access)
+   * - 'jwt'            — Cognito/local platform JWT (dashboard/CLI users)
+   * - 'end_user_jwt'   — app end-user JWT (signed by the app's signing key)
+   * - 'function_key'   — per-app BUTTERBASE_FUNCTION_SERVICE_KEY (auto-injected
+   *                      into Deno runtime; bound to a single app; scoped to
+   *                      a small allowlist of routes — see auth.ts).
+   * - 'anonymous'      — no token / unrecognised token
+   */
+  authMethod: 'api_key' | 'jwt' | 'end_user_jwt' | 'function_key' | 'anonymous';
   scopes: string[];
   keyId?: string;
   email?: string;
-  appId?: string;
+  appId?: string;   // Required when authMethod === 'function_key'; informational otherwise.
   rawToken?: string;
 }
 

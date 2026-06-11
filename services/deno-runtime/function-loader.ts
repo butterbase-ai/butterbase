@@ -72,6 +72,14 @@ export interface FunctionMetadata {
   function_name: string;
   code: string;
   env_vars: Record<string, string>;
+  /**
+   * Per-app function key for ctx.kv and ctx.integrations. NOT placed in
+   * env_vars on purpose: env_vars is exposed to user code via ctx.env, and
+   * a user who console.logs(ctx.env) (or ships it to a third-party logger)
+   * would leak the key. The worker template reads this field directly to
+   * mint the Authorization header for KV and integration calls.
+   */
+  internal_fn_key: string | null;
   timeout_ms: number;
   memory_limit_mb: number;
   db_connection_string: string | null;
@@ -183,10 +191,12 @@ export async function loadFunction(
     // Decrypt environment variables
     const envVars = decryptEnvVars(row.encrypted_env_vars, ENCRYPTION_KEY);
 
-    // Inject per-app KV function key so ctx.kv calls authenticate via the gateway.
-    // Failure is non-fatal: only ctx.kv calls will fail later with an auth error.
+    // Fetch the per-app function key so ctx.kv and ctx.integrations can
+    // authenticate against the gateway. Stored on metadata.internal_fn_key
+    // — NOT injected into env_vars, because env_vars is exposed via ctx.env
+    // and a user who logs ctx.env would leak the key. Failure is non-fatal:
+    // ctx.kv / ctx.integrations calls will fail later with an auth error.
     const kvKey = await fetchKvFunctionKey(appId);
-    if (kvKey) envVars.BUTTERBASE_FUNCTION_SERVICE_KEY = kvKey;
 
     // Fetch database connection string for this app
     const connResult = await client.queryObject<{ connection_string: string }>(
@@ -210,6 +220,7 @@ export async function loadFunction(
       function_name: row.name,
       code: row.code,
       env_vars: envVars,
+      internal_fn_key: kvKey,
       timeout_ms: row.timeout_ms,
       memory_limit_mb: row.memory_limit_mb,
       db_connection_string: dbConnectionString,

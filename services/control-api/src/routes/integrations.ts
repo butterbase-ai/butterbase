@@ -55,6 +55,15 @@ async function resolveEndUserId(
     const claims = await verifyEndUserJwt(controlDb, appId, auth.rawToken!);
     return claims.sub;
   }
+  // function_key behaves like api_key on this route: it MUST be combined
+  // with a body userId (the runtime always sends one — ctx.integrations.asUser
+  // refuses to call without it). We also defensively check that the auth.appId
+  // matches the route appId; the onRequest hook should already guarantee this,
+  // but route-level checks make the contract explicit.
+  if (auth?.authMethod === 'function_key') {
+    if (auth.appId !== appId) return null;
+    return bodyUserId ?? null;
+  }
   if (auth?.authMethod === 'api_key' && bodyUserId) {
     return bodyUserId;
   }
@@ -425,15 +434,30 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
-      const result = await executeTool(
-        app.controlDb, appId, userId, body.toolName, body.params || {},
-      );
+      let result: Awaited<ReturnType<typeof executeTool>>;
+      try {
+        result = await executeTool(
+          app.controlDb, appId, userId, body.toolName, body.params || {},
+        );
+      } catch (error: any) {
+        if (error.code === 'INTEGRATIONS_NOT_CONFIGURED') {
+          return reply.status(400).send(createAgentError({
+            code: error.code,
+            message: error.message,
+            remediation: 'Set COMPOSIO_API_KEY environment variable on the platform.',
+          }));
+        }
+        throw error;
+      }
 
       await logAuditEvent(app.controlDb, {
         appId,
         category: 'admin',
         eventType: 'integration.execute',
-        actorType: auth!.authMethod === 'end_user_jwt' ? 'app_user' : 'api_key',
+        actorType:
+          auth!.authMethod === 'end_user_jwt' ? 'app_user'
+          : auth!.authMethod === 'function_key' ? 'function_key'
+          : 'api_key',
         actorId: userId,
         eventData: { tool: body.toolName, successful: result.successful },
         success: result.successful,

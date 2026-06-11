@@ -54,6 +54,48 @@ export async function functionsListCommand(options: { app?: string }) {
   }
 }
 
+export async function functionsGetCommand(name: string, options: { app?: string; output?: string; json?: boolean; sourceOnly?: boolean }) {
+  const appId = await requireAppId(options.app);
+  const spinner = ora(`Fetching function "${name}"...`).start();
+
+  try {
+    const fn: any = await getFunction(appId, name);
+    spinner.stop();
+
+    if (options.output) {
+      await fs.writeFile(options.output, fn.code ?? '', 'utf-8');
+      console.log(chalk.green(`✓ Wrote source code to ${options.output}`));
+      return;
+    }
+
+    if (options.sourceOnly) {
+      process.stdout.write(fn.code ?? '');
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(fn, null, 2));
+      return;
+    }
+
+    console.log(chalk.bold(`\n${fn.name}`));
+    if (fn.description) console.log(chalk.gray(`  Description: ${fn.description}`));
+    const triggerTypes = Array.isArray(fn.triggers)
+      ? fn.triggers.map((t: { type: string }) => t.type).join(', ')
+      : '—';
+    console.log(chalk.gray(`  Triggers: ${triggerTypes}`));
+    console.log(chalk.gray(`  Deployed: ${fn.deployedAt}`));
+    if (fn.timeoutMs) console.log(chalk.gray(`  Timeout: ${fn.timeoutMs}ms`));
+    if (fn.memoryLimitMb) console.log(chalk.gray(`  Memory: ${fn.memoryLimitMb}MB`));
+    console.log(chalk.blue('\n--- Source ---'));
+    console.log(fn.code ?? '');
+  } catch (error) {
+    spinner.fail('Failed to fetch function');
+    console.error(chalk.red((error as Error).message));
+    process.exit(1);
+  }
+}
+
 export async function functionsDeployCommand(file: string, options: {
   app?: string;
   name?: string;

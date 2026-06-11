@@ -65,6 +65,75 @@ The available calls are:
 
 When the function runs on behalf of an app, the proposer is recorded as `kind: 'agent'` and certain side-effect capabilities require human approval even if the user has [`yolo_mode`](#yolo-mode) on.
 
+## Entity primitives
+
+### Upsert (`upsert_entity`)
+
+Dedup order: **`id` > `canonical_keys` > `primary_email` > insert new**.
+
+- If you pass `id`, it's an upsert by id (current legacy behavior).
+- Else if you pass non-empty `canonical_keys`, substrate looks up an entity of the same type whose canonical_keys contain every key/value pair you sent (JSONB `@>`). On hit: update and return `was_insert: false`.
+- Else if you pass `primary_email`, substrate looks up by `(type, lower(primary_email))`. On hit: update. On insert, substrate **auto-promotes** `primary_email` into `canonical_keys.email` so future calls can dedup either way.
+
+Race-safety: primary_email lookups are protected by a partial unique index. Canonical_keys-only lookups are best-effort — two near-simultaneous identical writes can still race; clean up with `merge_entities`.
+
+### Patch (`patch_entity`)
+
+RFC 7396 JSON Merge Patch over `attrs`. Atomic.
+
+```ts
+await ctx.substrate.patchEntity('ent_…', { title: 'CTO', previous_title: null });
+// title set to 'CTO', previous_title key deleted, all other attrs untouched.
+```
+
+Optional optimistic concurrency: pass `if_updated_at` to get an error instead of a silent clobber.
+
+Use `patch_entity` for any partial update. `update_entity` (legacy) replaces `attrs` wholesale and is kept only for backwards compatibility.
+
+### Merge (`merge_entities`)
+
+Collapse a duplicate into a survivor.
+
+```ts
+await ctx.substrate.mergeEntities('ent_loser', 'ent_winner', 'duplicate by email');
+```
+
+Semantics:
+- The **loser** is hard-deleted from `substrate.entities`.
+- An alias row is inserted into `substrate.entity_aliases` mapping `loser_id → winner_id`.
+- **No automatic FK rewriting.** If your app stores `attrs.company_id = 'ent_loser'` on other entities, those references will not be updated by `merge_entities`. Your read path must resolve old IDs through `entity_aliases`:
+
+  ```sql
+  SELECT COALESCE(a.canonical_id, $1) AS resolved_id
+  FROM (VALUES ($1)) t(id)
+  LEFT JOIN substrate.entity_aliases a ON a.alias_id = $1;
+  ```
+
+- One ledger action per merge. `reversible: false` — undoing a merge means re-creating the loser, which the platform won't do for you.
+
+### Delete (`delete_entity`)
+
+Hard delete, not reversible. Requires approval by default.
+
+```ts
+await ctx.substrate.deleteEntity('ent_…', 'manual cleanup');
+```
+
+Prefer `merge_entities` when collapsing duplicates (preserves alias resolution). Use `delete_entity` only when the entity is genuinely garbage with no inbound references worth preserving.
+
+For soft delete, patch the entity instead: `ctx.substrate.patchEntity(id, { deleted_at: new Date().toISOString() })` and filter on read.
+
+### Bulk revert (`bulk_revert_actions`)
+
+Revert up to 200 ledger actions in one call. Per-action failures are collected into the response, not raised. Use after a buggy ingest run produced many bad actions:
+
+```ts
+await ctx.substrate.propose('bulk_revert_actions', {
+  action_ids: ['act_…', 'act_…', /* … */],
+  reason: 'rolling back failed ingest run 2026-06-11',
+});
+```
+
 ## Authentication
 
 Three ways to reach the substrate over HTTP:

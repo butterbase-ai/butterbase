@@ -27,6 +27,25 @@ interface ListFunctionsResponse {
   }>;
 }
 
+interface FunctionDetailResponse {
+  id: string;
+  name: string;
+  description?: string;
+  code: string;
+  triggers: Array<{ type: string; config: unknown; enabled?: boolean }>;
+  timeoutMs?: number;
+  memoryLimitMb?: number;
+  deployedAt: string;
+  lastInvoked?: string;
+  invocationCount: number;
+  errorCount: number;
+  avgDuration: number;
+  agent_tool?: boolean;
+  agent_tool_description?: string | null;
+  agent_tool_mode?: 'read_only' | 'read_write' | null;
+  agent_tool_exposed_to?: 'developer_only' | 'end_user' | null;
+}
+
 interface FunctionLogsResponse {
   logs: Array<{
     timestamp: string;
@@ -45,16 +64,18 @@ interface FunctionLogsResponse {
 export function registerManageFunction(server: McpServer) {
   server.tool(
     'manage_function',
-    `Manage function lifecycle: list, delete, get logs, and update environment variables.
+    `Manage function lifecycle: list, get source, delete, get logs, and update environment variables.
 
 Actions:
   - "list":       List all deployed functions with status, metrics, and invocation URLs
+  - "get":        Retrieve a single function's full detail including its deployed source code
   - "delete":     Delete a deployed function permanently (IRREVERSIBLE)
   - "get_logs":   Retrieve recent invocation logs for debugging and monitoring
   - "update_env": Update environment variables for a deployed function without redeploying code
 
 Parameters by action:
   list:       { app_id, action: "list" }
+  get:        { app_id, action: "get", function_name }
   delete:     { app_id, action: "delete", function_name }
   get_logs:   { app_id, action: "get_logs", function_name, limit?, since?, level?, include_deleted? }
   update_env: { app_id, action: "update_env", function_name, env }
@@ -66,8 +87,8 @@ Common errors:
 Idempotency: Safe to call anytime (list is read-only; delete is idempotent; update_env is safe to call multiple times).`,
     {
       app_id: z.string().describe('The app ID'),
-      action: z.enum(['list', 'delete', 'get_logs', 'update_env']).describe('The action to perform'),
-      function_name: z.string().optional().describe('The function name (required for delete, get_logs, update_env)'),
+      action: z.enum(['list', 'get', 'delete', 'get_logs', 'update_env']).describe('The action to perform'),
+      function_name: z.string().optional().describe('The function name (required for get, delete, get_logs, update_env)'),
       // get_logs params
       limit: z.number().optional().describe('Maximum number of logs to return (default: 100)'),
       since: z.string().optional().describe('ISO timestamp to filter logs after this time'),
@@ -91,6 +112,14 @@ Idempotency: Safe to call anytime (list is read-only; delete is idempotent; upda
       switch (action) {
         case 'list': {
           const result = await apiGet<ListFunctionsResponse>(`/v1/${args.app_id}/functions`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'get': {
+          const err = need(args.function_name, '"function_name" is required for the "get" action.');
+          if (err) return err;
+          const result = await apiGet<FunctionDetailResponse>(
+            `/v1/${args.app_id}/functions/${args.function_name}`
+          );
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'delete': {

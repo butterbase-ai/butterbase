@@ -33,6 +33,7 @@ export type AuditActorType =
   | 'platform_user'
   | 'app_user'
   | 'api_key'
+  | 'function_key'
   | 'system'
   | 'anonymous';
 
