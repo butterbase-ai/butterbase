@@ -9,7 +9,7 @@ import { initCommand } from '../src/commands/init.js';
 import { loginCommand, logoutCommand, configGetCommand, configSetCommand } from '../src/commands/config.js';
 import { appsListCommand, appsCreateCommand, appsUseCommand, appsDeleteCommand, appsPauseCommand, appsResumeCommand, appsLinkSubstrateCommand, appsUnlinkSubstrateCommand } from '../src/commands/apps.js';
 import { schemaGetCommand, schemaApplyCommand } from '../src/commands/schema.js';
-import { functionsListCommand, functionsDeployCommand, functionsLogsCommand, functionsDeleteCommand, functionsInvokeCommand, functionsEnvSetCommand, functionsEnvListCommand } from '../src/commands/functions.js';
+import { functionsListCommand, functionsGetCommand, functionsDeployCommand, functionsLogsCommand, functionsDeleteCommand, functionsInvokeCommand, functionsEnvSetCommand, functionsEnvListCommand } from '../src/commands/functions.js';
 import { storageListCommand, storageUploadCommand, storageDeleteCommand, storageConfigCommand } from '../src/commands/storage.js';
 import { realtimeEnableCommand, realtimeConfigCommand, realtimeDisableCommand } from '../src/commands/realtime.js';
 import { deployCommand } from '../src/commands/deploy.js';
@@ -369,6 +369,15 @@ functions
   .description('List deployed functions')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .action(functionsListCommand);
+
+functions
+  .command('get <function-name>')
+  .description('Show a deployed function including its source code')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--output <file>', 'Write source code to a file instead of stdout')
+  .option('--source-only', 'Print only the source code (no metadata)')
+  .option('--json', 'Print full function detail as JSON')
+  .action(functionsGetCommand);
 
 functions
   .command('deploy <file>')
