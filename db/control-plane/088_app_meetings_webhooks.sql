@@ -2,7 +2,7 @@
 -- Per-app forward target for the meetings webhook fan-out.
 
 CREATE TABLE app_meetings_webhooks (
-  app_id              TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+  app_id              TEXT PRIMARY KEY,
   forward_url         TEXT NOT NULL,
   forward_secret_hash TEXT NOT NULL,
   events              TEXT[] NOT NULL DEFAULT ARRAY[
