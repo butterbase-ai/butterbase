@@ -3310,6 +3310,13 @@ const { data } = await admin.integrations.asUser('user_xyz').execute('SLACK_POST
 });
 \`\`\`
 
+> Inside a deployed function, \`ctx.integrations.asUser(userId).execute(...)\` is
+> the canonical cron-driven form — the function-key injected as
+> \`BUTTERBASE_FUNCTION_SERVICE_KEY\` is recognised by \`/integrations/execute\`
+> when (and only when) the call targets the same app the function was deployed
+> to. You do not need to set \`BUTTERBASE_API_KEY\` as a custom env var for this
+> path to work.
+
 ---
 
 ### CLI

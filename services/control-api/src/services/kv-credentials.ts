@@ -118,6 +118,27 @@ export class KvCredentialsService {
     return rows[0] ?? null;
   }
 
+  /**
+   * Like resolveFunctionKey, but also returns the app owner's user_id for use
+   * as AuthContext.userId when this key authenticates a request from the Deno
+   * runtime. The owner_id is sourced from user_app_index (the control-DB
+   * owner-lookup table) and matches the userId that a bb_sk_* minted by that
+   * owner would carry.
+   */
+  async resolveFunctionKeyWithOwner(
+    plaintextKey: string,
+    appId: string,
+  ): Promise<{ app_id: string; owner_id: string } | null> {
+    const { rows } = await this.db.query<{ app_id: string; owner_id: string }>(
+      `SELECT kv.app_id, uai.user_id AS owner_id
+         FROM app_kv_credentials kv
+         JOIN user_app_index uai ON uai.app_id = kv.app_id
+        WHERE kv.kv_function_key = $1 AND kv.app_id = $2`,
+      [plaintextKey, appId],
+    );
+    return rows[0] ?? null;
+  }
+
   async rotate(appId: string): Promise<KvCredential> {
     const password = randomBytes(KV_PASSWORD_BYTES).toString('hex');
     const { rows } = await this.db.query<KvCredential>(

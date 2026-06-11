@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import pg from 'pg';
+import { randomUUID } from 'node:crypto';
 import { KvCredentialsService } from './kv-credentials.js';
 
 const PLATFORM_URL =
@@ -125,5 +126,65 @@ describeDb('KvCredentialsService', () => {
     const after = await svc.rotate(app.id);
     expect(after.kv_function_key).toBe(before.kv_function_key);
     expect(after.redis_password).not.toBe(before.redis_password);
+  });
+});
+
+describeDb('resolveFunctionKeyWithOwner', () => {
+  let testOwnerId: string;
+  let testAppId: string;
+  let otherAppId: string;
+
+  beforeAll(async () => {
+    if (!RUN_DB_TESTS) return;
+    // Insert a platform user so we can create user_app_index entries with a real owner.
+    testOwnerId = randomUUID();
+    await pool.query(
+      `INSERT INTO platform_users (id, email, account_status, plan_id)
+       VALUES ($1, $2, 'active', 'playground')
+       ON CONFLICT (id) DO NOTHING`,
+      [testOwnerId, `kv-owner-${testOwnerId}@kv-test.example.com`],
+    );
+
+    // Register two apps in user_app_index (the control-DB owner-lookup table;
+    // the `apps` table itself lives on a separate DB and is not present here).
+    testAppId = `kv-test-owner-${Date.now()}-a`;
+    otherAppId = `kv-test-owner-${Date.now()}-b`;
+    await pool.query(
+      `INSERT INTO user_app_index (app_id, user_id, region)
+       VALUES ($1, $3, 'us'), ($2, $3, 'us')`,
+      [testAppId, otherAppId, testOwnerId],
+    );
+  });
+
+  afterAll(async () => {
+    if (!RUN_DB_TESTS) return;
+    await pool.query(`DELETE FROM app_kv_credentials WHERE app_id IN ($1, $2)`, [
+      testAppId,
+      otherAppId,
+    ]);
+    await pool.query(`DELETE FROM user_app_index WHERE app_id IN ($1, $2)`, [
+      testAppId,
+      otherAppId,
+    ]);
+    await pool.query(`DELETE FROM platform_users WHERE id = $1`, [testOwnerId]);
+  });
+
+  it('returns { owner_id, app_id } when the key matches the app', async () => {
+    const cred = await svc.provision(testAppId, 'us-east-1');
+    const result = await svc.resolveFunctionKeyWithOwner(cred.kv_function_key, testAppId);
+    expect(result).not.toBeNull();
+    expect(result!.app_id).toBe(testAppId);
+    expect(result!.owner_id).toBe(testOwnerId);
+  });
+
+  it('returns null when the key is correct but for a different app', async () => {
+    const cred = await svc.provision(testAppId, 'us-east-1');
+    const result = await svc.resolveFunctionKeyWithOwner(cred.kv_function_key, otherAppId);
+    expect(result).toBeNull();
+  });
+
+  it('returns null on a junk token', async () => {
+    const result = await svc.resolveFunctionKeyWithOwner('not-a-real-key', testAppId);
+    expect(result).toBeNull();
   });
 });

@@ -153,4 +153,15 @@ describe('authorizeAppAiCall', () => {
     const r = await authorizeAppAiCall(db, APP_ID, req);
     expect(r).toEqual({ ok: false, status: 403, body: { error: 'forbidden', code: 'FORBIDDEN' } });
   });
+
+  it('rejects function_key even when userId aliases the owner (no owner-by-userId-aliasing)', async () => {
+    // function_key sets auth.userId = owner_id for downstream attribution,
+    // but the AI gateway authorizer must NOT treat that as owner-grade access.
+    // Otherwise a leaked FSK would drain the owner's AI credits.
+    const db = makeDb({ owner_id: OWNER_ID });
+    const req = makeReq({ userId: OWNER_ID, authMethod: 'function_key', scopes: ['integrations:execute'] });
+    const r = await authorizeAppAiCall(db, APP_ID, req);
+    expect(r).toEqual({ ok: false, status: 403, body: { error: 'forbidden', code: 'FORBIDDEN' } });
+    if (r.ok) throw new Error('unreachable');
+  });
 });

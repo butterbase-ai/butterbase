@@ -136,6 +136,14 @@ export default async function handler(ctx) {
 }
 ```
 
+**Authentication.** `ctx.integrations` is auto-wired with a per-app function key.
+It can only call `/integrations/execute` for the app it was injected into, and
+it always runs as a service caller — so `.asUser(userId)` is required when you
+need an end-user's connection (cron jobs, scheduled syncs, webhook handlers).
+The bare `ctx.integrations.execute(...)` form only works when the function was
+invoked with an end-user JWT, because it relies on the request's auth context
+to resolve the connection.
+
 ## SDK
 
 ```typescript

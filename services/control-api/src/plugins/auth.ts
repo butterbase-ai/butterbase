@@ -1,6 +1,9 @@
+import crypto from 'node:crypto';
 import fp from 'fastify-plugin';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { ApiKeyService } from '../services/api-key-service.js';
+import { KvCredentialsService } from '../services/kv-credentials.js';
+import { getRedisClient } from '../services/redis.js';
 import type { AuthContext } from '@butterbase/shared/types';
 import type { AuthProvider } from '../services/auth-provider.js';
 import { LocalAuthProvider } from '../services/local-auth-provider.js';
@@ -116,6 +119,68 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         scopes: [],
       };
       return;
+    }
+
+    // Per-app function key: the BUTTERBASE_FUNCTION_SERVICE_KEY auto-injected
+    // into the Deno runtime. It's a 40-char hex string (no recognisable prefix),
+    // so we gate the DB lookup behind cheap shape checks: (a) the URL must
+    // contain /v1/<appId>/..., (b) the token must be hex.
+    //
+    // Acceptance is strictly app-bound: the appId in the URL must match the
+    // app_id stored alongside the key. function_key auth is scoped narrowly —
+    // routes opt in by checking authMethod === 'function_key'. No existing
+    // route accepts it; the only opt-in lives in routes/integrations.ts.
+    //
+    // Placed before the dev escape hatch so the runtime's FSK works regardless
+    // of whether platform auth is enabled for the deployment.
+    if (token && /^[a-f0-9]{40,80}$/.test(token)) {
+      const urlMatch = request.url.match(/^\/v1\/(app_[a-z0-9]+)(?:\/|$|\?)/);
+      if (urlMatch) {
+        const urlAppId = urlMatch[1];
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+        // Cache key MUST include both appId and token hash. Cross-app keying
+        // prevents a stale entry for app A from authorising a request to app B.
+        const cacheKey = `auth:fnkey:${urlAppId}:${tokenHash}`;
+        let resolved: { app_id: string; owner_id: string } | null = null;
+        let usedCache = false;
+
+        try {
+          const cached = await getRedisClient().get(cacheKey);
+          if (cached === '__invalid__') {
+            usedCache = true;
+          } else if (cached) {
+            resolved = JSON.parse(cached);
+            usedCache = true;
+          }
+        } catch {
+          // Redis miss/error — fall through to a live DB lookup.
+        }
+
+        if (!usedCache) {
+          const svc = new KvCredentialsService(fastify.controlDb);
+          resolved = await svc.resolveFunctionKeyWithOwner(token, urlAppId);
+          getRedisClient()
+            .setex(
+              cacheKey,
+              resolved ? 60 : 10,
+              resolved ? JSON.stringify(resolved) : '__invalid__',
+            )
+            .catch(() => {});
+        }
+
+        if (resolved) {
+          request.auth = {
+            userId: resolved.owner_id,
+            authMethod: 'function_key',
+            scopes: ['integrations:execute'],
+            appId: resolved.app_id,
+          } as AuthContext;
+          return;
+        }
+        // No match: fall through to the existing 401 path. Do NOT 401 here —
+        // we want the same error surface as any other bad token, and we want
+        // the dev escape hatch below to still be reachable when auth is off.
+      }
     }
 
     // Development escape hatch (anonymous or non-service-key requests only)
