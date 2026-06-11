@@ -61,7 +61,7 @@ async function resolveEndUserId(
   // matches the route appId; the onRequest hook should already guarantee this,
   // but route-level checks make the contract explicit.
   if (auth?.authMethod === 'function_key') {
-    if (auth.appId && auth.appId !== appId) return null;
+    if (auth.appId !== appId) return null;
     return bodyUserId ?? null;
   }
   if (auth?.authMethod === 'api_key' && bodyUserId) {
@@ -434,9 +434,21 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
-      const result = await executeTool(
-        app.controlDb, appId, userId, body.toolName, body.params || {},
-      );
+      let result: Awaited<ReturnType<typeof executeTool>>;
+      try {
+        result = await executeTool(
+          app.controlDb, appId, userId, body.toolName, body.params || {},
+        );
+      } catch (error: any) {
+        if (error.code === 'INTEGRATIONS_NOT_CONFIGURED') {
+          return reply.status(400).send(createAgentError({
+            code: error.code,
+            message: error.message,
+            remediation: 'Set COMPOSIO_API_KEY environment variable on the platform.',
+          }));
+        }
+        throw error;
+      }
 
       await logAuditEvent(app.controlDb, {
         appId,

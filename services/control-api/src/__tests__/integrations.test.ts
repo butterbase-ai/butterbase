@@ -216,6 +216,7 @@ describe('POST /v1/:appId/integrations/execute (function_key auth)', () => {
     // the request got past auth. Acceptable: 200 OR any 4xx/5xx whose error
     // code starts with INTEGRATIONS_. The fail mode is 401 AUTH_*.
     expect(res.statusCode).not.toBe(401);
+    expect(res.statusCode).toBeLessThan(500);
     if (res.statusCode >= 400) {
       const code = res.json()?.error?.code ?? '';
       expect(code.startsWith('AUTH_')).toBe(false);
