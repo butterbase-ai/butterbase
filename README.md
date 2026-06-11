@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/butterbase-ai-butterbase-badge.png)](https://mseep.ai/app/butterbase-ai-butterbase)
+
 <p align="center">
   <img src=".github/assets/logo.png" alt="Butterbase" width="420" />
 </p>
