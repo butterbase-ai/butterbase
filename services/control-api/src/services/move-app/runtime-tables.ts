@@ -50,6 +50,7 @@ export const MOVE_APP_RUNTIME_TABLES = [
   'audit_events',
   'ai_usage_logs',
   'ai_video_jobs',
+  'actor_usage_logs',
   'mcp_tool_call_log',
 
   // Deployment + billing history (per-app, follow the app on move)
