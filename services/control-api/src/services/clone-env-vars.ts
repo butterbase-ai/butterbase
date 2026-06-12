@@ -81,6 +81,29 @@ const CONVENTIONS: Record<string, DetectedConvention['convention']> = {
 export const AUTO_MINT_CONVENTION_KEYS = Object.keys(CONVENTIONS);
 
 /**
+ * Deterministic per-clone fills. Unlike CONVENTIONS, these are not secrets —
+ * they're values the platform already knows at clone time. The cloner should
+ * never have to type these into the env-vars banner.
+ *
+ *   BUTTERBASE_API_URL — public control-api URL
+ *   BUTTERBASE_APP_ID  — the dest app's id
+ *
+ * Resolution is centralized here so the same value lands in every receiver
+ * (functions, dashboards, frontends) and so tests can stub it cheaply.
+ */
+export function resolveStaticFills(
+  args: { destAppId: string; apiBaseUrl: string },
+): Record<string, string> {
+  return {
+    BUTTERBASE_API_URL: args.apiBaseUrl,
+    BUTTERBASE_APP_ID: args.destAppId,
+  };
+}
+
+/** Names of static-fill keys. Convenience for tests + the dashboard. */
+export const STATIC_FILL_KEYS = ['BUTTERBASE_API_URL', 'BUTTERBASE_APP_ID'];
+
+/**
  * Inspect a list of env var key names and surface platform-recognized conventions
  * the caller can opt into (e.g. auto-minting a scoped bb_sk_* for BUTTERBASE_API_KEY).
  */

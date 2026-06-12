@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { listSourceEnvVarKeys, detectConventions, mintApiKeyForClone } from '../clone-env-vars.js';
+import { listSourceEnvVarKeys, detectConventions, mintApiKeyForClone, resolveStaticFills, AUTO_MINT_CONVENTION_KEYS, STATIC_FILL_KEYS } from '../clone-env-vars.js';
 import { encrypt } from '../crypto.js';
 import { runtimeDb, controlDb } from '../../__tests__/test-helpers/control-db.js';
 import { randomUUID } from 'node:crypto';
@@ -55,14 +55,36 @@ describeDb('listSourceEnvVarKeys', () => {
 });
 
 describe('detectConventions', () => {
-  it('flags BUTTERBASE_API_KEY as auto-mintable', () => {
-    expect(detectConventions(['BUTTERBASE_API_KEY', 'OPENAI_KEY'])).toEqual([
+  it('flags BUTTERBASE_API_KEY and BB_SUBSTRATE_KEY as auto-mintable', () => {
+    expect(detectConventions(['BUTTERBASE_API_KEY', 'BB_SUBSTRATE_KEY', 'OPENAI_KEY'])).toEqual([
       { key: 'BUTTERBASE_API_KEY', convention: 'butterbase_api_key', auto_mintable: true },
+      { key: 'BB_SUBSTRATE_KEY', convention: 'butterbase_api_key', auto_mintable: true },
     ]);
   });
 
   it('returns empty when no known conventions match', () => {
     expect(detectConventions(['OPENAI_KEY', 'STRIPE_SECRET'])).toEqual([]);
+  });
+
+  it('AUTO_MINT_CONVENTION_KEYS covers both BUTTERBASE_API_KEY and BB_SUBSTRATE_KEY', () => {
+    expect(AUTO_MINT_CONVENTION_KEYS).toEqual(
+      expect.arrayContaining(['BUTTERBASE_API_KEY', 'BB_SUBSTRATE_KEY']),
+    );
+  });
+});
+
+describe('resolveStaticFills', () => {
+  it('returns BUTTERBASE_API_URL from apiBaseUrl and BUTTERBASE_APP_ID from destAppId', () => {
+    expect(resolveStaticFills({ destAppId: 'app_xyz', apiBaseUrl: 'https://api.example.com' })).toEqual({
+      BUTTERBASE_API_URL: 'https://api.example.com',
+      BUTTERBASE_APP_ID: 'app_xyz',
+    });
+  });
+
+  it('STATIC_FILL_KEYS matches resolveStaticFills output', () => {
+    const fills = resolveStaticFills({ destAppId: 'app_xyz', apiBaseUrl: 'https://x' });
+    expect(STATIC_FILL_KEYS).toEqual(expect.arrayContaining(Object.keys(fills)));
+    expect(Object.keys(fills).length).toBe(STATIC_FILL_KEYS.length);
   });
 });
 

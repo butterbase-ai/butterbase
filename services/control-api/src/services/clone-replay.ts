@@ -18,7 +18,8 @@ import AdmZip from 'adm-zip';
 import * as R2 from './r2.js';
 import * as DeploymentService from './deployment.service.js';
 import { encrypt, decrypt } from './crypto.js';
-import { listSourceEnvVarKeys, mintApiKeyForClone, AUTO_MINT_CONVENTION_KEYS } from './clone-env-vars.js';
+import { listSourceEnvVarKeys, mintApiKeyForClone, AUTO_MINT_CONVENTION_KEYS, resolveStaticFills } from './clone-env-vars.js';
+import { config } from '../config.js';
 import { getComposioClient } from './composio-client.js';
 
 export interface ReplayFunctionsEnvVarOpts {
@@ -472,6 +473,17 @@ export async function replayFunctions(
               warnings.push(`Auto-mint failed for ${f.name} (${mintTargets.join(',')}): ${(mintErr as Error).message}`);
               logger.warn({ err: mintErr, fn: f.name, keys: mintTargets }, '[clone] auto-mint failed; continuing');
             }
+          }
+        }
+
+        // Static fills: deterministic values the platform already knows. Only
+        // applied when the source function actually used the key and the
+        // caller didn't supply one explicitly.
+        const staticFills = resolveStaticFills({ destAppId, apiBaseUrl: config.apiBaseUrl });
+        const srcKeysForFn = sourceKeysMap.get(f.name);
+        if (srcKeysForFn) {
+          for (const [k, v] of Object.entries(staticFills)) {
+            if (srcKeysForFn.has(k) && !(k in merged)) merged[k] = v;
           }
         }
 
