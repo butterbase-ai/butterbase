@@ -785,12 +785,32 @@ async function executeClone(
       // replayNonSecretConfig which only touches runtime tables.
       const meetingsWebhookResult = await replayMeetingsWebhook(
         controlDb,
+        destRuntimePool,
         job.source_app_id,
         resolvedDestAppId,
         logger,
       );
       if (meetingsWebhookResult.warnings.length > 0) {
         await appendCloneJobWarnings(controlDb, jobId, meetingsWebhookResult.warnings);
+      }
+      // If the new wsec_* was wired directly into the receiver function's env
+      // vars, strip NOTETAKER_WEBHOOK_SECRET from the persisted unfilled list
+      // so the dashboard banner doesn't keep asking the cloner to set it.
+      if (meetingsWebhookResult.filledFnEnvVar) {
+        const { fnName, key } = meetingsWebhookResult.filledFnEnvVar;
+        const remaining = { ...fnResult.unfilledEnvVars };
+        const fnEntry = remaining[fnName];
+        if (fnEntry && fnEntry.includes(key)) {
+          const filtered = fnEntry.filter((k) => k !== key);
+          if (filtered.length > 0) remaining[fnName] = filtered;
+          else delete remaining[fnName];
+          await controlDb.query(
+            `UPDATE template_clone_jobs SET unfilled_env_vars = $1::jsonb, updated_at = now() WHERE id = $2`,
+            [JSON.stringify(remaining), jobId],
+          ).catch((err) => {
+            logger.warn({ err, jobId }, '[clone] failed to strip notetaker secret from unfilled_env_vars');
+          });
+        }
       }
       logger.info(
         { destAppId: resolvedDestAppId, minted: meetingsWebhookResult.minted },

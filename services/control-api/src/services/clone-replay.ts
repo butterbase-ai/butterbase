@@ -17,8 +17,8 @@ import { introspectRls } from './rls-introspector.js';
 import AdmZip from 'adm-zip';
 import * as R2 from './r2.js';
 import * as DeploymentService from './deployment.service.js';
-import { encrypt } from './crypto.js';
-import { listSourceEnvVarKeys, mintApiKeyForClone } from './clone-env-vars.js';
+import { encrypt, decrypt } from './crypto.js';
+import { listSourceEnvVarKeys, mintApiKeyForClone, AUTO_MINT_CONVENTION_KEYS } from './clone-env-vars.js';
 import { getComposioClient } from './composio-client.js';
 
 export interface ReplayFunctionsEnvVarOpts {
@@ -443,25 +443,35 @@ export async function replayFunctions(
         const provided = opts?.pendingEnvVarValues?.[f.name] ?? {};
         const merged: Record<string, string> = { ...provided };
 
-        const autoFor = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
-        for (const r of autoFor) {
+        // Explicit per-function mint requests + implicit convention mints. A
+        // single bb_sk_* satisfies every convention key (see CONVENTIONS in
+        // clone-env-vars.ts) so we mint at most one key per function and reuse
+        // it for all matching keys. Skip any key the caller already supplied
+        // via pendingEnvVarValues.
+        const explicit = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
+        const conventionMintTargets = (sourceKeysMap.get(f.name) ? [...sourceKeysMap.get(f.name)!] : [])
+          .filter(k => AUTO_MINT_CONVENTION_KEYS.includes(k) && !(k in merged));
+        const explicitKeys = explicit.map(r => r.key);
+        const mintTargets = Array.from(new Set([...explicitKeys, ...conventionMintTargets]));
+
+        if (mintTargets.length > 0) {
           if (!opts?.controlPool || !opts?.destAppOwnerId) {
             logger.warn(
-              { fn: f.name, key: r.key },
-              '[clone] auto-mint requested but controlPool or destAppOwnerId missing; skipping',
+              { fn: f.name, keys: mintTargets },
+              '[clone] auto-mint required but controlPool or destAppOwnerId missing; skipping',
             );
-            continue;
-          }
-          try {
-            const minted = await mintApiKeyForClone(opts.controlPool, {
-              ownerId: opts.destAppOwnerId,
-              destAppId,
-              fnName: f.name,
-            });
-            merged[r.key] = minted.key;
-          } catch (mintErr) {
-            warnings.push(`Auto-mint failed for ${f.name}/${r.key}: ${(mintErr as Error).message}`);
-            logger.warn({ err: mintErr, fn: f.name, key: r.key }, '[clone] auto-mint failed; continuing');
+          } else {
+            try {
+              const minted = await mintApiKeyForClone(opts.controlPool, {
+                ownerId: opts.destAppOwnerId,
+                destAppId,
+                fnName: f.name,
+              });
+              for (const k of mintTargets) merged[k] = minted.key;
+            } catch (mintErr) {
+              warnings.push(`Auto-mint failed for ${f.name} (${mintTargets.join(',')}): ${(mintErr as Error).message}`);
+              logger.warn({ err: mintErr, fn: f.name, keys: mintTargets }, '[clone] auto-mint failed; continuing');
+            }
           }
         }
 
@@ -1074,12 +1084,34 @@ export async function replayNonSecretConfig(
  * signature verification to pass. We surface the wsec_* once in the warnings
  * stream — same one-time delivery model the PUT /webhook route uses.
  */
+/** Parse a meetings webhook `forward_url` and return the function name that
+ *  receives it. Returns null if the URL doesn't follow the per-app
+ *  `/v1/{app_id}/fn/{name}` convention (e.g. user pointed Recall at an
+ *  external host) — in that case we can't auto-wire the env var.
+ *
+ *  Exported so tests can exercise the path parser in isolation. */
+export function parseReceiverFunctionName(forwardUrl: string, appId: string): string | null {
+  try {
+    const u = new URL(forwardUrl);
+    const idx = u.pathname.indexOf(`/v1/${appId}/fn/`);
+    if (idx === -1) return null;
+    const tail = u.pathname.slice(idx + `/v1/${appId}/fn/`.length);
+    // First path segment after /fn/, no query/fragment (URL parser already
+    // strips those into u.search/u.hash, but trailing slashes can still leak).
+    const name = tail.split('/')[0]?.trim();
+    return name && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function replayMeetingsWebhook(
   controlPool: pg.Pool,
+  destRuntimePool: pg.Pool,
   sourceAppId: string,
   destAppId: string,
   logger: ReplayLogger,
-): Promise<{ warnings: string[]; minted: boolean }> {
+): Promise<{ warnings: string[]; minted: boolean; filledFnEnvVar: { fnName: string; key: string } | null }> {
   const warnings: string[] = [];
   try {
     const src = await controlPool.query<{ forward_url: string; events: string[] }>(
@@ -1088,14 +1120,14 @@ export async function replayMeetingsWebhook(
     );
     if (src.rows.length === 0) {
       logger.info({ destAppId }, '[clone] no meetings webhook to replay');
-      return { warnings, minted: false };
+      return { warnings, minted: false, filledFnEnvVar: null };
     }
 
     const encryptionKey = process.env.AUTH_ENCRYPTION_KEY;
     if (!encryptionKey) {
       warnings.push('meetings_webhook: AUTH_ENCRYPTION_KEY not configured; cannot mint a fresh signing secret. Re-run PUT /v1/{dest}/ai/meetings/webhook manually.');
       logger.warn({ destAppId }, '[clone] meetings webhook present on source but cannot mint without AUTH_ENCRYPTION_KEY');
-      return { warnings, minted: false };
+      return { warnings, minted: false, filledFnEnvVar: null };
     }
 
     // Rewrite app id occurrences in the forward URL. App ids use a 14-char
@@ -1121,18 +1153,64 @@ export async function replayMeetingsWebhook(
       [destAppId, forwardUrl, secretEncrypted, src.rows[0].events],
     );
 
-    warnings.push(
-      `meetings_webhook: auto-minted for cloned app. Forward URL: ${forwardUrl}${rewrote ? ' (rewritten from source app id)' : ''}. ` +
-      `NEW signing secret (shown once, store now): ${rawSecret}. ` +
-      `Set this as the webhook receiver function's env var (typically NOTETAKER_WEBHOOK_SECRET) on the cloned app — Recall events will fail signature verification until you do.`,
-    );
-    logger.info({ destAppId, forwardUrl, rewrote }, '[clone] meetings webhook auto-minted');
-    return { warnings, minted: true };
+    // Close the loop: if the forward URL points to a function on this same app
+    // (the typical /v1/{app_id}/fn/{name} pattern), write the new secret into
+    // that function's env vars under NOTETAKER_WEBHOOK_SECRET so signature
+    // verification works without the cloner copy-pasting anything. Soft-fail
+    // — if the receiver fn doesn't exist or the env var write fails, we keep
+    // the platform row and the cloner can still wire it up by hand using the
+    // warning text below.
+    const ENV_KEY = 'NOTETAKER_WEBHOOK_SECRET';
+    let filledFnEnvVar: { fnName: string; key: string } | null = null;
+    const fnName = parseReceiverFunctionName(forwardUrl, destAppId);
+    if (fnName) {
+      try {
+        const fnRow = await destRuntimePool.query<{ id: string; encrypted_env_vars: string | null }>(
+          `SELECT id, encrypted_env_vars FROM app_functions
+            WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL
+            LIMIT 1`,
+          [destAppId, fnName],
+        );
+        if (fnRow.rows.length > 0) {
+          const existing: Record<string, string> = fnRow.rows[0].encrypted_env_vars
+            ? JSON.parse(decrypt(fnRow.rows[0].encrypted_env_vars, encryptionKey))
+            : {};
+          existing[ENV_KEY] = rawSecret;
+          const reEncrypted = encrypt(JSON.stringify(existing), encryptionKey);
+          await destRuntimePool.query(
+            `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
+            [reEncrypted, fnRow.rows[0].id],
+          );
+          filledFnEnvVar = { fnName, key: ENV_KEY };
+          logger.info({ destAppId, fnName }, '[clone] notetaker secret wired into receiver function env vars');
+        } else {
+          logger.info({ destAppId, fnName }, '[clone] receiver fn name parsed but not found on dest; skipping env var write');
+        }
+      } catch (envErr) {
+        warnings.push(`meetings_webhook: minted but failed to wire ${ENV_KEY} into ${fnName}: ${(envErr as Error).message}`);
+        logger.warn({ err: envErr, fnName }, '[clone] failed to write notetaker secret into function env vars; continuing');
+      }
+    }
+
+    if (filledFnEnvVar) {
+      warnings.push(
+        `meetings_webhook: auto-minted for cloned app and wired into ${filledFnEnvVar.fnName} as ${filledFnEnvVar.key}. ` +
+        `Forward URL: ${forwardUrl}${rewrote ? ' (rewritten from source app id)' : ''}.`,
+      );
+    } else {
+      warnings.push(
+        `meetings_webhook: auto-minted for cloned app. Forward URL: ${forwardUrl}${rewrote ? ' (rewritten from source app id)' : ''}. ` +
+        `NEW signing secret (shown once, store now): ${rawSecret}. ` +
+        `Set this as the webhook receiver function's env var (typically NOTETAKER_WEBHOOK_SECRET) on the cloned app — Recall events will fail signature verification until you do.`,
+      );
+    }
+    logger.info({ destAppId, forwardUrl, rewrote, fnWired: !!filledFnEnvVar }, '[clone] meetings webhook auto-minted');
+    return { warnings, minted: true, filledFnEnvVar };
   } catch (err) {
     const msg = `meetings_webhook replay failed: ${(err as Error).message}`;
     warnings.push(msg);
     logger.warn({ err }, '[clone] meetings webhook replay failed; continuing');
-    return { warnings, minted: false };
+    return { warnings, minted: false, filledFnEnvVar: null };
   }
 }
 

@@ -67,9 +67,18 @@ export interface DetectedConvention {
   auto_mintable: boolean;
 }
 
+// Both keys mint the SAME credential shape — a bb_sk_* scoped to the dest app.
+// Every bb_sk_ carries substrate_user_id = owner, so it works on both the app
+// plane (BUTTERBASE_API_KEY) and the caller's substrate (BB_SUBSTRATE_KEY).
+// See api-key-service.ts:42-45 for the cross-surface guarantee.
 const CONVENTIONS: Record<string, DetectedConvention['convention']> = {
   BUTTERBASE_API_KEY: 'butterbase_api_key',
+  BB_SUBSTRATE_KEY: 'butterbase_api_key',
 };
+
+/** Names of convention keys that the clone flow auto-mints by default
+ *  (no `auto_mint_api_key` opt-in required from the caller). */
+export const AUTO_MINT_CONVENTION_KEYS = Object.keys(CONVENTIONS);
 
 /**
  * Inspect a list of env var key names and surface platform-recognized conventions
