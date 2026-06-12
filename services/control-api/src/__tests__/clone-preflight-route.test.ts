@@ -44,15 +44,18 @@ vi.mock('../config.js', () => ({
 }));
 
 // Mock clone-env-vars so we don't need a real AUTH_ENCRYPTION_KEY / decrypt chain.
+const listSourceEnvVarKeysMock = vi.fn(async () => [
+  { fn_name: 'my-fn', keys: ['BUTTERBASE_API_KEY', 'OPENAI_KEY'] as string[] },
+]);
 vi.mock('../services/clone-env-vars.js', () => ({
-  listSourceEnvVarKeys: vi.fn(async () => [
-    { fn_name: 'my-fn', keys: ['BUTTERBASE_API_KEY', 'OPENAI_KEY'] },
-  ]),
+  listSourceEnvVarKeys: (...args: unknown[]) => listSourceEnvVarKeysMock(...(args as [])),
   detectConventions: vi.fn((keys: string[]) =>
     keys.includes('BUTTERBASE_API_KEY')
       ? [{ key: 'BUTTERBASE_API_KEY', convention: 'butterbase_api_key', auto_mintable: true }]
       : [],
   ),
+  AUTO_MINT_CONVENTION_KEYS: ['BUTTERBASE_API_KEY', 'BB_SUBSTRATE_KEY'],
+  STATIC_FILL_KEYS: ['BUTTERBASE_API_URL', 'BUTTERBASE_APP_ID'],
 }));
 
 // ---------------------------------------------------------------------------
@@ -62,12 +65,20 @@ import fp from 'fastify-plugin';
 import { cloneRoutesPreflight } from '../routes/clone-preflight.js';
 
 let testUserId: string | null = null;
+let controlDbMeetingsWebhookRows: any[] = [];
 
 async function buildApp() {
   const app = Fastify({ logger: false });
 
-  // Minimal controlDb stub (region resolver uses it but is mocked above).
-  const controlDbStub = { query: vi.fn() };
+  // Minimal controlDb stub. The preflight route probes app_meetings_webhooks
+  // for the NOTETAKER_WEBHOOK_SECRET classification — return whatever the
+  // current test set up.
+  const controlDbStub = {
+    query: vi.fn(async (sql: string) => {
+      if (sql.includes('app_meetings_webhooks')) return { rows: controlDbMeetingsWebhookRows };
+      return { rows: [] };
+    }),
+  };
   app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
 
   // Inject auth from testUserId variable so individual tests can swap it.
@@ -152,5 +163,43 @@ describe('GET /v1/templates/:source_app_id/clone-preflight', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/templates/app_gone/clone-preflight' });
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe('RESOURCE_NOT_FOUND');
+  });
+
+  it('key_meta marks convention keys + static fills as auto_filled', async () => {
+    testUserId = null;
+    controlDbMeetingsWebhookRows = [];
+    mockRuntimeQuery.mockResolvedValueOnce({ rows: [{ visibility: 'public', owner_id: OWNER_ID }] });
+    listSourceEnvVarKeysMock.mockResolvedValueOnce([
+      { fn_name: 'agent-chat', keys: [
+        'BUTTERBASE_API_KEY', 'BB_SUBSTRATE_KEY', 'BUTTERBASE_API_URL', 'BUTTERBASE_APP_ID',
+        'NOTETAKER_WEBHOOK_SECRET', 'FRONTEND_URL', 'OPENAI_KEY',
+      ] },
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_pub/clone-preflight' });
+    expect(res.statusCode).toBe(200);
+    const meta = res.json().functions[0].key_meta as { key: string; status: string }[];
+    const byKey = Object.fromEntries(meta.map((m) => [m.key, m.status]));
+    expect(byKey.BUTTERBASE_API_KEY).toBe('auto_filled');
+    expect(byKey.BB_SUBSTRATE_KEY).toBe('auto_filled');
+    expect(byKey.BUTTERBASE_API_URL).toBe('auto_filled');
+    expect(byKey.BUTTERBASE_APP_ID).toBe('auto_filled');
+    // No meetings webhook row → NOTETAKER stays user_required.
+    expect(byKey.NOTETAKER_WEBHOOK_SECRET).toBe('user_required');
+    expect(byKey.FRONTEND_URL).toBe('user_required');
+    expect(byKey.OPENAI_KEY).toBe('user_required');
+  });
+
+  it('key_meta marks NOTETAKER_WEBHOOK_SECRET as auto_filled when source has app_meetings_webhooks', async () => {
+    testUserId = null;
+    controlDbMeetingsWebhookRows = [{ ok: 1 }];
+    mockRuntimeQuery.mockResolvedValueOnce({ rows: [{ visibility: 'public', owner_id: OWNER_ID }] });
+    listSourceEnvVarKeysMock.mockResolvedValueOnce([
+      { fn_name: 'notetaker-webhook', keys: ['NOTETAKER_WEBHOOK_SECRET'] },
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_pub/clone-preflight' });
+    const meta = res.json().functions[0].key_meta as { key: string; status: string }[];
+    expect(meta[0]).toMatchObject({ key: 'NOTETAKER_WEBHOOK_SECRET', status: 'auto_filled' });
   });
 });
