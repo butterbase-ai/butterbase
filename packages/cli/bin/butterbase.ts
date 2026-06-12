@@ -1037,9 +1037,11 @@ aiMeetings
   .option('--app <appId>', 'Override current app')
   .option('--no-transcript', 'Disable transcription')
   .option('--recording <mode>', '"mp4" (default), "audio_only", or "false"', 'mp4')
+  .option('--bot-name <name>', 'Display name the bot uses when joining (1–64 chars; default "Butterbase Notetaker")')
   .option('--json', 'Output raw JSON')
   .action((meetingUrl, opts) => aiMeetingsStartCommand(meetingUrl, {
-    app: opts.app, transcript: opts.transcript, recording: opts.recording, json: opts.json,
+    app: opts.app, transcript: opts.transcript, recording: opts.recording,
+    botName: opts.botName, json: opts.json,
   }));
 
 aiMeetings

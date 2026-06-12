@@ -33,6 +33,7 @@ Content-Type: application/json
   "meetingUrl": "https://zoom.us/j/12345...",
   "transcript": true,
   "recording": "mp4",
+  "botName": "Acme Notetaker",
   "metadata": { "session_id": "abc123" }
 }
 ```
@@ -42,6 +43,7 @@ Content-Type: application/json
 | `meetingUrl` | string | required | Any Zoom / Meet / Teams / Webex URL |
 | `transcript` | boolean | `true` | Transcribe in addition to recording |
 | `recording` | `"mp4" \| "audio_only" \| false` | `"mp4"` | `false` skips recording entirely |
+| `botName` | string | `"Butterbase Notetaker"` | Display name the bot uses when it joins the call. 1–64 chars |
 | `metadata` | `Record<string,string>` | `{}` | Arbitrary string→string map. Keys may not start with `bb_` (reserved) |
 
 Response:
@@ -55,9 +57,12 @@ Response:
   "durationSeconds": null,
   "recordingUrl": null,
   "transcriptUrl": null,
+  "botName": "Acme Notetaker",
   "metadata": { "session_id": "abc123" }
 }
 ```
+
+`botName` is echoed back so callers can confirm what was sent. Bots created before this field was supported come back with `"Butterbase Notetaker"`.
 
 `startedAt` / `completedAt` / URLs populate as the bot progresses. Poll `GET /v1/{app_id}/ai/meetings/{id}` or rely on webhooks.
 

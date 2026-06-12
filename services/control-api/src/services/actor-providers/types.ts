@@ -16,6 +16,8 @@ export interface StartActorRequest {
   recording: 'mp4' | 'audio_only' | false;
   /** App-supplied metadata. Merged into an `app.*` keyspace; bb_* keys rejected. */
   metadata?: Record<string, string>;
+  /** Display name the bot uses when it joins the call. 1-64 chars. Defaults to 'Butterbase Notetaker'. */
+  botName?: string;
 }
 
 export type ActorStatus =
@@ -31,6 +33,9 @@ export interface ActorBot {
   recordingUrl: string | null;
   transcriptUrl: string | null;
   metadata: Record<string, string>;
+  /** Display name the bot used when joining. Bots created before this field was
+   *  supported fall back to 'Butterbase Notetaker'. */
+  botName: string;
 }
 
 export interface ListActorBotsRequest {

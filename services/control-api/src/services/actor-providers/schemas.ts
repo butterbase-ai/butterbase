@@ -13,6 +13,7 @@ export const startMeetingsRequestSchema = z.object({
   transcript: z.boolean().default(true),
   recording: z.union([z.literal('mp4'), z.literal('audio_only'), z.literal(false)]).default('mp4'),
   metadata: safeMetadata,
+  botName: z.string().trim().min(1).max(64).optional(),
 });
 
 export const listMeetingsRequestSchema = z.object({

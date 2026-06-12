@@ -2179,6 +2179,7 @@ Content-Type: application/json
   "meetingUrl": "https://zoom.us/j/12345...",
   "transcript": true,
   "recording": "mp4",
+  "botName": "Acme Notetaker",
   "metadata": { "session_id": "abc123" }
 }
 \`\`\`
@@ -2190,6 +2191,7 @@ Returns:
   "id": "c086e720-d319-44b8-82d8-3a363f2cd9f4",
   "status": "joining",
   "startedAt": "2026-06-11T17:01:29Z",
+  "botName": "Acme Notetaker",
   "metadata": { "session_id": "abc123" }
 }
 \`\`\`
@@ -2199,6 +2201,7 @@ Returns:
 | \`meetingUrl\` | required | Any Zoom / Meet / Teams / Webex meeting URL |
 | \`transcript\` | \`true\` | When \`true\`, the call is transcribed in addition to being recorded |
 | \`recording\` | \`"mp4"\` | \`"mp4"\` for video+audio, \`"audio_only"\` for audio only, \`false\` to skip |
+| \`botName\` | \`"Butterbase Notetaker"\` | Display name attendees see when the bot joins. 1–64 chars |
 | \`metadata\` | \`{}\` | Arbitrary string→string map. Keys may not start with \`bb_\` (reserved) |
 
 ### Get / list / stop

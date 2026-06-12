@@ -127,13 +127,14 @@ export async function aiUsageCommand(options: { app?: string; startDate?: string
 
 import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api-client.js';
 
-export async function aiMeetingsStartCommand(meetingUrl: string, options: { app?: string; transcript?: boolean; recording?: 'mp4' | 'audio_only' | 'false'; json?: boolean }) {
+export async function aiMeetingsStartCommand(meetingUrl: string, options: { app?: string; transcript?: boolean; recording?: 'mp4' | 'audio_only' | 'false'; botName?: string; json?: boolean }) {
   const appId = await requireAppId(options.app);
   const recording = options.recording === 'false' ? false : (options.recording ?? 'mp4');
   const spinner = ora('Spawning meeting bot...').start();
   try {
     const r: any = await apiPost(`/v1/${appId}/ai/meetings`, {
       meetingUrl, transcript: options.transcript ?? true, recording,
+      botName: options.botName,
     });
     spinner.stop();
     if (options.json) return console.log(JSON.stringify(r, null, 2));

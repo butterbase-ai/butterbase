@@ -9,6 +9,8 @@ export interface StartMeetingRequest {
   transcript?: boolean;
   recording?: 'mp4' | 'audio_only' | false;
   metadata?: Record<string, string>;
+  /** Display name the bot uses when it joins. 1-64 chars. Defaults to 'Butterbase Notetaker'. */
+  botName?: string;
 }
 
 export interface MeetingBot {
@@ -20,6 +22,9 @@ export interface MeetingBot {
   recordingUrl: string | null;
   transcriptUrl: string | null;
   metadata: Record<string, string>;
+  /** Display name the bot used when joining. 'Butterbase Notetaker' for legacy bots created
+   *  before this field was supported. */
+  botName: string;
 }
 
 export interface ListMeetingsOptions {

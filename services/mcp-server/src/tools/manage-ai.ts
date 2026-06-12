@@ -29,10 +29,11 @@ Actions:
                        When status is "completed", content_urls contains absolute URLs (same origin
                        as the polling_url) that the caller can fetch() directly using the same
                        Authorization header. Use this to drive your own polling loop.
-  - start_meeting     { app_id, meeting_url, transcript?, recording?, metadata? }
+  - start_meeting     { app_id, meeting_url, transcript?, recording?, metadata?, bot_name? }
                        Spawn a meeting bot that joins a Zoom/Meet/Teams/Webex call.
                        recording: "mp4" (default), "audio_only", or false. transcript defaults to true.
-                       Returns { id, status, ... }. Save id to call get_meeting / stop_meeting later.
+                       bot_name (1–64 chars) sets the display name attendees see; defaults to "Butterbase Notetaker".
+                       Returns { id, status, botName, ... }. Save id to call get_meeting / stop_meeting later.
   - get_meeting       { app_id, meeting_id }
                        Current status + recordingUrl / transcriptUrl (populated when artifacts are ready).
   - list_meetings     { app_id, status?, limit?, cursor? }
@@ -107,6 +108,8 @@ drive the SDK from inside a function or DO.`,
         .describe('For start_meeting: "mp4" (default), "audio_only", or false to skip recording'),
       metadata: z.record(z.string()).optional()
         .describe('For start_meeting — arbitrary string→string map; keys may not start with bb_'),
+      bot_name: z.string().min(1).max(64).optional()
+        .describe('For start_meeting — display name the bot uses when it joins (1–64 chars). Defaults to "Butterbase Notetaker".'),
       status: z.enum(['joining','waiting_room','in_call','recording','ended','done','fatal']).optional()
         .describe('For list_meetings — filter to one lifecycle phase'),
       limit: z.coerce.number().int().min(1).max(100).optional().describe('For list_meetings (default 20)'),
@@ -208,6 +211,7 @@ drive the SDK from inside a function or DO.`,
               transcript: args.transcript ?? true,
               recording,
               metadata: args.metadata,
+              botName: args.bot_name,
             });
             break;
           }
