@@ -8,6 +8,7 @@
  */
 
 import type pg from 'pg';
+import { randomBytes } from 'node:crypto';
 import { introspectSchema } from './schema-introspector.js';
 import { diffSchema } from './schema-differ.js';
 import { applyMigration } from './schema-applier.js';
@@ -1052,6 +1053,87 @@ export async function replayNonSecretConfig(
   await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
   await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
   return { warnings };
+}
+
+/**
+ * Auto-mint a meetings webhook config for the cloned app when (and only when)
+ * the source had one. Without this, the cloned app's `notetaker-webhook` (or
+ * equivalent) function is deployed but the platform-side forwarder has no
+ * row in `app_meetings_webhooks` for the dest, so Recall events go nowhere.
+ *
+ * Behavior:
+ *   - No source row → no-op (most apps).
+ *   - Source row exists → mint a FRESH wsec_* secret for the dest (never share
+ *     the source's secret — that would let the source app's owner forge events
+ *     for the cloned app), rewrite the forward_url substituting sourceAppId →
+ *     destAppId (URLs typically point to the app's own function via
+ *     /v1/{app_id}/fn/{name}), encrypt under AUTH_ENCRYPTION_KEY, and INSERT.
+ *
+ * Caveat surfaced as a warning: the cloned function still needs the new
+ * plaintext as its env var (NOTETAKER_WEBHOOK_SECRET in the CRM template) for
+ * signature verification to pass. We surface the wsec_* once in the warnings
+ * stream — same one-time delivery model the PUT /webhook route uses.
+ */
+export async function replayMeetingsWebhook(
+  controlPool: pg.Pool,
+  sourceAppId: string,
+  destAppId: string,
+  logger: ReplayLogger,
+): Promise<{ warnings: string[]; minted: boolean }> {
+  const warnings: string[] = [];
+  try {
+    const src = await controlPool.query<{ forward_url: string; events: string[] }>(
+      `SELECT forward_url, events FROM app_meetings_webhooks WHERE app_id = $1`,
+      [sourceAppId],
+    );
+    if (src.rows.length === 0) {
+      logger.info({ destAppId }, '[clone] no meetings webhook to replay');
+      return { warnings, minted: false };
+    }
+
+    const encryptionKey = process.env.AUTH_ENCRYPTION_KEY;
+    if (!encryptionKey) {
+      warnings.push('meetings_webhook: AUTH_ENCRYPTION_KEY not configured; cannot mint a fresh signing secret. Re-run PUT /v1/{dest}/ai/meetings/webhook manually.');
+      logger.warn({ destAppId }, '[clone] meetings webhook present on source but cannot mint without AUTH_ENCRYPTION_KEY');
+      return { warnings, minted: false };
+    }
+
+    // Rewrite app id occurrences in the forward URL. App ids use a 14-char
+    // alphanumeric body after `app_` (~73 bits of entropy via APP_ID_ALPHABET),
+    // so substring collisions with unrelated URL segments are negligible —
+    // same logic as rewriteAppIdInArtifact above.
+    const sourceUrl = src.rows[0].forward_url;
+    const forwardUrl = sourceUrl.split(sourceAppId).join(destAppId);
+    const rewrote = forwardUrl !== sourceUrl;
+
+    const raw = randomBytes(32).toString('base64url');
+    const rawSecret = `wsec_${raw}`;
+    const secretEncrypted = encrypt(rawSecret, encryptionKey);
+
+    await controlPool.query(
+      `INSERT INTO app_meetings_webhooks (app_id, forward_url, forward_secret_encrypted, events, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (app_id) DO UPDATE
+         SET forward_url              = EXCLUDED.forward_url,
+             forward_secret_encrypted = EXCLUDED.forward_secret_encrypted,
+             events                   = EXCLUDED.events,
+             updated_at               = now()`,
+      [destAppId, forwardUrl, secretEncrypted, src.rows[0].events],
+    );
+
+    warnings.push(
+      `meetings_webhook: auto-minted for cloned app. Forward URL: ${forwardUrl}${rewrote ? ' (rewritten from source app id)' : ''}. ` +
+      `NEW signing secret (shown once, store now): ${rawSecret}. ` +
+      `Set this as the webhook receiver function's env var (typically NOTETAKER_WEBHOOK_SECRET) on the cloned app — Recall events will fail signature verification until you do.`,
+    );
+    logger.info({ destAppId, forwardUrl, rewrote }, '[clone] meetings webhook auto-minted');
+    return { warnings, minted: true };
+  } catch (err) {
+    const msg = `meetings_webhook replay failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] meetings webhook replay failed; continuing');
+    return { warnings, minted: false };
+  }
 }
 
 // ---------------------------------------------------------------------------

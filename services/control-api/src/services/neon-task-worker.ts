@@ -20,7 +20,7 @@ import {
 } from './repo-storage.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
-import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
+import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayMeetingsWebhook, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
@@ -778,6 +778,23 @@ async function executeClone(
       logger.info(
         { destAppId: resolvedDestAppId, warnings: cfgResult.warnings.length },
         '[clone] non-secret config replayed',
+      );
+
+      // Step 6a-bis: Mint a fresh meetings-webhook config for the dest if the
+      // source had one. Lives in the control DB (not runtime), so kept out of
+      // replayNonSecretConfig which only touches runtime tables.
+      const meetingsWebhookResult = await replayMeetingsWebhook(
+        controlDb,
+        job.source_app_id,
+        resolvedDestAppId,
+        logger,
+      );
+      if (meetingsWebhookResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, meetingsWebhookResult.warnings);
+      }
+      logger.info(
+        { destAppId: resolvedDestAppId, minted: meetingsWebhookResult.minted },
+        '[clone] meetings webhook step complete',
       );
 
       // Step 6b (Phase 5 A6): Replay auth_hook_function binding — only if the
