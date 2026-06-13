@@ -56,7 +56,7 @@ Prefer to skip the local install? Butterbase also runs a hosted MCP endpoint:
 
 The server exposes tools across Butterbase's surface area, including:
 
-- **Apps & regions** — `init_app`, `manage_app`, `list_regions`, `move_app`
+- **Apps & regions** — `init_app`, `manage_app` (actions: list/delete/pause/get_config/update_access_mode/secure/update_cors/set_visibility/preview_clone_env_vars/clone/get_clone_job/find_templates/set_clone_webhook/link_substrate/unlink_substrate/move/move_status/teardown_source_replica), `list_regions`
 - **Schema** — `manage_schema`, `manage_migrations`
 - **Auth** — `manage_auth_config`, `manage_auth_users`, `manage_oauth`
 - **Data** — `select_rows`, `insert_row`, `seed_database`
