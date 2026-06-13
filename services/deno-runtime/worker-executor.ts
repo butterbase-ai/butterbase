@@ -445,12 +445,62 @@ function buildWorkerCode(
           }
         },
       } : null,
-      env: ${JSON.stringify({
-        ...metadata.env_vars,
-        BUTTERBASE_APP_ID: metadata.app_id,
-        BUTTERBASE_API_URL: Deno.env.get("API_BASE_URL") || "http://localhost:4000",
-      })},
+      env: ${JSON.stringify((() => {
+        const p = metadata.platform;
+        // Platform-owned keys injected AFTER user env_vars so user-set vars
+        // can't shadow them. Absent (omitted) when not configured — callers
+        // should branch on `typeof ctx.env.BUTTERBASE_FRONTEND_URL === "string"`
+        // rather than checking against empty strings.
+        const platformEnv: Record<string, string> = {
+          BUTTERBASE_APP_ID: metadata.app_id,
+          BUTTERBASE_API_URL: Deno.env.get("API_BASE_URL") || "http://localhost:4000",
+          BUTTERBASE_APP_NAME: p.app_name,
+          BUTTERBASE_REGION: p.region,
+          BUTTERBASE_ANON_KEY: p.anon_key,
+        };
+        if (p.frontend_url) platformEnv.BUTTERBASE_FRONTEND_URL = p.frontend_url;
+        if (p.subdomain) platformEnv.BUTTERBASE_SUBDOMAIN = p.subdomain;
+        if (p.stripe_connect_account_id) platformEnv.BUTTERBASE_STRIPE_ACCOUNT_ID = p.stripe_connect_account_id;
+        if (p.ai_default_model) platformEnv.BUTTERBASE_AI_DEFAULT_MODEL = p.ai_default_model;
+        return {
+          ...metadata.env_vars,
+          ...platformEnv,
+        };
+      })())},
       user: ${context.userId ? `{ id: "${context.userId}" }` : "null"},
+      app: ${JSON.stringify({
+        id: metadata.app_id,
+        name: metadata.platform.app_name,
+        ownerId: metadata.platform.owner_id,
+        region: metadata.platform.region,
+        subdomain: metadata.platform.subdomain,
+        anonKey: metadata.platform.anon_key,
+        allowedOrigins: metadata.platform.allowed_origins,
+        frontend: metadata.platform.frontend_url ? {
+          url: metadata.platform.frontend_url,
+        } : null,
+        auth: {
+          accessTokenTtl: metadata.platform.jwt_access_token_ttl,
+          refreshTokenTtlDays: metadata.platform.jwt_refresh_token_ttl_days,
+          hookFunction: metadata.platform.auth_hook_function,
+        },
+        ai: metadata.platform.ai_default_model ? {
+          defaultModel: metadata.platform.ai_default_model,
+        } : null,
+        billing: metadata.platform.stripe_connect_account_id ? {
+          stripeAccountId: metadata.platform.stripe_connect_account_id,
+        } : null,
+      })},
+      request: ${JSON.stringify({
+        id: context.requestHeaders["x-request-id"] ?? null,
+        ip: context.requestHeaders["fly-client-ip"]
+          ?? context.requestHeaders["cf-connecting-ip"]
+          ?? (context.requestHeaders["x-forwarded-for"]?.split(",")[0]?.trim() ?? null),
+        country: context.requestHeaders["cf-ipcountry"]
+          ?? context.requestHeaders["fly-region"]
+          ?? null,
+        functionName: metadata.function_name,
+      })},
       idempotency: db ? {
         // Atomically claim a key. Returns true if newly claimed (caller should
         // proceed), false if the key was already processed (caller should treat
