@@ -9,6 +9,16 @@
 
 Migration is mechanical — the new actions take the same parameters as the standalone tools they replace, plus the `action` discriminator.
 
+### Added
+
+- **Runtime**: function `ctx` now surfaces platform-known values so user code doesn't have to set them as env vars by hand. Two parallel surfaces, same source of truth:
+  - Flat `ctx.env.BUTTERBASE_*` (muscle-memory `Deno.env`-style):
+    - Always present: `BUTTERBASE_APP_ID`, `BUTTERBASE_API_URL`, `BUTTERBASE_APP_NAME`, `BUTTERBASE_REGION`, `BUTTERBASE_ANON_KEY`.
+    - Present when configured (omitted otherwise — branch with `typeof === "string"`, not empty-string checks): `BUTTERBASE_FRONTEND_URL`, `BUTTERBASE_SUBDOMAIN`, `BUTTERBASE_STRIPE_ACCOUNT_ID`, `BUTTERBASE_AI_DEFAULT_MODEL`.
+  - Structured `ctx.app = { id, name, ownerId, region, subdomain, anonKey, allowedOrigins, frontend, auth, ai, billing }` with optional sub-objects (`frontend`, `ai`, `billing`) set to `null` when unconfigured. `ctx.app.auth` is always present (`{ accessTokenTtl, refreshTokenTtlDays, hookFunction }`).
+  - Per-invocation `ctx.request = { id, ip, country, functionName }` derived from `X-Request-Id` / `Fly-Client-Ip` / `Cf-Connecting-Ip` / `X-Forwarded-For` / `Cf-Ipcountry` / `Fly-Region` headers.
+  - Platform keys are injected **after** user `envVars` so user-set vars can't shadow them. No new infra; one extended `apps` SELECT in `function-loader.ts`. See `core-concepts/functions` → Platform context.
+
 ## [0.3.0] - 2026-06-08
 
 ### Added

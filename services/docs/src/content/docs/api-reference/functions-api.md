@@ -58,7 +58,7 @@ Authorization: Bearer {token}
 | Field | Default | Description |
 |-------|---------|-------------|
 | `description` | — | What the function does |
-| `envVars` | — | Environment variables (encrypted) |
+| `envVars` | — | Environment variables (encrypted). The platform also auto-injects `BUTTERBASE_*` keys at runtime — see [Platform context](/core-concepts/functions/#platform-context). Platform keys are injected after your `envVars` so you can't shadow them. |
 | `timeoutMs` | 30000 | Max execution time (max: 300000) |
 | `memoryLimitMb` | 128 | Memory limit (range: 64-1024) |
 | `triggers` | `[{type: "http"}]` | Array of trigger configs. At most one per type. |
