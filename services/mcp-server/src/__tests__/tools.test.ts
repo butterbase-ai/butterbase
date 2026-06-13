@@ -49,15 +49,12 @@ describe('MCP Server Tools', () => {
       'manage_rls',
       'manage_schema',
       'manage_storage',
-      'move_app',
-      'move_app_status',
       'prep_and_submit_hackathon_entry',
       'query_audit_logs',
       'rag_query',
       'seed_database',
       'select_rows',
       'submit_suggestion',
-      'teardown_source_replica',
       // submit_hackathon_entry is omitted because it is only shown when a
       // hackathon is within its active submission window (active-window cache
       // returns false in tests with no real server).

@@ -31,7 +31,6 @@ import { registerManageDurableObjects } from './tools/manage-durable-objects.js'
 import { registerManageAi } from './tools/manage-ai.js';
 import { registerBilling } from './tools/billing.js';
 import { registerApiKeys } from './tools/api-keys.js';
-import { registerMoveApp } from './tools/move-app.js';
 import { registerListRegions } from './tools/list-regions.js';
 import { registerManageMigrations } from './tools/manage-migrations.js';
 import { registerManageAgents } from './tools/manage-agents.js';
@@ -102,7 +101,6 @@ export async function createButterbaseMcpServer() {
   registerManageAi(server);
   registerBilling(server);
   registerApiKeys(server);
-  registerMoveApp(server);
   registerListRegions(server);
   registerManageMigrations(server);
   registerManageAgents(server);
