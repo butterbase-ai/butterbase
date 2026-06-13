@@ -84,6 +84,27 @@ export interface FunctionMetadata {
   memory_limit_mb: number;
   db_connection_string: string | null;
   substrate_user_id: string | null;
+  /**
+   * Platform-known values surfaced to user code via ctx.env.BUTTERBASE_*
+   * and the structured ctx.app mirror. Strictly platform-owned, non-secret
+   * values pulled from the apps row. Any field may be null when not
+   * configured — the worker template omits absent flat keys and mirrors
+   * null on ctx.app so user code can branch with `if (ctx.app.frontend)`.
+   */
+  platform: {
+    app_name: string;
+    owner_id: string;
+    region: string;
+    subdomain: string | null;
+    frontend_url: string | null;
+    anon_key: string;
+    allowed_origins: string[];
+    stripe_connect_account_id: string | null;
+    ai_default_model: string | null;
+    jwt_access_token_ttl: string | null;
+    jwt_refresh_token_ttl_days: number | null;
+    auth_hook_function: string | null;
+  };
 }
 
 interface CacheEntry {
@@ -168,9 +189,16 @@ export async function loadFunction(
 
     const row = result.rows[0] as any;
 
-    // Check if app database is provisioned
+    // Check if app database is provisioned + pull platform-known values
+    // surfaced to user code via ctx.env.BUTTERBASE_* / ctx.app.
     const appCheck = await client.queryObject(
-      `SELECT db_provisioned, substrate_user_id FROM apps WHERE id = $1`,
+      `SELECT
+         db_provisioned, substrate_user_id,
+         name, owner_id, region, subdomain,
+         deployment_url, anon_key, allowed_origins,
+         stripe_connect_account_id,
+         ai_config, jwt_config, auth_hook_function
+       FROM apps WHERE id = $1`,
       [appId]
     );
 
@@ -214,6 +242,9 @@ export async function loadFunction(
 
     const dbConnectionString = connResult.rows[0].connection_string;
 
+    const aiConfig = (app.ai_config ?? {}) as Record<string, unknown>;
+    const jwtConfig = (app.jwt_config ?? {}) as Record<string, unknown>;
+
     const metadata: FunctionMetadata = {
       id: row.id,
       app_id: row.app_id,
@@ -224,7 +255,21 @@ export async function loadFunction(
       timeout_ms: row.timeout_ms,
       memory_limit_mb: row.memory_limit_mb,
       db_connection_string: dbConnectionString,
-      substrate_user_id: appCheck.rows[0]?.substrate_user_id ?? null,
+      substrate_user_id: app.substrate_user_id ?? null,
+      platform: {
+        app_name: app.name,
+        owner_id: app.owner_id,
+        region: app.region,
+        subdomain: app.subdomain ?? null,
+        frontend_url: app.deployment_url ?? null,
+        anon_key: app.anon_key,
+        allowed_origins: Array.isArray(app.allowed_origins) ? app.allowed_origins : [],
+        stripe_connect_account_id: app.stripe_connect_account_id ?? null,
+        ai_default_model: typeof aiConfig.defaultModel === 'string' ? aiConfig.defaultModel : null,
+        jwt_access_token_ttl: typeof jwtConfig.accessTokenTtl === 'string' ? jwtConfig.accessTokenTtl : null,
+        jwt_refresh_token_ttl_days: typeof jwtConfig.refreshTokenTtlDays === 'number' ? jwtConfig.refreshTokenTtlDays : null,
+        auth_hook_function: app.auth_hook_function ?? null,
+      },
     };
 
     // Add to cache (LRU eviction if full)

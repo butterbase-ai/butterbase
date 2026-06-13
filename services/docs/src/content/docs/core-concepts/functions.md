@@ -92,6 +92,7 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 - Environment variables via `ctx.env.VAR_NAME`
 - Database access via `ctx.db.query(sql)`
 - User info via `ctx.user` (when invoked with end-user JWT)
+- App metadata via `ctx.app` and per-request data via `ctx.request` — see "Platform context" below
 - Console output (`console.log`, `console.info`, `console.warn`, `console.error`, `console.debug`) — captured and visible in invocation logs
 - Network access
 - Webhook idempotency via `ctx.idempotency.claim(key)` — see "Idempotent webhook handlers" below
@@ -100,6 +101,46 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 :::note
 Use `ctx.env`, not `Deno.env.get()` for function-specific environment variables.
 :::
+
+## Platform context
+
+The runtime auto-injects platform-known values so you don't have to set them as env vars yourself. Two surfaces, same source of truth:
+
+**Flat (`ctx.env.BUTTERBASE_*`)** — always present unless noted:
+
+| Key | Value |
+|-----|-------|
+| `BUTTERBASE_APP_ID` | App ID (e.g. `app_abc123`) |
+| `BUTTERBASE_API_URL` | Public API base URL |
+| `BUTTERBASE_APP_NAME` | App display name |
+| `BUTTERBASE_REGION` | Primary region (e.g. `sjc`) |
+| `BUTTERBASE_ANON_KEY` | App's public anon key (safe to expose to browsers) |
+| `BUTTERBASE_FRONTEND_URL` | Deployed frontend URL — **absent when no frontend is deployed** |
+| `BUTTERBASE_SUBDOMAIN` | Platform-assigned subdomain — absent if unset |
+| `BUTTERBASE_STRIPE_ACCOUNT_ID` | Connected Stripe account — absent if billing not configured |
+| `BUTTERBASE_AI_DEFAULT_MODEL` | Default model from `manage_ai` — absent if unset |
+
+Optional keys are **omitted** rather than empty-stringed. Branch on `typeof ctx.env.BUTTERBASE_FRONTEND_URL === "string"`.
+
+**Structured (`ctx.app`)** — same values, typed access, optional sub-objects are `null` when absent:
+
+```ts
+ctx.app = {
+  id, name, ownerId, region, subdomain, anonKey, allowedOrigins,
+  frontend: { url } | null,           // null when no frontend deployed
+  auth:     { accessTokenTtl, refreshTokenTtlDays, hookFunction },
+  ai:       { defaultModel } | null,  // null when AI config empty
+  billing:  { stripeAccountId } | null, // null when billing not connected
+}
+```
+
+**Per-request (`ctx.request`)** — derived from incoming headers:
+
+```ts
+ctx.request = { id, ip, country, functionName }
+```
+
+Platform keys are injected **after** your function-specific env vars, so a user-set `BUTTERBASE_APP_ID` will not shadow the real one.
 
 ## RLS in functions
 

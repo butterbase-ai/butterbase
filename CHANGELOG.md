@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Breaking changes
+
+- **MCP**: `create_agent`, `update_agent`, `delete_agent`, `get_agent`, `list_agents`, and `validate_agent_spec` are removed. Use `manage_agents` with `action: "create" | "update" | "delete" | "get" | "list" | "validate"`.
+- **MCP**: `move_app`, `move_app_status`, and `teardown_source_replica` are removed. Use `manage_app` with `action: "move" | "move_status" | "teardown_source_replica"`.
+
+Migration is mechanical — the new actions take the same parameters as the standalone tools they replace, plus the `action` discriminator.
+
 ## [0.3.0] - 2026-06-08
 
 ### Added

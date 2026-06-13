@@ -22,16 +22,13 @@ describe('MCP Server Tools', () => {
     const toolNames = result.tools.map((t) => t.name).sort();
     expect(toolNames).toEqual([
       'butterbase_docs',
-      'create_agent',
       'create_frontend_deployment',
-      'delete_agent',
       'deploy_function',
-      'get_agent',
       'init_app',
       'insert_row',
       'invoke_function',
-      'list_agents',
       'list_regions',
+      'manage_agents',
       'manage_ai',
       'manage_api_keys',
       'manage_app',
@@ -52,17 +49,12 @@ describe('MCP Server Tools', () => {
       'manage_rls',
       'manage_schema',
       'manage_storage',
-      'move_app',
-      'move_app_status',
       'prep_and_submit_hackathon_entry',
       'query_audit_logs',
       'rag_query',
       'seed_database',
       'select_rows',
       'submit_suggestion',
-      'teardown_source_replica',
-      'update_agent',
-      'validate_agent_spec',
       // submit_hackathon_entry is omitted because it is only shown when a
       // hackathon is within its active submission window (active-window cache
       // returns false in tests with no real server).
@@ -114,7 +106,7 @@ describe('MCP Server Tools', () => {
     const actions = (tool!.inputSchema as unknown as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'link_substrate', 'list', 'pause', 'preview_clone_env_vars', 'secure', 'set_clone_webhook', 'set_visibility', 'unlink_substrate', 'update_access_mode', 'update_cors',
+      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'link_substrate', 'list', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'secure', 'set_clone_webhook', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [
@@ -132,7 +124,7 @@ describe('MCP Server Tools', () => {
     expect(tool).toBeDefined();
     const actions = ((tool!.inputSchema as unknown) as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
-    expect(actions.sort()).toEqual(['delete', 'get_logs', 'list', 'update_env']);
+    expect(actions.sort()).toEqual(['delete', 'get', 'get_logs', 'list', 'update_env']);
     const names = result.tools.map((t) => t.name);
     for (const removed of ['list_functions', 'delete_function', 'get_function_logs', 'update_function_env']) {
       expect(names).not.toContain(removed);

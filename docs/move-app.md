@@ -24,11 +24,11 @@ After the move completes, the previous region is kept as a hot replica for fast 
 
 ### MCP
 
-Use the `move_app` MCP tool:
+Use the `manage_app` MCP tool (action: `"move"`):
 ```
-move_app({ app_id: "app-123", dest_region: "eu-west-1" })
+manage_app({ action: "move", app_id: "app-123", dest_region: "eu-west-1" })
 ```
-Poll status with `move_app_status({ migration_id: "..." })`.
+Poll status with `manage_app({ action: "move_status", migration_id: "..." })`.
 
 ### REST API
 

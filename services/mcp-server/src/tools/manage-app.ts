@@ -5,7 +5,7 @@ import { apiGet, apiDelete, apiPatch, apiPost } from '../api-client.js';
 export function registerManageApp(server: McpServer) {
   server.tool(
     'manage_app',
-    `Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, update CORS, clone, and find templates.
+    `Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, update CORS, clone, find templates, and migrate regions.
 
 Actions:
   - "list":                    List all backend apps with basic metadata (no app_id needed)
@@ -23,6 +23,9 @@ Actions:
   - "set_clone_webhook":       Set or clear a webhook that fires when someone clones this app. Pass webhook_url + webhook_secret to configure, or clear_webhook: true to remove.
   - "link_substrate":          Link this app to the caller's substrate. Once linked, the app's deployed functions receive ctx.substrate and its actions/entities flow into the caller's substrate ledger.
   - "unlink_substrate":        Unlink this app from substrate. ctx.substrate stops being injected; in-flight actions are unaffected.
+  - "move":                    Migrate an app to a different region. Returns migration_id + initial status "queued".
+  - "move_status":             Get the current status of an in-progress migration.
+  - "teardown_source_replica": After a completed move, decommission the retained source-region replica.
 
 Parameters by action:
   list:                    { action: "list" }
@@ -40,12 +43,15 @@ Parameters by action:
   set_clone_webhook:       { action: "set_clone_webhook", app_id, webhook_url, webhook_secret } or { action: "set_clone_webhook", app_id, clear_webhook: true }
   link_substrate:          { action: "link_substrate", app_id }
   unlink_substrate:        { action: "unlink_substrate", app_id }
+  move:                    { action: "move", app_id, dest_region }
+  move_status:             { action: "move_status", app_id, migration_id }
+  teardown_source_replica: { action: "teardown_source_replica", migration_id }
 
 Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'move', 'move_status', 'teardown_source_replica'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -85,6 +91,9 @@ Common errors:
       sort: z.enum(['recent', 'popular']).optional().describe('Optional for "find_templates". Sort order: "recent" or "popular". Defaults to "recent".'),
       limit: z.number().int().optional().describe('Optional for "find_templates". Max results per page (default 20).'),
       offset: z.number().int().optional().describe('Optional for "find_templates". Pagination offset (default 0).'),
+      // move / move_status / teardown_source_replica params
+      dest_region: z.string().optional().describe('Required for "move". Target region slug (e.g. "us-west-2").'),
+      migration_id: z.string().optional().describe('Required for "move_status" and "teardown_source_replica". The migration ID returned by action: "move".'),
     },
     {
       title: 'Manage App',
@@ -254,6 +263,28 @@ Common errors:
             webhook_url: args.webhook_url,
             webhook_secret: args.webhook_secret,
           });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'move': {
+          const err =
+            need(args.app_id, '"app_id" is required for the "move" action.') ??
+            need(args.dest_region, '"dest_region" is required for the "move" action.');
+          if (err) return err;
+          const result = await apiPost(`/v1/apps/${args.app_id}/move`, { dest_region: args.dest_region });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'move_status': {
+          const err =
+            need(args.app_id, '"app_id" is required for the "move_status" action.') ??
+            need(args.migration_id, '"migration_id" is required for the "move_status" action.');
+          if (err) return err;
+          const result = await apiGet(`/v1/apps/${args.app_id}/migrations/${args.migration_id}`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'teardown_source_replica': {
+          const err = need(args.migration_id, '"migration_id" is required for the "teardown_source_replica" action.');
+          if (err) return err;
+          const result = await apiDelete(`/v1/source-replicas/${args.migration_id}`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
       }
