@@ -22,16 +22,13 @@ describe('MCP Server Tools', () => {
     const toolNames = result.tools.map((t) => t.name).sort();
     expect(toolNames).toEqual([
       'butterbase_docs',
-      'create_agent',
       'create_frontend_deployment',
-      'delete_agent',
       'deploy_function',
-      'get_agent',
       'init_app',
       'insert_row',
       'invoke_function',
-      'list_agents',
       'list_regions',
+      'manage_agents',
       'manage_ai',
       'manage_api_keys',
       'manage_app',
@@ -61,8 +58,6 @@ describe('MCP Server Tools', () => {
       'select_rows',
       'submit_suggestion',
       'teardown_source_replica',
-      'update_agent',
-      'validate_agent_spec',
       // submit_hackathon_entry is omitted because it is only shown when a
       // hackathon is within its active submission window (active-window cache
       // returns false in tests with no real server).

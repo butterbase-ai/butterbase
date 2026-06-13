@@ -34,7 +34,7 @@ import { registerApiKeys } from './tools/api-keys.js';
 import { registerMoveApp } from './tools/move-app.js';
 import { registerListRegions } from './tools/list-regions.js';
 import { registerManageMigrations } from './tools/manage-migrations.js';
-import { registerAgentTools } from './tools/agents.js';
+import { registerManageAgents } from './tools/manage-agents.js';
 import { registerManageKv } from './tools/manage-kv.js';
 import { startActiveWindowListener } from './eligibility-listener.js';
 import { isActiveWindowCached, startActiveWindowPoller } from './active-window-cache.js';
@@ -105,7 +105,7 @@ export async function createButterbaseMcpServer() {
   registerMoveApp(server);
   registerListRegions(server);
   registerManageMigrations(server);
-  registerAgentTools(server);
+  registerManageAgents(server);
   if (process.env.PARTNER_PROXY_ENABLED === 'true') {
     registerListPartnerApis(server);
   }
