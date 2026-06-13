@@ -124,7 +124,7 @@ describe('MCP Server Tools', () => {
     expect(tool).toBeDefined();
     const actions = ((tool!.inputSchema as unknown) as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
-    expect(actions.sort()).toEqual(['delete', 'get_logs', 'list', 'update_env']);
+    expect(actions.sort()).toEqual(['delete', 'get', 'get_logs', 'list', 'update_env']);
     const names = result.tools.map((t) => t.name);
     for (const removed of ['list_functions', 'delete_function', 'get_function_logs', 'update_function_env']) {
       expect(names).not.toContain(removed);
