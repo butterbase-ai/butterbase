@@ -22,6 +22,25 @@ import {
   CURATED_TOOLKITS,
 } from '../services/composio-client.js';
 
+// Append status params to a redirect URL without clobbering an existing
+// query string. `bb.integrations.connect({ redirectUrl })` accepts any
+// valid URL, including ones that already carry `?foo=bar`, so a bare
+// `${url}?status=...` concat produces `...?foo=bar?status=...` and breaks
+// `URLSearchParams.get('foo')` on the client side.
+export function withStatusParams(base: string, params: Record<string, string>): string {
+  try {
+    const url = new URL(base);
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    return url.toString();
+  } catch {
+    // base wasn't a parseable URL — fall back to safe concat. Pre-validated
+    // at the connect endpoint via z.string().url(), so this is defense-in-depth.
+    const sep = base.includes('?') ? '&' : '?';
+    const qs = new URLSearchParams(params).toString();
+    return `${base}${sep}${qs}`;
+  }
+}
+
 // --- Schemas ---
 
 const configureSchema = z.object({
@@ -289,21 +308,21 @@ export async function integrationRoutes(app: FastifyInstance) {
 
       // Verify the signed state token
       if (!state) {
-        return reply.redirect(`${config.dashboardUrl}?status=error&message=missing_state`);
+        return reply.redirect(withStatusParams(config.dashboardUrl, { status: 'error', message: 'missing_state' }));
       }
 
       const payload = verifyStateToken(state);
       if (!payload) {
-        return reply.redirect(`${config.dashboardUrl}?status=error&message=invalid_state`);
+        return reply.redirect(withStatusParams(config.dashboardUrl, { status: 'error', message: 'invalid_state' }));
       }
 
       // Verify the appId in the URL matches the state token
       if (payload.appId !== appId) {
-        return reply.redirect(`${payload.redirectUrl}?status=error&message=app_mismatch`);
+        return reply.redirect(withStatusParams(payload.redirectUrl, { status: 'error', message: 'app_mismatch' }));
       }
 
       if (status !== 'success' || !connectedAccountId) {
-        return reply.redirect(`${payload.redirectUrl}?status=error&message=connection_failed`);
+        return reply.redirect(withStatusParams(payload.redirectUrl, { status: 'error', message: 'connection_failed' }));
       }
 
       // Record the connection — no polling needed, it's already active
@@ -325,7 +344,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         success: true,
       });
 
-      return reply.redirect(`${payload.redirectUrl}?status=connected&toolkit=${payload.toolkit}`);
+      return reply.redirect(withStatusParams(payload.redirectUrl, { status: 'connected', toolkit: payload.toolkit }));
     }
   );
 
