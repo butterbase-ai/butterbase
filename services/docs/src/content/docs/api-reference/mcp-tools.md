@@ -13,23 +13,22 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 |------|-------------|
 | `init_app` | Create a new app. Accepts an optional `region` slug. Returns app_id and API base URL. |
 | `list_regions` | List the regions an app can be created or moved to. |
-| `move_app` | Move an existing app to another region. |
-| `move_app_status` | Check the progress of an app move. |
-| `list_apps` | List all apps with metadata. |
-| `delete_app` | Permanently delete an app. Irreversible. |
-| `pause_app` | Kill-switch — pause/resume all data-plane traffic. Returns 503 (`APP_PAUSED`) on data-plane endpoints while paused. |
-| `get_app_config` | Read app configuration (CORS, JWT, storage limits). |
-| `update_cors` | Set allowed CORS origins. |
-| `update_jwt_config` | Configure access/refresh token lifetimes. |
-| `update_app_access_mode` | Toggle anonymous vs authenticated-only access. |
-| `set_visibility` | Mark an app public or private, optionally setting the templates-browser `listed` flag. |
-| `generate_service_key` | Generate a `bb_sk_` API key. Shown only once. |
-| `manage_app` | Comprehensive app management: list/delete/pause, configure access/visibility, clone templates, set webhooks. See `manage_app` actions below. |
+| `manage_app` | Comprehensive app management: list/delete/pause, configure access/visibility, move between regions, clone templates, set webhooks. See `manage_app` actions below. |
 
 ### manage_app actions
 
 | Action | Description |
 |--------|-------------|
+| `list` | List all apps with metadata. |
+| `delete` | Permanently delete an app. Irreversible. |
+| `pause` | Kill-switch — pause/resume all data-plane traffic. Returns 503 (`APP_PAUSED`) on data-plane endpoints while paused. |
+| `get_config` | Read app configuration (CORS, JWT, storage limits). |
+| `update_cors` | Set allowed CORS origins. |
+| `update_access_mode` | Toggle anonymous vs authenticated-only access. |
+| `set_visibility` | Mark an app public or private, optionally setting the templates-browser `listed` flag. |
+| `move` | Move an existing app to another region. Pass `dest_region`. Returns a `migration_id`; the app stays available for reads during the move. |
+| `move_status` | Check the progress of a move in flight. Pass `migration_id` (returned by `action: "move"`). |
+| `teardown_source_replica` | After a completed move, decommission the retained source-region replica. Pass `migration_id`. |
 | `find_templates` | Search public, listed app templates. Pass optional `q` (name prefix), `region`, `sort` (`recent` or `popular`), `limit` (max 50), `offset`. Returns `{ items: [...], total, limit, offset }`. |
 | `clone` | Clone a public app's repo snapshot into a new app you own. Pass `source_app_id` and optionally `name` and `region`. Returns `{ job_id, status: "pending" }`. |
 | `get_clone_job` | Poll the status of a clone job by `job_id`. Returns `status` (`pending`, `completed`, or `failed`), `dest_app_id` when completed, and `error_message` when failed. |

@@ -79,7 +79,7 @@ butterbase apps use app_abc123
 butterbase apps delete app_abc123
 ```
 
-Region selection at app creation and app moves are currently available via [MCP](/getting-started/mcp-setup/) tools (`init_app`, `list_regions`, `move_app`, `move_app_status`) and the [REST API](/api-reference/platform-api/#apps--regions). See [Regions](/core-concepts/regions/) for guidance.
+Region selection at app creation and app moves are currently available via [MCP](/getting-started/mcp-setup/) tools (`init_app`, `list_regions`, `manage_app` with action `"move"` or `"move_status"`) and the [REST API](/api-reference/platform-api/#apps--regions). See [Regions](/core-concepts/regions/) for guidance.
 
 ## Schema
 

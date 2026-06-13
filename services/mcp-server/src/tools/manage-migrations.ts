@@ -7,8 +7,8 @@ export function registerManageMigrations(server: McpServer) {
     'manage_migrations',
     `Read and control in-flight app migrations.
 
-This complements move_app / move_app_status / teardown_source_replica with the four
-operational routes those tools don't cover.
+This complements manage_app (actions: move / move_status / teardown_source_replica) with the four
+operational routes those actions don't cover.
 
 Actions:
   - get_active             : { app_id, action: "get_active" }
@@ -23,8 +23,8 @@ Actions:
                              Lists active retained source replicas for the caller's apps.
                              Use this before tearing down to discover what's still around.
 
-Use list_regions + move_app to start a move; move_app_status to watch progress;
-teardown_source_replica when you're confident the move is stable.`,
+Use list_regions + manage_app (action: "move") to start a move; manage_app (action: "move_status") to watch progress;
+manage_app (action: "teardown_source_replica") when you're confident the move is stable.`,
     {
       app_id: z.string().optional().describe('Required for get_active / abort / reverse.'),
       migration_id: z.string().optional().describe('Required for abort / reverse.'),

@@ -16,7 +16,7 @@ More regions are coming soon. If you'd like one in a specific part of the world,
 
 ### Fetching the live list
 
-The supported region list is always available from the API. Use this if you're building a UI that lets your users choose a region, or if you want to validate a region slug before calling `init_app` or `move_app`.
+The supported region list is always available from the API. Use this if you're building a UI that lets your users choose a region, or if you want to validate a region slug before calling `init_app` or `manage_app` (action: `"move"`).
 
 **MCP**
 
@@ -84,7 +84,7 @@ If your audience shifts — or you want to be closer to a different part of the 
 **MCP**
 
 ```
-move_app({ app_id: "app_abc123", dest_region: "us-east-1" })
+manage_app({ action: "move", app_id: "app_abc123", dest_region: "us-east-1" })
 ```
 
 **CLI**
@@ -98,7 +98,7 @@ While the move is in progress, your app stays available for reads. Writes pause 
 Check progress at any time:
 
 ```
-move_app_status({ app_id: "app_abc123" })
+manage_app({ action: "move_status", app_id: "app_abc123", migration_id: "<id from move>" })
 ```
 
 You can't move an app while another move is already in progress for it.

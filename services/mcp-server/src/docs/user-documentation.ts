@@ -74,8 +74,9 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 |------|--------------|
 | **init_app** | Create a new backend app. You supply a name (and optionally a region); you receive the app id and API base URL. |
 | **list_regions** | List the regions an app can be created or moved to. Reads the live set, so it stays accurate as regions are added. |
-| **move_app** | Move an existing app to another region. Returns a migration_id; the app stays available for reads during the move. |
-| **move_app_status** | Check the progress of a move in flight. |
+| **manage_app** (action: "move") | Move an existing app to another region. Pass \`dest_region\`; returns a \`migration_id\`. The app stays available for reads during the move. |
+| **manage_app** (action: "move_status") | Check the progress of a move in flight. Pass \`migration_id\` (returned by action: "move"). |
+| **manage_app** (action: "teardown_source_replica") | After a completed move, decommission the retained source-region replica. Pass \`migration_id\`. |
 | **manage_app** (action: "list") | List all apps you have access to with their metadata. |
 | **manage_app** (action: "delete") | Permanently delete an app and its database. This is irreversible. |
 | **manage_app** (action: "get_config") | Read an app's current configuration (CORS origins, JWT settings, storage limits). |
@@ -2763,7 +2764,7 @@ Global (unaffected by region choice):
 ### Moving an app between regions
 
 \`\`\`
-move_app({ app_id: "app_abc123", dest_region: "us-east-1" })
+manage_app({ action: "move", app_id: "app_abc123", dest_region: "us-east-1" })
 \`\`\`
 
 While the move runs, the app stays available for reads. Writes pause briefly during the cutover and resume automatically once the move completes. Typically takes a few minutes, depending on data size.
@@ -2771,7 +2772,7 @@ While the move runs, the app stays available for reads. Writes pause briefly dur
 Check progress:
 
 \`\`\`
-move_app_status({ app_id: "app_abc123", migration_id: "<id from move_app>" })
+manage_app({ action: "move_status", app_id: "app_abc123", migration_id: "<id from move>" })
 \`\`\`
 
 You cannot start another move while one is already in progress for the same app.

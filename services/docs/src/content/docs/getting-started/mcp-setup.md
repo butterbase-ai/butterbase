@@ -81,14 +81,15 @@ Include your API key as a Bearer token in the Authorization header.
 |------|--------------|
 | **init_app** | Create a new backend app. You supply a name (and optionally a region); you receive the app id and API base URL. |
 | **list_regions** | List the regions an app can be created or moved to. |
-| **move_app** | Move an existing app to another region. |
-| **move_app_status** | Check the progress of a move in flight. |
-| **list_apps** | List all apps you have access to with their metadata. |
-| **delete_app** | Permanently delete an app and its database. This is irreversible. |
-| **get_app_config** | Read an app's current configuration (CORS origins, JWT settings, storage limits). |
-| **update_cors** | Set the list of allowed origins for browser requests to your app's API. |
-| **update_jwt_config** | Configure access token lifetime and refresh token lifetime. |
-| **generate_service_key** | Generate a `bb_sk_` prefixed API key for programmatic access. |
+| **manage_app** (action: "list") | List all apps you have access to with their metadata. |
+| **manage_app** (action: "delete") | Permanently delete an app and its database. This is irreversible. |
+| **manage_app** (action: "get_config") | Read an app's current configuration (CORS origins, JWT settings, storage limits). |
+| **manage_app** (action: "update_cors") | Set the list of allowed origins for browser requests to your app's API. |
+| **manage_app** (action: "move") | Move an existing app to another region. Pass `dest_region`; returns a `migration_id`. |
+| **manage_app** (action: "move_status") | Check the progress of a move in flight. Pass `migration_id`. |
+| **manage_app** (action: "teardown_source_replica") | Decommission the retained source-region replica after a completed move. |
+| **manage_auth_config** (action: "update_jwt") | Configure access token lifetime and refresh token lifetime. |
+| **manage_auth_config** (action: "generate_service_key") | Generate a `bb_sk_` prefixed API key for programmatic access. |
 
 ### Schema & Migrations
 
