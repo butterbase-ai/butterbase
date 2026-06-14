@@ -1,5 +1,6 @@
 // Invocation logger for usage tracking and debugging
-import { Pool } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
+import { Pool, type PoolClient } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
+import { isDeadConnectionError } from "./function-loader.ts";
 import type { FunctionMetadata } from "./function-loader.ts";
 import type { ExecutionResult } from "./worker-executor.ts";
 
@@ -50,6 +51,33 @@ function getRuntimeDbUrl(): string {
 // Separate pool for logging (don't block function execution)
 const loggingPool = new Pool(getRuntimeDbUrl(), 5);
 
+// Mirror of function-loader's dead-conn recovery: Neon idle-evicts pooled
+// TCP sessions, so the first write on a checked-out client can hit BrokenPipe
+// (or a deno-postgres "session was terminated" surface) and otherwise drop
+// the function_invocations row for that call.
+async function dropLoggingClient(client: PoolClient): Promise<void> {
+  try { await (client as unknown as { end?: () => Promise<void> }).end?.(); } catch { /* ignore */ }
+  try { client.release(); } catch { /* ignore */ }
+}
+
+async function withLoggingClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const client = await loggingPool.connect();
+    try {
+      const result = await fn(client);
+      client.release();
+      return result;
+    } catch (err) {
+      await dropLoggingClient(client);
+      if (attempt === 1 || !isDeadConnectionError(err)) throw err;
+      console.warn(
+        `[invocation-logger] loggingPool dead connection (${(err as Error).message ?? err}); retrying once`,
+      );
+    }
+  }
+  throw new Error("withLoggingClient: exhausted retries");
+}
+
 export async function logInvocation(
   metadata: FunctionMetadata,
   request: Request,
@@ -74,8 +102,7 @@ export async function logInvocation(
     const billedMemory = Math.ceil(result.metrics.memory_used_mb);
 
     // Log invocation
-    const client = await loggingPool.connect();
-    try {
+    await withLoggingClient(async (client) => {
       await client.queryObject(
         `INSERT INTO function_invocations (
           function_id, app_id, user_id, method, path, headers,
@@ -106,7 +133,9 @@ export async function logInvocation(
         ]
       );
 
-      // Update function stats (fire-and-forget)
+      // Update function stats (fire-and-forget — runs on the same client
+      // before release; if the conn went bad mid-batch, dropLoggingClient
+      // tears it down rather than returning a poisoned slot to the pool).
       client.queryObject(
         `UPDATE app_functions SET
           last_invoked_at = now(),
@@ -117,9 +146,7 @@ export async function logInvocation(
          WHERE id = $1`,
         [metadata.id, !result.success, result.metrics.duration_ms, statusCode]
       ).catch((err) => console.error("Failed to update function stats:", err));
-    } finally {
-      client.release();
-    }
+    });
   } catch (err) {
     console.error("Failed to log invocation:", err);
   }
