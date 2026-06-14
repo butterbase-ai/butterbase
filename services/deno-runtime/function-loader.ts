@@ -82,6 +82,15 @@ export interface FunctionMetadata {
   internal_fn_key: string | null;
   timeout_ms: number;
   memory_limit_mb: number;
+  /**
+   * Per-function gate for service-key impersonation (Phase 2). When false,
+   * the control-api edge will 403 any call carrying `X-Butterbase-As-User`
+   * before the function runs. Default true preserves the implicit pre-Phase-2
+   * contract (bearer-equality check was implicitly allowing this for any
+   * app-scoped key) — flip to false in `manage_function` for admin-only or
+   * billing-webhook handlers that should never accept an as-user assertion.
+   */
+  allow_service_key_impersonation: boolean;
   db_connection_string: string | null;
   substrate_user_id: string | null;
   /**
@@ -176,6 +185,7 @@ export async function loadFunction(
       `SELECT
         id, app_id, name, code, encrypted_env_vars,
         timeout_ms, memory_limit_mb,
+        allow_service_key_impersonation,
         deployed_at
        FROM app_functions
        WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
@@ -254,6 +264,7 @@ export async function loadFunction(
       internal_fn_key: kvKey,
       timeout_ms: row.timeout_ms,
       memory_limit_mb: row.memory_limit_mb,
+      allow_service_key_impersonation: row.allow_service_key_impersonation !== false,
       db_connection_string: dbConnectionString,
       substrate_user_id: app.substrate_user_id ?? null,
       platform: {

@@ -401,6 +401,8 @@ functions
   .option('--agent-tool-description <desc>', 'Description shown to the LLM when this function is exposed as an agent tool')
   .option('--agent-tool-mode <mode>', 'read_only (default) | read_write (read_write requires HITL approval)')
   .option('--agent-tool-exposed-to <scope>', 'developer_only (default) | end_user')
+  .option('--allow-impersonation', 'Allow service-key callers to impersonate via X-Butterbase-As-User (default)')
+  .option('--no-allow-impersonation', 'Reject any X-Butterbase-As-User header — for admin-only / billing-webhook handlers')
   .action(functionsDeployCommand);
 
 functions

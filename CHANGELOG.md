@@ -11,6 +11,25 @@ Migration is mechanical — the new actions take the same parameters as the stan
 
 ### Added
 
+- **Runtime**: `ctx.caller` on every function invocation surfaces validated caller identity — `{ type: 'service_key' | 'end_user_jwt' | 'loopback' | 'anonymous', keyId, scope, userId }`. Use this instead of parsing `req.headers.authorization` by hand for audit logging or in-function policy checks. `keyId` is a non-secret api-key row id safe to log; `userId` is the user the request is acting on behalf of (propagated through `ctx.invoke` chains and `X-Butterbase-As-User` impersonation). See `core-concepts/functions` → Server-to-server function calls.
+- **Runtime**: `ctx.invoke('fn-name', body, opts?)` for same-app function-to-function calls. Authenticated with the per-app internal function key (auto-injected, never exposed via `ctx.env`), `ctx.user.id` propagates automatically to the callee, `ctx.caller.type === 'loopback'`. Cycle guard caps chains at depth 4; the 5th hop throws synchronously with `ctx.invoke loop limit exceeded`. Returns a standard `Response`.
+- **Runtime / control-api**: per-function impersonation gate via `X-Butterbase-As-User`. App-scoped service keys (`bb_sk_*` with `app:<this-app>` scope) and same-app loopbacks may set this header; the runtime populates `ctx.user.id` with the asserted id before invoking. The gate is per-function (`app_functions.allow_service_key_impersonation`, default `true`) — flip to `false` on admin-only or billing-webhook handlers and the platform 403s any `X-Butterbase-As-User` header on those endpoints at the edge. End-user JWTs and keys scoped to other apps cannot impersonate. Audit rows on impersonated invocations carry `event_data.impersonated_user_id` for downstream "what was done as me" surfaces.
+- **MCP / CLI / SDK / dashboard**: `allow_service_key_impersonation` exposed end-to-end. `deploy_function` accepts the field at deploy time; `manage_function` gains a new action `update_settings` (and the underlying `PATCH /v1/{app_id}/functions/{name}/settings`) to flip it without redeploying code; `bb functions deploy --no-allow-impersonation` for the CLI; `apiClient.updateFunctionSettings()` in `@butterbase/sdk`; a "Security — Service-key impersonation" toggle on the function detail page in the dashboard with cache-invalidation so the new value takes effect immediately.
+- **Shared types**: new `FunctionCaller` interface in `@butterbase/shared` mirrors `ctx.caller`. Importable from user function code that wants types on the runtime context.
+- **Runtime migration**: `024_function_impersonation_flag.sql` adds `app_functions.allow_service_key_impersonation BOOLEAN NOT NULL DEFAULT true`. Defaults preserve pre-Phase-2 behavior — existing functions keep working without any code changes.
+
+### Changed
+
+- **Clone job**: auto-mints **one** `bb_sk_*` per cloned app instead of one per function. Previously the clone replay minted a distinct key per function, with the label `Auto-mint for clone (<dest_app_id>/<fn_name>)`; cross-function calls that compared the bearer to `ctx.env.BUTTERBASE_API_KEY` therefore 401d because each fn's env held a different key. The new shape labels the key `Auto-mint for clone (<dest_app_id>)` and writes the same value into every fn's env. Existing already-cloned apps are not retroactively fixed by this change — run `scripts/backfill-consolidate-clone-keys.ts` against the affected runtime DBs to consolidate retroactively.
+
+### Deprecated
+
+- **Templates / user code**: the bearer-equality auth pattern in function code is deprecated. Code that compared `req.headers.get('authorization') === \`Bearer ${ctx.env.BUTTERBASE_API_KEY}\`` to decide whether to trust an `as_user_id` body field worked only when every caller and callee shared one key — a coincidence the clone job no longer (and arguably never should have) guaranteed. Replace with `ctx.user.id` (impersonation is now a platform concern, gated per-function) or `ctx.invoke('fn-name', body)` for same-app calls (no bearer involved). The platform will keep accepting the old pattern for back-compat in this release; it will not be removed without a separate breaking-change notice.
+
+### Operational
+
+- **Backfill script**: `scripts/backfill-consolidate-clone-keys.ts` scans every runtime DB for apps whose functions disagree on the value of `BUTTERBASE_API_KEY` / `BB_SUBSTRATE_KEY` and rewrites every function's env to one canonical value (the alphabetically-first existing value — deterministic, no new key mint). Dry-run by default; `--fix` to apply; `--app <id>` to scope to one app. Safe to run multiple times (idempotent), and does not revoke the displaced api_keys rows (orphan revocation is a separate ops task).
+
 - **Runtime**: function `ctx` now surfaces platform-known values so user code doesn't have to set them as env vars by hand. Two parallel surfaces, same source of truth:
   - Flat `ctx.env.BUTTERBASE_*` (muscle-memory `Deno.env`-style):
     - Always present: `BUTTERBASE_APP_ID`, `BUTTERBASE_API_URL`, `BUTTERBASE_APP_NAME`, `BUTTERBASE_REGION`, `BUTTERBASE_ANON_KEY`.

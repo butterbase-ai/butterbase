@@ -26,10 +26,18 @@ export interface ExecutionResult {
   };
 }
 
+export interface CallerInfo {
+  type: "service_key" | "end_user_jwt" | "loopback" | "anonymous";
+  keyId: string | null;
+  scope: string | null;
+  userId: string | null;
+}
+
 export async function executeFunction(
   metadata: FunctionMetadata,
   request: Request,
-  userId?: string
+  userId?: string,
+  caller?: CallerInfo
 ): Promise<ExecutionResult> {
   const startTime = Date.now();
   const startMemory = (performance as any).memory?.usedJSHeapSize || 0;
@@ -60,6 +68,7 @@ export async function executeFunction(
       requestHeaders,
       requestBody,
       userId,
+      caller,
     });
 
     // Execute in Web Worker with timeout
@@ -245,6 +254,7 @@ function buildWorkerCode(
     requestHeaders: Record<string, string>;
     requestBody: string | null;
     userId?: string;
+    caller?: CallerInfo;
   }
 ): string {
   return `
@@ -468,6 +478,16 @@ function buildWorkerCode(
         };
       })())},
       user: ${context.userId ? `{ id: "${context.userId}" }` : "null"},
+      caller: ${JSON.stringify(
+        context.caller
+          ? {
+              type: context.caller.type,
+              keyId: context.caller.keyId,
+              scope: context.caller.scope,
+              userId: context.caller.userId,
+            }
+          : { type: "anonymous", keyId: null, scope: null, userId: null }
+      )},
       app: ${JSON.stringify({
         id: metadata.app_id,
         name: metadata.platform.app_name,
@@ -501,6 +521,48 @@ function buildWorkerCode(
           ?? null,
         functionName: metadata.function_name,
       })},
+      /**
+       * Phase 3: ctx.invoke('fn', body) — same-app function-to-function call.
+       *
+       * Auth: uses the per-app internal function key (already injected on
+       * loadFunction, never exposed via ctx.env). Identity: ctx.user.id is
+       * propagated as X-Butterbase-As-User so the callee sees the same end
+       * user. Cycle guard: X-Butterbase-Loop-Depth is incremented per hop;
+       * at MAX (4) we throw locally instead of letting the platform 508.
+       *
+       * Returns a standard Response. opts.method defaults to POST; pass
+       * 'GET'/'PUT'/etc. as needed. opts.headers overlays on top of the
+       * platform-injected ones (the platform headers always win for
+       * authorization, x-butterbase-loop-depth, x-butterbase-as-user).
+       */
+      invoke: async (fnName, body, opts) => {
+        const MAX_DEPTH = 4;
+        const incomingDepth = parseInt(${JSON.stringify(context.requestHeaders["x-butterbase-loop-depth"] || "0")}, 10) || 0;
+        const nextDepth = incomingDepth + 1;
+        if (nextDepth > MAX_DEPTH) {
+          throw new Error("ctx.invoke loop limit exceeded (depth " + nextDepth + " > " + MAX_DEPTH + ")");
+        }
+        const apiUrl = ${JSON.stringify(Deno.env.get("API_BASE_URL") || Deno.env.get("CONTROL_API_URL") || "http://localhost:4000")};
+        const internalKey = ${JSON.stringify(metadata.internal_fn_key || '')};
+        if (!internalKey) {
+          throw new Error("ctx.invoke unavailable: no internal function key on this runtime");
+        }
+        const userHeaders = (opts && typeof opts.headers === "object" && opts.headers) || {};
+        const platformHeaders = {
+          "content-type": "application/json",
+          "authorization": "Bearer " + internalKey,
+          "x-butterbase-loop-depth": String(nextDepth),
+          "x-butterbase-caller-source-fn": ${JSON.stringify(metadata.function_name)},
+        };
+        ${context.userId ? `platformHeaders["x-butterbase-as-user"] = ${JSON.stringify(context.userId)};` : ''}
+        const merged = { ...userHeaders, ...platformHeaders };
+        const method = (opts && typeof opts.method === "string") ? opts.method : "POST";
+        const url = apiUrl + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/fn/" + encodeURIComponent(fnName);
+        const bodyInit = body === undefined || method === "GET" || method === "HEAD"
+          ? undefined
+          : (typeof body === "string" ? body : JSON.stringify(body));
+        return fetch(url, { method, headers: merged, body: bodyInit });
+      },
       idempotency: db ? {
         // Atomically claim a key. Returns true if newly claimed (caller should
         // proceed), false if the key was already processed (caller should treat

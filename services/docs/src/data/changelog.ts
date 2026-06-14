@@ -21,6 +21,38 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-06-14',
+    category: 'functions',
+    title: 'ctx.invoke for same-app function-to-function calls',
+    description: 'Call sibling functions on the same app with `ctx.invoke(\'fn-name\', body)` — no bearer ceremony, no env vars. Authenticated with the per-app internal function key (never exposed to user code), `ctx.user.id` propagates automatically to the callee, and a depth-4 cycle guard throws synchronously on the 5th hop. Replaces the brittle pattern of having one fn call another over HTTP with `Bearer ctx.env.BUTTERBASE_API_KEY`.',
+    href: '/core-concepts/functions/#server-to-server-function-calls',
+    icon: '🔗',
+  },
+  {
+    date: '2026-06-14',
+    category: 'functions',
+    title: 'ctx.caller — validated caller identity',
+    description: 'Every function invocation now surfaces `ctx.caller = { type, keyId, scope, userId }`. Type is one of `service_key`, `end_user_jwt`, `loopback`, or `anonymous`. The `keyId` is a non-secret api-key row id safe to log in audit trails; `userId` is the user the request is acting on behalf of (propagated through ctx.invoke chains and X-Butterbase-As-User impersonation). Stop parsing `req.headers.authorization` by hand.',
+    href: '/core-concepts/functions/#ctx-caller-who-called-this-function',
+    icon: '🪪',
+  },
+  {
+    date: '2026-06-14',
+    category: 'functions',
+    title: 'Service-key impersonation gate',
+    description: 'App-scoped service keys can now assert "act on behalf of user X" via the `X-Butterbase-As-User` header — the runtime populates `ctx.user.id` before invoking. Per-function `allow_service_key_impersonation` (default `true`) lets admin-only and billing-webhook handlers opt out; the platform 403s any X-Butterbase-As-User on those endpoints at the edge. End-user JWTs and out-of-app service keys cannot impersonate. Surfaced through `deploy_function`, `manage_function action: "update_settings"`, the CLI (`bb functions deploy --no-allow-impersonation`), the SDK (`apiClient.updateFunctionSettings`), and a toggle on the dashboard function detail page.',
+    href: '/core-concepts/functions/#x-butterbase-as-user-when-you-have-to-call-from-outside',
+    icon: '🛂',
+  },
+  {
+    date: '2026-06-14',
+    category: 'tooling',
+    title: 'Cloned apps now mint one shared API key',
+    description: 'Previously the clone job auto-minted a distinct `bb_sk_*` per function on the cloned app — any sibling-fn call that compared its bearer to its own `ctx.env.BUTTERBASE_API_KEY` 401d because every fn carried a different key. Clones now mint one key per app, fanned out to every function that needs `BUTTERBASE_API_KEY` / `BB_SUBSTRATE_KEY`. Existing already-cloned apps can be consolidated with `scripts/backfill-consolidate-clone-keys.ts`.',
+    href: '/core-concepts/functions/#server-to-server-function-calls',
+    icon: '🔑',
+  },
+  {
     date: '2026-06-08',
     category: 'ai',
     title: 'Agents',

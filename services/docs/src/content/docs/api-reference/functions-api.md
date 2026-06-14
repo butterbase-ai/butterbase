@@ -67,6 +67,7 @@ Authorization: Bearer {token}
 | `agent_tool_description` | — | Short description shown to the LLM (max 500 chars). |
 | `agent_tool_mode` | `read_only` | `read_only` or `read_write`. `read_write` requires HITL approval. |
 | `agent_tool_exposed_to` | `developer_only` | `developer_only` or `end_user`. |
+| `allow_service_key_impersonation` | `true` | When `true`, this function accepts `X-Butterbase-As-User` from app-scoped service keys and the runtime populates `ctx.user.id` accordingly. Set to `false` on admin-only or billing-webhook handlers — the platform 403s any `X-Butterbase-As-User` header on them at the edge. See [Server-to-server function calls](/core-concepts/functions/#server-to-server-function-calls). |
 
 ### Trigger types
 
@@ -96,6 +97,22 @@ When `agent_tool: true`, this function becomes callable from any agent in the sa
 ```
 
 The 4 `agent_tool*` fields are returned on `GET /functions` and `GET /functions/{name}` so clients can render UI state.
+
+## Update function settings
+
+```json
+PATCH /v1/{app_id}/functions/{name}/settings
+Authorization: Bearer {token}
+
+{
+  "allow_service_key_impersonation": false
+}
+```
+
+Toggle per-function settings without redeploying code. Currently the only
+supported field is `allow_service_key_impersonation` (the Phase 2
+impersonation gate). On success, the runtime cache is invalidated so the new
+value takes effect on the next invocation.
 
 ## Update environment variables
 

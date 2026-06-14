@@ -37,6 +37,8 @@ const deployFunctionSchema = z.object({
   agent_tool_description: z.string().max(500).optional(),
   agent_tool_mode: z.enum(['read_only', 'read_write']).default('read_only'),
   agent_tool_exposed_to: z.enum(['developer_only', 'end_user']).default('developer_only'),
+  /** Phase 2: per-function gate for X-Butterbase-As-User impersonation. */
+  allow_service_key_impersonation: z.boolean().default(true),
 });
 
 type TriggerInput = z.infer<typeof triggerInputSchema>;
@@ -157,8 +159,9 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
         `INSERT INTO app_functions (
           app_id, name, code, description, encrypted_env_vars,
           timeout_ms, memory_limit_mb, deployed_by,
-          agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
+          allow_service_key_impersonation
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT (app_id, name)
         DO UPDATE SET
           code = $3,
@@ -173,13 +176,15 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
           agent_tool = $9,
           agent_tool_description = COALESCE($10, app_functions.agent_tool_description),
           agent_tool_mode = $11,
-          agent_tool_exposed_to = $12
+          agent_tool_exposed_to = $12,
+          allow_service_key_impersonation = $13
         RETURNING id, name, deployed_at`,
         [
           appId, body.name, body.code, body.description ?? null, encryptedEnvVars,
           body.timeoutMs ?? 30000, body.memoryLimitMb ?? 128, requireUserId(request),
           body.agent_tool, body.agent_tool_description ?? null,
           body.agent_tool_mode, body.agent_tool_exposed_to,
+          body.allow_service_key_impersonation,
         ],
       );
 
@@ -334,6 +339,69 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     });
   });
 
+  // PATCH /v1/:appId/functions/:name/settings — toggle per-function settings
+  // without redeploying code. Currently only `allow_service_key_impersonation`
+  // (Phase 2 impersonation gate), but the route is extensible for future
+  // per-function knobs. Skips the encryption + re-deploy round-trip the
+  // INSERT/ON CONFLICT path takes, so it's safe to call on hot functions.
+  fastify.patch('/v1/:appId/functions/:name/settings', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
+    const { appId, name } = request.params as { appId: string; name: string };
+    const body = request.body as { allow_service_key_impersonation?: boolean };
+
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+
+    if (body.allow_service_key_impersonation === undefined) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Provide at least one setting to update',
+        remediation: 'Currently supported: allow_service_key_impersonation (boolean).',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+
+    const result = await (await runtimeDb(appId)).query(
+      `UPDATE app_functions
+         SET allow_service_key_impersonation = $1, updated_at = now()
+       WHERE app_id = $2 AND name = $3 AND deleted_at IS NULL
+       RETURNING id, name, allow_service_key_impersonation, updated_at`,
+      [body.allow_service_key_impersonation, appId, name]
+    );
+
+    if (result.rows.length === 0) {
+      return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: 'Function not found',
+        remediation: 'Verify the function name. Use list_functions to see available functions.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
+    }
+
+    // Invalidate function cache so the runtime picks up the new flag on next
+    // invocation. Without this, an in-cache metadata row would keep the old
+    // `allow_service_key_impersonation` value until natural expiry (5 min).
+    const invalidationResult = await invalidateFunctionCache(appId, name);
+
+    logFromRequest(request, {
+      appId,
+      category: 'admin',
+      eventType: 'function.settings.update',
+      action: 'update',
+      resourceType: 'function',
+      resourceId: name,
+      eventData: { allow_service_key_impersonation: body.allow_service_key_impersonation },
+      success: true,
+    });
+
+    return reply.send({
+      message: 'Function settings updated successfully',
+      function: result.rows[0],
+      cache_invalidation: {
+        success: invalidationResult.success,
+        attempts: invalidationResult.attempts,
+      },
+    });
+  });
+
   // List functions for an app
   fastify.get('/v1/:appId/functions', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId } = request.params as { appId: string };
@@ -347,6 +415,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
         f.deployed_at, f.last_invoked_at, f.last_status_code,
         f.invocation_count AS invocation_count_total,
         f.agent_tool, f.agent_tool_description, f.agent_tool_mode, f.agent_tool_exposed_to,
+        f.allow_service_key_impersonation,
         COALESCE(stats.invocation_count_24h, 0) AS invocation_count_24h,
         COALESCE(stats.error_count_24h, 0) AS error_count_24h,
         stats.avg_duration_24h,

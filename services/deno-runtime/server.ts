@@ -109,15 +109,27 @@ serve(async (req: Request) => {
       );
     }
 
-    // Extract user ID from headers
+    // Extract user ID + caller identity from platform-injected headers.
+    // `x-user-id` is the effective user (end-user JWT subject, or null for
+    // service-key/anonymous). `x-butterbase-caller-*` describes WHO made the
+    // request: type=service_key|end_user_jwt|anonymous, plus key_id/scope for
+    // service-key calls. Phase 1 surfaces these as `ctx.caller` in user code.
     const userId = req.headers.get("x-user-id") || undefined;
+    const callerTypeRaw = req.headers.get("x-butterbase-caller-type");
+    const callerKeyId = req.headers.get("x-butterbase-caller-key-id") || null;
+    const callerScope = req.headers.get("x-butterbase-caller-scope") || null;
+    const callerType: "service_key" | "end_user_jwt" | "loopback" | "anonymous" =
+      callerTypeRaw === "service_key" || callerTypeRaw === "end_user_jwt" || callerTypeRaw === "loopback"
+        ? callerTypeRaw
+        : "anonymous";
+    const caller = { type: callerType, keyId: callerKeyId, scope: callerScope, userId: userId ?? null };
 
     // Execute function
     activeWorkers++;
     const startTime = Date.now();
 
     try {
-      const result = await executeFunction(metadata, req, userId);
+      const result = await executeFunction(metadata, req, userId, caller);
 
       // Log invocation (async, fire-and-forget)
       logInvocation(metadata, req, result, userId).catch((err) =>

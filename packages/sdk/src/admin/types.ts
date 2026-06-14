@@ -156,6 +156,13 @@ export interface DeployFunctionParams extends AgentToolFields {
   trigger?: FunctionTrigger;
   /** Canonical multi-trigger array. At most one trigger per type. */
   triggers?: FunctionTrigger[];
+  /**
+   * Default true. When true, this function accepts an `X-Butterbase-As-User`
+   * header from app-scoped service-key callers and treats `ctx.user.id` as
+   * the asserted user. Set to false for admin-only or billing-webhook
+   * handlers that must never be invoked on behalf of an end-user.
+   */
+  allow_service_key_impersonation?: boolean;
 }
 
 export interface FunctionSummary extends AgentToolFields {
@@ -171,6 +178,8 @@ export interface FunctionSummary extends AgentToolFields {
   invocationCount?: number;
   errorRate?: number;
   avgDuration?: number;
+  /** Phase 2 impersonation gate. See DeployFunctionParams. */
+  allow_service_key_impersonation?: boolean;
 }
 
 export interface FunctionDetails extends FunctionSummary {

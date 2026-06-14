@@ -123,15 +123,24 @@ export interface MintedCloneKey {
  * app's AI gateway. Used when the user opts into auto-mint for the
  * BUTTERBASE_API_KEY convention. Scope is intentionally limited to
  * `app:<destAppId>` + `ai:gateway` so a leaked key cannot be repurposed.
+ *
+ * One key per cloned app (not per function). Functions on the same app
+ * frequently call each other (cron fn calls ingest fn, ingest fn calls
+ * enrichment fn, …) and any in-function caller-equality check on the bearer
+ * (`req.headers.authorization === Bearer ctx.env.BUTTERBASE_API_KEY`) only
+ * works when every function sees the same key. The `fnName` arg is accepted
+ * but currently only used in the key's display name when supplied — multiple
+ * call sites within a single clone job MUST pass the same key to every
+ * function (use `mintSharedCloneKey` from replayFunctions).
  */
 export async function mintApiKeyForClone(
   controlPool: pg.Pool,
-  args: { ownerId: string; destAppId: string; fnName: string },
+  args: { ownerId: string; destAppId: string },
 ): Promise<MintedCloneKey> {
   const result = await ApiKeyService.generateApiKey(
     controlPool,
     args.ownerId,
-    `Auto-mint for clone (${args.destAppId}/${args.fnName})`,
+    `Auto-mint for clone (${args.destAppId})`,
     [`app:${args.destAppId}`, 'ai:gateway'],
     'app',
   );
