@@ -492,6 +492,7 @@ function buildWorkerCode(
         id: metadata.app_id,
         name: metadata.platform.app_name,
         ownerId: metadata.platform.owner_id,
+        substrateUserId: metadata.substrate_user_id,
         region: metadata.platform.region,
         subdomain: metadata.platform.subdomain,
         anonKey: metadata.platform.anon_key,

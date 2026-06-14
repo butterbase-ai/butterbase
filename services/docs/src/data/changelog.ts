@@ -24,7 +24,7 @@ export const changelog: RoadmapItem[] = [
     date: '2026-06-14',
     category: 'functions',
     title: 'ctx.invoke for same-app function-to-function calls',
-    description: 'Call sibling functions on the same app with `ctx.invoke(\'fn-name\', body)` — no bearer ceremony, no env vars. Authenticated with the per-app internal function key (never exposed to user code), `ctx.user.id` propagates automatically to the callee, and a depth-4 cycle guard throws synchronously on the 5th hop. Replaces the brittle pattern of having one fn call another over HTTP with `Bearer ctx.env.BUTTERBASE_API_KEY`.',
+    description: 'Call sibling functions on the same app with `ctx.invoke(\'fn-name\', body)` — no bearer ceremony, no env vars. Authenticated with the per-app internal function key (never exposed to user code), `ctx.user.id` propagates automatically to the callee, and a depth-4 cycle guard throws synchronously on the 5th hop. Replaces the brittle pattern of having one fn call another over HTTP with `Bearer ctx.env.BUTTERBASE_API_KEY`. Same release: `ctx.app.substrateUserId` surfaces the linked substrate user id (or `null` when the app is not substrate-linked) so you can stop using `if (ctx.substrate)` as a proxy for "is this app linked?".',
     href: '/core-concepts/functions/#server-to-server-function-calls',
     icon: '🔗',
   },

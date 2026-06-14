@@ -129,6 +129,7 @@ Optional keys are **omitted** rather than empty-stringed. Branch on `typeof ctx.
 ```ts
 ctx.app = {
   id, name, ownerId, region, subdomain, anonKey, allowedOrigins,
+  substrateUserId,                    // substrate user the app is linked to, or null if not linked. ctx.substrate is also null in that case.
   frontend: { url } | null,           // null when no frontend deployed
   auth:     { accessTokenTtl, refreshTokenTtlDays, hookFunction },
   ai:       { defaultModel } | null,  // null when AI config empty

@@ -1,5 +1,5 @@
 // Function metadata loader with LRU cache
-import { Pool } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
+import { Pool, type PoolClient } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
 import { decryptEnvVars } from "./crypto.ts";
 
 // Multi-region: resolve instance region from BUTTERBASE_REGION (explicit)
@@ -128,6 +128,70 @@ const cache = new Map<string, CacheEntry>();
 // Connection pool to the runtime DB (app_functions, apps, app_db_connections)
 const runtimePool = new Pool(getRuntimeDbUrl(), 10);
 
+// Neon's pooler silently drops idle TCP sessions (~5 min). A client checked out
+// from runtimePool can hold a dead socket whose first write fails with
+// BrokenPipe / EPIPE / ConnectionAborted. Detect that surface so withRuntimeClient
+// can drop the poisoned client and retry once on a fresh connection instead of
+// surfacing a 500 to the caller.
+//
+// Exported for invocation-logger.ts (which keeps a separate loggingPool against
+// the same runtime DB and has the same idle-eviction problem).
+export function isDeadConnectionError(err: unknown): boolean {
+  if (!err) return false;
+  const e = err as { name?: string; message?: string; code?: string; cause?: unknown };
+  if (e.name === "BrokenPipe" || e.name === "ConnectionReset" || e.name === "ConnectionAborted") return true;
+  if (e.code === "EPIPE" || e.code === "ECONNRESET" || e.code === "ECONNABORTED") return true;
+  const msg = String(e.message ?? "").toLowerCase();
+  if (
+    msg.includes("broken pipe") ||
+    msg.includes("connection reset") ||
+    msg.includes("connection refused") ||
+    msg.includes("connection closed") ||
+    msg.includes("connection is closed") ||
+    msg.includes("unexpected eof") ||
+    msg.includes("not connected") ||
+    // deno-postgres surface when the backend sent a FATAL terminate notice
+    // (e.g. Neon idle eviction reaping the session, or admin-initiated
+    // pg_terminate_backend). Same operational meaning as BrokenPipe — the
+    // pooled client is unusable and must be dropped before retry.
+    msg.includes("session was terminated") ||
+    msg.includes("terminating connection")
+  ) return true;
+  return e.cause ? isDeadConnectionError(e.cause) : false;
+}
+
+// Drop a poisoned client without returning it to the pool. deno-postgres'
+// PoolClient.release() puts the connection back on the free list — if the
+// underlying TCP is dead, the next caller picks up the same broken socket.
+// end() closes the connection (mirrors the safeCommit pattern in
+// worker-executor.ts); release() is then a best-effort cleanup of the pool slot.
+async function dropClient(client: PoolClient): Promise<void> {
+  try { await (client as unknown as { end?: () => Promise<void> }).end?.(); } catch { /* ignore */ }
+  try { client.release(); } catch { /* ignore */ }
+}
+
+// Acquire → run → release helper that retries once on a dead connection.
+// The callback must be safe to re-run (all runtimePool callers here are
+// read-only metadata lookups, so idempotency is trivially satisfied).
+async function withRuntimeClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const client = await runtimePool.connect();
+    try {
+      const result = await fn(client);
+      client.release();
+      return result;
+    } catch (err) {
+      await dropClient(client);
+      if (attempt === 1 || !isDeadConnectionError(err)) throw err;
+      console.warn(
+        `[function-loader] runtimePool dead connection (${(err as Error).message ?? err}); retrying once`,
+      );
+    }
+  }
+  // Unreachable: loop either returns or throws on each iteration.
+  throw new Error("withRuntimeClient: exhausted retries");
+}
+
 function getCacheKey(appId: string, functionName: string): string {
   return `${appId}:${functionName}`;
 }
@@ -136,17 +200,14 @@ async function getDeployedAt(
   appId: string,
   functionName: string
 ): Promise<Date | null> {
-  const client = await runtimePool.connect();
-  try {
+  return withRuntimeClient(async (client) => {
     const result = await client.queryObject(
       `SELECT deployed_at FROM app_functions
        WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
       [appId, functionName]
     );
     return result.rows.length > 0 ? (result.rows[0] as any).deployed_at : null;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function loadFunction(
@@ -178,9 +239,10 @@ export async function loadFunction(
 
   console.log(`Cache miss: ${cacheKey}, loading from DB...`);
 
-  // Load from database
-  const client = await runtimePool.connect();
-  try {
+  // Load from database. withRuntimeClient retries once on a dead pooled
+  // connection (BrokenPipe from Neon's idle-socket eviction) so a stale slot
+  // doesn't surface as a 500 to the function caller.
+  return withRuntimeClient(async (client): Promise<FunctionMetadata | null> => {
     const result = await client.queryObject(
       `SELECT
         id, app_id, name, code, encrypted_env_vars,
@@ -296,9 +358,7 @@ export async function loadFunction(
     });
 
     return metadata;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export function invalidateCache(appId: string, functionName: string): void {
