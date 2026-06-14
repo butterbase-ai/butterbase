@@ -5,6 +5,7 @@ import { introspectSchema } from '../services/schema-introspector.js';
 import { buildSelectQuery } from '../services/query-builder.js';
 import { AppResolver, AppNotFoundError, AppAuthRequiredError, AppPausedError, assertAppNotPaused } from '../services/app-resolver.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
+import { ApiKeyService } from '../services/api-key-service.js';
 import type { EndUserClaims } from '@butterbase/shared/types';
 import {
   createAgentError,
@@ -384,8 +385,10 @@ export async function autoApiRoutes(app: FastifyInstance) {
         paused: boolean;
         paused_reason: string | null;
         trigger_config: { auth?: 'required' | 'optional' | 'none' } | null;
+        allow_service_key_impersonation: boolean | null;
       }>(
-        `SELECT a.paused, a.paused_reason, ft.trigger_config
+        `SELECT a.paused, a.paused_reason, ft.trigger_config,
+                f.allow_service_key_impersonation
          FROM apps a
          LEFT JOIN app_functions f
            ON f.app_id = a.id AND f.name = $2 AND f.deleted_at IS NULL
@@ -399,18 +402,65 @@ export async function autoApiRoutes(app: FastifyInstance) {
         throw new AppPausedError(app_id, meta.paused_reason ?? null);
       }
 
-      // Extract user ID from end-user JWT (if present)
+      // Extract caller identity. Two paths:
+      //   1) Bearer is a bb_sk_* service key — validate and surface key_id +
+      //      scopes to the runtime. This is the path cron / cross-fn callers
+      //      take, and it's what `ctx.caller` exposes in the runtime so user
+      //      code doesn't have to do its own bearer comparisons.
+      //   2) Bearer is an end-user JWT — verify and surface user id.
+      // The two paths are mutually exclusive on a single request, so try the
+      // cheap shape check (bb_sk_* prefix) before the expensive JWT verify.
       const authHeader = request.headers.authorization;
+      let callerType: 'service_key' | 'end_user_jwt' | 'loopback' | 'anonymous' = 'anonymous';
+      let callerKeyId: string | null = null;
+      let callerScope: string | null = null;
 
       if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.substring(7);
-        try {
-          // Verify end-user JWT
-          const claims = await verifyEndUserJwt(app.controlDb, app_id, token);
-          userId = claims.sub;
-        } catch (error) {
-          app.log.warn({ error }, 'Invalid end-user JWT');
-          // Continue without user ID - function can handle auth
+        if (token.startsWith('bb_sk_')) {
+          const auth = await ApiKeyService.validateApiKey(app.controlDb, token);
+          if (auth) {
+            callerType = 'service_key';
+            callerKeyId = auth.keyId ?? null;
+            // Pick the first app-scoped scope that names this app, if any.
+            // Format on the wire is `app:<app_id>`; fall back to the literal
+            // scope list if no app-scoped entry exists (lets ai:gateway-only
+            // keys still surface SOMETHING in ctx.caller).
+            const appScoped = auth.scopes?.find(s => s.startsWith('app:')) ?? null;
+            callerScope = appScoped ?? auth.scopes?.[0] ?? null;
+          } else {
+            // Invalid / revoked bb_sk_* — leave as anonymous and let the
+            // user function decide. Same posture as a missing bearer.
+            app.log.warn({ app_id, functionName }, 'invalid bb_sk_* on function invocation');
+          }
+        } else if (/^[a-f0-9]{40,80}$/.test(token)) {
+          // Phase 3: per-app internal function key (40–80 hex chars, no
+          // prefix). Used by ctx.invoke for same-app function-to-function
+          // calls — the runtime injected this key on the calling function's
+          // ctx, so a valid match here implies "this app's runtime is
+          // calling itself." Treat as `loopback`: equivalent trust to a
+          // service key scoped to this app, but distinguishable in audit
+          // logs and ctx.caller for downstream debugging.
+          const { KvCredentialsService } = await import('../services/kv-credentials.js');
+          const svc = new KvCredentialsService(app.controlDb);
+          const resolved = await svc.resolveFunctionKeyWithOwner(token, app_id);
+          if (resolved) {
+            callerType = 'loopback';
+            callerScope = `app:${app_id}`;
+            // keyId stays null — function_keys aren't first-class api_keys
+            // rows; we don't have a stable id to surface.
+          } else {
+            app.log.warn({ app_id, functionName }, 'unrecognized function_key on fn invocation');
+          }
+        } else {
+          try {
+            const claims = await verifyEndUserJwt(app.controlDb, app_id, token);
+            userId = claims.sub;
+            callerType = 'end_user_jwt';
+          } catch (error) {
+            app.log.warn({ error }, 'Invalid end-user JWT');
+            // Continue without user ID - function can handle auth
+          }
         }
       }
 
@@ -422,6 +472,50 @@ export async function autoApiRoutes(app: FastifyInstance) {
       // its own 404 / 405 so error semantics stay consistent.
       if (meta?.trigger_config?.auth === 'required' && !userId) {
         return reply.code(401).send(AUTH_REQUIRED_ERROR);
+      }
+
+      // Phase 2: service-key impersonation via `X-Butterbase-As-User`.
+      //   - Header is honored ONLY when the caller is an app-scoped service
+      //     key for THIS app (scope starts with `app:<app_id>`). Anonymous
+      //     callers and end-user JWTs cannot impersonate — letting an end
+      //     user claim to be another user is an obvious privilege break.
+      //   - The target function must allow impersonation. The flag defaults
+      //     to true (preserves the implicit pre-Phase-2 contract) and is
+      //     flipped to false for admin/billing-webhook handlers.
+      //   - When honored, the impersonated id wins over any user id we may
+      //     have derived from an end-user JWT path (which isn't possible
+      //     here anyway — service-key path doesn't set userId).
+      const asUserHeader = request.headers['x-butterbase-as-user'];
+      const asUser = typeof asUserHeader === 'string' ? asUserHeader.trim() : null;
+      if (asUser) {
+        // Phase 3: `loopback` calls (same-app ctx.invoke) are internally
+        // trusted — the runtime authenticated with the per-app function
+        // key, which only the platform-managed runtime holds. Accept them
+        // the same as app-scoped service keys here.
+        const isAppScopedServiceKey =
+          callerType === 'service_key' && callerScope === `app:${app_id}`;
+        const isLoopback = callerType === 'loopback';
+        if (!isAppScopedServiceKey && !isLoopback) {
+          return reply.code(403).send(createAgentError({
+            code: 'AUTH_IMPERSONATION_FORBIDDEN',
+            message: 'X-Butterbase-As-User requires an app-scoped service key',
+            remediation: 'Send the request with a bb_sk_* key whose scope includes `app:<this app>`. End-user JWTs cannot impersonate other users.',
+            documentation_url: getDocUrl('AUTH_IMPERSONATION_FORBIDDEN'),
+          }));
+        }
+        // meta.allow_service_key_impersonation is null when the function row
+        // or HTTP trigger is missing — same NULL path as trigger_config. In
+        // that case we don't know whether impersonation is allowed; fall
+        // through and let the runtime return its 404.
+        if (meta?.allow_service_key_impersonation === false) {
+          return reply.code(403).send(createAgentError({
+            code: 'AUTH_IMPERSONATION_DISABLED',
+            message: `Function ${functionName} does not accept service-key impersonation`,
+            remediation: 'Enable impersonation via `manage_function` (allowServiceKeyImpersonation: true), or call the function with an end-user JWT instead of a service key + as-user header.',
+            documentation_url: getDocUrl('AUTH_IMPERSONATION_DISABLED'),
+          }));
+        }
+        userId = asUser;
       }
 
       // Forward to Deno runtime (preserve query string)
@@ -460,6 +554,13 @@ export async function autoApiRoutes(app: FastifyInstance) {
       // Platform headers always override whatever the caller sent
       forwardHeaders['x-user-id'] = userId || '';
       forwardHeaders['x-app-id'] = app_id;
+      // Caller identity (Phase 1: ctx.caller). Always set the type so the
+      // runtime can normalize; key_id/scope only present for service-key
+      // calls. Headers are platform-injected — anything the user sent under
+      // these names was already overwritten by this assignment.
+      forwardHeaders['x-butterbase-caller-type'] = callerType;
+      if (callerKeyId) forwardHeaders['x-butterbase-caller-key-id'] = callerKeyId;
+      if (callerScope) forwardHeaders['x-butterbase-caller-scope'] = callerScope;
 
       // Forward the raw body without re-serialization:
       //   - Buffer: wildcard parser captured multipart / octet-stream / etc.
@@ -491,9 +592,19 @@ export async function autoApiRoutes(app: FastifyInstance) {
         action: 'invoke',
         resourceType: 'function',
         resourceId: functionName,
-        actorType: userId ? 'app_user' : 'anonymous',
-        actorId: userId ?? null,
-        eventData: { duration_ms: durationMs, status_code: denoResponse.status, method: request.method },
+        // When a service key impersonates an end-user, attribute the action
+        // to the key (not the impersonated user) so the audit trail shows
+        // who actually invoked the request. The impersonated user lives in
+        // event_data.impersonated_user_id alongside, queryable for
+        // user-facing "what was done as me" surfaces.
+        actorType: callerType === 'service_key' ? 'api_key' : (userId ? 'app_user' : 'anonymous'),
+        actorId: callerType === 'service_key' ? (callerKeyId ?? null) : (userId ?? null),
+        eventData: {
+          duration_ms: durationMs,
+          status_code: denoResponse.status,
+          method: request.method,
+          ...(asUser ? { impersonated_user_id: asUser } : {}),
+        },
         ipAddress: request.ip ?? null,
         userAgent: (request.headers['user-agent'] as string | undefined) ?? null,
         success: denoResponse.ok,

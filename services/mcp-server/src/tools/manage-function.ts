@@ -72,6 +72,7 @@ Actions:
   - "delete":     Delete a deployed function permanently (IRREVERSIBLE)
   - "get_logs":   Retrieve recent invocation logs for debugging and monitoring
   - "update_env": Update environment variables for a deployed function without redeploying code
+  - "update_settings": Toggle per-function settings (currently: allow_service_key_impersonation)
 
 Parameters by action:
   list:       { app_id, action: "list" }
@@ -79,6 +80,7 @@ Parameters by action:
   delete:     { app_id, action: "delete", function_name }
   get_logs:   { app_id, action: "get_logs", function_name, limit?, since?, level?, include_deleted? }
   update_env: { app_id, action: "update_env", function_name, env }
+  update_settings: { app_id, action: "update_settings", function_name, allow_service_key_impersonation? }
 
 Common errors:
   - RESOURCE_NOT_FOUND: Function doesn't exist
@@ -87,8 +89,8 @@ Common errors:
 Idempotency: Safe to call anytime (list is read-only; delete is idempotent; update_env is safe to call multiple times).`,
     {
       app_id: z.string().describe('The app ID'),
-      action: z.enum(['list', 'get', 'delete', 'get_logs', 'update_env']).describe('The action to perform'),
-      function_name: z.string().optional().describe('The function name (required for get, delete, get_logs, update_env)'),
+      action: z.enum(['list', 'get', 'delete', 'get_logs', 'update_env', 'update_settings']).describe('The action to perform'),
+      function_name: z.string().optional().describe('The function name (required for get, delete, get_logs, update_env, update_settings)'),
       // get_logs params
       limit: z.number().optional().describe('Maximum number of logs to return (default: 100)'),
       since: z.string().optional().describe('ISO timestamp to filter logs after this time'),
@@ -96,6 +98,12 @@ Idempotency: Safe to call anytime (list is read-only; delete is idempotent; upda
       include_deleted: z.boolean().optional().describe('Include logs for soft-deleted functions (post-incident forensics). Default: false.'),
       // update_env params
       env: z.record(z.union([z.string(), z.null()])).optional().describe('Environment variables to set (string) or delete (null)'),
+      // update_settings params
+      allow_service_key_impersonation: z.boolean().optional().describe(
+        'Per-function gate (Phase 2). When false, the platform 403s any call ' +
+        'carrying X-Butterbase-As-User at the edge — use for admin-only or ' +
+        'billing-webhook handlers that must never accept an as-user assertion.'
+      ),
     },
     {
       title: 'Manage Function',
@@ -195,6 +203,29 @@ Idempotency: Safe to call anytime (list is read-only; delete is idempotent; upda
               },
             ],
           };
+        }
+        case 'update_settings': {
+          const err = need(args.function_name, '"function_name" is required for the "update_settings" action.');
+          if (err) return err;
+          if (args.allow_service_key_impersonation === undefined) {
+            return {
+              content: [{ type: 'text' as const, text: 'Error: provide at least one setting to update (currently: allow_service_key_impersonation).' }],
+              isError: true,
+            };
+          }
+          const url = `${getBaseUrl()}/v1/${args.app_id}/functions/${args.function_name}/settings`;
+          const res = await fetch(url, {
+            method: 'PATCH',
+            headers: getHeaders(),
+            body: JSON.stringify({
+              allow_service_key_impersonation: args.allow_service_key_impersonation,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }], isError: true };
+          }
+          return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
         }
       }
     }

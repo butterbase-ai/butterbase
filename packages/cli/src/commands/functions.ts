@@ -109,6 +109,8 @@ export async function functionsDeployCommand(file: string, options: {
   agentToolDescription?: string;
   agentToolMode?: string;
   agentToolExposedTo?: string;
+  /** --allow-impersonation / --no-allow-impersonation */
+  allowImpersonation?: boolean;
 }) {
   const appId = await requireAppId(options.app);
 
@@ -172,6 +174,10 @@ export async function functionsDeployCommand(file: string, options: {
       ...(options.agentToolDescription !== undefined ? { agent_tool_description: options.agentToolDescription } : {}),
       ...(mode ? { agent_tool_mode: mode as 'read_only' | 'read_write' } : {}),
       ...(exposed ? { agent_tool_exposed_to: exposed as 'developer_only' | 'end_user' } : {}),
+      // Phase 2: per-fn impersonation gate. Default-on at the API; the flag
+      // only travels in the body when the user explicitly passes --allow-
+      // impersonation or --no-allow-impersonation.
+      ...(options.allowImpersonation !== undefined ? { allow_service_key_impersonation: options.allowImpersonation } : {}),
     });
 
     spinner.succeed(`Deployed function "${functionName}"`);

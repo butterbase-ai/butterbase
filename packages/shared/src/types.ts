@@ -115,6 +115,43 @@ export interface AuthContext {
   rawToken?: string;
 }
 
+/**
+ * Caller identity surfaced as `ctx.caller` inside a deployed function.
+ *
+ * Populated from the validated Authorization header at the control-api edge
+ * (or filled with `{ type: 'anonymous', ... }` when no bearer was present).
+ * User code SHOULD prefer reading this over decoding `req.headers.authorization`
+ * by hand — the platform has already done the cryptographic checks.
+ *
+ * Identity propagation rule of thumb:
+ *   - `type === 'end_user_jwt'`: `userId` is the app-user who hit the endpoint.
+ *     `ctx.user.id` is set; `keyId`/`scope` are null.
+ *   - `type === 'service_key'`: a `bb_sk_*` key authenticated the request.
+ *     `keyId` is the row id of the key (safe to log/audit, never the secret).
+ *     `scope` is one of the key's `app:<app_id>` / `ai:gateway` entries —
+ *     useful for "is this an app-scoped caller?" checks.
+ *   - `type === 'anonymous'`: no bearer, or the bearer was invalid/revoked.
+ */
+export interface FunctionCaller {
+  /**
+   * - `service_key` — user-managed bb_sk_*
+   * - `end_user_jwt` — an app end-user
+   * - `loopback` — same-app ctx.invoke from a sibling function
+   * - `anonymous` — no/invalid bearer
+   */
+  type: 'service_key' | 'end_user_jwt' | 'loopback' | 'anonymous';
+  /** API-key row id (e.g. `ak_…`). Present iff `type === 'service_key'`. */
+  keyId: string | null;
+  /** First app- or gateway-scope on the key (e.g. `app:app_xyz`). */
+  scope: string | null;
+  /**
+   * The user this request is acting *on behalf of*. For `end_user_jwt` this is
+   * the JWT subject; for `service_key` it is null today (Phase 2 enables an
+   * impersonation header that populates this).
+   */
+  userId: string | null;
+}
+
 export interface AppSigningKey {
   id: string;
   app_id: string;

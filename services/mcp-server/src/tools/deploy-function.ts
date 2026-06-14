@@ -156,6 +156,13 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
         'developer_only (default) — only dashboard/CLI test runs can call it. ' +
         'end_user — also callable by public agent invocations.'
       ),
+      allow_service_key_impersonation: z.boolean().optional().describe(
+        'Default true. Lets an app-scoped service-key caller assert "act as ' +
+        'user X" via the X-Butterbase-As-User header — the runtime populates ' +
+        'ctx.user with the asserted id before invoking. Set to false on ' +
+        'admin-only or billing-webhook handlers that must never accept an ' +
+        'as-user assertion: control-api will 403 such calls at the edge.'
+      ),
     },
     {
       title: 'Deploy Function',
@@ -169,6 +176,7 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
         app_id, name, code, description, envVars, timeoutMs, memoryLimitMb,
         trigger, triggers,
         agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
+        allow_service_key_impersonation,
       } = args;
 
       const result = await apiPost(`/v1/${app_id}/functions`, {
@@ -184,6 +192,7 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
         ...(agent_tool_description !== undefined ? { agent_tool_description } : {}),
         ...(agent_tool_mode !== undefined ? { agent_tool_mode } : {}),
         ...(agent_tool_exposed_to !== undefined ? { agent_tool_exposed_to } : {}),
+        ...(allow_service_key_impersonation !== undefined ? { allow_service_key_impersonation } : {}),
       });
 
       return {

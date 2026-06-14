@@ -387,6 +387,44 @@ export async function replayFunctions(
     logger.warn({ err }, '[clone] listSourceEnvVarKeys failed; unfilledEnvVars will be empty');
   }
 
+  // Mint at most ONE shared bb_sk_* key for the entire clone — every function
+  // that needs BUTTERBASE_API_KEY / BB_SUBSTRATE_KEY (and isn't satisfied by
+  // user-supplied values) gets the same key. This is what makes intra-app
+  // function calls work: a cron fn that POSTs to a sibling fn with
+  // `Authorization: Bearer ctx.env.BUTTERBASE_API_KEY` only succeeds if the
+  // callee's env carries the same value. Pre-cloud this was minted per
+  // function, which silently 401d every sibling call.
+  //
+  // We mint only after confirming at least one function actually needs a key
+  // and the caller passed the credentials to mint with — otherwise the mint
+  // is skipped and unfilled keys surface to the dashboard banner as usual.
+  let sharedMintedKey: string | null = null;
+  let sharedMintError: string | null = null;
+  const anyFnNeedsMint =
+    (opts?.autoMintRequests?.length ?? 0) > 0 ||
+    [...sourceKeysMap.values()].some(keys =>
+      [...keys].some(k => AUTO_MINT_CONVENTION_KEYS.includes(k)),
+    );
+  if (anyFnNeedsMint) {
+    if (!opts?.controlPool || !opts?.destAppOwnerId) {
+      sharedMintError = 'auto-mint required but controlPool or destAppOwnerId missing';
+      logger.warn({ destAppId }, `[clone] ${sharedMintError}; skipping shared key mint`);
+    } else {
+      try {
+        const minted = await mintApiKeyForClone(opts.controlPool, {
+          ownerId: opts.destAppOwnerId,
+          destAppId,
+        });
+        sharedMintedKey = minted.key;
+        logger.info({ destAppId, keyId: minted.keyId }, '[clone] shared API key minted for clone');
+      } catch (mintErr) {
+        sharedMintError = `shared key mint failed: ${(mintErr as Error).message}`;
+        warnings.push(sharedMintError);
+        logger.warn({ err: mintErr, destAppId }, '[clone] shared key mint failed; per-function keys will remain unfilled');
+      }
+    }
+  }
+
   for (const f of src.rows) {
     try {
       const ins = await destRuntimePool.query<{ id: string }>(
@@ -444,11 +482,10 @@ export async function replayFunctions(
         const provided = opts?.pendingEnvVarValues?.[f.name] ?? {};
         const merged: Record<string, string> = { ...provided };
 
-        // Explicit per-function mint requests + implicit convention mints. A
-        // single bb_sk_* satisfies every convention key (see CONVENTIONS in
-        // clone-env-vars.ts) so we mint at most one key per function and reuse
-        // it for all matching keys. Skip any key the caller already supplied
-        // via pendingEnvVarValues.
+        // Explicit per-function mint requests + implicit convention mints.
+        // Skip any key the caller already supplied via pendingEnvVarValues.
+        // All target keys for all functions receive the SAME app-wide minted
+        // bb_sk_* (sharedMintedKey, minted once above the loop).
         const explicit = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
         const conventionMintTargets = (sourceKeysMap.get(f.name) ? [...sourceKeysMap.get(f.name)!] : [])
           .filter(k => AUTO_MINT_CONVENTION_KEYS.includes(k) && !(k in merged));
@@ -456,23 +493,17 @@ export async function replayFunctions(
         const mintTargets = Array.from(new Set([...explicitKeys, ...conventionMintTargets]));
 
         if (mintTargets.length > 0) {
-          if (!opts?.controlPool || !opts?.destAppOwnerId) {
-            logger.warn(
-              { fn: f.name, keys: mintTargets },
-              '[clone] auto-mint required but controlPool or destAppOwnerId missing; skipping',
-            );
+          if (sharedMintedKey) {
+            for (const k of mintTargets) merged[k] = sharedMintedKey;
           } else {
-            try {
-              const minted = await mintApiKeyForClone(opts.controlPool, {
-                ownerId: opts.destAppOwnerId,
-                destAppId,
-                fnName: f.name,
-              });
-              for (const k of mintTargets) merged[k] = minted.key;
-            } catch (mintErr) {
-              warnings.push(`Auto-mint failed for ${f.name} (${mintTargets.join(',')}): ${(mintErr as Error).message}`);
-              logger.warn({ err: mintErr, fn: f.name, keys: mintTargets }, '[clone] auto-mint failed; continuing');
-            }
+            // Shared mint either wasn't attempted (no credentials) or failed —
+            // surface per-fn so the dashboard banner shows what's unfilled.
+            // `sharedMintError` is already warned + (when it failed at mint
+            // time) pushed to top-level warnings, so don't double-record.
+            logger.warn(
+              { fn: f.name, keys: mintTargets, sharedMintError },
+              '[clone] shared key unavailable; mint targets will remain unfilled',
+            );
           }
         }
 

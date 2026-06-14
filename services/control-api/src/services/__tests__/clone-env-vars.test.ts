@@ -102,7 +102,6 @@ describeDb('mintApiKeyForClone', () => {
     const { key, keyId } = await mintApiKeyForClone(controlDb, {
       ownerId,
       destAppId,
-      fnName: 'agent-chat',
     });
     expect(key.startsWith('bb_sk_')).toBe(true);
 
@@ -112,8 +111,10 @@ describeDb('mintApiKeyForClone', () => {
     );
     expect(row.rows[0].user_id).toBe(ownerId);
     expect(row.rows[0].scopes).toEqual(expect.arrayContaining([`app:${destAppId}`, 'ai:gateway']));
-    expect(row.rows[0].name).toContain('agent-chat');
-    expect(row.rows[0].name).toContain('clone');
+    // Per Phase 4: the auto-minted key is one-per-app, NOT one-per-function —
+    // function name is intentionally absent from the label so all functions on
+    // a cloned app share one credential.
+    expect(row.rows[0].name).toBe(`Auto-mint for clone (${destAppId})`);
 
     await controlDb.query(`DELETE FROM api_keys WHERE id = $1`, [keyId]);
     await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);

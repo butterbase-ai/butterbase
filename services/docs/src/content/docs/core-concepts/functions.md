@@ -91,7 +91,9 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 - Standard Web APIs (fetch, Request, Response, Headers, URL, etc.)
 - Environment variables via `ctx.env.VAR_NAME`
 - Database access via `ctx.db.query(sql)`
-- User info via `ctx.user` (when invoked with end-user JWT)
+- User info via `ctx.user` (populated for end-user JWTs, or for service-key callers that pass `X-Butterbase-As-User` — see "Server-to-server function calls" below)
+- Caller identity via `ctx.caller` — type, key id, scope, propagated user id (see "Server-to-server function calls" below)
+- Sibling-function calls via `ctx.invoke('fn-name', body)` — no manual auth, identity propagates automatically
 - App metadata via `ctx.app` and per-request data via `ctx.request` — see "Platform context" below
 - Console output (`console.log`, `console.info`, `console.warn`, `console.error`, `console.debug`) — captured and visible in invocation logs
 - Network access
@@ -141,6 +143,99 @@ ctx.request = { id, ip, country, functionName }
 ```
 
 Platform keys are injected **after** your function-specific env vars, so a user-set `BUTTERBASE_APP_ID` will not shadow the real one.
+
+## Server-to-server function calls
+
+A common pattern is a cron-triggered function that fans out to sibling
+functions on the same app — e.g. `auto-sync-google` calls `ingest-gmail` and
+`ingest-calendar`. The platform gives you three tools for this:
+
+### `ctx.invoke('fn-name', body)` — the easy path
+
+Use this for any same-app function call. No bearer ceremony, no env-var keys.
+
+```typescript
+export async function handler(req, ctx) {
+  // Identity propagates automatically: if this fn was invoked with an
+  // end-user JWT, the callee sees the same ctx.user.id.
+  const r = await ctx.invoke('ingest-gmail', { workspace_id: 'ws_abc' });
+  const data = await r.json();
+  return new Response(JSON.stringify({ enqueued: data.queued }), { status: 200 });
+}
+```
+
+Behavior:
+- Authenticated with the per-app internal function key (auto-injected, never
+  exposed via `ctx.env`).
+- `ctx.user.id` propagates: the callee sees the same user the caller saw.
+- `ctx.caller.type === 'loopback'` in the callee.
+- Cycle guard: `ctx.invoke` chains are capped at depth 4; the 5th hop throws
+  `ctx.invoke loop limit exceeded` synchronously.
+- Returns a standard `Response` (just like `fetch`).
+
+### `ctx.caller` — who called this function
+
+Populated on every invocation. Use it for audit logging or to make policy
+decisions in user code without parsing `req.headers.authorization` by hand.
+
+```ts
+ctx.caller = {
+  type: 'service_key' | 'end_user_jwt' | 'loopback' | 'anonymous',
+  keyId: string | null,  // present iff type === 'service_key'
+  scope: string | null,  // first app- or gateway-scope on the key
+  userId: string | null, // user this request is acting on behalf of
+}
+```
+
+| Caller | type | userId | keyId |
+|--------|------|--------|-------|
+| Browser with end-user JWT | `end_user_jwt` | JWT `sub` | `null` |
+| Cron / external service with `bb_sk_*` | `service_key` | `null` (unless impersonating) | api key row id |
+| Sibling function via `ctx.invoke` | `loopback` | propagated | `null` |
+| No bearer / invalid bearer | `anonymous` | `null` | `null` |
+
+### `X-Butterbase-As-User` — when you have to call from outside
+
+For callers that can't use `ctx.invoke` (cron jobs running outside the
+runtime, external services, scripts), send the header alongside an
+app-scoped `bb_sk_*`:
+
+```http
+POST /v1/app_abc/fn/ingest-gmail
+Authorization: Bearer bb_sk_…
+X-Butterbase-As-User: 11111111-2222-3333-4444-555555555555
+Content-Type: application/json
+
+{ "workspace_id": "ws_abc" }
+```
+
+The runtime populates `ctx.user.id` with the asserted id before invoking the
+function — no in-function bearer comparison required.
+
+**Per-function gate.** Functions can opt out of impersonation with
+`allow_service_key_impersonation: false` at deploy time (or via
+`manage_function action: "update_settings"`). The platform 403s any
+`X-Butterbase-As-User` header on those functions at the edge. Use this for
+admin-only or billing-webhook handlers that must never act on behalf of an
+end user.
+
+### Anti-pattern: bearer-equality checks
+
+Some older templates compared the incoming bearer to their own
+`ctx.env.BUTTERBASE_API_KEY` to decide whether to trust an `as_user_id` body
+field:
+
+```ts
+// ❌ Don't do this — fragile under key rotation, multi-key environments,
+//    or cloned apps where every function gets a different key.
+const expected = `Bearer ${ctx.env.BUTTERBASE_API_KEY}`;
+if (req.headers.get('authorization') === expected) {
+  userId = body.as_user_id;
+}
+```
+
+Replace with `ctx.user.id` (impersonation is now a platform concern) or
+`ctx.invoke` (no bearer involved at all).
 
 ## RLS in functions
 
