@@ -303,7 +303,7 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
         for (const it of items) {
           lines.push(`• [${it.appName}] "${it.functionName}" — ${it.failureCount} failure${it.failureCount === 1 ? '' : 's'}`);
           if (it.lastError) lines.push(`    ${truncateError(it.lastError).split('\n')[0]}`);
-          lines.push(`    ${dashboardUrl}/apps/${it.appId}/functions/${it.functionName}/logs`);
+          lines.push(`    ${dashboardUrl}/apps/${it.appId}/functions/${it.functionName}`);
           lines.push('');
         }
       }
@@ -325,7 +325,7 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       const streak = data.streakLen || '3';
       const fn = data.functionName || 'a function';
       const app = data.appName || data.appId || 'your app';
-      const logsUrl = `${dashboardUrl}/apps/${data.appId}/functions/${data.functionName}/logs`;
+      const logsUrl = `${dashboardUrl}/apps/${data.appId}/functions/${data.functionName}`;
       return [
         `"${fn}" in ${app} has failed ${streak} times in a row.`,
         '',
@@ -348,7 +348,7 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
         '',
         '(You will receive at most one email per hook function per day for this app.)',
         '',
-        `View function logs: ${dashboardUrl}/apps/${data.appId}/functions/${data.hookFunction}/logs`,
+        `View function logs: ${dashboardUrl}/apps/${data.appId}/functions/${data.hookFunction}`,
       ].join('\n');
 
     case 'auto_refill_failed':
@@ -504,7 +504,7 @@ ${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}`;
     }
 
     const fnRows = items.map((it) => {
-      const url = `${dashboardUrl}/apps/${escapeHtml(it.appId)}/functions/${escapeHtml(it.functionName)}/logs`;
+      const url = `${dashboardUrl}/apps/${escapeHtml(it.appId)}/functions/${escapeHtml(it.functionName)}`;
       const errLine = it.lastError ? escapeHtml(truncateError(it.lastError).split('\n')[0]) : '';
       return `<tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
 <div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
@@ -564,7 +564,7 @@ ${section('Deployments', deployRows)}
     const fn = data.functionName || 'a function';
     const app = data.appName || data.appId || 'your app';
     const errorMsg = truncateError(data.errorMessage || '(no message captured)');
-    const logsUrl = `${dashboardUrl}/apps/${data.appId}/functions/${data.functionName}/logs`;
+    const logsUrl = `${dashboardUrl}/apps/${data.appId}/functions/${data.functionName}`;
 
     const reArmNote = `We&rsquo;ll only email again after a successful run, then another 3 consecutive failures.`;
 

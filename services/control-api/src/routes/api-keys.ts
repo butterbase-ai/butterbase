@@ -12,6 +12,9 @@ export async function apiKeyRoutes(app: FastifyInstance) {
   // substrate_user_id; otherwise (default) mints a regular bb_sk_ app key.
   app.post('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);
+    // Note: `scopes` (legacy array) is parsed for back-compat audit logging only —
+    // the field is no longer forwarded to ApiKeyService. Scope selection has moved to
+    // `key_scope` + `additional_scopes`, wired up in the Task 2 route rewrite.
     const { name, scopes, scope } = request.body as {
       name?: string;
       scopes?: string[];
@@ -39,8 +42,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       app.controlDb,
       userId,
       name,
-      scopes,
-      scope
+      { substrateAccess: scope }
     );
 
     logFromRequest(request, {

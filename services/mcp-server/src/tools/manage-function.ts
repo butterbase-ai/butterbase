@@ -44,6 +44,8 @@ interface FunctionDetailResponse {
   agent_tool_description?: string | null;
   agent_tool_mode?: 'read_only' | 'read_write' | null;
   agent_tool_exposed_to?: 'developer_only' | 'end_user' | null;
+  /** Env-var keys present (values stay encrypted server-side). */
+  envKeys?: string[];
 }
 
 interface FunctionLogsResponse {

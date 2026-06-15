@@ -137,12 +137,18 @@ export async function mintApiKeyForClone(
   controlPool: pg.Pool,
   args: { ownerId: string; destAppId: string },
 ): Promise<MintedCloneKey> {
+  // Produces ['app:<destAppId>', 'ai:gateway'] — the standard clone baseline.
+  // If buildScopes's defaults for `keyScope: 'app'` ever change, review whether
+  // clone-minted keys should pick up the new tokens here.
   const result = await ApiKeyService.generateApiKey(
     controlPool,
     args.ownerId,
     `Auto-mint for clone (${args.destAppId})`,
-    [`app:${args.destAppId}`, 'ai:gateway'],
-    'app',
+    {
+      keyScope: 'app',
+      targetAppId: args.destAppId,
+      substrateAccess: 'app',
+    },
   );
   return { key: result.key, keyId: result.keyId };
 }

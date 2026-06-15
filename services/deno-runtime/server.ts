@@ -136,7 +136,7 @@ serve(async (req: Request) => {
         console.error("Failed to log invocation:", err)
       );
 
-      if (!result.response) {
+      if (!result.response && !result.responseStream) {
         const status = result.timeout ? 504 : 500;
         const body = result.timeout
           ? {
@@ -152,6 +152,22 @@ serve(async (req: Request) => {
         return new Response(JSON.stringify(body), {
           status,
           headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // Streaming response (Content-Type: text/event-stream) — return the
+      // ReadableStream directly so chunks reach the client as they're produced.
+      // Same header hygiene as the buffered path: strip content-length/encoding
+      // since both are wrong for a stream we're re-emitting.
+      if (result.responseStream) {
+        const sHeaders = { ...result.responseStream.headers };
+        delete sHeaders["content-length"];
+        delete sHeaders["Content-Length"];
+        delete sHeaders["content-encoding"];
+        delete sHeaders["Content-Encoding"];
+        return new Response(result.responseStream.stream, {
+          status: result.responseStream.status,
+          headers: sHeaders,
         });
       }
 

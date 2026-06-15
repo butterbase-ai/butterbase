@@ -9,7 +9,7 @@ import { initCommand } from '../src/commands/init.js';
 import { loginCommand, logoutCommand, configGetCommand, configSetCommand } from '../src/commands/config.js';
 import { appsListCommand, appsCreateCommand, appsUseCommand, appsDeleteCommand, appsPauseCommand, appsResumeCommand, appsLinkSubstrateCommand, appsUnlinkSubstrateCommand } from '../src/commands/apps.js';
 import { schemaGetCommand, schemaApplyCommand } from '../src/commands/schema.js';
-import { functionsListCommand, functionsGetCommand, functionsDeployCommand, functionsLogsCommand, functionsDeleteCommand, functionsInvokeCommand, functionsEnvSetCommand, functionsEnvListCommand } from '../src/commands/functions.js';
+import { functionsListCommand, functionsGetCommand, functionsDeployCommand, functionsLogsCommand, functionsDeleteCommand, functionsInvokeCommand, functionsEnvSetCommand, functionsEnvListCommand, functionsMetricsCommand } from '../src/commands/functions.js';
 import { storageListCommand, storageUploadCommand, storageDeleteCommand, storageConfigCommand } from '../src/commands/storage.js';
 import { realtimeEnableCommand, realtimeConfigCommand, realtimeDisableCommand } from '../src/commands/realtime.js';
 import { deployCommand } from '../src/commands/deploy.js';
@@ -442,6 +442,13 @@ functionsEnvCmd
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('--json', 'Output as JSON')
   .action(functionsEnvListCommand);
+
+functions
+  .command('metrics <function-name>')
+  .description('Show invocation count, error rate, and avg duration for a function')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output as JSON')
+  .action(functionsMetricsCommand);
 
 // Storage
 const storage = program.command('storage').description('Manage file storage');

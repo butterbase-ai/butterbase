@@ -337,8 +337,12 @@ export async function functionsEnvListCommand(name: string, options: { app?: str
   try {
     const fn: any = await getFunction(appId, name);
     spinner.stop();
-    const envVars: Record<string, string> = fn.envVars ?? fn.env_vars ?? {};
-    const keys = Object.keys(envVars);
+    // Prefer the dedicated envKeys field (server-side decrypts + returns
+    // keys only). Fall back to legacy envVars/env_vars shapes for older
+    // control-api builds that still return the full encrypted record.
+    const keys: string[] = Array.isArray(fn.envKeys)
+      ? fn.envKeys
+      : Object.keys((fn.envVars ?? fn.env_vars ?? {}) as Record<string, string>);
     if (options.json) {
       console.log(JSON.stringify({ keys }, null, 2));
       return;
@@ -355,6 +359,42 @@ export async function functionsEnvListCommand(name: string, options: { app?: str
     console.log(chalk.gray('  (values are write-only — set with `butterbase functions env set <name> KEY=VALUE`)'));
   } catch (error) {
     spinner.fail('Failed to fetch env');
+    console.error(chalk.red((error as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function functionsMetricsCommand(name: string, options: { app?: string; json?: boolean }) {
+  const appId = await requireAppId(options.app);
+  const spinner = ora(`Fetching metrics for "${name}"...`).start();
+  try {
+    const fn: any = await getFunction(appId, name);
+    spinner.stop();
+    const metrics = {
+      invocationCount: Number(fn.invocationCount ?? 0),
+      errorCount: Number(fn.errorCount ?? 0),
+      errorRate: Number(fn.invocationCount ?? 0) > 0
+        ? Number(fn.errorCount ?? 0) / Number(fn.invocationCount)
+        : 0,
+      avgDurationMs: Number(fn.avgDuration ?? 0),
+      lastInvoked: fn.lastInvoked ?? null,
+      deployedAt: fn.deployedAt ?? null,
+    };
+    if (options.json) {
+      console.log(JSON.stringify(metrics, null, 2));
+      return;
+    }
+    console.log('');
+    console.log(chalk.bold(name));
+    console.log(chalk.gray(`  Invocations:   ${metrics.invocationCount.toLocaleString()}`));
+    console.log(chalk.gray(`  Errors:        ${metrics.errorCount.toLocaleString()}`));
+    console.log(chalk.gray(`  Error rate:    ${(metrics.errorRate * 100).toFixed(2)}%`));
+    console.log(chalk.gray(`  Avg duration:  ${metrics.avgDurationMs > 0 ? `${metrics.avgDurationMs.toFixed(0)} ms` : '—'}`));
+    console.log(chalk.gray(`  Last invoked:  ${metrics.lastInvoked ?? '—'}`));
+    console.log(chalk.gray(`  Deployed at:   ${metrics.deployedAt ?? '—'}`));
+    console.log('');
+  } catch (error) {
+    spinner.fail('Failed to fetch metrics');
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

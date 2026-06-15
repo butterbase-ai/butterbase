@@ -44,7 +44,7 @@ exports[`weekly_digest body (HTML) > renders a styled list with logs links 1`] =
 <h2 style="margin:24px 0 0 0;font-size:13px;font-weight:600;color:#737373;text-transform:uppercase;letter-spacing:0.05em;">Functions</h2>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;"><tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
 <div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
-<a href="https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs" style="color:#0a0a0a;text-decoration:none;">&ldquo;capture-lead&rdquo;</a>
+<a href="https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead" style="color:#0a0a0a;text-decoration:none;">&ldquo;capture-lead&rdquo;</a>
 <span style="color:#737373;font-weight:400;"> in pantry</span>
 </div>
 <div style="font-size:13px;color:#737373;margin-bottom:6px;">
@@ -53,7 +53,7 @@ exports[`weekly_digest body (HTML) > renders a styled list with logs links 1`] =
 <div style="font-size:12px;color:#737373;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;background:#fafafa;padding:8px 10px;border-radius:6px;border:1px solid #f0f0f0;word-break:break-word;">TypeError: Cannot read properties of undefined (reading &#39;rows&#39;)</div>
 </td></tr><tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
 <div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
-<a href="https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs/logs" style="color:#0a0a0a;text-decoration:none;">&ldquo;index-docs&rdquo;</a>
+<a href="https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs" style="color:#0a0a0a;text-decoration:none;">&ldquo;index-docs&rdquo;</a>
 <span style="color:#737373;font-weight:400;"> in recipes</span>
 </div>
 <div style="font-size:13px;color:#737373;margin-bottom:6px;">
@@ -62,7 +62,7 @@ exports[`weekly_digest body (HTML) > renders a styled list with logs links 1`] =
 <div style="font-size:12px;color:#737373;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;background:#fafafa;padding:8px 10px;border-radius:6px;border:1px solid #f0f0f0;word-break:break-word;">fetch failed: ECONNREFUSED</div>
 </td></tr><tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
 <div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
-<a href="https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe/logs" style="color:#0a0a0a;text-decoration:none;">&ldquo;transcribe&rdquo;</a>
+<a href="https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe" style="color:#0a0a0a;text-decoration:none;">&ldquo;transcribe&rdquo;</a>
 <span style="color:#737373;font-weight:400;"> in voyp-personal</span>
 </div>
 <div style="font-size:13px;color:#737373;margin-bottom:0;">
@@ -88,14 +88,14 @@ exports[`weekly_digest body (text) > renders a list with logs URL per item 1`] =
 
 • [pantry] "capture-lead" — 47 failures
     TypeError: Cannot read properties of undefined (reading 'rows')
-    https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs
+    https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead
 
 • [recipes] "index-docs" — 12 failures
     fetch failed: ECONNREFUSED
-    https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs/logs
+    https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs
 
 • [voyp-personal] "transcribe" — 3 failures
-    https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe/logs
+    https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe
 
 Open dashboard: https://dashboard.butterbase.ai"
 `;
@@ -105,14 +105,14 @@ exports[`weekly_digest body (text) > renders both Functions and Deployments sect
 
 • [pantry] "capture-lead" — 47 failures
     TypeError: Cannot read properties of undefined (reading 'rows')
-    https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs
+    https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead
 
 • [recipes] "index-docs" — 12 failures
     fetch failed: ECONNREFUSED
-    https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs/logs
+    https://dashboard.butterbase.ai/apps/app_recipes/functions/index-docs
 
 • [voyp-personal] "transcribe" — 3 failures
-    https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe/logs
+    https://dashboard.butterbase.ai/apps/app_voyp/functions/transcribe
 
 Deployments (2):
 

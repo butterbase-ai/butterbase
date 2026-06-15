@@ -17,7 +17,7 @@ exports[`function_failed HTML body > renders an HTML variant alongside the text 
 </h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#737373;">in pantry</p>
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0;"><tr><td style="border-radius:8px;background:#0a0a0a;">
-<a href="https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead/logs" style="display:inline-block;padding:12px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Open function logs</a>
+<a href="https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead" style="display:inline-block;padding:12px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Open function logs</a>
 </td></tr></table>
 <p style="margin:32px 0 8px 0;font-size:13px;font-weight:600;color:#0a0a0a;">Most recent error</p>
 <pre style="margin:0;padding:16px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:#0a0a0a;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;">TypeError: Cannot read properties of undefined (reading &#39;rows&#39;)</pre>
@@ -34,7 +34,7 @@ You're receiving this because you own a Butterbase app. <a href="https://dashboa
 exports[`function_failed email > body at streak 3 leads with logs link and trails with re-arm note 1`] = `
 ""capture-lead" in pantry has failed 3 times in a row.
 
-Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead/logs
+Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead
 
 Most recent error:
 TypeError: Cannot read properties of undefined (reading 'rows')
@@ -45,7 +45,7 @@ We'll only email again after a successful run, then another 3 consecutive failur
 exports[`function_failed email > body at streak 7 leads with logs link and trails with re-arm note 1`] = `
 ""capture-lead" in pantry has failed 7 times in a row.
 
-Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead/logs
+Open logs: https://dashboard.butterbase.ai/apps/app_test001/functions/capture-lead
 
 Most recent error:
 TypeError: Cannot read properties of undefined (reading 'rows')

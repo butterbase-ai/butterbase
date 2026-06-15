@@ -52,7 +52,7 @@ describe('weekly_digest body (text)', () => {
     expect(body).toContain('Functions (3)');
     expect(body).toContain('capture-lead');
     expect(body).toContain('47 failures');
-    expect(body).toContain('https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs');
+    expect(body).toContain('https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead');
     expect(body).toMatchSnapshot();
   });
   it('renders both Functions and Deployments sections when both present', () => {
@@ -85,7 +85,7 @@ describe('weekly_digest body (HTML)', () => {
   it('renders a styled list with logs links', () => {
     const html = buildBillingEmailHtml('weekly_digest', { itemsJson: JSON.stringify(items3) })!;
     expect(html).toContain('3 things need attention');
-    expect(html).toContain('href="https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead/logs"');
+    expect(html).toContain('href="https://dashboard.butterbase.ai/apps/app_pantry/functions/capture-lead"');
     expect(html).toMatchSnapshot();
   });
   it('renders a quiet-week card when empty', () => {

@@ -15,6 +15,18 @@ export interface ExecutionResult {
     headers: Record<string, string>;
     bodyBase64: string;
   };
+  /**
+   * Present when the user function returned a streaming response
+   * (Content-Type: text/event-stream). The runtime hands the readable side
+   * back to the caller and pumps worker chunks into the writer as they
+   * arrive. metrics.duration_ms here reflects time-to-first-byte, not
+   * end-to-end stream duration.
+   */
+  responseStream?: {
+    status: number;
+    headers: Record<string, string>;
+    stream: ReadableStream<Uint8Array>;
+  };
   error?: {
     message: string;
     stack?: string;
@@ -101,6 +113,20 @@ export async function executeFunction(
     // Phase 2: Worker awaits waitUntil promises, then sends "done" — terminate worker
     const WAIT_UNTIL_TIMEOUT_MS = 30_000;
 
+    // Streaming responses (Content-Type: text/event-stream) pump chunks into
+    // this TransformStream as they arrive from the worker. The writable side
+    // is closed on stream_end / stream_error / done.
+    let streamWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
+    const closeStreamWriter = async (err?: unknown) => {
+      if (!streamWriter) return;
+      const w = streamWriter;
+      streamWriter = null;
+      try {
+        if (err) await w.abort(err);
+        else await w.close();
+      } catch { /* writer already closed */ }
+    };
+
     const result = await new Promise<any>((resolve, reject) => {
       let responded = false;
 
@@ -112,6 +138,58 @@ export async function executeFunction(
             message: String(e.data.message).slice(0, MAX_LOG_LENGTH),
             timestamp: e.data.timestamp,
           });
+          return;
+        }
+
+        // Streaming start: build a TransformStream, resolve the caller's
+        // promise with the readable side so server.ts can return a
+        // streaming Response, then keep listening for chunks below.
+        if (!responded && e.data.type === "stream_start") {
+          responded = true;
+          clearTimeout(timeoutId);
+          const ts = new TransformStream<Uint8Array, Uint8Array>();
+          streamWriter = ts.writable.getWriter();
+          resolve({
+            type: "stream_start",
+            response: {
+              status: e.data.status,
+              headers: e.data.headers,
+              stream: ts.readable,
+            },
+          });
+          const bgTimeoutId = setTimeout(() => {
+            closeStreamWriter(new Error("stream timeout"));
+            worker.terminate();
+          }, WAIT_UNTIL_TIMEOUT_MS);
+          worker.onmessage = (e2) => {
+            if (e2.data.type === "stream_chunk" && streamWriter) {
+              const bin = atob(e2.data.chunkBase64);
+              const chunk = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) chunk[i] = bin.charCodeAt(i);
+              // Best-effort write; ignore errors from a closed reader so a
+              // disconnected client doesn't crash the executor.
+              streamWriter.write(chunk).catch(() => {});
+            } else if (e2.data.type === "stream_end" || e2.data.type === "done") {
+              closeStreamWriter();
+              clearTimeout(bgTimeoutId);
+              if (e2.data.type === "done") worker.terminate();
+            } else if (e2.data.type === "stream_error") {
+              closeStreamWriter(new Error(e2.data.message || "stream error"));
+              clearTimeout(bgTimeoutId);
+              worker.terminate();
+            } else if (e2.data.type === "console" && collectedLogs.length < MAX_LOG_ENTRIES) {
+              collectedLogs.push({
+                level: e2.data.level,
+                message: String(e2.data.message).slice(0, MAX_LOG_LENGTH),
+                timestamp: e2.data.timestamp,
+              });
+            }
+          };
+          worker.onerror = () => {
+            closeStreamWriter(new Error("worker error"));
+            clearTimeout(bgTimeoutId);
+            worker.terminate();
+          };
           return;
         }
 
@@ -166,6 +244,24 @@ export async function executeFunction(
           message: result.error.message,
           stack: result.error.stack,
         },
+        logs: collectedLogs,
+        metrics: {
+          duration_ms: duration,
+          memory_used_mb: memoryUsed,
+        },
+      };
+    }
+
+    if (result.type === "stream_start") {
+      // Stream is still in progress in the worker; metrics here reflect
+      // time-to-first-byte. End-to-end logging happens in the worker's
+      // logger via console capture; the invocation log stamps the stream
+      // start time and the streamed response is treated as a 2xx success.
+      const isHttpError = result.response.status >= 400;
+      return {
+        success: !isHttpError,
+        responseStream: result.response,
+        error: isHttpError ? { message: `HTTP ${result.response.status}` } : undefined,
         logs: collectedLogs,
         metrics: {
           duration_ms: duration,
@@ -852,30 +948,60 @@ function buildWorkerCode(
     try {
       const response = await handler(request, ctx);
 
-      // Get body as ArrayBuffer to preserve binary data
-      const bodyBuffer = await response.arrayBuffer();
-      const bodyArray = new Uint8Array(bodyBuffer);
+      // Streaming opt-in: when the handler returns an SSE response, pump the
+      // body chunk-by-chunk through postMessage instead of buffering it.
+      // Other content types stay on the buffered path — base64+postMessage
+      // is cheaper for small responses and avoids the streaming bookkeeping.
+      const __ct = (response.headers.get("content-type") || "").toLowerCase();
+      const __shouldStream = !!response.body && __ct.startsWith("text/event-stream");
+      if (__shouldStream) {
+        self.postMessage({
+          type: "stream_start",
+          status: response.status,
+          headers: Object.fromEntries(response.headers.entries()),
+        });
+        const __reader = response.body.getReader();
+        try {
+          while (true) {
+            const { value, done } = await __reader.read();
+            if (done) break;
+            let __bin = "";
+            for (let i = 0; i < value.length; i++) __bin += String.fromCharCode(value[i]);
+            self.postMessage({ type: "stream_chunk", chunkBase64: btoa(__bin) });
+          }
+          self.postMessage({ type: "stream_end" });
+        } catch (streamErr) {
+          self.postMessage({ type: "stream_error", message: streamErr?.message ?? String(streamErr) });
+        }
+        if (__waitUntilPromises.length > 0) {
+          await Promise.allSettled(__waitUntilPromises);
+        }
+      } else {
+        // Get body as ArrayBuffer to preserve binary data
+        const bodyBuffer = await response.arrayBuffer();
+        const bodyArray = new Uint8Array(bodyBuffer);
 
-      // Encode as base64 for safe serialization through postMessage
-      // Use a more efficient method that doesn't spread the array
-      let binary = '';
-      for (let i = 0; i < bodyArray.length; i++) {
-        binary += String.fromCharCode(bodyArray[i]);
-      }
-      const base64 = btoa(binary);
+        // Encode as base64 for safe serialization through postMessage
+        // Use a more efficient method that doesn't spread the array
+        let binary = '';
+        for (let i = 0; i < bodyArray.length; i++) {
+          binary += String.fromCharCode(bodyArray[i]);
+        }
+        const base64 = btoa(binary);
 
-      const serialized = {
-        status: response.status,
-        headers: Object.fromEntries(response.headers.entries()),
-        bodyBase64: base64,
-      };
+        const serialized = {
+          status: response.status,
+          headers: Object.fromEntries(response.headers.entries()),
+          bodyBase64: base64,
+        };
 
-      // Phase 1: Send response immediately so caller gets it fast
-      self.postMessage({ type: "success", response: serialized });
+        // Phase 1: Send response immediately so caller gets it fast
+        self.postMessage({ type: "success", response: serialized });
 
-      // Phase 2: Await any waitUntil promises (background work)
-      if (__waitUntilPromises.length > 0) {
-        await Promise.allSettled(__waitUntilPromises);
+        // Phase 2: Await any waitUntil promises (background work)
+        if (__waitUntilPromises.length > 0) {
+          await Promise.allSettled(__waitUntilPromises);
+        }
       }
     } catch (error) {
       self.postMessage({

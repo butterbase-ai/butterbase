@@ -332,6 +332,8 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     return reply.send({
       message: 'Environment variables updated successfully',
       function: result.rows[0],
+      // Keys present after merge — dashboard uses this to refresh the chip list.
+      updatedKeys: Object.keys(mergedVars),
       cache_invalidation: {
         success: invalidationResult.success,
         attempts: invalidationResult.attempts,
@@ -507,6 +509,16 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const fn = result.rows[0];
     const triggers = (fn.triggers as Array<{ type: string; config: unknown; enabled: boolean }>)
       .map((t) => ({ ...t, config: redactTriggerConfig(t.type, t.config) }));
+    // Surface env-var keys (not values) so dashboard/CLI can show what's
+    // configured without re-deploying to find out. Values stay encrypted.
+    let envKeys: string[] = [];
+    if (fn.encrypted_env_vars) {
+      try {
+        envKeys = Object.keys(JSON.parse(decrypt(fn.encrypted_env_vars, process.env.AUTH_ENCRYPTION_KEY!)));
+      } catch {
+        // Treat unreadable blobs as no keys — better than 500'ing the detail page.
+      }
+    }
     return reply.send({
       id: fn.id,
       name: fn.name,
@@ -524,6 +536,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       agent_tool_description: fn.agent_tool_description,
       agent_tool_mode: fn.agent_tool_mode,
       agent_tool_exposed_to: fn.agent_tool_exposed_to,
+      envKeys,
     });
   });
 
@@ -567,6 +580,31 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
 
     await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
 
+    // Optional impersonation: caller may pass X-Butterbase-As-User to invoke
+    // the function with ctx.user set to that id. Gated by the per-function
+    // allow_service_key_impersonation flag (defaults to true). Refuse the
+    // header rather than silently dropping it — dropping would mask a
+    // misconfiguration during RLS testing.
+    const asUserHeader = request.headers['x-butterbase-as-user'];
+    const asUser = Array.isArray(asUserHeader) ? asUserHeader[0] : asUserHeader;
+    if (asUser) {
+      const impersonationCheck = await (await runtimeDb(appId)).query(
+        'SELECT allow_service_key_impersonation FROM app_functions WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL',
+        [appId, name]
+      );
+      if (
+        impersonationCheck.rows.length > 0 &&
+        impersonationCheck.rows[0].allow_service_key_impersonation === false
+      ) {
+        return reply.status(403).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: 'Impersonation is disabled for this function.',
+          remediation: 'Enable allow_service_key_impersonation on the function before invoking with X-Butterbase-As-User.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA)
+        }));
+      }
+    }
+
     // Track lambda invocation for billing
     const fnOwnerResult = await (await runtimeDb(appId)).query(
       'SELECT owner_id FROM apps WHERE id = $1',
@@ -580,15 +618,23 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const invokeStart = Date.now();
     let denoResponse: Response;
     try {
+      // When impersonating, x-user-id (the runtime's effective-user header)
+      // becomes the asserted id, and we mark the caller as a service-key
+      // impersonator so functions that branch on ctx.caller.type can react.
+      const runtimeHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-user-id': asUser || requireUserId(request),
+        'x-app-id': appId,
+      };
+      if (asUser) {
+        runtimeHeaders['x-butterbase-caller-type'] = 'service_key';
+        runtimeHeaders['x-butterbase-as-user'] = asUser;
+      }
       denoResponse = await fetch(
         `${config.runtimeUrl}/execute/${appId}/${name}`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-user-id': requireUserId(request),
-            'x-app-id': appId,
-          },
+          headers: runtimeHeaders,
           body: request.body != null ? JSON.stringify(request.body) : JSON.stringify({}),
         }
       );
@@ -610,8 +656,8 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       throw err;
     }
 
-    const responseBody = await denoResponse.text();
     const contentType = denoResponse.headers.get('content-type') || 'application/json';
+    const isStream = contentType.toLowerCase().startsWith('text/event-stream');
 
     logFromRequest(request, {
       appId,
@@ -623,11 +669,38 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       eventData: {
         duration_ms: Date.now() - invokeStart,
         status_code: denoResponse.status,
+        streaming: isStream,
       },
       success: denoResponse.ok,
       errorMessage: denoResponse.ok ? null : `HTTP ${denoResponse.status}`,
     });
 
+    if (isStream && denoResponse.body) {
+      // Passthrough SSE: hijack the reply so Fastify doesn't add a
+      // Content-Length (which would collide with Transfer-Encoding: chunked).
+      // Matches the existing pattern in routes/frontend-from-source.ts.
+      reply.raw.statusCode = denoResponse.status;
+      reply.raw.setHeader('content-type', contentType);
+      reply.raw.setHeader('cache-control', 'no-cache, no-transform');
+      reply.raw.setHeader('connection', 'keep-alive');
+      reply.raw.setHeader('x-accel-buffering', 'no');
+      reply.hijack();
+      const reader = denoResponse.body.getReader();
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          reply.raw.write(value);
+        }
+      } catch {
+        // Client disconnected mid-stream — nothing to do.
+      } finally {
+        reply.raw.end();
+      }
+      return;
+    }
+
+    const responseBody = await denoResponse.text();
     return reply
       .status(denoResponse.status)
       .header('content-type', contentType)
@@ -709,4 +782,106 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       hasMore: result.rows.length === limit,
     });
   });
+
+  // Tail function logs over SSE. Polls function_invocations every ~2s and
+  // emits new rows as `log` events. Each row uses its UTC timestamp as the
+  // cursor; on reconnect the client passes last_event_id to resume without
+  // gaps. Closes when the client disconnects.
+  fastify.get(
+    '/v1/:appId/functions/:name/logs/stream',
+    { config: { requiresAppRegion: true, migrationGuard: true } },
+    async (request, reply) => {
+      const { appId, name } = request.params as { appId: string; name: string };
+      const { since, level } = request.query as {
+        since?: string;
+        level?: 'error' | 'all';
+      };
+
+      await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+
+      const fnResult = await (await runtimeDb(appId)).query(
+        'SELECT id FROM app_functions WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL',
+        [appId, name]
+      );
+      if (fnResult.rows.length === 0) {
+        return reply.status(404).send(createAgentError({
+          code: RESOURCE_NOT_FOUND,
+          message: 'Function not found',
+          remediation: 'Verify the function name. Use list_functions to see deployed functions.',
+          documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+        }));
+      }
+      const functionId = fnResult.rows[0].id;
+
+      reply.raw.statusCode = 200;
+      reply.raw.setHeader('content-type', 'text/event-stream');
+      reply.raw.setHeader('cache-control', 'no-cache, no-transform');
+      reply.raw.setHeader('connection', 'keep-alive');
+      // Disable buffering for nginx / cloudflare so chunks reach the client.
+      reply.raw.setHeader('x-accel-buffering', 'no');
+      reply.hijack();
+
+      // Resume cursor: prefer last_event_id from EventSource auto-reconnect,
+      // then explicit ?since=, then "now" so we don't dump backlog on first
+      // open. Stored as ISO so we can pass it straight back into started_at>.
+      const lastEventId = request.headers['last-event-id'];
+      let cursor: string = (Array.isArray(lastEventId) ? lastEventId[0] : lastEventId)
+        || since
+        || new Date().toISOString();
+
+      // Keep-alive comment every 15s so intermediaries don't reap the
+      // connection on idle.
+      const keepAlive = setInterval(() => {
+        if (!reply.raw.writableEnded) reply.raw.write(': keepalive\n\n');
+      }, 15_000);
+
+      let closed = false;
+      const onClose = () => {
+        closed = true;
+        clearInterval(keepAlive);
+      };
+      request.raw.once('close', onClose);
+
+      try {
+        while (!closed && !reply.raw.writableEnded) {
+          const params: unknown[] = [functionId, cursor];
+          let q = `
+            SELECT
+              id, method, path, status_code, duration_ms, memory_used_mb,
+              error_message, error_stack, console_logs, started_at
+            FROM function_invocations
+            WHERE function_id = $1 AND started_at > $2
+          `;
+          if (level === 'error') q += ' AND error_message IS NOT NULL';
+          q += ' ORDER BY started_at ASC LIMIT 100';
+
+          const rows = (await (await runtimeDb(appId)).query(q, params)).rows;
+          for (const row of rows) {
+            const log = {
+              timestamp: row.started_at,
+              method: row.method,
+              path: row.path,
+              statusCode: row.status_code,
+              duration: row.duration_ms,
+              memoryUsed: parseFloat(row.memory_used_mb),
+              error: row.error_message,
+              stack: row.error_stack,
+              consoleLogs: row.console_logs || [],
+            };
+            const iso = row.started_at instanceof Date
+              ? row.started_at.toISOString()
+              : String(row.started_at);
+            cursor = iso;
+            reply.raw.write(`id: ${iso}\nevent: log\ndata: ${JSON.stringify(log)}\n\n`);
+          }
+
+          if (closed) break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } finally {
+        clearInterval(keepAlive);
+        if (!reply.raw.writableEnded) reply.raw.end();
+      }
+    }
+  );
 }

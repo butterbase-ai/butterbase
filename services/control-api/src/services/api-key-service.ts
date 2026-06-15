@@ -25,24 +25,88 @@ const apiKeyCacheKey = (keyHash: string) => `auth:apikey:${keyHash}`;
  * New scopes can be added without a migration — `scopes` is a TEXT[] column.
  * Route handlers gate access by checking `request.auth.scopes`.
  */
+
+export const ALLOWED_EXTRA_SCOPES = new Set(['ai:gateway', 'substrate']);
+
+export interface GenerateApiKeyOptions {
+  keyScope?: 'account' | 'app';                     // default 'account' for back-compat
+  targetAppId?: string;                             // required iff keyScope === 'app'
+  additionalScopes?: string[];                      // allowlisted
+  substrateAccess?: 'app' | 'substrate' | 'both';   // existing axis
+}
+
+export class ScopeValidationError extends Error {
+  readonly name = 'ScopeValidationError';
+  readonly code: 'INVALID_KEY_SCOPE' | 'TARGET_APP_REQUIRED' | 'TARGET_APP_NOT_ALLOWED'
+              | 'RESERVED_SCOPE' | 'UNKNOWN_SCOPE';
+  constructor(code: ScopeValidationError['code'], message: string) {
+    super(message);
+    this.code = code;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+function validateScopeInputs(opts: GenerateApiKeyOptions) {
+  const keyScope = opts.keyScope ?? 'account';
+  if (keyScope !== 'account' && keyScope !== 'app') {
+    throw new ScopeValidationError('INVALID_KEY_SCOPE',
+      "key_scope must be 'account' or 'app'");
+  }
+  if (keyScope === 'app' && !opts.targetAppId) {
+    throw new ScopeValidationError('TARGET_APP_REQUIRED',
+      "target_app_id is required when key_scope is 'app'");
+  }
+  if (keyScope === 'account' && opts.targetAppId) {
+    throw new ScopeValidationError('TARGET_APP_NOT_ALLOWED',
+      "target_app_id must not be set when key_scope is 'account'");
+  }
+  for (const s of opts.additionalScopes ?? []) {
+    if (s === '*' || s.startsWith('app:')) {
+      throw new ScopeValidationError('RESERVED_SCOPE',
+        `'${s}' is a reserved scope. Use key_scope to control account/app scope instead.`);
+    }
+    if (!ALLOWED_EXTRA_SCOPES.has(s)) {
+      throw new ScopeValidationError('UNKNOWN_SCOPE',
+        `'${s}' is not a valid scope. Allowed: ${[...ALLOWED_EXTRA_SCOPES].join(', ')}.`);
+    }
+  }
+}
+
+function buildScopes(opts: GenerateApiKeyOptions): string[] {
+  const keyScope = opts.keyScope ?? 'account';
+  const extras = opts.additionalScopes ?? [];
+  if (keyScope === 'app') {
+    if (!opts.targetAppId) {
+      throw new Error('BUG: buildScopes called for app scope without targetAppId — validateScopeInputs should have caught this');
+    }
+    return [`app:${opts.targetAppId}`, 'ai:gateway', ...extras];
+  }
+  return ['*', ...extras];
+}
+
 export class ApiKeyService {
   /**
-   * Generate a new API key for a user
-   * Returns the plaintext key ONCE - it's never stored or returned again
+   * Generate a new API key for a user.
+   * Returns the plaintext key ONCE - it's never stored or returned again.
+   *
+   * Options:
+   *   keyScope        — 'account' (default, full-access '*' scopes) or 'app'
+   *                     (scopes locked to a specific app via 'app:<id>')
+   *   targetAppId     — required when keyScope === 'app'
+   *   additionalScopes — extra allowlisted scopes to append (e.g. 'substrate')
+   *   substrateAccess — controls the `scope` DB column and key prefix:
+   *                     'substrate' emits a bb_sub_-prefixed key; 'app' (default)
+   *                     or 'both' emits a bb_sk_-prefixed key.
    */
   static async generateApiKey(
     pool: Pool,
     userId: string,
     name: string,
-    scopes: string[] = ['*'],
-    scope?: 'app' | 'substrate' | 'both'
+    options: GenerateApiKeyOptions = {}
   ): Promise<{ key: string; keyId: string; prefix: string; name: string }> {
-    // scope='substrate' emits a bb_sub_-prefixed substrate-only key. Anything
-    // else (default 'app' or 'both') emits a bb_sk_-prefixed key. Every key —
-    // regardless of scope — carries substrate_user_id = userId, so every
-    // bb_sk_ key works on both the app plane and the caller's substrate. The
-    // 'app' vs 'both' label is informational only; substrate gates check
-    // substrate_user_id, not scope.
+    validateScopeInputs(options);
+    const scopes = buildScopes(options);
+    const scope = options.substrateAccess ?? 'app';
     const isSubstrateOnly = scope === 'substrate';
     const isBoth = scope === 'both';
     const prefix = isSubstrateOnly ? API_KEY_SUBSTRATE_PREFIX : API_KEY_PREFIX;
@@ -50,10 +114,8 @@ export class ApiKeyService {
     const randomBytes = crypto.randomBytes(20);
     const randomHex = randomBytes.toString('hex');
     const fullKey = `${prefix}${randomHex}`;
-
     const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex');
     const keyPrefix = fullKey.substring(0, 12);
-
     const dbScope = isBoth ? 'both' : (isSubstrateOnly ? 'substrate' : 'app');
 
     const result = await pool.query(
@@ -61,15 +123,7 @@ export class ApiKeyService {
          (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, name`,
-      [
-        userId,
-        keyHash,
-        keyPrefix,
-        name,
-        scopes,
-        dbScope,
-        userId,
-      ]
+      [userId, keyHash, keyPrefix, name, scopes, dbScope, userId]
     );
 
     return {
