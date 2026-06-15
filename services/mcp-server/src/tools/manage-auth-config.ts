@@ -161,12 +161,30 @@ Example — with substrate access:
     name: "Agent Key",
     created_at: "2024-01-15T10:00:00Z"
   }
-  Note: key works on app endpoints AND on substrate endpoints for this account.`,
+  Note: key works on app endpoints AND on substrate endpoints for this account.
+
+### generate_service_key (app-scoped, for function impersonation)
+Input: {
+  app_id: "app_abc123",
+  action: "generate_service_key",
+  name: "My Function Caller",
+  key_scope: "app"
+}
+Output: { key: "bb_sk_...", scopes: ["app:app_abc123", "ai:gateway"], ... }
+Use the returned key with the X-Butterbase-As-User header to invoke auth:required functions.
+
+### generate_service_key (account-scoped, default)
+Input: {
+  action: "generate_service_key",
+  name: "Platform Admin"
+}
+Output: { key: "bb_sk_...", scopes: ["*"], ... }
+Use for AI gateway, integrations, control-API surfaces.`,
     {
       action: z.enum(['configure_auth_hook', 'update_jwt', 'generate_service_key'])
         .describe('The action to perform'),
       // configure_auth_hook params
-      app_id: z.string().optional().describe('The app ID (required for configure_auth_hook and update_jwt)'),
+      app_id: z.string().optional().describe('The app ID (required for configure_auth_hook and update_jwt); also required for generate_service_key when key_scope === \'app\'.'),
       post_auth_function: z.string().nullable().optional()
         .describe('Name of deployed function to call after auth events, or null to remove (configure_auth_hook only)'),
       // update_jwt params
@@ -180,6 +198,18 @@ Example — with substrate access:
       name: z.string().optional().describe('Descriptive name for the key (e.g., "Production Deploy Key") (generate_service_key only)'),
       substrate_access: z.boolean().optional()
         .describe('When true, the generated key works for BOTH app operations and substrate operations on the caller\'s substrate. Default false (app-only). (generate_service_key only)'),
+      key_scope: z.enum(['account', 'app']).optional()
+        .describe(
+          "Whether the key is scoped to your whole account or to a single app. " +
+          "Use 'app' (required for calling auth:required functions via " +
+          "X-Butterbase-As-User impersonation). Use 'account' for platform APIs. " +
+          "Default 'account'. (generate_service_key only)"
+        ),
+      additional_scopes: z.array(z.string()).optional()
+        .describe(
+          "Optional extra scope tokens to add. Allowed: 'ai:gateway', 'substrate'. " +
+          "Do NOT pass 'app:<id>' or '*' — use key_scope instead. (generate_service_key only)"
+        ),
     },
     {
       title: 'Manage Auth Config',
@@ -226,12 +256,22 @@ Example — with substrate access:
           };
         }
         case 'generate_service_key': {
-          const err = need(args.name, '"name" is required for this action.');
-          if (err) return err;
+          const nameErr = need(args.name, '"name" is required for this action.');
+          if (nameErr) return nameErr;
+
+          if (args.key_scope === 'app') {
+            const appErr = need(args.app_id, '"app_id" is required when key_scope is "app".');
+            if (appErr) return appErr;
+          }
 
           const url = `${getBaseUrl()}/api-keys`;
           const body: Record<string, unknown> = { name: args.name };
           if (args.substrate_access) body.scope = 'both';
+          if (args.key_scope) body.key_scope = args.key_scope;
+          if (args.key_scope === 'app') body.target_app_id = args.app_id;
+          if (args.additional_scopes && args.additional_scopes.length > 0) {
+            body.additional_scopes = args.additional_scopes;
+          }
 
           const res = await fetch(url, {
             method: 'POST',
@@ -243,23 +283,13 @@ Example — with substrate access:
 
           if (!res.ok) {
             return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: JSON.stringify(data, null, 2),
-                },
-              ],
-              isError: true,
+              content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+              isError: true as const,
             };
           }
 
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify(data, null, 2),
-              },
-            ],
+            content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
           };
         }
       }
