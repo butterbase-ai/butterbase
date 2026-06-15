@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@butterbase/cli':
-        specifier: ^0.3.0
-        version: 0.3.2(typescript@6.0.3)
+        specifier: ^0.5.0
+        version: 0.5.0(typescript@6.0.3)
       pg:
         specifier: ^8.20.0
         version: 8.21.0
@@ -30,17 +30,17 @@ importers:
 
 packages:
 
-  '@butterbase/cli@0.3.2':
-    resolution: {integrity: sha512-bCmQLDtJa2L6fFXatTVk3izjv5dxkHVD4u95xg99BMXGN0VqMJQXB8GH7+WYXc5kHmZgg5hBKuWrXjhafZQYZA==}
+  '@butterbase/cli@0.5.0':
+    resolution: {integrity: sha512-nYtPNHlRnhihrtaZFh/OgVKeW3Tut3rGX8nkCI5ZQBdoW+yvOI4G0ZBcFOK5mOXQfmk4WpSI3Az+VvkIY6ZA4A==}
     hasBin: true
 
-  '@butterbase/sdk@2.3.1':
-    resolution: {integrity: sha512-u7Fs/N9GyNeB69S6sbhetKLD/gAXPxo2USvkiKa0OE5l8ZwamehVDv/2VYWLnzfhiBDM2JfOwl9VXlsRq2AnJg==}
+  '@butterbase/sdk@2.5.0':
+    resolution: {integrity: sha512-FKUo2g4dHMGOkQKhItgNTtHAY9X72bciT7PyxG9ZvxLihjSQi+KgxrPGeKpokonZPrXyZsNtCfuTcLAueS4QYg==}
     peerDependencies:
       typescript: '>=5.0.0'
 
-  '@butterbase/shared@0.2.0':
-    resolution: {integrity: sha512-FT9u6YOEjkUfOUFJH92qi5bwOM8c4krifvX8mNF2dFhAOtPjzjewy4R7l+dBD+PGJpSOelfvKfcOItHz57aO/w==}
+  '@butterbase/shared@0.3.0':
+    resolution: {integrity: sha512-zkDw2T/oOYQUexM78Gbp5hWZI/QxBjNn1P1xGt0kD+li7AJb5i1pt6E5A4rdXNXWgpvXHxooNiEhGvum84l6Bg==}
 
   '@cloudflare/kv-asset-handler@0.5.0':
     resolution: {integrity: sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==}
@@ -1048,6 +1048,10 @@ packages:
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
 
+  ignore@5.3.2:
+    resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
+    engines: {node: '>= 4'}
+
   is-interactive@2.0.0:
     resolution: {integrity: sha512-qP1vozQRI+BMOPcjFzrjXuQvdak2pHNUMZoeG2eRbiSqyvbEf/wQtEOTOX1guk6E3t36RkaqiSt8A/6YElNxLQ==}
     engines: {node: '>=12'}
@@ -1431,25 +1435,27 @@ packages:
 
 snapshots:
 
-  '@butterbase/cli@0.3.2(typescript@6.0.3)':
+  '@butterbase/cli@0.5.0(typescript@6.0.3)':
     dependencies:
-      '@butterbase/sdk': 2.3.1(typescript@6.0.3)
+      '@butterbase/sdk': 2.5.0(typescript@6.0.3)
       adm-zip: 0.5.17
       chalk: 5.6.2
       commander: 12.1.0
       dotenv: 16.6.1
       fs-extra: 11.3.5
+      ignore: 5.3.2
       ora: 8.2.0
       prompts: 2.4.2
+      tsx: 4.22.3
     transitivePeerDependencies:
       - typescript
 
-  '@butterbase/sdk@2.3.1(typescript@6.0.3)':
+  '@butterbase/sdk@2.5.0(typescript@6.0.3)':
     dependencies:
-      '@butterbase/shared': 0.2.0
+      '@butterbase/shared': 0.3.0
       typescript: 6.0.3
 
-  '@butterbase/shared@0.2.0': {}
+  '@butterbase/shared@0.3.0': {}
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 
@@ -2133,6 +2139,8 @@ snapshots:
   get-east-asian-width@1.6.0: {}
 
   graceful-fs@4.2.11: {}
+
+  ignore@5.3.2: {}
 
   is-interactive@2.0.0: {}
 
