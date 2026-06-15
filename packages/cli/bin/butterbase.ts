@@ -616,7 +616,14 @@ const keys = program.command('keys').description('Manage API keys');
 keys
   .command('generate [name]')
   .description('Generate a new API key')
-  .option('--scope <scope>', 'Add a permission scope (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--scope <scope>', "Key scope: 'account' (default) or 'app'")
+  .option('--app <id>', 'App ID to bind the key to (required when --scope app)')
+  .option(
+    '--extra-scope <scope>',
+    "Extra scope token (repeatable). Allowed: ai:gateway, substrate",
+    (v, prev: string[]) => prev.concat(v),
+    [] as string[]
+  )
   .option('--substrate', 'Generate a substrate-scoped key (bb_sub_*) usable against /v1/me/substrate/* routes')
   .option('--json', 'Output as JSON')
   .action(keysGenerateCommand);

@@ -381,15 +381,25 @@ export async function getFrontendEnv(appId: string) {
 
 // — Keys wrappers —
 
-export async function generateApiKey(
-  name: string,
-  scopes?: string[],
-  scope?: 'app' | 'substrate'
-) {
-  const body: Record<string, unknown> = { name };
-  if (scopes && scopes.length > 0) body.scopes = scopes;
-  if (scope) body.scope = scope;
-  return apiPost<{ key: string; keyId: string; name: string }>('/api-keys', body);
+export interface GenerateApiKeyArgs {
+  name: string;
+  keyScope?: 'account' | 'app';
+  targetAppId?: string;
+  additionalScopes?: string[];
+  substrateAccess?: 'app' | 'substrate' | 'both';
+}
+
+export async function generateApiKey(args: GenerateApiKeyArgs) {
+  const body: Record<string, unknown> = { name: args.name };
+  if (args.keyScope) body.key_scope = args.keyScope;
+  if (args.targetAppId) body.target_app_id = args.targetAppId;
+  if (args.additionalScopes && args.additionalScopes.length > 0) {
+    body.additional_scopes = args.additionalScopes;
+  }
+  if (args.substrateAccess) body.scope = args.substrateAccess;
+  return apiPost<{ key: string; keyId: string; name: string; prefix: string }>(
+    '/api-keys', body
+  );
 }
 
 export async function listApiKeys() {
