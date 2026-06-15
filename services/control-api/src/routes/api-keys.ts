@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { ApiKeyService } from '../services/api-key-service.js';
+import { ApiKeyService, ScopeValidationError } from '../services/api-key-service.js';
 import { requireUserId } from '../utils/require-auth.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
@@ -10,15 +10,23 @@ export async function apiKeyRoutes(app: FastifyInstance) {
   // POST /api-keys — Generate new API key
   // body.scope='substrate' mints a bb_sub_ key bound to the caller's
   // substrate_user_id; otherwise (default) mints a regular bb_sk_ app key.
+  // New fields: key_scope ('account'|'app'), target_app_id, additional_scopes.
   app.post('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);
-    // Note: `scopes` (legacy array) is parsed for back-compat audit logging only —
-    // the field is no longer forwarded to ApiKeyService. Scope selection has moved to
-    // `key_scope` + `additional_scopes`, wired up in the Task 2 route rewrite.
-    const { name, scopes, scope } = request.body as {
+    const {
+      name,
+      scopes: legacyScopes,
+      scope: substrateAccess,
+      key_scope,
+      target_app_id,
+      additional_scopes,
+    } = request.body as {
       name?: string;
       scopes?: string[];
       scope?: 'app' | 'substrate' | 'both';
+      key_scope?: 'account' | 'app';
+      target_app_id?: string;
+      additional_scopes?: string[];
     };
 
     if (!name || typeof name !== 'string') {
@@ -29,7 +37,8 @@ export async function apiKeyRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl('VALIDATION_INVALID_SCHEMA'),
       }));
     }
-    if (scope !== undefined && scope !== 'app' && scope !== 'substrate' && scope !== 'both') {
+    if (substrateAccess !== undefined &&
+        substrateAccess !== 'app' && substrateAccess !== 'substrate' && substrateAccess !== 'both') {
       return reply.code(400).send(createAgentError({
         code: 'VALIDATION_INVALID_SCOPE',
         message: "scope must be 'app', 'substrate', or 'both'",
@@ -37,26 +46,62 @@ export async function apiKeyRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl('VALIDATION_INVALID_SCOPE'),
       }));
     }
+    if (legacyScopes !== undefined && (key_scope !== undefined || additional_scopes !== undefined)) {
+      return reply.code(400).send(createAgentError({
+        code: 'VALIDATION_INVALID_SCHEMA',
+        message: 'Cannot mix legacy `scopes` array with `key_scope`/`additional_scopes`. Use the new fields.',
+        remediation: 'Drop the `scopes` field and use `key_scope` plus optional `additional_scopes`.',
+        documentation_url: getDocUrl('VALIDATION_INVALID_SCHEMA'),
+      }));
+    }
 
-    const result = await ApiKeyService.generateApiKey(
-      app.controlDb,
-      userId,
-      name,
-      { substrateAccess: scope }
-    );
+    // Legacy `scopes` array (when sent alone) is treated as additional_scopes so
+    // the service-layer allowlist validates it instead of silently dropping it.
+    const effectiveAdditional = additional_scopes ?? legacyScopes;
 
-    logFromRequest(request, {
-      appId: PLATFORM_APP_ID,
-      category: 'admin',
-      eventType: 'api_key.create',
-      action: 'create',
-      resourceType: 'api_key',
-      resourceId: result.keyId,
-      eventData: { name, scopes: scopes ?? ['*'], scope: scope ?? 'app', prefix: result.prefix },
-      success: true,
-    });
+    try {
+      const result = await ApiKeyService.generateApiKey(
+        app.controlDb,
+        userId,
+        name,
+        {
+          keyScope: key_scope ?? 'account',
+          targetAppId: target_app_id,
+          additionalScopes: effectiveAdditional,
+          substrateAccess,
+        }
+      );
 
-    return reply.code(201).send(result);
+      logFromRequest(request, {
+        appId: target_app_id ?? PLATFORM_APP_ID,
+        category: 'admin',
+        eventType: 'api_key.create',
+        action: 'create',
+        resourceType: 'api_key',
+        resourceId: result.keyId,
+        eventData: {
+          name,
+          key_scope: key_scope ?? 'account',
+          target_app_id: target_app_id ?? null,
+          additional_scopes: effectiveAdditional ?? [],
+          substrate_access: substrateAccess ?? 'app',
+          prefix: result.prefix,
+        },
+        success: true,
+      });
+
+      return reply.code(201).send(result);
+    } catch (e) {
+      if (e instanceof ScopeValidationError) {
+        return reply.code(400).send(createAgentError({
+          code: e.code,
+          message: e.message,
+          remediation: 'See key_scope/additional_scopes docs for valid values.',
+          documentation_url: getDocUrl(e.code),
+        }));
+      }
+      throw e;
+    }
   });
 
   // GET /api-keys — List user's API keys
