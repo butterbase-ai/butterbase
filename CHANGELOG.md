@@ -4,6 +4,21 @@
 
 ### Breaking changes
 
+- **CLI**: `bb keys generate --scope` now takes `account|app` (was an arbitrary string array). Use `--extra-scope <token>` for additional allowlisted scope tokens (`ai:gateway`, `substrate`). Migration: `bb keys generate foo --scope ai:gateway` → `bb keys generate foo --scope account --extra-scope ai:gateway`.
+
+### Added
+
+- **CLI**: `bb keys generate --app <id>` flag (required when `--scope app`; auto-resolved from a `bb.config` in the current directory when absent).
+- **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
+- **MCP**: `manage_auth_config:generate_service_key` accepts `key_scope` and `additional_scopes`; requires `app_id` when `key_scope === 'app'`.
+- **Dashboard**: "Generate API key" dialog: scope radio (account / this app) + app picker + advanced scopes disclosure + scope summary on success.
+
+### Fixed
+
+- `AUTH_IMPERSONATION_FORBIDDEN` is now reachable from public surfaces: users can mint the app-scoped service keys needed to call functions with `auth: required` via `X-Butterbase-As-User`, instead of needing to re-run `journey-deploy`.
+
+---
+
 - **MCP**: `create_agent`, `update_agent`, `delete_agent`, `get_agent`, `list_agents`, and `validate_agent_spec` are removed. Use `manage_agents` with `action: "create" | "update" | "delete" | "get" | "list" | "validate"`.
 - **MCP**: `move_app`, `move_app_status`, and `teardown_source_replica` are removed. Use `manage_app` with `action: "move" | "move_status" | "teardown_source_replica"`.
 
