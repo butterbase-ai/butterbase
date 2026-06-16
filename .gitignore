@@ -11,3 +11,7 @@ __pycache__/
 Example Code/
 stress_test_results*
 *.superpowers
+
+# Repo uses npm + package-lock.json; ignore stray pnpm lockfiles created
+# when someone runs `pnpm install` in a workspace.
+pnpm-lock.yaml
