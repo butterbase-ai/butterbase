@@ -165,10 +165,21 @@ Artifacts are written via the `upsert_source_artifact` capability through `POST 
 Full-text search across `decisions`, `commitments`, `learnings`, and `source_artifacts`.
 
 ```
-GET /v1/me/substrate/memory/search?q=billing&kinds=decisions,commitments&limit=20
+GET /v1/me/substrate/memory?q=billing&kinds=decisions,commitments&limit=20
 ```
 
 `kinds` accepts any subset of `decisions`, `commitments`, `learnings`, `source_artifacts` (comma-separated). Omitting `kinds` searches all of them.
+
+| Query param | Type | Default |
+|---|---|---|
+| `q` | string (FTS query; omit or pass `*` to list all) | _none_ |
+| `kinds` | comma-separated subset of `decisions`, `commitments`, `learnings`, `source_artifacts` | _all_ |
+| `limit` | int (1–200) | 20 |
+| `match` | `and` \| `or` \| `phrase` | `and` |
+
+When `q` is omitted or empty (or `*`), the endpoint returns the most recent items across the selected kinds ordered by `updated_at DESC`, capped by `limit`. No full-text ranking is performed — `rank` will be `null` in those rows. Use this as a "list all" path.
+
+`match` controls how multi-word queries are evaluated: `and` requires all words (default), `or` matches any word, `phrase` requires words to appear adjacently. Omitting `match` is identical to `match=and`.
 
 Response:
 
@@ -181,7 +192,10 @@ Response:
       "title": "Adopt substrate",
       "body_text": "agent memory needs a single source of truth",
       "rank": 0.18,
-      "updated_at": "2026-05-31T…"
+      "updated_at": "2026-05-31T…",
+      "source_artifact_id": null,
+      "supersedes": null,
+      "status": "active"
     },
     {
       "id": "art_01…",
@@ -189,11 +203,22 @@ Response:
       "title": "Weekly product sync — 2026-06-09",
       "body_text": "Reviewed phase 6 scope; Alice owns billing migration.",
       "rank": 0.12,
-      "updated_at": "2026-06-09T…"
+      "updated_at": "2026-06-09T…",
+      "source_artifact_id": null,
+      "supersedes": null,
+      "status": null
     }
   ]
 }
 ```
+
+Three fields are present on every result row:
+
+| Field | Type | Notes |
+|---|---|---|
+| `source_artifact_id` | `string \| null` | Back-pointer to the source artifact this memory was extracted from. `null` for source artifacts themselves and for items ingested without one. |
+| `supersedes` | `string \| null` | Only set on `kind: 'decision'` rows where this decision replaces an earlier one (holds the replaced decision ID). |
+| `status` | `string \| null` | `'active'` / `'superseded'` / `'reversed'` / `'expired'` for decisions; `'proposed'` / `'confirmed'` / `'fulfilled'` / `'expired'` / `'broken'` / etc. for commitments; `null` for learnings and source_artifacts. |
 
 ## Capabilities
 

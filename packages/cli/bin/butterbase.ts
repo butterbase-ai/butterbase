@@ -1429,9 +1429,10 @@ substrateArtifacts
 
 // substrate memory
 substrate
-  .command('memory <query>')
+  .command('memory [query]')
   .description('Semantic search over substrate memory (decisions, commitments, learnings, source artifacts)')
   .option('--limit <n>', 'Max results')
+  .option('--match <mode>', 'Match mode: and, or, or phrase (default: and)')
   .option('--json', 'Output raw JSON')
   .action((query, opts) => substrateMemoryCommand(query, opts));
 

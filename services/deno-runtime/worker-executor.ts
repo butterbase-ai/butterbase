@@ -924,7 +924,7 @@ function buildWorkerCode(
         const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/memory:search', {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
-          body: JSON.stringify({ q, kinds: opts?.kinds, limit: opts?.limit }),
+          body: JSON.stringify({ q, kinds: opts?.kinds, limit: opts?.limit, match: opts?.match }),
         });
         if (!res.ok) throw new Error('substrate.searchMemory failed: ' + res.status);
         return (await res.json()).results;

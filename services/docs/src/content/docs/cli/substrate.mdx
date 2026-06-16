@@ -85,8 +85,51 @@ butterbase substrate artifacts get art_01H... --json | jq -r '.content'
 
 Full-text search across decisions, commitments, learnings, and source artifacts.
 
+`<query>` is optional. When omitted, the command returns the most recent items across the selected kinds ordered by recency, capped by `--limit`.
+
 ```bash
+# search with a query
 butterbase substrate memory "OKR planning Q3" --limit 10
+
+# list most recent items (no query)
+butterbase substrate memory --limit 20
+
+# require all words (default)
+butterbase substrate memory "billing migration" --match and
+
+# match any word
+butterbase substrate memory "billing migration" --match or
+
+# require adjacent words (phrase search)
+butterbase substrate memory "billing migration" --match phrase
+```
+
+| Option | Type | Default |
+|---|---|---|
+| `<query>` | string (FTS query; omit to list all) | _none_ |
+| `--match <mode>` | `and` \| `or` \| `phrase` | `and` |
+| `--kinds <k,...>` | comma-separated: `decisions`, `commitments`, `learnings`, `source_artifacts` | _all_ |
+| `--limit <n>` | int (1–200) | 20 |
+| `--json` | flag | _table output_ |
+
+Each result row includes `id`, `kind`, `title`, `body_text`, `rank` (null when no query), `updated_at`, `source_artifact_id`, `supersedes`, and `status`.
+
+```json
+{
+  "results": [
+    {
+      "id": "dec_01…",
+      "kind": "decision",
+      "title": "Adopt substrate",
+      "body_text": "agents need shared memory",
+      "rank": 0.18,
+      "updated_at": "2026-05-31T…",
+      "source_artifact_id": null,
+      "supersedes": null,
+      "status": "active"
+    }
+  ]
+}
 ```
 
 ## Outbox

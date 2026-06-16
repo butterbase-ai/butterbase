@@ -86,9 +86,9 @@ export async function substrateArtifactsGetCommand(id: string, _opts: { json?: b
   } catch (e) { handleAuthError(e); }
 }
 
-export async function substrateMemoryCommand(query: string, opts: { limit?: string; json?: boolean }) {
+export async function substrateMemoryCommand(query: string | undefined, opts: { limit?: string; match?: string; json?: boolean }) {
   try {
-    const q = qs({ q: query, limit: opts.limit });
+    const q = qs({ q: query, limit: opts.limit, match: opts.match });
     const res = await apiGet<{ results: any[] }>(`/v1/me/substrate/memory${q}`);
     if (opts.json) { console.log(JSON.stringify(res, null, 2)); return; }
     for (const r of res.results ?? []) {
