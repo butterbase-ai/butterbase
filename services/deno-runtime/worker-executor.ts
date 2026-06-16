@@ -929,6 +929,21 @@ function buildWorkerCode(
         if (!res.ok) throw new Error('substrate.searchMemory failed: ' + res.status);
         return (await res.json()).results;
       },
+      async listMemory(opts) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/memory:list', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+          body: JSON.stringify({
+            source_artifact_id: opts?.source_artifact_id,
+            kinds: opts?.kinds,
+            superseded: opts?.superseded,
+            before: opts?.before,
+            limit: opts?.limit,
+          }),
+        });
+        if (!res.ok) throw new Error('substrate.listMemory failed: ' + res.status);
+        return (await res.json()).results;
+      },
       async upsertEntity(payload) {
         return await this.propose('upsert_entity', payload);
       },

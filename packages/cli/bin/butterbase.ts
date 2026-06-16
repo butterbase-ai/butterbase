@@ -123,6 +123,7 @@ import {
   substrateArtifactsListCommand,
   substrateArtifactsGetCommand,
   substrateMemoryCommand,
+  substrateMemoryListCommand,
   substrateOutboxListCommand,
   substrateOutboxCancelCommand,
   substrateOutboxRetryCommand,
@@ -1435,6 +1436,17 @@ substrate
   .option('--match <mode>', 'Match mode: and, or, or phrase (default: and)')
   .option('--json', 'Output raw JSON')
   .action((query, opts) => substrateMemoryCommand(query, opts));
+
+substrate
+  .command('memory-list')
+  .description('List memory entries with optional filters')
+  .option('--source-artifact-id <id>', 'Filter by source artifact ID')
+  .option('--kinds <list>', 'Filter by kinds (comma-separated)')
+  .option('--superseded <bool>', 'Filter by superseded status (true|false)')
+  .option('--before <iso>', 'Pagination cursor (ISO date)')
+  .option('--limit <n>', 'Max results')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => substrateMemoryListCommand(opts));
 
 // substrate outbox
 const substrateOutbox = substrate.command('outbox').description('Manage the substrate outbox queue');

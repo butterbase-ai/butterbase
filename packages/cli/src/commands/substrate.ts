@@ -97,6 +97,30 @@ export async function substrateMemoryCommand(query: string | undefined, opts: { 
   } catch (e) { handleAuthError(e); }
 }
 
+export async function substrateMemoryListCommand(opts: {
+  sourceArtifactId?: string;
+  kinds?: string;
+  superseded?: string;
+  before?: string;
+  limit?: string;
+  json?: boolean;
+}) {
+  try {
+    const q = qs({
+      source_artifact_id: opts.sourceArtifactId,
+      kinds: opts.kinds,
+      superseded: opts.superseded,
+      before: opts.before,
+      limit: opts.limit,
+    });
+    const res = await apiGet<{ results: any[]; next_before: string | null }>(`/v1/me/substrate/memory/list${q}`);
+    if (opts.json) { console.log(JSON.stringify(res, null, 2)); return; }
+    for (const r of res.results ?? []) {
+      console.log(`${r.kind?.padEnd(12)} ${r.id?.padEnd(24)} ${r.title ?? ''}`);
+    }
+  } catch (e) { handleAuthError(e); }
+}
+
 export async function substrateOutboxListCommand(opts: { state?: string; json?: boolean }) {
   try {
     const q = qs({ state: opts.state });

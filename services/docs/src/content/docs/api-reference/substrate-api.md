@@ -181,6 +181,10 @@ When `q` is omitted or empty (or `*`), the endpoint returns the most recent item
 
 `match` controls how multi-word queries are evaluated: `and` requires all words (default), `or` matches any word, `phrase` requires words to appear adjacently. Omitting `match` is identical to `match=and`.
 
+:::note[When to use which]
+Use `GET /v1/me/substrate/memory` when you need FTS-ranked results and a relevance score (`rank`). Use `GET /v1/me/substrate/memory/list` when you need chronological ordering or structural filters (kind subset, source artifact scope, superseded status). The two endpoints share the same underlying tables but serve different query shapes.
+:::
+
 Response:
 
 ```json
@@ -219,6 +223,92 @@ Three fields are present on every result row:
 | `source_artifact_id` | `string \| null` | Back-pointer to the source artifact this memory was extracted from. `null` for source artifacts themselves and for items ingested without one. |
 | `supersedes` | `string \| null` | Only set on `kind: 'decision'` rows where this decision replaces an earlier one (holds the replaced decision ID). |
 | `status` | `string \| null` | `'active'` / `'superseded'` / `'reversed'` / `'expired'` for decisions; `'proposed'` / `'confirmed'` / `'fulfilled'` / `'expired'` / `'broken'` / etc. for commitments; `null` for learnings and source_artifacts. |
+
+## Memory list (chronological browse)
+
+Chronological browse across `decisions`, `commitments`, `learnings`, and `source_artifacts` with structural filters. Unlike the FTS search endpoint, results are always ordered by `updated_at DESC` and there is no relevance ranking.
+
+```
+GET /v1/me/substrate/memory/list?source_artifact_id=art_…&kinds=decisions,commitments,learnings&limit=25
+```
+
+| Query param | Type | Default |
+|---|---|---|
+| `kinds` | comma-separated subset of `decisions`, `commitments`, `learnings`, `source_artifacts` | _all_ |
+| `source_artifact_id` | string | _none_ |
+| `superseded` | `true` \| `false` | _include all_ |
+| `before` | ISO timestamp (keyset cursor from `next_before`) | _none_ |
+| `limit` | int (1–100) | 25 |
+
+**`source_artifact_id`** restricts results to rows linked to that source artifact. Source-artifact rows themselves are excluded from the response when this filter is set, because they carry no `source_artifact_id` back-pointer of their own.
+
+**`superseded`** when `false`, excludes decisions with `status='superseded'` and commitments with `status='expired'`. When `true` or omitted, all statuses are returned.
+
+**`before`** accepts the `next_before` value from a previous response for keyset pagination. Pass it verbatim — it is an ISO timestamp.
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "id": "dec_…",
+      "kind": "decision",
+      "title": "…",
+      "body_text": "…",
+      "updated_at": "…",
+      "source_artifact_id": "art_…",
+      "supersedes": "dec_…",
+      "status": "active"
+    }
+  ],
+  "next_before": "2026-06-09T14:32:00.000Z"
+}
+```
+
+`next_before` is `null` when there are no more pages.
+
+`status` is set on decisions and commitments; `null` for learnings and source_artifacts. `supersedes` is only set on decisions that replace an earlier decision.
+
+### Example — list every decision, commitment, and learning extracted from a meeting
+
+```
+GET /v1/me/substrate/memory/list
+  ?source_artifact_id=art_01JXYZ…
+  &kinds=decisions,commitments,learnings
+  &superseded=false
+  &limit=50
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "id": "dec_01JXYZ…",
+      "kind": "decision",
+      "title": "Ship phase 6 by end of June",
+      "body_text": "Agreed in the weekly sync. Alice owns the billing migration.",
+      "updated_at": "2026-06-09T14:30:00.000Z",
+      "source_artifact_id": "art_01JXYZ…",
+      "supersedes": null,
+      "status": "active"
+    },
+    {
+      "id": "com_01JXYZ…",
+      "kind": "commitment",
+      "title": "Alice to deliver billing migration PR by 2026-06-13",
+      "body_text": null,
+      "updated_at": "2026-06-09T14:30:01.000Z",
+      "source_artifact_id": "art_01JXYZ…",
+      "supersedes": null,
+      "status": "confirmed"
+    }
+  ],
+  "next_before": null
+}
+```
 
 ## Capabilities
 
@@ -424,4 +514,4 @@ The stream does not include payloads — clients are expected to re-fetch the af
 
 - **CLI**: see [`butterbase substrate`](/cli/substrate/) for every command.
 - **TypeScript SDK**: substrate calls are namespaced under `butterbase.substrate.*` (mirror of the HTTP surface).
-- **Inside a function**: `ctx.substrate.*` (`propose`, `getEntity`, `findEntities`, `searchMemory`) — see [Substrate](/core-concepts/substrate/).
+- **Inside a function**: `ctx.substrate.*` (`propose`, `getEntity`, `findEntities`, `searchMemory`, `listMemory`) — see [Substrate](/core-concepts/substrate/).

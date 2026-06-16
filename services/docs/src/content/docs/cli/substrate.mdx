@@ -132,6 +132,23 @@ Each result row includes `id`, `kind`, `title`, `body_text`, `rank` (null when n
 }
 ```
 
+## Memory list (chronological browse)
+
+Chronological browse across decisions, commitments, learnings, and source artifacts with structural filters. Results are ordered by `updated_at DESC`. There is no relevance ranking.
+
+```bash
+butterbase substrate memory-list --source-artifact-id art_01H... --kinds decisions,commitments,learnings --superseded false --limit 50
+```
+
+| Flag | Type | Default |
+|---|---|---|
+| `--kinds <k,...>` | comma-separated: `decisions`, `commitments`, `learnings`, `source_artifacts` | _all_ |
+| `--source-artifact-id <id>` | string — restrict to rows linked to this source artifact (source_artifact rows excluded when set) | _none_ |
+| `--superseded <bool>` | `true` \| `false` — when `false`, excludes superseded decisions and expired commitments | _include all_ |
+| `--before <timestamp>` | ISO timestamp keyset cursor (paste `next_before` from a previous response) | _none_ |
+| `--limit <n>` | int (1–100) | 25 |
+| `--json` | flag | _table output_ |
+
 ## Outbox
 
 ```bash
