@@ -55,13 +55,27 @@ The available calls are:
 
 ### Capabilities at a glance
 
-| Capability | Purpose |
-|---|---|
-| `record_decision` | Write a decision row. Auto-executes. |
-| `record_commitment` | Write a commitment. Accepts an optional `source_artifact_id` to link the commitment back to the meeting / email / document it was extracted from. |
-| `record_learning` | Write a learning. Auto-executes. |
-| `upsert_source_artifact` | Insert or update a source artifact (transcript, email thread, document). Idempotent by `(external_system, external_id)`; reversible; `yolo_eligible`. Use this when an app ingests source material the agent should later be able to cite. |
-| `send_email_draft`, … | Side-effecting capabilities. Always require approval for agent proposers. |
+Every proposed action either executes immediately or blocks in `proposed` state until the owner approves it. The `Default policy` column shows which behavior the platform applies out of the box. Owners can override with `dangerously_skip_approval: true` on a single call, but agents cannot.
+
+A non-obvious asymmetry that has tripped up agent authors: **`record_decision` auto-approves, but `record_principle`, `supersede_decision`, and `retire_principle` all require human approval by default.** All three mutate the policy-enforcement layer of the substrate, so the platform conservatively gates them.
+
+| Capability | Default policy | Reversible | Restricted | Notes |
+|---|---|---|---|---|
+| `record_decision` | auto | yes | no | Write a decision row. |
+| `record_commitment` | auto | yes | no | Write a commitment. Accepts optional `source_artifact_id`. |
+| `record_learning` | auto | yes | no | Write a retrospective learning. |
+| `upsert_entity` | auto | yes | no | Create or update an entity. Dedups by id > canonical_keys > primary_email. |
+| `update_entity` | auto | yes | no | Replace `attrs` wholesale on an existing entity (legacy). Prefer `patch_entity`. |
+| `patch_entity` | auto | yes | no | RFC 7396 merge-patch over `attrs`. Supports `if_updated_at` optimistic lock. |
+| `upsert_source_artifact` | auto | yes | no | Insert or update a source artifact. Idempotent by `(external_system, external_id)`. |
+| `revert_action` | auto | no | no | Revert a single reversible ledger action. |
+| `record_principle` | approval_required | no | no | Record a durable principle used by the policy engine. Requires human approval. |
+| `supersede_decision` | approval_required | no | no | Mark an existing decision superseded and insert a replacement. Requires human approval. |
+| `retire_principle` | approval_required | no | no | Set a principle to `status=expired`. Requires human approval. |
+| `delete_entity` | approval_required | no | no | Hard-delete an entity. Not reversible. |
+| `merge_entities` | approval_required | no | no | Collapse a duplicate entity into a survivor via alias. Not reversible. |
+| `bulk_revert_actions` | approval_required | no | no | Revert up to 200 ledger actions in one call. Per-action failures are collected, not raised. |
+| `send_email_draft` | approval_required | no | no | Record an intended email draft. Side-effecting; always requires approval for agent proposers. |
 
 When the function runs on behalf of an app, the proposer is recorded as `kind: 'agent'` and certain side-effect capabilities require human approval even if the user has [`yolo_mode`](#yolo-mode) on.
 

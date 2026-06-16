@@ -3841,6 +3841,136 @@ Action groups:
 - **Entities:** \`find_entities\`, \`get_entity\`.
 - **Source artifacts:** \`list_source_artifacts\`, \`get_source_artifact\`. Writes use \`propose\` with \`capability: "upsert_source_artifact"\`.
 - **Memory:** \`search_memory\` — FTS-ranked search; params: \`q\` (optional; omit or pass \`*\` to list the most recent items by \`updated_at DESC\`, no FTS ranking), \`kinds\` (subset of \`decisions\`, \`commitments\`, \`learnings\`, \`source_artifacts\`), \`limit\`, \`match\` (\`and\` [default] | \`or\` | \`phrase\`). Each result row includes \`source_artifact_id\` (back-pointer to the source artifact, nullable), \`supersedes\` (replaced decision ID, only on \`kind: 'decision'\`), and \`status\` (\`active\`/\`superseded\`/\`reversed\`/\`expired\` for decisions; \`proposed\`/\`confirmed\`/\`fulfilled\`/\`expired\`/\`broken\`/etc. for commitments; \`null\` for learnings and source_artifacts). \`list_memory\` — chronological browse (no FTS); params: \`kinds\`, \`source_artifact_id\` (restrict to rows linked to this artifact; source_artifact rows excluded when set), \`superseded\` (boolean; \`false\` excludes superseded decisions and expired commitments), \`before\` (ISO timestamp keyset cursor from \`next_before\`), \`limit\` (1–100, default 25). Returns \`{ results, next_before }\`.
+
+### Capability default-policy table
+
+Every proposed action either auto-executes or blocks for owner approval. The default_policy column is the platform default; owners can pass \`dangerously_skip_approval: true\` on a single call to override. Agents cannot override — side-effecting capabilities always gate on a human when the proposer is \`kind: 'agent'\`.
+
+Critical asymmetry: \`record_decision\` auto-approves, but \`record_principle\`, \`supersede_decision\`, and \`retire_principle\` all require human approval by default. These three mutate the policy-enforcement layer of the substrate.
+
+| Capability | Default policy | Reversible | Notes |
+|---|---|---|---|
+| record_decision | auto | yes | |
+| record_commitment | auto | yes | |
+| record_learning | auto | yes | |
+| upsert_entity | auto | yes | Dedups by id > canonical_keys > primary_email |
+| update_entity | auto | yes | Replaces attrs wholesale; prefer patch_entity |
+| patch_entity | auto | yes | RFC 7396 merge-patch over attrs |
+| upsert_source_artifact | auto | yes | Idempotent by (external_system, external_id) |
+| revert_action | auto | no | Reverts a single reversible ledger action |
+| record_principle | approval_required | no | Mutates policy layer |
+| supersede_decision | approval_required | no | Mutates policy layer |
+| retire_principle | approval_required | no | Mutates policy layer |
+| delete_entity | approval_required | no | Hard delete, not recoverable |
+| merge_entities | approval_required | no | Loser becomes an alias |
+| bulk_revert_actions | approval_required | no | Up to 200 actions; per-action failures collected, not raised |
+| send_email_draft | approval_required | no | Side-effecting; yolo_eligible but agent proposals always gate |
+
+### Capability payload schemas
+
+Exact field names and types. Fields without a default are required.
+
+\`\`\`
+record_decision
+  title: string
+  kind: 'operational'|'strategic'|'mission'|'vision'|'principle'|'policy_decision'
+  rationale?: string
+  salience?: 'ambient'|'normal'|'archival'  (default: 'normal')
+  source_artifact_id?: string
+
+record_commitment
+  description: string
+  status: 'proposed'|'tentative'|'confirmed'|'fulfilled'|'expired'|'broken'
+  from_entity?: string
+  to_entity?: string
+  amount?: number
+  unit?: string
+  due_at?: string  (ISO 8601)
+  source_artifact_id?: string
+  attrs?: object
+
+record_learning
+  title: string
+  description: string
+  resolution_taken?: string
+  related_decision_id?: string
+  source_artifact_id?: string
+
+record_principle
+  title: string
+  applies_to: object  (e.g. {capability: "send_email_draft", target_role: "investor"})
+  constraint_spec: object  (e.g. {type: "max_per_week", params: {n: 2}})
+  rationale?: string
+  salience?: 'ambient'|'normal'|'archival'  (default: 'ambient')
+
+supersede_decision
+  old_decision_id: string
+  new_title: string
+  kind: 'operational'|'strategic'|'mission'|'vision'|'principle'|'policy_decision'
+  new_rationale?: string
+
+retire_principle
+  principle_id: string
+  reason: string
+
+upsert_entity
+  type: 'person'|'company'|'fund'|'workspace'|'team'|'project'|'event'|'agent'|'self'
+  display_name: string
+  id?: string
+  primary_email?: string  (email)
+  canonical_keys?: object
+  linked_app_user_id?: string  (uuid)
+  linked_app_id?: string
+  attrs?: object
+
+update_entity
+  id: string
+  display_name?: string
+  primary_email?: string  (email)
+  attrs?: object
+
+patch_entity
+  id: string
+  display_name?: string
+  primary_email?: string  (email)
+  attrs_patch?: object  (RFC 7396 merge-patch; null value removes a key)
+  if_updated_at?: string  (datetime, optimistic concurrency lock)
+
+merge_entities
+  loser_id: string
+  winner_id: string
+  reason: string
+
+delete_entity
+  id: string
+  reason: string
+
+upsert_source_artifact
+  kind: string
+  title: string
+  id?: string
+  external_system?: string
+  external_id?: string
+  summary?: string
+  content?: string
+  storage_object_id?: string
+  url?: string
+  links?: {entity_ids?: string[], project_tags?: string[]}
+  attrs?: object
+
+revert_action
+  action_id: string
+
+bulk_revert_actions
+  action_ids: string[]  (1–200 items)
+  reason: string
+
+send_email_draft
+  to: string
+  subject: string
+  body: string
+  target_role?: string
+\`\`\`
 - **Outbox:** \`list_outbox\`, \`retry_outbox\`, \`cancel_outbox\`.
 - **Attention rules:** \`list_rules\`, \`get_rule\`, \`create_rule\`, \`update_rule\`, \`delete_rule\`, \`enable_rule\`, \`disable_rule\`, \`list_rule_firings\`.
 - **Snapshots & settings:** \`snapshots\`, \`get_settings\`, \`set_yolo\`.

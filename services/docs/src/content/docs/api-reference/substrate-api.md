@@ -319,6 +319,105 @@ A few capabilities accept fields that aren't obvious from their name:
 | `record_commitment` | `source_artifact_id`, `attrs` | `source_artifact_id` links the commitment back to the artifact it was extracted from (FK to `source_artifacts(id) ON DELETE SET NULL`). `attrs` is a free-form JSON bag for caller metadata. |
 | `upsert_source_artifact` | `id`, `external_system`, `external_id`, `summary`, `content`, `storage_object_id`, `url`, `links`, `attrs` | Required: `kind`, `title`. Idempotent by `(external_system, external_id)` when `id` is omitted. `default_policy='auto'`, `reversible=true`, `yolo_eligible=true`. Returns `{ artifact_id, was_insert, before }`. |
 
+## Capability payloads
+
+For the default-policy and flags for every capability, see the [Capabilities at a glance table](/core-concepts/substrate/#capabilities-at-a-glance) in the concept doc.
+
+The schemas below list exact field names and types as defined in the capability Zod schemas. Fields marked optional may be omitted.
+
+### Memory writes
+
+```
+record_decision
+  required: title (string), kind ('operational'|'strategic'|'mission'|'vision'|'principle'|'policy_decision')
+  optional: rationale (string), salience ('ambient'|'normal'|'archival', default 'normal'), source_artifact_id (string)
+  default_policy: auto
+
+record_commitment
+  required: description (string), status ('proposed'|'tentative'|'confirmed'|'fulfilled'|'expired'|'broken')
+  optional: from_entity (string), to_entity (string), amount (number), unit (string), due_at (string, ISO 8601), source_artifact_id (string), attrs (object)
+  default_policy: auto
+
+record_learning
+  required: title (string), description (string)
+  optional: resolution_taken (string), related_decision_id (string), source_artifact_id (string)
+  default_policy: auto
+
+record_principle
+  required: title (string), applies_to (object, e.g. {capability: "send_email_draft", target_role: "investor"}), constraint_spec (object, e.g. {type: "max_per_week", params: {n: 2}})
+  optional: rationale (string), salience ('ambient'|'normal'|'archival', default 'ambient')
+  default_policy: approval_required
+
+supersede_decision
+  required: old_decision_id (string), new_title (string), kind ('operational'|'strategic'|'mission'|'vision'|'principle'|'policy_decision')
+  optional: new_rationale (string)
+  default_policy: approval_required
+
+retire_principle
+  required: principle_id (string), reason (string)
+  default_policy: approval_required
+```
+
+### Entity writes
+
+```
+upsert_entity
+  required: type ('person'|'company'|'fund'|'workspace'|'team'|'project'|'event'|'agent'|'self'), display_name (string)
+  optional: id (string), primary_email (string, email), canonical_keys (object), linked_app_user_id (string, uuid), linked_app_id (string), attrs (object)
+  default_policy: auto
+  note: dedups by id > canonical_keys > primary_email
+
+update_entity
+  required: id (string)
+  optional: display_name (string), primary_email (string, email), attrs (object)
+  default_policy: auto
+  note: replaces attrs wholesale; prefer patch_entity for partial updates
+
+patch_entity
+  required: id (string)
+  optional: display_name (string), primary_email (string, email), attrs_patch (object, RFC 7396 merge-patch), if_updated_at (string, datetime, optimistic lock)
+  default_policy: auto
+
+merge_entities
+  required: loser_id (string), winner_id (string), reason (string)
+  default_policy: approval_required
+
+delete_entity
+  required: id (string), reason (string)
+  default_policy: approval_required
+```
+
+### Source artifacts
+
+```
+upsert_source_artifact
+  required: kind (string), title (string)
+  optional: id (string), external_system (string), external_id (string), summary (string), content (string), storage_object_id (string), url (string), links ({entity_ids?: string[], project_tags?: string[]}), attrs (object)
+  default_policy: auto
+  note: idempotent by (external_system, external_id) when id is omitted
+```
+
+### Revert / bulk-revert
+
+```
+revert_action
+  required: action_id (string)
+  default_policy: auto
+
+bulk_revert_actions
+  required: action_ids (string[], 1–200 items), reason (string)
+  default_policy: approval_required
+```
+
+### Side-effecting
+
+```
+send_email_draft
+  required: to (string), subject (string), body (string)
+  optional: target_role (string)
+  default_policy: approval_required
+```
+
 ## Daily snapshots
 
 Snapshots are the basis for attention-rule `snapshot_predicate` conditions.
