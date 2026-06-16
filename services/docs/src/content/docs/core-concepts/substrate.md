@@ -137,6 +137,18 @@ Prefer `merge_entities` when collapsing duplicates (preserves alias resolution).
 
 For soft delete, patch the entity instead: `ctx.substrate.patchEntity(id, { deleted_at: new Date().toISOString() })` and filter on read.
 
+### Idempotent proposals
+
+Pass `idempotency_key` as a third argument to `propose` (or as a body field on `POST /v1/me/substrate/actions/propose`) to protect retries — network blips, lambda re-runs, or duplicate webhook deliveries — from doubling actions in the ledger:
+
+```ts
+await ctx.substrate.propose('record_decision', payload, {
+  idempotency_key: 'mtg_2026-06-16:record_decision',
+});
+```
+
+Keys are scoped per substrate user (two users can reuse the same string without collision) and are retained forever — there is no TTL. Pick keys that are stable for the unit of work you are deduplicating; a meeting ID combined with the capability is a good pattern, while a per-call UUID defeats the purpose. When the key matches a prior action, the response returns that prior action's verdict and result unchanged, and includes `"replay": true` so callers can tell a replay apart from a fresh propose.
+
 ### Bulk revert (`bulk_revert_actions`)
 
 Revert up to 200 ledger actions in one call. Per-action failures are collected into the response, not raised. Use after a buggy ingest run produced many bad actions:

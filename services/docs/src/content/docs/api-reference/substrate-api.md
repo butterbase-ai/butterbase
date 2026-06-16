@@ -68,6 +68,35 @@ Response:
 
 Verdict values: `auto_approved`, `auto_approved_yolo`, `requires_approval`, `rejected`.
 
+#### `idempotency_key` — deduplicating retries
+
+`idempotency_key` is an optional string field in the request body. When set, the substrate deduplicates retries so that a network blip or a lambda re-run does not produce a duplicate ledger row.
+
+- **Scope:** per substrate user. Two different users can use the same key without collision.
+- **Window:** forever. Keys are never aged out. Pick keys that are stable for the unit-of-work you are deduplicating (e.g. `meeting_id + ":" + capability` is a good choice; a per-call UUID is not).
+- **Collision behavior:** if a prior action with the same `(substrate_user_id, idempotency_key)` exists, the propose returns that prior action's verdict and result without executing the capability again.
+- **Response shape on replay:** the response is identical to the original — same `action_id`, same `verdict` (with `conflicts` always empty on replay), same `result`. The replay reflects the action's **current** status: if the original action was later approved, `requires_approval` on the replay will be `false`. A top-level `"replay": true` field is added so callers can distinguish a replay from a fresh propose.
+
+Example — same key sent twice:
+
+```json
+// First call — fresh propose
+POST /v1/me/substrate/actions/propose
+{
+  "capability": "record_decision",
+  "payload": { "title": "Migrate billing to Stripe", "kind": "strategic" },
+  "idempotency_key": "mtg_2026-06-16:record_decision"
+}
+// → { "action_id": "act_01…", "verdict": { … }, "requires_approval": false, "result": { … } }
+
+// Second call — same key, same user
+POST /v1/me/substrate/actions/propose
+{ …same body… }
+// → { "action_id": "act_01…", "verdict": { … }, "requires_approval": false, "result": { … }, "replay": true }
+```
+
+For the capability payload schemas, see [Capability payloads](#capability-payloads).
+
 ### List
 
 ```
