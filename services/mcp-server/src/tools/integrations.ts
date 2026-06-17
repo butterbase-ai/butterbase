@@ -40,7 +40,12 @@ Example — configure (BYO OAuth credentials, e.g. Twitter/X):
   Input:  {
     app_id: "app_abc123", action: "configure", toolkit: "twitter",
     scopes: ["tweet.read", "tweet.write", "users.read", "offline.access"],
-    oauth_credentials: { client_id: "...", client_secret: "...", auth_scheme: "OAUTH2" }
+    oauth_credentials: {
+      client_id: "...",
+      client_secret: "...",
+      generic_id: "<Twitter App Bearer Token>",  // toolkit-specific extra field
+      auth_scheme: "OAUTH2"
+    }
   }
   Output: { id: "...", toolkit_slug: "twitter", enabled: true }
 
@@ -90,7 +95,7 @@ Common errors:
           'GOOGLE_SERVICE_ACCOUNT', 'NO_AUTH', 'BASIC_WITH_JWT', 'CALCOM_AUTH',
           'SERVICE_ACCOUNT', 'SAML', 'DCR_OAUTH', 'S2S_OAUTH2',
         ]).optional(),
-      }).optional().describe('BYO OAuth credentials for non-curated toolkits (configure only). Omit for curated toolkits.'),
+      }).catchall(z.union([z.string(), z.number(), z.boolean()])).optional().describe('BYO OAuth credentials for non-curated toolkits (configure / rotate_credentials). Required fields vary by toolkit — pass any extras the toolkit needs (e.g. twitter requires `generic_id` as the App Bearer Token). Omit for curated toolkits.'),
       // list_available params
       search: z.string().optional().describe('Search query to find integrations by name (list_available only)'),
       // list_tools params (toolkit is already above, shared)

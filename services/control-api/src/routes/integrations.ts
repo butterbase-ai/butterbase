@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppResolver } from '../services/app-resolver.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
-import { createAgentError } from '../services/error-handler.js';
+import { createAgentError, ErrorResponses } from '../services/error-handler.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
 import { config } from '../config.js';
 import {
@@ -44,6 +44,13 @@ export function withStatusParams(base: string, params: Record<string, string>): 
 
 // --- Schemas ---
 
+// passthrough() — Composio toolkits ask for varying extra fields beyond
+// client_id/client_secret (e.g. Twitter requires `generic_id` as the App
+// Bearer Token for app-only endpoints). The Composio auth_config schema
+// already validates per-toolkit requirements, so we don't whitelist —
+// any string/number/boolean field on oauth_credentials is forwarded as a
+// Composio credential. `auth_scheme` is the one structural field we
+// intercept and strip out before forwarding.
 const oauthCredentialsSchema = z.object({
   client_id: z.string().min(1).max(500),
   client_secret: z.string().min(1).max(2000),
@@ -52,7 +59,7 @@ const oauthCredentialsSchema = z.object({
     'GOOGLE_SERVICE_ACCOUNT', 'NO_AUTH', 'BASIC_WITH_JWT', 'CALCOM_AUTH',
     'SERVICE_ACCOUNT', 'SAML', 'DCR_OAUTH', 'S2S_OAUTH2',
   ]).optional(),
-}).strict();
+}).catchall(z.union([z.string(), z.number(), z.boolean()]));
 
 const configureSchema = z.object({
   toolkit: z.string().min(1).max(100),
@@ -147,7 +154,14 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
-      const body = configureSchema.parse(request.body);
+      const parsed = configureSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send(ErrorResponses.validationError(
+          'Invalid configure body',
+          parsed.error.issues,
+        ));
+      }
+      const body = parsed.data;
       const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId);
 
       try {
@@ -220,7 +234,14 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
-      const body = oauthCredentialsSchema.parse(request.body);
+      const parsed = oauthCredentialsSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send(ErrorResponses.validationError(
+          'Invalid oauth_credentials body',
+          parsed.error.issues,
+        ));
+      }
+      const body = parsed.data;
       const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId);
 
       try {

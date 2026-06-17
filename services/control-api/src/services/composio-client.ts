@@ -155,11 +155,13 @@ function mapComposioAuthConfigError(err: any, toolkit: string, byo: boolean): Er
 export type OAuthCredentials = {
   client_id: string;
   client_secret: string;
-  /** Composio auth scheme. Defaults to 'OAUTH2'. */
+  /** Composio auth scheme. Defaults to 'OAUTH2'. Stripped before forwarding. */
   auth_scheme?:
     | 'OAUTH2' | 'OAUTH1' | 'API_KEY' | 'BASIC' | 'BILLCOM_AUTH' | 'BEARER_TOKEN'
     | 'GOOGLE_SERVICE_ACCOUNT' | 'NO_AUTH' | 'BASIC_WITH_JWT' | 'CALCOM_AUTH'
     | 'SERVICE_ACCOUNT' | 'SAML' | 'DCR_OAUTH' | 'S2S_OAUTH2';
+  /** Any additional credential fields the toolkit requires (e.g. twitter's `generic_id`). */
+  [key: string]: string | number | boolean | undefined;
 };
 
 /**
@@ -198,12 +200,15 @@ export async function configureIntegration(
   let authConfig: { id?: string };
   try {
     if (oauthCredentials) {
-      const authScheme = oauthCredentials.auth_scheme ?? 'OAUTH2';
-      const credentials: Record<string, string> = {
-        client_id: oauthCredentials.client_id,
-        client_secret: oauthCredentials.client_secret,
-      };
-      if (scopes && scopes.length) credentials.scopes = scopes.join(',');
+      const { auth_scheme: authSchemeOpt, ...rest } = oauthCredentials;
+      const authScheme = authSchemeOpt ?? 'OAUTH2';
+      const credentials: Record<string, string | number | boolean> = {};
+      for (const [k, v] of Object.entries(rest)) {
+        if (v !== undefined) credentials[k] = v;
+      }
+      if (scopes && scopes.length && credentials.scopes === undefined) {
+        credentials.scopes = scopes.join(',');
+      }
       authConfig = await composio.authConfigs.create(composioSlug, {
         type: 'use_custom_auth',
         authScheme,
@@ -278,10 +283,11 @@ export async function rotateIntegrationCredentials(
     );
   }
 
-  const credentials: Record<string, string> = {
-    client_id: oauthCredentials.client_id,
-    client_secret: oauthCredentials.client_secret,
-  };
+  const { auth_scheme: _ignored, ...rest } = oauthCredentials;
+  const credentials: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(rest)) {
+    if (v !== undefined) credentials[k] = v;
+  }
 
   try {
     await composio.authConfigs.update(authConfigId, {
