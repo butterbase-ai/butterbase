@@ -195,7 +195,7 @@ describe('MCP Server Tools', () => {
     const actions = ((tool!.inputSchema as unknown) as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'configure', 'disable', 'execute_action', 'list_available', 'list_connected', 'list_tools',
+      'configure', 'disable', 'execute_action', 'list_available', 'list_connected', 'list_tools', 'rotate_credentials',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [

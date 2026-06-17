@@ -26,6 +26,7 @@ import {
   integrationsListCommand,
   integrationsConfigCommand,
   integrationsConfigureCommand,
+  integrationsRotateCommand,
   integrationsDisableCommand,
   integrationsConnectCommand,
   integrationsConnectionsCommand,
@@ -670,7 +671,19 @@ integrations
   .option('--app <app-id>', 'App ID')
   .option('--display-name <name>', 'Human-readable display name')
   .option('--scope <scope>', 'Add a scope (repeatable)', (v, prev: string[]) => prev.concat(v), [] as string[])
+  .option('--client-id <id>', 'BYO OAuth client_id (falls back to <TOOLKIT>_CLIENT_ID env)')
+  .option('--client-secret <secret>', 'BYO OAuth client_secret (falls back to <TOOLKIT>_CLIENT_SECRET env)')
+  .option('--auth-scheme <scheme>', 'Composio auth scheme for BYO creds (default OAUTH2)')
   .action(integrationsConfigureCommand);
+
+integrations
+  .command('rotate <toolkit>')
+  .description('Rotate BYO OAuth credentials on an existing integration')
+  .option('--app <app-id>', 'App ID')
+  .option('--client-id <id>', 'New OAuth client_id (falls back to <TOOLKIT>_CLIENT_ID env)')
+  .option('--client-secret <secret>', 'New OAuth client_secret (falls back to <TOOLKIT>_CLIENT_SECRET env)')
+  .option('--auth-scheme <scheme>', 'Composio auth scheme (default OAUTH2)')
+  .action(integrationsRotateCommand);
 
 integrations
   .command('disable <toolkit>')

@@ -4,14 +4,53 @@ import {
   getAvailableIntegrations,
   getIntegrationConfig,
   configureIntegration,
+  rotateIntegrationCredentials,
   disableIntegration,
   connectIntegration,
   listConnections,
   disconnectAccount,
   listIntegrationTools,
   executeIntegrationTool,
+  type OAuthCredentialsInput,
 } from '../lib/api-client.js';
 import { getCurrentAppId } from '../lib/config.js';
+
+/**
+ * Resolve BYO OAuth credentials from CLI flags, falling back to env vars.
+ *
+ * Env-var convention mirrors how function deploys pull secrets: the toolkit
+ * slug is uppercased and hyphens become underscores, then suffixed with
+ * `_CLIENT_ID` / `_CLIENT_SECRET`. Examples:
+ *   twitter         → TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET
+ *   google-calendar → GOOGLE_CALENDAR_CLIENT_ID, GOOGLE_CALENDAR_CLIENT_SECRET
+ *
+ * Returns undefined when neither flag nor env supplies a client_id (so the
+ * caller can fall through to Composio-managed auth for curated toolkits).
+ * Throws when one half is provided and the other isn't — that's almost
+ * always a typo, not an intent to half-configure.
+ */
+function resolveOAuthCredentials(
+  toolkit: string,
+  opts: { clientId?: string; clientSecret?: string; authScheme?: string },
+  options: { requireBoth?: boolean } = {},
+): OAuthCredentialsInput | undefined {
+  const envBase = toolkit.toUpperCase().replace(/-/g, '_');
+  const clientId = opts.clientId ?? process.env[`${envBase}_CLIENT_ID`];
+  const clientSecret = opts.clientSecret ?? process.env[`${envBase}_CLIENT_SECRET`];
+  if (!clientId && !clientSecret) return options.requireBoth ? (() => {
+    throw new Error(
+      `Missing OAuth credentials. Pass --client-id and --client-secret, ` +
+      `or export ${envBase}_CLIENT_ID and ${envBase}_CLIENT_SECRET.`,
+    );
+  })() : undefined;
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      `Incomplete OAuth credentials. Provide BOTH client_id and client_secret ` +
+      `(via --client-id/--client-secret or ${envBase}_CLIENT_ID/${envBase}_CLIENT_SECRET).`,
+    );
+  }
+  return { client_id: clientId, client_secret: clientSecret, auth_scheme: opts.authScheme };
+}
 
 async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
@@ -72,14 +111,55 @@ export async function integrationsConfigCommand(options: { app?: string }) {
   }
 }
 
-export async function integrationsConfigureCommand(toolkit: string, options: { app?: string; displayName?: string; scope?: string[] }) {
+export async function integrationsConfigureCommand(
+  toolkit: string,
+  options: {
+    app?: string;
+    displayName?: string;
+    scope?: string[];
+    clientId?: string;
+    clientSecret?: string;
+    authScheme?: string;
+  },
+) {
   const appId = await requireAppId(options.app);
-  const spinner = ora(`Configuring ${toolkit}...`).start();
+  let creds: OAuthCredentialsInput | undefined;
   try {
-    await configureIntegration(appId, toolkit, options.displayName, options.scope);
+    creds = resolveOAuthCredentials(toolkit, options);
+  } catch (error) {
+    console.error(chalk.red(`✗ ${(error as Error).message}`));
+    process.exit(1);
+  }
+  const spinner = ora(`Configuring ${toolkit}${creds ? ' (BYO credentials)' : ''}...`).start();
+  try {
+    await configureIntegration(appId, toolkit, options.displayName, options.scope, creds);
     spinner.succeed(`${toolkit} configured`);
   } catch (error) {
     spinner.fail(`Failed to configure ${toolkit}`);
+    console.error(chalk.red((error as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function integrationsRotateCommand(
+  toolkit: string,
+  options: { app?: string; clientId?: string; clientSecret?: string; authScheme?: string },
+) {
+  const appId = await requireAppId(options.app);
+  let creds: OAuthCredentialsInput;
+  try {
+    creds = resolveOAuthCredentials(toolkit, options, { requireBoth: true })!;
+  } catch (error) {
+    console.error(chalk.red(`✗ ${(error as Error).message}`));
+    process.exit(1);
+    return;
+  }
+  const spinner = ora(`Rotating credentials for ${toolkit}...`).start();
+  try {
+    await rotateIntegrationCredentials(appId, toolkit, creds);
+    spinner.succeed(`${toolkit} credentials rotated`);
+  } catch (error) {
+    spinner.fail(`Failed to rotate ${toolkit} credentials`);
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

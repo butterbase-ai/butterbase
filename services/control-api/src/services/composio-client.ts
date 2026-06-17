@@ -116,8 +116,61 @@ function composioUserId(appId: string, userId: string): string {
 // ==========================================
 
 /**
+ * Map a Composio SDK error from authConfigs.create() to a Butterbase
+ * domain error. The Composio SDK throws errors with .status / .message
+ * (and sometimes .code) — we sniff the message for the well-known
+ * "managed auth not available" signal and surface a 400 with remediation;
+ * otherwise we wrap as INTEGRATIONS_UPSTREAM_ERROR (502) so the caller
+ * doesn't see a generic INTERNAL_ERROR.
+ */
+function mapComposioAuthConfigError(err: any, toolkit: string, byo: boolean): Error {
+  const rawMsg: string = err?.message || err?.error?.message || String(err);
+  const status: number | undefined = err?.status ?? err?.statusCode ?? err?.response?.status;
+  const lower = rawMsg.toLowerCase();
+  const managedUnavailable =
+    !byo && (
+      lower.includes('managed auth') ||
+      lower.includes('use_composio_managed_auth') ||
+      lower.includes('no auth config') ||
+      lower.includes('not supported') ||
+      lower.includes('not available') ||
+      lower.includes('credentials are required') ||
+      status === 404
+    );
+  if (managedUnavailable) {
+    return Object.assign(
+      new Error(
+        `Toolkit "${toolkit}" does not have Composio-managed OAuth credentials. ` +
+        `Provide oauth_credentials.{client_id, client_secret} when calling configure.`,
+      ),
+      { code: 'INTEGRATIONS_BYO_CREDENTIALS_REQUIRED', upstreamMessage: rawMsg, upstreamStatus: status },
+    );
+  }
+  return Object.assign(
+    new Error(`Composio rejected the auth config for "${toolkit}": ${rawMsg}`),
+    { code: 'INTEGRATIONS_UPSTREAM_ERROR', upstreamMessage: rawMsg, upstreamStatus: status },
+  );
+}
+
+export type OAuthCredentials = {
+  client_id: string;
+  client_secret: string;
+  /** Composio auth scheme. Defaults to 'OAUTH2'. */
+  auth_scheme?:
+    | 'OAUTH2' | 'OAUTH1' | 'API_KEY' | 'BASIC' | 'BILLCOM_AUTH' | 'BEARER_TOKEN'
+    | 'GOOGLE_SERVICE_ACCOUNT' | 'NO_AUTH' | 'BASIC_WITH_JWT' | 'CALCOM_AUTH'
+    | 'SERVICE_ACCOUNT' | 'SAML' | 'DCR_OAUTH' | 'S2S_OAUTH2';
+};
+
+/**
  * Configure an integration for an app.
  * Creates a Composio auth config (or returns existing one).
+ *
+ * If `oauthCredentials` is provided, registers a use_custom_auth config with the
+ * caller's OAuth client_id/client_secret (BYO). Otherwise, asks Composio to use
+ * its managed auth — which only works for toolkits Composio has provisioned
+ * client credentials for. Non-curated toolkits without managed auth fail here
+ * and surface as INTEGRATIONS_BYO_CREDENTIALS_REQUIRED.
  */
 export async function configureIntegration(
   controlDb: Pool,
@@ -125,6 +178,7 @@ export async function configureIntegration(
   toolkit: string,
   scopes?: string[],
   displayName?: string,
+  oauthCredentials?: OAuthCredentials,
 ): Promise<IntegrationConfig> {
   const composio = getComposioClient();
   const runtimePool = await getRuntimeDbForApp(controlDb, appId);
@@ -140,10 +194,31 @@ export async function configureIntegration(
   }
 
   // Composio authConfigs.create requires uppercase slug with hyphens removed (e.g. "GOOGLECALENDAR", "GITHUB")
-  const authConfig = await composio.authConfigs.create(toolkit.toUpperCase().replace(/-/g, ''), {
-    type: 'use_composio_managed_auth',
-    name: `${appId}_${toolkit}`,
-  });
+  const composioSlug = toolkit.toUpperCase().replace(/-/g, '');
+  let authConfig: { id?: string };
+  try {
+    if (oauthCredentials) {
+      const authScheme = oauthCredentials.auth_scheme ?? 'OAUTH2';
+      const credentials: Record<string, string> = {
+        client_id: oauthCredentials.client_id,
+        client_secret: oauthCredentials.client_secret,
+      };
+      if (scopes && scopes.length) credentials.scopes = scopes.join(',');
+      authConfig = await composio.authConfigs.create(composioSlug, {
+        type: 'use_custom_auth',
+        authScheme,
+        credentials,
+        name: `${appId}_${toolkit}`,
+      } as any);
+    } else {
+      authConfig = await composio.authConfigs.create(composioSlug, {
+        type: 'use_composio_managed_auth',
+        name: `${appId}_${toolkit}`,
+      });
+    }
+  } catch (err: any) {
+    throw mapComposioAuthConfigError(err, toolkit, !!oauthCredentials);
+  }
 
   const authConfigId = authConfig.id ?? '';
 
@@ -160,6 +235,70 @@ export async function configureIntegration(
     [appId, toolkit, authConfigId, displayName || null, JSON.stringify(scopes || [])],
   );
 
+  return result.rows[0];
+}
+
+/**
+ * Rotate the BYO OAuth credentials on an existing integration.
+ *
+ * Preserves the Composio auth_config_id (and therefore all existing
+ * connected accounts that reference it) while swapping in new
+ * client_id/client_secret. Use when the OAuth client is rotated by the
+ * upstream provider — call this instead of disable+configure, which
+ * would orphan every connected account.
+ *
+ * The toolkit must already be configured. If it isn't, throws
+ * INTEGRATIONS_TOOLKIT_NOT_ENABLED.
+ */
+export async function rotateIntegrationCredentials(
+  controlDb: Pool,
+  appId: string,
+  toolkit: string,
+  oauthCredentials: OAuthCredentials,
+): Promise<IntegrationConfig> {
+  const composio = getComposioClient();
+  const runtimePool = await getRuntimeDbForApp(controlDb, appId);
+
+  const existing = await runtimePool.query(
+    'SELECT * FROM app_integration_configs WHERE app_id = $1 AND toolkit_slug = $2',
+    [appId, toolkit],
+  );
+  if (existing.rows.length === 0) {
+    throw Object.assign(
+      new Error(`Integration "${toolkit}" is not configured for this app`),
+      { code: 'INTEGRATIONS_TOOLKIT_NOT_ENABLED' },
+    );
+  }
+
+  const authConfigId: string = existing.rows[0].composio_auth_config_id;
+  if (!authConfigId) {
+    throw Object.assign(
+      new Error(`Integration "${toolkit}" has no Composio auth_config_id; reconfigure with oauth_credentials instead`),
+      { code: 'INTEGRATIONS_BYO_CREDENTIALS_REQUIRED' },
+    );
+  }
+
+  const credentials: Record<string, string> = {
+    client_id: oauthCredentials.client_id,
+    client_secret: oauthCredentials.client_secret,
+  };
+
+  try {
+    await composio.authConfigs.update(authConfigId, {
+      type: 'custom',
+      credentials,
+    } as any);
+  } catch (err: any) {
+    throw mapComposioAuthConfigError(err, toolkit, true);
+  }
+
+  const result = await runtimePool.query(
+    `UPDATE app_integration_configs
+       SET updated_at = now(), enabled = true
+     WHERE app_id = $1 AND toolkit_slug = $2
+     RETURNING *`,
+    [appId, toolkit],
+  );
   return result.rows[0];
 }
 
@@ -374,6 +513,36 @@ export async function disconnectAccount(
 // Integration discovery
 // ==========================================
 
+export interface ToolkitListing {
+  toolkit: string;
+  displayName: string;
+  curated: boolean;
+  /** Auth schemes supported by the toolkit (e.g. ["OAUTH2", "API_KEY"]). */
+  auth_schemes: string[];
+  /**
+   * True if the toolkit has NO Composio-managed credentials available
+   * (caller must supply oauth_credentials when calling configure).
+   * False if Composio can issue managed credentials for at least one scheme.
+   */
+  requires_byo_credentials: boolean;
+}
+
+function projectToolkit(t: any): ToolkitListing {
+  const slug = (t?.slug || '').toLowerCase();
+  const managedSchemes: string[] = Array.isArray(t?.composioManagedAuthSchemes)
+    ? t.composioManagedAuthSchemes : [];
+  const detailModes: string[] = Array.isArray(t?.authConfigDetails)
+    ? t.authConfigDetails.map((d: any) => d?.mode).filter(Boolean) : [];
+  const authSchemes = detailModes.length ? detailModes : managedSchemes;
+  return {
+    toolkit: slug,
+    displayName: t?.name || t?.slug || '',
+    curated: CURATED_TOOLKITS.includes(slug as any),
+    auth_schemes: authSchemes,
+    requires_byo_credentials: managedSchemes.length === 0,
+  };
+}
+
 /**
  * Search the Composio catalog for available integrations.
  * Uses composio.toolkits.list() which returns toolkit-level metadata
@@ -381,7 +550,7 @@ export async function disconnectAccount(
  */
 export async function searchToolkits(
   search: string,
-): Promise<Array<{ toolkit: string; displayName: string; curated: boolean }>> {
+): Promise<ToolkitListing[]> {
   const composio = getComposioClient();
   // toolkits.get(params) returns a paginated list; the SDK doesn't support
   // free-text search, so we fetch a page and filter client-side.
@@ -396,11 +565,7 @@ export async function searchToolkits(
       return slug.includes(query) || name.includes(query);
     })
     .slice(0, 20)
-    .map((t: any) => ({
-      toolkit: (t.slug || '').toLowerCase(),
-      displayName: t.name || t.slug || '',
-      curated: CURATED_TOOLKITS.includes((t.slug || '').toLowerCase() as any),
-    }));
+    .map(projectToolkit);
 }
 
 // ==========================================

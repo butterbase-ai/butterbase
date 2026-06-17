@@ -451,11 +451,35 @@ export async function getIntegrationConfig(appId: string) {
   return apiGet<{ integrations: any[] }>(`/v1/${appId}/integrations/config`);
 }
 
-export async function configureIntegration(appId: string, toolkit: string, displayName?: string, scopes?: string[]) {
+export type OAuthCredentialsInput = {
+  client_id: string;
+  client_secret: string;
+  auth_scheme?: string;
+};
+
+export async function configureIntegration(
+  appId: string,
+  toolkit: string,
+  displayName?: string,
+  scopes?: string[],
+  oauthCredentials?: OAuthCredentialsInput,
+) {
   const body: Record<string, unknown> = { toolkit };
   if (displayName) body.displayName = displayName;
   if (scopes && scopes.length > 0) body.scopes = scopes;
+  if (oauthCredentials) body.oauth_credentials = oauthCredentials;
   return apiPost<any>(`/v1/${appId}/integrations/configure`, body);
+}
+
+export async function rotateIntegrationCredentials(
+  appId: string,
+  toolkit: string,
+  oauthCredentials: OAuthCredentialsInput,
+) {
+  return apiPatch<any>(
+    `/v1/${appId}/integrations/configure/${encodeURIComponent(toolkit)}/credentials`,
+    oauthCredentials,
+  );
 }
 
 export async function disableIntegration(appId: string, toolkit: string) {

@@ -8,6 +8,7 @@ import { logAuditEvent } from '../services/audit/audit-events-service.js';
 import { config } from '../config.js';
 import {
   configureIntegration,
+  rotateIntegrationCredentials,
   listIntegrationConfigs,
   disableIntegration,
   initiateConnection,
@@ -43,10 +44,21 @@ export function withStatusParams(base: string, params: Record<string, string>): 
 
 // --- Schemas ---
 
+const oauthCredentialsSchema = z.object({
+  client_id: z.string().min(1).max(500),
+  client_secret: z.string().min(1).max(2000),
+  auth_scheme: z.enum([
+    'OAUTH2', 'OAUTH1', 'API_KEY', 'BASIC', 'BILLCOM_AUTH', 'BEARER_TOKEN',
+    'GOOGLE_SERVICE_ACCOUNT', 'NO_AUTH', 'BASIC_WITH_JWT', 'CALCOM_AUTH',
+    'SERVICE_ACCOUNT', 'SAML', 'DCR_OAUTH', 'S2S_OAUTH2',
+  ]).optional(),
+}).strict();
+
 const configureSchema = z.object({
   toolkit: z.string().min(1).max(100),
   scopes: z.array(z.string()).optional(),
   displayName: z.string().max(100).optional(),
+  oauth_credentials: oauthCredentialsSchema.optional(),
 });
 
 const connectSchema = z.object({
@@ -141,6 +153,7 @@ export async function integrationRoutes(app: FastifyInstance) {
       try {
         const integration = await configureIntegration(
           app.controlDb, resolved.id, body.toolkit, body.scopes, body.displayName,
+          body.oauth_credentials,
         );
 
         await logAuditEvent(app.controlDb, {
@@ -149,7 +162,11 @@ export async function integrationRoutes(app: FastifyInstance) {
           eventType: 'integration.configure',
           actorType: 'api_key',
           actorId: auth.userId,
-          eventData: { toolkit: body.toolkit, scopes: body.scopes },
+          eventData: {
+            toolkit: body.toolkit,
+            scopes: body.scopes,
+            byo_credentials: !!body.oauth_credentials,
+          },
           success: true,
         });
 
@@ -160,6 +177,91 @@ export async function integrationRoutes(app: FastifyInstance) {
             code: error.code,
             message: error.message,
             remediation: 'Set COMPOSIO_API_KEY environment variable on the platform.',
+          }));
+        }
+        if (error.code === 'INTEGRATIONS_BYO_CREDENTIALS_REQUIRED') {
+          return reply.status(400).send(createAgentError({
+            code: error.code,
+            message: error.message,
+            remediation:
+              `Register an OAuth app with "${body.toolkit}", then call configure again with ` +
+              `oauth_credentials: { client_id, client_secret }. ` +
+              `For OAuth2 toolkits the redirect URI to register is your Butterbase callback URL: ` +
+              `${config.apiBaseUrl}/v1/<app_id>/integrations/callback`,
+          }));
+        }
+        if (error.code === 'INTEGRATIONS_UPSTREAM_ERROR') {
+          return reply.status(502).send(createAgentError({
+            code: error.code,
+            message: error.message,
+            remediation:
+              'The integration provider (Composio) rejected the auth config. ' +
+              'Check the toolkit slug and (if BYO) the OAuth credentials, then retry.',
+          }));
+        }
+        throw error;
+      }
+    }
+  );
+
+  // ==========================================
+  // PATCH /v1/:appId/integrations/configure/:toolkit/credentials — Rotate BYO creds
+  // ==========================================
+  app.patch<{ Params: { appId: string; toolkit: string } }>(
+    '/v1/:appId/integrations/configure/:toolkit/credentials',
+    async (request, reply) => {
+      const { appId, toolkit } = request.params;
+      const auth = request.auth;
+      if (!auth?.userId || auth.authMethod === 'end_user_jwt') {
+        return reply.status(401).send(createAgentError({
+          code: 'AUTH_REQUIRED',
+          message: 'API key or platform JWT required',
+          remediation: 'Provide an API key.',
+        }));
+      }
+
+      const body = oauthCredentialsSchema.parse(request.body);
+      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId);
+
+      try {
+        const integration = await rotateIntegrationCredentials(
+          app.controlDb, resolved.id, toolkit, body,
+        );
+
+        await logAuditEvent(app.controlDb, {
+          appId: resolved.id,
+          category: 'admin',
+          eventType: 'integration.rotate_credentials',
+          actorType: 'api_key',
+          actorId: auth.userId,
+          eventData: { toolkit },
+          success: true,
+        });
+
+        return reply.status(200).send(integration);
+      } catch (error: any) {
+        if (error.code === 'INTEGRATIONS_TOOLKIT_NOT_ENABLED') {
+          return reply.status(404).send(createAgentError({
+            code: error.code,
+            message: error.message,
+            remediation: `Configure "${toolkit}" first with POST /v1/:appId/integrations/configure.`,
+          }));
+        }
+        if (error.code === 'INTEGRATIONS_BYO_CREDENTIALS_REQUIRED') {
+          return reply.status(400).send(createAgentError({
+            code: error.code,
+            message: error.message,
+            remediation:
+              `Reconfigure "${toolkit}" with oauth_credentials: { client_id, client_secret } via POST.`,
+          }));
+        }
+        if (error.code === 'INTEGRATIONS_UPSTREAM_ERROR') {
+          return reply.status(502).send(createAgentError({
+            code: error.code,
+            message: error.message,
+            remediation:
+              'The integration provider (Composio) rejected the credential update. ' +
+              'Check the new client_id/client_secret and retry.',
           }));
         }
         throw error;
@@ -228,11 +330,16 @@ export async function integrationRoutes(app: FastifyInstance) {
         }
       }
 
-      // Return curated list
+      // Return curated list. Curated toolkits use Composio-managed auth, so
+      // the caller never needs to provide BYO credentials. `auth_schemes` is
+      // left empty here — callers wanting the full scheme list per toolkit
+      // can use the `search` query param to hit the live catalog.
       const curatedList = CURATED_TOOLKITS.map(slug => ({
         toolkit: slug,
         displayName: slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
         curated: true,
+        auth_schemes: [],
+        requires_byo_credentials: false,
       }));
       return reply.send({ integrations: curatedList });
     }
