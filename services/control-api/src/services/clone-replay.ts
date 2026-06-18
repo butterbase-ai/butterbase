@@ -838,6 +838,19 @@ async function replayOauthConfigs(
  * namespaced to the DEST app (`{destAppId}_{toolkit}`), then insert the dest
  * row with the new id.
  *
+ * BYO vs managed auth: if the source row has `credentials_encrypted` set, the
+ * config was created with `use_custom_auth` (caller-supplied OAuth client). We
+ * decrypt those credentials and recreate the auth config with the same
+ * authScheme + credentials on the dest. Otherwise we use
+ * `use_composio_managed_auth`, which only works for curated toolkits Composio
+ * has provisioned client credentials for.
+ *
+ * Legacy data caveat: rows created before the credentials_encrypted column
+ * existed have NULL there. If such a row was originally BYO, the managed-auth
+ * fallback will fail at Composio and the row is dropped with a warning telling
+ * the cloner to reconfigure on the dest. This cannot be repaired retroactively
+ * because Composio doesn't expose stored client secrets on read.
+ *
  * Soft-fail semantics:
  *   - Composio not configured → 1 warning, return.
  *   - Per-row Composio/DB error → 1 warning, continue with next row.
@@ -851,10 +864,18 @@ export async function replayIntegrations(
   warnings: string[],
   logger: ReplayLogger,
 ): Promise<void> {
-  let src: { rows: Array<{ toolkit_slug: string; display_name: string | null; scopes: unknown }> };
+  let src: {
+    rows: Array<{
+      toolkit_slug: string;
+      display_name: string | null;
+      scopes: unknown;
+      credentials_encrypted: string | null;
+      auth_scheme: string | null;
+    }>;
+  };
   try {
     src = await sourceRuntimePool.query(
-      `SELECT toolkit_slug, display_name, scopes
+      `SELECT toolkit_slug, display_name, scopes, credentials_encrypted, auth_scheme
          FROM app_integration_configs
         WHERE app_id = $1 AND enabled = true
         ORDER BY toolkit_slug`,
@@ -899,10 +920,27 @@ export async function replayIntegrations(
       }
 
       const composioSlug = row.toolkit_slug.toUpperCase().replace(/-/g, '');
-      const authConfig = await composio.authConfigs.create(composioSlug, {
-        type: 'use_composio_managed_auth',
-        name: `${destAppId}_${row.toolkit_slug}`,
-      });
+
+      let authConfig: { id?: string };
+      if (row.credentials_encrypted) {
+        const encryptionKey = process.env.AUTH_ENCRYPTION_KEY ?? config.auth.encryptionKey;
+        if (!encryptionKey) {
+          throw new Error('AUTH_ENCRYPTION_KEY not set; cannot decrypt BYO credentials for replay');
+        }
+        const credsPlain = JSON.parse(decrypt(row.credentials_encrypted, encryptionKey)) as
+          Record<string, string | number | boolean>;
+        authConfig = await composio.authConfigs.create(composioSlug, {
+          type: 'use_custom_auth',
+          authScheme: row.auth_scheme ?? 'OAUTH2',
+          credentials: credsPlain,
+          name: `${destAppId}_${row.toolkit_slug}`,
+        } as any);
+      } else {
+        authConfig = await composio.authConfigs.create(composioSlug, {
+          type: 'use_composio_managed_auth',
+          name: `${destAppId}_${row.toolkit_slug}`,
+        });
+      }
       const newAuthConfigId = authConfig.id ?? '';
       if (!newAuthConfigId) {
         throw new Error('composio returned empty auth config id');
@@ -912,15 +950,21 @@ export async function replayIntegrations(
 
       await destRuntimePool.query(
         `INSERT INTO app_integration_configs
-           (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes)
-         VALUES ($1, $2, $3, $4, true, $5::jsonb)
+           (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes,
+            credentials_encrypted, auth_scheme)
+         VALUES ($1, $2, $3, $4, true, $5::jsonb, $6, $7)
          ON CONFLICT (app_id, toolkit_slug) DO UPDATE
            SET composio_auth_config_id = EXCLUDED.composio_auth_config_id,
                display_name            = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
                scopes                  = EXCLUDED.scopes,
+               credentials_encrypted   = EXCLUDED.credentials_encrypted,
+               auth_scheme             = EXCLUDED.auth_scheme,
                enabled                 = true,
                updated_at              = now()`,
-        [destAppId, row.toolkit_slug, newAuthConfigId, row.display_name, scopesJson],
+        [
+          destAppId, row.toolkit_slug, newAuthConfigId, row.display_name, scopesJson,
+          row.credentials_encrypted, row.auth_scheme,
+        ],
       );
       succeeded += 1;
     } catch (err) {

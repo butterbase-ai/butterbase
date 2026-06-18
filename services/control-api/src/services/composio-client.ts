@@ -3,6 +3,7 @@ import { Composio } from '@composio/core';
 import { createHmac, randomUUID } from 'crypto';
 import type { Pool } from 'pg';
 import { config } from '../config.js';
+import { encrypt } from './crypto.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 
@@ -198,6 +199,10 @@ export async function configureIntegration(
   // Composio authConfigs.create requires uppercase slug with hyphens removed (e.g. "GOOGLECALENDAR", "GITHUB")
   const composioSlug = toolkit.toUpperCase().replace(/-/g, '');
   let authConfig: { id?: string };
+  // Captured for persistence so clone-replay can recreate the auth config
+  // on a destination app. See db/runtime-plane/025_byo_integration_credentials.sql.
+  let credentialsForStorage: Record<string, string | number | boolean> | null = null;
+  let authSchemeForStorage: string | null = null;
   try {
     if (oauthCredentials) {
       const { auth_scheme: authSchemeOpt, ...rest } = oauthCredentials;
@@ -209,6 +214,8 @@ export async function configureIntegration(
       if (scopes && scopes.length && credentials.scopes === undefined) {
         credentials.scopes = scopes.join(',');
       }
+      credentialsForStorage = credentials;
+      authSchemeForStorage = authScheme;
       authConfig = await composio.authConfigs.create(composioSlug, {
         type: 'use_custom_auth',
         authScheme,
@@ -227,17 +234,36 @@ export async function configureIntegration(
 
   const authConfigId = authConfig.id ?? '';
 
+  // Encrypt BYO credentials at rest. Managed-auth rows leave both columns NULL.
+  // AUTH_ENCRYPTION_KEY is required in production (services/control-api/src/index.ts
+  // refuses to boot without it); dev mode has a hardcoded fallback via config.ts.
+  let credentialsEncrypted: string | null = null;
+  if (credentialsForStorage) {
+    const encryptionKey = process.env.AUTH_ENCRYPTION_KEY ?? config.auth.encryptionKey;
+    if (!encryptionKey) {
+      throw new Error('AUTH_ENCRYPTION_KEY must be set to persist BYO integration credentials');
+    }
+    credentialsEncrypted = encrypt(JSON.stringify(credentialsForStorage), encryptionKey);
+  }
+
   // Store in our DB (app_integration_configs is runtime-tier)
   const result = await runtimePool.query(
-    `INSERT INTO app_integration_configs (app_id, toolkit_slug, composio_auth_config_id, display_name, scopes)
-     VALUES ($1, $2, $3, $4, $5::jsonb)
+    `INSERT INTO app_integration_configs
+       (app_id, toolkit_slug, composio_auth_config_id, display_name, scopes,
+        credentials_encrypted, auth_scheme)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
      ON CONFLICT (app_id, toolkit_slug)
      DO UPDATE SET composio_auth_config_id = EXCLUDED.composio_auth_config_id,
-       display_name = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
-       scopes = EXCLUDED.scopes,
+       display_name          = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
+       scopes                = EXCLUDED.scopes,
+       credentials_encrypted = EXCLUDED.credentials_encrypted,
+       auth_scheme           = EXCLUDED.auth_scheme,
        enabled = true, updated_at = now()
      RETURNING *`,
-    [appId, toolkit, authConfigId, displayName || null, JSON.stringify(scopes || [])],
+    [
+      appId, toolkit, authConfigId, displayName || null, JSON.stringify(scopes || []),
+      credentialsEncrypted, authSchemeForStorage,
+    ],
   );
 
   return result.rows[0];
@@ -283,7 +309,7 @@ export async function rotateIntegrationCredentials(
     );
   }
 
-  const { auth_scheme: _ignored, ...rest } = oauthCredentials;
+  const { auth_scheme: authSchemeOpt, ...rest } = oauthCredentials;
   const credentials: Record<string, string | number | boolean> = {};
   for (const [k, v] of Object.entries(rest)) {
     if (v !== undefined) credentials[k] = v;
@@ -298,12 +324,22 @@ export async function rotateIntegrationCredentials(
     throw mapComposioAuthConfigError(err, toolkit, true);
   }
 
+  // Refresh the at-rest credentials so clone-replay can recreate this config.
+  const encryptionKey = process.env.AUTH_ENCRYPTION_KEY ?? config.auth.encryptionKey;
+  if (!encryptionKey) {
+    throw new Error('AUTH_ENCRYPTION_KEY must be set to persist BYO integration credentials');
+  }
+  const credentialsEncrypted = encrypt(JSON.stringify(credentials), encryptionKey);
+
   const result = await runtimePool.query(
     `UPDATE app_integration_configs
-       SET updated_at = now(), enabled = true
+       SET credentials_encrypted = $3,
+           auth_scheme           = COALESCE($4, auth_scheme),
+           updated_at            = now(),
+           enabled               = true
      WHERE app_id = $1 AND toolkit_slug = $2
      RETURNING *`,
-    [appId, toolkit],
+    [appId, toolkit, credentialsEncrypted, authSchemeOpt ?? null],
   );
   return result.rows[0];
 }
