@@ -53,12 +53,16 @@ async function scanOnce(
       // window if no success exists yet). The streak_key is the
       // last-success timestamp (or 'none'); the dedup key is keyed on it
       // so the next streak after a successful run gets a fresh key.
+      //
+      // The last_success CTE is INTENTIONALLY unbounded by the lookback
+      // window: streak_key must be stable for the lifetime of a streak,
+      // and bounding it would let an old success age out of the window
+      // and silently rotate the dedup key, re-firing the email mid-streak.
       const r = await runtimePool.query<FailureGroup>(
         `WITH last_success AS (
            SELECT function_id, MAX(started_at) AS last_success_at
              FROM function_invocations
             WHERE error_message IS NULL
-              AND started_at >= now() - interval '${STREAK_LOOKBACK}'
             GROUP BY function_id
          )
          SELECT fi.app_id,
