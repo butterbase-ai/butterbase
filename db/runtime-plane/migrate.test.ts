@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { resolveRuntimeUrls, MigrationScopeError } from './migrate.js';
+import pg from 'pg';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe('resolveRuntimeUrls', () => {
   it('returns one URL per region from env', () => {
@@ -19,13 +25,6 @@ describe('resolveRuntimeUrls', () => {
     ).toThrow(/NEON_RUNTIME_PROJECT_ID_EU_WEST_1/);
   });
 });
-
-import pg from 'pg';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe('migrations', () => {
   it('023_actor_usage_logs has correct column schema', async () => {
