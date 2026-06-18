@@ -42,10 +42,10 @@ describe('applyByScope', () => {
     },
   } as any;
 
-  it('throws not-implemented error for runtime scope without touching DB', async () => {
+  it('throws misplaced-migration error for runtime scope without touching DB', async () => {
     await expect(
       applyByScope('runtime', 'demo.sql', '-- @scope: runtime\n', failingClient)
-    ).rejects.toThrow(/runtime tier is not implemented until Phase 2/);
+    ).rejects.toThrow(/scope=runtime but it is under db\/control-plane\//);
   });
 
   it('throws not-implemented error for data scope without touching DB', async () => {
