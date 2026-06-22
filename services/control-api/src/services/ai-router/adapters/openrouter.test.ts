@@ -153,6 +153,26 @@ describe('openrouter adapter', () => {
     expect(r.usage?.totalCost).toBe(0.0387255);
   });
 
+  it('maps OpenRouter prompt_tokens_details to unified cache fields', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'ok' } }],
+      usage: {
+        prompt_tokens: 10399,
+        completion_tokens: 60,
+        total_tokens: 10459,
+        prompt_tokens_details: { cached_tokens: 10318, cache_write_tokens: 0 },
+        cost: 0.01,
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+    const result = await a.chatCompletion(
+      { model: 'anthropic/claude-3-5-sonnet', messages: [{ role: 'user', content: 'hi' }] },
+      'anthropic/claude-3-5-sonnet'
+    );
+    expect(result.usage?.cache_read_input_tokens).toBe(10318);
+    expect(result.usage?.cache_creation_input_tokens).toBe(0);
+  });
+
   it('chatCompletion 429 throws AdapterError kind=rate_limit', async () => {
     const fetcher = vi.fn(async () => new Response('{"error":{"message":"rate"}}', { status: 429 })) as unknown as typeof fetch;
     const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });

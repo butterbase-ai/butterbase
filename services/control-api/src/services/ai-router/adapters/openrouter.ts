@@ -196,6 +196,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     // silently fall back to a catalog-token estimate (which under-counts image
     // models that bill per-image, not per-token).
     const cost = pickProviderCost(json.usage);
+    const details = json.usage?.prompt_tokens_details;
     return {
       status: res.status,
       body: json,
@@ -203,6 +204,8 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
         promptTokens: json.usage.prompt_tokens ?? 0,
         completionTokens: json.usage.completion_tokens ?? 0,
         totalCost: cost,
+        cache_read_input_tokens: details?.cached_tokens,
+        cache_creation_input_tokens: details?.cache_write_tokens,
       } : null,
       providerCostUsd: cost,
     };
