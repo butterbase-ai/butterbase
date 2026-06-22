@@ -227,6 +227,56 @@ describe('chatCompletionRequestSchema', () => {
   });
 });
 
+describe('chatCompletionSchema cache_control preservation', () => {
+  it('preserves cache_control on text content parts', () => {
+    const parsed = chatCompletionRequestSchema.parse({
+      model: 'anthropic/claude-sonnet-4-6',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'big doc', cache_control: { type: 'ephemeral' } }],
+      }],
+    })
+    expect((parsed.messages[0] as { content: Array<{ cache_control?: unknown }> }).content[0].cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('preserves cache_control with 1h ttl', () => {
+    const parsed = chatCompletionRequestSchema.parse({
+      model: 'anthropic/claude-sonnet-4-6',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'x', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+      }],
+    })
+    expect((parsed.messages[0] as { content: Array<{ cache_control?: { ttl?: string } }> }).content[0].cache_control?.ttl).toBe('1h')
+  })
+
+  it('preserves top-level cache_control', () => {
+    const parsed = chatCompletionRequestSchema.parse({
+      model: 'anthropic/claude-sonnet-4-6',
+      cache_control: { type: 'ephemeral' },
+      messages: [{ role: 'user', content: 'hi' }],
+    }) as Record<string, unknown>
+    expect(parsed.cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('preserves session_id', () => {
+    const parsed = chatCompletionRequestSchema.parse({
+      model: 'anthropic/claude-sonnet-4-6',
+      session_id: 'conv_abc123',
+      messages: [{ role: 'user', content: 'hi' }],
+    }) as Record<string, unknown>
+    expect(parsed.session_id).toBe('conv_abc123')
+  })
+
+  it('rejects session_id over 256 chars', () => {
+    expect(() => chatCompletionRequestSchema.parse({
+      model: 'anthropic/claude-sonnet-4-6',
+      session_id: 'x'.repeat(257),
+      messages: [{ role: 'user', content: 'hi' }],
+    })).toThrow()
+  })
+})
+
 describe('embeddingRequestSchema', () => {
   it('accepts a string input', () => {
     expect(

@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+export const cacheControlSchema = z.object({
+  type: z.literal('ephemeral'),
+  ttl: z.enum(['5m', '1h']).optional(),
+});
+
 /**
  * OpenAI Chat Completions content-part schema. Covers the common parts we
  * understand (text, image_url, video_url) and leaves room for emerging part
@@ -7,12 +12,13 @@ import { z } from 'zod';
  * upstream-supported modalities the moment OpenAI ships them.
  */
 export const contentPartSchema = z.union([
-  z.object({ type: z.literal('text'), text: z.string() }),
+  z.object({ type: z.literal('text'), text: z.string(), cache_control: cacheControlSchema.optional() }),
   z.object({
     type: z.literal('image_url'),
     image_url: z.object({ url: z.string(), detail: z.string().optional() }),
+    cache_control: cacheControlSchema.optional(),
   }),
-  z.object({ type: z.literal('video_url'), video_url: z.object({ url: z.string() }) }),
+  z.object({ type: z.literal('video_url'), video_url: z.object({ url: z.string() }), cache_control: cacheControlSchema.optional() }),
   z.object({ type: z.string() }).passthrough(),
 ]);
 
@@ -53,12 +59,14 @@ const systemMessageSchema = z.object({
   role: z.literal('system'),
   content: z.union([z.string(), z.array(contentPartSchema)]),
   name: z.string().optional(),
+  cache_control: cacheControlSchema.optional(),
 });
 
 const userMessageSchema = z.object({
   role: z.literal('user'),
   content: z.union([z.string(), z.array(contentPartSchema)]),
   name: z.string().optional(),
+  cache_control: cacheControlSchema.optional(),
 });
 
 const assistantMessageSchema = z.object({
@@ -67,12 +75,14 @@ const assistantMessageSchema = z.object({
   name: z.string().optional(),
   refusal: z.string().nullable().optional(),
   tool_calls: z.array(toolCallSchema).optional(),
+  cache_control: cacheControlSchema.optional(),
 });
 
 const toolMessageSchema = z.object({
   role: z.literal('tool'),
   content: z.union([z.string(), z.array(contentPartSchema)]),
   tool_call_id: z.string(),
+  cache_control: cacheControlSchema.optional(),
 });
 
 const functionMessageSchema = z.object({
@@ -170,6 +180,8 @@ export const chatCompletionRequestSchema = z
     tools: z.array(toolDeclarationSchema).optional(),
     tool_choice: toolChoiceSchema.optional(),
     parallel_tool_calls: z.boolean().optional(),
+    cache_control: cacheControlSchema.optional(),
+    session_id: z.string().max(256).optional(),
   })
   .passthrough();
 
