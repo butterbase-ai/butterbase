@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { gatewayRoutes } from './gateway.js';
+import { gatewayRoutes, buildAdapters } from './gateway.js';
 
 // ---------- mock the router so no real DB is needed ----------
 vi.mock('../services/ai-router/router.js', async (orig) => {
@@ -568,6 +568,67 @@ describe('POST /v1/chat/completions — tool-calling round trip', () => {
     expect(res.statusCode).toBe(400);
     expect(mockRouteChatCompletion).not.toHaveBeenCalled();
     await app.close();
+  });
+});
+
+// ---------- Fix 6: buildAdapters passes baseUrl/catalogUrl to provider adapters ----------
+
+// Vitest hoists vi.mock() calls, so we declare the spy capture objects before
+// the mock factory runs. The factory closes over these references.
+const primaryAdapterArgs: unknown[] = [];
+const secondaryAdapterArgs: unknown[] = [];
+const tertiaryAdapterArgs: unknown[] = [];
+
+vi.mock('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js', () => ({
+  providerPrimaryAdapter: vi.fn((opts: unknown) => { primaryAdapterArgs.push(opts); return { _kind: 'primary' }; }),
+  providerSecondaryAdapter: vi.fn((opts: unknown) => { secondaryAdapterArgs.push(opts); return { _kind: 'secondary' }; }),
+  providerTertiaryAdapter: vi.fn((opts: unknown) => { tertiaryAdapterArgs.push(opts); return { _kind: 'tertiary' }; }),
+}));
+
+vi.mock('../config.js', async (orig) => {
+  const actual = await orig<typeof import('../config.js')>();
+  return {
+    ...actual,
+    config: {
+      ...actual.config,
+      aiRouter: {
+        ...actual.config.aiRouter,
+        providerPrimaryApiKey: 'key-primary',
+        providerPrimaryBaseUrl: 'https://primary.example.com',
+        providerSecondaryApiKey: 'key-secondary',
+        providerSecondaryBaseUrl: 'https://secondary.example.com',
+        providerSecondaryCatalogUrl: 'https://catalog.secondary.example.com',
+        providerTertiaryApiKey: 'key-tertiary',
+        providerTertiaryBaseUrl: 'https://tertiary.example.com',
+      },
+    },
+  };
+});
+
+describe('Fix 6 — buildAdapters passes baseUrl and catalogUrl to adapter constructors', () => {
+  it('13. provider-primary adapter receives baseUrl', async () => {
+    primaryAdapterArgs.length = 0;
+    await buildAdapters();
+    expect(primaryAdapterArgs).toHaveLength(1);
+    const opts = primaryAdapterArgs[0] as Record<string, unknown>;
+    expect(opts.baseUrl).toBe('https://primary.example.com');
+  });
+
+  it('14. provider-secondary adapter receives baseUrl and catalogUrl', async () => {
+    secondaryAdapterArgs.length = 0;
+    await buildAdapters();
+    expect(secondaryAdapterArgs).toHaveLength(1);
+    const opts = secondaryAdapterArgs[0] as Record<string, unknown>;
+    expect(opts.baseUrl).toBe('https://secondary.example.com');
+    expect(opts.catalogUrl).toBe('https://catalog.secondary.example.com');
+  });
+
+  it('15. provider-tertiary adapter still receives baseUrl (regression guard)', async () => {
+    tertiaryAdapterArgs.length = 0;
+    await buildAdapters();
+    expect(tertiaryAdapterArgs).toHaveLength(1);
+    const opts = tertiaryAdapterArgs[0] as Record<string, unknown>;
+    expect(opts.baseUrl).toBe('https://tertiary.example.com');
   });
 });
 
