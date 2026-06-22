@@ -101,6 +101,19 @@ export function estimateWorstCaseUsd(
  *
  * `random` is injectable for deterministic tests; defaults to Math.random.
  */
+/**
+ * If `pinned` is in the eligible candidate set, return it — caller should use
+ * it as the head of the routing chain. Else return null and fall through to
+ * normal ranking. Used by the chat path's sticky-binding integration.
+ */
+export function pickStickyRouter(
+  candidates: RouterName[],
+  pinned: RouterName | null,
+): RouterName | null {
+  if (pinned && candidates.includes(pinned)) return pinned;
+  return null;
+}
+
 export function rankRoutersPresenceMode(
   entry: CatalogEntry,
   enabled: Set<string>,

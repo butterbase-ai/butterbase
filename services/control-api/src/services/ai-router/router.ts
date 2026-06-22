@@ -1,7 +1,15 @@
 import type pg from 'pg';
 import type { Redis } from 'ioredis';
 import { readCatalogEntry, readEnabledRouters } from './catalog.js';
-import { rankRoutersForModel, rankRoutersPresenceMode, estimateWorstCaseUsd } from './select.js';
+import { rankRoutersForModel, rankRoutersPresenceMode, estimateWorstCaseUsd, pickStickyRouter } from './select.js';
+import {
+  createStickyBindingsFromRedis,
+  hashCacheablePrefix,
+  prefixKey,
+  sessionKey,
+  ttlSecondsFor,
+  type StickyBindings,
+} from './sticky-bindings.js';
 import { config } from '../../config.js';
 import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
@@ -100,6 +108,11 @@ export interface RouteContext {
   appId: string | null;
   userId: string;
   region: string;
+  /**
+   * Optional injection point for tests. When omitted, the router builds a
+   * StickyBindings from `redis` lazily inside routeChatCompletion.
+   */
+  stickyBindings?: StickyBindings;
 }
 
 export interface RouteChatResult {
@@ -144,12 +157,37 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
 
   const lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
 
+  // ---- Sticky binding lookup ------------------------------------------------
+  // Conversations pinned to a specific router via session_id (preferred) or a
+  // prefix hash (when cache_control is present) stay on that router for the
+  // TTL — preserves prompt-cache continuity across turns. On pinned-router
+  // failure we delete the binding so the next turn re-picks fresh.
+  const stickyBindings: StickyBindings = ctx.stickyBindings
+    ?? createStickyBindingsFromRedis(ctx.redis as any);
+  let bindingKey: string | null = null;
+  let pinned: RouterName | null = null;
+  if (req.session_id) {
+    bindingKey = sessionKey(req.session_id);
+    pinned = await stickyBindings.get(bindingKey);
+  } else if (req.cache_control) {
+    bindingKey = prefixKey(hashCacheablePrefix(req));
+    pinned = await stickyBindings.get(bindingKey);
+  }
+
+  const stickyChoice = pickStickyRouter(ranked.map(r => r.name), pinned);
+  const orderedCandidates = stickyChoice
+    ? [
+        ranked.find(r => r.name === stickyChoice)!,
+        ...ranked.filter(r => r.name !== stickyChoice),
+      ]
+    : ranked;
+
   const fallbackChain: string[] = [];
   let result: AdapterResult | null = null;
   let chosenRouter: RouterName | null = null;
   let lastError: unknown = null;
 
-  for (const candidate of ranked) {
+  for (const candidate of orderedCandidates) {
     const adapter = ctx.adapters.get(candidate.name);
     if (!adapter) {
       fallbackChain.push(`${candidate.name}:no_adapter`);
@@ -159,14 +197,31 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       const upstreamId = adapter.toUpstreamId(canonicalId);
       result = await adapter.chatCompletion(req, upstreamId);
       chosenRouter = candidate.name;
+      // Write/refresh the sticky binding on success so subsequent turns in
+      // the same session/prefix-context land back on this router for cache
+      // continuity. Best-effort: a KV failure here must not fail the call.
+      if (bindingKey && (req.session_id || req.cache_control)) {
+        try {
+          await stickyBindings.set(bindingKey, candidate.name, ttlSecondsFor(req));
+        } catch (e) {
+          console.warn('[router] sticky set failed:', e);
+        }
+      }
       break;
     } catch (err) {
       lastError = err;
       if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        // If the failing candidate was the sticky pin, drop the binding before
+        // falling through so the next conversation turn re-picks fresh.
+        if (candidate.name === pinned && bindingKey) {
+          try { await stickyBindings.delete(bindingKey); } catch (e) { console.warn('[router] sticky delete failed:', e); }
+          pinned = null;
+        }
         fallbackChain.push(`${candidate.name}:${err.kind}`);
         continue;
       }
       // Non-fallback error (auth, bad_request) — release lease + rethrow.
+      // Do NOT touch the sticky binding; the upstream wasn't a routing failure.
       await settleAfterCall(ctx.platformPool, lease, 0);
       throw err;
     }

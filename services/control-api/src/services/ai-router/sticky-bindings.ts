@@ -41,6 +41,33 @@ export function createStickyBindings(kv: KVClient): StickyBindings {
 }
 
 // ---------------------------------------------------------------------------
+// ioredis adapter — wraps an ioredis client to match the KVClient interface.
+// The KVClient contract uses get/put/delete; ioredis uses get/set/setex/del.
+// ---------------------------------------------------------------------------
+
+interface IoredisLike {
+  get(key: string): Promise<string | null>;
+  set(...args: any[]): Promise<any>;
+  del(key: string): Promise<any>;
+}
+
+export function createStickyBindingsFromRedis(redis: IoredisLike): StickyBindings {
+  const kv: KVClient = {
+    get: (key) => redis.get(key),
+    put: async (key, value, opts) => {
+      const ttl = opts?.expirationTtl;
+      if (typeof ttl === 'number' && ttl > 0) {
+        await redis.set(key, value, 'EX', ttl);
+      } else {
+        await redis.set(key, value);
+      }
+    },
+    delete: async (key) => { await redis.del(key); },
+  };
+  return createStickyBindings(kv);
+}
+
+// ---------------------------------------------------------------------------
 // Key builders
 // ---------------------------------------------------------------------------
 
