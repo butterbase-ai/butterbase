@@ -162,4 +162,53 @@ describe('wrapStreamForSettlement — ImaRouter cache tokens', () => {
       cacheCreationInputTokens: 0,
     });
   });
+
+  it('does NOT double-add cacheRead when a second usage event arrives without prompt_tokens', async () => {
+    // First event: ImaRouter shape with prompt_tokens=800, cached_tokens=6003 → normalized to 6803.
+    // Second event: usage present but prompt_tokens absent → must NOT re-add cacheRead.
+    // Expected final promptTokens = 6803 (not 6803 + 6003).
+    const chunks = [
+      'data: {"usage":{"prompt_tokens":800,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":6003},"claude_cache_creation_5_m_tokens":4000,"claude_cache_creation_1_h_tokens":2003}}\n\n',
+      'data: {"usage":{"completion_tokens":150}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const upstream = makeStream(chunks);
+    let captured: Parameters<Parameters<typeof wrapStreamForSettlement>[1]>[0] | null = null;
+    const wrapped = wrapStreamForSettlement(upstream, async (usage) => {
+      captured = usage;
+    });
+    await drainStream(wrapped);
+    // promptTokens should be 800 + 6003 = 6803 (no double-add)
+    expect(captured).toMatchObject({
+      promptTokens: 6803,
+      completionTokens: 150,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Split-line robustness — SSE data: line bisected across TCP chunks
+// ---------------------------------------------------------------------------
+
+describe('wrapStreamForSettlement — split-line SSE robustness', () => {
+  it('extracts cacheReadInputTokens correctly when data: line is split across two TCP chunks', async () => {
+    // Build a full SSE usage line and split it mid-JSON to simulate a TCP boundary.
+    const fullLine = 'data: {"usage":{"prompt_tokens":800,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":6003},"claude_cache_creation_5_m_tokens":4000,"claude_cache_creation_1_h_tokens":2003}}\n\n';
+    const splitAt = Math.floor(fullLine.length / 2);
+    const chunks = [
+      fullLine.slice(0, splitAt),
+      fullLine.slice(splitAt),
+      'data: [DONE]\n\n',
+    ];
+    const upstream = makeStream(chunks);
+    let captured: Parameters<Parameters<typeof wrapStreamForSettlement>[1]>[0] | null = null;
+    const wrapped = wrapStreamForSettlement(upstream, async (usage) => {
+      captured = usage;
+    });
+    await drainStream(wrapped);
+    expect(captured).toMatchObject({
+      cacheReadInputTokens: 6003,
+      promptTokens: 6803, // 800 + 6003
+    });
+  });
 });

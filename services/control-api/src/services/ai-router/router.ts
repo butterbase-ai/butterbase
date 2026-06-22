@@ -274,6 +274,7 @@ export function wrapStreamForSettlement(
   const decoder = new TextDecoder();
   let promptTokens = 0, completionTokens = 0, providerCost: number | null = null;
   let cacheReadInputTokens = 0, cacheCreationInputTokens = 0;
+  let lineBuffer = '';
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -286,8 +287,10 @@ export function wrapStreamForSettlement(
             controller.close();
             return;
           }
-          const text = decoder.decode(value, { stream: true });
-          for (const line of text.split('\n')) {
+          lineBuffer += decoder.decode(value, { stream: true });
+          const parts = lineBuffer.split('\n');
+          lineBuffer = parts.pop() ?? '';
+          for (const line of parts) {
             if (!line.startsWith('data: ')) continue;
             const data = line.slice(6).trim();
             if (!data || data === '[DONE]') continue;
@@ -309,10 +312,14 @@ export function wrapStreamForSettlement(
                   ? cacheWrite5m + cacheWrite1h
                   : (details?.cache_write_tokens ?? 0);
 
-                const rawPromptTokens = u.prompt_tokens ?? promptTokens;
+                const rawPromptTokens = u.prompt_tokens ?? 0;
                 // ImaRouter excludes cached tokens from prompt_tokens; add them back
                 // so downstream billing math (prompt_tokens - cache_read_input_tokens) is correct.
-                promptTokens = hasImaRouterFields ? rawPromptTokens + cacheRead : rawPromptTokens;
+                // Only update promptTokens when a fresh raw value is present to avoid double-adding
+                // cacheRead if a later usage event arrives without prompt_tokens.
+                if (rawPromptTokens > 0) {
+                  promptTokens = hasImaRouterFields ? rawPromptTokens + cacheRead : rawPromptTokens;
+                }
                 completionTokens = u.completion_tokens ?? completionTokens;
                 cacheReadInputTokens = cacheRead;
                 cacheCreationInputTokens = cacheCreate;
