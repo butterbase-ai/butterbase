@@ -119,6 +119,7 @@ export interface RouteChatResult {
   status: number;
   stream?: ReadableStream<Uint8Array>;
   body?: unknown;
+  chosen?: RouterName;
 }
 
 export class RouterError extends Error {
@@ -271,7 +272,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         status: result.status,
       }));
     });
-    return { status: result.status, stream: wrapped };
+    return { status: result.status, stream: wrapped, chosen: chosenRouter };
   }
 
   // Non-streaming.
@@ -312,7 +313,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     status: result.status,
   }));
 
-  return { status: result.status, body: result.body };
+  return { status: result.status, body: result.body, chosen: chosenRouter };
 }
 
 interface StreamUsage {

@@ -216,11 +216,15 @@ export async function gatewayRoutes(app: FastifyInstance) {
         body,
       );
       if (result.stream) {
-        reply.raw.writeHead(result.status, {
+        const headers: Record<string, string> = {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
-        });
+        };
+        if (result.chosen) {
+          headers['x-butterbase-router'] = result.chosen;
+        }
+        reply.raw.writeHead(result.status, headers);
         const reader = result.stream.getReader();
         while (true) {
           const { done, value } = await reader.read();
@@ -233,6 +237,9 @@ export async function gatewayRoutes(app: FastifyInstance) {
       }
       const usage = (result.body as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } } | undefined)?.usage ?? null;
       emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage, stream: false });
+      if (result.chosen) {
+        reply.header('x-butterbase-router', result.chosen);
+      }
       return reply.code(result.status).send(result.body);
     } catch (err) {
       if (auditCtx) {

@@ -210,6 +210,52 @@ describe('POST /v1/chat/completions', () => {
     expect(r.headers['content-type']).toContain('text/event-stream');
     expect(r.body).toContain('data: [DONE]');
   });
+
+  it('7b. x-butterbase-router header present on successful non-streaming response', async () => {
+    app = await buildTestApp({ userId: 'user-jwt-router-header', authMethod: 'jwt', scopes: [] });
+    mockRouteChatCompletion.mockResolvedValueOnce({
+      status: 200,
+      body: { id: 'chatcmpl-header', choices: [] },
+      chosen: 'openrouter',
+    });
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: CHAT_BODY,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['x-butterbase-router']).toBe('openrouter');
+  });
+
+  it('7c. x-butterbase-router header present on successful streaming response', async () => {
+    app = await buildTestApp({ userId: 'user-jwt-router-stream', authMethod: 'jwt', scopes: [] });
+
+    const sseChunk = new TextEncoder().encode('data: [DONE]\n\n');
+    let callCount = 0;
+    const mockReader = {
+      read: async () => {
+        if (callCount++ === 0) return { done: false, value: sseChunk };
+        return { done: true, value: undefined };
+      },
+    };
+    const mockStream = { getReader: () => mockReader };
+    mockRouteChatCompletion.mockResolvedValueOnce({
+      status: 200,
+      stream: mockStream,
+      chosen: 'provider-primary',
+    });
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: { ...CHAT_BODY, stream: true },
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['x-butterbase-router']).toBe('provider-primary');
+  });
 });
 
 describe('POST /v1/embeddings', () => {
