@@ -82,6 +82,67 @@ describe('routeChatCompletion fallback', () => {
   });
 });
 
+describe('catalog upstreamId passthrough (date-suffixed ids)', () => {
+  it('passes catalog-stored upstreamId to chatCompletion, not adapter-derived value', async () => {
+    // Simulate: catalog stores "claude-haiku-4-5-20251001" but adapter.toUpstreamId
+    // would naively produce "claude-haiku-4-5" (missing date suffix).
+    const catalogUpstreamId = 'claude-haiku-4-5-20251001';
+    const catalogEntry = {
+      canonicalId: 'anthropic/claude-haiku-4.5',
+      displayName: 'Claude Haiku 4.5',
+      updatedAt: new Date().toISOString(),
+      routers: [{
+        name: 'openrouter',
+        upstreamId: catalogUpstreamId,
+        promptPricePerMtok: 1,
+        completionPricePerMtok: 1,
+        contextLength: 128000,
+      }],
+    };
+
+    let capturedUpstreamId: string | undefined;
+    const adapter: RouterAdapter = {
+      name: 'openrouter' as any,
+      toUpstreamId: (_id: string) => 'claude-haiku-4-5', // naive transform, missing date suffix
+      listModels: vi.fn(async () => []),
+      chatCompletion: vi.fn(async (_req: any, upstreamId: string) => {
+        capturedUpstreamId = upstreamId;
+        return {
+          status: 200,
+          body: { id: 'r', object: 'chat.completion', model: upstreamId, choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+          usage: { promptTokens: 1, completionTokens: 1, totalCost: null },
+          providerCostUsd: null,
+        };
+      }),
+    };
+
+    const redis = {
+      get: vi.fn(async (key: string) => {
+        if (key === 'ai_catalog:model:anthropic/claude-haiku-4.5') return JSON.stringify(catalogEntry);
+        if (key === 'ai_catalog:routers') return JSON.stringify([{ name: 'openrouter', enabled: true }]);
+        return null;
+      }),
+    } as any;
+
+    const ctx = {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters: new Map<string, RouterAdapter>([['openrouter', adapter]]),
+      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+    };
+
+    await routeChatCompletion(ctx as any, {
+      model: 'anthropic/claude-haiku-4.5',
+      messages: [{ role: 'user', content: 'hi' }],
+    } as any);
+
+    // Must use the catalog-stored upstreamId, NOT the adapter-derived one
+    expect(capturedUpstreamId).toBe(catalogUpstreamId);
+    expect(capturedUpstreamId).not.toBe('claude-haiku-4-5');
+  });
+});
+
 describe('presence mode ranker selection', () => {
   let origPresenceMode: boolean;
 

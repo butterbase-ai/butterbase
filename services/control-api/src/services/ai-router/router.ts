@@ -195,7 +195,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       continue;
     }
     try {
-      const upstreamId = adapter.toUpstreamId(canonicalId);
+      const upstreamId = candidate.upstreamId ?? adapter.toUpstreamId(canonicalId);
       result = await adapter.chatCompletion(req, upstreamId);
       chosenRouter = candidate.name;
       // Write/refresh the sticky binding on success so subsequent turns in
@@ -425,7 +425,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
       continue;
     }
     try {
-      result = await adapter.embedding(req, adapter.toUpstreamId(canonicalId));
+      result = await adapter.embedding(req, candidate.upstreamId ?? adapter.toUpstreamId(canonicalId));
       chosenRouter = candidate.name;
       break;
     } catch (err) {
@@ -704,7 +704,7 @@ export async function routeVideoSubmit(
       continue;
     }
     try {
-      const result = await adapter.submitVideo(req, adapter.toUpstreamId(canonicalId));
+      const result = await adapter.submitVideo(req, candidate.upstreamId ?? adapter.toUpstreamId(canonicalId));
       submitted = { result, router: candidate.name };
       break;
     } catch (err) {
