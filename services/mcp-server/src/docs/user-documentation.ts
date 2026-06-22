@@ -2181,7 +2181,13 @@ Content-Type: application/json
   "transcript": true,
   "recording": "mp4",
   "botName": "Acme Notetaker",
-  "metadata": { "session_id": "abc123" }
+  "metadata": { "session_id": "abc123" },
+  "automaticLeave": {
+    "waitingRoomTimeoutSec": 900,
+    "noOneJoinedTimeoutSec": 600,
+    "everyoneLeftTimeoutSec": 120,
+    "inCallNotRecordingTimeoutSec": 1800
+  }
 }
 \`\`\`
 
@@ -2204,6 +2210,24 @@ Returns:
 | \`recording\` | \`"mp4"\` | \`"mp4"\` for video+audio, \`"audio_only"\` for audio only, \`false\` to skip |
 | \`botName\` | \`"Butterbase Notetaker"\` | Display name attendees see when the bot joins. 1–64 chars |
 | \`metadata\` | \`{}\` | Arbitrary string→string map. Keys may not start with \`bb_\` (reserved) |
+| \`automaticLeave\` | \`{}\` | Per-bot overrides for the auto-leave timers. See below. |
+
+#### Auto-leave timers
+
+Tell the bot when to give up and leave the call on its own. All sub-fields are optional positive integers in **seconds** (max \`86400\` = 24h); omitted ones inherit the provider default.
+
+| Sub-field | Triggers when… |
+|---|---|
+| \`waitingRoomTimeoutSec\` | Bot has been stuck in the waiting room for this many seconds. |
+| \`noOneJoinedTimeoutSec\` | Bot is in the call but no participants ever joined within this many seconds. |
+| \`everyoneLeftTimeoutSec\` | All participants have left and this many seconds pass with the room empty. |
+| \`inCallNotRecordingTimeoutSec\` | Bot is in-call but not recording for this many seconds. |
+
+Example — leave if not admitted within 15 minutes:
+
+\`\`\`json
+{ "automaticLeave": { "waitingRoomTimeoutSec": 900 } }
+\`\`\`
 
 ### Get / list / stop
 

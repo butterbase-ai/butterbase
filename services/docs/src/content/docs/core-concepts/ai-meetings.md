@@ -19,6 +19,28 @@ Butterbase includes a meeting bot primitive at `ctx.ai.meetings` (or `bb.ai.meet
 3. When the call ends, recording and transcript artifacts become available. The exact charge is computed from real measured duration and settles against your reserved lease — unused portion refunded automatically.
 4. Your registered webhook endpoint receives a forwarded event when each artifact is ready. The webhook payload only carries the recording / transcript **id**; to get the download URL, follow up with a `GET` on the bot — `recordingUrl` and `transcriptUrl` are populated there.
 
+## Controlling when the bot gives up
+
+By default, the bot leans on the provider's built-in auto-leave defaults — it'll sit in a waiting room or an empty room for a while before giving up. Pass `automaticLeave` on spawn to override any of those timers per bot. Each sub-field is optional (omitted ones inherit the provider default) and takes a positive number of seconds.
+
+| Sub-field | Triggers when… |
+|---|---|
+| `waitingRoomTimeoutSec` | The bot has been stuck in the waiting room (host hasn't admitted it) for this many seconds. |
+| `noOneJoinedTimeoutSec` | The bot is in the call but no participants ever joined within this many seconds. |
+| `everyoneLeftTimeoutSec` | All participants have left and this many seconds pass with the room empty. |
+| `inCallNotRecordingTimeoutSec` | The bot is in the call but not recording (e.g. recording consent denied) for this many seconds. |
+
+**Example — leave if not admitted within 15 minutes:**
+
+```ts
+await bb.ai.meetings.start({
+  meetingUrl,
+  automaticLeave: { waitingRoomTimeoutSec: 900 },
+});
+```
+
+See the [AI Meetings API reference](/api-reference/ai-meetings-api/#auto-leave-timers) for the full HTTP shape.
+
 ## Configuring webhooks
 
 For each app, register one forward URL plus a per-app HMAC secret. Butterbase signs every forwarded event with your app's own secret — verification on your side is the standard HMAC-SHA256 pattern, identical to Stripe / GitHub / Recall.ai webhooks.

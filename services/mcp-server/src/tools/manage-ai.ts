@@ -29,10 +29,17 @@ Actions:
                        When status is "completed", content_urls contains absolute URLs (same origin
                        as the polling_url) that the caller can fetch() directly using the same
                        Authorization header. Use this to drive your own polling loop.
-  - start_meeting     { app_id, meeting_url, transcript?, recording?, metadata?, bot_name? }
+  - start_meeting     { app_id, meeting_url, transcript?, recording?, metadata?, bot_name?, automatic_leave? }
                        Spawn a meeting bot that joins a Zoom/Meet/Teams/Webex call.
                        recording: "mp4" (default), "audio_only", or false. transcript defaults to true.
                        bot_name (1–64 chars) sets the display name attendees see; defaults to "Butterbase Notetaker".
+                       automatic_leave: per-bot overrides for the auto-leave timers (in seconds, positive ints, max 86400).
+                         Any sub-field omitted inherits the provider default.
+                         - waiting_room_timeout_sec       — leave if still in the waiting room after N seconds
+                         - no_one_joined_timeout_sec      — leave if no participants joined within N seconds
+                         - everyone_left_timeout_sec      — leave N seconds after the last participant leaves
+                         - in_call_not_recording_timeout_sec — leave if in-call but not recording for N seconds
+                       Example: automatic_leave: { waiting_room_timeout_sec: 900 } makes the bot give up after 15 min in the waiting room.
                        Returns { id, status, botName, ... }. Save id to call get_meeting / stop_meeting later.
   - get_meeting       { app_id, meeting_id }
                        Current status + recordingUrl / transcriptUrl (populated when artifacts are ready).
@@ -110,6 +117,13 @@ drive the SDK from inside a function or DO.`,
         .describe('For start_meeting — arbitrary string→string map; keys may not start with bb_'),
       bot_name: z.string().min(1).max(64).optional()
         .describe('For start_meeting — display name the bot uses when it joins (1–64 chars). Defaults to "Butterbase Notetaker".'),
+      automatic_leave: z.object({
+        waiting_room_timeout_sec: z.number().int().positive().max(86400).optional(),
+        no_one_joined_timeout_sec: z.number().int().positive().max(86400).optional(),
+        everyone_left_timeout_sec: z.number().int().positive().max(86400).optional(),
+        in_call_not_recording_timeout_sec: z.number().int().positive().max(86400).optional(),
+      }).strict().optional()
+        .describe('For start_meeting — per-bot overrides for auto-leave timers (seconds). Any field omitted inherits the provider default. e.g. { waiting_room_timeout_sec: 900 } leaves if not admitted within 15 min.'),
       status: z.enum(['joining','waiting_room','in_call','recording','ended','done','fatal']).optional()
         .describe('For list_meetings — filter to one lifecycle phase'),
       limit: z.coerce.number().int().min(1).max(100).optional().describe('For list_meetings (default 20)'),
@@ -206,12 +220,20 @@ drive the SDK from inside a function or DO.`,
               return { content: [{ type: 'text' as const, text: 'Error: "meeting_url" is required for "start_meeting".' }], isError: true as const };
             }
             const recording = args.recording === 'false' ? false : (args.recording ?? 'mp4');
+            const al = args.automatic_leave;
+            const automaticLeave = al ? {
+              ...(al.waiting_room_timeout_sec !== undefined && { waitingRoomTimeoutSec: al.waiting_room_timeout_sec }),
+              ...(al.no_one_joined_timeout_sec !== undefined && { noOneJoinedTimeoutSec: al.no_one_joined_timeout_sec }),
+              ...(al.everyone_left_timeout_sec !== undefined && { everyoneLeftTimeoutSec: al.everyone_left_timeout_sec }),
+              ...(al.in_call_not_recording_timeout_sec !== undefined && { inCallNotRecordingTimeoutSec: al.in_call_not_recording_timeout_sec }),
+            } : undefined;
             result = await apiPost(`/v1/${app_id}/ai/meetings`, {
               meetingUrl: args.meeting_url,
               transcript: args.transcript ?? true,
               recording,
               metadata: args.metadata,
               botName: args.bot_name,
+              ...(automaticLeave && Object.keys(automaticLeave).length && { automaticLeave }),
             });
             break;
           }

@@ -10,6 +10,17 @@ export interface ActorTenantContext {
   leaseId: string;
 }
 
+export interface AutomaticLeaveConfig {
+  /** Leave if the bot is still in the waiting room after N seconds. */
+  waitingRoomTimeoutSec?: number;
+  /** Leave if no participants joined within N seconds of the bot joining. */
+  noOneJoinedTimeoutSec?: number;
+  /** Leave N seconds after the last participant leaves. */
+  everyoneLeftTimeoutSec?: number;
+  /** Leave if the bot is in-call but not recording for N seconds. */
+  inCallNotRecordingTimeoutSec?: number;
+}
+
 export interface StartActorRequest {
   meetingUrl: string;
   transcript: boolean;          // true → opt into vendor's built-in transcription
@@ -18,6 +29,8 @@ export interface StartActorRequest {
   metadata?: Record<string, string>;
   /** Display name the bot uses when it joins the call. 1-64 chars. Defaults to 'Butterbase Notetaker'. */
   botName?: string;
+  /** Per-bot overrides for vendor automatic-leave timers. Any field omitted uses the vendor default. */
+  automaticLeave?: AutomaticLeaveConfig;
 }
 
 export type ActorStatus =
