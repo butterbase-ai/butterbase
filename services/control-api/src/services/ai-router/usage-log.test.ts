@@ -15,10 +15,10 @@ describeDb('writeAiUsageRow', () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: RUNTIME_URL });
     await pool.query(
-      `INSERT INTO apps (id, name, owner_id, ai_config)
-       VALUES ($1, 'usage-log-test', $2, '{}'::jsonb)
+      `INSERT INTO apps (id, name, owner_id, db_name, ai_config)
+       VALUES ($1, 'usage-log-test', $2, $3, '{}'::jsonb)
        ON CONFLICT (id) DO NOTHING`,
-      [appId, '00000000-0000-0000-0000-000000000001']
+      [appId, '00000000-0000-0000-0000-000000000001', `db_${appId}`]
     );
   });
   afterAll(async () => { await pool.end(); });
@@ -92,5 +92,60 @@ describeDb('writeAiUsageRow', () => {
       `SELECT app_id FROM ai_usage_logs ORDER BY created_at DESC LIMIT 1`,
     );
     expect(r.rows[0].app_id).toBeNull();
+  });
+
+  it('persists cache_read and cache_creation token counts', async () => {
+    await writeAiUsageRow(pool, {
+      appId,
+      userId: null,
+      model: 'anthropic/claude-sonnet-4-6',
+      router: 'provider-primary',
+      promptTokens: 1000,
+      completionTokens: 200,
+      totalTokens: 1200,
+      providerCostUsd: 0.003,
+      chargedCreditsUsd: 0.0036,
+      markupPct: 20,
+      fallbackChain: [],
+      leaseId: null,
+      keyType: 'platform',
+      chargedToUser: true,
+      cacheReadInputTokens: 800,
+      cacheCreationInputTokens: 100,
+    });
+    const got = await pool.query(
+      `SELECT cache_read_input_tokens, cache_creation_input_tokens
+       FROM ai_usage_logs WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [appId]
+    );
+    expect(BigInt(got.rows[0].cache_read_input_tokens)).toBe(800n);
+    expect(BigInt(got.rows[0].cache_creation_input_tokens)).toBe(100n);
+  });
+
+  it('defaults cache token counts to 0 when omitted', async () => {
+    await writeAiUsageRow(pool, {
+      appId,
+      userId: null,
+      model: 'openai/gpt-4o',
+      router: 'provider-primary',
+      promptTokens: 50,
+      completionTokens: 20,
+      totalTokens: 70,
+      providerCostUsd: 0.0002,
+      chargedCreditsUsd: 0.00024,
+      markupPct: 20,
+      fallbackChain: [],
+      leaseId: null,
+      keyType: 'platform',
+      chargedToUser: true,
+      // cacheReadInputTokens and cacheCreationInputTokens intentionally omitted
+    });
+    const got = await pool.query(
+      `SELECT cache_read_input_tokens, cache_creation_input_tokens
+       FROM ai_usage_logs WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [appId]
+    );
+    expect(Number(got.rows[0].cache_read_input_tokens)).toBe(0);
+    expect(Number(got.rows[0].cache_creation_input_tokens)).toBe(0);
   });
 });

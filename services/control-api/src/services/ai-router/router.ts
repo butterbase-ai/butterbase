@@ -236,6 +236,8 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
     markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
     keyType: 'platform', chargedToUser: true,
+    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+    cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   const t1 = Date.now();
   console.log(JSON.stringify({
@@ -371,6 +373,8 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
     markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
     keyType: 'platform', chargedToUser: true,
+    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+    cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   const t1 = Date.now();
   console.log(JSON.stringify({

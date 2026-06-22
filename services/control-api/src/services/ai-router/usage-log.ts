@@ -16,6 +16,10 @@ export interface AiUsageRow {
   leaseId: string | null;
   keyType: 'platform' | 'byok';
   chargedToUser: boolean;
+  /** Tokens served from the Anthropic prompt cache (read hit). Defaults to 0. */
+  cacheReadInputTokens?: number;
+  /** Tokens written into the Anthropic prompt cache. Defaults to 0. */
+  cacheCreationInputTokens?: number;
 }
 
 /**
@@ -30,8 +34,9 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
     `INSERT INTO ai_usage_logs (
        app_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
        cost_usd, key_type, charged_to_user, request_metadata,
-       router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+       router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id,
+       cache_read_input_tokens, cache_creation_input_tokens
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
     [
       row.appId,
       row.model,
@@ -49,6 +54,8 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.markupPct,
       row.fallbackChain,
       row.leaseId,
+      row.cacheReadInputTokens ?? 0,
+      row.cacheCreationInputTokens ?? 0,
     ]
   );
 }
