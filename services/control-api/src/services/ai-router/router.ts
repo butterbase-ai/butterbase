@@ -197,6 +197,8 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
         markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
         keyType: 'platform', chargedToUser: true,
+        cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
+        cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
       }).catch(err => console.error('[router] usage-log write failed:', err));
       const t1 = Date.now();
       console.log(JSON.stringify({
@@ -258,7 +260,12 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   return { status: result.status, body: result.body };
 }
 
-interface StreamUsage { promptTokens: number; completionTokens: number; }
+interface StreamUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+}
 
 export function wrapStreamForSettlement(
   upstream: ReadableStream<Uint8Array>,
@@ -266,6 +273,7 @@ export function wrapStreamForSettlement(
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let promptTokens = 0, completionTokens = 0, providerCost: number | null = null;
+  let cacheReadInputTokens = 0, cacheCreationInputTokens = 0;
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -274,7 +282,7 @@ export function wrapStreamForSettlement(
         while (true) {
           const { done, value } = await reader.read();
           if (done) {
-            try { await onComplete({ promptTokens, completionTokens }, providerCost); } catch (e) { console.error('[router] stream settle:', e); }
+            try { await onComplete({ promptTokens, completionTokens, cacheReadInputTokens, cacheCreationInputTokens }, providerCost); } catch (e) { console.error('[router] stream settle:', e); }
             controller.close();
             return;
           }
@@ -286,9 +294,29 @@ export function wrapStreamForSettlement(
             try {
               const parsed = JSON.parse(data) as any;
               if (parsed.usage) {
-                promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
-                completionTokens = parsed.usage.completion_tokens ?? completionTokens;
-                const c = pickProviderCost(parsed.usage);
+                const u = parsed.usage;
+                const details = u.prompt_tokens_details;
+                const cacheRead = details?.cached_tokens ?? 0;
+
+                // ImaRouter shape: claude_cache_creation_*_tokens present on the usage object.
+                // ImaRouter also excludes cached tokens from prompt_tokens — add them back.
+                const hasImaRouterFields =
+                  typeof u.claude_cache_creation_5_m_tokens === 'number' ||
+                  typeof u.claude_cache_creation_1_h_tokens === 'number';
+                const cacheWrite5m = u.claude_cache_creation_5_m_tokens ?? 0;
+                const cacheWrite1h = u.claude_cache_creation_1_h_tokens ?? 0;
+                const cacheCreate = hasImaRouterFields
+                  ? cacheWrite5m + cacheWrite1h
+                  : (details?.cache_write_tokens ?? 0);
+
+                const rawPromptTokens = u.prompt_tokens ?? promptTokens;
+                // ImaRouter excludes cached tokens from prompt_tokens; add them back
+                // so downstream billing math (prompt_tokens - cache_read_input_tokens) is correct.
+                promptTokens = hasImaRouterFields ? rawPromptTokens + cacheRead : rawPromptTokens;
+                completionTokens = u.completion_tokens ?? completionTokens;
+                cacheReadInputTokens = cacheRead;
+                cacheCreationInputTokens = cacheCreate;
+                const c = pickProviderCost(u);
                 if (c !== null) providerCost = c;
               }
             } catch { /* ignore non-JSON */ }
@@ -297,7 +325,7 @@ export function wrapStreamForSettlement(
         }
       } catch (err) {
         controller.error(err);
-        try { await onComplete({ promptTokens, completionTokens }, providerCost); } catch {}
+        try { await onComplete({ promptTokens, completionTokens, cacheReadInputTokens, cacheCreationInputTokens }, providerCost); } catch {}
       }
     },
   });

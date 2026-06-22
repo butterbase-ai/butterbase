@@ -1043,7 +1043,7 @@ describe('wrapStreamForSettlement', () => {
     // Drain the wrapped stream to trigger the onComplete callback.
     const reader = wrapped.getReader();
     while (!(await reader.read()).done) { /* drain */ }
-    expect(captured).toEqual({ promptTokens: 10, completionTokens: 1299, cost: 0.0387255 });
+    expect(captured).toEqual({ promptTokens: 10, completionTokens: 1299, cost: 0.0387255, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
   });
 
   it('still reads legacy total_cost when cost is absent', async () => {
