@@ -188,6 +188,10 @@ export async function gatewayRoutes(app: FastifyInstance) {
     try {
       const user = resolveGatewayUser(request);
       const body = chatCompletionSchema.parse(request.body);
+      const headerSessionId = request.headers['x-session-id']
+      if (!body.session_id && typeof headerSessionId === 'string' && headerSessionId.length <= 256) {
+        body.session_id = headerSessionId
+      }
       auditCtx = {
         endpoint: 'chat.completions',
         model: body.model,
