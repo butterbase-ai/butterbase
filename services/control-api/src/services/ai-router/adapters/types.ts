@@ -61,6 +61,8 @@ export interface AdapterUsage {
   promptTokens: number;
   completionTokens: number;
   totalCost: number | null;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
 }
 
 export interface AdapterResult {
