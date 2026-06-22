@@ -82,13 +82,30 @@ export function rankRoutersForModel(
 /**
  * Worst-case USD cost: prompt_tokens × prompt_price + max_tokens × completion_price.
  * Used for lease reservation; actual cost from router response settles the lease.
+ *
+ * Optionally cache-aware: when `cacheReadInputTokens > 0`, that portion of
+ * `promptTokens` is excluded from the input-cost charge. This is used on the
+ * settlement-fallback path (when the upstream's `usage.cost` is null) so we
+ * don't over-bill customers for tokens the upstream served from cache.
+ *
+ * We don't know each router's exact cache-read price, so cached tokens are
+ * billed at $0 here — a conservative under-estimate relative to the upstream's
+ * real cache-read line item, but a strict improvement over the previous
+ * behavior, which ignored `cache_read_input_tokens` entirely on this path.
+ * The lease-reservation call site passes no cache field (cache state is
+ * unknown before the call), preserving worst-case behavior there.
+ *
+ * If `cacheReadInputTokens` exceeds `promptTokens` (degenerate input), the
+ * non-cached portion clamps to 0 rather than going negative.
  */
 export function estimateWorstCaseUsd(
   prices: { promptPricePerMtok: number; completionPricePerMtok: number },
   promptTokens: number,
-  maxCompletionTokens: number
+  maxCompletionTokens: number,
+  cacheReadInputTokens: number = 0,
 ): number {
-  const promptCost = (promptTokens / 1_000_000) * prices.promptPricePerMtok;
+  const nonCachedPromptTokens = Math.max(0, promptTokens - cacheReadInputTokens);
+  const promptCost = (nonCachedPromptTokens / 1_000_000) * prices.promptPricePerMtok;
   const completionCost = (maxCompletionTokens / 1_000_000) * prices.completionPricePerMtok;
   return promptCost + completionCost;
 }

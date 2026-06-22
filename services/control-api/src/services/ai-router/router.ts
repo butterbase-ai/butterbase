@@ -20,7 +20,7 @@ import { logAuditEvent } from '../audit/audit-events-service.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 import { maybeSendCreditsEmail } from '../credits-email.js';
 import { sendBillingEmail } from '../auth/email-service.js';
-import { AdapterError, type RouterAdapter, type AdapterResult, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult } from './adapters/types.js';
+import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult } from './adapters/types.js';
 import type { RouterName } from './normalize.js';
 
 const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 'model_not_available', 'unknown']);
@@ -238,7 +238,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   // Streaming: wrap so we can parse usage after [DONE] and settle.
   if (result.stream) {
     const wrapped = wrapStreamForSettlement(result.stream, async (usage, providerCost) => {
-      const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens);
+      const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cacheReadInputTokens ?? 0);
       const chargedCredits = applyMarkup(cost, ctx.markupPct);
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill(
@@ -276,9 +276,9 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   }
 
   // Non-streaming.
-  const usage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
+  const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
-    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens);
+    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cache_read_input_tokens ?? 0);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
@@ -446,9 +446,9 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     throw err;
   }
 
-  const usage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
+  const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
-    ?? (usage.promptTokens / 1_000_000) * ranked[0].promptPricePerMtok;
+    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, 0, usage.cache_read_input_tokens ?? 0);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);

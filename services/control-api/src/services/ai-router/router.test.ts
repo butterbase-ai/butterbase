@@ -251,6 +251,55 @@ describe('nullable appId', () => {
   });
 });
 
+describe('settlement-fallback cost is cache-aware (Task 13)', () => {
+  it('when providerCostUsd is null, cache_read_input_tokens reduces the charged input-cost portion', async () => {
+    const { writeAiUsageRow } = await import('./usage-log.js');
+    vi.mocked(writeAiUsageRow).mockClear();
+
+    // Two structurally identical calls; only cache_read_input_tokens differs.
+    const makeCtx = () => ({
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis: makeRedis(entry('openrouter', 10, 10), [{ name: 'openrouter', enabled: true }]),
+      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+    });
+
+    const noCacheAdapter: RouterAdapter = {
+      toUpstreamId: () => 'm',
+      chatCompletion: vi.fn(async () => ({
+        status: 200,
+        body: { id: 'r', object: 'chat.completion', model: 'm', choices: [], usage: { prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100 } },
+        usage: { promptTokens: 1000, completionTokens: 100, totalCost: null, cache_read_input_tokens: 0 },
+        providerCostUsd: null, // forces fallback estimator
+      })),
+    } as any;
+
+    const cachedAdapter: RouterAdapter = {
+      toUpstreamId: () => 'm',
+      chatCompletion: vi.fn(async () => ({
+        status: 200,
+        body: { id: 'r', object: 'chat.completion', model: 'm', choices: [], usage: { prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100 } },
+        usage: { promptTokens: 1000, completionTokens: 100, totalCost: null, cache_read_input_tokens: 800 },
+        providerCostUsd: null,
+      })),
+    } as any;
+
+    const ctxA: any = { ...makeCtx(), adapters: new Map([['openrouter', noCacheAdapter]]) };
+    const ctxB: any = { ...makeCtx(), adapters: new Map([['openrouter', cachedAdapter]]) };
+
+    await routeChatCompletion(ctxA, { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+    await routeChatCompletion(ctxB, { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+
+    const calls = vi.mocked(writeAiUsageRow).mock.calls;
+    const noCacheRow = calls[0][1] as any;
+    const cachedRow = calls[1][1] as any;
+
+    expect(cachedRow.providerCostUsd).toBeLessThan(noCacheRow.providerCostUsd);
+    expect(cachedRow.cacheReadInputTokens).toBe(800);
+    expect(noCacheRow.cacheReadInputTokens).toBe(0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Helper: build a CatalogEntry for a video model
 // ---------------------------------------------------------------------------

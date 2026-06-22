@@ -119,6 +119,34 @@ describe('estimateWorstCaseUsd', () => {
   it('returns 0 for zero tokens', () => {
     expect(estimateWorstCaseUsd({ promptPricePerMtok: 3, completionPricePerMtok: 15 }, 0, 0)).toBe(0);
   });
+
+  describe('cache-aware (settlement-fallback path)', () => {
+    const prices = { promptPricePerMtok: 3, completionPricePerMtok: 15 };
+
+    it('treats missing cacheReadInputTokens as zero (unchanged behavior)', () => {
+      const baseline = estimateWorstCaseUsd(prices, 1000, 4096);
+      const withZero = estimateWorstCaseUsd(prices, 1000, 4096, 0);
+      expect(withZero).toBeCloseTo(baseline, 10);
+      expect(withZero).toBeCloseTo(0.003 + 0.06144, 5);
+    });
+
+    it('excludes cached tokens from input cost when cacheReadInputTokens < promptTokens', () => {
+      // 1000 prompt - 600 cached = 400 non-cached at $3/Mtok = 0.0012;
+      // completion 4096 at $15/Mtok = 0.06144.
+      const cost = estimateWorstCaseUsd(prices, 1000, 4096, 600);
+      expect(cost).toBeCloseTo(0.0012 + 0.06144, 6);
+    });
+
+    it('returns completion-only cost when cacheReadInputTokens === promptTokens', () => {
+      const cost = estimateWorstCaseUsd(prices, 1000, 4096, 1000);
+      expect(cost).toBeCloseTo(0.06144, 6);
+    });
+
+    it('clamps non-cached portion to 0 when cacheReadInputTokens > promptTokens', () => {
+      const cost = estimateWorstCaseUsd(prices, 1000, 4096, 5000);
+      expect(cost).toBeCloseTo(0.06144, 6);
+    });
+  });
 });
 
 describe('rankRoutersPresenceMode', () => {
