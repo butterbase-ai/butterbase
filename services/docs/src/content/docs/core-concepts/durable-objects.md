@@ -81,6 +81,10 @@ https://<your-subdomain>.butterbase.dev/_do/<name>/<instance-id>
 
 The same URL accepts both HTTP and WebSocket upgrade. Different instance IDs (`/lobby`, `/general`, `/team-1`) are completely isolated — separate state, separate connections.
 
+:::caution[Subdomain only]
+DOs are reachable **only** on your app's subdomain (`<your-subdomain>.butterbase.dev`). They are **not** mounted under the control API — `https://api.butterbase.ai/v1/<app_id>/_do/...` returns `404 Route not found`. If you're constructing URLs from `VITE_API_URL` or any `api_base` value, swap to the app subdomain before appending `/_do/<name>/<id>`.
+:::
+
 ```js
 // Browser
 const ws = new WebSocket('wss://my-app.butterbase.dev/_do/chat-room/lobby');
@@ -117,21 +121,28 @@ Real authentication enforcement at the dispatcher is on the v2 roadmap.
 :::
 
 :::caution[WebSocket auth gotcha]
-Browsers cannot send custom headers on the `WebSocket` upgrade request, so `access_mode: 'authenticated'` will reject every browser WebSocket connection at the dispatcher with 401 — the upgrade never reaches your `fetch` handler.
+**Browser WebSockets cannot use `access_mode: 'authenticated'`.** Browsers can't set custom headers on a `WebSocket` upgrade, and the `_do/<class>/<id>` dispatcher reads auth **only** from the `Authorization` header. `?token=…` in the URL and `Sec-WebSocket-Protocol` are *silently ignored* by the dispatcher — you'll see a 401 with no clue why, and the upgrade never reaches your `fetch` handler.
 
-If your DO accepts WebSocket connections from the browser, set `access_mode: 'public'` and validate the token *inside* `fetch()`, reading it from the URL query string or the `Sec-WebSocket-Protocol` header:
+> This differs from the platform's `/realtime` WebSocket route, which *does* accept `?token=`. DOs do not — the dispatcher in front of WfP is a thinner shim.
+
+**Pattern for browser-facing WebSocket DOs:** set `access_mode: 'public'` and validate the token yourself inside `fetch()`, reading it from `?token=` or `Sec-WebSocket-Protocol` (both are visible to your handler once the dispatcher lets the request through):
 
 ```ts
 async fetch(req: Request): Promise<Response> {
   if (req.headers.get('Upgrade') === 'websocket') {
     const token = new URL(req.url).searchParams.get('token');
-    if (!await verifyToken(token, this.env)) {
+    if (!token || !(await verifyToken(token, this.env))) {
       return new Response('unauthorized', { status: 401 });
     }
-    // ... accept upgrade
+    const pair = new WebSocketPair();
+    this.state.acceptWebSocket(pair[1]);
+    return new Response(null, { status: 101, webSocket: pair[0] });
   }
+  // ... non-WS branches can still require Authorization header
 }
 ```
+
+`verifyToken` should either call `GET https://api.butterbase.ai/auth/<app_id>/me` with `Authorization: Bearer <token>`, or verify the JWT signature offline against the per-app JWKS (see the v1 limitation note above). Server-to-server callers (Functions, your own backend) can keep using `access_mode: 'authenticated'` or `'service_key'` and pass `Authorization` normally — the gotcha only affects browser WS.
 :::
 
 ## Environment variables

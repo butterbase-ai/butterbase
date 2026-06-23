@@ -1,6 +1,6 @@
 {
   "name": "@butterbase/sdk",
-  "version": "2.5.0",
+  "version": "2.7.0",
   "description": "Universal TypeScript SDK for Butterbase",
   "license": "Apache-2.0",
   "homepage": "https://butterbase.ai",
