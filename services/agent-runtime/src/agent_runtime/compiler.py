@@ -89,12 +89,15 @@ def compile_graph(
                     status=status, error=err,
                 )
             if emitter is not None:
-                await emitter.emit("tool_call_end", {
+                payload: dict[str, Any] = {
                     "tool_source": tool.source,
                     "tool_name": tool.name,
                     "status": status,
                     "duration_ms": duration_ms,
-                })
+                }
+                if err is not None:
+                    payload["error"] = err
+                await emitter.emit("tool_call_end", payload)
 
     async def _run_llm(node: LlmNode, state: dict[str, Any]) -> None:
         allow = [t.name for t in node.tools]
