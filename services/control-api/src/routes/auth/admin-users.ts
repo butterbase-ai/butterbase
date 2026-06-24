@@ -148,6 +148,13 @@ export async function adminAuthUsersRoutes(app: FastifyInstance) {
         success: true,
       });
 
+      app.platformEventBus.emit('auth.user.deleted', {
+        appId: app_id,
+        userId: user_id,
+        email: result.rows[0].email,
+        runtimeDb,
+      });
+
       return { deleted: true, user_id, email: result.rows[0].email };
     } catch (err) {
       if (err instanceof AppNotFoundError) {
