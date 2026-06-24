@@ -288,6 +288,17 @@ async function handleOAuthCallback(
     }
     const user = userResult.rows[0];
 
+    if (user.is_new_user) {
+      app.platformEventBus.emit('auth.signup.completed', {
+        appId,
+        userId: user.id,
+        email: user.email,
+        displayName: user.display_name,
+        provider, // actual provider string ('google', 'github', etc.) — variable already in scope
+        runtimeDb,
+      });
+    }
+
     // Get signing key
     const signingKey = await getOrCreateSigningKey(app.controlDb, appId);
 

@@ -122,6 +122,16 @@ export async function signupRoutes(app: FastifyInstance) {
         success: true,
       });
 
+      // Emit platform event for cloud-side fan-out (substrate auto-mirror etc.)
+      app.platformEventBus.emit('auth.signup.completed', {
+        appId: app_id,
+        userId: user.id,
+        email: user.email,
+        displayName: user.display_name,
+        provider: 'email',
+        runtimeDb,
+      });
+
       // Fire post_auth hook (fire-and-forget)
       fireAuthHook(app.controlDb, app_id, {
         event: 'signup',

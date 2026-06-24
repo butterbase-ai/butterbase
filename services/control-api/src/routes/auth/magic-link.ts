@@ -70,6 +70,15 @@ export async function magicLinkRoutes(app: FastifyInstance) {
         try {
           user = await createUser(app.controlDb, app_id, email, null);
           isNewUser = true;
+
+          app.platformEventBus.emit('auth.signup.completed', {
+            appId: app_id,
+            userId: user.id,
+            email, // raw input from parseResult.data
+            displayName: null, // createUser called without display_name
+            provider: 'magic_link',
+            runtimeDb,
+          });
         } catch (err: any) {
           // Handle race condition: concurrent magic-link requests for same email
           if (err.code === '23505') {
