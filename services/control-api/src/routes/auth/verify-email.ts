@@ -76,6 +76,13 @@ export async function verifyEmailRoutes(app: FastifyInstance) {
       // Mark email as verified
       await markEmailVerified(app.controlDb, app_id, row.user_id);
 
+      app.platformEventBus.emit('auth.email.verified', {
+        appId: app_id,
+        userId: row.user_id,
+        email: row.email,
+        runtimeDb,
+      });
+
       logAuditEvent(runtimeDb, {
         appId: app_id,
         userId: row.user_id,
