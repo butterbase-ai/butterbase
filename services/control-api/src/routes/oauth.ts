@@ -2,9 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { OAuthClientService } from '../services/oauth-client-service.js';
 import { OAuthStateService } from '../services/oauth-state-service.js';
 import { OAuthCodeService } from '../services/oauth-code-service.js';
+import { ApiKeyService } from '../services/api-key-service.js';
 import { config } from '../config.js';
 
 const ALLOWED_SCOPES = new Set(['mcp', 'ai:gateway']);
+const ACCESS_TOKEN_TTL_SEC = 90 * 24 * 3600;
 
 export async function oauthRoutes(app: FastifyInstance) {
   app.route({
@@ -171,6 +173,72 @@ export async function oauthRoutes(app: FastifyInstance) {
       u.searchParams.set('code', code);
       u.searchParams.set('state', payload.state);
       return reply.send({ redirect_to: u.toString() });
+    },
+  });
+
+  app.route({
+    method: 'POST',
+    url: '/oauth/token',
+    config: { public: true },
+    handler: async (request, reply) => {
+      // Accept either JSON (Fastify built-in parser) or
+      // application/x-www-form-urlencoded (registered parser → object;
+      // wildcard fallback → Buffer/string).
+      let body: Record<string, string> = {};
+      if (typeof request.body === 'string') {
+        body = Object.fromEntries(new URLSearchParams(request.body));
+      } else if (Buffer.isBuffer(request.body)) {
+        body = Object.fromEntries(new URLSearchParams(request.body.toString('utf8')));
+      } else if (request.body && typeof request.body === 'object') {
+        body = request.body as Record<string, string>;
+      }
+
+      if (body.grant_type !== 'authorization_code') {
+        return reply.code(400).send({ error: 'unsupported_grant_type' });
+      }
+      if (!body.code || !body.client_id || !body.redirect_uri || !body.code_verifier) {
+        return reply.code(400).send({
+          error: 'invalid_request',
+          error_description: 'code, client_id, redirect_uri, code_verifier required',
+        });
+      }
+
+      const consumed = await OAuthCodeService.consume(app.controlDb, {
+        code: body.code,
+        client_id: body.client_id,
+        redirect_uri: body.redirect_uri,
+        code_verifier: body.code_verifier,
+      });
+      if ('error' in consumed) {
+        return reply.code(400).send({ error: consumed.error });
+      }
+
+      const t = consumed.requested_target;
+      const client = await OAuthClientService.lookup(app.controlDb, body.client_id);
+      const displayName = `OAuth: ${client?.client_name ?? body.client_id}`;
+      const minted = await ApiKeyService.generateApiKey(
+        app.controlDb,
+        consumed.user_id,
+        displayName,
+        {
+          keyScope: t.key_scope,
+          targetAppId: t.target_app_id,
+          additionalScopes: t.additional_scopes ?? [],
+        }
+      );
+
+      // ApiKeyService.generateApiKey doesn't accept expires_at; patch it.
+      await app.controlDb.query(
+        `UPDATE api_keys SET expires_at = now() + interval '90 days' WHERE id = $1`,
+        [minted.keyId]
+      );
+
+      return reply.send({
+        access_token: minted.key,
+        token_type: 'Bearer',
+        expires_in: ACCESS_TOKEN_TTL_SEC,
+        scope: consumed.scope,
+      });
     },
   });
 }
