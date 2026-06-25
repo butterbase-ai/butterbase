@@ -8,12 +8,57 @@ import { config } from '../config.js';
 const ALLOWED_SCOPES = new Set(['mcp', 'ai:gateway']);
 const ACCESS_TOKEN_TTL_SEC = 90 * 24 * 3600;
 
+// In-memory token bucket per IP for /oauth/register. Phase-1 mitigation against
+// trivial filling of oauth_clients. Follow-up: replace with a Redis counter so
+// the limit holds across control-api replicas.
+const REGISTER_LIMIT_PER_HOUR = 10;
+const registerBuckets = new Map<string, { count: number; resetAt: number }>();
+function rateLimitRegister(ip: string): boolean {
+  const now = Date.now();
+  const bucket = registerBuckets.get(ip);
+  if (!bucket || bucket.resetAt < now) {
+    registerBuckets.set(ip, { count: 1, resetAt: now + 3_600_000 });
+    return true;
+  }
+  if (bucket.count >= REGISTER_LIMIT_PER_HOUR) return false;
+  bucket.count++;
+  return true;
+}
+
+// CSRF gate for the consent endpoints. They are reached from the dashboard
+// (cookie/JWT auth) and mutate state (decide mints a code; details leaks the
+// user's app list). Origin must equal the dashboard URL. E2E tests bypass.
+function enforceDashboardOrigin(
+  request: { headers: Record<string, string | string[] | undefined> },
+  reply: { code: (n: number) => { send: (b: unknown) => unknown } },
+): boolean {
+  if (process.env.BUTTERBASE_E2E === '1') return true;
+  const allowed = config.dashboardUrl;
+  if (!allowed) return true;
+  const originRaw = request.headers.origin;
+  const origin = Array.isArray(originRaw) ? originRaw[0] : originRaw;
+  if (origin !== allowed) {
+    reply.code(403).send({ error: 'invalid_origin', error_description: 'Origin not allowed' });
+    return false;
+  }
+  return true;
+}
+
 export async function oauthRoutes(app: FastifyInstance) {
   app.route({
     method: 'POST',
     url: '/oauth/register',
     config: { public: true },
     handler: async (request, reply) => {
+      // E2E test harness exercises this endpoint dozens of times per run from
+      // 127.0.0.1; skipping under the explicit flag keeps the limit honest in
+      // prod without breaking deterministic test setup.
+      if (process.env.BUTTERBASE_E2E !== '1') {
+        const ip = request.ip ?? 'unknown';
+        if (!rateLimitRegister(ip)) {
+          return reply.code(429).send({ error: 'too_many_requests', error_description: 'Rate limit exceeded; try again in an hour.' });
+        }
+      }
       const body = (request.body ?? {}) as { client_name?: unknown; redirect_uris?: unknown };
       const redirect_uris = body.redirect_uris;
       const client_name = body.client_name;
@@ -93,6 +138,7 @@ export async function oauthRoutes(app: FastifyInstance) {
     method: 'GET',
     url: '/oauth/authorize/details',
     handler: async (request, reply) => {
+      if (!enforceDashboardOrigin(request, reply)) return reply;
       const st = (request.query as Record<string, string | undefined>).st;
       const payload = st ? OAuthStateService.verify(st) : null;
       if (!payload) {
@@ -125,6 +171,7 @@ export async function oauthRoutes(app: FastifyInstance) {
     method: 'POST',
     url: '/oauth/authorize/decide',
     handler: async (request, reply) => {
+      if (!enforceDashboardOrigin(request, reply)) return reply;
       if (!request.auth?.userId) {
         return reply.code(401).send({ error: 'login_required' });
       }
@@ -146,13 +193,17 @@ export async function oauthRoutes(app: FastifyInstance) {
       }
 
       const t = body.target ?? {};
+      // NOTE: read_only is intentionally dropped here. The consent UI still
+      // accepts it and labels it "(coming soon)". Enforcement requires a
+      // future migration to add `api_keys.read_only` + a guard in
+      // ApiKeyService — until then we don't persist the flag rather than
+      // silently lie about it.
       const target = {
         key_scope: t.key_scope === 'app' ? 'app' : 'account',
         target_app_id: typeof t.target_app_id === 'string' ? t.target_app_id : undefined,
         additional_scopes: Array.isArray(t.additional_scopes)
           ? t.additional_scopes.filter((s: unknown) => typeof s === 'string')
           : [],
-        read_only: t.read_only === true,
       } as const;
 
       if (target.key_scope === 'app' && !target.target_app_id) {

@@ -8,7 +8,6 @@ export interface RequestedTarget {
   key_scope: 'account' | 'app';
   target_app_id?: string;
   additional_scopes: string[];
-  read_only?: boolean;
 }
 
 export interface IssueParams {

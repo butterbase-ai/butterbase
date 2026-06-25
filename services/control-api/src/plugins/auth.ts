@@ -152,6 +152,15 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
     // the substrate preHandler can run. Set an anonymous auth so any non-substrate
     // route that happens to be hit by a substrate token still 401s correctly.
     if (token && token.startsWith('bb_sub_')) {
+      // /mcp must never accept anonymous — substrate-scoped tokens are not
+      // valid MCP credentials, so emit the standard 401 + WWW-Authenticate
+      // challenge rather than falling through to anonymous auth.
+      if (isMcpRoute(request)) {
+        return reply
+          .code(401)
+          .header('www-authenticate', mcpChallengeHeader())
+          .send(mcpAuthRequiredBody());
+      }
       request.auth = {
         userId: null,
         authMethod: 'anonymous',

@@ -394,3 +394,55 @@ describe('POST /oauth/token', () => {
     await app.close();
   });
 });
+
+describe('CSRF on /oauth/authorize/decide', () => {
+  it('403s when Origin is not the dashboard URL (E2E bypass off)', async () => {
+    const app = await buildAppForTest();
+    const { st, userId } = await prepareConsent(app);
+    const prev = process.env.BUTTERBASE_E2E;
+    delete process.env.BUTTERBASE_E2E;
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/oauth/authorize/decide',
+        headers: {
+          'x-test-user-id': userId,
+          origin: 'https://evil.example',
+        },
+        payload: { st, decision: 'approve', target: { key_scope: 'account', additional_scopes: [] } },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe('invalid_origin');
+    } finally {
+      if (prev !== undefined) process.env.BUTTERBASE_E2E = prev;
+    }
+    await app.close();
+  });
+});
+
+describe('/oauth/register rate limit', () => {
+  it('returns 429 after exceeding REGISTER_LIMIT_PER_HOUR from one IP', async () => {
+    const app = await buildAppForTest();
+    const prev = process.env.BUTTERBASE_E2E;
+    delete process.env.BUTTERBASE_E2E;
+    // Use a unique remote address to avoid colliding with the bucket the
+    // CSRF/other tests may populate (registerBuckets is module-scoped state).
+    const remoteAddress = '203.0.113.42';
+    let last;
+    try {
+      for (let i = 0; i < 11; i++) {
+        last = await app.inject({
+          method: 'POST',
+          url: '/oauth/register',
+          remoteAddress,
+          payload: { client_name: 'rl', redirect_uris: ['http://127.0.0.1:11111/cb'] },
+        });
+      }
+    } finally {
+      if (prev !== undefined) process.env.BUTTERBASE_E2E = prev;
+    }
+    expect(last!.statusCode).toBe(429);
+    expect(last!.json().error).toBe('too_many_requests');
+    await app.close();
+  });
+});

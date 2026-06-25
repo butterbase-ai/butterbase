@@ -1,9 +1,12 @@
 import type { FastifyInstance } from 'fastify';
+import { config } from '../config.js';
 
+// Source of truth for the public URL used in oauth metadata. Must agree with
+// the WWW-Authenticate `resource_metadata` URL emitted by plugins/auth.ts so
+// clients discover the same authorization server.
 function baseUrl(): string {
-  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL;
-  const port = process.env.CONTROL_API_PORT ?? '4000';
-  return `http://localhost:${port}`;
+  return (config as { publicUrl?: string }).publicUrl
+    ?? `http://localhost:${(config as { port?: number }).port ?? 4000}`;
 }
 
 export async function wellKnownRoutes(app: FastifyInstance) {
