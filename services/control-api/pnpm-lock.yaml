@@ -22,10 +22,13 @@ importers:
         version: 3.1048.0
       '@butterbase/mcp-server':
         specifier: file:../mcp-server
-        version: file:../mcp-server
+        version: '@butterbase/mcp@file:../mcp-server(typescript@5.9.3)'
       '@butterbase/shared':
         specifier: file:../../packages/shared
         version: file:../../packages/shared
+      '@butterbase/static-frontend-worker':
+        specifier: file:../../packages/static-frontend-worker
+        version: file:../../packages/static-frontend-worker
       '@composio/core':
         specifier: ^0.6.10
         version: 0.6.11(ws@8.20.1)(zod@3.25.76)
@@ -268,12 +271,23 @@ packages:
     resolution: {integrity: sha512-iY8yvjE0y651BixKNPgmv1WrQc+GZ142sb0z4gYnChDDY2YqI4P/jsSopBWrKfAt7LOJAkOXt7rC/hms+WclQQ==}
     engines: {node: '>=18.0.0'}
 
-  '@butterbase/mcp-server@file:../mcp-server':
+  '@butterbase/mcp@file:../mcp-server':
     resolution: {directory: ../mcp-server, type: directory}
     hasBin: true
 
+  '@butterbase/sdk@2.7.0':
+    resolution: {integrity: sha512-UXM5D0RKKfVU4bmpRfXln9cYsgjKfdvjPyo8UUX09569Y3Ydu0WWxm0SdlVSaRVzZa72WAHpAIpsSB/Fhyry6w==}
+    peerDependencies:
+      typescript: '>=5.0.0'
+
+  '@butterbase/shared@0.3.0':
+    resolution: {integrity: sha512-zkDw2T/oOYQUexM78Gbp5hWZI/QxBjNn1P1xGt0kD+li7AJb5i1pt6E5A4rdXNXWgpvXHxooNiEhGvum84l6Bg==}
+
   '@butterbase/shared@file:../../packages/shared':
     resolution: {directory: ../../packages/shared, type: directory}
+
+  '@butterbase/static-frontend-worker@file:../../packages/static-frontend-worker':
+    resolution: {directory: ../../packages/static-frontend-worker, type: directory}
 
   '@cloudflare/kv-asset-handler@0.3.4':
     resolution: {integrity: sha512-YLPHc8yASwjNkmcDMQMY35yiWjoKAKnhUbPRszBRS0YgH+IXtsMp61j+yTcnCE3oO2DgP0U3iejLC8FTtKDC8Q==}
@@ -3346,16 +3360,30 @@ snapshots:
 
   '@aws/lambda-invoke-store@0.2.4': {}
 
-  '@butterbase/mcp-server@file:../mcp-server':
+  '@butterbase/mcp@file:../mcp-server(typescript@5.9.3)':
     dependencies:
+      '@butterbase/sdk': 2.7.0(typescript@5.9.3)
+      '@butterbase/shared': 0.3.0
       '@modelcontextprotocol/sdk': 1.29.0(zod@3.25.76)
       adm-zip: 0.5.17
+      pg: 8.20.0
       zod: 3.25.76
     transitivePeerDependencies:
       - '@cfworker/json-schema'
+      - pg-native
       - supports-color
+      - typescript
+
+  '@butterbase/sdk@2.7.0(typescript@5.9.3)':
+    dependencies:
+      '@butterbase/shared': 0.3.0
+      typescript: 5.9.3
+
+  '@butterbase/shared@0.3.0': {}
 
   '@butterbase/shared@file:../../packages/shared': {}
+
+  '@butterbase/static-frontend-worker@file:../../packages/static-frontend-worker': {}
 
   '@cloudflare/kv-asset-handler@0.3.4':
     dependencies:
