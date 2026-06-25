@@ -80,20 +80,33 @@ export function rankRoutersForModel(
 }
 
 /**
+ * Anthropic prices an ephemeral 5-minute prompt-cache *write* at 1.25× the base
+ * input rate. (1-hour writes are 2×, but adapters collapse both 5m and 1h cache
+ * creation into a single `cache_creation_input_tokens` count, so we apply the
+ * 5m multiplier as a floor — a conservative under-estimate for 1h writes.)
+ */
+const CACHE_WRITE_PRICE_MULTIPLIER = 1.25;
+
+/**
  * Worst-case USD cost: prompt_tokens × prompt_price + max_tokens × completion_price.
  * Used for lease reservation; actual cost from router response settles the lease.
  *
- * Optionally cache-aware: when `cacheReadInputTokens > 0`, that portion of
- * `promptTokens` is excluded from the input-cost charge. This is used on the
- * settlement-fallback path (when the upstream's `usage.cost` is null) so we
- * don't over-bill customers for tokens the upstream served from cache.
+ * Cache-aware on the settlement-fallback path (when the upstream's `usage.cost`
+ * is null), where adapters report a token breakdown:
  *
- * We don't know each router's exact cache-read price, so cached tokens are
- * billed at $0 here — a conservative under-estimate relative to the upstream's
- * real cache-read line item, but a strict improvement over the previous
- * behavior, which ignored `cache_read_input_tokens` entirely on this path.
- * The lease-reservation call site passes no cache field (cache state is
- * unknown before the call), preserving worst-case behavior there.
+ *  - `cacheReadInputTokens`: that portion of `promptTokens` is excluded from the
+ *    input-cost charge (billed at $0). We don't know each router's exact
+ *    cache-read price, so this is a deliberate, customer-favorable under-estimate
+ *    relative to the upstream's real cache-read line item (~0.1× input).
+ *  - `cacheCreationInputTokens`: charged at `CACHE_WRITE_PRICE_MULTIPLIER × prompt
+ *    price`. Unlike cache reads, cache-creation tokens are NOT part of
+ *    `promptTokens` (adapters report them as a separate count), so they are
+ *    *added*, not subtracted. Omitting this term silently undercharged every
+ *    prompt-cache write — the expensive side of caching — by the full creation
+ *    cost (see known-bugs/2026-06-23-cache-creation-tokens-unpriced.md).
+ *
+ * The lease-reservation call site passes no cache fields (cache state is unknown
+ * before the call), preserving worst-case behavior there.
  *
  * If `cacheReadInputTokens` exceeds `promptTokens` (degenerate input), the
  * non-cached portion clamps to 0 rather than going negative.
@@ -103,11 +116,14 @@ export function estimateWorstCaseUsd(
   promptTokens: number,
   maxCompletionTokens: number,
   cacheReadInputTokens: number = 0,
+  cacheCreationInputTokens: number = 0,
 ): number {
   const nonCachedPromptTokens = Math.max(0, promptTokens - cacheReadInputTokens);
   const promptCost = (nonCachedPromptTokens / 1_000_000) * prices.promptPricePerMtok;
+  const cacheCreationCost =
+    (Math.max(0, cacheCreationInputTokens) / 1_000_000) * prices.promptPricePerMtok * CACHE_WRITE_PRICE_MULTIPLIER;
   const completionCost = (maxCompletionTokens / 1_000_000) * prices.completionPricePerMtok;
-  return promptCost + completionCost;
+  return promptCost + cacheCreationCost + completionCost;
 }
 
 /**

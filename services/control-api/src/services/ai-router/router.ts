@@ -238,7 +238,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   // Streaming: wrap so we can parse usage after [DONE] and settle.
   if (result.stream) {
     const wrapped = wrapStreamForSettlement(result.stream, async (usage, providerCost) => {
-      const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cacheReadInputTokens ?? 0);
+      const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cacheReadInputTokens ?? 0, usage.cacheCreationInputTokens ?? 0);
       const chargedCredits = applyMarkup(cost, ctx.markupPct);
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill(
@@ -278,7 +278,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   // Non-streaming.
   const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
-    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cache_read_input_tokens ?? 0);
+    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cache_read_input_tokens ?? 0, usage.cache_creation_input_tokens ?? 0);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
@@ -448,7 +448,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
 
   const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
-    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, 0, usage.cache_read_input_tokens ?? 0);
+    ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, 0, usage.cache_read_input_tokens ?? 0, usage.cache_creation_input_tokens ?? 0);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
