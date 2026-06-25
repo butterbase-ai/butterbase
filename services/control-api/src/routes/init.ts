@@ -45,7 +45,7 @@ export async function initRoutes(app: FastifyInstance) {
     const allRows: any[] = [];
     for (const region of regions) {
       const { rows } = await app.runtimeDb(region).query(
-        'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_user_id, created_at FROM apps WHERE owner_id = $1 ORDER BY created_at DESC',
+        'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_user_id, substrate_autopropagate, created_at FROM apps WHERE owner_id = $1 ORDER BY created_at DESC',
         [ownerId]
       );
       allRows.push(...rows);
