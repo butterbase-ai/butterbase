@@ -271,7 +271,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         latency_ms: t1 - t0,
         status: result.status,
       }));
-    });
+    }, result.costFetcher);
     return { status: result.status, stream: wrapped, chosen: chosenRouter };
   }
 
@@ -326,11 +326,21 @@ interface StreamUsage {
 export function wrapStreamForSettlement(
   upstream: ReadableStream<Uint8Array>,
   onComplete: (usage: StreamUsage, providerCostUsd: number | null) => Promise<void>,
+  costFetcher?: () => Promise<number | null>,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let promptTokens = 0, completionTokens = 0, providerCost: number | null = null;
   let cacheReadInputTokens = 0, cacheCreationInputTokens = 0;
   let lineBuffer = '';
+
+  const settle = async () => {
+    // Only invoke costFetcher when the in-stream usage events never carried a cost.
+    if (providerCost === null && costFetcher) {
+      try { providerCost = await costFetcher(); } catch (e) { console.error('[router] costFetcher:', e); }
+    }
+    try { await onComplete({ promptTokens, completionTokens, cacheReadInputTokens, cacheCreationInputTokens }, providerCost); }
+    catch (e) { console.error('[router] stream settle:', e); }
+  };
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -338,11 +348,7 @@ export function wrapStreamForSettlement(
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) {
-            try { await onComplete({ promptTokens, completionTokens, cacheReadInputTokens, cacheCreationInputTokens }, providerCost); } catch (e) { console.error('[router] stream settle:', e); }
-            controller.close();
-            return;
-          }
+          if (done) { await settle(); controller.close(); return; }
           lineBuffer += decoder.decode(value, { stream: true });
           const parts = lineBuffer.split('\n');
           lineBuffer = parts.pop() ?? '';
@@ -356,9 +362,6 @@ export function wrapStreamForSettlement(
                 const u = parsed.usage;
                 const details = u.prompt_tokens_details;
                 const cacheRead = details?.cached_tokens ?? 0;
-
-                // ImaRouter shape: claude_cache_creation_*_tokens present on the usage object.
-                // ImaRouter also excludes cached tokens from prompt_tokens — add them back.
                 const hasImaRouterFields =
                   typeof u.claude_cache_creation_5_m_tokens === 'number' ||
                   typeof u.claude_cache_creation_1_h_tokens === 'number';
@@ -367,12 +370,7 @@ export function wrapStreamForSettlement(
                 const cacheCreate = hasImaRouterFields
                   ? cacheWrite5m + cacheWrite1h
                   : (details?.cache_write_tokens ?? 0);
-
                 const rawPromptTokens = u.prompt_tokens ?? 0;
-                // ImaRouter excludes cached tokens from prompt_tokens; add them back
-                // so downstream billing math (prompt_tokens - cache_read_input_tokens) is correct.
-                // Only update promptTokens when a fresh raw value is present to avoid double-adding
-                // cacheRead if a later usage event arrives without prompt_tokens.
                 if (rawPromptTokens > 0) {
                   promptTokens = hasImaRouterFields ? rawPromptTokens + cacheRead : rawPromptTokens;
                 }
@@ -388,7 +386,7 @@ export function wrapStreamForSettlement(
         }
       } catch (err) {
         controller.error(err);
-        try { await onComplete({ promptTokens, completionTokens, cacheReadInputTokens, cacheCreationInputTokens }, providerCost); } catch {}
+        await settle();
       }
     },
   });

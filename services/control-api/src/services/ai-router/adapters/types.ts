@@ -75,6 +75,13 @@ export interface AdapterResult {
   usage: AdapterUsage | null;
   /** Provider's reported cost, in USD; null when adapter can't extract it. */
   providerCostUsd: number | null;
+  /**
+   * Optional post-hoc cost lookup. Used by streaming adapters that cannot
+   * report cost inline (e.g. iMARouter's chat stream). wrapStreamForSettlement
+   * awaits this after the upstream emits [DONE] when no in-stream cost was
+   * observed.
+   */
+  costFetcher?: () => Promise<number | null>;
 }
 
 export type AdapterErrorKind =

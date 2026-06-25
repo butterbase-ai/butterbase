@@ -2,7 +2,7 @@
  * Tests for streaming usage extraction in wrapStreamForSettlement.
  * Covers cache-token propagation for both OpenRouter and ImaRouter SSE shapes.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { wrapStreamForSettlement } from './router.js';
 
 function makeStream(chunks: string[]): ReadableStream<Uint8Array> {
@@ -210,5 +210,46 @@ describe('wrapStreamForSettlement — split-line SSE robustness', () => {
       cacheReadInputTokens: 6003,
       promptTokens: 6803, // 800 + 6003
     });
+  });
+});
+
+describe('wrapStreamForSettlement — costFetcher hook', () => {
+  it('calls costFetcher after [DONE] when no in-stream providerCost was seen', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+      'data: {"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) { for (const c2 of chunks) c.enqueue(new TextEncoder().encode(c2)); c.close(); },
+    });
+    let captured: number | null = -1;
+    const costFetcher = vi.fn().mockResolvedValue(0.000077);
+    const wrapped = wrapStreamForSettlement(upstream, async (_usage, providerCost) => { captured = providerCost; }, costFetcher);
+
+    const reader = wrapped.getReader();
+    while (true) { const { done } = await reader.read(); if (done) break; }
+
+    expect(costFetcher).toHaveBeenCalledTimes(1);
+    expect(captured).toBe(0.000077);
+  });
+
+  it('skips costFetcher when an in-stream providerCost was already observed', async () => {
+    const chunks = [
+      'data: {"usage":{"prompt_tokens":3,"completion_tokens":1,"cost":0.0001}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) { for (const c2 of chunks) c.enqueue(new TextEncoder().encode(c2)); c.close(); },
+    });
+    let captured: number | null = -1;
+    const costFetcher = vi.fn().mockResolvedValue(0.9);
+    const wrapped = wrapStreamForSettlement(upstream, async (_usage, providerCost) => { captured = providerCost; }, costFetcher);
+
+    const reader = wrapped.getReader();
+    while (true) { const { done } = await reader.read(); if (done) break; }
+
+    expect(costFetcher).not.toHaveBeenCalled();
+    expect(captured).toBe(0.0001);
   });
 });
