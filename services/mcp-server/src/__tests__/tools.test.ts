@@ -106,7 +106,7 @@ describe('MCP Server Tools', () => {
     const actions = (tool!.inputSchema as unknown as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'link_substrate', 'list', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'secure', 'set_clone_webhook', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors',
+      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'link_substrate', 'list', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'secure', 'set_clone_webhook', 'set_substrate_autopropagate', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [
@@ -124,7 +124,7 @@ describe('MCP Server Tools', () => {
     expect(tool).toBeDefined();
     const actions = ((tool!.inputSchema as unknown) as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
-    expect(actions.sort()).toEqual(['delete', 'get', 'get_logs', 'list', 'update_env']);
+    expect(actions.sort()).toEqual(['delete', 'get', 'get_logs', 'list', 'update_env', 'update_settings']);
     const names = result.tools.map((t) => t.name);
     for (const removed of ['list_functions', 'delete_function', 'get_function_logs', 'update_function_env']) {
       expect(names).not.toContain(removed);
