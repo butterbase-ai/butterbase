@@ -24,6 +24,7 @@ function resolveSesRegion(): string {
 export const config = {
   port: parseInt(process.env.CONTROL_API_PORT ?? '4000', 10),
   nodeEnv: process.env.NODE_ENV ?? 'development',
+  publicUrl: process.env.PUBLIC_URL,
 
   logging: {
     requestLoggingEnabled: process.env.CONTROL_API_REQUEST_LOGGING !== 'false',
