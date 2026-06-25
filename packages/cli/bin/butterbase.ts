@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { renderError } from '../src/lib/errors.js';
 import { initCommand } from '../src/commands/init.js';
 import { loginCommand, logoutCommand, configGetCommand, configSetCommand } from '../src/commands/config.js';
-import { appsListCommand, appsCreateCommand, appsUseCommand, appsDeleteCommand, appsPauseCommand, appsResumeCommand, appsLinkSubstrateCommand, appsUnlinkSubstrateCommand } from '../src/commands/apps.js';
+import { appsListCommand, appsCreateCommand, appsUseCommand, appsDeleteCommand, appsPauseCommand, appsResumeCommand, appsLinkSubstrateCommand, appsUnlinkSubstrateCommand, appsSubstrateAutopropagateCommand } from '../src/commands/apps.js';
 import { schemaGetCommand, schemaApplyCommand } from '../src/commands/schema.js';
 import { functionsListCommand, functionsGetCommand, functionsDeployCommand, functionsLogsCommand, functionsDeleteCommand, functionsInvokeCommand, functionsEnvSetCommand, functionsEnvListCommand, functionsMetricsCommand } from '../src/commands/functions.js';
 import { storageListCommand, storageUploadCommand, storageDeleteCommand, storageConfigCommand } from '../src/commands/storage.js';
@@ -247,6 +247,12 @@ apps
   .command('unlink-substrate [app-id]')
   .description('Unlink this app from your substrate')
   .action(appsUnlinkSubstrateCommand);
+
+apps
+  .command('substrate-autopropagate <app-id>')
+  .description('Toggle per-event auto-mirroring of app activity into the linked substrate (e.g. user signups)')
+  .option('--users <bool>', 'Mirror user events (signup / email-verified / user-deleted) into the substrate', (v) => v === 'true')
+  .action(appsSubstrateAutopropagateCommand);
 
 const appsConfig = apps.command('config').description('Read or update the app\'s server-side config');
 
