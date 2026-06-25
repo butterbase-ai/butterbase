@@ -1,3 +1,4 @@
+-- @scope: runtime
 -- 027_apps_substrate_autopropagate.sql
 -- Adds per-event opt-in toggles for auto-mirroring app activity into the
 -- linked owner's substrate. JSONB shape (v1):
