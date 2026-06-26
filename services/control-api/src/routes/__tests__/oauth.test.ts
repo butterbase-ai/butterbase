@@ -359,7 +359,7 @@ describe('POST /oauth/token', () => {
     const body = res.json();
     expect(body.access_token).toMatch(/^bb_sk_/);
     expect(body.token_type).toBe('Bearer');
-    expect(body.expires_in).toBeGreaterThan(7_000_000);
+    expect(body.expires_in).toBeUndefined();
     expect(body.scope).toBe('mcp');
     await app.close();
   });

@@ -6,7 +6,6 @@ import { ApiKeyService } from '../services/api-key-service.js';
 import { config } from '../config.js';
 
 const ALLOWED_SCOPES = new Set(['mcp', 'ai:gateway']);
-const ACCESS_TOKEN_TTL_SEC = 90 * 24 * 3600;
 
 // In-memory token bucket per IP for /oauth/register. Phase-1 mitigation against
 // trivial filling of oauth_clients. Follow-up: replace with a Redis counter so
@@ -285,16 +284,12 @@ export async function oauthRoutes(app: FastifyInstance) {
         }
       );
 
-      // ApiKeyService.generateApiKey doesn't accept expires_at; patch it.
-      await app.controlDb.query(
-        `UPDATE api_keys SET expires_at = now() + interval '90 days' WHERE id = $1`,
-        [minted.keyId]
-      );
-
+      // Tokens minted via OAuth never expire — users revoke via the API Keys
+      // dashboard when they're done. Per RFC 6749 §5.1, expires_in is OPTIONAL;
+      // omitting it tells the client the token has no fixed lifetime.
       return reply.send({
         access_token: minted.key,
         token_type: 'Bearer',
-        expires_in: ACCESS_TOKEN_TTL_SEC,
         scope: consumed.scope,
       });
     },
