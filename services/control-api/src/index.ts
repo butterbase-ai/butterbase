@@ -243,20 +243,11 @@ app.decorate('authProvider', (config.cognito.userPoolId
     )
   : new LocalAuthProvider(config.auth.jwtSecret)) as AuthProvider);
 
-// OAuth 2.1 token endpoint is required to accept application/x-www-form-urlencoded
-// (RFC 6749 §3.2). Register a dedicated parser so handlers receive an object,
-// not a Buffer (the wildcard below would otherwise swallow it as bytes).
-app.addContentTypeParser(
-  'application/x-www-form-urlencoded',
-  { parseAs: 'string' },
-  (_req, body, done) => {
-    try {
-      done(null, Object.fromEntries(new URLSearchParams(body as string)));
-    } catch (err) {
-      done(err as Error, undefined);
-    }
-  }
-);
+// NOTE: application/x-www-form-urlencoded is parsed by the per-app OAuth
+// route plugin (routes/auth/oauth.ts) via querystring.parse — that parser
+// is registered globally on the Fastify instance, so /oauth/token also
+// receives an object body. Do NOT add a second parser here; Fastify
+// throws FST_ERR_CTP_ALREADY_PRESENT on duplicate registration.
 
 // Capture all non-JSON, non-text request bodies as raw Buffers so function
 // execution can forward them faithfully to the Deno runtime.
