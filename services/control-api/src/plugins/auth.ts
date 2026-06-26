@@ -30,7 +30,10 @@ function publicBaseUrl(): string {
 
 function mcpChallengeHeader(): string {
   const metadataUrl = `${publicBaseUrl()}/.well-known/oauth-protected-resource`;
-  return `Bearer realm="butterbase", resource_metadata="${metadataUrl}"`;
+  // Include `scope` per MCP authz spec 2025-11-25 (§ "WWW-Authenticate Header"):
+  // SHOULD include a scope parameter so spec-aware clients can pre-populate
+  // the consent screen without an extra discovery round trip.
+  return `Bearer realm="butterbase", resource_metadata="${metadataUrl}", scope="mcp"`;
 }
 
 function mcpAuthRequiredBody() {
