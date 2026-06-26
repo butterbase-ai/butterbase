@@ -10,6 +10,42 @@ import { LocalAuthProvider } from '../services/local-auth-provider.js';
 import { CognitoAuthProvider } from '../services/cognito-auth-provider.js';
 import { config } from '../config.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
+
+/**
+ * MCP discovery handshake. RFC 9728 (OAuth 2.0 Protected Resource Metadata)
+ * requires that a protected resource emit a `WWW-Authenticate: Bearer …
+ * resource_metadata="…"` header on 401 so a client (e.g. Claude Code) can
+ * discover the authorization server and start an OAuth flow. We only attach
+ * it on the /mcp endpoint — the rest of the control-api is for browser/SDK
+ * clients that already know how to mint a JWT or service key.
+ */
+function isMcpRoute(request: FastifyRequest): boolean {
+  return request.routeOptions?.url === '/mcp';
+}
+
+function publicBaseUrl(): string {
+  return (config as { publicUrl?: string }).publicUrl
+    ?? `http://localhost:${(config as { port?: number }).port ?? 4000}`;
+}
+
+function mcpChallengeHeader(): string {
+  const metadataUrl = `${publicBaseUrl()}/.well-known/oauth-protected-resource`;
+  // Include `scope` per MCP authz spec 2025-11-25 (§ "WWW-Authenticate Header"):
+  // SHOULD include a scope parameter so spec-aware clients can pre-populate
+  // the consent screen without an extra discovery round trip.
+  return `Bearer realm="butterbase", resource_metadata="${metadataUrl}", scope="mcp"`;
+}
+
+function mcpAuthRequiredBody() {
+  const base = publicBaseUrl();
+  return createAgentError({
+    code: 'AUTH_REQUIRED',
+    message:
+      'MCP requires authentication. Run an OAuth flow against this server (see WWW-Authenticate header) or supply a bb_sk_ API key.',
+    remediation: `In Claude Code: \`claude mcp add butterbase ${base}/mcp\`. A browser window will open for you to log in and grant access.`,
+    documentation_url: getDocUrl('AUTH_REQUIRED'),
+  });
+}
 // Stripe provisioning lives in the cloud overlay; in OSS mode it's a no-op.
 async function provisionStripeCustomer(
   ...args: [unknown, string, string]
@@ -94,6 +130,12 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       );
 
       if (!authContext) {
+        if (isMcpRoute(request)) {
+          return reply
+            .code(401)
+            .header('www-authenticate', mcpChallengeHeader())
+            .send(mcpAuthRequiredBody());
+        }
         return reply.code(401).send(createAgentError({
           code: 'AUTH_INVALID_API_KEY',
           message: 'Invalid or revoked API key',
@@ -113,6 +155,15 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
     // the substrate preHandler can run. Set an anonymous auth so any non-substrate
     // route that happens to be hit by a substrate token still 401s correctly.
     if (token && token.startsWith('bb_sub_')) {
+      // /mcp must never accept anonymous — substrate-scoped tokens are not
+      // valid MCP credentials, so emit the standard 401 + WWW-Authenticate
+      // challenge rather than falling through to anonymous auth.
+      if (isMcpRoute(request)) {
+        return reply
+          .code(401)
+          .header('www-authenticate', mcpChallengeHeader())
+          .send(mcpAuthRequiredBody());
+      }
       request.auth = {
         userId: null,
         authMethod: 'anonymous',
@@ -194,6 +245,15 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
     }
 
     if (!token) {
+      // MCP is the one path where anonymous is not allowed. RFC 9728 says we
+      // must emit a WWW-Authenticate challenge pointing at the protected-
+      // resource metadata so the client can start an OAuth flow.
+      if (isMcpRoute(request)) {
+        return reply
+          .code(401)
+          .header('www-authenticate', mcpChallengeHeader())
+          .send(mcpAuthRequiredBody());
+      }
       // Allow anonymous access - set anonymous auth context
       request.auth = {
         userId: null,
@@ -233,6 +293,12 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         claims = await authProvider.verifyJwt(token);
       } catch (error) {
         fastify.log.warn({ err: error }, 'JWT validation failed');
+        if (isMcpRoute(request)) {
+          return reply
+            .code(401)
+            .header('www-authenticate', mcpChallengeHeader())
+            .send(mcpAuthRequiredBody());
+        }
         return reply.code(401).send(createAgentError({
           code: 'AUTH_INVALID_TOKEN',
           message: 'Invalid JWT token',
@@ -292,6 +358,12 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         };
       } catch (error) {
         fastify.log.error({ err: error }, 'JWT validation failed');
+        if (isMcpRoute(request)) {
+          return reply
+            .code(401)
+            .header('www-authenticate', mcpChallengeHeader())
+            .send(mcpAuthRequiredBody());
+        }
         return reply.code(401).send(createAgentError({
           code: 'AUTH_INVALID_TOKEN',
           message: 'Invalid JWT token',

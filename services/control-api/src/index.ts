@@ -38,6 +38,8 @@ import { rlsRoutes } from './routes/rls.js';
 import { oauthConfigRoutes } from './routes/oauth-config.js';
 import { auditLogRoutes } from './routes/audit-logs.js';
 import { mcpRoutes } from './routes/mcp.js';
+import { wellKnownRoutes } from './routes/well-known.js';
+import { oauthRoutes } from './routes/oauth.js';
 import { storageRoutes } from './routes/storage.js';
 import { appConfigRoutes } from './routes/app-config.js';
 import { cloneWebhookConfigRoutes } from './routes/clone-webhook-config.js';
@@ -240,6 +242,12 @@ app.decorate('authProvider', (config.cognito.userPoolId
       config.cognito.region,
     )
   : new LocalAuthProvider(config.auth.jwtSecret)) as AuthProvider);
+
+// NOTE: application/x-www-form-urlencoded is parsed by the per-app OAuth
+// route plugin (routes/auth/oauth.ts) via querystring.parse — that parser
+// is registered globally on the Fastify instance, so /oauth/token also
+// receives an object body. Do NOT add a second parser here; Fastify
+// throws FST_ERR_CTP_ALREADY_PRESENT on duplicate registration.
 
 // Capture all non-JSON, non-text request bodies as raw Buffers so function
 // execution can forward them faithfully to the Deno runtime.
@@ -553,6 +561,8 @@ app.register(autoApiRoutes);
 app.register(rlsRoutes);
 app.register(oauthConfigRoutes);
 app.register(auditLogRoutes);
+app.register(wellKnownRoutes);
+app.register(oauthRoutes);
 app.register(mcpRoutes);
 app.register(storageRoutes);
 app.register(appConfigRoutes);
