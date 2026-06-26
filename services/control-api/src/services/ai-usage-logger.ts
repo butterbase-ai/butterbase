@@ -30,10 +30,11 @@ export async function logAiUsage(db: Pool, log: AiUsageLog): Promise<void> {
 
     // Insert into ai_usage_logs table (runtime-tier)
     await runtimePool.query(
-      `INSERT INTO ai_usage_logs (app_id, model, provider, prompt_tokens, completion_tokens, total_tokens, cost_usd, key_type, charged_to_user, request_metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      `INSERT INTO ai_usage_logs (app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens, cost_usd, key_type, charged_to_user, request_metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         log.appId,
+        log.userId,
         log.model,
         log.provider,
         log.promptTokens,
@@ -46,19 +47,11 @@ export async function logAiUsage(db: Pool, log: AiUsageLog): Promise<void> {
       ]
     );
 
-    // Get app owner for usage metering (apps is runtime-tier)
-    const ownerResult = await runtimePool.query(
-      'SELECT owner_id FROM apps WHERE id = $1',
-      [log.appId]
-    );
-
-    if (ownerResult.rows.length > 0) {
-      const ownerId = ownerResult.rows[0].owner_id;
-
-      // Only increment usage meter if charged to user (platform key)
-      if (log.chargedToUser) {
-        await incrementUsage(ownerId, 'ai_tokens', log.totalTokens, log.appId);
-      }
+    // Meter against the caller (log.userId), not the app owner. Pre-028 this
+    // resolved owner_id via apps and silently skipped null-app-id rows; now
+    // app-less / non-owned-app calls also land in usage_meters.
+    if (log.chargedToUser && log.userId) {
+      await incrementUsage(log.userId, 'ai_tokens', log.totalTokens, log.appId ?? undefined);
     }
   } catch (error) {
     // Don't throw - logging should never block the response

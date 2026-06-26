@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { apiGet, apiDelete, apiPatch, apiPost } from '../api-client.js';
+import { apiGet, apiDelete, apiPatch, apiPost, apiPut } from '../api-client.js';
 
 export function registerManageApp(server: McpServer) {
   server.tool(
@@ -21,8 +21,9 @@ Actions:
   - "get_clone_job":           Look up the status of a previously-started clone job. Returns { status, dest_app_id?, error_message? }.
   - "find_templates":          Search public templates by name, region, sort order, and pagination. Returns paginated list of public app templates.
   - "set_clone_webhook":       Set or clear a webhook that fires when someone clones this app. Pass webhook_url + webhook_secret to configure, or clear_webhook: true to remove.
-  - "link_substrate":          Link this app to the caller's substrate. Once linked, the app's deployed functions receive ctx.substrate and its actions/entities flow into the caller's substrate ledger.
-  - "unlink_substrate":        Unlink this app from substrate. ctx.substrate stops being injected; in-flight actions are unaffected.
+  - "link_substrate":              Link this app to the caller's substrate. Once linked, the app's deployed functions receive ctx.substrate and its actions/entities flow into the caller's substrate ledger.
+  - "unlink_substrate":            Unlink this app from substrate. ctx.substrate stops being injected; in-flight actions are unaffected.
+  - "set_substrate_autopropagate": Toggle per-event auto-mirroring of app activity into the linked owner's substrate. Currently supports 'users' (signup / email-verified / user-deleted). Requires the app to already be linked via 'link_substrate'.
   - "move":                    Migrate an app to a different region. Returns migration_id + initial status "queued".
   - "move_status":             Get the current status of an in-progress migration.
   - "teardown_source_replica": After a completed move, decommission the retained source-region replica.
@@ -41,8 +42,9 @@ Parameters by action:
   get_clone_job:           { action: "get_clone_job", job_id }
   find_templates:          { action: "find_templates", q?, region?, sort?, limit?, offset? }
   set_clone_webhook:       { action: "set_clone_webhook", app_id, webhook_url, webhook_secret } or { action: "set_clone_webhook", app_id, clear_webhook: true }
-  link_substrate:          { action: "link_substrate", app_id }
-  unlink_substrate:        { action: "unlink_substrate", app_id }
+  link_substrate:              { action: "link_substrate", app_id }
+  unlink_substrate:            { action: "unlink_substrate", app_id }
+  set_substrate_autopropagate: { action: "set_substrate_autopropagate", app_id, users? }
   move:                    { action: "move", app_id, dest_region }
   move_status:             { action: "move_status", app_id, migration_id }
   teardown_source_replica: { action: "teardown_source_replica", migration_id }
@@ -51,7 +53,7 @@ Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'move', 'move_status', 'teardown_source_replica'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -91,6 +93,8 @@ Common errors:
       sort: z.enum(['recent', 'popular']).optional().describe('Optional for "find_templates". Sort order: "recent" or "popular". Defaults to "recent".'),
       limit: z.number().int().optional().describe('Optional for "find_templates". Max results per page (default 20).'),
       offset: z.number().int().optional().describe('Optional for "find_templates". Pagination offset (default 0).'),
+      // set_substrate_autopropagate params
+      users: z.boolean().optional().describe('Optional for "set_substrate_autopropagate". true to mirror user signup / email-verified / user-deleted events into the substrate; false to disable. At least one toggle key must be provided.'),
       // move / move_status / teardown_source_replica params
       dest_region: z.string().optional().describe('Required for "move". Target region slug (e.g. "us-west-2").'),
       migration_id: z.string().optional().describe('Required for "move_status" and "teardown_source_replica". The migration ID returned by action: "move".'),
@@ -246,6 +250,24 @@ Common errors:
           const err = need(args.app_id, '"app_id" is required for this action.');
           if (err) return err;
           const result = await apiDelete(`/v1/me/apps/${args.app_id}/substrate-link`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'set_substrate_autopropagate': {
+          const err = need(args.app_id, '"app_id" is required for this action.');
+          if (err) return err;
+          // Build body from only the keys the caller explicitly provided.
+          const body: { users?: boolean } = {};
+          if (args.users !== undefined) body.users = args.users;
+          if (Object.keys(body).length === 0) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: 'Error: At least one toggle key must be provided (e.g. users: true). Shape: { users?: boolean }',
+              }],
+              isError: true as const,
+            };
+          }
+          const result = await apiPut(`/v1/me/apps/${args.app_id}/substrate-autopropagate`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'set_clone_webhook': {

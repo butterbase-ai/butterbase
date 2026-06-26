@@ -236,11 +236,13 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
       );
     }
 
-    // Reconcile AI tokens
+    // Reconcile AI tokens — key on user_id (post-028), since app_id is
+    // nullable and the caller can also hit AI on apps they don't own.
+    // Both cases were silently dropped under the old apps.owner_id join.
     const aiResult = await runtimePool.query(
       `SELECT app_id, COALESCE(SUM(total_tokens), 0) as total
        FROM ai_usage_logs
-       WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+       WHERE user_id = $1
          AND DATE(created_at) >= $2
        GROUP BY app_id`,
       [userId, periodStart]

@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { RouterName } from './normalize.js';
+import { incrementUsage } from '../usage-metering.js';
 
 export interface AiUsageRow {
   appId: string | null;
@@ -32,13 +33,14 @@ export interface AiUsageRow {
 export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Promise<void> {
   await runtimePool.query(
     `INSERT INTO ai_usage_logs (
-       app_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
+       app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
        cost_usd, key_type, charged_to_user, request_metadata,
        router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id,
        cache_read_input_tokens, cache_creation_input_tokens
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
     [
       row.appId,
+      row.userId,
       row.model,
       row.router,              // provider column = router name (legacy)
       row.promptTokens,
@@ -58,4 +60,12 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.cacheCreationInputTokens ?? 0,
     ]
   );
+
+  // Fan the call into usage_meters via the Redis hot path. Meter against
+  // the caller (row.userId), not apps.owner_id — that join misses app-less
+  // gateway calls (app_id = NULL) and calls against apps the caller does
+  // not own, both of which are still billed via credit_leases.
+  if (row.chargedToUser && row.userId) {
+    void incrementUsage(row.userId, 'ai_tokens', row.totalTokens, row.appId ?? undefined);
+  }
 }

@@ -944,6 +944,40 @@ function buildWorkerCode(
         if (!res.ok) throw new Error('substrate.listMemory failed: ' + res.status);
         return (await res.json()).results;
       },
+      async listSourceArtifacts(opts) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/source-artifacts:list', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+          body: JSON.stringify({ kind: opts?.kind, q: opts?.q, limit: opts?.limit, count: opts?.count }),
+        });
+        if (!res.ok) throw new Error('substrate.listSourceArtifacts failed: ' + res.status);
+        return (await res.json()).source_artifacts;
+      },
+      async getSourceArtifact(id) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/source-artifacts/' + encodeURIComponent(id), {
+          headers: { 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+        });
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error('substrate.getSourceArtifact failed: ' + res.status);
+        return await res.json();
+      },
+      async listActions(opts) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/actions:list', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+          body: JSON.stringify({ status: opts?.status, capability: opts?.capability, source_app_id: opts?.source_app_id, source_rule_id: opts?.source_rule_id, before: opts?.before, limit: opts?.limit }),
+        });
+        if (!res.ok) throw new Error('substrate.listActions failed: ' + res.status);
+        return (await res.json()).actions;
+      },
+      async getAction(id) {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/actions/' + encodeURIComponent(id), {
+          headers: { 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+        });
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error('substrate.getAction failed: ' + res.status);
+        return await res.json();
+      },
       async upsertEntity(payload) {
         return await this.propose('upsert_entity', payload);
       },

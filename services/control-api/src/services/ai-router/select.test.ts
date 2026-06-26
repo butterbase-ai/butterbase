@@ -147,6 +147,46 @@ describe('estimateWorstCaseUsd', () => {
       expect(cost).toBeCloseTo(0.06144, 6);
     });
   });
+
+  describe('cache-creation pricing (write side)', () => {
+    const prices = { promptPricePerMtok: 3, completionPricePerMtok: 15 };
+
+    it('treats missing cacheCreationInputTokens as zero (unchanged behavior)', () => {
+      const baseline = estimateWorstCaseUsd(prices, 1000, 4096, 0);
+      const withZero = estimateWorstCaseUsd(prices, 1000, 4096, 0, 0);
+      expect(withZero).toBeCloseTo(baseline, 10);
+    });
+
+    it('charges cache-creation tokens at 1.25× prompt price, added on top of input', () => {
+      // 1000 non-cached prompt at $3/Mtok = 0.003; completion 4096 at $15/Mtok = 0.06144;
+      // 800 cache-creation tokens at 3 × 1.25 = $3.75/Mtok = 0.003.
+      const cost = estimateWorstCaseUsd(prices, 1000, 4096, 0, 800);
+      expect(cost).toBeCloseTo(0.003 + 0.06144 + 0.003, 6);
+    });
+
+    it('cache creation is additive — not part of promptTokens, so not subtracted', () => {
+      // Regression for the flat-charge bug: a cache *write* must cost strictly
+      // more than the same call with no cache write.
+      const noWrite = estimateWorstCaseUsd(prices, 16, 7, 0, 0);
+      const withWrite = estimateWorstCaseUsd(prices, 16, 7, 0, 5590);
+      expect(withWrite).toBeGreaterThan(noWrite);
+      // 5590 × 3 × 1.25 / 1e6 = 0.02096... extra.
+      expect(withWrite - noWrite).toBeCloseTo((5590 * 3 * 1.25) / 1_000_000, 9);
+    });
+
+    it('prices a cache write strictly higher than the equivalent cache read', () => {
+      // The exact scenario from the prod repro: identical prompt, one writes the
+      // cache (REQ1), the next reads it (REQ2). Write must cost more than read.
+      const writeReq = estimateWorstCaseUsd(prices, 16, 7, 0, 5590);     // cache creation
+      const readReq = estimateWorstCaseUsd(prices, 5606, 7, 5590, 0);    // cache read
+      expect(writeReq).toBeGreaterThan(readReq);
+    });
+
+    it('clamps negative cacheCreationInputTokens to 0', () => {
+      const cost = estimateWorstCaseUsd(prices, 1000, 4096, 0, -100);
+      expect(cost).toBeCloseTo(0.003 + 0.06144, 6);
+    });
+  });
 });
 
 describe('rankRoutersPresenceMode', () => {

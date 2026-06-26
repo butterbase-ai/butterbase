@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import prompts from 'prompts';
-import { initApp, listApps, deleteApp, pauseApp, apiPost, apiDelete } from '../lib/api-client.js';
+import { initApp, listApps, deleteApp, pauseApp, apiPost, apiDelete, apiPut } from '../lib/api-client.js';
 import { setCurrentAppId, getCurrentAppId } from '../lib/config.js';
 
 export async function appsListCommand() {
@@ -179,6 +179,40 @@ export async function appsUnlinkSubstrateCommand(appId: string) {
     spinner.succeed(`Unlinked ${appId} from substrate`);
   } catch (error) {
     spinner.fail('Failed to unlink app from substrate');
+    console.error(chalk.red((error as Error).message));
+    process.exit(1);
+  }
+}
+
+export async function appsSubstrateAutopropagateCommand(appId: string, opts: { users?: boolean }) {
+  if (!appId) appId = (await getCurrentAppId()) || '';
+  if (!appId) {
+    console.log(chalk.red('✗ App ID is required'));
+    console.log(chalk.gray('Usage: butterbase apps substrate-autopropagate <app-id> --users <true|false>'));
+    process.exit(1);
+  }
+
+  const body: { users?: boolean } = {};
+  if (opts.users !== undefined) body.users = opts.users;
+
+  if (Object.keys(body).length === 0) {
+    console.log(chalk.red('✗ At least one toggle flag must be provided.'));
+    console.log(chalk.gray('  Example: butterbase apps substrate-autopropagate <app-id> --users true'));
+    process.exit(1);
+  }
+
+  const spinner = ora(`Updating substrate autopropagate settings for ${appId}...`).start();
+  try {
+    const result: any = await apiPut(`/v1/me/apps/${appId}/substrate-autopropagate`, body);
+    spinner.succeed(`Updated substrate autopropagate settings for ${appId}`);
+    if (result && typeof result === 'object') {
+      console.log(chalk.gray('\n  Current settings:'));
+      for (const [key, value] of Object.entries(result)) {
+        console.log(chalk.gray(`    ${key}: ${value}`));
+      }
+    }
+  } catch (error) {
+    spinner.fail('Failed to update substrate autopropagate settings');
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

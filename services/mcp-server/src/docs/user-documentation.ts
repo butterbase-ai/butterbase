@@ -3742,9 +3742,16 @@ export async function handler(req, ctx) {
   });
   const people = await ctx.substrate.findEntities({ type: 'person', limit: 10 });
   const one = await ctx.substrate.getEntity('ent_…');
-  return Response.json({ verdict, prior, browse, people, one });
+  // Source artifacts (meeting transcripts, email threads, documents) and the action ledger:
+  const artifacts = await ctx.substrate.listSourceArtifacts({ q: 'onboarding', kind: 'meeting_transcript', limit: 10 });
+  const artifact = await ctx.substrate.getSourceArtifact('art_…'); // null if not found
+  const actions = await ctx.substrate.listActions({ status: 'executed', limit: 25 });
+  const action = await ctx.substrate.getAction('act_…');           // null if not found
+  return Response.json({ verdict, prior, browse, people, one, artifacts, action });
 }
 \`\`\`
+
+Every read method (\`searchMemory\`, \`listMemory\`, \`listSourceArtifacts\`, \`listActions\`) returns an array (empty when there are no matches — never an error). The \`get*\` methods return the row or \`null\` when the id is unknown.
 
 Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require human approval even if the user has \`yolo_mode\` on. Memory writes (\`record_decision\`, etc.) auto-execute.
 
@@ -4059,12 +4066,56 @@ export function getUserDocumentation(topic: DocTopic): string {
       SECTIONS.rag,
       SECTIONS.billing,
       SECTIONS.platform,
+      SECTIONS.regions,
       SECTIONS.schema,
       SECTIONS.sdk,
       SECTIONS.cli,
+      SECTIONS.realtime,
       SECTIONS.integrations,
       SECTIONS.substrate,
     ].join('\n\n');
   }
   return SECTIONS[topic];
+}
+
+export interface DocSearchHit {
+  topic: Exclude<DocTopic, 'all'>;
+  /** Number of query-term occurrences across the section. */
+  score: number;
+  /** A short excerpt around the first match, for the result index. */
+  snippet: string;
+}
+
+/**
+ * Substring search across every documentation section. Splits the query into
+ * whitespace-delimited terms, counts case-insensitive occurrences per section,
+ * and returns the highest-scoring sections. No external index — the corpus is
+ * already in memory.
+ */
+export function searchUserDocumentation(query: string, maxHits = 5): DocSearchHit[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return [];
+
+  const hits: DocSearchHit[] = [];
+  for (const [topic, text] of Object.entries(SECTIONS) as [Exclude<DocTopic, 'all'>, string][]) {
+    const lower = text.toLowerCase();
+    let score = 0;
+    let firstPos = Infinity;
+    for (const term of terms) {
+      let idx = lower.indexOf(term);
+      if (idx !== -1 && idx < firstPos) firstPos = idx;
+      while (idx !== -1) {
+        score++;
+        idx = lower.indexOf(term, idx + term.length);
+      }
+    }
+    if (score > 0) {
+      const start = Math.max(0, firstPos - 80);
+      const snippet = text.slice(start, start + 240).replace(/\s+/g, ' ').trim();
+      hits.push({ topic, score, snippet });
+    }
+  }
+
+  hits.sort((a, b) => b.score - a.score);
+  return hits.slice(0, maxHits);
 }

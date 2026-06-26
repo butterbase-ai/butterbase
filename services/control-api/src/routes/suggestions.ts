@@ -195,7 +195,12 @@ export async function suggestionsRoutes(app: FastifyInstance) {
       });
     }
 
-    return reply.code(201).send({ suggestion: rows[0] });
+    // Do NOT echo the captured `context` back to the client. It holds up to 20
+    // recent tool calls with verbatim `parameters` (function source, html_content),
+    // which can be tens of KB and blows past MCP per-tool-result limits. The
+    // context is still persisted for the admin views (/admin/suggestions/:id).
+    const { context: _context, ...suggestion } = rows[0];
+    return reply.code(201).send({ suggestion });
   });
 
   // ---------- Admin-secret authenticated ----------
