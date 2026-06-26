@@ -64,10 +64,29 @@ export function filterToolsByActiveWindow<T extends { name: string }>(
 }
 
 
+// MCP initialize response carries an optional `instructions` field that hosts
+// pass to the model as system-prompt-adjacent context. Use it to nudge any host
+// that surfaces server text (Claude Code, Cursor, VS Code do) toward the right
+// onboarding path the moment a user opens a chat after install.
+const SERVER_INSTRUCTIONS = [
+  'These tools manage a Butterbase backend — databases, functions, storage, auth, AI, RAG, deployments.',
+  '',
+  'AUTH: tools require an authenticated session. If a tool call returns 401, the user has not yet completed the browser OAuth flow.',
+  'Direct them to:',
+  '  • Claude Code: run `/mcp` (or `claude mcp login butterbase`)',
+  '  • Cursor: Settings → MCP → toggle butterbase on → click "Needs Login"',
+  '  • VS Code: ⌘⇧P → "MCP: List Servers" → butterbase → Authenticate',
+  '  • Other clients: invoke any butterbase tool — the client should open a browser automatically',
+  '',
+  'After consent, retry the original tool call.',
+].join('\n');
+
 export async function createButterbaseMcpServer() {
   const server = new McpServer({
     name: 'butterbase',
     version: '0.1.0',
+  }, {
+    instructions: SERVER_INSTRUCTIONS,
   });
 
   registerInitApp(server);

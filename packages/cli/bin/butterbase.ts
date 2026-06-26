@@ -154,6 +154,7 @@ import {
 } from '../src/commands/agents.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
 import { templatesCommand } from '../src/commands/templates.js';
+import { mcpInstallCommand } from '../src/commands/mcp.js';
 
 function resolveVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -1686,6 +1687,20 @@ agents
   .description('Delete an agent')
   .option('-y, --yes', 'Skip confirmation prompt')
   .action(agentsDeleteCommand);
+
+// MCP — install Butterbase as an MCP server across AI clients
+const mcp = program.command('mcp').description('Install Butterbase as an MCP server in your AI clients');
+
+mcp
+  .command('install [url]')
+  .description('Install Butterbase MCP across all detected clients (delegates to add-mcp + prints per-client OAuth next-steps)')
+  .option('-n, --name <name>', 'Server name written to client configs (default: butterbase)')
+  .option('-s, --scope <scope>', 'global | local (default: global)')
+  .option('-a, --clients <list>', 'Comma-separated client list or "all" (default: all)')
+  .option('--no-yes', 'Disable add-mcp\'s -y auto-confirm (will prompt for each client)')
+  .action((url, opts) => mcpInstallCommand({
+    url, name: opts.name, scope: opts.scope, clients: opts.clients, yes: opts.yes,
+  }));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {

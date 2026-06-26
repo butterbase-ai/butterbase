@@ -1,6 +1,6 @@
 {
   "name": "@butterbase/cli",
-  "version": "0.5.0",
+  "version": "0.6.1",
   "description": "Command-line tool for Butterbase project scaffolding and backend management",
   "license": "Apache-2.0",
   "homepage": "https://butterbase.ai",
