@@ -53,6 +53,47 @@ describe('OAuthClientService', () => {
     ).rejects.toThrow(/loopback/i);
   });
 
+  it('accepts private-use URI schemes for native desktop clients (RFC 8252)', async () => {
+    // Cursor: cursor://anysphere.cursor-mcp/oauth/callback
+    // VS Code: vscode://… ; reverse-DNS: com.example.app:/cb
+    const cursorRow = {
+      client_id: 'mcp_aabbccddeeff00112233cc01',
+      client_name: 'Cursor',
+      redirect_uris: ['cursor://anysphere.cursor-mcp/oauth/callback'],
+      created_at: new Date(),
+    };
+    const vscodeRow = {
+      client_id: 'mcp_aabbccddeeff00112233cc02',
+      client_name: 'VS Code',
+      redirect_uris: ['vscode://ms-vscode.cmcp/oauth'],
+      created_at: new Date(),
+    };
+    const reverseDnsRow = {
+      client_id: 'mcp_aabbccddeeff00112233cc03',
+      client_name: 'Native App',
+      redirect_uris: ['com.example.app:/oauth-cb'],
+      created_at: new Date(),
+    };
+    await expect(
+      OAuthClientService.register(makePoolStub([cursorRow]), {
+        client_name: 'Cursor',
+        redirect_uris: ['cursor://anysphere.cursor-mcp/oauth/callback'],
+      })
+    ).resolves.toBeDefined();
+    await expect(
+      OAuthClientService.register(makePoolStub([vscodeRow]), {
+        client_name: 'VS Code',
+        redirect_uris: ['vscode://ms-vscode.cmcp/oauth'],
+      })
+    ).resolves.toBeDefined();
+    await expect(
+      OAuthClientService.register(makePoolStub([reverseDnsRow]), {
+        client_name: 'Native App',
+        redirect_uris: ['com.example.app:/oauth-cb'],
+      })
+    ).resolves.toBeDefined();
+  });
+
   it('accepts http://localhost and http://127.0.0.1', async () => {
     const localhostRow = {
       client_id: 'mcp_aabbccddeeff00112233aa01',
