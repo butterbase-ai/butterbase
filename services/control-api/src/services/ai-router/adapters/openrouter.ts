@@ -315,6 +315,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
 
   return {
     name: 'openrouter',
+    capabilities: { supportsNativeMessages: () => false },
     toUpstreamId: (canonical) => canonical,
     listModels,
     chatCompletion,

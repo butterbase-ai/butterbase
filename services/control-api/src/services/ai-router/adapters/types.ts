@@ -104,8 +104,17 @@ export class AdapterError extends Error {
   }
 }
 
+export interface AdapterCapabilities {
+  /** True when this adapter can forward a request directly to upstream
+   *  Anthropic Messages API (POST /v1/messages) for the given canonical
+   *  model id. When false, the messages router must translate to and
+   *  from chat-completions. */
+  supportsNativeMessages: (canonicalId: string) => boolean;
+}
+
 export interface RouterAdapter {
   name: RouterName;
+  capabilities: AdapterCapabilities;
   toUpstreamId(canonicalId: string): string;
   listModels(): Promise<UpstreamModel[]>;
   chatCompletion(req: ChatCompletionRequest, upstreamId: string): Promise<AdapterResult>;
