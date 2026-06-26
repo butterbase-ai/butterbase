@@ -104,7 +104,7 @@ function makePoolStub() {
           }],
         };
       }
-      if (sql.startsWith('SELECT id, name FROM apps WHERE owner_id')) {
+      if (sql.startsWith('SELECT app_id AS id, COALESCE(app_name, app_id) AS name')) {
         return { rows: currentApps };
       }
       if (sql.startsWith('UPDATE oauth_clients SET last_used_at')) {
