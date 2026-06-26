@@ -229,17 +229,32 @@ export async function adminRoutes(app: FastifyInstance) {
     // Fetch runtime stats from every region and sum per-user. Per-region
     // rows are mutually disjoint (no app appears in two regions), so this
     // is a true cross-region aggregate.
+    // App counts come from apps.owner_id; AI usage is summed via
+    // ai_usage_logs.user_id (post-028), which captures app-less gateway
+    // calls and calls against apps the user does not own. Joining AI
+    // through apps would drop both — they are still billed via
+    // credit_leases, so the admin view would understate spend.
     const runtimeStatsRows = await fanOutQuery<{
       owner_id: string; app_count: number; ai_cost_usd: string; ai_tokens: string;
     }>(
-      `SELECT a.owner_id,
-              count(DISTINCT a.id)::int AS app_count,
-              coalesce(sum(u.cost_usd), 0)::numeric AS ai_cost_usd,
-              coalesce(sum(u.total_tokens), 0)::bigint AS ai_tokens
-       FROM apps a
-       LEFT JOIN ai_usage_logs u ON u.app_id = a.id
-       WHERE a.owner_id = ANY($1::uuid[])
-       GROUP BY a.owner_id`,
+      `SELECT coalesce(u.user_id, ac.owner_id) AS owner_id,
+              coalesce(ac.app_count, 0)::int AS app_count,
+              coalesce(u.ai_cost_usd, 0)::numeric AS ai_cost_usd,
+              coalesce(u.ai_tokens, 0)::bigint AS ai_tokens
+         FROM (
+           SELECT user_id,
+                  sum(cost_usd)     AS ai_cost_usd,
+                  sum(total_tokens) AS ai_tokens
+             FROM ai_usage_logs
+            WHERE user_id = ANY($1::uuid[])
+            GROUP BY user_id
+         ) u
+         FULL OUTER JOIN (
+           SELECT owner_id, count(DISTINCT id)::int AS app_count
+             FROM apps
+            WHERE owner_id = ANY($1::uuid[])
+            GROUP BY owner_id
+         ) ac ON ac.owner_id = u.user_id`,
       [userIds]
     );
 
@@ -463,14 +478,14 @@ export async function adminRoutes(app: FastifyInstance) {
         [days]
       ),
       fanOutQuery<{ user_id: string; requests: number; tokens: string; cost_usd: string }>(
-        `SELECT ap.owner_id AS user_id,
+        `SELECT user_id,
                 count(*)::int AS requests,
-                coalesce(sum(a.total_tokens),0)::bigint AS tokens,
-                coalesce(sum(a.cost_usd),0)::numeric AS cost_usd
-         FROM ai_usage_logs a
-         JOIN apps ap ON a.app_id = ap.id
-         WHERE a.created_at >= current_date - $1::int * interval '1 day'
-         GROUP BY ap.owner_id
+                coalesce(sum(total_tokens),0)::bigint AS tokens,
+                coalesce(sum(cost_usd),0)::numeric AS cost_usd
+         FROM ai_usage_logs
+         WHERE created_at >= current_date - $1::int * interval '1 day'
+           AND user_id IS NOT NULL
+         GROUP BY user_id
          ORDER BY cost_usd DESC
          LIMIT 50`,
         [days]
@@ -950,7 +965,7 @@ export async function adminRoutes(app: FastifyInstance) {
                 coalesce(sum(total_tokens),0)::bigint AS tokens,
                 coalesce(sum(cost_usd),0)::numeric AS cost_usd
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT a.id FROM apps a WHERE a.owner_id = $1)
+         WHERE user_id = $1
          GROUP BY model
          ORDER BY cost_usd DESC`,
         [id]
@@ -961,7 +976,7 @@ export async function adminRoutes(app: FastifyInstance) {
                 coalesce(sum(total_tokens),0)::bigint AS tokens,
                 coalesce(sum(cost_usd),0)::numeric AS cost_usd
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT a.id FROM apps a WHERE a.owner_id = $1)
+         WHERE user_id = $1
            AND created_at >= current_date - interval '30 days'
          GROUP BY date(created_at)
          ORDER BY date ASC`,
@@ -1296,7 +1311,7 @@ export async function adminRoutes(app: FastifyInstance) {
                 coalesce(sum(total_tokens),0)::bigint AS tokens,
                 coalesce(sum(cost_usd),0)::numeric AS cost_usd
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT a.id FROM apps a WHERE a.owner_id = $1)
+         WHERE user_id = $1
          GROUP BY model, provider, router
          ORDER BY cost_usd DESC`,
         [id]
@@ -1307,7 +1322,7 @@ export async function adminRoutes(app: FastifyInstance) {
                 coalesce(sum(total_tokens),0)::bigint AS tokens,
                 coalesce(sum(cost_usd),0)::numeric AS cost_usd
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT a.id FROM apps a WHERE a.owner_id = $1)
+         WHERE user_id = $1
          GROUP BY COALESCE(router, '(direct)')
          ORDER BY cost_usd DESC`,
         [id]
@@ -1319,7 +1334,7 @@ export async function adminRoutes(app: FastifyInstance) {
                 coalesce(sum(a.cost_usd),0)::numeric AS cost_usd
          FROM ai_usage_logs a
          JOIN apps ap ON a.app_id = ap.id
-         WHERE ap.owner_id = $1
+         WHERE a.user_id = $1
          GROUP BY a.app_id, ap.name
          ORDER BY cost_usd DESC`,
         [id]
@@ -1330,7 +1345,7 @@ export async function adminRoutes(app: FastifyInstance) {
                 coalesce(sum(total_tokens),0)::bigint AS tokens,
                 coalesce(sum(cost_usd),0)::numeric AS cost_usd
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT a.id FROM apps a WHERE a.owner_id = $1)
+         WHERE user_id = $1
            AND created_at >= current_date - interval '30 days'
          GROUP BY date(created_at)
          ORDER BY date ASC`,
