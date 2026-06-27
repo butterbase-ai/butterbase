@@ -26,14 +26,11 @@ describe('resolveRuntimeUrls', () => {
   });
 });
 
-describe('migrations', () => {
-  it('023_actor_usage_logs has correct column schema', async () => {
-    const dbUrl = process.env.TEST_DATABASE_URL;
-    if (!dbUrl) {
-      console.warn('TEST_DATABASE_URL not set, skipping database test');
-      return;
-    }
+const skipDb = !process.env.TEST_DATABASE_URL;
 
+describe.skipIf(skipDb)('migrations', () => {
+  it('023_actor_usage_logs has correct column schema', async () => {
+    const dbUrl = process.env.TEST_DATABASE_URL!;
     const pool = new pg.Pool({ connectionString: dbUrl });
     const client = await pool.connect();
     try {
@@ -75,12 +72,7 @@ describe('migrations', () => {
   });
 
   it('applies 029 ai_responses table', async () => {
-    const dbUrl = process.env.TEST_DATABASE_URL;
-    if (!dbUrl) {
-      console.warn('TEST_DATABASE_URL not set, skipping database test');
-      return;
-    }
-
+    const dbUrl = process.env.TEST_DATABASE_URL!;
     const pool = new pg.Pool({ connectionString: dbUrl });
     const client = await pool.connect();
     try {
