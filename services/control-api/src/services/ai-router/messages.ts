@@ -48,7 +48,7 @@ export async function routeMessages(
   // and forward the request body directly. Streaming native path is wired in Task 7.
   const native = await pickFirstNativeAdapter(ctx, stripped);
   if (native && native.adapter.nativeMessages && !req.stream) {
-    const upstreamId = native.adapter.toUpstreamId(stripped);
+    const upstreamId = native.router.upstreamId ?? native.adapter.toUpstreamId(stripped);
     const result = await native.adapter.nativeMessages(normalized, upstreamId, _headers);
     return { status: result.status, body: result.body, chosen: native.adapter.name };
   }

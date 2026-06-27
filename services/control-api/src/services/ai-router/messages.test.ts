@@ -36,7 +36,7 @@ describe('routeMessages (native passthrough)', () => {
       canonicalId: 'anthropic/claude-opus-4.8',
       routers: [{ name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8' }],
     } as any);
-    vi.mocked(rankRoutersForModel).mockReturnValue([{ name: 'provider-secondary' }] as any);
+    vi.mocked(rankRoutersForModel).mockReturnValue([{ name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8' }] as any);
 
     const native = vi.fn().mockResolvedValue({
       status: 200,
