@@ -67,6 +67,7 @@ import { billingRoutes } from './routes/billing.js';
 import { aiConfigRoutes } from './routes/ai-config.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
+import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
 import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
 import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
@@ -853,6 +854,14 @@ Promise.resolve(app.ready())
       (app as any).forkSweeperHandle = forkSweeperHandle;
     }
 
+    // Responses sweeper: deletes expired ai_responses rows (expires_at < now)
+    // across all runtime regions. Runs hourly; gracefully skips regions whose
+    // DBs have not yet run migration 029.
+    if (process.env.SKIP_RESPONSES_SWEEPER !== '1') {
+      const responsesSweeperHandle = startResponsesSweeper(config.runtimeDb, app.log);
+      (app as any).responsesSweeperHandle = responsesSweeperHandle;
+    }
+
     // Clone-jobs pruner: deletes template_clone_jobs rows in status
     // 'completed' or 'failed' older than 30 days (runs every 24 h).
     if (process.env.SKIP_CLONE_JOBS_PRUNER !== '1') {
@@ -925,6 +934,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
+      if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});
       if ((app as any).cloneJobsPrunerHandle) await (app as any).cloneJobsPrunerHandle.stop().catch(() => {});
       if ((app as any).cloneWebhookSweeperHandle) await (app as any).cloneWebhookSweeperHandle.stop().catch(() => {});
 
