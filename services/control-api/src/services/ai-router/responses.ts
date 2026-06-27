@@ -79,6 +79,7 @@ export async function routeResponses(
       id,
       model: req.model,
       createdAt,
+      previousResponseId: req.previous_response_id ?? null,
       ccStream: cc.stream,
       onClose: async (finalBody) => {
         await insertResponseRow(ctx.runtimePool, {

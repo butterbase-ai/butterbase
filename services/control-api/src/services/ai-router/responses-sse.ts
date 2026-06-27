@@ -4,6 +4,7 @@ export function translateCcStreamToResponsesSse(args: {
   id: string;
   model: string;
   createdAt: number;
+  previousResponseId?: string | null;
   ccStream: ReadableStream<Uint8Array>;
   onClose: (final: ResponsesResponseBody) => Promise<void>;
 }): ReadableStream<Uint8Array> {
@@ -31,50 +32,55 @@ export function translateCcStreamToResponsesSse(args: {
         }),
       );
       const reader = args.ccStream.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += dec.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buffer.indexOf('\n\n')) >= 0) {
-          const line = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data.trim() === '[DONE]') continue;
-          let p: any;
-          try {
-            p = JSON.parse(data);
-          } catch {
-            continue;
-          }
-          const c = p.choices?.[0]?.delta?.content;
-          if (c) {
-            if (!opened) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += dec.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buffer.indexOf('\n\n')) >= 0) {
+            const line = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6);
+            if (data.trim() === '[DONE]') continue;
+            let p: any;
+            try {
+              p = JSON.parse(data);
+            } catch {
+              continue;
+            }
+            const c = p.choices?.[0]?.delta?.content;
+            if (c) {
+              if (!opened) {
+                controller.enqueue(
+                  evt('response.output_item.added', {
+                    output_index: 0,
+                    item: {
+                      type: 'message',
+                      id: `msg_${args.id.slice(4, 12)}`,
+                      role: 'assistant',
+                      content: [],
+                    },
+                  }),
+                );
+                opened = true;
+              }
               controller.enqueue(
-                evt('response.output_item.added', {
+                evt('response.output_text.delta', {
                   output_index: 0,
-                  item: {
-                    type: 'message',
-                    id: `msg_${args.id.slice(4, 12)}`,
-                    role: 'assistant',
-                    content: [],
-                  },
+                  content_index: 0,
+                  delta: c,
                 }),
               );
-              opened = true;
+              textAcc += c;
             }
-            controller.enqueue(
-              evt('response.output_text.delta', {
-                output_index: 0,
-                content_index: 0,
-                delta: c,
-              }),
-            );
-            textAcc += c;
+            if (p.usage) usage = p.usage;
           }
-          if (p.usage) usage = p.usage;
         }
+      } catch (e) {
+        controller.error(e);
+        return;
       }
       if (opened) {
         controller.enqueue(
@@ -102,7 +108,7 @@ export function translateCcStreamToResponsesSse(args: {
         created_at: args.createdAt,
         status: 'completed',
         model: args.model,
-        previous_response_id: null,
+        previous_response_id: args.previousResponseId ?? null,
         output: opened
           ? [
               {
