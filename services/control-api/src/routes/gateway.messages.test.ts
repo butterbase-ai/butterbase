@@ -52,6 +52,32 @@ describe('POST /v1/messages', () => {
     expect(JSON.parse(res.body).type).toBe('message');
   });
 
+  it('emits event: error SSE event when stream errors mid-flight', async () => {
+    const { routeMessages } = await import('../services/ai-router/messages.js');
+    // Build a stream that yields one chunk then throws
+    const errStream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {}\n\n'));
+        controller.error(new Error('upstream reset'));
+      },
+    });
+    (routeMessages as any).mockResolvedValueOnce({ status: 200, stream: errStream, chosen: 'provider-secondary' });
+
+    const app = Fastify({ logger: false });
+    app.decorate('controlDb', {} as any);
+    app.addHook('onRequest', async (req) => {
+      (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
+    });
+    await app.register(gatewayRoutes);
+    await app.ready();
+    const res = await app.inject({
+      method: 'POST', url: '/v1/messages',
+      headers: { 'anthropic-version': '2023-06-01' },
+      payload: { model: 'anthropic/claude-3.5-sonnet', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], stream: true },
+    });
+    expect(res.body).toContain('event: error');
+  });
+
   it('returns 404 when ai_gateway_v2_endpoints flag is off', async () => {
     const { config } = await import('../config.js');
     const original = config.aiRouter.v2EndpointsEnabled;

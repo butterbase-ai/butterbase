@@ -37,6 +37,30 @@ vi.mock('../config.js', async (orig) => {
 });
 
 describe('POST /v1/responses', () => {
+  it('emits event: error SSE event when stream errors mid-flight', async () => {
+    const { routeResponses } = await import('../services/ai-router/responses.js');
+    const errStream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: response.created\ndata: {}\n\n'));
+        controller.error(new Error('upstream reset'));
+      },
+    });
+    (routeResponses as any).mockResolvedValueOnce({ status: 200, stream: errStream, chosen: 'provider-secondary' });
+
+    const app = Fastify({ logger: false });
+    app.decorate('controlDb', {} as any);
+    app.addHook('onRequest', async (req) => {
+      (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
+    });
+    await app.register(gatewayRoutes);
+    await app.ready();
+    const res = await app.inject({
+      method: 'POST', url: '/v1/responses',
+      payload: { model: 'openai/gpt-4o', input: 'hi', stream: true },
+    });
+    expect(res.body).toContain('event: error');
+  });
+
   it('200 with Responses-shaped body', async () => {
     const app = Fastify({ logger: false });
     app.decorate('controlDb', {} as any);
@@ -51,5 +75,27 @@ describe('POST /v1/responses', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).object).toBe('response');
+  });
+
+  it('returns 404 when ai_gateway_v2_endpoints flag is off', async () => {
+    const { config } = await import('../config.js');
+    const original = config.aiRouter.v2EndpointsEnabled;
+    (config.aiRouter as any).v2EndpointsEnabled = false;
+    try {
+      const app = Fastify({ logger: false });
+      app.decorate('controlDb', {} as any);
+      app.addHook('onRequest', async (req) => {
+        (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
+      });
+      await app.register(gatewayRoutes);
+      await app.ready();
+      const res = await app.inject({
+        method: 'POST', url: '/v1/responses',
+        payload: { model: 'openai/gpt-4o', input: 'hi' },
+      });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      (config.aiRouter as any).v2EndpointsEnabled = original;
+    }
   });
 });

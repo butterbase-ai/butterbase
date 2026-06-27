@@ -11,13 +11,15 @@
  * chat-completions doesn't produce thinking deltas) → content_block_stop →
  * message_delta (with stop_reason + usage) → message_stop.
  */
+import { ulid } from 'ulidx';
+
 export function translateCcStreamToMessagesSse(
   model: string,
   cc: ReadableStream<Uint8Array>,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
-  const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+  const messageId = `msg_${ulid().toLowerCase().slice(0, 8)}`;
   let buffer = '';
   let blockOpen = false;
   const blockIndex = 0;
