@@ -45,6 +45,22 @@ describe('messagesRequestToChatCompletion', () => {
     const cc = messagesRequestToChatCompletion(baseReq, { enabled: true, effort: 'high', budgetTokens: 24000 });
     expect((cc as any).reasoning_effort).toBe('high');
   });
+  it('maps tool_choice auto', () => {
+    const cc = messagesRequestToChatCompletion({
+      ...baseReq,
+      tools: [{ name: 'now', description: 'd', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'auto' },
+    } as MessagesRequest, null);
+    expect(cc.tool_choice).toBe('auto');
+  });
+  it('maps tool_choice tool with name', () => {
+    const cc = messagesRequestToChatCompletion({
+      ...baseReq,
+      tools: [{ name: 'now', description: 'd', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'tool', name: 'now' },
+    } as MessagesRequest, null);
+    expect(cc.tool_choice).toEqual({ type: 'function', function: { name: 'now' } });
+  });
 });
 
 describe('chatCompletionResponseToMessages', () => {
@@ -78,6 +94,22 @@ describe('chatCompletionResponseToMessages', () => {
       usage: { prompt_tokens: 1, completion_tokens: 1 },
     } as any);
     expect(body.stop_reason).toBe('max_tokens');
+  });
+  it('finish_reason content_filter -> stop_sequence', () => {
+    const body = chatCompletionResponseToMessages('m', {
+      id: 'cc_4',
+      choices: [{ message: { role: 'assistant', content: 'x' }, finish_reason: 'content_filter' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    } as any);
+    expect(body.stop_reason).toBe('stop_sequence');
+  });
+  it('finish_reason function_call -> tool_use', () => {
+    const body = chatCompletionResponseToMessages('m', {
+      id: 'cc_5',
+      choices: [{ message: { role: 'assistant', content: null }, finish_reason: 'function_call' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    } as any);
+    expect(body.stop_reason).toBe('tool_use');
   });
 });
 

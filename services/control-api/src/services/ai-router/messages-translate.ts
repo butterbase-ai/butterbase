@@ -11,7 +11,7 @@ export class UnsupportedTranslationError extends Error {
 
 type CCMessage =
   | { role: 'system' | 'user' | 'assistant'; content: string }
-  | { role: 'assistant'; content: string | null; tool_calls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> }
+  | { role: 'assistant'; content: string | null; tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> }
   | { role: 'tool'; tool_call_id: string; content: string };
 
 function blockContentToString(content: unknown): string {
@@ -51,7 +51,7 @@ export function messagesRequestToChatCompletion(req: MessagesRequest, reasoning:
       messages.push({
         role: 'assistant',
         content: texts.length ? texts.join('\n') : null,
-        tool_calls: toolCalls,
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
       });
     } else {
       for (const b of m.content) {
