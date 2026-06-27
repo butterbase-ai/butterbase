@@ -51,31 +51,52 @@ function wrapNativeAnthropicStreamForSettlement(
   ctx: RouteContext,
   canonicalId: string,
   chosenRouter: string,
+  startedAt: number,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let inputTokens = 0, outputTokens = 0;
   let cacheReadTokens = 0, cacheCreateTokens = 0;
   let lineBuffer = '';
+  let settled = false;
 
   const settle = async () => {
-    const providerCost = estimateWorstCaseUsd(pricing, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens);
-    const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
-    await settleAfterCall(ctx.platformPool, lease, chargedCredits);
-    maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
-      .catch(err => console.error('[messages] auto-refill failed:', err));
-    maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
-      .catch(err => console.error('[messages] credits-email failed:', err));
-    writeAiUsageRow(ctx.runtimePool, {
-      appId: ctx.appId, userId: ctx.userId, model: canonicalId,
-      router: chosenRouter as any,
-      promptTokens: inputTokens, completionTokens: outputTokens,
-      totalTokens: inputTokens + outputTokens,
-      providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-      markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
-      keyType: 'platform', chargedToUser: true,
-      cacheReadInputTokens: cacheReadTokens,
-      cacheCreationInputTokens: cacheCreateTokens,
-    }).catch(err => console.error('[messages] usage-log write failed:', err));
+    if (settled) return;
+    settled = true;
+    try {
+      const providerCost = estimateWorstCaseUsd(pricing, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens);
+      const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
+      await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+      maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
+        .catch(err => console.warn('[messages] auto-refill failed:', err));
+      maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
+        .catch(err => console.warn('[messages] credits-email failed:', err));
+      writeAiUsageRow(ctx.runtimePool, {
+        appId: ctx.appId, userId: ctx.userId, model: canonicalId,
+        router: chosenRouter as any,
+        promptTokens: inputTokens, completionTokens: outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+        markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+        keyType: 'platform', chargedToUser: true,
+        cacheReadInputTokens: cacheReadTokens,
+        cacheCreationInputTokens: cacheCreateTokens,
+      }).catch(err => console.warn('[messages] usage-log write failed:', err));
+      console.log(JSON.stringify({
+        level: 'info',
+        type: 'ai_router.call',
+        app_id: ctx.appId,
+        user_id: ctx.userId,
+        canonical_model: canonicalId,
+        chosen_router: chosenRouter,
+        provider_cost_usd: providerCost,
+        charged_credits_usd: chargedCredits,
+        markup_pct: ctx.markupPct,
+        latency_ms: Date.now() - startedAt,
+        status: 200,
+      }));
+    } catch (e) {
+      console.error('[messages] stream settle failed (non-fatal):', e);
+    }
   };
 
   return new ReadableStream<Uint8Array>({
@@ -142,6 +163,8 @@ export async function routeMessages(
     const reservedUsd = worstUsd * (1 + ctx.markupPct / 100);
     const lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
 
+    const startedAt = Date.now();
+
     if (req.stream) {
       let streamResult;
       try {
@@ -161,6 +184,7 @@ export async function routeMessages(
         ctx,
         stripped,
         native.router.name,
+        startedAt,
       );
       return { status: streamResult.status, stream: wrappedStream, chosen: native.adapter.name, usage: null };
     }
@@ -210,6 +234,19 @@ export async function routeMessages(
       cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
       cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
     }).catch(err => console.error('[messages] usage-log write failed:', err));
+    console.log(JSON.stringify({
+      level: 'info',
+      type: 'ai_router.call',
+      app_id: ctx.appId,
+      user_id: ctx.userId,
+      canonical_model: stripped,
+      chosen_router: native.router.name,
+      provider_cost_usd: providerCost,
+      charged_credits_usd: chargedCredits,
+      markup_pct: ctx.markupPct,
+      latency_ms: Date.now() - startedAt,
+      status: result.status,
+    }));
 
     return { status: result.status, body: result.body, chosen: native.adapter.name, usage };
   }

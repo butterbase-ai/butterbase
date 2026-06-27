@@ -133,6 +133,47 @@ describe('routeMessages (native passthrough, non-streaming)', () => {
   });
 });
 
+describe('routeMessages (native passthrough, non-streaming, error path)', () => {
+  it('settles with 0 credits when adapter.nativeMessages rejects', async () => {
+    vi.mocked(readCatalogEntry).mockResolvedValue({
+      canonicalId: 'anthropic/claude-opus-4.8',
+      routers: [{ name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8', promptPricePerMtok: 3, completionPricePerMtok: 15, contextLength: 200000 }],
+    } as any);
+    vi.mocked(rankRoutersForModel).mockReturnValue([
+      { name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8', promptPricePerMtok: 3, completionPricePerMtok: 15, contextLength: 200000 }
+    ] as any);
+
+    const native = vi.fn().mockRejectedValue(new Error('upstream timeout'));
+    const adapters = new Map<string, any>([
+      ['provider-secondary', {
+        name: 'provider-secondary',
+        capabilities: { supportsNativeMessages: () => true },
+        toUpstreamId: (id: string) => id,
+        nativeMessages: native,
+      }],
+    ]);
+
+    const { settleAfterCall } = await import('./billing-gate.js');
+    vi.mocked(settleAfterCall).mockClear();
+
+    await expect(routeMessages(
+      {
+        adapters, redis: {} as any,
+        platformPool: {} as any, runtimePool: {} as any,
+        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+      } as any,
+      { model: 'anthropic/claude-opus-4.8', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }] },
+      { anthropicVersion: '2023-06-01' },
+    )).rejects.toThrow('upstream timeout');
+
+    expect(settleAfterCall).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      0,
+    );
+  });
+});
+
 describe('routeMessages (native passthrough, streaming)', () => {
   it('settles lease and writes usage row after draining stream', async () => {
     vi.mocked(readCatalogEntry).mockResolvedValue({
