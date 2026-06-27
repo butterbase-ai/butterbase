@@ -2,6 +2,11 @@
 -- 029_ai_responses.sql
 -- Responses API state table for chaining previous_response_id.
 -- Stores LLM responses with related metadata for the Responses API.
+--
+-- TODO(ttl-cleanup): a periodic cron (or pg_cron job) must DELETE FROM ai_responses
+-- WHERE expires_at < extract(epoch from now())::bigint to prevent unbounded growth.
+-- No cleanup cron was found in this repo at the time of writing (2026-06-27).
+-- Add one before enabling the Responses API in production.
 
 CREATE TABLE IF NOT EXISTS ai_responses (
   id TEXT PRIMARY KEY,
