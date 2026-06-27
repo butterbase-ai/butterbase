@@ -10,6 +10,7 @@ import {
 import { parseReasoningFromBody, stripThinkingSuffix } from './reasoning.js';
 import { readCatalogEntry } from './catalog.js';
 import { rankRoutersForModel } from './select.js';
+import { translateCcStreamToMessagesSse } from './messages-sse.js';
 
 export interface RouteMessagesResult {
   status: number;
@@ -43,12 +44,21 @@ export async function routeMessages(
   const reasoning = parseReasoningFromBody(req as unknown as Record<string, unknown>);
   const normalized: MessagesRequest = { ...req, model: stripped };
 
-  // Native passthrough path (non-streaming only). When an adapter supports the
-  // Anthropic Messages API natively, skip the chat-completions translation layer
-  // and forward the request body directly. Streaming native path is wired in Task 7.
+  // Native passthrough path. When an adapter supports the Anthropic Messages
+  // API natively, skip the chat-completions translation layer and forward the
+  // request body directly. Streaming native path forwards upstream bytes as-is
+  // (no translation) — Anthropic event shape is already correct.
   const native = await pickFirstNativeAdapter(ctx, stripped);
-  if (native && native.adapter.nativeMessages && !req.stream) {
+  if (native && native.adapter.nativeMessages) {
     const upstreamId = native.router.upstreamId ?? native.adapter.toUpstreamId(stripped);
+    if (req.stream) {
+      const result = await native.adapter.nativeMessages(
+        { ...normalized, stream: true },
+        upstreamId,
+        _headers,
+      );
+      return { status: result.status, stream: result.stream, chosen: native.adapter.name };
+    }
     const result = await native.adapter.nativeMessages(normalized, upstreamId, _headers);
     return { status: result.status, body: result.body, chosen: native.adapter.name };
   }
@@ -67,11 +77,17 @@ export async function routeMessages(
   }
 
   if (req.stream) {
-    // Streaming translation lives in Task 7; non-streaming Task 5
-    // returns 501 explicitly so a half-shipped state is loud.
-    return { status: 501, body: {
-      type: 'error', error: { type: 'not_implemented', message: 'streaming pending Task 7' },
-    } };
+    // Translation streaming: ask the chat-completions router for an SSE stream
+    // and re-emit it in Anthropic's event shape.
+    const cc = await routeChatCompletion(ctx, { ...(ccReq as any), stream: true });
+    if (!cc.stream) {
+      return { status: cc.status, body: cc.body, chosen: cc.chosen };
+    }
+    return {
+      status: 200,
+      stream: translateCcStreamToMessagesSse(stripped, cc.stream),
+      chosen: cc.chosen,
+    };
   }
 
   const cc = await routeChatCompletion(ctx, ccReq as any);
