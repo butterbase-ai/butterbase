@@ -217,6 +217,7 @@ export async function routeMessages(
         totalCost: null,
         cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
         cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+        reasoningTokens: u.reasoning_tokens,
       };
     })();
 
@@ -245,6 +246,7 @@ export async function routeMessages(
       keyType: 'platform', chargedToUser: true,
       cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
       cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+      reasoningTokens: usage.reasoningTokens,
     }).catch(err => console.error('[messages] usage-log write failed:', err));
     console.log(JSON.stringify({
       level: 'info',

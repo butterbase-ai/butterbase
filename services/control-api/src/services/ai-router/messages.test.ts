@@ -100,7 +100,7 @@ describe('routeMessages (native passthrough, non-streaming)', () => {
         content: [{ type: 'text', text: 'hello' }], stop_reason: 'end_turn',
         usage: { input_tokens: 5, output_tokens: 3 }
       },
-      usage: { promptTokens: 5, completionTokens: 3, totalCost: null },
+      usage: { promptTokens: 5, completionTokens: 3, totalCost: null, reasoningTokens: 2 },
       providerCostUsd: null,
     });
     const adapters = new Map<string, any>([
@@ -127,9 +127,57 @@ describe('routeMessages (native passthrough, non-streaming)', () => {
 
     expect(writeAiUsageRow).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ promptTokens: 5, completionTokens: 3 }),
+      expect.objectContaining({ promptTokens: 5, completionTokens: 3, reasoningTokens: 2 }),
     );
     expect(settleAfterCall).toHaveBeenCalled();
+  });
+});
+
+describe('routeMessages (native passthrough, non-streaming, with reasoning tokens)', () => {
+  it('forwards reasoningTokens from adapter usage to writeAiUsageRow', async () => {
+    vi.mocked(readCatalogEntry).mockResolvedValue({
+      canonicalId: 'anthropic/claude-opus-4.8',
+      routers: [{ name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8', promptPricePerMtok: 3, completionPricePerMtok: 15, contextLength: 200000 }],
+    } as any);
+    vi.mocked(rankRoutersForModel).mockReturnValue([
+      { name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8', promptPricePerMtok: 3, completionPricePerMtok: 15, contextLength: 200000 }
+    ] as any);
+
+    const native = vi.fn().mockResolvedValue({
+      status: 200,
+      body: {
+        id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-opus-4.8',
+        content: [{ type: 'text', text: 'result' }], stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 6, reasoning_tokens: 100 }
+      },
+      usage: { promptTokens: 4, completionTokens: 6, totalCost: null, reasoningTokens: 100 },
+      providerCostUsd: null,
+    });
+    const adapters = new Map<string, any>([
+      ['provider-secondary', {
+        name: 'provider-secondary',
+        capabilities: { supportsNativeMessages: () => true },
+        toUpstreamId: (id: string) => id,
+        nativeMessages: native,
+      }],
+    ]);
+
+    const { writeAiUsageRow } = await import('./usage-log.js');
+
+    await routeMessages(
+      {
+        adapters, redis: {} as any,
+        platformPool: {} as any, runtimePool: {} as any,
+        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+      } as any,
+      { model: 'anthropic/claude-opus-4.8', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }] },
+      { anthropicVersion: '2023-06-01' },
+    );
+
+    expect(writeAiUsageRow).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ promptTokens: 4, completionTokens: 6, reasoningTokens: 100 }),
+    );
   });
 });
 
