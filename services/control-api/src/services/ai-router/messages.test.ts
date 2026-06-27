@@ -238,3 +238,74 @@ describe('routeMessages (native passthrough, streaming)', () => {
     );
   });
 });
+
+describe('routeMessages (native passthrough, streaming, thinking tokens)', () => {
+  it('accumulates thinking_delta text and writes reasoningTokens to usage row', async () => {
+    vi.mocked(readCatalogEntry).mockResolvedValue({
+      canonicalId: 'anthropic/claude-opus-4.8',
+      routers: [{ name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8', promptPricePerMtok: 3, completionPricePerMtok: 15, contextLength: 200000 }],
+    } as any);
+    vi.mocked(rankRoutersForModel).mockReturnValue([
+      { name: 'provider-secondary', upstreamId: 'anthropic.claude-opus-4-8', promptPricePerMtok: 3, completionPricePerMtok: 15, contextLength: 200000 }
+    ] as any);
+
+    // Build a stream that includes thinking_delta events followed by normal text.
+    const enc = new TextEncoder();
+    const events = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me reason about this."}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"The answer is 42."}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].map(s => enc.encode(s));
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of events) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+
+    const native = vi.fn().mockResolvedValue({ status: 200, stream });
+    const adapters = new Map<string, any>([
+      ['provider-secondary', {
+        name: 'provider-secondary',
+        capabilities: { supportsNativeMessages: () => true },
+        toUpstreamId: (id: string) => id,
+        nativeMessages: native,
+      }],
+    ]);
+
+    const { writeAiUsageRow } = await import('./usage-log.js');
+    vi.mocked(writeAiUsageRow).mockClear();
+
+    const result = await routeMessages(
+      {
+        adapters, redis: {} as any,
+        platformPool: {} as any, runtimePool: {} as any,
+        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+      } as any,
+      { model: 'anthropic/claude-opus-4.8', max_tokens: 200, messages: [{ role: 'user', content: 'think' }], stream: true },
+      { anthropicVersion: '2023-06-01' },
+    );
+
+    // Drain the stream to trigger settlement
+    expect(result.stream).toBeDefined();
+    const reader = result.stream!.getReader();
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+
+    // estimatePromptTokens is mocked to return 10; since thinkingText is non-empty,
+    // reasoningTokens should be set to 10 in the usage row.
+    expect(writeAiUsageRow).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ promptTokens: 12, completionTokens: 20, reasoningTokens: 10 }),
+    );
+  });
+});

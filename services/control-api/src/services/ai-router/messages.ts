@@ -56,6 +56,10 @@ function wrapNativeAnthropicStreamForSettlement(
   const decoder = new TextDecoder();
   let inputTokens = 0, outputTokens = 0;
   let cacheReadTokens = 0, cacheCreateTokens = 0;
+  // reasoningTokens: accumulated from thinking_delta SSE events and tokenized at
+  // end-of-stream. Anthropic does not surface a dedicated counter; this is heuristic
+  // and included in output_tokens already. Tracked here for observability.
+  let thinkingText = '';
   let lineBuffer = '';
   let settled = false;
 
@@ -70,6 +74,9 @@ function wrapNativeAnthropicStreamForSettlement(
         .catch(err => console.warn('[messages] auto-refill failed:', err));
       maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
         .catch(err => console.warn('[messages] credits-email failed:', err));
+      const reasoningTokens = thinkingText.length > 0
+        ? estimatePromptTokens([{ role: 'assistant', content: thinkingText }], canonicalId)
+        : undefined;
       writeAiUsageRow(ctx.runtimePool, {
         appId: ctx.appId, userId: ctx.userId, model: canonicalId,
         router: chosenRouter as any,
@@ -80,6 +87,7 @@ function wrapNativeAnthropicStreamForSettlement(
         keyType: 'platform', chargedToUser: true,
         cacheReadInputTokens: cacheReadTokens,
         cacheCreationInputTokens: cacheCreateTokens,
+        reasoningTokens,
       }).catch(err => console.warn('[messages] usage-log write failed:', err));
       console.log(JSON.stringify({
         level: 'info',
@@ -126,6 +134,10 @@ function wrapNativeAnthropicStreamForSettlement(
               // Anthropic SSE: message_delta carries output_tokens (final count)
               if (parsed?.type === 'message_delta' && parsed?.usage) {
                 outputTokens = parsed.usage.output_tokens ?? outputTokens;
+              }
+              // Anthropic SSE: content_block_delta with thinking_delta accumulates thinking text
+              if (parsed?.type === 'content_block_delta' && parsed?.delta?.type === 'thinking_delta') {
+                thinkingText += parsed.delta.thinking ?? '';
               }
             } catch { /* ignore non-JSON */ }
           }
