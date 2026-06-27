@@ -18,6 +18,8 @@ import {
   chatCompletionRequestSchema as chatCompletionSchema,
   embeddingRequestSchema as embeddingSchema,
 } from '../services/ai-router/schemas.js';
+import { messagesRequestSchema } from '../services/ai-router/messages-schema.js';
+import { routeMessages } from '../services/ai-router/messages.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
@@ -109,7 +111,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
 }
 
 interface GatewayAuditContext {
-  endpoint: 'chat.completions' | 'embeddings';
+  endpoint: 'chat.completions' | 'embeddings' | 'messages';
   model?: string;
   appId: string;
   userId: string;
@@ -252,6 +254,67 @@ export async function gatewayRoutes(app: FastifyInstance) {
         });
       }
       return handleRouterError(reply, err);
+    }
+  });
+
+  app.post('/v1/messages', async (request, reply) => {
+    const startedAt = Date.now();
+    let auditCtx: GatewayAuditContext | null = null;
+    try {
+      const user = resolveGatewayUser(request);
+      const body = messagesRequestSchema.parse(request.body);
+      auditCtx = {
+        endpoint: 'messages',
+        model: body.model,
+        appId: request.auth.appId ?? '_platform',
+        userId: user.userId,
+        ipAddress: request.ip ?? null,
+        userAgent: request.headers['user-agent'] ?? null,
+        startedAt,
+      };
+      const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const result = await routeMessages(
+        {
+          platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
+          adapters, markupPct: config.aiRouter.markupPct,
+          appId: request.auth.appId ?? null, userId: user.userId, region: user.region,
+        },
+        body,
+        {
+          anthropicVersion: typeof request.headers['anthropic-version'] === 'string' ? request.headers['anthropic-version'] : undefined,
+          anthropicBeta: typeof request.headers['anthropic-beta'] === 'string' ? request.headers['anthropic-beta'] : undefined,
+        },
+      );
+      if (result.stream) {
+        reply.raw.setHeader('content-type', 'text/event-stream');
+        reply.raw.setHeader('cache-control', 'no-cache, no-transform');
+        reply.raw.setHeader('connection', 'keep-alive');
+        reply.hijack();
+        const reader = result.stream.getReader();
+        while (true) { const { done, value } = await reader.read(); if (done) break; reply.raw.write(value); }
+        reply.raw.end();
+        emitGatewayEvent(app, auditCtx, { success: true, status: 200, usage: null, stream: true });
+        return;
+      }
+      emitGatewayEvent(app, auditCtx, { success: result.status < 400, status: result.status, usage: null, stream: false });
+      return reply.code(result.status).send(result.body);
+    } catch (err) {
+      if (auditCtx) {
+        const e = err as { message?: string; gatewayCode?: string; code?: string; statusCode?: number; gatewayStatus?: number };
+        emitGatewayEvent(app, auditCtx, {
+          success: false, errorMessage: e.message ?? 'unknown',
+          errorCode: e.gatewayCode ?? e.code ?? 'error',
+          status: e.gatewayStatus ?? e.statusCode,
+        });
+      }
+      // Translate handleRouterError's OpenAI shape to Anthropic shape:
+      const r = await new Promise<{ statusCode: number; body: string }>((resolve) => {
+        const stub: any = { code(c: number) { this._c = c; return this; }, send(b: any) { resolve({ statusCode: this._c ?? 500, body: typeof b === 'string' ? b : JSON.stringify(b) }); return this; } };
+        handleRouterError(stub, err);
+      });
+      let parsed: any; try { parsed = JSON.parse(r.body); } catch { parsed = { error: { message: r.body } }; }
+      const t = parsed.error?.type ?? 'api_error';
+      return reply.code(r.statusCode).send({ type: 'error', error: { type: t, message: parsed.error?.message ?? 'error' } });
     }
   });
 
