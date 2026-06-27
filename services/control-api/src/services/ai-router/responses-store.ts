@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { randomBytes } from 'node:crypto';
+import { ulid } from 'ulidx';
 
 export const DEFAULT_TTL_SECONDS = 30 * 24 * 3600;
 
@@ -16,7 +16,7 @@ export interface ResponseRow {
 }
 
 export function generateResponseId(): string {
-  return `rsp_${randomBytes(13).toString('hex')}`;
+  return `rsp_${ulid().toLowerCase()}`;
 }
 
 export async function insertResponseRow(pool: pg.Pool, row: ResponseRow): Promise<void> {
