@@ -37,7 +37,7 @@ const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 
  * NOT NULL, so we only record when the router was invoked from an app
  * context (gateway-level user calls without an app are skipped).
  */
-async function acquireWithAudit(
+export async function acquireWithAudit(
   ctx: RouteContext,
   reservedUsd: number,
   ttlSeconds: number,
@@ -76,7 +76,7 @@ async function acquireWithAudit(
   }
 }
 
-async function maybeFireCreditsEmail(pool: pg.Pool, userId: string): Promise<void> {
+export async function maybeFireCreditsEmail(pool: pg.Pool, userId: string): Promise<void> {
   try {
     const r = await pool.query<{ monthly_allowance_usd: string; credits_usd: string }>(
       `SELECT monthly_allowance_usd::text, credits_usd::text

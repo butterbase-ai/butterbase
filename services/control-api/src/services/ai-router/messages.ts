@@ -1,6 +1,6 @@
 import type { MessagesRequest } from './messages-schema.js';
 import type { RouteContext } from './router.js';
-import { routeChatCompletion } from './router.js';
+import { routeChatCompletion, acquireWithAudit, maybeFireCreditsEmail } from './router.js';
 import {
   messagesRequestToChatCompletion,
   chatCompletionResponseToMessages,
@@ -9,9 +9,15 @@ import {
 } from './messages-translate.js';
 import { parseReasoningFromBody, stripThinkingSuffix } from './reasoning.js';
 import { readCatalogEntry } from './catalog.js';
-import { rankRoutersForModel } from './select.js';
+import { rankRoutersForModel, estimateWorstCaseUsd } from './select.js';
 import { translateCcStreamToMessagesSse } from './messages-sse.js';
 import type { AdapterUsage } from './adapters/types.js';
+import { estimatePromptTokens } from './tokenizer.js';
+import { settleAfterCall, leaseTtlSeconds } from './billing-gate.js';
+import type { LeaseHandle } from './billing-gate.js';
+import { writeAiUsageRow } from './usage-log.js';
+import { applyMarkup } from './markup.js';
+import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 
 export interface RouteMessagesResult {
   status: number;
@@ -38,6 +44,80 @@ async function pickFirstNativeAdapter(ctx: RouteContext, canonicalId: string) {
   return null;
 }
 
+function wrapNativeAnthropicStreamForSettlement(
+  upstream: ReadableStream<Uint8Array>,
+  lease: LeaseHandle,
+  pricing: { promptPricePerMtok: number; completionPricePerMtok: number },
+  ctx: RouteContext,
+  canonicalId: string,
+  chosenRouter: string,
+): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  let inputTokens = 0, outputTokens = 0;
+  let cacheReadTokens = 0, cacheCreateTokens = 0;
+  let lineBuffer = '';
+
+  const settle = async () => {
+    const providerCost = estimateWorstCaseUsd(pricing, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens);
+    const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
+    await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+    maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
+      .catch(err => console.error('[messages] auto-refill failed:', err));
+    maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
+      .catch(err => console.error('[messages] credits-email failed:', err));
+    writeAiUsageRow(ctx.runtimePool, {
+      appId: ctx.appId, userId: ctx.userId, model: canonicalId,
+      router: chosenRouter as any,
+      promptTokens: inputTokens, completionTokens: outputTokens,
+      totalTokens: inputTokens + outputTokens,
+      providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+      markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+      keyType: 'platform', chargedToUser: true,
+      cacheReadInputTokens: cacheReadTokens,
+      cacheCreationInputTokens: cacheCreateTokens,
+    }).catch(err => console.error('[messages] usage-log write failed:', err));
+  };
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const reader = upstream.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) { await settle(); controller.close(); return; }
+          lineBuffer += decoder.decode(value, { stream: true });
+          const parts = lineBuffer.split('\n');
+          lineBuffer = parts.pop() ?? '';
+          for (const line of parts) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (!data) continue;
+            try {
+              const parsed = JSON.parse(data) as any;
+              // Anthropic SSE: message_start carries input_tokens
+              if (parsed?.type === 'message_start' && parsed?.message?.usage) {
+                const u = parsed.message.usage;
+                inputTokens = u.input_tokens ?? inputTokens;
+                outputTokens = u.output_tokens ?? outputTokens;
+                cacheReadTokens = u.cache_read_input_tokens ?? 0;
+                cacheCreateTokens = u.cache_creation_input_tokens ?? 0;
+              }
+              // Anthropic SSE: message_delta carries output_tokens (final count)
+              if (parsed?.type === 'message_delta' && parsed?.usage) {
+                outputTokens = parsed.usage.output_tokens ?? outputTokens;
+              }
+            } catch { /* ignore non-JSON */ }
+          }
+          controller.enqueue(value);
+        }
+      } catch (err) {
+        controller.error(err);
+        await settle();
+      }
+    },
+  });
+}
+
 export async function routeMessages(
   ctx: RouteContext,
   req: MessagesRequest,
@@ -54,18 +134,84 @@ export async function routeMessages(
   const native = await pickFirstNativeAdapter(ctx, stripped);
   if (native && native.adapter.nativeMessages) {
     const upstreamId = native.router.upstreamId ?? native.adapter.toUpstreamId(stripped);
+
+    // Estimate cost for lease reservation
+    const promptTokens = estimatePromptTokens(req.messages as any, stripped);
+    const maxTokens = req.max_tokens ?? 4096;
+    const worstUsd = estimateWorstCaseUsd(native.router, promptTokens, maxTokens);
+    const reservedUsd = worstUsd * (1 + ctx.markupPct / 100);
+    const lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+
     if (req.stream) {
-      const result = await native.adapter.nativeMessages(
-        { ...normalized, stream: true },
-        upstreamId,
-        _headers,
+      let streamResult;
+      try {
+        streamResult = await native.adapter.nativeMessages(
+          { ...normalized, stream: true },
+          upstreamId,
+          _headers,
+        );
+      } catch (err) {
+        await settleAfterCall(ctx.platformPool, lease, 0);
+        throw err;
+      }
+      const wrappedStream = wrapNativeAnthropicStreamForSettlement(
+        streamResult.stream!,
+        lease,
+        native.router,
+        ctx,
+        stripped,
+        native.router.name,
       );
-      // Usage is not extractable from the raw upstream SSE bytes without wrapping
-      // the stream — usage is null for streaming native calls.
-      return { status: result.status, stream: result.stream, chosen: native.adapter.name, usage: null };
+      return { status: streamResult.status, stream: wrappedStream, chosen: native.adapter.name, usage: null };
     }
-    const result = await native.adapter.nativeMessages(normalized, upstreamId, _headers);
-    return { status: result.status, body: result.body, chosen: native.adapter.name, usage: result.usage };
+
+    let result;
+    try {
+      result = await native.adapter.nativeMessages(normalized, upstreamId, _headers);
+    } catch (err) {
+      await settleAfterCall(ctx.platformPool, lease, 0);
+      throw err;
+    }
+
+    const usage: AdapterUsage = result.usage ?? (() => {
+      const u = (result.body as any)?.usage ?? {};
+      return {
+        promptTokens: u.input_tokens ?? 0,
+        completionTokens: u.output_tokens ?? 0,
+        totalCost: null,
+        cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+        cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+      };
+    })();
+
+    const providerCost = result.providerCostUsd
+      ?? estimateWorstCaseUsd(
+        native.router,
+        usage.promptTokens,
+        usage.completionTokens,
+        usage.cache_read_input_tokens ?? 0,
+        usage.cache_creation_input_tokens ?? 0,
+      );
+    const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
+
+    await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+    maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
+      .catch(err => console.error('[messages] auto-refill failed:', err));
+    maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
+      .catch(err => console.error('[messages] credits-email failed:', err));
+    writeAiUsageRow(ctx.runtimePool, {
+      appId: ctx.appId, userId: ctx.userId, model: stripped,
+      router: native.router.name as any,
+      promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+      totalTokens: usage.promptTokens + usage.completionTokens,
+      providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+      markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+      keyType: 'platform', chargedToUser: true,
+      cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+      cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+    }).catch(err => console.error('[messages] usage-log write failed:', err));
+
+    return { status: result.status, body: result.body, chosen: native.adapter.name, usage };
   }
   void usedSuffix;
 
