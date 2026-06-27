@@ -25,6 +25,17 @@ vi.mock('../services/ai-router/router.js', async (orig) => {
   return { ...actual, routeChatCompletion: vi.fn(), routeEmbedding: vi.fn() };
 });
 
+vi.mock('../config.js', async (orig) => {
+  const actual = await orig<typeof import('../config.js')>();
+  return {
+    ...actual,
+    config: {
+      ...actual.config,
+      aiRouter: { ...actual.config.aiRouter, v2EndpointsEnabled: true },
+    },
+  };
+});
+
 describe('POST /v1/responses', () => {
   it('200 with Responses-shaped body', async () => {
     const app = Fastify({ logger: false });

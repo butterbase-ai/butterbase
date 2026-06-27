@@ -263,6 +263,9 @@ export async function gatewayRoutes(app: FastifyInstance) {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
+      if (!config.aiRouter.v2EndpointsEnabled) {
+        return reply.code(404).send({ error: { message: 'Not found', type: 'invalid_request_error', code: 'not_found' } });
+      }
       const user = resolveGatewayUser(request);
       const body = messagesRequestSchema.parse(request.body);
       auditCtx = {
@@ -324,6 +327,9 @@ export async function gatewayRoutes(app: FastifyInstance) {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
+      if (!config.aiRouter.v2EndpointsEnabled) {
+        return reply.code(404).send({ error: { message: 'Not found', type: 'invalid_request_error', code: 'not_found' } });
+      }
       const user = resolveGatewayUser(request);
       const body = responsesRequestSchema.parse(request.body);
       auditCtx = {
