@@ -63,6 +63,8 @@ export interface AdapterUsage {
   totalCost: number | null;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
+  /** Reasoning tokens consumed by thinking/reasoning models (e.g. o1, claude thinking). Undefined for non-reasoning models. */
+  reasoningTokens?: number;
 }
 
 export interface AdapterResult {

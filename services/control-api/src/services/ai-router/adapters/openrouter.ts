@@ -1,5 +1,6 @@
 import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult } from './types.js';
 import { AdapterError } from './types.js';
+import { extractReasoningTokens } from '../reasoning.js';
 
 interface OpenRouterConfig {
   apiKey: string;
@@ -197,6 +198,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     // models that bill per-image, not per-token).
     const cost = pickProviderCost(json.usage);
     const details = json.usage?.prompt_tokens_details;
+    const rt = json.usage ? extractReasoningTokens(json.usage as Record<string, unknown>) : 0;
     return {
       status: res.status,
       body: json,
@@ -206,6 +208,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
         totalCost: cost,
         cache_read_input_tokens: details?.cached_tokens,
         cache_creation_input_tokens: details?.cache_write_tokens,
+        reasoningTokens: rt > 0 ? rt : undefined,
       } : null,
       providerCostUsd: cost,
     };

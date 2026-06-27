@@ -21,6 +21,8 @@ export interface AiUsageRow {
   cacheReadInputTokens?: number;
   /** Tokens written into the Anthropic prompt cache. Defaults to 0. */
   cacheCreationInputTokens?: number;
+  /** Reasoning tokens consumed by thinking/reasoning models (e.g. o1, claude thinking). Null when not applicable. */
+  reasoningTokens?: number;
 }
 
 /**
@@ -36,8 +38,8 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
        app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
        cost_usd, key_type, charged_to_user, request_metadata,
        router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id,
-       cache_read_input_tokens, cache_creation_input_tokens
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+       cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
     [
       row.appId,
       row.userId,
@@ -58,6 +60,7 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.leaseId,
       row.cacheReadInputTokens ?? 0,
       row.cacheCreationInputTokens ?? 0,
+      row.reasoningTokens ?? null,
     ]
   );
 
