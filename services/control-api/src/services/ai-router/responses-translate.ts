@@ -14,9 +14,8 @@ type CCMessage = {
 function itemsToMessages(items: unknown[]): CCMessage[] {
   const out: CCMessage[] = [];
   for (const it of items as Array<Record<string, unknown>>) {
+    // priorInput rows are stored as raw CC user messages (no `type` field); priorOutput rows are Responses items. Accept both.
     if (it.type === 'message' || (it.type === undefined && it.role !== undefined)) {
-      // Handles both Responses message items ({ type: 'message', role, content })
-      // and raw chat-completions messages ({ role, content }) stored as priorInput.
       const role = (it.role === 'developer' ? 'system' : it.role) as CCMessage['role'];
       const c = it.content;
       let text: string;
@@ -108,7 +107,7 @@ export function chatCompletionResponseToResponses(args: {
 }): ResponsesResponseBody {
   const ch = args.cc.choices[0];
   const output: ResponsesResponseBody['output'] = [];
-  if (ch.message.content) {
+  if (ch.message.content != null) {
     output.push({
       type: 'message', id: `msg_${args.id.slice(4, 12)}`, role: 'assistant',
       content: [{ type: 'output_text', text: ch.message.content }],

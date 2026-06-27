@@ -43,6 +43,14 @@ describe('chatCompletionResponseToResponses', () => {
     expect(body.output[0].content[0]).toEqual({ type: 'output_text', text: 'hi back' });
     expect(body.usage).toEqual({ input_tokens: 1, output_tokens: 2, total_tokens: 3 });
   });
+  it('preserves empty-string content as an output_text item', () => {
+    const body = chatCompletionResponseToResponses({
+      id: 'rsp_y', model: 'm', createdAt: 0, previousResponseId: null,
+      cc: { id: 'cc_y', choices: [{ message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 1, completion_tokens: 0 } } as any,
+    });
+    expect(body.output[0]).toMatchObject({ type: 'message', content: [{ type: 'output_text', text: '' }] });
+  });
 });
 
 it('BUILTIN_TOOL_TYPES enumerates the four deferred tools', () => {
