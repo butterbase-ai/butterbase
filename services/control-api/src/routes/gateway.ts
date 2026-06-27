@@ -296,12 +296,30 @@ export async function gatewayRoutes(app: FastifyInstance) {
         reply.raw.setHeader('connection', 'keep-alive');
         reply.hijack();
         const reader = result.stream.getReader();
-        while (true) { const { done, value } = await reader.read(); if (done) break; reply.raw.write(value); }
-        reply.raw.end();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            reply.raw.write(value);
+          }
+          reply.raw.end();
+        } catch (streamErr) {
+          reply.raw.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'stream_error', message: String(streamErr) } })}\n\n`);
+          reply.raw.end();
+          return;
+        }
         emitGatewayEvent(app, auditCtx, { success: true, status: 200, usage: null, stream: true });
         return;
       }
-      emitGatewayEvent(app, auditCtx, { success: result.status < 400, status: result.status, usage: null, stream: false });
+      // DONE_WITH_CONCERNS: full billing settlement (writeAiUsageRow / credit lease) for the native
+      // non-streaming path requires integrating the lease + charge flow from routeChatCompletion
+      // into routeMessages — estimated >100 lines of refactoring. Deferred. Usage is surfaced in
+      // the audit event only; ai_usage_logs row is NOT written for native /v1/messages calls today.
+      const resultUsage = (result as { usage?: { promptTokens?: number; completionTokens?: number } | null }).usage;
+      const auditUsage = resultUsage
+        ? { prompt_tokens: resultUsage.promptTokens ?? 0, completion_tokens: resultUsage.completionTokens ?? 0, total_tokens: (resultUsage.promptTokens ?? 0) + (resultUsage.completionTokens ?? 0) }
+        : null;
+      emitGatewayEvent(app, auditCtx, { success: result.status < 400, status: result.status, usage: auditUsage, stream: false });
       return reply.code(result.status).send(result.body);
     } catch (err) {
       if (auditCtx) {
@@ -353,8 +371,18 @@ export async function gatewayRoutes(app: FastifyInstance) {
         reply.raw.setHeader('connection', 'keep-alive');
         reply.hijack();
         const reader = result.stream.getReader();
-        while (true) { const { done, value } = await reader.read(); if (done) break; reply.raw.write(value); }
-        reply.raw.end();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            reply.raw.write(value);
+          }
+          reply.raw.end();
+        } catch (streamErr) {
+          reply.raw.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'stream_error', message: String(streamErr) } })}\n\n`);
+          reply.raw.end();
+          return;
+        }
         emitGatewayEvent(app, auditCtx, { success: true, status: 200, usage: null, stream: true });
         return;
       }

@@ -11,12 +11,15 @@ import { parseReasoningFromBody, stripThinkingSuffix } from './reasoning.js';
 import { readCatalogEntry } from './catalog.js';
 import { rankRoutersForModel } from './select.js';
 import { translateCcStreamToMessagesSse } from './messages-sse.js';
+import type { AdapterUsage } from './adapters/types.js';
 
 export interface RouteMessagesResult {
   status: number;
   body?: MessagesResponseBody | unknown;
   stream?: ReadableStream<Uint8Array>;
   chosen?: string;
+  /** Usage reported by the adapter; null for streaming (unavailable until stream end). */
+  usage?: AdapterUsage | null;
 }
 
 export interface MessagesHeaders {
@@ -57,10 +60,12 @@ export async function routeMessages(
         upstreamId,
         _headers,
       );
-      return { status: result.status, stream: result.stream, chosen: native.adapter.name };
+      // Usage is not extractable from the raw upstream SSE bytes without wrapping
+      // the stream — usage is null for streaming native calls.
+      return { status: result.status, stream: result.stream, chosen: native.adapter.name, usage: null };
     }
     const result = await native.adapter.nativeMessages(normalized, upstreamId, _headers);
-    return { status: result.status, body: result.body, chosen: native.adapter.name };
+    return { status: result.status, body: result.body, chosen: native.adapter.name, usage: result.usage };
   }
   void usedSuffix;
 
