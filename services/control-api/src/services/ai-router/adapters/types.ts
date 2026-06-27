@@ -124,6 +124,17 @@ export interface RouterAdapter {
   /** Fetch the raw MP4 bytes for a completed job. Pass through to caller as a stream. */
   fetchVideoContent?(upstreamJobId: string, index?: number): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
   /**
+   * Native Anthropic Messages API passthrough. When implemented, `routeMessages`
+   * skips the chat-completions translation layer and forwards the request body
+   * directly to the upstream provider's `/v1/messages` endpoint (non-streaming only;
+   * streaming native path is wired in a later task).
+   */
+  nativeMessages?(
+    req: import('../messages-schema.js').MessagesRequest,
+    upstreamId: string,
+    headers: { anthropicVersion?: string; anthropicBeta?: string },
+  ): Promise<AdapterResult>;
+  /**
    * Optional accessor returning a drift report from the most recent
    * `listModels()` call. Adapters that dynamically refresh their catalog from
    * an upstream source can use this to surface known modelIds vs. local

@@ -43,9 +43,16 @@ export async function routeMessages(
   const reasoning = parseReasoningFromBody(req as unknown as Record<string, unknown>);
   const normalized: MessagesRequest = { ...req, model: stripped };
 
-  // Native passthrough path — deferred to Task 6. For Task 5 we always
-  // translate; Task 6 swaps in the native branch before the translation.
-  void pickFirstNativeAdapter; void usedSuffix;
+  // Native passthrough path (non-streaming only). When an adapter supports the
+  // Anthropic Messages API natively, skip the chat-completions translation layer
+  // and forward the request body directly. Streaming native path is wired in Task 7.
+  const native = await pickFirstNativeAdapter(ctx, stripped);
+  if (native && native.adapter.nativeMessages && !req.stream) {
+    const upstreamId = native.adapter.toUpstreamId(stripped);
+    const result = await native.adapter.nativeMessages(normalized, upstreamId, _headers);
+    return { status: result.status, body: result.body, chosen: native.adapter.name };
+  }
+  void usedSuffix;
 
   let ccReq;
   try {
