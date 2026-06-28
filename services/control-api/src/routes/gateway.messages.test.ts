@@ -78,6 +78,29 @@ describe('POST /v1/messages', () => {
     expect(res.body).toContain('event: error');
   });
 
+  it('rewrites pre-route 401 payloads to Anthropic shape', async () => {
+    const app = Fastify({ logger: false });
+    app.decorate('controlDb', {} as any);
+    // Simulate the auth plugin rejecting with the Butterbase-shaped 401 BEFORE the route runs.
+    app.addHook('onRequest', async (_req, reply) => {
+      return reply.code(401).send({ error: { message: 'Invalid or revoked API key' } });
+    });
+    await app.register(gatewayRoutes);
+    await app.ready();
+    const res = await app.inject({
+      method: 'POST', url: '/v1/messages',
+      headers: { authorization: 'Bearer bb_sk_bogus' },
+      payload: { model: 'x', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] },
+    });
+    expect(res.statusCode).toBe(401);
+    const body = JSON.parse(res.body);
+    expect(body.type).toBe('error');
+    expect(body.error?.type).toBe('authentication_error');
+    expect(body.error?.message).toContain('Invalid');
+    // Ensure OpenAI shape is NOT emitted on this endpoint.
+    expect(body.error?.code).toBeUndefined();
+  });
+
   it('returns 404 when ai_gateway_v2_endpoints flag is off', async () => {
     const { config } = await import('../config.js');
     const original = config.aiRouter.v2EndpointsEnabled;

@@ -166,17 +166,30 @@ function emitGatewayEvent(
 export async function gatewayRoutes(app: FastifyInstance) {
   const adapters = await buildAdapters();
 
-  // Fix 3: Rewrite Butterbase-shaped 401 errors on /v1/* paths to OpenAI shape.
-  // The auth plugin fires in onRequest before the route handler, so gateway error
-  // handling never runs for rejected keys. This onSend hook intercepts the reply.
+  // Fix 3: Rewrite Butterbase-shaped 401 errors on /v1/* paths to per-endpoint
+  // provider shape. The auth plugin fires in onRequest before the route handler,
+  // so gateway error handling never runs for rejected keys. This onSend hook
+  // intercepts the reply. `/v1/messages` gets Anthropic shape; everything else
+  // gets OpenAI shape.
   app.addHook('onSend', async (request, reply, payload) => {
     if (!request.url.startsWith('/v1/')) return payload;
     if (reply.statusCode !== 401) return payload;
     if (typeof payload !== 'string') return payload;
     let parsed: unknown;
     try { parsed = JSON.parse(payload); } catch { return payload; }
-    const p = parsed as { error?: { type?: string; code?: string; message?: string } };
-    if (p.error?.type) return payload; // already OpenAI shape
+    const p = parsed as { type?: string; error?: { type?: string; code?: string; message?: string } };
+    const wantsAnthropic = request.url.startsWith('/v1/messages');
+    if (wantsAnthropic) {
+      if (p.type === 'error' && p.error?.type) return payload; // already Anthropic shape
+      return JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'authentication_error',
+          message: p.error?.message ?? 'Invalid API key',
+        },
+      });
+    }
+    if (p.error?.type && !p.type) return payload; // already OpenAI shape
     return JSON.stringify({
       error: {
         message: p.error?.message ?? 'Invalid API key',
