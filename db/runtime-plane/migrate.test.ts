@@ -26,14 +26,11 @@ describe('resolveRuntimeUrls', () => {
   });
 });
 
-describe('migrations', () => {
-  it('023_actor_usage_logs has correct column schema', async () => {
-    const dbUrl = process.env.TEST_DATABASE_URL;
-    if (!dbUrl) {
-      console.warn('TEST_DATABASE_URL not set, skipping database test');
-      return;
-    }
+const skipDb = !process.env.TEST_DATABASE_URL;
 
+describe.skipIf(skipDb)('migrations', () => {
+  it('023_actor_usage_logs has correct column schema', async () => {
+    const dbUrl = process.env.TEST_DATABASE_URL!;
     const pool = new pg.Pool({ connectionString: dbUrl });
     const client = await pool.connect();
     try {
@@ -68,6 +65,41 @@ describe('migrations', () => {
         'lease_id',
         'request_metadata',
       ]);
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  });
+
+  it('applies 029 ai_responses table', async () => {
+    const dbUrl = process.env.TEST_DATABASE_URL!;
+    const pool = new pg.Pool({ connectionString: dbUrl });
+    const client = await pool.connect();
+    try {
+      // Load and apply the migration
+      const migrationPath = path.join(__dirname, '029_ai_responses.sql');
+      const migrationSql = fs.readFileSync(migrationPath, 'utf-8');
+
+      // Skip the @scope comment line and apply the rest
+      const sqlLines = migrationSql.split('\n').filter(line => !line.startsWith('-- @scope'));
+      await client.query(sqlLines.join('\n'));
+
+      // Verify table exists
+      const res = await client.query(`SELECT to_regclass('ai_responses') as t`);
+      expect(res.rows[0].t).toBe('ai_responses');
+
+      // Query the columns from information_schema
+      const { rows } = await client.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'ai_responses'
+        ORDER BY column_name
+      `);
+
+      const columnNames = rows.map(row => row.column_name);
+      expect(columnNames).toEqual(
+        expect.arrayContaining(['id', 'created_at', 'previous_response_id', 'model',
+                                'input_messages', 'output', 'usage', 'status', 'expires_at'])
+      );
     } finally {
       client.release();
       await pool.end();

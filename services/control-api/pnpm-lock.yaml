@@ -104,6 +104,9 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+      ulidx:
+        specifier: ^2.4.1
+        version: 2.4.1
       wrangler:
         specifier: ^3.114.17
         version: 3.114.17
@@ -2208,6 +2211,9 @@ packages:
   jszip@3.10.1:
     resolution: {integrity: sha512-xXDvecyTpGLrqFrvkrUSoxxfJI5AH7U8zxxtVclpsUtMCq4JQ290LY8AW5c7Ggnr/Y/oK+bQMbqK2qmtk3pN4g==}
 
+  layerr@3.0.0:
+    resolution: {integrity: sha512-tv754Ki2dXpPVApOrjTyRo4/QegVb9eVFq4mjqp4+NM5NaX7syQvN5BBNfV/ZpAHCEHV24XdUVrBAoka4jt3pA==}
+
   lie@3.3.0:
     resolution: {integrity: sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==}
 
@@ -2847,6 +2853,10 @@ packages:
 
   ufo@1.6.4:
     resolution: {integrity: sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA==}
+
+  ulidx@2.4.1:
+    resolution: {integrity: sha512-xY7c8LPyzvhvew0Fn+Ek3wBC9STZAuDI/Y5andCKi9AX6/jvfaX45PhsDX8oxgPL0YFp0Jhr8qWMbS/p9375Xg==}
+    engines: {node: '>=16'}
 
   underscore@1.13.8:
     resolution: {integrity: sha512-DXtD3ZtEQzc7M8m4cXotyHR+FAS18C64asBYY5vqZexfYryNNnDc02W4hKg3rdQuqOYas1jkseX0+nZXjTXnvQ==}
@@ -5186,6 +5196,8 @@ snapshots:
       readable-stream: 2.3.8
       setimmediate: 1.0.5
 
+  layerr@3.0.0: {}
+
   lie@3.3.0:
     dependencies:
       immediate: 3.0.6
@@ -5840,6 +5852,10 @@ snapshots:
   typescript@5.9.3: {}
 
   ufo@1.6.4: {}
+
+  ulidx@2.4.1:
+    dependencies:
+      layerr: 3.0.0
 
   underscore@1.13.8: {}
 

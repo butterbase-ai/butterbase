@@ -173,6 +173,38 @@ describe('openrouter adapter', () => {
     expect(result.usage?.cache_creation_input_tokens).toBe(0);
   });
 
+  it('extracts reasoningTokens from completion_tokens_details.reasoning_tokens', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'thought' } }],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 300,
+        total_tokens: 310,
+        cost: 0.002,
+        completion_tokens_details: { reasoning_tokens: 256 },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+    const r = await a.chatCompletion(
+      { model: 'openai/o1', messages: [{ role: 'user', content: 'think' }] },
+      'openai/o1'
+    );
+    expect(r.usage?.reasoningTokens).toBe(256);
+  });
+
+  it('reasoningTokens is undefined when completion_tokens_details is absent', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'hi' } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost: 0.001 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+    const r = await a.chatCompletion(
+      { model: 'anthropic/claude-3-5-sonnet', messages: [{ role: 'user', content: 'hi' }] },
+      'anthropic/claude-3-5-sonnet'
+    );
+    expect(r.usage?.reasoningTokens).toBeUndefined();
+  });
+
   it('chatCompletion 429 throws AdapterError kind=rate_limit', async () => {
     const fetcher = vi.fn(async () => new Response('{"error":{"message":"rate"}}', { status: 429 })) as unknown as typeof fetch;
     const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });

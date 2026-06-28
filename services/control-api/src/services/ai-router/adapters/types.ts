@@ -63,6 +63,8 @@ export interface AdapterUsage {
   totalCost: number | null;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
+  /** Reasoning tokens consumed by thinking/reasoning models (e.g. o1, claude thinking). Undefined for non-reasoning models. */
+  reasoningTokens?: number;
 }
 
 export interface AdapterResult {
@@ -104,8 +106,17 @@ export class AdapterError extends Error {
   }
 }
 
+export interface AdapterCapabilities {
+  /** True when this adapter can forward a request directly to upstream
+   *  Anthropic Messages API (POST /v1/messages) for the given canonical
+   *  model id. When false, the messages router must translate to and
+   *  from chat-completions. */
+  supportsNativeMessages: (canonicalId: string) => boolean;
+}
+
 export interface RouterAdapter {
   name: RouterName;
+  capabilities: AdapterCapabilities;
   toUpstreamId(canonicalId: string): string;
   listModels(): Promise<UpstreamModel[]>;
   chatCompletion(req: ChatCompletionRequest, upstreamId: string): Promise<AdapterResult>;
@@ -114,6 +125,17 @@ export interface RouterAdapter {
   pollVideo?(pollingUrl: string): Promise<VideoPollResult>;
   /** Fetch the raw MP4 bytes for a completed job. Pass through to caller as a stream. */
   fetchVideoContent?(upstreamJobId: string, index?: number): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
+  /**
+   * Native Anthropic Messages API passthrough. When implemented, `routeMessages`
+   * skips the chat-completions translation layer and forwards the request body
+   * directly to the upstream provider's `/v1/messages` endpoint (non-streaming only;
+   * streaming native path is wired in a later task).
+   */
+  nativeMessages?(
+    req: import('../messages-schema.js').MessagesRequest,
+    upstreamId: string,
+    headers: { anthropicVersion?: string; anthropicBeta?: string },
+  ): Promise<AdapterResult>;
   /**
    * Optional accessor returning a drift report from the most recent
    * `listModels()` call. Adapters that dynamically refresh their catalog from
