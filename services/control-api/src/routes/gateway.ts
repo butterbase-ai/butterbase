@@ -319,7 +319,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
       const auditUsage = resultUsage
         ? { prompt_tokens: resultUsage.promptTokens ?? 0, completion_tokens: resultUsage.completionTokens ?? 0, total_tokens: (resultUsage.promptTokens ?? 0) + (resultUsage.completionTokens ?? 0) }
         : null;
-      emitGatewayEvent(app, auditCtx, { success: result.status < 400, status: result.status, usage: auditUsage, stream: false });
+      if (result.status < 400) {
+        emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage: auditUsage, stream: false });
+      } else {
+        emitGatewayEvent(app, auditCtx, { success: false, status: result.status, errorMessage: 'route returned non-2xx', errorCode: 'route_error' });
+      }
       return reply.code(result.status).send(result.body);
     } catch (err) {
       if (auditCtx) {
@@ -386,7 +390,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
         emitGatewayEvent(app, auditCtx, { success: true, status: 200, usage: null, stream: true });
         return;
       }
-      emitGatewayEvent(app, auditCtx, { success: result.status < 400, status: result.status, usage: null, stream: false });
+      if (result.status < 400) {
+        emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage: null, stream: false });
+      } else {
+        emitGatewayEvent(app, auditCtx, { success: false, status: result.status, errorMessage: 'route returned non-2xx', errorCode: 'route_error' });
+      }
       return reply.code(result.status).send(result.body);
     } catch (err) {
       if (auditCtx) {
