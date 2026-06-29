@@ -155,6 +155,77 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 | `execute_integration_action` | Execute a tool on behalf of a user. |
 | `list_connected_accounts` | List all users with connected accounts for an app. |
 
+## EnrichLayer (people / company search + enrichment)
+
+| Tool | Description |
+|------|-------------|
+| `manage_enrichlayer` | Search LinkedIn people/companies with structured filters, enrich profiles by URL (with 30-day cache), and queue async work-email lookups. All metered against the user's Butterbase credits at platform pricing. See [EnrichLayer API](./enrichlayer-api.md) for HTTP shapes, response payloads, and pricing math. |
+
+### manage_enrichlayer actions
+
+All actions take `{ app_id, action, ... }` where `action` selects the operation.
+
+| Action | Description |
+|--------|-------------|
+| `search_person` | Structured-filter search for people. Every filter accepts boolean syntax (`OR`, `AND`, `NOT`, parens, double-quoted phrases). Filters: `current_role_title`, `past_role_title`, `current_company_name`, `current_company_industry`, `country`, `region`, `city`, `education_school_name`, `education_degree_name`, `education_field_of_study`, plus `page_size`, `next_token`, `enrich_profiles`. Costs 3 credits per result returned. Empty searches are free. |
+| `search_company` | Structured-filter search for companies. Filters: `industry`, `country`, `employee_count_max`, plus `page_size`, `next_token`, `enrich_profiles`. |
+| `get_profile` | Fetch a full LinkedIn profile by URL with cache. Pass `linkedin_profile_url`. Optional `live_fetch: "force"` skips cache. 2 credits on a cache miss, 0 on a hit (cache TTL: 30d for hits, 7d for not-found, 1h for failed). |
+| `queue_email_lookup` | Queue an async work-email lookup. Pass `linkedin_profile_url`. Returns `lookup_id` and `status: "pending"`. Poll with `get_email_lookup`. EnrichLayer charges ~3 credits at queue time and 1 more when the webhook resolves. |
+| `get_email_lookup` | Poll an email lookup by `id`. Returns `{ status, email, credits_consumed }`. |
+| `get_credit_balance` | Read the platform's EnrichLayer credit balance (not the user's Butterbase balance). Doesn't deduct credits. |
+
+### Boolean syntax examples
+
+```jsonc
+// VPs from top colleges
+{
+  "action": "search_person",
+  "current_role_title": "(VP OR \"Vice President\") AND NOT assistant",
+  "education_school_name": "(Harvard OR Stanford OR MIT OR Princeton OR Yale)",
+  "country": "US",
+  "page_size": 25
+}
+
+// CTOs at fintech startups under 200 employees
+{
+  "action": "search_company",
+  "industry": "Financial Services",
+  "employee_count_max": 200,
+  "country": "US"
+}
+
+// Profile lookup — cache absorbs duplicates
+{ "action": "get_profile", "linkedin_profile_url": "https://www.linkedin.com/in/jane-doe-abc123" }
+```
+
+### Pricing summary (default rate ≈ $0.02016 / EnrichLayer credit)
+
+| What | Cost |
+|---|---|
+| `search_person`/`search_company` (URLs only) | 3 credits × results returned (~$0.06/result) |
+| Same with `enrich_profiles: true` | 3 + N per result (~$0.12+/result) |
+| `get_profile` cache miss | 2 credits (~$0.04) |
+| `get_profile` cache hit | 0 |
+| `queue_email_lookup` queue accept | 3 credits (~$0.06) |
+| Webhook resolution callback | 1 credit (~$0.02) |
+| `get_credit_balance` | 0 |
+
+### Errors
+
+`manage_enrichlayer` returns `isError: true` with the underlying control-api error text. Common conditions:
+
+- `insufficient_credits` (402) — user's Butterbase balance is below the minimum gate ($0.05 default). No vendor call is made.
+- `forbidden` (403) — authed user doesn't own the app.
+- `enrichlayer_disabled` (503) — feature flag is off on this deployment.
+- `enrichlayer_unavailable` (503) — platform key not configured or `ENRICHLAYER_WEBHOOK_HOST_URL` missing for async email.
+
+### Conceptual notes
+
+- **Caching saves real money.** Repeated `get_profile` calls against the same normalized LinkedIn URL within 30 days cost $0. Treat the cache as durable and feel free to re-fetch on render.
+- **Searches return 0 credits charged when there are 0 results** — use a `page_size: 1` probe to preview cost (look at `data.totalResultCount`) before paginating.
+- **Async email is genuinely async.** The queue call returns immediately; the email lands minutes later via webhook. Plan your UI for a `pending` state.
+- **Phone numbers are not supported** — EnrichLayer doesn't expose them. Layer a second vendor when needed.
+
 ## KV Store
 
 | Tool | Description |
