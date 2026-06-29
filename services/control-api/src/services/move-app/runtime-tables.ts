@@ -52,6 +52,8 @@ export const MOVE_APP_RUNTIME_TABLES = [
   'ai_video_jobs',
   'actor_usage_logs',
   'mcp_tool_call_log',
+  'people_usage_logs',
+  'people_profile_cache',
 
   // Deployment + billing history (per-app, follow the app on move)
   'app_deployments',
@@ -115,6 +117,7 @@ export const MOVE_APP_EXCLUDED: Record<string, string> = {
   // Per-region queues — transient state, dest region drives its own work:
   neon_tasks: 'per-region Neon API queue; dest neon-task-worker re-provisions on move',
   rag_ingestion_queue: 'per-region RAG ingestion queue; pending tasks lost on move (acceptable v1)',
+  people_email_lookups: 'pending rows reference a people-search webhook callback URL pinned to source region; copying would orphan in-flight lookups. Acceptable v1 — moves are infrequent, pending lookups complete within seconds.',
 
 };
 

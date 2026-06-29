@@ -12,8 +12,8 @@ describe('MeterType', () => {
     expect(types).toHaveLength(6);
   });
 
-  it('accepts enrichlayer_credits as a meter type', () => {
-    const type: MeterType = 'enrichlayer_credits';
+  it('accepts people_credits as a meter type', () => {
+    const type: MeterType = 'people_credits';
     expect(type).toBeDefined();
   });
 });

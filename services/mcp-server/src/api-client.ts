@@ -1,4 +1,4 @@
-import { getRequestAuthorizationHeader } from './request-auth-context.js';
+import { getRequestAuthorizationHeader, getRequestTestUserId } from './request-auth-context.js';
 
 // On Fly (production), default to the public Fly-anycast URL so that
 // auto-CRUD/storage/function requests for cross-region apps pass through
@@ -37,6 +37,15 @@ export function getHeaders(): HeadersInit {
     headers['Authorization'] = authorizationHeader;
   } else if (getApiKey()) {
     headers['Authorization'] = `Bearer ${getApiKey()}`;
+  }
+
+  // Forward the E2E test-user header when present (set only by /mcp under
+  // BUTTERBASE_E2E=1 on the inbound side). Lets unauthenticated MCP smoke
+  // tests reach the control-api routes through the same bypass the route
+  // layer honours. Real traffic never carries this.
+  const testUserId = getRequestTestUserId();
+  if (testUserId) {
+    (headers as Record<string, string>)['x-test-user-id'] = testUserId;
   }
 
   return headers;

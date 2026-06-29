@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createButterbaseMcpServer, runWithRequestAuthorizationHeader } from '@butterbase/mcp-server';
+import { createButterbaseMcpServer, runWithRequestAuth } from '@butterbase/mcp-server';
 
 async function handleMcp(
   app: FastifyInstance,
@@ -24,8 +24,15 @@ async function handleMcp(
     const authorizationHeader = typeof request.headers.authorization === 'string'
       ? request.headers.authorization
       : undefined;
+    // E2E mode only: forward x-test-user-id from MCP request into downstream
+    // tool HTTP calls so the same dev bypass works through the MCP path.
+    const rawTestUid = request.headers['x-test-user-id'];
+    const testUserId =
+      process.env.BUTTERBASE_E2E === '1' && typeof rawTestUid === 'string' && rawTestUid.length > 0
+        ? rawTestUid
+        : undefined;
 
-    await runWithRequestAuthorizationHeader(authorizationHeader, async () => {
+    await runWithRequestAuth({ authorizationHeader, testUserId }, async () => {
       await transport.handleRequest(request.raw, reply.raw, request.body);
     });
   } catch (error) {

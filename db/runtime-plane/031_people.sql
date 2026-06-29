@@ -1,8 +1,9 @@
--- 031_enrichlayer.sql — EnrichLayer managed-integration tables.
+-- @scope: runtime
+-- 031_people.sql — People managed-integration tables.
 
-CREATE TABLE IF NOT EXISTS enrichlayer_usage_logs (
+CREATE TABLE IF NOT EXISTS people_usage_logs (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_id          uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  app_id          text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   user_id         uuid NOT NULL,
   action          text NOT NULL,
   credits_consumed integer NOT NULL DEFAULT 0,
@@ -14,12 +15,12 @@ CREATE TABLE IF NOT EXISTS enrichlayer_usage_logs (
   linkedin_url    text,
   created_at      timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_el_usage_app_created ON enrichlayer_usage_logs (app_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_el_usage_user_created ON enrichlayer_usage_logs (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_people_usage_app_created ON people_usage_logs (app_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_people_usage_user_created ON people_usage_logs (user_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS enrichlayer_profile_cache (
+CREATE TABLE IF NOT EXISTS people_profile_cache (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_id         uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  app_id         text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   normalized_url text NOT NULL,
   status         text NOT NULL CHECK (status IN ('ok','not_found','failed')),
   payload_jsonb  jsonb,
@@ -27,11 +28,11 @@ CREATE TABLE IF NOT EXISTS enrichlayer_profile_cache (
   expires_at     timestamptz NOT NULL,
   UNIQUE (app_id, normalized_url)
 );
-CREATE INDEX IF NOT EXISTS idx_el_cache_expires ON enrichlayer_profile_cache (expires_at);
+CREATE INDEX IF NOT EXISTS idx_people_cache_expires ON people_profile_cache (expires_at);
 
-CREATE TABLE IF NOT EXISTS enrichlayer_email_lookups (
+CREATE TABLE IF NOT EXISTS people_email_lookups (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_id          uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  app_id          text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   user_id         uuid NOT NULL,
   normalized_url  text NOT NULL,
   nonce           text NOT NULL UNIQUE,
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS enrichlayer_email_lookups (
   requested_at    timestamptz NOT NULL DEFAULT now(),
   resolved_at     timestamptz
 );
-CREATE INDEX IF NOT EXISTS idx_el_email_pending ON enrichlayer_email_lookups (status, requested_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_people_email_pending ON people_email_lookups (status, requested_at) WHERE status = 'pending';
 
 ALTER TABLE apps
-  ADD COLUMN IF NOT EXISTS enrichlayer_byok_key_encrypted bytea;
+  ADD COLUMN IF NOT EXISTS people_byok_key_encrypted bytea;

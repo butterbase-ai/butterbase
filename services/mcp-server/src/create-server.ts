@@ -29,6 +29,7 @@ import { registerSubmitHackathonEntry } from './tools/submit-hackathon-entry.js'
 import { registerListPartnerApis } from './tools/list-partner-apis.js';
 import { registerManageDurableObjects } from './tools/manage-durable-objects.js';
 import { registerManageAi } from './tools/manage-ai.js';
+import { registerManagePeople } from './tools/manage-people.js';
 import { registerBilling } from './tools/billing.js';
 import { registerApiKeys } from './tools/api-keys.js';
 import { registerListRegions } from './tools/list-regions.js';
@@ -37,7 +38,7 @@ import { registerManageAgents } from './tools/manage-agents.js';
 import { registerManageKv } from './tools/manage-kv.js';
 import { startActiveWindowListener } from './eligibility-listener.js';
 import { isActiveWindowCached, startActiveWindowPoller } from './active-window-cache.js';
-export { runWithRequestAuthorizationHeader, getRequestAuthorizationHeader } from './request-auth-context.js';
+export { runWithRequestAuthorizationHeader, runWithRequestAuth, getRequestAuthorizationHeader, getRequestTestUserId } from './request-auth-context.js';
 
 // Prime and maintain the process-wide active-window cache.
 // When a Postgres connection string is available, also listen for NOTIFY
@@ -118,6 +119,7 @@ export async function createButterbaseMcpServer() {
   registerSubmitHackathonEntry(server);
   registerManageDurableObjects(server);
   registerManageAi(server);
+  registerManagePeople(server);
   registerBilling(server);
   registerApiKeys(server);
   registerListRegions(server);
