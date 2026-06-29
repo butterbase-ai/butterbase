@@ -66,6 +66,7 @@ import { adminAuthRoutes } from './routes/admin-auth.js';
 import { billingRoutes } from './routes/billing.js';
 import { aiConfigRoutes } from './routes/ai-config.js';
 import { enrichLayerRoutes } from './routes/enrichlayer.js';
+import { enrichLayerWebhookRoutes } from './routes/enrichlayer-webhook.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
@@ -554,6 +555,7 @@ try {
 }
 app.register(aiConfigRoutes);
 app.register(enrichLayerRoutes);
+app.register(enrichLayerWebhookRoutes);
 app.register(aiVideoRoutes);
 app.register(gatewayRoutes);
 app.register(aiMeetingsRoutes);
