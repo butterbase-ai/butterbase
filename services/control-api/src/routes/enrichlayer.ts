@@ -9,7 +9,8 @@ import { getEnrichLayerAdapter } from '../services/enrichlayer/registry.js';
 import { getEnrichLayerPricing } from '../services/enrichlayer/pricing.js';
 import { normalizeLinkedinUrl } from '../services/enrichlayer/url.js';
 import { lookupCachedProfile, writeCachedProfile } from '../services/enrichlayer/cache.js';
-import { encryptByok, decryptByok } from '../services/enrichlayer/byok-crypto.js';
+// BYOK disabled per product decision — kept commented for easy re-enable:
+// import { encryptByok, decryptByok } from '../services/enrichlayer/byok-crypto.js';
 import {
   getCreditsBalance,
   deductCreditsBalance,
@@ -37,22 +38,28 @@ type ResolveKeyResult =
  * Returns { error: 'byok_decrypt_failed' } when a BYOK key exists but cannot be decrypted.
  */
 async function resolveKey(
-  runtime: pg.Pool,
-  appId: string,
+  _runtime: pg.Pool,
+  _appId: string,
 ): Promise<ResolveKeyResult> {
-  const r = await runtime.query<{ enrichlayer_byok_key_encrypted: string | null }>(
-    'SELECT enrichlayer_byok_key_encrypted FROM apps WHERE id = $1',
-    [appId],
-  );
-  if (r.rows.length > 0 && r.rows[0].enrichlayer_byok_key_encrypted) {
-    try {
-      const apiKey = decryptByok(r.rows[0].enrichlayer_byok_key_encrypted);
-      return { apiKey, keyType: 'byok' };
-    } catch (err) {
-      console.error('[enrichlayer] BYOK decryption failed', { appId, error: err });
-      return { error: 'byok_decrypt_failed' };
-    }
-  }
+  // NOTE: BYOK disabled per product decision — the platform always uses its
+  // own EnrichLayer key. Kept here (commented) so the BYOK path can be
+  // re-enabled without re-deriving the resolution logic. The DB column
+  // `apps.enrichlayer_byok_key_encrypted` is also retained for the same
+  // reason; it will simply remain NULL.
+  //
+  // const r = await _runtime.query<{ enrichlayer_byok_key_encrypted: string | null }>(
+  //   'SELECT enrichlayer_byok_key_encrypted FROM apps WHERE id = $1',
+  //   [_appId],
+  // );
+  // if (r.rows.length > 0 && r.rows[0].enrichlayer_byok_key_encrypted) {
+  //   try {
+  //     const apiKey = decryptByok(r.rows[0].enrichlayer_byok_key_encrypted);
+  //     return { apiKey, keyType: 'byok' };
+  //   } catch (err) {
+  //     console.error('[enrichlayer] BYOK decryption failed', { appId, error: err });
+  //     return { error: 'byok_decrypt_failed' };
+  //   }
+  // }
   if (config.enrichlayer.apiKey) {
     return { apiKey: config.enrichlayer.apiKey, keyType: 'platform' };
   }
@@ -516,51 +523,56 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     }
   });
 
-  // ── PUT /v1/:appId/enrichlayer/byok ───────────────────────────────────────
-  app.put('/v1/:appId/enrichlayer/byok', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
-    }
-    const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);
-
-    const body = request.body as { apiKey: string };
-    if (!body?.apiKey || typeof body.apiKey !== 'string') {
-      return reply.code(400).send({ error: 'apiKey is required' });
-    }
-
-    const runtime = await getRuntimeDbForApp(app.controlDb, appId);
-
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
-    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
-
-    const encrypted = encryptByok(body.apiKey);
-    await runtime.query(
-      'UPDATE apps SET enrichlayer_byok_key_encrypted = $1 WHERE id = $2',
-      [encrypted, appId],
-    );
-
-    return reply.send({ ok: true });
-  });
-
-  // ── DELETE /v1/:appId/enrichlayer/byok ────────────────────────────────────
-  app.delete('/v1/:appId/enrichlayer/byok', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
-    }
-    const { appId } = request.params as { appId: string };
-    const userId = requireUserId(request);
-
-    const runtime = await getRuntimeDbForApp(app.controlDb, appId);
-
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
-    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
-
-    await runtime.query(
-      'UPDATE apps SET enrichlayer_byok_key_encrypted = NULL WHERE id = $1',
-      [appId],
-    );
-
-    return reply.send({ ok: true });
-  });
+  // ── BYOK routes disabled per product decision ────────────────────────────
+  // Kept here (commented) so the routes can be re-enabled without recreating
+  // the handler bodies. `encryptByok` / `decryptByok` / the `apps.enrichlayer_
+  // byok_key_encrypted` column are retained for the same reason. The MCP
+  // tool's `set_byok_key` / `clear_byok_key` actions are also disabled in
+  // services/mcp-server/src/tools/manage-enrichlayer.ts.
+  //
+  // app.put('/v1/:appId/enrichlayer/byok', async (request, reply) => {
+  //   if (!config.enrichlayer.enabled) {
+  //     return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  //   }
+  //   const { appId } = request.params as { appId: string };
+  //   const userId = requireUserId(request);
+  //
+  //   const body = request.body as { apiKey: string };
+  //   if (!body?.apiKey || typeof body.apiKey !== 'string') {
+  //     return reply.code(400).send({ error: 'apiKey is required' });
+  //   }
+  //
+  //   const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+  //
+  //   const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+  //   if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+  //
+  //   const encrypted = encryptByok(body.apiKey);
+  //   await runtime.query(
+  //     'UPDATE apps SET enrichlayer_byok_key_encrypted = $1 WHERE id = $2',
+  //     [encrypted, appId],
+  //   );
+  //
+  //   return reply.send({ ok: true });
+  // });
+  //
+  // app.delete('/v1/:appId/enrichlayer/byok', async (request, reply) => {
+  //   if (!config.enrichlayer.enabled) {
+  //     return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  //   }
+  //   const { appId } = request.params as { appId: string };
+  //   const userId = requireUserId(request);
+  //
+  //   const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+  //
+  //   const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+  //   if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+  //
+  //   await runtime.query(
+  //     'UPDATE apps SET enrichlayer_byok_key_encrypted = NULL WHERE id = $1',
+  //     [appId],
+  //   );
+  //
+  //   return reply.send({ ok: true });
+  // });
 }

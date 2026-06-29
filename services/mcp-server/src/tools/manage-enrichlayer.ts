@@ -24,10 +24,11 @@ Actions:
                          Poll the status of an email lookup. Returns status, email (when complete), credits used.
   - get_credit_balance  { app_id }
                          Read the platform's EnrichLayer credit balance.
-  - set_byok_key        { app_id, api_key }
-                         Set this app's Bring-Your-Own-Key (BYOK) for EnrichLayer. Encrypts at rest.
-  - clear_byok_key      { app_id }
-                         Clear this app's BYOK, reverting to the platform key.
+  // BYOK actions are disabled — the platform manages the EnrichLayer key. If
+  // your MCP client previously called set_byok_key/clear_byok_key they will
+  // now return an error.
+  // - set_byok_key   (disabled)
+  // - clear_byok_key (disabled)
 
 This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, email lookup, BYOK, credits).`,
     {
@@ -133,18 +134,25 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
             result = await apiGet(`/v1/${app_id}/enrichlayer/credit-balance`);
             break;
           }
-          case 'set_byok_key': {
-            if (!args.api_key) {
-              return { content: [{ type: 'text' as const, text: 'Error: "api_key" is required for "set_byok_key".' }], isError: true as const };
-            }
-            result = await apiPut(`/v1/${app_id}/enrichlayer/byok`, {
-              apiKey: args.api_key,
-            });
-            break;
-          }
+          case 'set_byok_key':
           case 'clear_byok_key': {
-            result = await apiDelete(`/v1/${app_id}/enrichlayer/byok`);
-            break;
+            // BYOK disabled per product decision — the platform always uses
+            // its own EnrichLayer key. Re-enable by uncommenting the route
+            // handlers in services/control-api/src/routes/enrichlayer.ts and
+            // the implementations below.
+            //
+            // case 'set_byok_key': {
+            //   if (!args.api_key) {
+            //     return { content: [{ type: 'text' as const, text: 'Error: "api_key" is required for "set_byok_key".' }], isError: true as const };
+            //   }
+            //   result = await apiPut(`/v1/${app_id}/enrichlayer/byok`, { apiKey: args.api_key });
+            //   break;
+            // }
+            // case 'clear_byok_key': {
+            //   result = await apiDelete(`/v1/${app_id}/enrichlayer/byok`);
+            //   break;
+            // }
+            return { content: [{ type: 'text' as const, text: 'BYOK is not supported — the platform manages the EnrichLayer key.' }], isError: true as const };
           }
         }
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
