@@ -56,7 +56,7 @@ vi.mock('../config.js', () => ({
         primary: {
           apiKey: 'platform-key',
           baseUrl: '',
-          creditCostHeader: 'x-enrichlayer-credit-cost',
+          creditCostHeader: 'x-cost',
           authScheme: 'bearer',
           baseUsdPerCredit: 0.0168,
           markupPct: 20,
@@ -422,7 +422,7 @@ describe.skipIf(!RUN)('people e2e smoke', () => {
     const r5 = await app.inject({
       method: 'POST',
       url: `/v1/webhooks/people/email?nonce=${nonce}`,
-      headers: { 'x-enrichlayer-credit-cost': '1' },
+      headers: { 'x-cost': '1' },
       payload: { email: 'x@y.com' },
     });
 
@@ -448,7 +448,7 @@ describe.skipIf(!RUN)('people e2e smoke', () => {
     const r6 = await app.inject({
       method: 'POST',
       url: `/v1/webhooks/people/email?nonce=${nonce}`,
-      headers: { 'x-enrichlayer-credit-cost': '1' },
+      headers: { 'x-cost': '1' },
       payload: { email: 'x@y.com' },
     });
 
