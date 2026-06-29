@@ -1,24 +1,24 @@
-// services/control-api/src/routes/enrichlayer.ts
-// EnrichLayer sync routes: search, profile (with cache), email queue, credit-balance, BYOK.
+// services/control-api/src/routes/people.ts
+// People sync routes: search, profile (with cache), email queue, credit-balance, BYOK.
 import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { requireUserId } from '../utils/require-auth.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
-import { getEnrichLayerAdapter } from '../services/enrichlayer/registry.js';
-import { getEnrichLayerPricing } from '../services/enrichlayer/pricing.js';
-import { normalizeLinkedinUrl } from '../services/enrichlayer/url.js';
-import { lookupCachedProfile, writeCachedProfile } from '../services/enrichlayer/cache.js';
+import { getPeopleAdapter } from '../services/people/registry.js';
+import { getPeoplePricing } from '../services/people/pricing.js';
+import { normalizeLinkedinUrl } from '../services/people/url.js';
+import { lookupCachedProfile, writeCachedProfile } from '../services/people/cache.js';
 // BYOK disabled per product decision — kept commented for easy re-enable:
-// import { encryptByok, decryptByok } from '../services/enrichlayer/byok-crypto.js';
+// import { encryptByok, decryptByok } from '../services/people/byok-crypto.js';
 import {
   getCreditsBalance,
   deductCreditsBalance,
   incrementUsage,
 } from '../services/usage-metering.js';
 import { config } from '../config.js';
-import { EnrichLayerError } from '../services/enrichlayer/types.js';
-import type { SearchPersonRequest, SearchCompanyRequest } from '../services/enrichlayer/types.js';
+import { PeopleError } from '../services/people/types.js';
+import type { SearchPersonRequest, SearchCompanyRequest } from '../services/people/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,26 +42,26 @@ async function resolveKey(
   _appId: string,
 ): Promise<ResolveKeyResult> {
   // NOTE: BYOK disabled per product decision — the platform always uses its
-  // own EnrichLayer key. Kept here (commented) so the BYOK path can be
+  // own People key. Kept here (commented) so the BYOK path can be
   // re-enabled without re-deriving the resolution logic. The DB column
-  // `apps.enrichlayer_byok_key_encrypted` is also retained for the same
+  // `apps.people_byok_key_encrypted` is also retained for the same
   // reason; it will simply remain NULL.
   //
-  // const r = await _runtime.query<{ enrichlayer_byok_key_encrypted: string | null }>(
-  //   'SELECT enrichlayer_byok_key_encrypted FROM apps WHERE id = $1',
+  // const r = await _runtime.query<{ people_byok_key_encrypted: string | null }>(
+  //   'SELECT people_byok_key_encrypted FROM apps WHERE id = $1',
   //   [_appId],
   // );
-  // if (r.rows.length > 0 && r.rows[0].enrichlayer_byok_key_encrypted) {
+  // if (r.rows.length > 0 && r.rows[0].people_byok_key_encrypted) {
   //   try {
-  //     const apiKey = decryptByok(r.rows[0].enrichlayer_byok_key_encrypted);
+  //     const apiKey = decryptByok(r.rows[0].people_byok_key_encrypted);
   //     return { apiKey, keyType: 'byok' };
   //   } catch (err) {
-  //     console.error('[enrichlayer] BYOK decryption failed', { appId, error: err });
+  //     console.error('[people] BYOK decryption failed', { appId, error: err });
   //     return { error: 'byok_decrypt_failed' };
   //   }
   // }
-  if (config.enrichlayer.apiKey) {
-    return { apiKey: config.enrichlayer.apiKey, keyType: 'platform' };
+  if (config.people.apiKey) {
+    return { apiKey: config.people.apiKey, keyType: 'platform' };
   }
   return null;
 }
@@ -103,7 +103,7 @@ interface AuditParams {
 
 async function writeAuditRow(runtime: pg.Pool, p: AuditParams): Promise<void> {
   await runtime.query(
-    `INSERT INTO enrichlayer_usage_logs
+    `INSERT INTO people_usage_logs
        (app_id, user_id, action, credits_consumed, usd_cost, usd_charged, key_type, request_id, response_status, linkedin_url)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
@@ -115,11 +115,11 @@ async function writeAuditRow(runtime: pg.Pool, p: AuditParams): Promise<void> {
 }
 
 /**
- * Map EnrichLayerError to an HTTP response. 5xx upstream → 502.
+ * Map PeopleError to an HTTP response. 5xx upstream → 502.
  * All other errors re-throw to the global handler.
  */
-function sendEnrichLayerError(err: unknown, reply: any): boolean {
-  if (err instanceof EnrichLayerError) {
+function sendPeopleError(err: unknown, reply: any): boolean {
+  if (err instanceof PeopleError) {
     const code = err.status >= 500 ? 502 : err.status;
     reply.code(code).send({ error: err.message, code: err.code });
     return true;
@@ -136,17 +136,17 @@ const BYOK_DECRYPT_FAILED_REPLY = {
 // Route module
 // ---------------------------------------------------------------------------
 
-export async function enrichLayerRoutes(app: FastifyInstance) {
-  // ── POST /v1/:appId/enrichlayer/search/person ─────────────────────────────
-  app.post('/v1/:appId/enrichlayer/search/person', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+export async function peopleRoutes(app: FastifyInstance) {
+  // ── POST /v1/:appId/people/search/person ─────────────────────────────
+  app.post('/v1/:appId/people/search/person', async (request, reply) => {
+    if (!config.people.enabled) {
+      return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
     }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
-    const adapter = getEnrichLayerAdapter();
-    if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    const adapter = getPeopleAdapter();
+    if (!adapter) return reply.code(503).send({ error: 'people_unavailable' });
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
@@ -154,12 +154,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const resolved = await resolveKey(runtime, appId);
-    if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if (!resolved) return reply.code(503).send({ error: 'people_unavailable' });
     if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
-      if (bal.totalUsd < config.enrichlayer.minBalanceUsd) {
+      if (bal.totalUsd < config.people.minBalanceUsd) {
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -168,12 +168,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
       const body = request.body as SearchPersonRequest;
       const result = await adapter.searchPerson(body, { apiKey: resolved.apiKey });
 
-      const pricing = getEnrichLayerPricing();
+      const pricing = getPeoplePricing();
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (resolved.keyType === 'platform' && usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'enrichlayer_credits', result.creditsConsumed, appId);
+        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -185,7 +185,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
       return reply.send({ data: result.data, usage: { creditsConsumed: result.creditsConsumed, usdCost, usdCharged } });
     } catch (err) {
-      if (err instanceof EnrichLayerError) {
+      if (err instanceof PeopleError) {
         await writeAuditRow(runtime, {
           appId, userId, action: 'search_person_error',
           creditsConsumed: 0, usdCost: 0, usdCharged: 0,
@@ -193,21 +193,21 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
           status: err.status, linkedinUrl: null,
         }).catch(() => {});
       }
-      if (sendEnrichLayerError(err, reply)) return;
+      if (sendPeopleError(err, reply)) return;
       throw err;
     }
   });
 
-  // ── POST /v1/:appId/enrichlayer/search/company ────────────────────────────
-  app.post('/v1/:appId/enrichlayer/search/company', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  // ── POST /v1/:appId/people/search/company ────────────────────────────
+  app.post('/v1/:appId/people/search/company', async (request, reply) => {
+    if (!config.people.enabled) {
+      return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
     }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
-    const adapter = getEnrichLayerAdapter();
-    if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    const adapter = getPeopleAdapter();
+    if (!adapter) return reply.code(503).send({ error: 'people_unavailable' });
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
@@ -215,12 +215,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const resolved = await resolveKey(runtime, appId);
-    if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if (!resolved) return reply.code(503).send({ error: 'people_unavailable' });
     if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
-      if (bal.totalUsd < config.enrichlayer.minBalanceUsd) {
+      if (bal.totalUsd < config.people.minBalanceUsd) {
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -229,12 +229,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
       const body = request.body as SearchCompanyRequest;
       const result = await adapter.searchCompany(body, { apiKey: resolved.apiKey });
 
-      const pricing = getEnrichLayerPricing();
+      const pricing = getPeoplePricing();
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (resolved.keyType === 'platform' && usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'enrichlayer_credits', result.creditsConsumed, appId);
+        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -246,7 +246,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
       return reply.send({ data: result.data, usage: { creditsConsumed: result.creditsConsumed, usdCost, usdCharged } });
     } catch (err) {
-      if (err instanceof EnrichLayerError) {
+      if (err instanceof PeopleError) {
         await writeAuditRow(runtime, {
           appId, userId, action: 'search_company_error',
           creditsConsumed: 0, usdCost: 0, usdCharged: 0,
@@ -254,21 +254,21 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
           status: err.status, linkedinUrl: null,
         }).catch(() => {});
       }
-      if (sendEnrichLayerError(err, reply)) return;
+      if (sendPeopleError(err, reply)) return;
       throw err;
     }
   });
 
-  // ── POST /v1/:appId/enrichlayer/profile ───────────────────────────────────
-  app.post('/v1/:appId/enrichlayer/profile', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  // ── POST /v1/:appId/people/profile ───────────────────────────────────
+  app.post('/v1/:appId/people/profile', async (request, reply) => {
+    if (!config.people.enabled) {
+      return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
     }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
-    const adapter = getEnrichLayerAdapter();
-    if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    const adapter = getPeopleAdapter();
+    if (!adapter) return reply.code(503).send({ error: 'people_unavailable' });
 
     const body = request.body as { linkedinProfileUrl: string; liveFetch?: 'force' };
 
@@ -304,12 +304,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
     // Cache miss — resolve key + balance gate
     const resolved = await resolveKey(runtime, appId);
-    if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if (!resolved) return reply.code(503).send({ error: 'people_unavailable' });
     if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
-      if (bal.totalUsd < config.enrichlayer.minBalanceUsd) {
+      if (bal.totalUsd < config.people.minBalanceUsd) {
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -326,12 +326,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
         result.data,
       );
 
-      const pricing = getEnrichLayerPricing();
+      const pricing = getPeoplePricing();
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (resolved.keyType === 'platform' && usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'enrichlayer_credits', result.creditsConsumed, appId);
+        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -347,7 +347,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
         usage: { creditsConsumed: result.creditsConsumed, usdCost, usdCharged, cached: false },
       });
     } catch (err) {
-      if (err instanceof EnrichLayerError) {
+      if (err instanceof PeopleError) {
         await writeAuditRow(runtime, {
           appId, userId, action: 'profile_error',
           creditsConsumed: 0, usdCost: 0, usdCharged: 0,
@@ -355,26 +355,26 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
           status: err.status, linkedinUrl: normalizedUrl ?? null,
         }).catch(() => {});
       }
-      if (sendEnrichLayerError(err, reply)) return;
+      if (sendPeopleError(err, reply)) return;
       throw err;
     }
   });
 
-  // ── POST /v1/:appId/enrichlayer/profile/email ─────────────────────────────
-  app.post('/v1/:appId/enrichlayer/profile/email', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  // ── POST /v1/:appId/people/profile/email ─────────────────────────────
+  app.post('/v1/:appId/people/profile/email', async (request, reply) => {
+    if (!config.people.enabled) {
+      return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
     }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
-    const adapter = getEnrichLayerAdapter();
-    if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    const adapter = getPeopleAdapter();
+    if (!adapter) return reply.code(503).send({ error: 'people_unavailable' });
 
-    if (!config.enrichlayer.webhookHostUrl) {
+    if (!config.people.webhookHostUrl) {
       return reply.code(503).send({
-        error: 'enrichlayer_unavailable',
-        message: 'EnrichLayer webhook host URL is not configured; async email lookups are disabled',
+        error: 'people_unavailable',
+        message: 'People webhook host URL is not configured; async email lookups are disabled',
       });
     }
 
@@ -393,12 +393,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const resolved = await resolveKey(runtime, appId);
-    if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if (!resolved) return reply.code(503).send({ error: 'people_unavailable' });
     if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
-      if (bal.totalUsd < config.enrichlayer.minBalanceUsd) {
+      if (bal.totalUsd < config.people.minBalanceUsd) {
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -410,25 +410,25 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
       // Insert the pending row BEFORE calling the adapter.
       // key_type is stored so the async webhook can skip Butterbase billing for BYOK rows.
       const lookupRow = await runtime.query<{ id: string }>(
-        `INSERT INTO enrichlayer_email_lookups (app_id, user_id, normalized_url, nonce, key_type, status)
+        `INSERT INTO people_email_lookups (app_id, user_id, normalized_url, nonce, key_type, status)
          VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING id`,
         [appId, userId, normalizedUrl, nonce, resolved.keyType],
       );
       lookupId = lookupRow.rows[0].id;
 
-      const callbackUrl = `${config.enrichlayer.webhookHostUrl}/v1/webhooks/enrichlayer/email?nonce=${nonce}`;
+      const callbackUrl = `${config.people.webhookHostUrl}/v1/webhooks/people/email?nonce=${nonce}`;
       const result = await adapter.queueEmailLookup(
         { linkedinProfileUrl: normalizedUrl, callbackUrl },
         { apiKey: resolved.apiKey },
       );
 
       // Queue-accept typically costs 0 credits; charge only if non-zero
-      const pricing = getEnrichLayerPricing();
+      const pricing = getPeoplePricing();
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (resolved.keyType === 'platform' && usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'enrichlayer_credits', result.creditsConsumed, appId);
+        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -443,11 +443,11 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
       // Clean up the orphan pending row on adapter failure.
       if (lookupId) {
         await runtime.query(
-          'DELETE FROM enrichlayer_email_lookups WHERE id = $1 AND status = $2',
+          'DELETE FROM people_email_lookups WHERE id = $1 AND status = $2',
           [lookupId, 'pending'],
         ).catch(() => {});  // swallow — don't mask original error
       }
-      if (err instanceof EnrichLayerError) {
+      if (err instanceof PeopleError) {
         await writeAuditRow(runtime, {
           appId, userId, action: 'profile_email_error',
           creditsConsumed: 0, usdCost: 0, usdCharged: 0,
@@ -455,15 +455,15 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
           status: err.status, linkedinUrl: normalizedUrl ?? null,
         }).catch(() => {});
       }
-      if (sendEnrichLayerError(err, reply)) return;
+      if (sendPeopleError(err, reply)) return;
       throw err;
     }
   });
 
-  // ── GET /v1/:appId/enrichlayer/email-lookup/:id ──────────────────────────
-  app.get('/v1/:appId/enrichlayer/email-lookup/:id', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  // ── GET /v1/:appId/people/email-lookup/:id ──────────────────────────
+  app.get('/v1/:appId/people/email-lookup/:id', async (request, reply) => {
+    if (!config.people.enabled) {
+      return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
     }
     const userId = requireUserId(request);
     const { appId, id } = request.params as { appId: string; id: string };
@@ -478,7 +478,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
       email: string | null;
       credits_consumed: number | null;
     }>(
-      `SELECT status, email, credits_consumed FROM enrichlayer_email_lookups WHERE id = $1 AND app_id = $2`,
+      `SELECT status, email, credits_consumed FROM people_email_lookups WHERE id = $1 AND app_id = $2`,
       [id, appId],
     );
 
@@ -494,19 +494,19 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     });
   });
 
-  // ── GET /v1/:appId/enrichlayer/credit-balance ─────────────────────────────
-  app.get('/v1/:appId/enrichlayer/credit-balance', async (request, reply) => {
-    if (!config.enrichlayer.enabled) {
-      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  // ── GET /v1/:appId/people/credit-balance ─────────────────────────────
+  app.get('/v1/:appId/people/credit-balance', async (request, reply) => {
+    if (!config.people.enabled) {
+      return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
     }
     const userId = requireUserId(request);
     const { appId } = request.params as { appId: string };
 
-    const adapter = getEnrichLayerAdapter();
-    if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    const adapter = getPeopleAdapter();
+    if (!adapter) return reply.code(503).send({ error: 'people_unavailable' });
 
-    if (!config.enrichlayer.apiKey) {
-      return reply.code(503).send({ error: 'enrichlayer_unavailable', message: 'platform key not configured' });
+    if (!config.people.apiKey) {
+      return reply.code(503).send({ error: 'people_unavailable', message: 'platform key not configured' });
     }
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
@@ -515,24 +515,24 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     try {
-      const r = await adapter.getCreditBalance({ apiKey: config.enrichlayer.apiKey });
+      const r = await adapter.getCreditBalance({ apiKey: config.people.apiKey });
       return reply.send({ balance: r.data.balance });
     } catch (err) {
-      if (sendEnrichLayerError(err, reply)) return;
+      if (sendPeopleError(err, reply)) return;
       throw err;
     }
   });
 
   // ── BYOK routes disabled per product decision ────────────────────────────
   // Kept here (commented) so the routes can be re-enabled without recreating
-  // the handler bodies. `encryptByok` / `decryptByok` / the `apps.enrichlayer_
+  // the handler bodies. `encryptByok` / `decryptByok` / the `apps.people_
   // byok_key_encrypted` column are retained for the same reason. The MCP
   // tool's `set_byok_key` / `clear_byok_key` actions are also disabled in
-  // services/mcp-server/src/tools/manage-enrichlayer.ts.
+  // services/mcp-server/src/tools/manage-people.ts.
   //
-  // app.put('/v1/:appId/enrichlayer/byok', async (request, reply) => {
-  //   if (!config.enrichlayer.enabled) {
-  //     return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  // app.put('/v1/:appId/people/byok', async (request, reply) => {
+  //   if (!config.people.enabled) {
+  //     return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
   //   }
   //   const { appId } = request.params as { appId: string };
   //   const userId = requireUserId(request);
@@ -549,16 +549,16 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
   //
   //   const encrypted = encryptByok(body.apiKey);
   //   await runtime.query(
-  //     'UPDATE apps SET enrichlayer_byok_key_encrypted = $1 WHERE id = $2',
+  //     'UPDATE apps SET people_byok_key_encrypted = $1 WHERE id = $2',
   //     [encrypted, appId],
   //   );
   //
   //   return reply.send({ ok: true });
   // });
   //
-  // app.delete('/v1/:appId/enrichlayer/byok', async (request, reply) => {
-  //   if (!config.enrichlayer.enabled) {
-  //     return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+  // app.delete('/v1/:appId/people/byok', async (request, reply) => {
+  //   if (!config.people.enabled) {
+  //     return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
   //   }
   //   const { appId } = request.params as { appId: string };
   //   const userId = requireUserId(request);
@@ -569,7 +569,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
   //   if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
   //
   //   await runtime.query(
-  //     'UPDATE apps SET enrichlayer_byok_key_encrypted = NULL WHERE id = $1',
+  //     'UPDATE apps SET people_byok_key_encrypted = NULL WHERE id = $1',
   //     [appId],
   //   );
   //

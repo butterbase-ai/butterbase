@@ -2,10 +2,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { apiGet, apiPost, apiPut, apiDelete } from '../api-client.js';
 
-export function registerManageEnrichlayer(server: McpServer) {
+export function registerManagePeople(server: McpServer) {
   server.tool(
-    'manage_enrichlayer',
-    `Use the app's EnrichLayer integration: search person/company, fetch profiles, queue email lookups, manage credits and BYOK keys.
+    'manage_people',
+    `Use the app's People integration: search person/company, fetch profiles, queue email lookups, manage credits and BYOK keys.
 
 Actions:
   - search_person       { app_id, current_role_title?, past_role_title?, current_company_name?, current_company_industry?, country?, region?, city?, education_school_name?, education_degree_name?, education_field_of_study?, page_size?, next_token?, enrich_profiles? }
@@ -23,14 +23,14 @@ Actions:
   - get_email_lookup    { app_id, id }
                          Poll the status of an email lookup. Returns status, email (when complete), credits used.
   - get_credit_balance  { app_id }
-                         Read the platform's EnrichLayer credit balance.
-  // BYOK actions are disabled — the platform manages the EnrichLayer key. If
+                         Read the platform's People credit balance.
+  // BYOK actions are disabled — the platform manages the People key. If
   // your MCP client previously called set_byok_key/clear_byok_key they will
   // now return an error.
   // - set_byok_key   (disabled)
   // - clear_byok_key (disabled)
 
-This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, email lookup, BYOK, credits).`,
+This tool wraps the app's /v1/:app_id/people/* routes (search, profile, email lookup, BYOK, credits).`,
     {
       app_id: z.string().describe('The app ID'),
       action: z.enum([
@@ -61,10 +61,10 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
       // get_email_lookup
       id: z.string().optional().describe('Lookup ID (required for get_email_lookup)'),
       // set_byok_key
-      api_key: z.string().optional().describe('EnrichLayer API key (required for set_byok_key)'),
+      api_key: z.string().optional().describe('People API key (required for set_byok_key)'),
     },
     {
-      title: 'Manage EnrichLayer',
+      title: 'Manage People',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -76,7 +76,7 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
         let result: unknown;
         switch (action) {
           case 'search_person': {
-            result = await apiPost(`/v1/${app_id}/enrichlayer/search/person`, {
+            result = await apiPost(`/v1/${app_id}/people/search/person`, {
               ...(args.current_role_title !== undefined && { currentRoleTitle: args.current_role_title }),
               ...(args.past_role_title !== undefined && { pastRoleTitle: args.past_role_title }),
               ...(args.current_company_name !== undefined && { currentCompanyName: args.current_company_name }),
@@ -94,7 +94,7 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
             break;
           }
           case 'search_company': {
-            result = await apiPost(`/v1/${app_id}/enrichlayer/search/company`, {
+            result = await apiPost(`/v1/${app_id}/people/search/company`, {
               ...(args.industry !== undefined && { industry: args.industry }),
               ...(args.country !== undefined && { country: args.country }),
               ...(args.employee_count_max !== undefined && { employeeCountMax: args.employee_count_max }),
@@ -108,7 +108,7 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
             if (!args.linkedin_profile_url) {
               return { content: [{ type: 'text' as const, text: 'Error: "linkedin_profile_url" is required for "get_profile".' }], isError: true as const };
             }
-            result = await apiPost(`/v1/${app_id}/enrichlayer/profile`, {
+            result = await apiPost(`/v1/${app_id}/people/profile`, {
               linkedinProfileUrl: args.linkedin_profile_url,
               liveFetch: args.live_fetch,
             });
@@ -118,7 +118,7 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
             if (!args.linkedin_profile_url) {
               return { content: [{ type: 'text' as const, text: 'Error: "linkedin_profile_url" is required for "queue_email_lookup".' }], isError: true as const };
             }
-            result = await apiPost(`/v1/${app_id}/enrichlayer/profile/email`, {
+            result = await apiPost(`/v1/${app_id}/people/profile/email`, {
               linkedinProfileUrl: args.linkedin_profile_url,
             });
             break;
@@ -127,32 +127,32 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
             if (!args.id) {
               return { content: [{ type: 'text' as const, text: 'Error: "id" is required for "get_email_lookup".' }], isError: true as const };
             }
-            result = await apiGet(`/v1/${app_id}/enrichlayer/email-lookup/${encodeURIComponent(args.id)}`);
+            result = await apiGet(`/v1/${app_id}/people/email-lookup/${encodeURIComponent(args.id)}`);
             break;
           }
           case 'get_credit_balance': {
-            result = await apiGet(`/v1/${app_id}/enrichlayer/credit-balance`);
+            result = await apiGet(`/v1/${app_id}/people/credit-balance`);
             break;
           }
           case 'set_byok_key':
           case 'clear_byok_key': {
             // BYOK disabled per product decision — the platform always uses
-            // its own EnrichLayer key. Re-enable by uncommenting the route
-            // handlers in services/control-api/src/routes/enrichlayer.ts and
+            // its own People key. Re-enable by uncommenting the route
+            // handlers in services/control-api/src/routes/people.ts and
             // the implementations below.
             //
             // case 'set_byok_key': {
             //   if (!args.api_key) {
             //     return { content: [{ type: 'text' as const, text: 'Error: "api_key" is required for "set_byok_key".' }], isError: true as const };
             //   }
-            //   result = await apiPut(`/v1/${app_id}/enrichlayer/byok`, { apiKey: args.api_key });
+            //   result = await apiPut(`/v1/${app_id}/people/byok`, { apiKey: args.api_key });
             //   break;
             // }
             // case 'clear_byok_key': {
-            //   result = await apiDelete(`/v1/${app_id}/enrichlayer/byok`);
+            //   result = await apiDelete(`/v1/${app_id}/people/byok`);
             //   break;
             // }
-            return { content: [{ type: 'text' as const, text: 'BYOK is not supported — the platform manages the EnrichLayer key.' }], isError: true as const };
+            return { content: [{ type: 'text' as const, text: 'BYOK is not supported — the platform manages the People key.' }], isError: true as const };
           }
         }
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };

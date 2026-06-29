@@ -1,22 +1,22 @@
-// services/control-api/src/routes/enrichlayer.e2e.test.ts
+// services/control-api/src/routes/people.e2e.test.ts
 //
-// End-to-end smoke test for EnrichLayer routes.
+// End-to-end smoke test for People routes.
 // Requires a real Postgres database — set TEST_DATABASE_URL to opt in.
 // Mirror of the env-var-gating pattern used in gateway.v2.e2e.test.ts.
 //
 // Harness:
-//   - Real pg.Pool for credit-balance SQL + enrichlayer_email_lookups rows
-//   - Full Fastify boot (enrichLayerRoutes + enrichLayerWebhookRoutes)
-//   - Stub adapter via setEnrichLayerAdapter()
+//   - Real pg.Pool for credit-balance SQL + people_email_lookups rows
+//   - Full Fastify boot (peopleRoutes + peopleWebhookRoutes)
+//   - Stub adapter via setPeopleAdapter()
 //   - Routing/Redis mocked (region-resolver, runtime-pool-registry, redis)
-//   - Pricing driven by env vars: ENRICHLAYER_BASE_USD_PER_CREDIT=0.0168, ENRICHLAYER_MARKUP_PCT=20
+//   - Pricing driven by env vars: PEOPLE_BASE_USD_PER_CREDIT=0.0168, PEOPLE_MARKUP_PCT=20
 //
-// Run: TEST_DATABASE_URL=<postgres-url> pnpm --filter @butterbase/control-api test enrichlayer.e2e
+// Run: TEST_DATABASE_URL=<postgres-url> pnpm --filter @butterbase/control-api test people.e2e
 
 // Set pricing env vars before any module import (pricing.ts reads process.env at call time
 // so setting them here is sufficient; these are not module-init-time reads).
-process.env.ENRICHLAYER_BASE_USD_PER_CREDIT = '0.0168';
-process.env.ENRICHLAYER_MARKUP_PCT = '20';
+process.env.PEOPLE_BASE_USD_PER_CREDIT = '0.0168';
+process.env.PEOPLE_MARKUP_PCT = '20';
 
 // ── Gate: skip if no test DB configured (mirror gateway.v2.e2e.test.ts) ─────
 const DB_URL = process.env.TEST_DATABASE_URL;
@@ -48,7 +48,7 @@ vi.mock('../services/redis.js', () => ({
 
 vi.mock('../config.js', () => ({
   config: {
-    enrichlayer: {
+    people: {
       enabled: true,
       apiKey: 'platform-key',
       minBalanceUsd: 0.01,
@@ -67,12 +67,12 @@ import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import pg from 'pg';
 
-import { enrichLayerRoutes } from './enrichlayer.js';
-import { enrichLayerWebhookRoutes } from './enrichlayer-webhook.js';
-import { setEnrichLayerAdapter } from '../services/enrichlayer/registry.js';
+import { peopleRoutes } from './people.js';
+import { peopleWebhookRoutes } from './people-webhook.js';
+import { setPeopleAdapter } from '../services/people/registry.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-registry.js';
-import type { EnrichLayerAdapter, ProfilePayload } from '../services/enrichlayer/types.js';
+import type { PeopleAdapter, ProfilePayload } from '../services/people/types.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -123,13 +123,13 @@ CREATE TABLE IF NOT EXISTS apps (
   db_name                          TEXT NOT NULL DEFAULT '',
   db_provisioned                   BOOLEAN NOT NULL DEFAULT false,
   region                           TEXT NOT NULL DEFAULT 'local',
-  enrichlayer_byok_key_encrypted   BYTEA,
+  people_byok_key_encrypted   BYTEA,
   created_at                       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at                       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-ALTER TABLE apps ADD COLUMN IF NOT EXISTS enrichlayer_byok_key_encrypted BYTEA;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS people_byok_key_encrypted BYTEA;
 
-CREATE TABLE IF NOT EXISTS enrichlayer_profile_cache (
+CREATE TABLE IF NOT EXISTS people_profile_cache (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   app_id         TEXT NOT NULL,
   normalized_url TEXT NOT NULL,
@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS enrichlayer_profile_cache (
   UNIQUE (app_id, normalized_url)
 );
 
-CREATE TABLE IF NOT EXISTS enrichlayer_email_lookups (
+CREATE TABLE IF NOT EXISTS people_email_lookups (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   app_id           TEXT NOT NULL,
   user_id          UUID NOT NULL,
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS enrichlayer_email_lookups (
   resolved_at      TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS enrichlayer_usage_logs (
+CREATE TABLE IF NOT EXISTS people_usage_logs (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   app_id           TEXT NOT NULL,
   user_id          UUID NOT NULL,
@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS enrichlayer_usage_logs (
 
 // ── Test suite ─────────────────────────────────────────────────────────────────
 
-describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
+describe.skipIf(!RUN)('people e2e smoke', () => {
   let pool: pg.Pool;
   let app: FastifyInstance;
 
@@ -182,7 +182,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
 
   // Shared adapter stub — defined at describe scope so the it() block can
   // inspect call counts after each step.
-  let adapter: EnrichLayerAdapter;
+  let adapter: PeopleAdapter;
 
   // ── Setup ───────────────────────────────────────────────────────────────────
 
@@ -252,7 +252,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
         status: 200,
       }),
     };
-    setEnrichLayerAdapter(adapter);
+    setPeopleAdapter(adapter);
 
     // Boot Fastify with real pool + both route modules.
     app = Fastify({ logger: false });
@@ -270,27 +270,27 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
     // Decorate with the real pool (deductCreditsBalance/getCreditsBalance use this).
     app.decorate('controlDb', pool as any);
 
-    await app.register(enrichLayerRoutes);
-    await app.register(enrichLayerWebhookRoutes);
+    await app.register(peopleRoutes);
+    await app.register(peopleWebhookRoutes);
     await app.ready();
   }, 30_000);
 
   // ── Teardown ─────────────────────────────────────────────────────────────────
 
   afterAll(async () => {
-    setEnrichLayerAdapter(null);
+    setPeopleAdapter(null);
     await app?.close();
 
     // Delete test rows (leave tables intact for subsequent runs).
     if (pool) {
       await pool.query(
-        `DELETE FROM enrichlayer_email_lookups WHERE app_id = $1`, [appId],
+        `DELETE FROM people_email_lookups WHERE app_id = $1`, [appId],
       );
       await pool.query(
-        `DELETE FROM enrichlayer_profile_cache WHERE app_id = $1`, [appId],
+        `DELETE FROM people_profile_cache WHERE app_id = $1`, [appId],
       );
       await pool.query(
-        `DELETE FROM enrichlayer_usage_logs WHERE app_id = $1`, [appId],
+        `DELETE FROM people_usage_logs WHERE app_id = $1`, [appId],
       );
       await pool.query(`DELETE FROM apps WHERE id = $1`, [appId]);
       await pool.query(`DELETE FROM platform_users WHERE id = $1`, [userId]);
@@ -309,7 +309,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
 
     const r1 = await app.inject({
       method: 'POST',
-      url: `/v1/${appId}/enrichlayer/search/person`,
+      url: `/v1/${appId}/people/search/person`,
       payload: { currentRoleTitle: 'CTO' },
     });
 
@@ -329,7 +329,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
 
     const r2 = await app.inject({
       method: 'POST',
-      url: `/v1/${appId}/enrichlayer/profile`,
+      url: `/v1/${appId}/people/profile`,
       payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/a' },
     });
 
@@ -352,7 +352,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
 
     const r3 = await app.inject({
       method: 'POST',
-      url: `/v1/${appId}/enrichlayer/profile`,
+      url: `/v1/${appId}/people/profile`,
       payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/a' },
     });
 
@@ -371,11 +371,11 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
 
     // ── Step 4: POST /profile/email → pending row ────────────────────────────
     //   response.lookupId is a UUID, response.status === 'pending'
-    //   DB: one row in enrichlayer_email_lookups with status='pending' and 64-char hex nonce
+    //   DB: one row in people_email_lookups with status='pending' and 64-char hex nonce
 
     const r4 = await app.inject({
       method: 'POST',
-      url: `/v1/${appId}/enrichlayer/profile/email`,
+      url: `/v1/${appId}/people/profile/email`,
       payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/a' },
     });
 
@@ -385,7 +385,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
     expect(b4.status).toBe('pending');
 
     const dbLookup = await pool.query<{ status: string; nonce: string }>(
-      `SELECT status, nonce FROM enrichlayer_email_lookups WHERE id = $1`,
+      `SELECT status, nonce FROM people_email_lookups WHERE id = $1`,
       [b4.lookupId],
     );
     expect(dbLookup.rows).toHaveLength(1);
@@ -394,14 +394,14 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
 
     const nonce = dbLookup.rows[0].nonce;
 
-    // ── Step 5: POST /webhooks/enrichlayer/email — first delivery ────────────
+    // ── Step 5: POST /webhooks/people/email — first delivery ────────────
     //   response 200 { ok: true }
     //   DB: lookup row status='resolved', email='x@y.com'
     //   balance after ≈ 0.83872 − 0.02016 = 0.81856
 
     const r5 = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${nonce}`,
+      url: `/v1/webhooks/people/email?nonce=${nonce}`,
       headers: { 'x-enrichlayer-credit-cost': '1' },
       payload: { email: 'x@y.com' },
     });
@@ -410,7 +410,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
     expect(r5.json()).toEqual({ ok: true });
 
     const dbResolved = await pool.query<{ status: string; email: string }>(
-      `SELECT status, email FROM enrichlayer_email_lookups WHERE id = $1`,
+      `SELECT status, email FROM people_email_lookups WHERE id = $1`,
       [b4.lookupId],
     );
     expect(dbResolved.rows[0].status).toBe('resolved');
@@ -427,7 +427,7 @@ describe.skipIf(!RUN)('enrichlayer e2e smoke', () => {
 
     const r6 = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${nonce}`,
+      url: `/v1/webhooks/people/email?nonce=${nonce}`,
       headers: { 'x-enrichlayer-credit-cost': '1' },
       payload: { email: 'x@y.com' },
     });

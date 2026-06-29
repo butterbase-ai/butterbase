@@ -21,7 +21,7 @@ export function encryptByok(plain: string): string {
 /**
  * Decrypts a BYOK API key previously encrypted with encryptByok().
  * Accepts either the original string OR a Buffer: the `bytea` column in
- * `apps.enrichlayer_byok_key_encrypted` round-trips the stored UTF-8 bytes
+ * `apps.people_byok_key_encrypted` round-trips the stored UTF-8 bytes
  * as a Buffer on SELECT, so passing the column value directly would
  * otherwise hit `.split is not a function` and the route would 503.
  */

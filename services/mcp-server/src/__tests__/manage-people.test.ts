@@ -1,4 +1,4 @@
-// Unit tests for manage_enrichlayer MCP tool.
+// Unit tests for manage_people MCP tool.
 // Verifies that search_person / search_company send camelCase structured body
 // fields (not the old { query: ... } shape).
 
@@ -18,7 +18,7 @@ async function createConnectedPair() {
   return { server, client };
 }
 
-describe('manage_enrichlayer tool', () => {
+describe('manage_people tool', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -36,7 +36,7 @@ describe('manage_enrichlayer tool', () => {
 
     const { client } = await createConnectedPair();
     await client.callTool({
-      name: 'manage_enrichlayer',
+      name: 'manage_people',
       arguments: {
         app_id: 'app_test123',
         action: 'search_person',
@@ -49,7 +49,7 @@ describe('manage_enrichlayer tool', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toMatch(/\/v1\/app_test123\/enrichlayer\/search\/person$/);
+    expect(url).toMatch(/\/v1\/app_test123\/people\/search\/person$/);
     expect(opts.method).toBe('POST');
 
     const body = JSON.parse(opts.body as string);
@@ -71,7 +71,7 @@ describe('manage_enrichlayer tool', () => {
 
     const { client } = await createConnectedPair();
     await client.callTool({
-      name: 'manage_enrichlayer',
+      name: 'manage_people',
       arguments: {
         app_id: 'app_test123',
         action: 'search_company',
@@ -84,7 +84,7 @@ describe('manage_enrichlayer tool', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toMatch(/\/v1\/app_test123\/enrichlayer\/search\/company$/);
+    expect(url).toMatch(/\/v1\/app_test123\/people\/search\/company$/);
     expect(opts.method).toBe('POST');
 
     const body = JSON.parse(opts.body as string);
@@ -106,7 +106,7 @@ describe('manage_enrichlayer tool', () => {
 
     const { client } = await createConnectedPair();
     const { tools } = await client.listTools();
-    const tool = tools.find((t) => t.name === 'manage_enrichlayer');
+    const tool = tools.find((t) => t.name === 'manage_people');
     expect(tool).toBeDefined();
 
     const urlProp = (tool!.inputSchema as any)?.properties?.linkedin_profile_url;

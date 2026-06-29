@@ -11,7 +11,7 @@ export async function lookupCachedProfile(
   normalizedUrl: string,
 ): Promise<{ status: 'ok' | 'not_found'; payload: ProfilePayload | null } | null> {
   const r = await runtime.query<{ status: 'ok' | 'not_found' | 'failed'; payload_jsonb: unknown }>(
-    `SELECT status, payload_jsonb FROM enrichlayer_profile_cache
+    `SELECT status, payload_jsonb FROM people_profile_cache
        WHERE app_id = $1 AND normalized_url = $2 AND expires_at > now()`,
     [appId, normalizedUrl],
   );
@@ -35,7 +35,7 @@ export async function writeCachedProfile(
         ? `now() + interval '${TTL_NOT_FOUND_DAYS} days'`
         : `now() + interval '${TTL_FAILED_HOURS} hours'`;
   await runtime.query(
-    `INSERT INTO enrichlayer_profile_cache (app_id, normalized_url, status, payload_jsonb, expires_at)
+    `INSERT INTO people_profile_cache (app_id, normalized_url, status, payload_jsonb, expires_at)
        VALUES ($1, $2, $3, $4, ${ttlExpr})
      ON CONFLICT (app_id, normalized_url) DO UPDATE
        SET status = EXCLUDED.status,

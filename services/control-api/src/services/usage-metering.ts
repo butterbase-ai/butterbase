@@ -20,7 +20,7 @@ export type MeterType =
   | 'do_storage_gb_seconds'
   | 'kv_ops'
   | 'kv_storage_bytes'
-  | 'enrichlayer_credits';
+  | 'people_credits';
 
 
 export class UsageMeteringError extends Error {

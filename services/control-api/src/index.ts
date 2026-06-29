@@ -65,8 +65,8 @@ import { platformEventsPlugin } from './services/platform-events/index.js';
 import { adminAuthRoutes } from './routes/admin-auth.js';
 import { billingRoutes } from './routes/billing.js';
 import { aiConfigRoutes } from './routes/ai-config.js';
-import { enrichLayerRoutes } from './routes/enrichlayer.js';
-import { enrichLayerWebhookRoutes } from './routes/enrichlayer-webhook.js';
+import { peopleRoutes } from './routes/people.js';
+import { peopleWebhookRoutes } from './routes/people-webhook.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
@@ -554,8 +554,8 @@ try {
   app.log.info({ err: err instanceof Error ? err.message : err }, 'substrate overlay not present, skipping');
 }
 app.register(aiConfigRoutes);
-app.register(enrichLayerRoutes);
-app.register(enrichLayerWebhookRoutes);
+app.register(peopleRoutes);
+app.register(peopleWebhookRoutes);
 app.register(aiVideoRoutes);
 app.register(gatewayRoutes);
 app.register(aiMeetingsRoutes);

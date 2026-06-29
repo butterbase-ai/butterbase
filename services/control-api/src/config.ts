@@ -86,14 +86,14 @@ export const config = {
     // signing key is required.
   },
 
-  enrichlayer: {
-    enabled: process.env.ENRICHLAYER_ENABLED === 'true',
-    apiKey: process.env.ENRICHLAYER_API_KEY ?? '',
-    baseUrl: process.env.ENRICHLAYER_BASE_URL ?? 'https://enrichlayer.com/api/v2',
-    fallbackCreditsPerAction: parseInt(process.env.ENRICHLAYER_FALLBACK_CREDITS_PER_ACTION ?? '3', 10),
-    minBalanceUsd: parseFloat(process.env.ENRICHLAYER_MIN_BALANCE_USD ?? '0.05'),
-    emailLookupCredits: parseInt(process.env.ENRICHLAYER_EMAIL_LOOKUP_CREDITS ?? '1', 10),
-    webhookHostUrl: process.env.ENRICHLAYER_WEBHOOK_HOST_URL ?? '',  // e.g. https://api.butterbase.ai
+  people: {
+    enabled: process.env.PEOPLE_ENABLED === 'true',
+    apiKey: process.env.PEOPLE_API_KEY ?? '',
+    baseUrl: process.env.PEOPLE_BASE_URL ?? 'https://enrichlayer.com/api/v2',
+    fallbackCreditsPerAction: parseInt(process.env.PEOPLE_FALLBACK_CREDITS_PER_ACTION ?? '3', 10),
+    minBalanceUsd: parseFloat(process.env.PEOPLE_MIN_BALANCE_USD ?? '0.05'),
+    emailLookupCredits: parseInt(process.env.PEOPLE_EMAIL_LOOKUP_CREDITS ?? '1', 10),
+    webhookHostUrl: process.env.PEOPLE_WEBHOOK_HOST_URL ?? '',  // e.g. https://api.butterbase.ai
   },
 
   /**

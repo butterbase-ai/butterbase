@@ -73,7 +73,7 @@ export interface ProfilePayload {
   country: string | null;
   experiences: unknown[];
   education: unknown[];
-  raw: unknown;                         // verbatim EnrichLayer body, for cache + future migrations
+  raw: unknown;                         // verbatim People body, for cache + future migrations
 }
 
 export interface QueueEmailRequest {
@@ -89,7 +89,7 @@ export interface EnrichResult<T> {
   notFound?: boolean;
 }
 
-export interface EnrichLayerAdapter {
+export interface PeopleAdapter {
   searchPerson(q: SearchPersonRequest, opts: { apiKey: string }): Promise<EnrichResult<SearchPersonResponse>>;
   searchCompany(q: SearchCompanyRequest, opts: { apiKey: string }): Promise<EnrichResult<SearchCompanyResponse>>;
   getProfile(req: GetProfileRequest, opts: { apiKey: string }): Promise<EnrichResult<ProfilePayload | null>>;
@@ -97,9 +97,9 @@ export interface EnrichLayerAdapter {
   getCreditBalance(opts: { apiKey: string }): Promise<EnrichResult<{ balance: number }>>;
 }
 
-export class EnrichLayerError extends Error {
+export class PeopleError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string) {
     super(message);
-    this.name = 'EnrichLayerError';
+    this.name = 'PeopleError';
   }
 }

@@ -1,11 +1,11 @@
 ---
-title: EnrichLayer API
-description: Complete reference for the EnrichLayer (LinkedIn enrichment) REST endpoints — structured-filter people/company search, profile lookups, async work-email lookup, and credit metering.
+title: People API
+description: Complete reference for the People (LinkedIn enrichment) REST endpoints — structured-filter people/company search, profile lookups, async work-email lookup, and credit metering.
 sidebar:
   order: 8
 ---
 
-Endpoints for finding people and companies on LinkedIn, fetching enriched profiles, and queuing async work-email lookups via Butterbase's managed EnrichLayer integration. Useful for Lead-Finder, CRM enrichment, and people-search features.
+Endpoints for finding people and companies on LinkedIn, fetching enriched profiles, and queuing async work-email lookups via Butterbase's managed People integration. Useful for Lead-Finder, CRM enrichment, and people-search features.
 
 All endpoints are app-scoped — the `app_id` lives in the URL path and the call is authenticated with a Butterbase service-key (`bb_sk_...`) or JWT belonging to that app's owner.
 
@@ -15,12 +15,12 @@ Every call is metered against the user's Butterbase credit balance at platform p
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | /v1/\{app_id\}/enrichlayer/search/person | Structured-filter search for people |
-| POST | /v1/\{app_id\}/enrichlayer/search/company | Structured-filter search for companies |
-| POST | /v1/\{app_id\}/enrichlayer/profile | Enrich a LinkedIn profile by URL (with 30-day cache) |
-| POST | /v1/\{app_id\}/enrichlayer/profile/email | Queue an async work-email lookup |
-| GET | /v1/\{app_id\}/enrichlayer/email-lookup/\{lookup_id\} | Poll a pending email lookup |
-| GET | /v1/\{app_id\}/enrichlayer/credit-balance | Read the platform's EnrichLayer credit balance |
+| POST | /v1/\{app_id\}/people/search/person | Structured-filter search for people |
+| POST | /v1/\{app_id\}/people/search/company | Structured-filter search for companies |
+| POST | /v1/\{app_id\}/people/profile | Enrich a LinkedIn profile by URL (with 30-day cache) |
+| POST | /v1/\{app_id\}/people/profile/email | Queue an async work-email lookup |
+| GET | /v1/\{app_id\}/people/email-lookup/\{lookup_id\} | Poll a pending email lookup |
+| GET | /v1/\{app_id\}/people/credit-balance | Read the platform's People credit balance |
 
 ## Pricing
 
@@ -54,7 +54,7 @@ The call's user must own the app referenced by `{app_id}` — Butterbase enforce
 ## Search people
 
 ```
-POST /v1/{app_id}/enrichlayer/search/person
+POST /v1/{app_id}/people/search/person
 Authorization: Bearer {token}
 Content-Type: application/json
 
@@ -66,7 +66,7 @@ Content-Type: application/json
 }
 ```
 
-Every filter accepts EnrichLayer's **boolean syntax** — `OR`, `AND`, `NOT`, parenthesized groups, double-quoted phrases — so you can express things like *"VPs OR Vice Presidents (but not assistants) who attended an Ivy League school"* in a single field.
+Every filter accepts People's **boolean syntax** — `OR`, `AND`, `NOT`, parenthesized groups, double-quoted phrases — so you can express things like *"VPs OR Vice Presidents (but not assistants) who attended an Ivy League school"* in a single field.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -118,14 +118,14 @@ Every filter accepts EnrichLayer's **boolean syntax** — `OR`, `AND`, `NOT`, pa
 | 402 | `{ "error": "insufficient_credits" }` | User's total Butterbase credit balance is below the minimum gate (default $0.05). Adapter is not called. |
 | 403 | `{ "error": "forbidden" }` | Authed user doesn't own the app. |
 | 404 | `{ "error": "app_not_found" }` | No app with that ID. |
-| 502 | `{ "error": "enrichlayer_5xx" }` | Vendor returned a 5xx. |
-| 503 | `{ "error": "enrichlayer_disabled" }` | Feature flag is off on this deployment. |
-| 503 | `{ "error": "enrichlayer_unavailable" }` | Platform key not configured (no adapter registered). |
+| 502 | `{ "error": "people_5xx" }` | Vendor returned a 5xx. |
+| 503 | `{ "error": "people_disabled" }` | Feature flag is off on this deployment. |
+| 503 | `{ "error": "people_unavailable" }` | Platform key not configured (no adapter registered). |
 
 ## Search companies
 
 ```
-POST /v1/{app_id}/enrichlayer/search/company
+POST /v1/{app_id}/people/search/company
 Content-Type: application/json
 
 {
@@ -161,7 +161,7 @@ Content-Type: application/json
 ## Get a profile (cached)
 
 ```
-POST /v1/{app_id}/enrichlayer/profile
+POST /v1/{app_id}/people/profile
 Content-Type: application/json
 
 {
@@ -176,7 +176,7 @@ Content-Type: application/json
 
 ### Cache behavior
 
-The first call against a given normalized URL hits the vendor (~2s) and writes the result into `enrichlayer_profile_cache`. Subsequent calls within the TTL are served from cache (typically <30ms) at **$0 cost**.
+The first call against a given normalized URL hits the vendor (~2s) and writes the result into `people_profile_cache`. Subsequent calls within the TTL are served from cache (typically <30ms) at **$0 cost**.
 
 | Result | TTL |
 |---|---|
@@ -228,10 +228,10 @@ The first call against a given normalized URL hits the vendor (~2s) and writes t
 
 ## Queue an async work-email lookup
 
-EnrichLayer doesn't return work emails inline. You queue the lookup and Butterbase waits for EnrichLayer's webhook callback.
+People doesn't return work emails inline. You queue the lookup and Butterbase waits for People's webhook callback.
 
 ```
-POST /v1/{app_id}/enrichlayer/profile/email
+POST /v1/{app_id}/people/profile/email
 Content-Type: application/json
 
 {
@@ -254,7 +254,7 @@ Save the `lookupId` and poll `GET /email-lookup/{lookup_id}` until `status === "
 ## Poll an email lookup
 
 ```
-GET /v1/{app_id}/enrichlayer/email-lookup/{lookup_id}
+GET /v1/{app_id}/people/email-lookup/{lookup_id}
 Authorization: Bearer {token}
 ```
 
@@ -271,18 +271,18 @@ Authorization: Bearer {token}
 ## Credit balance (platform-side passthrough)
 
 ```
-GET /v1/{app_id}/enrichlayer/credit-balance
+GET /v1/{app_id}/people/credit-balance
 ```
 
 ```json
 { "balance": 19962 }
 ```
 
-This is the platform's EnrichLayer-side credit balance — **not** the user's Butterbase credit balance. Useful for ops dashboards. Doesn't deduct user credits.
+This is the platform's People-side credit balance — **not** the user's Butterbase credit balance. Useful for ops dashboards. Doesn't deduct user credits.
 
 ## Audit trail
 
-Every successful call (and every adapter-thrown failure) writes a row to `enrichlayer_usage_logs`:
+Every successful call (and every adapter-thrown failure) writes a row to `people_usage_logs`:
 
 | Column | Notes |
 |---|---|
@@ -299,6 +299,6 @@ Query directly via `manage_data` / `select_rows` MCP tools for usage analytics i
 ## Notes
 
 - Searches return 0 credits charged when there are 0 results (vendor doesn't bill).
-- Cache hits don't count against the EnrichLayer credit pool.
-- `profile/email` returns 503 if `ENRICHLAYER_WEBHOOK_HOST_URL` isn't configured — async lookups can't deliver without a public callback URL.
-- The webhook receiver at `POST /v1/webhooks/enrichlayer/email?nonce=...` is unauthenticated by design; the 32-byte nonce serves as the auth gate. EnrichLayer's callback domain should be allow-listed at the load-balancer if you want defense in depth.
+- Cache hits don't count against the People credit pool.
+- `profile/email` returns 503 if `PEOPLE_WEBHOOK_HOST_URL` isn't configured — async lookups can't deliver without a public callback URL.
+- The webhook receiver at `POST /v1/webhooks/people/email?nonce=...` is unauthenticated by design; the 32-byte nonce serves as the auth gate. People's callback domain should be allow-listed at the load-balancer if you want defense in depth.

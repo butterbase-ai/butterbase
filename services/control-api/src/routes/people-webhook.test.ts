@@ -1,5 +1,5 @@
-// services/control-api/src/routes/enrichlayer-webhook.test.ts
-// Unit tests for the EnrichLayer email-lookup webhook receiver.
+// services/control-api/src/routes/people-webhook.test.ts
+// Unit tests for the People email-lookup webhook receiver.
 // All external dependencies are mocked — no real database or network.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -16,8 +16,8 @@ vi.mock('../services/usage-metering.js', () => ({
   incrementUsage: vi.fn(),
 }));
 
-vi.mock('../services/enrichlayer/pricing.js', () => ({
-  getEnrichLayerPricing: vi.fn(() => ({
+vi.mock('../services/people/pricing.js', () => ({
+  getPeoplePricing: vi.fn(() => ({
     baseUsdPerCredit: 0.0168,
     markupPct: 20,
     usdPerCredit: 0.02016,
@@ -26,7 +26,7 @@ vi.mock('../services/enrichlayer/pricing.js', () => ({
 
 vi.mock('../config.js', () => ({
   config: {
-    enrichlayer: {
+    people: {
       enabled: true,
       emailLookupCredits: 1,
     },
@@ -37,10 +37,10 @@ vi.mock('../config.js', () => ({
 
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { enrichLayerWebhookRoutes } from './enrichlayer-webhook.js';
+import { peopleWebhookRoutes } from './people-webhook.js';
 import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-registry.js';
 import { deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
-import { getEnrichLayerPricing } from '../services/enrichlayer/pricing.js';
+import { getPeoplePricing } from '../services/people/pricing.js';
 import { config } from '../config.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -96,20 +96,20 @@ async function buildTestApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   // Decorate controlDb so deductCreditsBalance(app.controlDb, …) doesn't crash.
   app.decorate('controlDb', {} as any);
-  await app.register(enrichLayerWebhookRoutes);
+  await app.register(peopleWebhookRoutes);
   await app.ready();
   return app;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe('POST /v1/webhooks/enrichlayer/email', () => {
+describe('POST /v1/webhooks/people/email', () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     // Reset pricing mock implementation so a per-test throw doesn't bleed into later tests.
-    vi.mocked(getEnrichLayerPricing).mockReturnValue({
+    vi.mocked(getPeoplePricing).mockReturnValue({
       baseUsdPerCredit: 0.0168,
       markupPct: 20,
       usdPerCredit: USD_PER_CREDIT,
@@ -131,7 +131,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
     });
 
@@ -144,12 +144,12 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
       USER_ID,
       1 * USD_PER_CREDIT, // 1 credit × USD_PER_CREDIT
     );
-    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'enrichlayer_credits', 1, APP_ID);
+    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 1, APP_ID);
 
     // audit log written
     const auditCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
     );
     expect(auditCall).toBeDefined();
     expect(auditCall![1]).toContain('profile_email_resolved');
@@ -172,7 +172,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: null }, // null email = lookup failed at vendor
     });
 
@@ -195,7 +195,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
     // Audit row written with usd_cost=0 and usd_charged=0 and action='profile_email_failed'
     const auditCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
     );
     expect(auditCall).toBeDefined();
     expect(auditCall![1]).toContain(0); // usd_cost = 0
@@ -209,7 +209,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=unknown-nonce`,
+      url: `/v1/webhooks/people/email?nonce=unknown-nonce`,
       payload: { email: 'jane@example.com' },
     });
 
@@ -233,7 +233,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
     });
 
@@ -266,7 +266,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
     vi.mocked(deductCreditsBalance).mockResolvedValue(1 * USD_PER_CREDIT);
     vi.mocked(incrementUsage).mockResolvedValue(undefined);
 
-    const url = `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`;
+    const url = `/v1/webhooks/people/email?nonce=${NONCE}`;
     const payload = { email: 'jane@example.com' };
 
     const res1 = await app.inject({ method: 'POST', url, payload });
@@ -291,7 +291,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
     // Inject with no payload — req.body will be null in Fastify
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       // no payload → req.body = null
     });
 
@@ -310,7 +310,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/webhooks/enrichlayer/email', // no ?nonce=
+      url: '/v1/webhooks/people/email', // no ?nonce=
       payload: { email: 'jane@example.com' },
     });
 
@@ -330,7 +330,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
     });
 
@@ -346,13 +346,13 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
   it('9. pricing throws after claim → 200 { ok: true, billing: "deferred" }, no deduct call', async () => {
     const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
-    vi.mocked(getEnrichLayerPricing).mockImplementation(() => {
+    vi.mocked(getPeoplePricing).mockImplementation(() => {
       throw new Error('pricing config missing');
     });
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
     });
 
@@ -379,7 +379,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
     });
 
@@ -393,7 +393,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
     // Audit row must record key_type='byok' and usd_charged=0
     const auditCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
     );
     expect(auditCall).toBeDefined();
     const auditParams = auditCall![1] as unknown[];
@@ -412,7 +412,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { work_email: 'jane.work@example.com' }, // no 'email' field
     });
 
@@ -435,7 +435,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { result: { email: 'jane.nested@example.com' } },
     });
 
@@ -450,17 +450,17 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
   });
 
   // ── Feature flag disabled → 200 { ignored: true } ────────────────────────
-  it('feature flag disabled → 200 { ignored: true } (EnrichLayer must see 200s)', async () => {
+  it('feature flag disabled → 200 { ignored: true } (People must see 200s)', async () => {
     const pool = makeRuntimePool();
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
 
-    const originalEnabled = config.enrichlayer.enabled;
-    (config.enrichlayer as any).enabled = false;
+    const originalEnabled = config.people.enabled;
+    (config.people as any).enabled = false;
 
     try {
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+        url: `/v1/webhooks/people/email?nonce=${NONCE}`,
         payload: { email: 'jane@example.com' },
       });
 
@@ -471,7 +471,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
       expect(runtimePoolFor).not.toHaveBeenCalled();
       expect(deductCreditsBalance).not.toHaveBeenCalled();
     } finally {
-      (config.enrichlayer as any).enabled = originalEnabled;
+      (config.people as any).enabled = originalEnabled;
     }
   });
 
@@ -484,7 +484,7 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
       headers: { 'x-enrichlayer-credit-cost': '5' },
     });
@@ -497,6 +497,6 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
       USER_ID,
       5 * USD_PER_CREDIT, // 5 credits from header
     );
-    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'enrichlayer_credits', 5, APP_ID);
+    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 5, APP_ID);
   });
 });

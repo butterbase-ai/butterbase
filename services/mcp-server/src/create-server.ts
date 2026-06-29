@@ -29,7 +29,7 @@ import { registerSubmitHackathonEntry } from './tools/submit-hackathon-entry.js'
 import { registerListPartnerApis } from './tools/list-partner-apis.js';
 import { registerManageDurableObjects } from './tools/manage-durable-objects.js';
 import { registerManageAi } from './tools/manage-ai.js';
-import { registerManageEnrichlayer } from './tools/manage-enrichlayer.js';
+import { registerManagePeople } from './tools/manage-people.js';
 import { registerBilling } from './tools/billing.js';
 import { registerApiKeys } from './tools/api-keys.js';
 import { registerListRegions } from './tools/list-regions.js';
@@ -119,7 +119,7 @@ export async function createButterbaseMcpServer() {
   registerSubmitHackathonEntry(server);
   registerManageDurableObjects(server);
   registerManageAi(server);
-  registerManageEnrichlayer(server);
+  registerManagePeople(server);
   registerBilling(server);
   registerApiKeys(server);
   registerListRegions(server);

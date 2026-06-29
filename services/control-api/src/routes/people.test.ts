@@ -1,25 +1,25 @@
-// services/control-api/src/routes/enrichlayer.test.ts
-// Unit tests for EnrichLayer routes. All external dependencies are mocked —
+// services/control-api/src/routes/people.test.ts
+// Unit tests for People routes. All external dependencies are mocked —
 // no real database or network connections required.
 
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 
 // ── Module mocks (vi.mock is hoisted by vitest before imports) ───────────────
 
-vi.mock('../services/enrichlayer/registry.js', () => ({
-  getEnrichLayerAdapter: vi.fn(),
+vi.mock('../services/people/registry.js', () => ({
+  getPeopleAdapter: vi.fn(),
 }));
 
 vi.mock('../services/region-resolver.js', () => ({
   getRuntimeDbForApp: vi.fn(),
 }));
 
-vi.mock('../services/enrichlayer/cache.js', () => ({
+vi.mock('../services/people/cache.js', () => ({
   lookupCachedProfile: vi.fn(),
   writeCachedProfile: vi.fn(),
 }));
 
-vi.mock('../services/enrichlayer/byok-crypto.js', () => ({
+vi.mock('../services/people/byok-crypto.js', () => ({
   encryptByok: vi.fn((k: string) => `enc:${k}`),
   decryptByok: vi.fn((k: string) => k.replace(/^enc:/, '')),
 }));
@@ -30,8 +30,8 @@ vi.mock('../services/usage-metering.js', () => ({
   incrementUsage: vi.fn(),
 }));
 
-vi.mock('../services/enrichlayer/pricing.js', () => ({
-  getEnrichLayerPricing: vi.fn(() => ({
+vi.mock('../services/people/pricing.js', () => ({
+  getPeoplePricing: vi.fn(() => ({
     baseUsdPerCredit: 0.0168,
     markupPct: 20,
     usdPerCredit: 0.02016,
@@ -40,7 +40,7 @@ vi.mock('../services/enrichlayer/pricing.js', () => ({
 
 vi.mock('../config.js', () => ({
   config: {
-    enrichlayer: {
+    people: {
       enabled: true,
       apiKey: 'platform-key',
       minBalanceUsd: 0.05,
@@ -53,15 +53,15 @@ vi.mock('../config.js', () => ({
 
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { enrichLayerRoutes } from './enrichlayer.js';
-import { getEnrichLayerAdapter } from '../services/enrichlayer/registry.js';
+import { peopleRoutes } from './people.js';
+import { getPeopleAdapter } from '../services/people/registry.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
-import { lookupCachedProfile, writeCachedProfile } from '../services/enrichlayer/cache.js';
-import { decryptByok } from '../services/enrichlayer/byok-crypto.js';
+import { lookupCachedProfile, writeCachedProfile } from '../services/people/cache.js';
+import { decryptByok } from '../services/people/byok-crypto.js';
 import { getCreditsBalance, deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
 import { config } from '../config.js';
-import { EnrichLayerError } from '../services/enrichlayer/types.js';
-import type { EnrichLayerAdapter, ProfilePayload } from '../services/enrichlayer/types.js';
+import { PeopleError } from '../services/people/types.js';
+import type { PeopleAdapter, ProfilePayload } from '../services/people/types.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -90,7 +90,7 @@ const SAMPLE_PROFILE: ProfilePayload = {
 
 /**
  * Make a minimal mock runtime pg.Pool whose query() is a vi.fn().
- * @param byokEncrypted - value of enrichlayer_byok_key_encrypted column (null = no BYOK)
+ * @param byokEncrypted - value of people_byok_key_encrypted column (null = no BYOK)
  * @param ownerId - owner_id to return for assertAppOwnership; null = app not found (empty rows)
  */
 function makeMockRuntime(byokEncrypted: string | null = null, ownerId: string | null = USER_ID) {
@@ -102,13 +102,13 @@ function makeMockRuntime(byokEncrypted: string | null = null, ownerId: string | 
       }
       return Promise.resolve({ rows: [{ owner_id: ownerId }], rowCount: 1 });
     }
-    if (typeof sql === 'string' && sql.includes('enrichlayer_byok_key_encrypted') && sql.startsWith('SELECT')) {
-      return Promise.resolve({ rows: [{ enrichlayer_byok_key_encrypted: byokEncrypted }], rowCount: 1 });
+    if (typeof sql === 'string' && sql.includes('people_byok_key_encrypted') && sql.startsWith('SELECT')) {
+      return Promise.resolve({ rows: [{ people_byok_key_encrypted: byokEncrypted }], rowCount: 1 });
     }
-    if (typeof sql === 'string' && sql.includes('enrichlayer_email_lookups') && sql.includes('INSERT')) {
+    if (typeof sql === 'string' && sql.includes('people_email_lookups') && sql.includes('INSERT')) {
       return Promise.resolve({ rows: [{ id: 'lookup-abc' }], rowCount: 1 });
     }
-    if (typeof sql === 'string' && sql.includes('enrichlayer_email_lookups') && sql.includes('SELECT')) {
+    if (typeof sql === 'string' && sql.includes('people_email_lookups') && sql.includes('SELECT')) {
       return Promise.resolve({
         rows: [{ status: 'pending', email: null, credits_consumed: 0 }],
         rowCount: 1,
@@ -120,7 +120,7 @@ function makeMockRuntime(byokEncrypted: string | null = null, ownerId: string | 
 }
 
 /** Make a minimal mock adapter whose methods are vi.fn() */
-function makeMockAdapter(overrides: Partial<EnrichLayerAdapter> = {}): EnrichLayerAdapter {
+function makeMockAdapter(overrides: Partial<PeopleAdapter> = {}): PeopleAdapter {
   return {
     searchPerson: vi.fn().mockResolvedValue({
       data: { results: [], nextPage: null, totalResultCount: 0 },
@@ -166,14 +166,14 @@ async function buildTestApp(userId = USER_ID): Promise<FastifyInstance> {
   });
   // Provide a controlDb decoration so usage-metering mocks can receive it
   app.decorate('controlDb', {} as any);
-  await app.register(enrichLayerRoutes);
+  await app.register(peopleRoutes);
   await app.ready();
   return app;
 }
 
 // ── Test suite ───────────────────────────────────────────────────────────────
 
-describe('EnrichLayer routes', () => {
+describe('People routes', () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
@@ -186,11 +186,11 @@ describe('EnrichLayer routes', () => {
   });
 
   // ── Scenario 1: search/person platform key → metering + audit + deduct ────
-  describe('POST /v1/:appId/enrichlayer/search/person — platform key', () => {
+  describe('POST /v1/:appId/people/search/person — platform key', () => {
     it('calls adapter, deducts credits, increments usage, writes audit row', async () => {
       const mockRuntime = makeMockRuntime(null); // no BYOK, owner = USER_ID
       const mockAdapter = makeMockAdapter(); // creditsConsumed=6
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
       vi.mocked(deductCreditsBalance).mockResolvedValue(6 * USD_PER_CREDIT);
@@ -198,7 +198,7 @@ describe('EnrichLayer routes', () => {
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        url: `/v1/${APP_ID}/people/search/person`,
         payload: { currentRoleTitle: 'CTO' },
       });
 
@@ -213,11 +213,11 @@ describe('EnrichLayer routes', () => {
         USER_ID,
         6 * USD_PER_CREDIT,
       );
-      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'enrichlayer_credits', 6, APP_ID);
+      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 6, APP_ID);
 
       // Audit row
       const auditCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
       );
       expect(auditCall).toBeDefined();
       expect(auditCall![1]).toContain('search_person');
@@ -225,17 +225,17 @@ describe('EnrichLayer routes', () => {
   });
 
   // ── Scenario 2: profile cache hit → adapter NOT called ────────────────────
-  describe('POST /v1/:appId/enrichlayer/profile — cache hit', () => {
+  describe('POST /v1/:appId/people/profile — cache hit', () => {
     it('serves from cache, adapter not called, audit action=profile_cache_hit, no charge', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(lookupCachedProfile).mockResolvedValue({ status: 'ok', payload: SAMPLE_PROFILE });
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/profile`,
+        url: `/v1/${APP_ID}/people/profile`,
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
@@ -254,7 +254,7 @@ describe('EnrichLayer routes', () => {
 
       // Audit row: action='profile_cache_hit'
       const auditCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
       );
       expect(auditCall).toBeDefined();
       expect(auditCall![1]).toContain('profile_cache_hit');
@@ -263,7 +263,7 @@ describe('EnrichLayer routes', () => {
   });
 
   // ── Scenario 3: profile cache miss + ok → adapter called, cache written ───
-  describe('POST /v1/:appId/enrichlayer/profile — cache miss ok', () => {
+  describe('POST /v1/:appId/people/profile — cache miss ok', () => {
     it('calls adapter, writes ok cache, charges user', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter({
@@ -275,7 +275,7 @@ describe('EnrichLayer routes', () => {
           notFound: false,
         }),
       });
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(lookupCachedProfile).mockResolvedValue(null); // cache miss
       vi.mocked(writeCachedProfile).mockResolvedValue(undefined);
@@ -285,7 +285,7 @@ describe('EnrichLayer routes', () => {
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/profile`,
+        url: `/v1/${APP_ID}/people/profile`,
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
@@ -305,12 +305,12 @@ describe('EnrichLayer routes', () => {
 
       // Charged
       expect(deductCreditsBalance).toHaveBeenCalledWith(expect.anything(), USER_ID, 5 * USD_PER_CREDIT);
-      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'enrichlayer_credits', 5, APP_ID);
+      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 5, APP_ID);
     });
   });
 
   // ── Scenario 4: profile cache miss + not_found → cache written, $0 charge ─
-  describe('POST /v1/:appId/enrichlayer/profile — cache miss not_found', () => {
+  describe('POST /v1/:appId/people/profile — cache miss not_found', () => {
     it('writes not_found cache, no charge', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter({
@@ -322,7 +322,7 @@ describe('EnrichLayer routes', () => {
           notFound: true,
         }),
       });
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(lookupCachedProfile).mockResolvedValue(null);
       vi.mocked(writeCachedProfile).mockResolvedValue(undefined);
@@ -330,7 +330,7 @@ describe('EnrichLayer routes', () => {
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/profile`,
+        url: `/v1/${APP_ID}/people/profile`,
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
@@ -354,18 +354,18 @@ describe('EnrichLayer routes', () => {
   });
 
   // ── Scenario 5: BYOK → balance gate skipped, no charge, key_type=byok ─────
-  describe('POST /v1/:appId/enrichlayer/search/person — BYOK key', () => {
+  describe('POST /v1/:appId/people/search/person — BYOK key', () => {
     it('skips balance check, no deduct, audit row has key_type=byok', async () => {
       const byokEncrypted = 'enc:my-byok-key';
       const mockRuntime = makeMockRuntime(byokEncrypted);
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(decryptByok).mockReturnValue('my-byok-key');
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        url: `/v1/${APP_ID}/people/search/person`,
         payload: { currentRoleTitle: 'CTO' },
       });
 
@@ -385,7 +385,7 @@ describe('EnrichLayer routes', () => {
 
       // Audit row with key_type='byok' and usd_charged=0
       const auditCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
       );
       expect(auditCall).toBeDefined();
       const auditParams = auditCall![1] as unknown[];
@@ -395,17 +395,17 @@ describe('EnrichLayer routes', () => {
   });
 
   // ── Scenario 6: insufficient balance → 402, adapter not called ────────────
-  describe('POST /v1/:appId/enrichlayer/search/person — low balance', () => {
+  describe('POST /v1/:appId/people/search/person — low balance', () => {
     it('returns 402 and does not call the adapter', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 0.01, totalUsd: 0.01 });
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        url: `/v1/${APP_ID}/people/search/person`,
         payload: { currentRoleTitle: 'CEO' },
       });
 
@@ -418,17 +418,17 @@ describe('EnrichLayer routes', () => {
   });
 
   // ── Scenario 7: profile/email → pending row, nonce in callbackUrl ─────────
-  describe('POST /v1/:appId/enrichlayer/profile/email', () => {
+  describe('POST /v1/:appId/people/profile/email', () => {
     it('inserts pending row with key_type=platform, calls adapter with nonce in callbackUrl, returns lookupId', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/profile/email`,
+        url: `/v1/${APP_ID}/people/profile/email`,
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
@@ -437,9 +437,9 @@ describe('EnrichLayer routes', () => {
       expect(body.lookupId).toBe('lookup-abc');
       expect(body.status).toBe('pending');
 
-      // Verify the INSERT into enrichlayer_email_lookups happened before adapter call
+      // Verify the INSERT into people_email_lookups happened before adapter call
       const insertCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_email_lookups') && (c[0] as string).includes('INSERT'),
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_email_lookups') && (c[0] as string).includes('INSERT'),
       );
       expect(insertCall).toBeDefined();
 
@@ -453,7 +453,7 @@ describe('EnrichLayer routes', () => {
 
       expect(mockAdapter.queueEmailLookup).toHaveBeenCalledWith(
         expect.objectContaining({
-          callbackUrl: `https://api.butterbase.ai/v1/webhooks/enrichlayer/email?nonce=${nonce}`,
+          callbackUrl: `https://api.butterbase.ai/v1/webhooks/people/email?nonce=${nonce}`,
         }),
         { apiKey: PLATFORM_KEY },
       );
@@ -463,13 +463,13 @@ describe('EnrichLayer routes', () => {
       const byokEncrypted = 'enc:my-byok-key';
       const mockRuntime = makeMockRuntime(byokEncrypted);
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       // decryptByok is already mocked to strip 'enc:' prefix → returns 'my-byok-key'
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/profile/email`,
+        url: `/v1/${APP_ID}/people/profile/email`,
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
@@ -478,7 +478,7 @@ describe('EnrichLayer routes', () => {
       const insertCall = mockRuntime.query.mock.calls.find(
         (c: unknown[]) =>
           typeof c[0] === 'string' &&
-          (c[0] as string).includes('enrichlayer_email_lookups') &&
+          (c[0] as string).includes('people_email_lookups') &&
           (c[0] as string).includes('INSERT'),
       );
       expect(insertCall).toBeDefined();
@@ -501,13 +501,13 @@ describe('EnrichLayer routes', () => {
       const attackerApp = await buildTestApp('u_attacker');
       const mockRuntime = makeMockRuntime(null, 'u_owner'); // app owned by u_owner, not u_attacker
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
 
       try {
         const res = await attackerApp.inject({
           method: 'POST',
-          url: `/v1/${APP_ID}/enrichlayer/search/person`,
+          url: `/v1/${APP_ID}/people/search/person`,
           payload: { currentRoleTitle: 'CTO' },
         });
 
@@ -522,12 +522,12 @@ describe('EnrichLayer routes', () => {
     it('POST search/person returns 404 when app does not exist', async () => {
       const mockRuntime = makeMockRuntime(null, null); // no row → app_not_found
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        url: `/v1/${APP_ID}/people/search/person`,
         payload: { currentRoleTitle: 'CTO' },
       });
 
@@ -542,7 +542,7 @@ describe('EnrichLayer routes', () => {
     it('returns 503 byok_decrypt_failed when decryptByok throws, adapter not called', async () => {
       const mockRuntime = makeMockRuntime('enc:corrupted-key');
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(decryptByok).mockImplementation(() => {
         throw new Error('aes-gcm auth tag mismatch');
@@ -553,7 +553,7 @@ describe('EnrichLayer routes', () => {
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        url: `/v1/${APP_ID}/people/search/person`,
         payload: { currentRoleTitle: 'CTO' },
       });
 
@@ -566,31 +566,31 @@ describe('EnrichLayer routes', () => {
   });
 
   // ── Scenario 10: profile/email 503 on empty webhookHostUrl ───────────────
-  describe('POST /v1/:appId/enrichlayer/profile/email — webhookHostUrl guard', () => {
-    it('returns 503 enrichlayer_unavailable before INSERT when webhookHostUrl is empty', async () => {
+  describe('POST /v1/:appId/people/profile/email — webhookHostUrl guard', () => {
+    it('returns 503 people_unavailable before INSERT when webhookHostUrl is empty', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
 
-      const originalUrl = config.enrichlayer.webhookHostUrl;
-      (config.enrichlayer as any).webhookHostUrl = '';
+      const originalUrl = config.people.webhookHostUrl;
+      (config.people as any).webhookHostUrl = '';
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/profile/email`,
+        url: `/v1/${APP_ID}/people/profile/email`,
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
-      (config.enrichlayer as any).webhookHostUrl = originalUrl;
+      (config.people as any).webhookHostUrl = originalUrl;
 
       expect(res.statusCode).toBe(503);
-      expect(res.json()).toMatchObject({ error: 'enrichlayer_unavailable' });
+      expect(res.json()).toMatchObject({ error: 'people_unavailable' });
 
-      // No INSERT into enrichlayer_email_lookups
+      // No INSERT into people_email_lookups
       const insertCall = mockRuntime.query.mock.calls.find(
         (c: unknown[]) => typeof c[0] === 'string'
-          && (c[0] as string).includes('enrichlayer_email_lookups')
+          && (c[0] as string).includes('people_email_lookups')
           && (c[0] as string).includes('INSERT'),
       );
       expect(insertCall).toBeUndefined();
@@ -598,33 +598,33 @@ describe('EnrichLayer routes', () => {
     });
   });
 
-  // ── Scenario 11: feature flag disabled → 503 enrichlayer_disabled ─────────
+  // ── Scenario 11: feature flag disabled → 503 people_disabled ─────────
   describe('feature flag disabled', () => {
-    it('all enrichlayer routes return 503 enrichlayer_disabled when enabled=false', async () => {
+    it('all people routes return 503 people_disabled when enabled=false', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter();
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
 
-      const originalEnabled = config.enrichlayer.enabled;
-      (config.enrichlayer as any).enabled = false;
+      const originalEnabled = config.people.enabled;
+      (config.people as any).enabled = false;
 
       try {
         const routes = [
-          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/search/person`, payload: { currentRoleTitle: 'CTO' } },
-          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/search/company`, payload: { industry: 'tech' } },
-          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/profile`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
-          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/profile/email`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
-          { method: 'GET' as const, url: `/v1/${APP_ID}/enrichlayer/email-lookup/some-id` },
-          { method: 'GET' as const, url: `/v1/${APP_ID}/enrichlayer/credit-balance` },
-          { method: 'PUT' as const, url: `/v1/${APP_ID}/enrichlayer/byok`, payload: { apiKey: 'key' } },
-          { method: 'DELETE' as const, url: `/v1/${APP_ID}/enrichlayer/byok` },
+          { method: 'POST' as const, url: `/v1/${APP_ID}/people/search/person`, payload: { currentRoleTitle: 'CTO' } },
+          { method: 'POST' as const, url: `/v1/${APP_ID}/people/search/company`, payload: { industry: 'tech' } },
+          { method: 'POST' as const, url: `/v1/${APP_ID}/people/profile`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
+          { method: 'POST' as const, url: `/v1/${APP_ID}/people/profile/email`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
+          { method: 'GET' as const, url: `/v1/${APP_ID}/people/email-lookup/some-id` },
+          { method: 'GET' as const, url: `/v1/${APP_ID}/people/credit-balance` },
+          { method: 'PUT' as const, url: `/v1/${APP_ID}/people/byok`, payload: { apiKey: 'key' } },
+          { method: 'DELETE' as const, url: `/v1/${APP_ID}/people/byok` },
         ];
 
         for (const route of routes) {
           const res = await app.inject(route as any);
           expect(res.statusCode, `${route.method} ${route.url}`).toBe(503);
-          expect(res.json(), `${route.method} ${route.url}`).toMatchObject({ error: 'enrichlayer_disabled' });
+          expect(res.json(), `${route.method} ${route.url}`).toMatchObject({ error: 'people_disabled' });
         }
 
         // Adapter never called when feature is disabled
@@ -633,7 +633,7 @@ describe('EnrichLayer routes', () => {
         expect(mockAdapter.getProfile).not.toHaveBeenCalled();
         expect(mockAdapter.queueEmailLookup).not.toHaveBeenCalled();
       } finally {
-        (config.enrichlayer as any).enabled = originalEnabled;
+        (config.people as any).enabled = originalEnabled;
       }
     });
   });
@@ -644,16 +644,16 @@ describe('EnrichLayer routes', () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter({
         searchPerson: vi.fn().mockRejectedValue(
-          new EnrichLayerError(502, 'upstream_error', 'upstream error'),
+          new PeopleError(502, 'upstream_error', 'upstream error'),
         ),
       });
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        url: `/v1/${APP_ID}/people/search/person`,
         payload: { currentRoleTitle: 'CTO' },
       });
 
@@ -661,32 +661,32 @@ describe('EnrichLayer routes', () => {
 
       // Audit row written with action='search_person_error', zero financials
       const auditCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
       );
       expect(auditCall).toBeDefined();
       const auditParams = auditCall![1] as unknown[];
       expect(auditParams).toContain('search_person_error');
       expect(auditParams).toContain(0); // creditsConsumed = 0
-      expect(auditParams).toContain(502); // responseStatus from EnrichLayerError
+      expect(auditParams).toContain(502); // responseStatus from PeopleError
     });
   });
 
   // ── Scenario 13: profile/email adapter throw → orphan row cleaned up ──────
   describe('profile/email adapter throw → orphan pending row deleted', () => {
-    it('DELETEs the pending enrichlayer_email_lookups row on adapter throw', async () => {
+    it('DELETEs the pending people_email_lookups row on adapter throw', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter({
         queueEmailLookup: vi.fn().mockRejectedValue(
-          new EnrichLayerError(502, 'adapter_error', 'adapter failure'),
+          new PeopleError(502, 'adapter_error', 'adapter failure'),
         ),
       });
-      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
       vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
 
       const res = await app.inject({
         method: 'POST',
-        url: `/v1/${APP_ID}/enrichlayer/profile/email`,
+        url: `/v1/${APP_ID}/people/profile/email`,
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
@@ -695,7 +695,7 @@ describe('EnrichLayer routes', () => {
       // DELETE was called for the orphan pending row
       const deleteCall = mockRuntime.query.mock.calls.find(
         (c: unknown[]) => typeof c[0] === 'string'
-          && (c[0] as string).includes('DELETE FROM enrichlayer_email_lookups'),
+          && (c[0] as string).includes('DELETE FROM people_email_lookups'),
       );
       expect(deleteCall).toBeDefined();
       const deleteParams = deleteCall![1] as unknown[];
@@ -704,7 +704,7 @@ describe('EnrichLayer routes', () => {
 
       // Audit row for error written
       const auditCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
       );
       expect(auditCall).toBeDefined();
       expect(auditCall![1]).toContain('profile_email_error');

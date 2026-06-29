@@ -37,7 +37,7 @@ describe('MCP Server Tools', () => {
       'manage_billing',
       'manage_durable_objects',
       'manage_edge_ssr',
-      'manage_enrichlayer',
+      'manage_people',
       'manage_frontend',
       'manage_function',
       'manage_integrations',

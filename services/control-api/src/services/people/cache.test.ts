@@ -57,7 +57,7 @@ describe('lookupCachedProfile', () => {
     const pool = makePool([]);
     await lookupCachedProfile(pool, APP_ID, URL);
     expect(pool.query).toHaveBeenCalledWith(
-      expect.stringContaining('enrichlayer_profile_cache'),
+      expect.stringContaining('people_profile_cache'),
       [APP_ID, URL],
     );
   });

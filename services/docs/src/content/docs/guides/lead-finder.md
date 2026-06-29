@@ -5,9 +5,9 @@ sidebar:
   order: 12
 ---
 
-Butterbase's EnrichLayer integration lets you search LinkedIn for people and companies, fetch enriched profiles, and look up work emails — all without managing a vendor API key, and all billed against your Butterbase credit balance at platform pricing.
+Butterbase's People integration lets you search LinkedIn for people and companies, fetch enriched profiles, and look up work emails — all without managing a vendor API key, and all billed against your Butterbase credit balance at platform pricing.
 
-This guide walks through a Lead-Finder-style flow end-to-end. For raw API + MCP reference, see [EnrichLayer API](/api-reference/enrichlayer-api/) and the `manage_enrichlayer` section of [MCP Tools](/api-reference/mcp-tools/#enrichlayer-people--company-search--enrichment).
+This guide walks through a Lead-Finder-style flow end-to-end. For raw API + MCP reference, see [People API](/api-reference/people-api/) and the `manage_people` section of [MCP Tools](/api-reference/mcp-tools/#people-people--company-search--enrichment).
 
 ## What you can build
 
@@ -23,7 +23,7 @@ The headline use case. Find Vice Presidents in the US who graduated from an Ivy 
 ```jsonc
 // MCP
 {
-  "tool": "manage_enrichlayer",
+  "tool": "manage_people",
   "action": "search_person",
   "current_role_title": "(VP OR \"Vice President\") AND NOT assistant",
   "education_school_name": "(Harvard OR Stanford OR MIT OR Princeton OR Yale)",
@@ -34,7 +34,7 @@ The headline use case. Find Vice Presidents in the US who graduated from an Ivy 
 
 ```bash
 # REST
-curl -X POST https://api.butterbase.ai/v1/$APP_ID/enrichlayer/search/person \
+curl -X POST https://api.butterbase.ai/v1/$APP_ID/people/search/person \
   -H "Authorization: Bearer $BB_SK" \
   -H "Content-Type: application/json" \
   -d '{
@@ -49,7 +49,7 @@ Returns up to 25 results plus `totalResultCount` (the full universe matching the
 
 ## The boolean syntax
 
-Every filter accepts EnrichLayer's boolean syntax inside the string:
+Every filter accepts People's boolean syntax inside the string:
 
 - `OR` between alternatives — `(CTO OR "VP Engineering")`
 - `AND` to require multiple — `senior AND engineer`
@@ -94,7 +94,7 @@ Either let the user pick filters in a form, or use the AI gateway to convert NL 
   "tool": "manage_ai",
   "action": "chat",
   "messages": [
-    { "role": "system", "content": "Convert the user's audience description into an EnrichLayer search_person filter object. Available fields: current_role_title, past_role_title, current_company_name, current_company_industry, country, region, city, education_school_name, education_degree_name, education_field_of_study. All fields accept boolean syntax. Reply with ONLY a JSON object." },
+    { "role": "system", "content": "Convert the user's audience description into an People search_person filter object. Available fields: current_role_title, past_role_title, current_company_name, current_company_industry, country, region, city, education_school_name, education_degree_name, education_field_of_study. All fields accept boolean syntax. Reply with ONLY a JSON object." },
     { "role": "user", "content": "VPs of engineering at fintech startups under 200 people, US-based" }
   ]
 }
@@ -166,7 +166,7 @@ Inspect `usage.cached` to know if you hit the cache.
 
 ### 7. Look up work email (async)
 
-This is the only flow that's genuinely asynchronous. EnrichLayer can't return a work email synchronously — they queue the lookup at their end and POST the result to a webhook you control.
+This is the only flow that's genuinely asynchronous. People can't return a work email synchronously — they queue the lookup at their end and POST the result to a webhook you control.
 
 ```jsonc
 {
@@ -187,13 +187,13 @@ Poll until resolved:
 // failed → { status: "failed", email: null, credits_consumed: 0 }  (email not found)
 ```
 
-Or, more elegantly: subscribe to changes on `enrichlayer_email_lookups` via the Realtime API for instant push.
+Or, more elegantly: subscribe to changes on `people_email_lookups` via the Realtime API for instant push.
 
 Typical resolution time is **seconds to a few minutes**. There's no SLA from the vendor.
 
 ## Pricing summary
 
-Default platform rate: **$0.02016 per EnrichLayer credit** ($0.0168 wholesale + 20% markup).
+Default platform rate: **$0.02016 per People credit** ($0.0168 wholesale + 20% markup).
 
 | Action | Credits | USD |
 |---|---|---|
@@ -206,7 +206,7 @@ Default platform rate: **$0.02016 per EnrichLayer credit** ($0.0168 wholesale + 
 | `get_credit_balance` | 0 | Free |
 | Empty search (0 results) | 0 | Free |
 
-Every call writes an `enrichlayer_usage_logs` row — query directly with `select_rows` for usage analytics.
+Every call writes an `people_usage_logs` row — query directly with `select_rows` for usage analytics.
 
 ## Limits & gotchas
 
@@ -215,13 +215,13 @@ Every call writes an `enrichlayer_usage_logs` row — query directly with `selec
 - **Cache is per-app.** Two apps that both look up the same LinkedIn URL each pay once. There's no cross-app cache.
 - **The cache key is the *normalized* URL** — lowercased, query/hash-stripped. `linkedin.com/in/Jane?utm=foo` and `LinkedIn.com/in/jane/` hit the same cache row.
 - **Vendor data lags reality.** Job changes can take weeks to reflect. Treat profile data as eventually consistent.
-- **`experiences[0]` is unreliable for current job** — EnrichLayer often keeps stale rows at the top of the experiences array while showing the current role in `occupation`/`headline`. Prefer those fields.
-- **No phone numbers.** EnrichLayer doesn't expose them at this tier.
+- **`experiences[0]` is unreliable for current job** — People often keeps stale rows at the top of the experiences array while showing the current role in `occupation`/`headline`. Prefer those fields.
+- **No phone numbers.** People doesn't expose them at this tier.
 - **Email lookups can fail.** Roughly 20–40% of work-email lookups come back `status: "failed"` (vendor couldn't find one). You're not charged for the resolve credit in that case.
 
 ## See also
 
-- [EnrichLayer API reference](/api-reference/enrichlayer-api/) — full REST contract
-- [`manage_enrichlayer` MCP tool](/api-reference/mcp-tools/#enrichlayer-people--company-search--enrichment) — agent-facing tool reference
+- [People API reference](/api-reference/people-api/) — full REST contract
+- [`manage_people` MCP tool](/api-reference/mcp-tools/#people-people--company-search--enrichment) — agent-facing tool reference
 - [AI Gateway](/api-reference/ai-api/) — pair with `manage_ai.chat` for NL → filter translation
 - [Realtime API](/api-reference/data-api/) — push email resolution events to the client
