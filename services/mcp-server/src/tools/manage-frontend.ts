@@ -21,9 +21,9 @@ Parameters by action:
   create_from_source:      { app_id, action: "create_from_source" }
   start_from_source:       { app_id, action: "start_from_source", deployment_id, lockfile_hash, build_command?, output_dir?, package_manager?, user_env? }
   set_env:                 { app_id, action: "set_env", vars }
-  configure_custom_domain: { app_id, action: "configure_custom_domain", domain_action, hostname?, domain_id? }
+  configure_custom_domain: { app_id, action: "configure_custom_domain", domain_action, hostname?, domain_id?, validation_method? }
     domain_action sub-options:
-      "add":    { hostname } — Register a new custom domain
+      "add":    { hostname, validation_method? } — Register a new custom domain. validation_method is "http" (default) or "txt"; use "txt" for any apex hostname on a Cloudflare-hosted zone.
       "list":   {} — List all custom domains for an app
       "status": { domain_id } — Check verification/SSL status of a domain
       "remove": { domain_id } — Remove a custom domain
@@ -82,6 +82,12 @@ Common errors:
         .describe('Required for "configure_custom_domain": the domain sub-action to perform'),
       hostname: z.string().optional().describe('Custom domain hostname (required for domain_action "add", e.g. app.example.com)'),
       domain_id: z.string().optional().describe('Domain ID (required for domain_action "status", "remove", "verify")'),
+      validation_method: z
+        .enum(['http', 'txt'])
+        .optional()
+        .describe(
+          'Optional for domain_action "add". SSL validation method: "http" (default — Cloudflare auto-validates via an HTTP challenge served from our zone; convenient but cannot work for apex domains whose DNS is on Cloudflare) or "txt" (Cloudflare emits a TXT record the customer adds to DNS; works in every case including apex on a Cloudflare-proxied zone). Use "txt" whenever the target hostname is an apex on a Cloudflare-hosted zone.',
+        ),
     },
     {
       title: 'Manage Frontend',
@@ -212,7 +218,7 @@ Common errors:
           const err = need(args.domain_action, '"domain_action" is required for the "configure_custom_domain" action.');
           if (err) return err;
 
-          const { domain_action, hostname, domain_id } = args;
+          const { domain_action, hostname, domain_id, validation_method } = args;
           const base = `/v1/${args.app_id}/custom-domains`;
 
           switch (domain_action) {
@@ -220,10 +226,12 @@ Common errors:
               if (!hostname) {
                 return { content: [{ type: 'text' as const, text: 'Error: "hostname" is required for domain_action "add".' }], isError: true };
               }
+              const addBody: Record<string, unknown> = { hostname };
+              if (validation_method) addBody.validation_method = validation_method;
               const res = await fetch(`${getBaseUrl()}${base}`, {
                 method: 'POST',
                 headers: getHeaders(),
-                body: JSON.stringify({ hostname }),
+                body: JSON.stringify(addBody),
               });
               const data = await res.json();
               return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }], ...(res.ok ? {} : { isError: true }) };

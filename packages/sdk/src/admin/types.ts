@@ -418,9 +418,29 @@ export interface CustomDomain {
   updated_at: string;
 }
 
+export interface CustomDomainVerificationRecord {
+  status?: string;
+  txt_name?: string;
+  txt_value?: string;
+  http_url?: string;
+  http_body?: string;
+  cname?: string;
+  cname_target?: string;
+}
+
+export interface CustomDomainOwnershipVerification {
+  type: string;
+  name: string;
+  value: string;
+}
+
 export interface CustomDomainAddResult {
   domain: CustomDomain;
   cname_target: string;
+  /** The SSL validation method actually used. 'http' (default) or 'txt'. */
+  validation_method?: 'http' | 'txt';
+  verification_records?: CustomDomainVerificationRecord[];
+  ownership_verification?: CustomDomainOwnershipVerification | null;
   instructions: string;
 }
 

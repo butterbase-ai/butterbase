@@ -20,10 +20,25 @@ export class AdminDomainsClient {
     }
   }
 
-  async add(hostname: string): Promise<ButterbaseResponse<CustomDomainAddResult>> {
+  /**
+   * Register a new custom domain.
+   *
+   * @param hostname e.g. 'app.example.com' or 'example.com' (apex)
+   * @param validationMethod SSL DCV method:
+   *   - 'http' (default): Cloudflare auto-validates via an HTTP challenge served from our zone.
+   *     Convenient but does NOT work for apex hostnames on Cloudflare-hosted zones.
+   *   - 'txt': Cloudflare emits a TXT record to add to DNS. Works in every case,
+   *     including apex on a Cloudflare-proxied zone. Use this for any apex on Cloudflare DNS.
+   */
+  async add(
+    hostname: string,
+    validationMethod?: 'http' | 'txt',
+  ): Promise<ButterbaseResponse<CustomDomainAddResult>> {
     try {
+      const body: Record<string, unknown> = { hostname };
+      if (validationMethod) body.validation_method = validationMethod;
       const data = await this.client.request<CustomDomainAddResult>(
-        'POST', `/v1/${this.client.appId}/custom-domains`, { hostname }
+        'POST', `/v1/${this.client.appId}/custom-domains`, body
       );
       return { data, error: null };
     } catch (error) {
