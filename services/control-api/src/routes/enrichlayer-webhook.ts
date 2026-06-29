@@ -6,8 +6,9 @@
 // this route carries NO auth header by design.
 //
 // ALWAYS returns HTTP 200 (with a JSON body) so EnrichLayer stops retrying.
-//   { ok: true }        — claim succeeded; credits charged, audit row written.
-//   { ignored: true }   — unknown/already-claimed nonce, null body, or any error.
+//   { ok: true }                  — claim succeeded; credits charged, audit row written.
+//   { ok: true, billing: 'deferred' } — claim succeeded but post-claim billing/audit threw.
+//   { ignored: true }             — unknown/already-claimed nonce, null body, or any error.
 //
 // Cross-region limitation (v1, Option C):
 //   enrichlayer_email_lookups rows live in the runtime DB tier.  This receiver
@@ -48,7 +49,17 @@ export async function enrichLayerWebhookRoutes(app: FastifyInstance) {
       req.log.warn('[enrichlayer-webhook] no runtime regions configured — ignoring');
       return reply.code(200).send({ ignored: true });
     }
-    const runtimePool = runtimePoolFor(regions[0]);
+
+    // Fix 1: runtimePoolFor can throw (uninitialized pool, misconfigured region).
+    // Wrap it so a throw returns 200 before any idempotent claim fires — stopping
+    // EnrichLayer retries without leaving a dangling pending row.
+    let runtimePool: ReturnType<typeof runtimePoolFor>;
+    try {
+      runtimePool = runtimePoolFor(regions[0]);
+    } catch (err) {
+      req.log.error({ err }, '[enrichlayer-webhook] runtimePoolFor failed — ignoring');
+      return reply.code(200).send({ ignored: true });
+    }
 
     // Locate the pending lookup row by nonce.
     let lookupRow: {
@@ -101,48 +112,48 @@ export async function enrichLayerWebhookRoutes(app: FastifyInstance) {
     // Atomic idempotent claim: the AND status='pending' predicate guarantees only
     // one concurrent webhook call transitions the row.  0 rows returned → already
     // claimed; return immediately without charging credits again.
+    // RETURNING key_type so the post-claim block can skip billing for BYOK rows.
     let claimed: boolean;
+    let claimedRow: { status: string; key_type: string } | null = null;
     try {
-      const claim = await runtimePool.query<{ status: string }>(
+      const claim = await runtimePool.query<{ status: string; key_type: string }>(
         `UPDATE enrichlayer_email_lookups
            SET status = $1, email = $2, credits_consumed = $3, resolved_at = now()
            WHERE id = $4 AND status = 'pending'
-           RETURNING status`,
+           RETURNING status, key_type`,
         [email ? 'resolved' : 'failed', email, credits, lookupRow.id],
       );
       claimed = claim.rows.length > 0;
+      claimedRow = claim.rows[0] ?? null;
     } catch (err) {
       req.log.error({ err, nonce }, '[enrichlayer-webhook] claim UPDATE failed — ignoring');
       return reply.code(200).send({ ignored: true });
     }
 
-    if (!claimed) {
+    if (!claimed || !claimedRow) {
       // Already claimed by a concurrent or prior webhook delivery.
       req.log.info({ nonce }, '[enrichlayer-webhook] nonce already claimed — ignoring');
       return reply.code(200).send({ ignored: true });
     }
 
-    // Charge credits only when the lookup succeeded (email found).
-    // v1 limitation: key_type is not stored on the lookup row, so BYOK users
-    // who used email-lookup will also have credits deducted here.  Acceptable
-    // for v1 since BYOK is uncommon for async email-lookup; track as a TODO.
-    const pricing = getEnrichLayerPricing();
-    const usdCost = email ? credits * pricing.usdPerCredit : 0;
-    let usdCharged = 0;
+    // Post-claim billing + audit.  If anything here throws AFTER the claim the row
+    // is already resolved — we must still return 200 so EnrichLayer stops retrying.
+    // The deferred response lets a repair job scan resolved rows with no audit entry.
+    try {
+      const pricing = getEnrichLayerPricing();
 
-    if (usdCost > 0) {
-      try {
+      // BYOK users pay EnrichLayer directly; skip Butterbase credit deduction.
+      const usdCost = email && claimedRow.key_type === 'platform'
+        ? pricing.usdPerCredit * credits
+        : 0;
+      let usdCharged = 0;
+
+      if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, lookupRow.user_id, usdCost);
         await incrementUsage(lookupRow.user_id, 'enrichlayer_credits', credits, lookupRow.app_id);
-      } catch (err) {
-        req.log.error({ err, nonce }, '[enrichlayer-webhook] credit metering failed — continuing');
-        // Don't fail the webhook over a metering error; the row is already claimed.
       }
-    }
 
-    // Write an audit row.  Hardcode key_type='platform' (v1 limitation — no
-    // key_type on enrichlayer_email_lookups; see comment above).
-    try {
+      // Audit row.  Use actual key_type from the lookup row (not hardcoded 'platform').
       await runtimePool.query(
         `INSERT INTO enrichlayer_usage_logs
            (app_id, user_id, action, credits_consumed, usd_cost, usd_charged,
@@ -151,19 +162,22 @@ export async function enrichLayerWebhookRoutes(app: FastifyInstance) {
         [
           lookupRow.app_id,
           lookupRow.user_id,
-          'profile_email_resolved',
+          email ? 'profile_email_resolved' : 'profile_email_failed',
           credits,
           usdCost,
           usdCharged,
-          'platform',
+          claimedRow.key_type,
           null,
           200,
           lookupRow.normalized_url,
         ],
       );
     } catch (err) {
-      req.log.error({ err, nonce }, '[enrichlayer-webhook] audit log write failed — continuing');
-      // Don't fail the webhook over an audit-log write failure.
+      req.log.error(
+        { err, nonce, lookup_id: lookupRow.id, app_id: lookupRow.app_id, user_id: lookupRow.user_id },
+        '[enrichlayer-webhook] post-claim billing/audit failed — deferred',
+      );
+      return reply.code(200).send({ ok: true, billing: 'deferred' });
     }
 
     return reply.code(200).send({ ok: true });

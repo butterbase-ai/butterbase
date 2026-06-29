@@ -363,11 +363,12 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     try {
       const nonce = crypto.randomBytes(32).toString('hex');
 
-      // Insert the pending row BEFORE calling the adapter
+      // Insert the pending row BEFORE calling the adapter.
+      // key_type is stored so the async webhook can skip Butterbase billing for BYOK rows.
       const lookupRow = await runtime.query<{ id: string }>(
-        `INSERT INTO enrichlayer_email_lookups (app_id, user_id, normalized_url, nonce, status)
-         VALUES ($1, $2, $3, $4, 'pending') RETURNING id`,
-        [appId, userId, normalizedUrl, nonce],
+        `INSERT INTO enrichlayer_email_lookups (app_id, user_id, normalized_url, nonce, key_type, status)
+         VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING id`,
+        [appId, userId, normalizedUrl, nonce, resolved.keyType],
       );
       const lookupId = lookupRow.rows[0].id;
 

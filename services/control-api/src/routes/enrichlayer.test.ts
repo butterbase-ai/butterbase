@@ -417,7 +417,7 @@ describe('EnrichLayer routes', () => {
 
   // ── Scenario 7: profile/email → pending row, nonce in callbackUrl ─────────
   describe('POST /v1/:appId/enrichlayer/profile/email', () => {
-    it('inserts pending row, calls adapter with nonce in callbackUrl, returns lookupId', async () => {
+    it('inserts pending row with key_type=platform, calls adapter with nonce in callbackUrl, returns lookupId', async () => {
       const mockRuntime = makeMockRuntime(null);
       const mockAdapter = makeMockAdapter();
       vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
@@ -443,14 +443,52 @@ describe('EnrichLayer routes', () => {
 
       // The nonce in the INSERT params matches the nonce in the callbackUrl passed to adapter
       const insertParams = insertCall![1] as string[];
-      const nonce = insertParams[3]; // [appId, userId, normalizedUrl, nonce]
+      const nonce = insertParams[3]; // [appId, userId, normalizedUrl, nonce, key_type]
       expect(nonce).toMatch(/^[0-9a-f]{64}$/); // 32 bytes = 64 hex chars
+
+      // Platform key → key_type='platform' stored in lookup row
+      expect(insertParams[4]).toBe('platform');
 
       expect(mockAdapter.queueEmailLookup).toHaveBeenCalledWith(
         expect.objectContaining({
           callbackUrl: `https://api.butterbase.ai/v1/webhooks/enrichlayer/email?nonce=${nonce}`,
         }),
         { apiKey: PLATFORM_KEY },
+      );
+    });
+
+    it('profile/email with BYOK key → INSERT carries key_type="byok"', async () => {
+      const byokEncrypted = 'enc:my-byok-key';
+      const mockRuntime = makeMockRuntime(byokEncrypted);
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      // decryptByok is already mocked to strip 'enc:' prefix → returns 'my-byok-key'
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/enrichlayer/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      expect(res.statusCode).toBe(200);
+
+      const insertCall = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).includes('enrichlayer_email_lookups') &&
+          (c[0] as string).includes('INSERT'),
+      );
+      expect(insertCall).toBeDefined();
+
+      const insertParams = insertCall![1] as string[];
+      // BYOK key → key_type='byok' stored in lookup row
+      expect(insertParams[4]).toBe('byok');
+
+      // Adapter called with BYOK key, not the platform key
+      expect(mockAdapter.queueEmailLookup).toHaveBeenCalledWith(
+        expect.anything(),
+        { apiKey: 'my-byok-key' },
       );
     });
   });
