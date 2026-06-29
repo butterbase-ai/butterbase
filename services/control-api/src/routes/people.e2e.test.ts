@@ -50,10 +50,30 @@ vi.mock('../config.js', () => ({
   config: {
     people: {
       enabled: true,
-      apiKey: 'platform-key',
       minBalanceUsd: 0.01,
-      webhookHostUrl: 'https://test.local',
-      emailLookupCredits: 1,
+      routing: {},
+      providers: {
+        primary: {
+          apiKey: 'platform-key',
+          baseUrl: '',
+          creditCostHeader: 'x-enrichlayer-credit-cost',
+          authScheme: 'bearer',
+          baseUsdPerCredit: 0.0168,
+          markupPct: 20,
+          fallbackCreditsPerAction: 1,
+          webhookHostUrl: 'https://test.local',
+        },
+        secondary: {
+          apiKey: '',
+          baseUrl: '',
+          creditCostHeader: '',
+          authScheme: 'bearer',
+          baseUsdPerCredit: 0,
+          markupPct: 0,
+          fallbackCreditsPerAction: 1,
+          webhookHostUrl: '',
+        },
+      },
     },
     auth: { enabled: false },
   },
@@ -69,7 +89,7 @@ import pg from 'pg';
 
 import { peopleRoutes } from './people.js';
 import { peopleWebhookRoutes } from './people-webhook.js';
-import { setPeopleAdapter } from '../services/people/registry.js';
+import { registerPeopleAdapter, unregisterPeopleAdapter } from '../services/people/registry.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-registry.js';
 import type { PeopleAdapter, ProfilePayload } from '../services/people/types.js';
@@ -252,7 +272,7 @@ describe.skipIf(!RUN)('people e2e smoke', () => {
         status: 200,
       }),
     };
-    setPeopleAdapter(adapter);
+    registerPeopleAdapter('primary', adapter);
 
     // Boot Fastify with real pool + both route modules.
     app = Fastify({ logger: false });
@@ -278,7 +298,7 @@ describe.skipIf(!RUN)('people e2e smoke', () => {
   // ── Teardown ─────────────────────────────────────────────────────────────────
 
   afterAll(async () => {
-    setPeopleAdapter(null);
+    unregisterPeopleAdapter('primary');
     await app?.close();
 
     // Delete test rows (leave tables intact for subsequent runs).

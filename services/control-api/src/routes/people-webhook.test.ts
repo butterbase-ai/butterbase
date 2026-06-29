@@ -28,7 +28,28 @@ vi.mock('../config.js', () => ({
   config: {
     people: {
       enabled: true,
-      emailLookupCredits: 1,
+      providers: {
+        primary: {
+          apiKey: 'platform-key',
+          baseUrl: '',
+          creditCostHeader: 'x-enrichlayer-credit-cost',
+          authScheme: 'bearer',
+          baseUsdPerCredit: 0.0168,
+          markupPct: 20,
+          fallbackCreditsPerAction: 1,
+          webhookHostUrl: '',
+        },
+        secondary: {
+          apiKey: '',
+          baseUrl: '',
+          creditCostHeader: 'x-secondary-credit-cost',
+          authScheme: 'bearer',
+          baseUsdPerCredit: 0.0168,
+          markupPct: 20,
+          fallbackCreditsPerAction: 1,
+          webhookHostUrl: '',
+        },
+      },
     },
   },
 }));
@@ -70,7 +91,7 @@ const SAMPLE_LOOKUP_ROW = {
  */
 function makeRuntimePool({
   findRow = SAMPLE_LOOKUP_ROW as typeof SAMPLE_LOOKUP_ROW | null,
-  claimRows = [{ status: 'resolved', key_type: 'platform' }] as { status: string; key_type: string }[],
+  claimRows = [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] as { status: string; key_type: string; provider_slot: string }[],
   failClaim = false,
 } = {}) {
   const queryFn = vi.fn().mockImplementation((sql: string) => {
@@ -79,10 +100,14 @@ function makeRuntimePool({
       if (findRow === null) return Promise.resolve({ rows: [], rowCount: 0 });
       return Promise.resolve({ rows: [findRow], rowCount: 1 });
     }
-    // Atomic claim update
-    if (sql.includes("status = 'pending'") || (sql.startsWith('UPDATE') && sql.includes('RETURNING status'))) {
+    // Atomic claim update (first UPDATE — transitions status)
+    if (sql.startsWith('UPDATE') && sql.includes("status = 'pending'")) {
       if (failClaim) return Promise.reject(new Error('DB claim error'));
       return Promise.resolve({ rows: claimRows, rowCount: claimRows.length });
+    }
+    // Credit count update (second UPDATE — sets credits_consumed)
+    if (sql.startsWith('UPDATE') && sql.includes('credits_consumed')) {
+      return Promise.resolve({ rows: [], rowCount: 1 });
     }
     // Audit log insert (or any other query)
     return Promise.resolve({ rows: [], rowCount: 0 });
@@ -124,7 +149,7 @@ describe('POST /v1/webhooks/people/email', () => {
 
   // ── Scenario 1: valid nonce + email present ───────────────────────────────
   it('1. valid nonce + email present → resolved, credits deducted, audit written, 200 { ok: true }', async () => {
-    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform' }] });
+    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
     vi.mocked(deductCreditsBalance).mockResolvedValue(1 * USD_PER_CREDIT);
     vi.mocked(incrementUsage).mockResolvedValue(undefined);
@@ -154,11 +179,12 @@ describe('POST /v1/webhooks/people/email', () => {
     expect(auditCall).toBeDefined();
     expect(auditCall![1]).toContain('profile_email_resolved');
     expect(auditCall![1]).toContain('platform');
+    expect(auditCall![1]).toContain('primary'); // provider_slot
 
     // UPDATE claim call happened
     const claimCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE'),
+        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE') && (c[0] as string).includes("status = 'pending'"),
     );
     expect(claimCall).toBeDefined();
     expect(claimCall![1]).toContain('resolved'); // status='resolved' (email found)
@@ -167,7 +193,7 @@ describe('POST /v1/webhooks/people/email', () => {
 
   // ── Scenario 2: valid nonce + null email (vendor lookup failed) ───────────
   it('2. valid nonce + null email → failed row, $0 charge, no deductCreditsBalance, audit action=profile_email_failed', async () => {
-    const pool = makeRuntimePool({ claimRows: [{ status: 'failed', key_type: 'platform' }] });
+    const pool = makeRuntimePool({ claimRows: [{ status: 'failed', key_type: 'platform', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
 
     const res = await app.inject({
@@ -186,7 +212,7 @@ describe('POST /v1/webhooks/people/email', () => {
     // UPDATE claim sets status='failed'
     const claimCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE'),
+        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE') && (c[0] as string).includes("status = 'pending'"),
     );
     expect(claimCall).toBeDefined();
     expect(claimCall![1][0]).toBe('failed');
@@ -253,11 +279,16 @@ describe('POST /v1/webhooks/people/email', () => {
         // Both calls find the row by nonce
         return Promise.resolve({ rows: [SAMPLE_LOOKUP_ROW], rowCount: 1 });
       }
-      if (sql.startsWith('UPDATE')) {
+      if (sql.startsWith('UPDATE') && sql.includes("status = 'pending'")) {
         callCount++;
         // First call → claims successfully; second call → 0 rows (already claimed)
-        const rows = callCount === 1 ? [{ status: 'resolved', key_type: 'platform' }] : [];
+        const rows = callCount === 1
+          ? [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }]
+          : [];
         return Promise.resolve({ rows, rowCount: rows.length });
+      }
+      if (sql.startsWith('UPDATE') && sql.includes('credits_consumed')) {
+        return Promise.resolve({ rows: [], rowCount: 1 });
       }
       return Promise.resolve({ rows: [], rowCount: 0 });
     });
@@ -344,7 +375,7 @@ describe('POST /v1/webhooks/people/email', () => {
 
   // ── Scenario 9: pricing throws after claim → 200 { ok: true, billing: 'deferred' }
   it('9. pricing throws after claim → 200 { ok: true, billing: "deferred" }, no deduct call', async () => {
-    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform' }] });
+    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
     vi.mocked(getPeoplePricing).mockImplementation(() => {
       throw new Error('pricing config missing');
@@ -362,7 +393,7 @@ describe('POST /v1/webhooks/people/email', () => {
     // Claim UPDATE was called (row is resolved) but deduction was not attempted
     const claimCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE'),
+        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE') && (c[0] as string).includes("status = 'pending'"),
     );
     expect(claimCall).toBeDefined();
 
@@ -372,7 +403,7 @@ describe('POST /v1/webhooks/people/email', () => {
 
   // ── Scenario 10: BYOK row → no deductCreditsBalance, audit has usd_charged=0 + key_type='byok'
   it('10. BYOK row (key_type="byok") → claim resolves, NO deductCreditsBalance, audit usd_charged=0 key_type=byok', async () => {
-    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'byok' }] });
+    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'byok', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
     vi.mocked(deductCreditsBalance).mockResolvedValue(0);
     vi.mocked(incrementUsage).mockResolvedValue(undefined);
@@ -405,7 +436,7 @@ describe('POST /v1/webhooks/people/email', () => {
 
   // ── Additional: work_email fallback field ─────────────────────────────────
   it('work_email field is accepted as email', async () => {
-    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform' }] });
+    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
     vi.mocked(deductCreditsBalance).mockResolvedValue(1 * USD_PER_CREDIT);
     vi.mocked(incrementUsage).mockResolvedValue(undefined);
@@ -421,14 +452,14 @@ describe('POST /v1/webhooks/people/email', () => {
 
     const claimCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE'),
+        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE') && (c[0] as string).includes("status = 'pending'"),
     );
     expect(claimCall![1][1]).toBe('jane.work@example.com');
   });
 
   // ── Additional: result.email nested field ─────────────────────────────────
   it('result.email nested field is accepted as email', async () => {
-    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform' }] });
+    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
     vi.mocked(deductCreditsBalance).mockResolvedValue(1 * USD_PER_CREDIT);
     vi.mocked(incrementUsage).mockResolvedValue(undefined);
@@ -444,7 +475,7 @@ describe('POST /v1/webhooks/people/email', () => {
 
     const claimCall = pool.query.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE'),
+        typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE') && (c[0] as string).includes("status = 'pending'"),
     );
     expect(claimCall![1][1]).toBe('jane.nested@example.com');
   });
@@ -476,8 +507,8 @@ describe('POST /v1/webhooks/people/email', () => {
   });
 
   // ── Additional: x-enrichlayer-credit-cost header overrides default ─────────
-  it('x-enrichlayer-credit-cost header is used when present', async () => {
-    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform' }] });
+  it('x-enrichlayer-credit-cost header is used when present (slot creditCostHeader)', async () => {
+    const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
     vi.mocked(deductCreditsBalance).mockResolvedValue(5 * USD_PER_CREDIT);
     vi.mocked(incrementUsage).mockResolvedValue(undefined);

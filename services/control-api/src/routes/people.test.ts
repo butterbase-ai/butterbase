@@ -19,11 +19,6 @@ vi.mock('../services/people/cache.js', () => ({
   writeCachedProfile: vi.fn(),
 }));
 
-vi.mock('../services/people/byok-crypto.js', () => ({
-  encryptByok: vi.fn((k: string) => `enc:${k}`),
-  decryptByok: vi.fn((k: string) => k.replace(/^enc:/, '')),
-}));
-
 vi.mock('../services/usage-metering.js', () => ({
   getCreditsBalance: vi.fn(),
   deductCreditsBalance: vi.fn(),
@@ -42,9 +37,30 @@ vi.mock('../config.js', () => ({
   config: {
     people: {
       enabled: true,
-      apiKey: 'platform-key',
       minBalanceUsd: 0.05,
-      webhookHostUrl: 'https://api.butterbase.ai',
+      routing: {},
+      providers: {
+        primary: {
+          apiKey: 'platform-key',
+          baseUrl: '',
+          creditCostHeader: 'x-enrichlayer-credit-cost',
+          authScheme: 'bearer',
+          baseUsdPerCredit: 0.0168,
+          markupPct: 20,
+          fallbackCreditsPerAction: 1,
+          webhookHostUrl: 'https://api.butterbase.ai',
+        },
+        secondary: {
+          apiKey: '',
+          baseUrl: '',
+          creditCostHeader: 'x-secondary-credit-cost',
+          authScheme: 'bearer',
+          baseUsdPerCredit: 0.0168,
+          markupPct: 20,
+          fallbackCreditsPerAction: 1,
+          webhookHostUrl: '',
+        },
+      },
     },
   },
 }));
@@ -57,10 +73,9 @@ import { peopleRoutes } from './people.js';
 import { getPeopleAdapter } from '../services/people/registry.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { lookupCachedProfile, writeCachedProfile } from '../services/people/cache.js';
-import { decryptByok } from '../services/people/byok-crypto.js';
 import { getCreditsBalance, deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
 import { config } from '../config.js';
-import { PeopleError } from '../services/people/types.js';
+import { PeopleError, PeopleProviderError } from '../services/people/types.js';
 import type { PeopleAdapter, ProfilePayload } from '../services/people/types.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -90,10 +105,9 @@ const SAMPLE_PROFILE: ProfilePayload = {
 
 /**
  * Make a minimal mock runtime pg.Pool whose query() is a vi.fn().
- * @param byokEncrypted - value of people_byok_key_encrypted column (null = no BYOK)
  * @param ownerId - owner_id to return for assertAppOwnership; null = app not found (empty rows)
  */
-function makeMockRuntime(byokEncrypted: string | null = null, ownerId: string | null = USER_ID) {
+function makeMockRuntime(ownerId: string | null = USER_ID) {
   const runtimeQuery = vi.fn().mockImplementation((sql: string, _params: unknown[]) => {
     // Ownership check: SELECT owner_id FROM apps WHERE id = $1
     if (typeof sql === 'string' && sql.includes('owner_id') && sql.includes('FROM apps')) {
@@ -102,15 +116,12 @@ function makeMockRuntime(byokEncrypted: string | null = null, ownerId: string | 
       }
       return Promise.resolve({ rows: [{ owner_id: ownerId }], rowCount: 1 });
     }
-    if (typeof sql === 'string' && sql.includes('people_byok_key_encrypted') && sql.startsWith('SELECT')) {
-      return Promise.resolve({ rows: [{ people_byok_key_encrypted: byokEncrypted }], rowCount: 1 });
-    }
     if (typeof sql === 'string' && sql.includes('people_email_lookups') && sql.includes('INSERT')) {
       return Promise.resolve({ rows: [{ id: 'lookup-abc' }], rowCount: 1 });
     }
     if (typeof sql === 'string' && sql.includes('people_email_lookups') && sql.includes('SELECT')) {
       return Promise.resolve({
-        rows: [{ status: 'pending', email: null, credits_consumed: 0 }],
+        rows: [{ status: 'pending', email: null, credits_consumed: 0, provider_slot: 'primary' }],
         rowCount: 1,
       });
     }
@@ -187,8 +198,8 @@ describe('People routes', () => {
 
   // ── Scenario 1: search/person platform key → metering + audit + deduct ────
   describe('POST /v1/:appId/people/search/person — platform key', () => {
-    it('calls adapter, deducts credits, increments usage, writes audit row', async () => {
-      const mockRuntime = makeMockRuntime(null); // no BYOK, owner = USER_ID
+    it('calls adapter, deducts credits, increments usage, writes audit row, sets x-people-* headers', async () => {
+      const mockRuntime = makeMockRuntime(); // owner = USER_ID
       const mockAdapter = makeMockAdapter(); // creditsConsumed=6
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -207,6 +218,12 @@ describe('People routes', () => {
       expect(body.usage.creditsConsumed).toBe(6);
       expect(body.usage.usdCost).toBeCloseTo(6 * USD_PER_CREDIT);
 
+      // x-people-* response headers
+      expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-credits-consumed']).toBe('6');
+      expect(parseFloat(res.headers['x-people-usd-cost'] as string)).toBeCloseTo(6 * USD_PER_CREDIT, 4);
+      expect(parseFloat(res.headers['x-people-usd-charged'] as string)).toBeCloseTo(6 * USD_PER_CREDIT, 4);
+
       // Metering
       expect(deductCreditsBalance).toHaveBeenCalledWith(
         expect.anything(),
@@ -221,13 +238,14 @@ describe('People routes', () => {
       );
       expect(auditCall).toBeDefined();
       expect(auditCall![1]).toContain('search_person');
+      expect(auditCall![1]).toContain('primary'); // provider_slot
     });
   });
 
   // ── Scenario 2: profile cache hit → adapter NOT called ────────────────────
   describe('POST /v1/:appId/people/profile — cache hit', () => {
-    it('serves from cache, adapter not called, audit action=profile_cache_hit, no charge', async () => {
-      const mockRuntime = makeMockRuntime(null);
+    it('serves from cache, adapter not called, audit action=profile_cache_hit, no charge, x-people-cached=true', async () => {
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -244,6 +262,11 @@ describe('People routes', () => {
       expect(body.usage.cached).toBe(true);
       expect(body.usage.creditsConsumed).toBe(0);
       expect(body.usage.usdCost).toBe(0);
+
+      // x-people-* headers on cache hit
+      expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-credits-consumed']).toBe('0');
+      expect(res.headers['x-people-cached']).toBe('true');
 
       // Adapter NOT called
       expect(mockAdapter.getProfile).not.toHaveBeenCalled();
@@ -264,8 +287,8 @@ describe('People routes', () => {
 
   // ── Scenario 3: profile cache miss + ok → adapter called, cache written ───
   describe('POST /v1/:appId/people/profile — cache miss ok', () => {
-    it('calls adapter, writes ok cache, charges user', async () => {
-      const mockRuntime = makeMockRuntime(null);
+    it('calls adapter, writes ok cache, charges user, sets x-people-cached=false', async () => {
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter({
         getProfile: vi.fn().mockResolvedValue({
           data: SAMPLE_PROFILE,
@@ -294,6 +317,10 @@ describe('People routes', () => {
       expect(body.status).toBe('ok');
       expect(body.usage.cached).toBe(false);
 
+      // x-people-* headers
+      expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-cached']).toBe('false');
+
       // Cache written with status='ok'
       expect(writeCachedProfile).toHaveBeenCalledWith(
         mockRuntime,
@@ -312,7 +339,7 @@ describe('People routes', () => {
   // ── Scenario 4: profile cache miss + not_found → cache written, $0 charge ─
   describe('POST /v1/:appId/people/profile — cache miss not_found', () => {
     it('writes not_found cache, no charge', async () => {
-      const mockRuntime = makeMockRuntime(null);
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter({
         getProfile: vi.fn().mockResolvedValue({
           data: null,
@@ -353,51 +380,10 @@ describe('People routes', () => {
     });
   });
 
-  // ── Scenario 5: BYOK → balance gate skipped, no charge, key_type=byok ─────
-  describe('POST /v1/:appId/people/search/person — BYOK key', () => {
-    it('skips balance check, no deduct, audit row has key_type=byok', async () => {
-      const byokEncrypted = 'enc:my-byok-key';
-      const mockRuntime = makeMockRuntime(byokEncrypted);
-      const mockAdapter = makeMockAdapter();
-      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
-      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
-      vi.mocked(decryptByok).mockReturnValue('my-byok-key');
-
-      const res = await app.inject({
-        method: 'POST',
-        url: `/v1/${APP_ID}/people/search/person`,
-        payload: { currentRoleTitle: 'CTO' },
-      });
-
-      expect(res.statusCode).toBe(200);
-
-      // Balance check NOT called (BYOK path)
-      expect(getCreditsBalance).not.toHaveBeenCalled();
-      // No deduction
-      expect(deductCreditsBalance).not.toHaveBeenCalled();
-      expect(incrementUsage).not.toHaveBeenCalled();
-
-      // Adapter called with the BYOK key
-      expect(mockAdapter.searchPerson).toHaveBeenCalledWith(
-        expect.anything(),
-        { apiKey: 'my-byok-key' },
-      );
-
-      // Audit row with key_type='byok' and usd_charged=0
-      const auditCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
-      );
-      expect(auditCall).toBeDefined();
-      const auditParams = auditCall![1] as unknown[];
-      expect(auditParams).toContain('byok');
-      expect(auditParams).toContain(0); // usd_charged
-    });
-  });
-
-  // ── Scenario 6: insufficient balance → 402, adapter not called ────────────
+  // ── Scenario 5: insufficient balance → 402, adapter not called ────────────
   describe('POST /v1/:appId/people/search/person — low balance', () => {
     it('returns 402 and does not call the adapter', async () => {
-      const mockRuntime = makeMockRuntime(null);
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -412,15 +398,18 @@ describe('People routes', () => {
       expect(res.statusCode).toBe(402);
       expect(res.json()).toMatchObject({ error: 'insufficient_credits' });
 
+      // x-people-provider set even on 402
+      expect(res.headers['x-people-provider']).toBe('primary');
+
       // Adapter NOT called
       expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
     });
   });
 
-  // ── Scenario 7: profile/email → pending row, nonce in callbackUrl ─────────
+  // ── Scenario 6: profile/email → pending row, nonce in callbackUrl ─────────
   describe('POST /v1/:appId/people/profile/email', () => {
-    it('inserts pending row with key_type=platform, calls adapter with nonce in callbackUrl, returns lookupId', async () => {
-      const mockRuntime = makeMockRuntime(null);
+    it('inserts pending row with key_type=platform + provider_slot, calls adapter with nonce in callbackUrl, returns lookupId', async () => {
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -437,6 +426,9 @@ describe('People routes', () => {
       expect(body.lookupId).toBe('lookup-abc');
       expect(body.status).toBe('pending');
 
+      // x-people-* headers
+      expect(res.headers['x-people-provider']).toBe('primary');
+
       // Verify the INSERT into people_email_lookups happened before adapter call
       const insertCall = mockRuntime.query.mock.calls.find(
         (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_email_lookups') && (c[0] as string).includes('INSERT'),
@@ -445,11 +437,13 @@ describe('People routes', () => {
 
       // The nonce in the INSERT params matches the nonce in the callbackUrl passed to adapter
       const insertParams = insertCall![1] as string[];
-      const nonce = insertParams[3]; // [appId, userId, normalizedUrl, nonce, key_type]
+      const nonce = insertParams[3]; // [appId, userId, normalizedUrl, nonce, key_type, slot]
       expect(nonce).toMatch(/^[0-9a-f]{64}$/); // 32 bytes = 64 hex chars
 
       // Platform key → key_type='platform' stored in lookup row
       expect(insertParams[4]).toBe('platform');
+      // provider_slot also stored
+      expect(insertParams[5]).toBe('primary');
 
       expect(mockAdapter.queueEmailLookup).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -458,48 +452,13 @@ describe('People routes', () => {
         { apiKey: PLATFORM_KEY },
       );
     });
-
-    it('profile/email with BYOK key → INSERT carries key_type="byok"', async () => {
-      const byokEncrypted = 'enc:my-byok-key';
-      const mockRuntime = makeMockRuntime(byokEncrypted);
-      const mockAdapter = makeMockAdapter();
-      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
-      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
-      // decryptByok is already mocked to strip 'enc:' prefix → returns 'my-byok-key'
-
-      const res = await app.inject({
-        method: 'POST',
-        url: `/v1/${APP_ID}/people/profile/email`,
-        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
-      });
-
-      expect(res.statusCode).toBe(200);
-
-      const insertCall = mockRuntime.query.mock.calls.find(
-        (c: unknown[]) =>
-          typeof c[0] === 'string' &&
-          (c[0] as string).includes('people_email_lookups') &&
-          (c[0] as string).includes('INSERT'),
-      );
-      expect(insertCall).toBeDefined();
-
-      const insertParams = insertCall![1] as string[];
-      // BYOK key → key_type='byok' stored in lookup row
-      expect(insertParams[4]).toBe('byok');
-
-      // Adapter called with BYOK key, not the platform key
-      expect(mockAdapter.queueEmailLookup).toHaveBeenCalledWith(
-        expect.anything(),
-        { apiKey: 'my-byok-key' },
-      );
-    });
   });
 
-  // ── Scenario 8: IDOR — ownership 403 ─────────────────────────────────────
+  // ── Scenario 7: IDOR — ownership 403 ─────────────────────────────────────
   describe('IDOR / ownership checks', () => {
     it('POST search/person returns 403 when authed user does not own the app', async () => {
       const attackerApp = await buildTestApp('u_attacker');
-      const mockRuntime = makeMockRuntime(null, 'u_owner'); // app owned by u_owner, not u_attacker
+      const mockRuntime = makeMockRuntime('u_owner'); // app owned by u_owner, not u_attacker
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -520,7 +479,7 @@ describe('People routes', () => {
     });
 
     it('POST search/person returns 404 when app does not exist', async () => {
-      const mockRuntime = makeMockRuntime(null, null); // no row → app_not_found
+      const mockRuntime = makeMockRuntime(null); // no row → app_not_found
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -537,44 +496,16 @@ describe('People routes', () => {
     });
   });
 
-  // ── Scenario 9: BYOK decrypt failure → 503 byok_decrypt_failed ───────────
-  describe('BYOK decryption failure', () => {
-    it('returns 503 byok_decrypt_failed when decryptByok throws, adapter not called', async () => {
-      const mockRuntime = makeMockRuntime('enc:corrupted-key');
-      const mockAdapter = makeMockAdapter();
-      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
-      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
-      vi.mocked(decryptByok).mockImplementation(() => {
-        throw new Error('aes-gcm auth tag mismatch');
-      });
-
-      // Suppress the console.error so test output stays pristine
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      const res = await app.inject({
-        method: 'POST',
-        url: `/v1/${APP_ID}/people/search/person`,
-        payload: { currentRoleTitle: 'CTO' },
-      });
-
-      consoleSpy.mockRestore();
-
-      expect(res.statusCode).toBe(503);
-      expect(res.json()).toMatchObject({ error: 'byok_decrypt_failed' });
-      expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
-    });
-  });
-
-  // ── Scenario 10: profile/email 503 on empty webhookHostUrl ───────────────
+  // ── Scenario 8: profile/email 503 on empty webhookHostUrl ───────────────
   describe('POST /v1/:appId/people/profile/email — webhookHostUrl guard', () => {
     it('returns 503 people_unavailable before INSERT when webhookHostUrl is empty', async () => {
-      const mockRuntime = makeMockRuntime(null);
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
 
-      const originalUrl = config.people.webhookHostUrl;
-      (config.people as any).webhookHostUrl = '';
+      const originalUrl = config.people.providers.primary.webhookHostUrl;
+      (config.people.providers.primary as any).webhookHostUrl = '';
 
       const res = await app.inject({
         method: 'POST',
@@ -582,10 +513,13 @@ describe('People routes', () => {
         payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
       });
 
-      (config.people as any).webhookHostUrl = originalUrl;
+      (config.people.providers.primary as any).webhookHostUrl = originalUrl;
 
       expect(res.statusCode).toBe(503);
       expect(res.json()).toMatchObject({ error: 'people_unavailable' });
+
+      // x-people-provider set even on 503
+      expect(res.headers['x-people-provider']).toBe('primary');
 
       // No INSERT into people_email_lookups
       const insertCall = mockRuntime.query.mock.calls.find(
@@ -598,10 +532,10 @@ describe('People routes', () => {
     });
   });
 
-  // ── Scenario 11: feature flag disabled → 503 people_disabled ─────────
+  // ── Scenario 9: feature flag disabled → 503 people_disabled ─────────
   describe('feature flag disabled', () => {
     it('all people routes return 503 people_disabled when enabled=false', async () => {
-      const mockRuntime = makeMockRuntime(null);
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -617,8 +551,6 @@ describe('People routes', () => {
           { method: 'POST' as const, url: `/v1/${APP_ID}/people/profile/email`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
           { method: 'GET' as const, url: `/v1/${APP_ID}/people/email-lookup/some-id` },
           { method: 'GET' as const, url: `/v1/${APP_ID}/people/credit-balance` },
-          { method: 'PUT' as const, url: `/v1/${APP_ID}/people/byok`, payload: { apiKey: 'key' } },
-          { method: 'DELETE' as const, url: `/v1/${APP_ID}/people/byok` },
         ];
 
         for (const route of routes) {
@@ -638,10 +570,10 @@ describe('People routes', () => {
     });
   });
 
-  // ── Scenario 12: failure-path audit row ───────────────────────────────────
+  // ── Scenario 10: failure-path audit row ───────────────────────────────────
   describe('search_person adapter throw → audit row written with search_person_error', () => {
     it('writes an audit row with action=search_person_error and zero financials on adapter throw', async () => {
-      const mockRuntime = makeMockRuntime(null);
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter({
         searchPerson: vi.fn().mockRejectedValue(
           new PeopleError(502, 'upstream_error', 'upstream error'),
@@ -659,6 +591,9 @@ describe('People routes', () => {
 
       expect(res.statusCode).toBe(502);
 
+      // x-people-provider set even on error
+      expect(res.headers['x-people-provider']).toBe('primary');
+
       // Audit row written with action='search_person_error', zero financials
       const auditCall = mockRuntime.query.mock.calls.find(
         (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
@@ -671,10 +606,10 @@ describe('People routes', () => {
     });
   });
 
-  // ── Scenario 13: profile/email adapter throw → orphan row cleaned up ──────
+  // ── Scenario 11: profile/email adapter throw → orphan row cleaned up ──────
   describe('profile/email adapter throw → orphan pending row deleted', () => {
     it('DELETEs the pending people_email_lookups row on adapter throw', async () => {
-      const mockRuntime = makeMockRuntime(null);
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter({
         queueEmailLookup: vi.fn().mockRejectedValue(
           new PeopleError(502, 'adapter_error', 'adapter failure'),
@@ -708,6 +643,38 @@ describe('People routes', () => {
       );
       expect(auditCall).toBeDefined();
       expect(auditCall![1]).toContain('profile_email_error');
+    });
+  });
+
+  // ── Scenario 12: PeopleProviderError action_unsupported_by_slot → 503 ─────
+  describe('PeopleProviderError action_unsupported_by_slot → 503 provider_action_unsupported', () => {
+    it('returns 503 { error: provider_action_unsupported, slot } when adapter throws PeopleProviderError', async () => {
+      const mockRuntime = makeMockRuntime();
+      const mockAdapter = makeMockAdapter({
+        searchPerson: vi.fn().mockRejectedValue(
+          new PeopleProviderError('action_unsupported_by_slot', 'search_person is not supported on the secondary slot'),
+        ),
+      });
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/search/person`,
+        payload: { currentRoleTitle: 'CTO' },
+      });
+
+      expect(res.statusCode).toBe(503);
+      const body = res.json();
+      expect(body.error).toBe('provider_action_unsupported');
+      expect(body.slot).toBe('primary'); // resolved slot from config.people.routing (empty → primary)
+
+      // x-people-provider set on 503
+      expect(res.headers['x-people-provider']).toBe('primary');
+
+      // Adapter was called (the error came FROM the adapter)
+      expect(mockAdapter.searchPerson).toHaveBeenCalledOnce();
     });
   });
 });
