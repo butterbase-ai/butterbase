@@ -8,8 +8,11 @@ export function registerManageEnrichlayer(server: McpServer) {
     `Use the app's EnrichLayer integration: search person/company, fetch profiles, queue email lookups, manage credits and BYOK keys.
 
 Actions:
-  - search_person       { app_id, current_role_title?, past_role_title?, current_company_name?, current_company_industry?, country?, region?, city?, page_size?, next_token?, enrich_profiles? }
-                         Structured-filter search for a person. Returns enriched person data and credit usage.
+  - search_person       { app_id, current_role_title?, past_role_title?, current_company_name?, current_company_industry?, country?, region?, city?, education_school_name?, education_degree_name?, education_field_of_study?, page_size?, next_token?, enrich_profiles? }
+                         Structured-filter search for a person. Boolean syntax works inside any field, e.g.
+                           current_role_title: '(VP OR "Vice President") AND NOT assistant'
+                           education_school_name: '(Harvard OR Stanford OR MIT OR Princeton OR Yale)'
+                         Returns enriched person data and credit usage.
   - search_company      { app_id, industry?, country?, employee_count_max?, page_size?, next_token?, enrich_profiles? }
                          Structured-filter search for a company. Returns enriched company data and credit usage.
   - get_profile         { app_id, linkedin_profile_url, live_fetch? }
@@ -40,6 +43,9 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
       current_company_industry: z.string().optional().describe('Current company industry filter (for search_person)'),
       region: z.string().optional().describe('Region/state filter (for search_person)'),
       city: z.string().optional().describe('City filter (for search_person)'),
+      education_school_name: z.string().optional().describe('Education school name filter, supports boolean (e.g. "(Harvard OR Stanford OR MIT)") — for search_person'),
+      education_degree_name: z.string().optional().describe('Education degree filter (e.g. "MBA", "PhD") — for search_person'),
+      education_field_of_study: z.string().optional().describe('Education field of study filter (e.g. "Computer Science") — for search_person'),
       // search_company fields
       industry: z.string().optional().describe('Industry filter (for search_company)'),
       employee_count_max: z.number().optional().describe('Maximum employee count filter (for search_company)'),
@@ -77,6 +83,9 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
               ...(args.country !== undefined && { country: args.country }),
               ...(args.region !== undefined && { region: args.region }),
               ...(args.city !== undefined && { city: args.city }),
+              ...(args.education_school_name !== undefined && { educationSchoolName: args.education_school_name }),
+              ...(args.education_degree_name !== undefined && { educationDegreeName: args.education_degree_name }),
+              ...(args.education_field_of_study !== undefined && { educationFieldOfStudy: args.education_field_of_study }),
               ...(args.page_size !== undefined && { pageSize: args.page_size }),
               ...(args.next_token !== undefined && { nextToken: args.next_token }),
               ...(args.enrich_profiles !== undefined && { enrichProfiles: args.enrich_profiles }),

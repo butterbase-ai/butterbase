@@ -6,6 +6,13 @@ export interface SearchPersonRequest {
   country?: string;
   region?: string;
   city?: string;
+  // Education filters — boolean syntax supported, e.g.
+  //   educationSchoolName: '(Harvard OR Stanford OR MIT)'
+  //   educationDegreeName: 'MBA'
+  //   educationFieldOfStudy: '"Computer Science"'
+  educationSchoolName?: string;
+  educationDegreeName?: string;
+  educationFieldOfStudy?: string;
   pageSize?: number;                // capped at 100 in route layer
   nextToken?: string;
   enrichProfiles?: boolean;         // true → enrich_profiles=enrich (costs more, returns full profile)
