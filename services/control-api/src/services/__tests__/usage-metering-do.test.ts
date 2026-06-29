@@ -11,4 +11,9 @@ describe('MeterType', () => {
     const types: MeterType[] = ['api_calls', 'storage_bytes', 'ai_tokens', 'lambda_invocations', 'bandwidth_bytes', 'mau'];
     expect(types).toHaveLength(6);
   });
+
+  it('accepts enrichlayer_credits as a meter type', () => {
+    const type: MeterType = 'enrichlayer_credits';
+    expect(type).toBeDefined();
+  });
 });
