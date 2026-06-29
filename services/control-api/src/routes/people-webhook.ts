@@ -112,6 +112,9 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
     // UPDATE so we can write the real value in a single atomic operation.
     const slot = (lookupRow.provider_slot as ProviderSlot) ?? 'primary';
     const providerCfg = config.people.providers[slot];
+    if (!providerCfg?.creditCostHeader && !providerCfg?.apiKey) {
+      console.error(`[people-webhook] slot=${slot} has no configured provider; charging fallback`);
+    }
     const creditHeader = providerCfg?.creditCostHeader;
     const rawHeaderCredits = creditHeader
       ? req.headers[creditHeader.toLowerCase()]

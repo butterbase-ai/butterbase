@@ -42,6 +42,15 @@ Costs are routed per provider slot (primary or secondary). The platform operator
 - `PEOPLE_PROVIDER_<SLOT>_BASE_USD_PER_CREDIT` — wholesale cost
 - `PEOPLE_PROVIDER_<SLOT>_MARKUP_PCT` — platform margin
 
+Action routing is controlled by one env var per action; each defaults to `primary` if unset:
+
+| Var | Action |
+|---|---|
+| `PEOPLE_ROUTE_SEARCH_PERSON` | `POST /people/search/person` |
+| `PEOPLE_ROUTE_SEARCH_COMPANY` | `POST /people/search/company` |
+| `PEOPLE_ROUTE_GET_PROFILE` | `POST /people/profile` |
+| `PEOPLE_ROUTE_QUEUE_EMAIL_LOOKUP` | `POST /people/profile/email` |
+
 The effective rate per slot is calculated as:
 
 ```

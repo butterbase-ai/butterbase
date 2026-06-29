@@ -500,6 +500,52 @@ describe('POST /v1/webhooks/people/email', () => {
     }
   });
 
+  // ── Additional: secondary slot — creditCostHeader read from correct slot ──
+  it('secondary slot: x-secondary-credit-cost header used (not fallback)', async () => {
+    const secondaryLookupRow = { ...SAMPLE_LOOKUP_ROW, provider_slot: 'secondary' };
+    const pool = makeRuntimePool({
+      findRow: secondaryLookupRow,
+      claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'secondary' }],
+    });
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+    vi.mocked(deductCreditsBalance).mockResolvedValue(7 * USD_PER_CREDIT);
+    vi.mocked(incrementUsage).mockResolvedValue(undefined);
+
+    // Override fallbackCreditsPerAction to 9 so we can confirm fallback was NOT used
+    const origFallback = config.people.providers.secondary.fallbackCreditsPerAction;
+    (config.people.providers.secondary as any).fallbackCreditsPerAction = 9;
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+        payload: { email: 'jane@example.com' },
+        headers: { 'x-secondary-credit-cost': '7' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+
+      // 7 credits from header, not 9 from fallback
+      expect(deductCreditsBalance).toHaveBeenCalledWith(
+        expect.anything(),
+        USER_ID,
+        7 * USD_PER_CREDIT,
+      );
+      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 7, APP_ID);
+
+      // Audit row records provider_slot='secondary'
+      const auditCall = pool.query.mock.calls.find(
+        (c: unknown[]) =>
+          typeof c[0] === 'string' && (c[0] as string).includes('people_usage_logs'),
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall![1]).toContain('secondary');
+    } finally {
+      (config.people.providers.secondary as any).fallbackCreditsPerAction = origFallback;
+    }
+  });
+
   // ── Additional: x-cost header overrides default ───────────────────────────
   it('x-cost header is used when present (slot creditCostHeader)', async () => {
     const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] });

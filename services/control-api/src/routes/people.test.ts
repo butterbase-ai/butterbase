@@ -74,6 +74,7 @@ import { getPeopleAdapter } from '../services/people/registry.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { lookupCachedProfile, writeCachedProfile } from '../services/people/cache.js';
 import { getCreditsBalance, deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
+import { getPeoplePricing } from '../services/people/pricing.js';
 import { config } from '../config.js';
 import { PeopleError, PeopleProviderError } from '../services/people/types.js';
 import type { PeopleAdapter, ProfilePayload } from '../services/people/types.js';
@@ -689,6 +690,67 @@ describe('People routes', () => {
 
       // Adapter was called (the error came FROM the adapter)
       expect(mockAdapter.searchPerson).toHaveBeenCalledOnce();
+    });
+  });
+
+  // ── Scenario 13: getPeopleAdapter returns null → 503 provider_not_registered ─
+  describe('POST /v1/:appId/people/search/person — no adapter registered', () => {
+    it('returns 503 { error: provider_not_registered, slot } with all x-people-* headers at zero', async () => {
+      const mockRuntime = makeMockRuntime();
+      vi.mocked(getPeopleAdapter).mockReturnValue(null as any);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/search/person`,
+        payload: { currentRoleTitle: 'CEO' },
+      });
+
+      expect(res.statusCode).toBe(503);
+      const body = res.json();
+      expect(body.error).toBe('provider_not_registered');
+      expect(body.slot).toBe('primary');
+
+      // All x-people-* headers present with zero values
+      expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-credits-consumed']).toBe('0');
+      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
+      expect(res.headers['x-people-usd-charged']).toBe('0.000000');
+    });
+  });
+
+  // ── Scenario 14: usdPerCredit=0 (free provider) skips balance gate ────────
+  describe('POST /v1/:appId/people/search/person — free provider (usdPerCredit=0)', () => {
+    it('skips balance gate and deductCreditsBalance when usdPerCredit=0', async () => {
+      const mockRuntime = makeMockRuntime();
+      const mockAdapter = makeMockAdapter(); // creditsConsumed=6
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      // Override pricing to usdPerCredit=0 for this test only
+      vi.mocked(getPeoplePricing).mockReturnValueOnce({
+        baseUsdPerCredit: 0,
+        markupPct: 0,
+        usdPerCredit: 0,
+      });
+      // Balance is below the normal minBalanceUsd threshold — but gate is skipped because usdPerCredit=0
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 0.01, totalUsd: 0.01 });
+      vi.mocked(incrementUsage).mockResolvedValue(undefined);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/search/person`,
+        payload: { currentRoleTitle: 'CEO' },
+      });
+
+      // Balance gate was skipped: usdPerCredit=0, so 200 despite low balance
+      expect(res.statusCode).toBe(200);
+
+      // Adapter WAS called
+      expect(mockAdapter.searchPerson).toHaveBeenCalledOnce();
+
+      // usdCost = creditsConsumed × 0 = 0 → deductCreditsBalance NOT called
+      expect(deductCreditsBalance).not.toHaveBeenCalled();
     });
   });
 });
