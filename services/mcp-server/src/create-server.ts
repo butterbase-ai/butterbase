@@ -38,7 +38,7 @@ import { registerManageAgents } from './tools/manage-agents.js';
 import { registerManageKv } from './tools/manage-kv.js';
 import { startActiveWindowListener } from './eligibility-listener.js';
 import { isActiveWindowCached, startActiveWindowPoller } from './active-window-cache.js';
-export { runWithRequestAuthorizationHeader, getRequestAuthorizationHeader } from './request-auth-context.js';
+export { runWithRequestAuthorizationHeader, runWithRequestAuth, getRequestAuthorizationHeader, getRequestTestUserId } from './request-auth-context.js';
 
 // Prime and maintain the process-wide active-window cache.
 // When a Postgres connection string is available, also listen for NOTIFY
