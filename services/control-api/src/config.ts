@@ -86,15 +86,37 @@ export const config = {
     // signing key is required.
   },
 
-  people: {
-    enabled: process.env.PEOPLE_ENABLED === 'true',
-    apiKey: process.env.PEOPLE_API_KEY ?? '',
-    baseUrl: process.env.PEOPLE_BASE_URL ?? 'https://enrichlayer.com/api/v2',
-    fallbackCreditsPerAction: parseInt(process.env.PEOPLE_FALLBACK_CREDITS_PER_ACTION ?? '3', 10),
-    minBalanceUsd: parseFloat(process.env.PEOPLE_MIN_BALANCE_USD ?? '0.05'),
-    emailLookupCredits: parseInt(process.env.PEOPLE_EMAIL_LOOKUP_CREDITS ?? '1', 10),
-    webhookHostUrl: process.env.PEOPLE_WEBHOOK_HOST_URL ?? '',  // e.g. https://api.butterbase.ai
-  },
+  people: (() => {
+    function readProvider(slot: 'PRIMARY' | 'SECONDARY') {
+      const rawMarkup = parseFloat(process.env[`PEOPLE_PROVIDER_${slot}_MARKUP_PCT`] ?? '20');
+      const markupPct = Math.max(0, Math.min(200, Number.isFinite(rawMarkup) ? rawMarkup : 20));
+      return {
+        apiKey: process.env[`PEOPLE_PROVIDER_${slot}_API_KEY`] ?? '',
+        baseUrl: process.env[`PEOPLE_PROVIDER_${slot}_BASE_URL`] ?? '',
+        creditCostHeader: process.env[`PEOPLE_PROVIDER_${slot}_CREDIT_COST_HEADER`] ?? '',
+        authScheme: (process.env[`PEOPLE_PROVIDER_${slot}_AUTH_SCHEME`] === 'api-key' ? 'api-key' : 'bearer') as 'bearer' | 'api-key',
+        baseUsdPerCredit: parseFloat(process.env[`PEOPLE_PROVIDER_${slot}_BASE_USD_PER_CREDIT`] ?? '0'),
+        markupPct,
+        fallbackCreditsPerAction: parseInt(process.env[`PEOPLE_PROVIDER_${slot}_FALLBACK_CREDITS`] ?? '3', 10),
+        webhookHostUrl: process.env[`PEOPLE_PROVIDER_${slot}_WEBHOOK_HOST_URL`] ?? '',
+      };
+    }
+    const ACTIONS = ['search_person','search_company','get_profile','queue_email_lookup'] as const;
+    const routing: Record<typeof ACTIONS[number], 'primary' | 'secondary'> = {} as never;
+    for (const a of ACTIONS) {
+      const v = process.env[`PEOPLE_ROUTE_${a.toUpperCase()}`];
+      routing[a] = v === 'secondary' ? 'secondary' : 'primary';
+    }
+    return {
+      enabled: process.env.PEOPLE_ENABLED === 'true',
+      minBalanceUsd: parseFloat(process.env.PEOPLE_MIN_BALANCE_USD ?? '0.05'),
+      routing,
+      providers: {
+        primary: readProvider('PRIMARY'),
+        secondary: readProvider('SECONDARY'),
+      },
+    };
+  })(),
 
   /**
    * Platform DB env vars introduced in multi-region Phase 1.
