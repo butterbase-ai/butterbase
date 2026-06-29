@@ -518,8 +518,14 @@ export async function listCustomDomains(appId: string) {
   return apiGet<{ domains: any[] }>(`/v1/${appId}/custom-domains`);
 }
 
-export async function addCustomDomain(appId: string, hostname: string) {
-  return apiPost<any>(`/v1/${appId}/custom-domains`, { hostname });
+export async function addCustomDomain(
+  appId: string,
+  hostname: string,
+  validationMethod?: 'http' | 'txt',
+) {
+  const body: Record<string, unknown> = { hostname };
+  if (validationMethod) body.validation_method = validationMethod;
+  return apiPost<any>(`/v1/${appId}/custom-domains`, body);
 }
 
 export async function getCustomDomainStatus(appId: string, domainId: string) {
