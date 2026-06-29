@@ -58,6 +58,7 @@ import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { lookupCachedProfile, writeCachedProfile } from '../services/enrichlayer/cache.js';
 import { decryptByok } from '../services/enrichlayer/byok-crypto.js';
 import { getCreditsBalance, deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
+import { config } from '../config.js';
 import type { EnrichLayerAdapter, ProfilePayload } from '../services/enrichlayer/types.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -85,9 +86,20 @@ const SAMPLE_PROFILE: ProfilePayload = {
 
 // ── Factory helpers ──────────────────────────────────────────────────────────
 
-/** Make a minimal mock runtime pg.Pool whose query() is a vi.fn() */
-function makeMockRuntime(byokEncrypted: string | null = null) {
-  const runtimeQuery = vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+/**
+ * Make a minimal mock runtime pg.Pool whose query() is a vi.fn().
+ * @param byokEncrypted - value of enrichlayer_byok_key_encrypted column (null = no BYOK)
+ * @param ownerId - owner_id to return for assertAppOwnership; null = app not found (empty rows)
+ */
+function makeMockRuntime(byokEncrypted: string | null = null, ownerId: string | null = USER_ID) {
+  const runtimeQuery = vi.fn().mockImplementation((sql: string, _params: unknown[]) => {
+    // Ownership check: SELECT owner_id FROM apps WHERE id = $1
+    if (typeof sql === 'string' && sql.includes('owner_id') && sql.includes('FROM apps')) {
+      if (ownerId === null) {
+        return Promise.resolve({ rows: [], rowCount: 0 }); // app not found
+      }
+      return Promise.resolve({ rows: [{ owner_id: ownerId }], rowCount: 1 });
+    }
     if (typeof sql === 'string' && sql.includes('enrichlayer_byok_key_encrypted') && sql.startsWith('SELECT')) {
       return Promise.resolve({ rows: [{ enrichlayer_byok_key_encrypted: byokEncrypted }], rowCount: 1 });
     }
@@ -144,11 +156,11 @@ function makeMockAdapter(overrides: Partial<EnrichLayerAdapter> = {}): EnrichLay
 }
 
 /** Build a test Fastify app with auth stubbed and controlDb mocked */
-async function buildTestApp(): Promise<FastifyInstance> {
+async function buildTestApp(userId = USER_ID): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   app.decorateRequest('auth', null as any);
   app.addHook('onRequest', async (request) => {
-    (request as any).auth = { userId: USER_ID, authMethod: 'api_key', scopes: ['*'] };
+    (request as any).auth = { userId, authMethod: 'api_key', scopes: ['*'] };
   });
   // Provide a controlDb decoration so usage-metering mocks can receive it
   app.decorate('controlDb', {} as any);
@@ -174,7 +186,7 @@ describe('EnrichLayer routes', () => {
   // ── Scenario 1: search/person platform key → metering + audit + deduct ────
   describe('POST /v1/:appId/enrichlayer/search/person — platform key', () => {
     it('calls adapter, deducts credits, increments usage, writes audit row', async () => {
-      const mockRuntime = makeMockRuntime(null); // no BYOK
+      const mockRuntime = makeMockRuntime(null); // no BYOK, owner = USER_ID
       const mockAdapter = makeMockAdapter(); // creditsConsumed=6
       vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
@@ -440,6 +452,109 @@ describe('EnrichLayer routes', () => {
         }),
         { apiKey: PLATFORM_KEY },
       );
+    });
+  });
+
+  // ── Scenario 8: IDOR — ownership 403 ─────────────────────────────────────
+  describe('IDOR / ownership checks', () => {
+    it('POST search/person returns 403 when authed user does not own the app', async () => {
+      const attackerApp = await buildTestApp('u_attacker');
+      const mockRuntime = makeMockRuntime(null, 'u_owner'); // app owned by u_owner, not u_attacker
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+
+      try {
+        const res = await attackerApp.inject({
+          method: 'POST',
+          url: `/v1/${APP_ID}/enrichlayer/search/person`,
+          payload: { currentRoleTitle: 'CTO' },
+        });
+
+        expect(res.statusCode).toBe(403);
+        expect(res.json()).toMatchObject({ error: 'forbidden' });
+        expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
+      } finally {
+        await attackerApp.close();
+      }
+    });
+
+    it('POST search/person returns 404 when app does not exist', async () => {
+      const mockRuntime = makeMockRuntime(null, null); // no row → app_not_found
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        payload: { currentRoleTitle: 'CTO' },
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ error: 'app_not_found' });
+      expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Scenario 9: BYOK decrypt failure → 503 byok_decrypt_failed ───────────
+  describe('BYOK decryption failure', () => {
+    it('returns 503 byok_decrypt_failed when decryptByok throws, adapter not called', async () => {
+      const mockRuntime = makeMockRuntime('enc:corrupted-key');
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(decryptByok).mockImplementation(() => {
+        throw new Error('aes-gcm auth tag mismatch');
+      });
+
+      // Suppress the console.error so test output stays pristine
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        payload: { currentRoleTitle: 'CTO' },
+      });
+
+      consoleSpy.mockRestore();
+
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toMatchObject({ error: 'byok_decrypt_failed' });
+      expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Scenario 10: profile/email 503 on empty webhookHostUrl ───────────────
+  describe('POST /v1/:appId/enrichlayer/profile/email — webhookHostUrl guard', () => {
+    it('returns 503 enrichlayer_unavailable before INSERT when webhookHostUrl is empty', async () => {
+      const mockRuntime = makeMockRuntime(null);
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+
+      const originalUrl = config.enrichlayer.webhookHostUrl;
+      (config.enrichlayer as any).webhookHostUrl = '';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/enrichlayer/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      (config.enrichlayer as any).webhookHostUrl = originalUrl;
+
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toMatchObject({ error: 'enrichlayer_unavailable' });
+
+      // No INSERT into enrichlayer_email_lookups
+      const insertCall = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string'
+          && (c[0] as string).includes('enrichlayer_email_lookups')
+          && (c[0] as string).includes('INSERT'),
+      );
+      expect(insertCall).toBeUndefined();
+      expect(mockAdapter.queueEmailLookup).not.toHaveBeenCalled();
     });
   });
 });

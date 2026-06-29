@@ -25,15 +25,21 @@ import type { SearchPersonRequest, SearchCompanyRequest } from '../services/enri
 
 type KeyType = 'platform' | 'byok';
 
+type ResolveKeyResult =
+  | { apiKey: string; keyType: KeyType }
+  | { error: 'byok_decrypt_failed' }
+  | null;
+
 /**
  * Resolve the API key to use for a given app.
  * Checks the app's runtime DB for a BYOK key first; falls back to the platform key.
  * Returns null when neither is available (→ 503).
+ * Returns { error: 'byok_decrypt_failed' } when a BYOK key exists but cannot be decrypted.
  */
 async function resolveKey(
   runtime: pg.Pool,
   appId: string,
-): Promise<{ apiKey: string; keyType: KeyType } | null> {
+): Promise<ResolveKeyResult> {
   const r = await runtime.query<{ enrichlayer_byok_key_encrypted: string | null }>(
     'SELECT enrichlayer_byok_key_encrypted FROM apps WHERE id = $1',
     [appId],
@@ -42,14 +48,37 @@ async function resolveKey(
     try {
       const apiKey = decryptByok(r.rows[0].enrichlayer_byok_key_encrypted);
       return { apiKey, keyType: 'byok' };
-    } catch {
-      // Decryption failure — fall through to platform key
+    } catch (err) {
+      console.error('[enrichlayer] BYOK decryption failed', { appId, error: err });
+      return { error: 'byok_decrypt_failed' };
     }
   }
   if (config.enrichlayer.apiKey) {
     return { apiKey: config.enrichlayer.apiKey, keyType: 'platform' };
   }
   return null;
+}
+
+/**
+ * Assert that the authenticated user owns the given app.
+ * Returns { ok: true } on success, or a reply descriptor on failure.
+ */
+async function assertAppOwnership(
+  runtimeDb: pg.Pool,
+  appId: string,
+  userId: string,
+): Promise<{ ok: true } | { ok: false; reply: { code: number; body: { error: string; message?: string } } }> {
+  const r = await runtimeDb.query<{ owner_id: string }>(
+    'SELECT owner_id FROM apps WHERE id = $1',
+    [appId],
+  );
+  if (r.rows.length === 0) {
+    return { ok: false, reply: { code: 404, body: { error: 'app_not_found' } } };
+  }
+  if (r.rows[0].owner_id !== userId) {
+    return { ok: false, reply: { code: 403, body: { error: 'forbidden' } } };
+  }
+  return { ok: true };
 }
 
 interface AuditParams {
@@ -91,6 +120,11 @@ function sendEnrichLayerError(err: unknown, reply: any): boolean {
   return false;
 }
 
+const BYOK_DECRYPT_FAILED_REPLY = {
+  error: 'byok_decrypt_failed' as const,
+  message: 'Stored BYOK key could not be decrypted. Reset via DELETE /byok and re-add.',
+};
+
 // ---------------------------------------------------------------------------
 // Route module
 // ---------------------------------------------------------------------------
@@ -105,8 +139,13 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+
     const resolved = await resolveKey(runtime, appId);
     if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
@@ -150,8 +189,13 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+
     const resolved = await resolveKey(runtime, appId);
     if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
@@ -205,6 +249,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+
     // Cache-first (unless force-live)
     if (body.liveFetch !== 'force') {
       const cached = await lookupCachedProfile(runtime, appId, normalizedUrl);
@@ -226,6 +273,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     // Cache miss — resolve key + balance gate
     const resolved = await resolveKey(runtime, appId);
     if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
@@ -280,6 +328,13 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     const adapter = getEnrichLayerAdapter();
     if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
 
+    if (!config.enrichlayer.webhookHostUrl) {
+      return reply.code(503).send({
+        error: 'enrichlayer_unavailable',
+        message: 'EnrichLayer webhook host URL is not configured; async email lookups are disabled',
+      });
+    }
+
     const body = request.body as { linkedinProfileUrl: string };
 
     let normalizedUrl: string;
@@ -290,8 +345,13 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     }
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+
     const resolved = await resolveKey(runtime, appId);
     if (!resolved) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
+    if ('error' in resolved) return reply.code(503).send(BYOK_DECRYPT_FAILED_REPLY);
 
     if (resolved.keyType === 'platform') {
       const bal = await getCreditsBalance(app.controlDb, userId);
@@ -342,10 +402,13 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── GET /v1/:appId/enrichlayer/email-lookup/:id ──────────────────────────
   app.get('/v1/:appId/enrichlayer/email-lookup/:id', async (request, reply) => {
-    requireUserId(request);
+    const userId = requireUserId(request);
     const { appId, id } = request.params as { appId: string; id: string };
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const r = await runtime.query<{
       status: string;
@@ -370,7 +433,8 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── GET /v1/:appId/enrichlayer/credit-balance ─────────────────────────────
   app.get('/v1/:appId/enrichlayer/credit-balance', async (request, reply) => {
-    requireUserId(request);
+    const userId = requireUserId(request);
+    const { appId } = request.params as { appId: string };
 
     const adapter = getEnrichLayerAdapter();
     if (!adapter) return reply.code(503).send({ error: 'enrichlayer_unavailable' });
@@ -378,6 +442,11 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
     if (!config.enrichlayer.apiKey) {
       return reply.code(503).send({ error: 'enrichlayer_unavailable', message: 'platform key not configured' });
     }
+
+    const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     try {
       const r = await adapter.getCreditBalance({ apiKey: config.enrichlayer.apiKey });
@@ -391,15 +460,19 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
   // ── PUT /v1/:appId/enrichlayer/byok ───────────────────────────────────────
   app.put('/v1/:appId/enrichlayer/byok', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    requireUserId(request);
+    const userId = requireUserId(request);
 
     const body = request.body as { apiKey: string };
     if (!body?.apiKey || typeof body.apiKey !== 'string') {
       return reply.code(400).send({ error: 'apiKey is required' });
     }
 
-    const encrypted = encryptByok(body.apiKey);
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+
+    const encrypted = encryptByok(body.apiKey);
     await runtime.query(
       'UPDATE apps SET enrichlayer_byok_key_encrypted = $1 WHERE id = $2',
       [encrypted, appId],
@@ -411,9 +484,13 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
   // ── DELETE /v1/:appId/enrichlayer/byok ────────────────────────────────────
   app.delete('/v1/:appId/enrichlayer/byok', async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    requireUserId(request);
+    const userId = requireUserId(request);
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+
+    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+
     await runtime.query(
       'UPDATE apps SET enrichlayer_byok_key_encrypted = NULL WHERE id = $1',
       [appId],
