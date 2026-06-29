@@ -111,7 +111,7 @@ Run with `page_size: 1` first. Show the user `totalResultCount` and the estimate
 
 ```jsonc
 { "action": "search_person", "current_role_title": "...", "page_size": 25 }
-// → { data: { results: [...], nextPage: "https://enrichlayer.com/api/v2/...&next_token=..." } }
+// → { data: { results: [...], nextPage: "https://api.platform.example.com/...&next_token=..." } }
 ```
 
 Parse `next_token` from `nextPage` and pass as `next_token` on the next call.
@@ -193,20 +193,22 @@ Typical resolution time is **seconds to a few minutes**. There's no SLA from the
 
 ## Pricing summary
 
-Default platform rate: **$0.02016 per People credit** ($0.0168 wholesale + 20% markup).
+Actual costs depend on which backend the operator routes each action to. The platform operator configures provider pricing independently via `PEOPLE_PROVIDER_<SLOT>_BASE_USD_PER_CREDIT` and `PEOPLE_PROVIDER_<SLOT>_MARKUP_PCT` for each slot.
 
-| Action | Credits | USD |
+At default platform pricing: **~$0.02 per People credit** per slot.
+
+| Action | Credits | USD (default rate) |
 |---|---|---|
-| `search_person` / `search_company` (URLs only) | 3 per result returned | $0.06 per result |
+| `search_person` / `search_company` (URLs only) | 3 per result returned | ~$0.06 per result |
 | Same with `enrich_profiles: true` | 3 + N per result (N = enriched profile size) | ~$0.12+ per result |
-| `get_profile` cache miss | 2 | $0.04 |
+| `get_profile` cache miss | 2 | ~$0.04 |
 | `get_profile` cache hit | 0 | Free |
-| `queue_email_lookup` queue accept | 3 | $0.06 |
-| Webhook email resolution | 1 | $0.02 |
+| `queue_email_lookup` queue accept | 3 | ~$0.06 |
+| Webhook email resolution | 1 | ~$0.02 |
 | `get_credit_balance` | 0 | Free |
 | Empty search (0 results) | 0 | Free |
 
-Every call writes an `people_usage_logs` row — query directly with `select_rows` for usage analytics.
+Cost transparency comes from response headers (`x-people-*`) and the body's `usage` object. Every call writes a `people_usage_logs` row — query directly with `select_rows` for usage analytics.
 
 ## Limits & gotchas
 

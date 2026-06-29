@@ -161,6 +161,8 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 |------|-------------|
 | `manage_people` | Search LinkedIn people/companies with structured filters, enrich profiles by URL (with 30-day cache), and queue async work-email lookups. All metered against the user's Butterbase credits at platform pricing. See [People API](./people-api.md) for HTTP shapes, response payloads, and pricing math. |
 
+Each action is routed to one of two configurable backends (`primary` or `secondary`); routing is operator-controlled at deploy time and not visible to MCP callers.
+
 ### manage_people actions
 
 All actions take `{ app_id, action, ... }` where `action` selects the operation.

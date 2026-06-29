@@ -22,14 +22,33 @@ Every call is metered against the user's Butterbase credit balance at platform p
 | GET | /v1/\{app_id\}/people/email-lookup/\{lookup_id\} | Poll a pending email lookup |
 | GET | /v1/\{app_id\}/people/credit-balance | Read the platform's People credit balance |
 
+## Response headers
+
+Every people response (success and error) carries these headers so callers can track cost without parsing the body:
+
+| Header | Example | Notes |
+|---|---|---|
+| `x-people-provider` | `primary` | Which provider slot served the call |
+| `x-people-credits-consumed` | `3` | Integer |
+| `x-people-usd-cost` | `0.060480` | What we owe the vendor |
+| `x-people-usd-charged` | `0.060480` | What we deducted from the user |
+| `x-people-cached` | `true` | Profile route only |
+
+Headers are present on every reply path — success, cache hit, balance-gate rejection (402), and error (503/4xx). For error or balance-rejection paths, numeric headers are `0` or `0.000000`. The `x-people-cached` header appears only on the `/profile` route.
+
 ## Pricing
+
+Costs are routed per provider slot (primary or secondary). The platform operator configures each slot's pricing independently via:
+- `PEOPLE_PROVIDER_<SLOT>_BASE_USD_PER_CREDIT` — wholesale cost
+- `PEOPLE_PROVIDER_<SLOT>_MARKUP_PCT` — platform margin
+
+The effective rate per slot is calculated as:
 
 ```
 usdPerCredit = base × (1 + markup%)
-             = 0.0168 × 1.20  ≈ 0.02016
 ```
 
-Every adapter response returns `x-enrichlayer-credit-cost` in its headers; Butterbase reads this and charges the exact amount. Observed per-action costs:
+Each adapter response includes a credit-cost header; Butterbase reads this and charges the exact amount. Observed per-action costs (at default platform pricing):
 
 | Action | Credits | USD @ default rate |
 |---|---|---|
@@ -96,7 +115,7 @@ Every filter accepts People's **boolean syntax** — `OR`, `AND`, `NOT`, parenth
         "lastUpdated": null
       }
     ],
-    "nextPage": "https://enrichlayer.com/api/v2/search/person?next_token=...",
+    "nextPage": "https://api.platform.example.com/search/person?next_token=...",
     "totalResultCount": 8269
   },
   "usage": {
