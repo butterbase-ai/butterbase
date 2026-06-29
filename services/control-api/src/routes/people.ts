@@ -119,7 +119,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const slot = resolveSlot('search_person');
     const adapter = getPeopleAdapter(slot);
     if (!adapter) {
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.code(503).send({ error: 'provider_not_registered', slot });
     }
     const providerCfg = config.people.providers[slot];
@@ -135,7 +135,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     if (pricing.usdPerCredit > 0) {
       const bal = await getCreditsBalance(app.controlDb, userId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
-        reply.header('x-people-provider', slot);
+        setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -165,7 +165,7 @@ export async function peopleRoutes(app: FastifyInstance) {
       if (err instanceof PeopleProviderError) {
         if (err.code === 'action_unsupported_by_slot') {
           request.log.error({ err, slot }, '[people] action_unsupported_by_slot — operator misconfiguration');
-          reply.header('x-people-provider', slot);
+          setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
           return reply.code(503).send({ error: 'provider_action_unsupported', slot });
         }
       }
@@ -178,7 +178,7 @@ export async function peopleRoutes(app: FastifyInstance) {
           providerSlot: slot,
         }).catch(() => {});
       }
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       if (sendPeopleError(err, reply)) return;
       throw err;
     }
@@ -195,7 +195,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const slot = resolveSlot('search_company');
     const adapter = getPeopleAdapter(slot);
     if (!adapter) {
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.code(503).send({ error: 'provider_not_registered', slot });
     }
     const providerCfg = config.people.providers[slot];
@@ -210,7 +210,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     if (pricing.usdPerCredit > 0) {
       const bal = await getCreditsBalance(app.controlDb, userId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
-        reply.header('x-people-provider', slot);
+        setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -240,7 +240,7 @@ export async function peopleRoutes(app: FastifyInstance) {
       if (err instanceof PeopleProviderError) {
         if (err.code === 'action_unsupported_by_slot') {
           request.log.error({ err, slot }, '[people] action_unsupported_by_slot — operator misconfiguration');
-          reply.header('x-people-provider', slot);
+          setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
           return reply.code(503).send({ error: 'provider_action_unsupported', slot });
         }
       }
@@ -253,7 +253,7 @@ export async function peopleRoutes(app: FastifyInstance) {
           providerSlot: slot,
         }).catch(() => {});
       }
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       if (sendPeopleError(err, reply)) return;
       throw err;
     }
@@ -270,7 +270,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const slot = resolveSlot('get_profile');
     const adapter = getPeopleAdapter(slot);
     if (!adapter) {
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.code(503).send({ error: 'provider_not_registered', slot });
     }
     const providerCfg = config.people.providers[slot];
@@ -315,7 +315,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     if (pricing.usdPerCredit > 0) {
       const bal = await getCreditsBalance(app.controlDb, userId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
-        reply.header('x-people-provider', slot);
+        setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -330,6 +330,7 @@ export async function peopleRoutes(app: FastifyInstance) {
         runtime, appId, normalizedUrl,
         result.notFound ? 'not_found' : 'ok',
         result.data,
+        slot,
       );
 
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
@@ -357,7 +358,7 @@ export async function peopleRoutes(app: FastifyInstance) {
       if (err instanceof PeopleProviderError) {
         if (err.code === 'action_unsupported_by_slot') {
           request.log.error({ err, slot }, '[people] action_unsupported_by_slot — operator misconfiguration');
-          reply.header('x-people-provider', slot);
+          setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
           return reply.code(503).send({ error: 'provider_action_unsupported', slot });
         }
       }
@@ -370,7 +371,7 @@ export async function peopleRoutes(app: FastifyInstance) {
           providerSlot: slot,
         }).catch(() => {});
       }
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       if (sendPeopleError(err, reply)) return;
       throw err;
     }
@@ -387,13 +388,13 @@ export async function peopleRoutes(app: FastifyInstance) {
     const slot = resolveSlot('queue_email_lookup');
     const adapter = getPeopleAdapter(slot);
     if (!adapter) {
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.code(503).send({ error: 'provider_not_registered', slot });
     }
     const providerCfg = config.people.providers[slot];
 
     if (!providerCfg.webhookHostUrl) {
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.code(503).send({
         error: 'people_unavailable',
         message: 'People webhook host URL is not configured; async email lookups are disabled',
@@ -419,7 +420,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     if (pricing.usdPerCredit > 0) {
       const bal = await getCreditsBalance(app.controlDb, userId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
-        reply.header('x-people-provider', slot);
+        setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
       }
     }
@@ -471,7 +472,7 @@ export async function peopleRoutes(app: FastifyInstance) {
       if (err instanceof PeopleProviderError) {
         if (err.code === 'action_unsupported_by_slot') {
           request.log.error({ err, slot }, '[people] action_unsupported_by_slot — operator misconfiguration');
-          reply.header('x-people-provider', slot);
+          setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
           return reply.code(503).send({ error: 'provider_action_unsupported', slot });
         }
       }
@@ -484,7 +485,7 @@ export async function peopleRoutes(app: FastifyInstance) {
           providerSlot: slot,
         }).catch(() => {});
       }
-      reply.header('x-people-provider', slot);
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       if (sendPeopleError(err, reply)) return;
       throw err;
     }
@@ -541,12 +542,12 @@ export async function peopleRoutes(app: FastifyInstance) {
     const providerCfg = config.people.providers.primary;
 
     if (!adapter) {
-      reply.header('x-people-provider', 'primary');
+      setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.code(503).send({ error: 'provider_not_registered', slot: 'primary' });
     }
 
     if (!providerCfg.apiKey) {
-      reply.header('x-people-provider', 'primary');
+      setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.code(503).send({ error: 'people_unavailable', message: 'platform key not configured' });
     }
 
@@ -560,7 +561,7 @@ export async function peopleRoutes(app: FastifyInstance) {
       setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       return reply.send({ balance: r.data.balance });
     } catch (err) {
-      reply.header('x-people-provider', 'primary');
+      setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
       if (sendPeopleError(err, reply)) return;
       throw err;
     }

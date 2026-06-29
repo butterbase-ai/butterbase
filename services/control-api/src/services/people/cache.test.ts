@@ -68,35 +68,35 @@ describe('lookupCachedProfile', () => {
 describe('writeCachedProfile', () => {
   it('upserts with interval "30 days" for status=ok', async () => {
     const pool = makePool([]);
-    await writeCachedProfile(pool, APP_ID, URL, 'ok', SAMPLE_PAYLOAD);
+    await writeCachedProfile(pool, APP_ID, URL, 'ok', SAMPLE_PAYLOAD, 'primary');
     expect(pool.query).toHaveBeenCalledWith(
       expect.stringContaining("interval '30 days'"),
-      [APP_ID, URL, 'ok', SAMPLE_PAYLOAD],
+      [APP_ID, URL, 'ok', SAMPLE_PAYLOAD, 'primary'],
     );
   });
 
   it('upserts with interval "7 days" for status=not_found', async () => {
     const pool = makePool([]);
-    await writeCachedProfile(pool, APP_ID, URL, 'not_found', null);
+    await writeCachedProfile(pool, APP_ID, URL, 'not_found', null, 'primary');
     expect(pool.query).toHaveBeenCalledWith(
       expect.stringContaining("interval '7 days'"),
-      [APP_ID, URL, 'not_found', null],
+      [APP_ID, URL, 'not_found', null, 'primary'],
     );
   });
 
   it('upserts with interval "1 hours" for status=failed', async () => {
     const pool = makePool([]);
-    await writeCachedProfile(pool, APP_ID, URL, 'failed', null);
+    await writeCachedProfile(pool, APP_ID, URL, 'failed', null, 'primary');
     expect(pool.query).toHaveBeenCalledWith(
       expect.stringContaining("interval '1 hours'"),
-      [APP_ID, URL, 'failed', null],
+      [APP_ID, URL, 'failed', null, 'primary'],
     );
   });
 
   it('uses ON CONFLICT upsert semantics — second call overwrites', async () => {
     const pool = makePool([]);
-    await writeCachedProfile(pool, APP_ID, URL, 'ok', SAMPLE_PAYLOAD);
-    await writeCachedProfile(pool, APP_ID, URL, 'not_found', null);
+    await writeCachedProfile(pool, APP_ID, URL, 'ok', SAMPLE_PAYLOAD, 'primary');
+    await writeCachedProfile(pool, APP_ID, URL, 'not_found', null, 'primary');
     expect(pool.query).toHaveBeenCalledTimes(2);
     // Both calls should use the UPSERT ON CONFLICT clause
     const calls = (pool.query as ReturnType<typeof vi.fn>).mock.calls;

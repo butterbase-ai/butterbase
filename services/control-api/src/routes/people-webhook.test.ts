@@ -32,7 +32,7 @@ vi.mock('../config.js', () => ({
         primary: {
           apiKey: 'platform-key',
           baseUrl: '',
-          creditCostHeader: 'x-enrichlayer-credit-cost',
+          creditCostHeader: 'x-cost',
           authScheme: 'bearer',
           baseUsdPerCredit: 0.0168,
           markupPct: 20,
@@ -78,6 +78,7 @@ const SAMPLE_LOOKUP_ROW = {
   app_id: APP_ID,
   user_id: USER_ID,
   normalized_url: NORMALIZED_URL,
+  provider_slot: 'primary',
 };
 
 // ── Pool factory ──────────────────────────────────────────────────────────────
@@ -100,14 +101,10 @@ function makeRuntimePool({
       if (findRow === null) return Promise.resolve({ rows: [], rowCount: 0 });
       return Promise.resolve({ rows: [findRow], rowCount: 1 });
     }
-    // Atomic claim update (first UPDATE — transitions status)
+    // Atomic claim update (single UPDATE — transitions status and sets credits_consumed)
     if (sql.startsWith('UPDATE') && sql.includes("status = 'pending'")) {
       if (failClaim) return Promise.reject(new Error('DB claim error'));
       return Promise.resolve({ rows: claimRows, rowCount: claimRows.length });
-    }
-    // Credit count update (second UPDATE — sets credits_consumed)
-    if (sql.startsWith('UPDATE') && sql.includes('credits_consumed')) {
-      return Promise.resolve({ rows: [], rowCount: 1 });
     }
     // Audit log insert (or any other query)
     return Promise.resolve({ rows: [], rowCount: 0 });
@@ -286,9 +283,6 @@ describe('POST /v1/webhooks/people/email', () => {
           ? [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }]
           : [];
         return Promise.resolve({ rows, rowCount: rows.length });
-      }
-      if (sql.startsWith('UPDATE') && sql.includes('credits_consumed')) {
-        return Promise.resolve({ rows: [], rowCount: 1 });
       }
       return Promise.resolve({ rows: [], rowCount: 0 });
     });
@@ -506,8 +500,8 @@ describe('POST /v1/webhooks/people/email', () => {
     }
   });
 
-  // ── Additional: x-enrichlayer-credit-cost header overrides default ─────────
-  it('x-enrichlayer-credit-cost header is used when present (slot creditCostHeader)', async () => {
+  // ── Additional: x-cost header overrides default ───────────────────────────
+  it('x-cost header is used when present (slot creditCostHeader)', async () => {
     const pool = makeRuntimePool({ claimRows: [{ status: 'resolved', key_type: 'platform', provider_slot: 'primary' }] });
     vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
     vi.mocked(deductCreditsBalance).mockResolvedValue(5 * USD_PER_CREDIT);
@@ -517,7 +511,7 @@ describe('POST /v1/webhooks/people/email', () => {
       method: 'POST',
       url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
-      headers: { 'x-enrichlayer-credit-cost': '5' },
+      headers: { 'x-cost': '5' },
     });
 
     expect(res.statusCode).toBe(200);

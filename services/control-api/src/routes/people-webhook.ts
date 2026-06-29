@@ -66,12 +66,14 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
       return reply.code(200).send({ ignored: true });
     }
 
-    // Locate the pending lookup row by nonce.
+    // Locate the pending lookup row by nonce.  Include provider_slot so we can
+    // parse the credit header before the atomic claim UPDATE.
     let lookupRow: {
       id: string;
       app_id: string;
       user_id: string;
       normalized_url: string;
+      provider_slot: string;
     } | null = null;
 
     try {
@@ -80,8 +82,9 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
         app_id: string;
         user_id: string;
         normalized_url: string;
+        provider_slot: string;
       }>(
-        `SELECT id, app_id, user_id, normalized_url
+        `SELECT id, app_id, user_id, normalized_url, provider_slot
            FROM people_email_lookups
            WHERE nonce = $1`,
         [nonce],
@@ -105,11 +108,26 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
       ((body?.result as Record<string, unknown> | null)?.email as string | null | undefined) ??
       null;
 
+    // Resolve slot and parse credit count from the inbound header BEFORE the claim
+    // UPDATE so we can write the real value in a single atomic operation.
+    const slot = (lookupRow.provider_slot as ProviderSlot) ?? 'primary';
+    const providerCfg = config.people.providers[slot];
+    const creditHeader = providerCfg?.creditCostHeader;
+    const rawHeaderCredits = creditHeader
+      ? req.headers[creditHeader.toLowerCase()]
+      : undefined;
+    const headerCredits =
+      typeof rawHeaderCredits === 'string' ? parseInt(rawHeaderCredits, 10) : NaN;
+    const credits =
+      Number.isFinite(headerCredits) && headerCredits >= 0
+        ? headerCredits
+        : (providerCfg?.fallbackCreditsPerAction ?? 1);
+
     // Atomic idempotent claim: the AND status='pending' predicate guarantees only
     // one concurrent webhook call transitions the row.  0 rows returned → already
     // claimed; return immediately without charging credits again.
-    // RETURNING key_type + provider_slot so the post-claim block can select the right
-    // provider config and skip billing for BYOK rows.
+    // credits_consumed is written with the real value in a single UPDATE.
+    // RETURNING key_type + provider_slot for use in the post-claim billing block.
     let claimed: boolean;
     let claimedRow: { status: string; key_type: string; provider_slot: string } | null = null;
     try {
@@ -118,8 +136,7 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
            SET status = $1, email = $2, credits_consumed = $3, resolved_at = now()
            WHERE id = $4 AND status = 'pending'
            RETURNING status, key_type, provider_slot`,
-        // credits placeholder; will be overwritten with the actual value below
-        [email ? 'resolved' : 'failed', email, 0, lookupRow.id],
+        [email ? 'resolved' : 'failed', email, credits, lookupRow.id],
       );
       claimed = claim.rows.length > 0;
       claimedRow = claim.rows[0] ?? null;
@@ -137,28 +154,8 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
     // Post-claim billing + audit.  If anything here throws AFTER the claim the row
     // is already resolved — we must still return 200 so People stops retrying.
     // The deferred response lets a repair job scan resolved rows with no audit entry.
+    // slot, providerCfg, and credits are already resolved above.
     try {
-      const slot = (claimedRow.provider_slot as ProviderSlot) ?? 'primary';
-      const providerCfg = config.people.providers[slot];
-
-      // Credit cost: prefer the vendor's per-slot header; fall back to slot's default.
-      const creditHeader = providerCfg?.creditCostHeader;
-      const rawHeaderCredits = creditHeader
-        ? req.headers[creditHeader.toLowerCase()]
-        : undefined;
-      const headerCredits =
-        typeof rawHeaderCredits === 'string' ? parseInt(rawHeaderCredits, 10) : NaN;
-      const credits =
-        Number.isFinite(headerCredits) && headerCredits >= 0
-          ? headerCredits
-          : (providerCfg?.fallbackCreditsPerAction ?? 1);
-
-      // Update the claim row with the actual credit count now that we know it.
-      await runtimePool.query(
-        `UPDATE people_email_lookups SET credits_consumed = $1 WHERE id = $2`,
-        [credits, lookupRow.id],
-      );
-
       const pricing = getPeoplePricing(slot);
 
       // BYOK users pay People directly; skip Butterbase credit deduction.

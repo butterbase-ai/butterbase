@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import type { ProfilePayload } from './types.js';
+import type { ProfilePayload, ProviderSlot } from './types.js';
 
 const TTL_OK_DAYS = 30;
 const TTL_NOT_FOUND_DAYS = 7;
@@ -27,6 +27,7 @@ export async function writeCachedProfile(
   normalizedUrl: string,
   status: 'ok' | 'not_found' | 'failed',
   payload: ProfilePayload | null,
+  slot: ProviderSlot,
 ): Promise<void> {
   const ttlExpr =
     status === 'ok'
@@ -35,13 +36,14 @@ export async function writeCachedProfile(
         ? `now() + interval '${TTL_NOT_FOUND_DAYS} days'`
         : `now() + interval '${TTL_FAILED_HOURS} hours'`;
   await runtime.query(
-    `INSERT INTO people_profile_cache (app_id, normalized_url, status, payload_jsonb, expires_at)
-       VALUES ($1, $2, $3, $4, ${ttlExpr})
+    `INSERT INTO people_profile_cache (app_id, normalized_url, status, payload_jsonb, expires_at, provider_slot)
+       VALUES ($1, $2, $3, $4, ${ttlExpr}, $5)
      ON CONFLICT (app_id, normalized_url) DO UPDATE
        SET status = EXCLUDED.status,
            payload_jsonb = EXCLUDED.payload_jsonb,
            fetched_at = now(),
-           expires_at = EXCLUDED.expires_at`,
-    [appId, normalizedUrl, status, payload],
+           expires_at = EXCLUDED.expires_at,
+           provider_slot = EXCLUDED.provider_slot`,
+    [appId, normalizedUrl, status, payload, slot],
   );
 }

@@ -43,7 +43,7 @@ vi.mock('../config.js', () => ({
         primary: {
           apiKey: 'platform-key',
           baseUrl: '',
-          creditCostHeader: 'x-enrichlayer-credit-cost',
+          creditCostHeader: 'x-cost',
           authScheme: 'bearer',
           baseUsdPerCredit: 0.0168,
           markupPct: 20,
@@ -287,7 +287,7 @@ describe('People routes', () => {
 
   // ── Scenario 3: profile cache miss + ok → adapter called, cache written ───
   describe('POST /v1/:appId/people/profile — cache miss ok', () => {
-    it('calls adapter, writes ok cache, charges user, sets x-people-cached=false', async () => {
+    it('calls adapter, writes ok cache (with slot), charges user, sets x-people-cached=false', async () => {
       const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter({
         getProfile: vi.fn().mockResolvedValue({
@@ -321,13 +321,14 @@ describe('People routes', () => {
       expect(res.headers['x-people-provider']).toBe('primary');
       expect(res.headers['x-people-cached']).toBe('false');
 
-      // Cache written with status='ok'
+      // Cache written with status='ok' and slot='primary'
       expect(writeCachedProfile).toHaveBeenCalledWith(
         mockRuntime,
         APP_ID,
         'https://www.linkedin.com/in/jane-doe',
         'ok',
         SAMPLE_PROFILE,
+        'primary',
       );
 
       // Charged
@@ -338,7 +339,7 @@ describe('People routes', () => {
 
   // ── Scenario 4: profile cache miss + not_found → cache written, $0 charge ─
   describe('POST /v1/:appId/people/profile — cache miss not_found', () => {
-    it('writes not_found cache, no charge', async () => {
+    it('writes not_found cache (with slot), no charge', async () => {
       const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter({
         getProfile: vi.fn().mockResolvedValue({
@@ -365,13 +366,14 @@ describe('People routes', () => {
       const body = res.json();
       expect(body.status).toBe('not_found');
 
-      // Cache written with status='not_found' (7d TTL is in writeCachedProfile)
+      // Cache written with status='not_found' and slot='primary' (7d TTL is in writeCachedProfile)
       expect(writeCachedProfile).toHaveBeenCalledWith(
         mockRuntime,
         APP_ID,
         'https://www.linkedin.com/in/jane-doe',
         'not_found',
         null,
+        'primary',
       );
 
       // No charge when creditsConsumed=0
@@ -398,8 +400,11 @@ describe('People routes', () => {
       expect(res.statusCode).toBe(402);
       expect(res.json()).toMatchObject({ error: 'insufficient_credits' });
 
-      // x-people-provider set even on 402
+      // x-people-* headers present on 402 (all zero for non-success paths)
       expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-credits-consumed']).toBe('0');
+      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
+      expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // Adapter NOT called
       expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
@@ -518,8 +523,11 @@ describe('People routes', () => {
       expect(res.statusCode).toBe(503);
       expect(res.json()).toMatchObject({ error: 'people_unavailable' });
 
-      // x-people-provider set even on 503
+      // x-people-* headers present on 503 (all zero for non-success paths)
       expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-credits-consumed']).toBe('0');
+      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
+      expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // No INSERT into people_email_lookups
       const insertCall = mockRuntime.query.mock.calls.find(
@@ -591,8 +599,11 @@ describe('People routes', () => {
 
       expect(res.statusCode).toBe(502);
 
-      // x-people-provider set even on error
+      // x-people-* headers present on error paths (all zero)
       expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-credits-consumed']).toBe('0');
+      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
+      expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // Audit row written with action='search_person_error', zero financials
       const auditCall = mockRuntime.query.mock.calls.find(
@@ -670,8 +681,11 @@ describe('People routes', () => {
       expect(body.error).toBe('provider_action_unsupported');
       expect(body.slot).toBe('primary'); // resolved slot from config.people.routing (empty → primary)
 
-      // x-people-provider set on 503
+      // x-people-* headers present on 503 (all zero for non-success paths)
       expect(res.headers['x-people-provider']).toBe('primary');
+      expect(res.headers['x-people-credits-consumed']).toBe('0');
+      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
+      expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // Adapter was called (the error came FROM the adapter)
       expect(mockAdapter.searchPerson).toHaveBeenCalledOnce();
