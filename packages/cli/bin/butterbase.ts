@@ -746,6 +746,10 @@ domains
   .command('add <hostname>')
   .description('Add a custom domain')
   .option('--app <app-id>', 'App ID')
+  .option(
+    '--validation-method <method>',
+    'SSL validation method: "http" (default) or "txt". Use "txt" for apex domains on Cloudflare.',
+  )
   .action(domainsAddCommand);
 
 domains

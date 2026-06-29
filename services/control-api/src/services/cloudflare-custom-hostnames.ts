@@ -62,12 +62,27 @@ interface CfResponse<T> {
   result: T;
 }
 
+export type SslValidationMethod = 'http' | 'txt';
+
 /**
  * Create a custom hostname on the zone via Cloudflare for SaaS.
- * SSL method defaults to 'http' (DCV over HTTP).
+ *
+ * `validationMethod` picks the SSL DCV method:
+ *   - 'http' (default): Cloudflare validates by serving a challenge from our SaaS zone.
+ *     Convenient — customer adds nothing — but fails when the customer's zone is
+ *     Cloudflare-proxied (orange cloud) because their CF intercepts the challenge,
+ *     and is also impossible for apex hostnames on CF-hosted zones (CNAME flattening
+ *     hides the CNAME from CF for SaaS).
+ *   - 'txt': Cloudflare issues a TXT record the customer drops in their DNS. Works
+ *     unconditionally, including apex + CF-proxied zones. This is the method to use
+ *     for any apex domain whose DNS is on Cloudflare.
+ *
  * Handles 409 (already exists) idempotently.
  */
-export async function createCustomHostname(hostname: string): Promise<CustomHostnameResult> {
+export async function createCustomHostname(
+  hostname: string,
+  validationMethod: SslValidationMethod = 'http',
+): Promise<CustomHostnameResult> {
   if (!config.cloudflare.zoneId) {
     throw new CustomHostnameError('Cloudflare zone ID not configured', 'MISSING_ZONE_ID');
   }
@@ -75,7 +90,7 @@ export async function createCustomHostname(hostname: string): Promise<CustomHost
   const body = {
     hostname,
     ssl: {
-      method: 'http',
+      method: validationMethod,
       type: 'dv',
       settings: {
         min_tls_version: '1.2',
@@ -199,7 +214,10 @@ export async function deleteCustomHostname(customHostnameId: string): Promise<vo
  * Re-trigger validation for a custom hostname by PATCHing it.
  * This causes Cloudflare to re-check ownership and SSL status.
  */
-export async function refreshCustomHostname(customHostnameId: string): Promise<CustomHostnameResult> {
+export async function refreshCustomHostname(
+  customHostnameId: string,
+  validationMethod: SslValidationMethod = 'http',
+): Promise<CustomHostnameResult> {
   if (!config.cloudflare.zoneId) {
     throw new CustomHostnameError('Cloudflare zone ID not configured', 'MISSING_ZONE_ID');
   }
@@ -209,7 +227,7 @@ export async function refreshCustomHostname(customHostnameId: string): Promise<C
     headers: getHeaders(),
     body: JSON.stringify({
       ssl: {
-        method: 'http',
+        method: validationMethod,
         type: 'dv',
       },
     }),

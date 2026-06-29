@@ -34,6 +34,11 @@ const addDomainSchema = z.object({
     .refine((h) => /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(h), {
       message: 'Hostname contains invalid characters',
     }),
+  // 'http' (default): CF auto-validates via an HTTP challenge served from our zone.
+  // 'txt': CF emits a TXT record the customer drops in their DNS. Required for any
+  // apex domain whose DNS is on Cloudflare (CNAME flattening + orange-cloud intercept
+  // make HTTP DCV impossible there); also works in every other case.
+  validation_method: z.enum(['http', 'txt']).optional().default('http'),
 });
 
 const CNAME_TARGET = config.cloudflare.customHostnameFallbackOrigin;
@@ -89,7 +94,7 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
     }
 
     const body = addDomainSchema.parse(request.body);
-    const { hostname } = body;
+    const { hostname, validation_method } = body;
 
     // Check hostname uniqueness in our DB — app_custom_domains is a runtime table
     const existing = await runtimeDb.query(
@@ -112,7 +117,7 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
     // Create custom hostname in Cloudflare
     let cfResult: CustomHostnames.CustomHostnameResult;
     try {
-      cfResult = await CustomHostnames.createCustomHostname(hostname);
+      cfResult = await CustomHostnames.createCustomHostname(hostname, validation_method);
     } catch (error) {
       if (isHttpError(error)) throw error;
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -164,10 +169,36 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
       success: true,
     });
 
+    const txtValidationRecord = cfResult.ssl?.validation_records?.find(
+      (r) => r.txt_name && r.txt_value,
+    );
+    const instructions =
+      validation_method === 'txt'
+        ? [
+            `Add the following records at your DNS provider:`,
+            ``,
+            `  1. CNAME (routing):`,
+            `       ${hostname}  CNAME  ${CNAME_TARGET}`,
+            `     If apex on Cloudflare, an "A/AAAA" or "CNAME flattened" record at the root is fine; the TXT below is what authorizes the cert.`,
+            ``,
+            txtValidationRecord
+              ? `  2. TXT (SSL validation):\n       ${txtValidationRecord.txt_name}  TXT  ${txtValidationRecord.txt_value}`
+              : `  2. TXT (SSL validation): Cloudflare will issue the TXT record details on the status endpoint shortly — call GET /v1/${appId}/custom-domains/${insertResult.rows[0].id}/status to fetch them.`,
+            cfResult.ownership_verification
+              ? `\n  3. Ownership TXT (Cloudflare-proxied zones only):\n       ${cfResult.ownership_verification.name}  ${cfResult.ownership_verification.type.toUpperCase()}  ${cfResult.ownership_verification.value}`
+              : ``,
+            ``,
+            `TXT validation works in every case, including apex domains on a Cloudflare-proxied zone.`,
+          ].join('\n')
+        : `Add a CNAME record at your DNS provider:\n  ${hostname}  CNAME  ${CNAME_TARGET}\n\nIf your DNS is managed by Cloudflare, set the record to DNS-only (grey cloud, not proxied).\nCloudflare will automatically validate ownership and issue an SSL certificate once the CNAME is active.\n\nNote: HTTP validation does NOT work for apex domains whose DNS is on Cloudflare. For that case, re-add the domain with validation_method: "txt".`;
+
     return reply.status(201).send({
       domain: insertResult.rows[0],
       cname_target: CNAME_TARGET,
-      instructions: `Add a CNAME record at your DNS provider:\n  ${hostname}  CNAME  ${CNAME_TARGET}\n\nIf your DNS is managed by Cloudflare, set the record to DNS-only (grey cloud, not proxied).\nCloudflare will automatically validate ownership and issue an SSL certificate once the CNAME is active.`,
+      validation_method,
+      verification_records: cfResult.ssl?.validation_records ?? [],
+      ownership_verification: cfResult.ownership_verification ?? null,
+      instructions,
     });
   });
 
@@ -292,7 +323,22 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
     }
 
     try {
-      const cfResult = await CustomHostnames.refreshCustomHostname(domain.cf_custom_hostname_id);
+      // Preserve the SSL method the customer originally chose (http vs txt).
+      // Fetching first costs one extra GET but avoids silently downgrading a
+      // txt-validated domain back to http on every refresh.
+      let currentMethod: CustomHostnames.SslValidationMethod = 'http';
+      try {
+        const current = await CustomHostnames.getCustomHostname(domain.cf_custom_hostname_id);
+        if (current.ssl?.method === 'txt' || current.ssl?.method === 'http') {
+          currentMethod = current.ssl.method;
+        }
+      } catch {
+        // Fall through with default 'http' — refresh will re-error and surface to caller.
+      }
+      const cfResult = await CustomHostnames.refreshCustomHostname(
+        domain.cf_custom_hostname_id,
+        currentMethod,
+      );
 
       // app_custom_domains is a runtime table
       await runtimeDb.query(

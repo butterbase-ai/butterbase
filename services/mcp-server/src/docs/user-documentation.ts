@@ -1678,31 +1678,50 @@ manage_frontend({ app_id: "app_abc123", action: "configure_custom_domain", domai
 POST /v1/{app_id}/custom-domains
 Authorization: Bearer {token}
 
-{ "hostname": "app.example.com" }
+{ "hostname": "app.example.com", "validation_method": "http" }
 \`\`\`
 
-Response includes a \`cname_target\` and setup instructions.
+Response includes a \`cname_target\`, the chosen \`validation_method\`, verification records, and setup instructions.
+
+#### Choosing a validation method
+
+\`validation_method\` controls how Cloudflare proves ownership and issues the SSL certificate.
+
+- **\`"http"\`** (default) \u2014 Cloudflare serves an HTTP challenge from our zone; the customer adds nothing besides the routing CNAME. Convenient, but **does not work** when the customer's DNS is on a Cloudflare-proxied zone \u2014 orange-cloud intercept blocks the challenge \u2014 and is **impossible for apex hostnames on Cloudflare-hosted zones** (CNAME flattening hides the record from CF for SaaS).
+- **\`"txt"\`** \u2014 Cloudflare emits a TXT record the customer drops in their DNS. Works in **every** scenario, including \`example.com\` (apex) on a Cloudflare-proxied zone. Required when the customer's DNS provider is Cloudflare and the hostname is the apex.
+
+Pick \`"txt"\` whenever the target hostname is an apex on a Cloudflare-hosted zone. Pick \`"http"\` for subdomains or non-Cloudflare DNS where convenience matters.
 
 #### Verification flow
 
+**HTTP method (default):**
 1. Add your domain via the API, MCP tool, CLI, or dashboard
-2. Add a CNAME record at your DNS provider: \`app.example.com \u2192 butterbase.dev\`
+2. Add a CNAME at your DNS provider: \`app.example.com \u2192 butterbase.dev\`
    - **If your DNS is on Cloudflare:** set the record to **DNS-only (grey cloud)**. Proxied (orange cloud) CNAMEs between different Cloudflare accounts produce Error 1014 and will not work.
 3. Cloudflare validates ownership and issues an SSL certificate automatically
 4. Check progress via the status endpoint (typically 5\u201315 minutes)
 5. Once \`status\` is \`"active"\` and \`ssl_status\` is \`"active"\`, the domain is live
 
+**TXT method (required for apex on Cloudflare):**
+1. Add the domain with \`validation_method: "txt"\`
+2. Point the hostname at us in DNS \u2014 a CNAME (\`app.example.com \u2192 butterbase.dev\`), or for an apex, whatever record your provider uses (CF's flattened CNAME at the root is fine)
+3. Add the SSL TXT record from \`verification_records[].txt_name\` / \`txt_value\` in the response
+4. If \`ownership_verification\` is also returned (Cloudflare-proxied zones), add that record too
+5. Poll the status endpoint; once \`ssl_status\` is \`"active"\`, the domain is live
+
 #### Managing domains
 
 | Method | Path / MCP Action | Purpose |
 |--------|-------------------|---------|
-| POST | /v1/{app_id}/custom-domains | Add a custom domain |
+| POST | /v1/{app_id}/custom-domains | Add a custom domain (accepts \`validation_method\`) |
 | GET | /v1/{app_id}/custom-domains | List all custom domains |
 | GET | /v1/{app_id}/custom-domains/{id}/status | Check verification/SSL status |
-| POST | /v1/{app_id}/custom-domains/{id}/verify | Re-trigger verification |
+| POST | /v1/{app_id}/custom-domains/{id}/verify | Re-trigger verification (preserves the original \`validation_method\`) |
 | DELETE | /v1/{app_id}/custom-domains/{id} | Remove a custom domain |
 
-**Apex domains:** For \`example.com\` (no subdomain), your DNS provider must support CNAME flattening (e.g., Cloudflare DNS). Otherwise, use \`www.example.com\` and set up a redirect from the apex.
+**Apex domains:** For \`example.com\` (no subdomain) on **Cloudflare DNS**, use \`validation_method: "txt"\` \u2014 HTTP DCV cannot work there. For apex on a non-Cloudflare provider, CNAME flattening with \`"http"\` works; otherwise use \`www.example.com\` and redirect the apex to it at your DNS edge.
+
+**Canonical \`www\` vs apex:** Butterbase does **not** force a www\u2194apex redirect on customer domains. Either variant can be canonical \u2014 set up the canonical one as a custom domain and the other as a DNS-level redirect at your provider.
 `,
 
   ai: `## AI Model Gateway
