@@ -19,7 +19,8 @@ export type MeterType =
   | 'do_cpu_ms'
   | 'do_storage_gb_seconds'
   | 'kv_ops'
-  | 'kv_storage_bytes';
+  | 'kv_storage_bytes'
+  | 'enrichlayer_credits';
 
 
 export class UsageMeteringError extends Error {
