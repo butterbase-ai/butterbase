@@ -103,3 +103,15 @@ export class PeopleError extends Error {
     this.name = 'PeopleError';
   }
 }
+
+export type ProviderSlot = 'primary' | 'secondary';
+
+export class PeopleProviderError extends Error {
+  constructor(
+    public readonly code: 'action_unsupported_by_slot' | 'provider_not_registered',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'PeopleProviderError';
+  }
+}

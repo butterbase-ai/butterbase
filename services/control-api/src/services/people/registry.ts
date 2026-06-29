@@ -1,11 +1,19 @@
-import type { PeopleAdapter } from './types.js';
+import type { PeopleAdapter, ProviderSlot } from './types.js';
 
-let adapter: PeopleAdapter | null = null;
+const adapters = new Map<ProviderSlot, PeopleAdapter>();
 
-export function setPeopleAdapter(a: PeopleAdapter | null): void {
-  adapter = a;
+export function registerPeopleAdapter(slot: ProviderSlot, adapter: PeopleAdapter): void {
+  adapters.set(slot, adapter);
 }
 
-export function getPeopleAdapter(): PeopleAdapter | null {
-  return adapter;
+export function unregisterPeopleAdapter(slot: ProviderSlot): void {
+  adapters.delete(slot);
+}
+
+export function getPeopleAdapter(slot: ProviderSlot): PeopleAdapter | null {
+  return adapters.get(slot) ?? null;
+}
+
+export function listRegisteredSlots(): ProviderSlot[] {
+  return Array.from(adapters.keys()).sort();
 }

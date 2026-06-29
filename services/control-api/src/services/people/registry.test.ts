@@ -1,17 +1,29 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { setPeopleAdapter, getPeopleAdapter } from './registry.js';
+import { registerPeopleAdapter, getPeopleAdapter, unregisterPeopleAdapter, listRegisteredSlots } from './registry.js';
 import type { PeopleAdapter } from './types.js';
 
 describe('people registry', () => {
-  beforeEach(() => setPeopleAdapter(null as unknown as PeopleAdapter));
+  beforeEach(() => { unregisterPeopleAdapter('primary'); unregisterPeopleAdapter('secondary'); });
 
-  it('returns null when no adapter is registered', () => {
-    expect(getPeopleAdapter()).toBeNull();
+  it('returns null when slot is empty', () => {
+    expect(getPeopleAdapter('primary')).toBeNull();
+    expect(getPeopleAdapter('secondary')).toBeNull();
   });
 
-  it('returns the registered adapter', () => {
-    const stub = { searchPerson: async () => ({ data: { results: [] }, creditsConsumed: 0, requestId: null, status: 200, notFound: false }) } as PeopleAdapter;
-    setPeopleAdapter(stub);
-    expect(getPeopleAdapter()).toBe(stub);
+  it('registers and retrieves by slot', () => {
+    const a = { searchPerson: async () => ({ data: { results: [], nextPage: null, totalResultCount: 0 }, creditsConsumed: 0, requestId: null, status: 200 }) } as PeopleAdapter;
+    const b = { searchPerson: async () => ({ data: { results: [], nextPage: null, totalResultCount: 0 }, creditsConsumed: 0, requestId: null, status: 200 }) } as PeopleAdapter;
+    registerPeopleAdapter('primary', a);
+    registerPeopleAdapter('secondary', b);
+    expect(getPeopleAdapter('primary')).toBe(a);
+    expect(getPeopleAdapter('secondary')).toBe(b);
+    expect(listRegisteredSlots()).toEqual(['primary', 'secondary']);
+  });
+
+  it('unregister removes', () => {
+    const a = { searchPerson: async () => ({}) } as unknown as PeopleAdapter;
+    registerPeopleAdapter('primary', a);
+    unregisterPeopleAdapter('primary');
+    expect(getPeopleAdapter('primary')).toBeNull();
   });
 });
