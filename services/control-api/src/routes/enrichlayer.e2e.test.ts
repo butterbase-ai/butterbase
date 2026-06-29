@@ -99,10 +99,6 @@ const SAMPLE_PROFILE: ProfilePayload = {
 // Create tables IF NOT EXISTS with minimal schema compatible with the route code.
 // We omit FK constraints across control/runtime boundary — in production these
 // live in separate databases so no cross-DB FK exists anyway.
-// Note: enrichlayer_usage_logs has both "status" (used by the sync route) and
-// "response_status" (used by the webhook route) because of a column-name mismatch
-// between enrichlayer.ts writeAuditRow and enrichlayer-webhook.ts. Both columns
-// are nullable so either INSERT succeeds without the other column present.
 
 const DDL = `
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -167,7 +163,6 @@ CREATE TABLE IF NOT EXISTS enrichlayer_usage_logs (
   usd_charged      NUMERIC(10,6) NOT NULL DEFAULT 0,
   key_type         TEXT NOT NULL DEFAULT 'platform',
   request_id       TEXT,
-  status           INTEGER,
   response_status  INTEGER,
   linkedin_url     TEXT,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()

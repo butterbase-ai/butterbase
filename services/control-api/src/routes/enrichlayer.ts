@@ -97,7 +97,7 @@ interface AuditParams {
 async function writeAuditRow(runtime: pg.Pool, p: AuditParams): Promise<void> {
   await runtime.query(
     `INSERT INTO enrichlayer_usage_logs
-       (app_id, user_id, action, credits_consumed, usd_cost, usd_charged, key_type, request_id, status, linkedin_url)
+       (app_id, user_id, action, credits_consumed, usd_cost, usd_charged, key_type, request_id, response_status, linkedin_url)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
       p.appId, p.userId, p.action,

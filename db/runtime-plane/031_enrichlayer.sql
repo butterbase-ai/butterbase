@@ -2,7 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS enrichlayer_usage_logs (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_id          uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  app_id          text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   user_id         uuid NOT NULL,
   action          text NOT NULL,
   credits_consumed integer NOT NULL DEFAULT 0,
@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_el_usage_user_created ON enrichlayer_usage_logs (
 
 CREATE TABLE IF NOT EXISTS enrichlayer_profile_cache (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_id         uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  app_id         text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   normalized_url text NOT NULL,
   status         text NOT NULL CHECK (status IN ('ok','not_found','failed')),
   payload_jsonb  jsonb,
@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_el_cache_expires ON enrichlayer_profile_cache (ex
 
 CREATE TABLE IF NOT EXISTS enrichlayer_email_lookups (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_id          uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  app_id          text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   user_id         uuid NOT NULL,
   normalized_url  text NOT NULL,
   nonce           text NOT NULL UNIQUE,
