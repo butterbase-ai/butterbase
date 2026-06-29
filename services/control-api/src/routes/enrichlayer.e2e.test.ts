@@ -49,6 +49,7 @@ vi.mock('../services/redis.js', () => ({
 vi.mock('../config.js', () => ({
   config: {
     enrichlayer: {
+      enabled: true,
       apiKey: 'platform-key',
       minBalanceUsd: 0.01,
       webhookHostUrl: 'https://test.local',

@@ -30,6 +30,10 @@ import { config } from '../config.js';
 
 export async function enrichLayerWebhookRoutes(app: FastifyInstance) {
   app.post('/v1/webhooks/enrichlayer/email', async (req, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(200).send({ ignored: true });  // EnrichLayer must see 200s
+    }
+
     // Missing nonce → nothing to do, stop EnrichLayer retries immediately.
     const nonce = ((req.query as Record<string, unknown>)?.nonce as string | undefined)?.trim();
     if (!nonce) {

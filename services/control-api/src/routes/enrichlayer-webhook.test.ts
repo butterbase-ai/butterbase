@@ -27,6 +27,7 @@ vi.mock('../services/enrichlayer/pricing.js', () => ({
 vi.mock('../config.js', () => ({
   config: {
     enrichlayer: {
+      enabled: true,
       emailLookupCredits: 1,
     },
   },
@@ -40,6 +41,7 @@ import { enrichLayerWebhookRoutes } from './enrichlayer-webhook.js';
 import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-registry.js';
 import { deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
 import { getEnrichLayerPricing } from '../services/enrichlayer/pricing.js';
+import { config } from '../config.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -445,6 +447,32 @@ describe('POST /v1/webhooks/enrichlayer/email', () => {
         typeof c[0] === 'string' && (c[0] as string).startsWith('UPDATE'),
     );
     expect(claimCall![1][1]).toBe('jane.nested@example.com');
+  });
+
+  // ── Feature flag disabled → 200 { ignored: true } ────────────────────────
+  it('feature flag disabled → 200 { ignored: true } (EnrichLayer must see 200s)', async () => {
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    const originalEnabled = config.enrichlayer.enabled;
+    (config.enrichlayer as any).enabled = false;
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/webhooks/enrichlayer/email?nonce=${NONCE}`,
+        payload: { email: 'jane@example.com' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ignored: true });
+
+      // No DB queries at all — flag check short-circuits before pool access
+      expect(runtimePoolFor).not.toHaveBeenCalled();
+      expect(deductCreditsBalance).not.toHaveBeenCalled();
+    } finally {
+      (config.enrichlayer as any).enabled = originalEnabled;
+    }
   });
 
   // ── Additional: x-enrichlayer-credit-cost header overrides default ─────────

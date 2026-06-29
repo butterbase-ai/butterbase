@@ -41,6 +41,7 @@ vi.mock('../services/enrichlayer/pricing.js', () => ({
 vi.mock('../config.js', () => ({
   config: {
     enrichlayer: {
+      enabled: true,
       apiKey: 'platform-key',
       minBalanceUsd: 0.05,
       webhookHostUrl: 'https://api.butterbase.ai',
@@ -59,6 +60,7 @@ import { lookupCachedProfile, writeCachedProfile } from '../services/enrichlayer
 import { decryptByok } from '../services/enrichlayer/byok-crypto.js';
 import { getCreditsBalance, deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
 import { config } from '../config.js';
+import { EnrichLayerError } from '../services/enrichlayer/types.js';
 import type { EnrichLayerAdapter, ProfilePayload } from '../services/enrichlayer/types.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -593,6 +595,119 @@ describe('EnrichLayer routes', () => {
       );
       expect(insertCall).toBeUndefined();
       expect(mockAdapter.queueEmailLookup).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Scenario 11: feature flag disabled → 503 enrichlayer_disabled ─────────
+  describe('feature flag disabled', () => {
+    it('all enrichlayer routes return 503 enrichlayer_disabled when enabled=false', async () => {
+      const mockRuntime = makeMockRuntime(null);
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+
+      const originalEnabled = config.enrichlayer.enabled;
+      (config.enrichlayer as any).enabled = false;
+
+      try {
+        const routes = [
+          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/search/person`, payload: { currentRoleTitle: 'CTO' } },
+          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/search/company`, payload: { industry: 'tech' } },
+          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/profile`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
+          { method: 'POST' as const, url: `/v1/${APP_ID}/enrichlayer/profile/email`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
+          { method: 'GET' as const, url: `/v1/${APP_ID}/enrichlayer/email-lookup/some-id` },
+          { method: 'GET' as const, url: `/v1/${APP_ID}/enrichlayer/credit-balance` },
+          { method: 'PUT' as const, url: `/v1/${APP_ID}/enrichlayer/byok`, payload: { apiKey: 'key' } },
+          { method: 'DELETE' as const, url: `/v1/${APP_ID}/enrichlayer/byok` },
+        ];
+
+        for (const route of routes) {
+          const res = await app.inject(route as any);
+          expect(res.statusCode, `${route.method} ${route.url}`).toBe(503);
+          expect(res.json(), `${route.method} ${route.url}`).toMatchObject({ error: 'enrichlayer_disabled' });
+        }
+
+        // Adapter never called when feature is disabled
+        expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
+        expect(mockAdapter.searchCompany).not.toHaveBeenCalled();
+        expect(mockAdapter.getProfile).not.toHaveBeenCalled();
+        expect(mockAdapter.queueEmailLookup).not.toHaveBeenCalled();
+      } finally {
+        (config.enrichlayer as any).enabled = originalEnabled;
+      }
+    });
+  });
+
+  // ── Scenario 12: failure-path audit row ───────────────────────────────────
+  describe('search_person adapter throw → audit row written with search_person_error', () => {
+    it('writes an audit row with action=search_person_error and zero financials on adapter throw', async () => {
+      const mockRuntime = makeMockRuntime(null);
+      const mockAdapter = makeMockAdapter({
+        searchPerson: vi.fn().mockRejectedValue(
+          new EnrichLayerError(502, 'upstream_error', 'upstream error'),
+        ),
+      });
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/enrichlayer/search/person`,
+        payload: { currentRoleTitle: 'CTO' },
+      });
+
+      expect(res.statusCode).toBe(502);
+
+      // Audit row written with action='search_person_error', zero financials
+      const auditCall = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+      );
+      expect(auditCall).toBeDefined();
+      const auditParams = auditCall![1] as unknown[];
+      expect(auditParams).toContain('search_person_error');
+      expect(auditParams).toContain(0); // creditsConsumed = 0
+      expect(auditParams).toContain(502); // responseStatus from EnrichLayerError
+    });
+  });
+
+  // ── Scenario 13: profile/email adapter throw → orphan row cleaned up ──────
+  describe('profile/email adapter throw → orphan pending row deleted', () => {
+    it('DELETEs the pending enrichlayer_email_lookups row on adapter throw', async () => {
+      const mockRuntime = makeMockRuntime(null);
+      const mockAdapter = makeMockAdapter({
+        queueEmailLookup: vi.fn().mockRejectedValue(
+          new EnrichLayerError(502, 'adapter_error', 'adapter failure'),
+        ),
+      });
+      vi.mocked(getEnrichLayerAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/enrichlayer/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      expect(res.statusCode).toBe(502);
+
+      // DELETE was called for the orphan pending row
+      const deleteCall = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string'
+          && (c[0] as string).includes('DELETE FROM enrichlayer_email_lookups'),
+      );
+      expect(deleteCall).toBeDefined();
+      const deleteParams = deleteCall![1] as unknown[];
+      expect(deleteParams[0]).toBe('lookup-abc'); // the id returned by the INSERT mock
+      expect(deleteParams[1]).toBe('pending');
+
+      // Audit row for error written
+      const auditCall = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('enrichlayer_usage_logs'),
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall![1]).toContain('profile_email_error');
     });
   });
 });

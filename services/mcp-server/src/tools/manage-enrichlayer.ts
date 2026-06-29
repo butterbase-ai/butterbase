@@ -8,10 +8,10 @@ export function registerManageEnrichlayer(server: McpServer) {
     `Use the app's EnrichLayer integration: search person/company, fetch profiles, queue email lookups, manage credits and BYOK keys.
 
 Actions:
-  - search_person       { app_id, query }
-                         Search for a person. Returns enriched person data and credit usage.
-  - search_company      { app_id, query }
-                         Search for a company. Returns enriched company data and credit usage.
+  - search_person       { app_id, current_role_title?, past_role_title?, current_company_name?, current_company_industry?, country?, region?, city?, page_size?, next_token?, enrich_profiles? }
+                         Structured-filter search for a person. Returns enriched person data and credit usage.
+  - search_company      { app_id, industry?, country?, employee_count_max?, page_size?, next_token?, enrich_profiles? }
+                         Structured-filter search for a company. Returns enriched company data and credit usage.
   - get_profile         { app_id, linkedin_profile_url, live_fetch? }
                          Fetch a full profile from a LinkedIn URL. live_fetch: "force" for live (not cached).
                          Returns cached flag and credit usage.
@@ -33,10 +33,23 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
         'search_person', 'search_company', 'get_profile', 'queue_email_lookup',
         'get_email_lookup', 'get_credit_balance', 'set_byok_key', 'clear_byok_key',
       ]).describe('The action to perform'),
-      // search_person / search_company
-      query: z.string().optional().describe('Search query (required for search_person, search_company)'),
+      // search_person fields (snake_case → camelCase body)
+      current_role_title: z.string().optional().describe('Current role/job title filter (for search_person)'),
+      past_role_title: z.string().optional().describe('Past role/job title filter (for search_person)'),
+      current_company_name: z.string().optional().describe('Current company name filter (for search_person)'),
+      current_company_industry: z.string().optional().describe('Current company industry filter (for search_person)'),
+      region: z.string().optional().describe('Region/state filter (for search_person)'),
+      city: z.string().optional().describe('City filter (for search_person)'),
+      // search_company fields
+      industry: z.string().optional().describe('Industry filter (for search_company)'),
+      employee_count_max: z.number().optional().describe('Maximum employee count filter (for search_company)'),
+      // shared search fields
+      country: z.string().optional().describe('Country filter (for search_person and search_company)'),
+      page_size: z.number().optional().describe('Number of results per page (for search_person and search_company)'),
+      next_token: z.string().optional().describe('Pagination token from a previous search response (for search_person and search_company)'),
+      enrich_profiles: z.boolean().optional().describe('Whether to enrich results with full profile data (for search_person and search_company)'),
       // get_profile
-      linkedin_profile_url: z.string().optional().describe('LinkedIn profile URL (required for get_profile, queue_email_lookup, get_email_lookup)'),
+      linkedin_profile_url: z.string().optional().describe('LinkedIn profile URL (required for get_profile and queue_email_lookup)'),
       live_fetch: z.enum(['force']).optional().describe('For get_profile: "force" to skip cache and fetch live'),
       // get_email_lookup
       id: z.string().optional().describe('Lookup ID (required for get_email_lookup)'),
@@ -56,20 +69,28 @@ This tool wraps the app's /v1/:app_id/enrichlayer/* routes (search, profile, ema
         let result: unknown;
         switch (action) {
           case 'search_person': {
-            if (!args.query) {
-              return { content: [{ type: 'text' as const, text: 'Error: "query" is required for "search_person".' }], isError: true as const };
-            }
             result = await apiPost(`/v1/${app_id}/enrichlayer/search/person`, {
-              query: args.query,
+              ...(args.current_role_title !== undefined && { currentRoleTitle: args.current_role_title }),
+              ...(args.past_role_title !== undefined && { pastRoleTitle: args.past_role_title }),
+              ...(args.current_company_name !== undefined && { currentCompanyName: args.current_company_name }),
+              ...(args.current_company_industry !== undefined && { currentCompanyIndustry: args.current_company_industry }),
+              ...(args.country !== undefined && { country: args.country }),
+              ...(args.region !== undefined && { region: args.region }),
+              ...(args.city !== undefined && { city: args.city }),
+              ...(args.page_size !== undefined && { pageSize: args.page_size }),
+              ...(args.next_token !== undefined && { nextToken: args.next_token }),
+              ...(args.enrich_profiles !== undefined && { enrichProfiles: args.enrich_profiles }),
             });
             break;
           }
           case 'search_company': {
-            if (!args.query) {
-              return { content: [{ type: 'text' as const, text: 'Error: "query" is required for "search_company".' }], isError: true as const };
-            }
             result = await apiPost(`/v1/${app_id}/enrichlayer/search/company`, {
-              query: args.query,
+              ...(args.industry !== undefined && { industry: args.industry }),
+              ...(args.country !== undefined && { country: args.country }),
+              ...(args.employee_count_max !== undefined && { employeeCountMax: args.employee_count_max }),
+              ...(args.page_size !== undefined && { pageSize: args.page_size }),
+              ...(args.next_token !== undefined && { nextToken: args.next_token }),
+              ...(args.enrich_profiles !== undefined && { enrichProfiles: args.enrich_profiles }),
             });
             break;
           }

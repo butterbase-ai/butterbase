@@ -132,6 +132,9 @@ const BYOK_DECRYPT_FAILED_REPLY = {
 export async function enrichLayerRoutes(app: FastifyInstance) {
   // ── POST /v1/:appId/enrichlayer/search/person ─────────────────────────────
   app.post('/v1/:appId/enrichlayer/search/person', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
@@ -175,6 +178,14 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
       return reply.send({ data: result.data, usage: { creditsConsumed: result.creditsConsumed, usdCost, usdCharged } });
     } catch (err) {
+      if (err instanceof EnrichLayerError) {
+        await writeAuditRow(runtime, {
+          appId, userId, action: 'search_person_error',
+          creditsConsumed: 0, usdCost: 0, usdCharged: 0,
+          keyType: resolved?.keyType ?? 'platform', requestId: null,
+          status: err.status, linkedinUrl: null,
+        }).catch(() => {});
+      }
       if (sendEnrichLayerError(err, reply)) return;
       throw err;
     }
@@ -182,6 +193,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── POST /v1/:appId/enrichlayer/search/company ────────────────────────────
   app.post('/v1/:appId/enrichlayer/search/company', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
@@ -225,6 +239,14 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
       return reply.send({ data: result.data, usage: { creditsConsumed: result.creditsConsumed, usdCost, usdCharged } });
     } catch (err) {
+      if (err instanceof EnrichLayerError) {
+        await writeAuditRow(runtime, {
+          appId, userId, action: 'search_company_error',
+          creditsConsumed: 0, usdCost: 0, usdCharged: 0,
+          keyType: resolved?.keyType ?? 'platform', requestId: null,
+          status: err.status, linkedinUrl: null,
+        }).catch(() => {});
+      }
       if (sendEnrichLayerError(err, reply)) return;
       throw err;
     }
@@ -232,6 +254,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── POST /v1/:appId/enrichlayer/profile ───────────────────────────────────
   app.post('/v1/:appId/enrichlayer/profile', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
@@ -315,6 +340,14 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
         usage: { creditsConsumed: result.creditsConsumed, usdCost, usdCharged, cached: false },
       });
     } catch (err) {
+      if (err instanceof EnrichLayerError) {
+        await writeAuditRow(runtime, {
+          appId, userId, action: 'profile_error',
+          creditsConsumed: 0, usdCost: 0, usdCharged: 0,
+          keyType: resolved?.keyType ?? 'platform', requestId: null,
+          status: err.status, linkedinUrl: normalizedUrl ?? null,
+        }).catch(() => {});
+      }
       if (sendEnrichLayerError(err, reply)) return;
       throw err;
     }
@@ -322,6 +355,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── POST /v1/:appId/enrichlayer/profile/email ─────────────────────────────
   app.post('/v1/:appId/enrichlayer/profile/email', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
@@ -360,6 +396,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
       }
     }
 
+    let lookupId: string | undefined;
     try {
       const nonce = crypto.randomBytes(32).toString('hex');
 
@@ -370,7 +407,7 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
          VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING id`,
         [appId, userId, normalizedUrl, nonce, resolved.keyType],
       );
-      const lookupId = lookupRow.rows[0].id;
+      lookupId = lookupRow.rows[0].id;
 
       const callbackUrl = `${config.enrichlayer.webhookHostUrl}/v1/webhooks/enrichlayer/email?nonce=${nonce}`;
       const result = await adapter.queueEmailLookup(
@@ -396,6 +433,21 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
       return reply.send({ lookupId, status: 'pending', usage: { creditsConsumed: result.creditsConsumed } });
     } catch (err) {
+      // Clean up the orphan pending row on adapter failure.
+      if (lookupId) {
+        await runtime.query(
+          'DELETE FROM enrichlayer_email_lookups WHERE id = $1 AND status = $2',
+          [lookupId, 'pending'],
+        ).catch(() => {});  // swallow — don't mask original error
+      }
+      if (err instanceof EnrichLayerError) {
+        await writeAuditRow(runtime, {
+          appId, userId, action: 'profile_email_error',
+          creditsConsumed: 0, usdCost: 0, usdCharged: 0,
+          keyType: resolved?.keyType ?? 'platform', requestId: null,
+          status: err.status, linkedinUrl: normalizedUrl ?? null,
+        }).catch(() => {});
+      }
       if (sendEnrichLayerError(err, reply)) return;
       throw err;
     }
@@ -403,6 +455,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── GET /v1/:appId/enrichlayer/email-lookup/:id ──────────────────────────
   app.get('/v1/:appId/enrichlayer/email-lookup/:id', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const userId = requireUserId(request);
     const { appId, id } = request.params as { appId: string; id: string };
 
@@ -434,6 +489,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── GET /v1/:appId/enrichlayer/credit-balance ─────────────────────────────
   app.get('/v1/:appId/enrichlayer/credit-balance', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const userId = requireUserId(request);
     const { appId } = request.params as { appId: string };
 
@@ -460,6 +518,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── PUT /v1/:appId/enrichlayer/byok ───────────────────────────────────────
   app.put('/v1/:appId/enrichlayer/byok', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 
@@ -484,6 +545,9 @@ export async function enrichLayerRoutes(app: FastifyInstance) {
 
   // ── DELETE /v1/:appId/enrichlayer/byok ────────────────────────────────────
   app.delete('/v1/:appId/enrichlayer/byok', async (request, reply) => {
+    if (!config.enrichlayer.enabled) {
+      return reply.code(503).send({ error: 'enrichlayer_disabled', message: 'EnrichLayer integration is not enabled on this deployment' });
+    }
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
 

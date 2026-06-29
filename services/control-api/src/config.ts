@@ -87,6 +87,7 @@ export const config = {
   },
 
   enrichlayer: {
+    enabled: process.env.ENRICHLAYER_ENABLED === 'true',
     apiKey: process.env.ENRICHLAYER_API_KEY ?? '',
     baseUrl: process.env.ENRICHLAYER_BASE_URL ?? 'https://enrichlayer.com/api/v2',
     fallbackCreditsPerAction: parseInt(process.env.ENRICHLAYER_FALLBACK_CREDITS_PER_ACTION ?? '3', 10),
