@@ -1,3 +1,4 @@
+-- @scope: runtime
 -- 031_enrichlayer.sql — EnrichLayer managed-integration tables.
 
 CREATE TABLE IF NOT EXISTS enrichlayer_usage_logs (

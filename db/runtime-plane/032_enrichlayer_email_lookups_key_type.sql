@@ -1,3 +1,4 @@
+-- @scope: runtime
 -- 032_enrichlayer_email_lookups_key_type.sql
 -- Add key_type to enrichlayer_email_lookups so the async-email webhook can
 -- distinguish BYOK requests (skip Butterbase billing — already billed at vendor)
