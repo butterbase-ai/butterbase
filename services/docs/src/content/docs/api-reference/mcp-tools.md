@@ -226,7 +226,7 @@ Costs vary by which provider the operator routes the action to. Numbers below ar
 - `insufficient_credits` (402) — user's Butterbase balance is below the minimum gate ($0.05 default). No provider call is made.
 - `forbidden` (403) — authed user doesn't own the app.
 - `people_disabled` (503) — feature flag is off on this deployment.
-- `people_unavailable` (503) — platform key not configured or `PEOPLE_WEBHOOK_HOST_URL` missing for async email.
+- `people_unavailable` (503) — feature not enabled or required platform configuration missing on this deployment.
 - `provider_not_registered` (503) — operator misconfiguration; no provider configured for the slot this action routed to.
 - `provider_action_unsupported` (503) — operator misconfiguration; the configured provider for this slot doesn't support this action.
 

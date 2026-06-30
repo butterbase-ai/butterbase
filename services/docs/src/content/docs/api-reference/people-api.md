@@ -49,18 +49,7 @@ Costs vary by which provider the operator routes the action to. Numbers below ar
 | Email lookup resolved (provider webhook) | 1 | $0.020 | Charged when the async result arrives |
 | Empty result set | 0 | $0 | Never billed |
 
-Costs are routed per provider slot (primary or secondary). The platform operator configures each slot's pricing independently via:
-- `PEOPLE_PROVIDER_<SLOT>_BASE_USD_PER_CREDIT` — wholesale cost
-- `PEOPLE_PROVIDER_<SLOT>_MARKUP_PCT` — platform margin
-
-Action routing is controlled by one env var per action; each defaults to `primary` if unset:
-
-| Var | Action |
-|---|---|
-| `PEOPLE_ROUTE_SEARCH_PERSON` | `POST /people/search/person` |
-| `PEOPLE_ROUTE_SEARCH_COMPANY` | `POST /people/search/company` |
-| `PEOPLE_ROUTE_GET_PROFILE` | `POST /people/profile` |
-| `PEOPLE_ROUTE_QUEUE_EMAIL_LOOKUP` | `POST /people/profile/email` |
+Costs vary by deployment — each platform operator configures pricing and routing independently. The actual credit count and USD cost for any individual call is always reported in the `x-people-*` response headers and the `usage` field of the body, so client code never needs to guess. Treat the numbers in the table above as typical defaults, not contractual values.
 
 ## Authentication
 
@@ -155,7 +144,7 @@ Not every field is guaranteed for every result — providers vary in what they e
 | 402 | `{ "error": "insufficient_credits" }` | User's total Butterbase credit balance is below the minimum gate (default $0.05). No provider call is made. |
 | 403 | `{ "error": "forbidden" }` | Authed user doesn't own the app. |
 | 404 | `{ "error": "app_not_found" }` | No app with that ID. |
-| 502 | `{ "error": "people_5xx" }` | The configured provider returned a 5xx. |
+| 502 | The configured search/enrichment provider returned an upstream error. Body contains a transient error description — don't machine-parse; treat as retryable. |
 | 503 | `{ "error": "people_disabled" }` | Feature flag is off on this deployment. |
 | 503 | `{ "error": "people_unavailable" }` | No provider registered for this deployment. |
 | 503 | `{ "error": "provider_not_registered", "slot": "primary" }` | Operator misconfiguration; no provider configured for the slot this action routed to. |
@@ -165,6 +154,7 @@ Not every field is guaranteed for every result — providers vary in what they e
 
 ```
 POST /v1/{app_id}/people/search/company
+Authorization: Bearer {token}
 Content-Type: application/json
 
 {
@@ -208,6 +198,7 @@ Same error table as `search/person` above.
 
 ```
 POST /v1/{app_id}/people/profile
+Authorization: Bearer {token}
 Content-Type: application/json
 
 {
@@ -271,12 +262,17 @@ The first call against a given normalized URL hits the configured profile provid
 }
 ```
 
+### Errors
+
+Error codes: same as [Search people](#search-people).
+
 ## Queue an async work-email lookup
 
 Work-email lookups are asynchronous — the platform queues the request and waits for a provider webhook callback.
 
 ```
 POST /v1/{app_id}/people/profile/email
+Authorization: Bearer {token}
 Content-Type: application/json
 
 {
@@ -296,6 +292,10 @@ Content-Type: application/json
 
 Save the `lookupId` and poll `GET /email-lookup/{lookup_id}` until `status === "resolved"`.
 
+### Errors
+
+Error codes: same as [Search people](#search-people).
+
 ## Poll an email lookup
 
 ```
@@ -312,6 +312,10 @@ Authorization: Bearer {token}
 ```
 
 `email` is populated once the webhook fires. `credits_consumed` is the total billed across the queue + resolve flow.
+
+### Errors
+
+Error codes: same as [Search people](#search-people).
 
 ## Audit trail
 
@@ -333,5 +337,4 @@ Query directly via `manage_data` / `select_rows` MCP tools for usage analytics i
 
 - Searches return 0 credits charged when there are 0 results.
 - Cache hits don't count against the credit balance.
-- `profile/email` returns 503 if `PEOPLE_WEBHOOK_HOST_URL` isn't configured — async lookups can't deliver without a public callback URL.
-- The webhook receiver at `POST /v1/webhooks/people/email?nonce=...` is unauthenticated by design; the 32-byte nonce serves as the auth gate. The provider's callback domain should be allow-listed at the load-balancer for defense in depth.
+- `profile/email` returns 503 if async email lookups aren't enabled on this deployment. Async email lookups resolve over time. The platform handles vendor callbacks server-side; poll the `GET /people/email-lookup/{id}` endpoint to check status.

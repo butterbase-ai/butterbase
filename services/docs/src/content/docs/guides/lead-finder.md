@@ -224,7 +224,7 @@ Every call writes a `people_usage_logs` row — query directly with `select_rows
 ## Limits & gotchas
 
 - **Insufficient credits → HTTP 402** if your Butterbase balance is below `$0.05`. Refill via the Billing page.
-- **`page_size` is capped at 100** in the adapter (vendor limit).
+- **`page_size` is capped at 100** in the adapter (provider limit).
 - **Cache is per-app.** Two apps that both look up the same LinkedIn URL each pay once. There's no cross-app cache.
 - **The cache key is the *normalized* URL** — lowercased, query/hash-stripped. `linkedin.com/in/Jane?utm=foo` and `LinkedIn.com/in/jane/` hit the same cache row.
 - **Profile data lags reality.** Job changes can take weeks to reflect. Treat profile data as eventually consistent.
