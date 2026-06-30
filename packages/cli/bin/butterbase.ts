@@ -155,6 +155,13 @@ import {
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
 import { templatesCommand } from '../src/commands/templates.js';
 import { mcpInstallCommand } from '../src/commands/mcp.js';
+import {
+  peopleSearchPersonCommand,
+  peopleSearchCompanyCommand,
+  peopleProfileCommand,
+  peopleEmailLookupCommand,
+  peopleEmailStatusCommand,
+} from '../src/commands/people.js';
 
 function resolveVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -1711,6 +1718,50 @@ mcp
   .action((url, opts) => mcpInstallCommand({
     url, name: opts.name, scope: opts.scope, clients: opts.clients, yes: opts.yes,
   }));
+
+// People — search, profile, and email enrichment
+const people = program.command('people').description('Search for people and companies, fetch profiles, and look up emails');
+
+people
+  .command('search-person <query>')
+  .description('Search for people using a natural-language query or structured filters')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--filters <json>', 'Structured search filters as a JSON object (overrides positional query if both given)')
+  .option('--limit <n>', 'Max results to return (default 10, max 100)', parseInt)
+  .option('--json', 'Output raw JSON')
+  .action((query, opts) => peopleSearchPersonCommand(query, opts));
+
+people
+  .command('search-company <query>')
+  .description('Search for companies using a natural-language query or structured filters')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--filters <json>', 'Structured search filters as a JSON object (overrides positional query if both given)')
+  .option('--limit <n>', 'Max results to return (default 10, max 100)', parseInt)
+  .option('--json', 'Output raw JSON')
+  .action((query, opts) => peopleSearchCompanyCommand(query, opts));
+
+people
+  .command('profile <linkedinUrl>')
+  .description('Fetch the profile for a LinkedIn URL (cached by default; use --live to bypass cache)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--live', 'Bypass the server-side cache and fetch a fresh profile')
+  .option('--json', 'Output raw JSON')
+  .action((linkedinUrl, opts) => peopleProfileCommand(linkedinUrl, opts));
+
+people
+  .command('email-lookup <linkedinUrl>')
+  .description('Queue an async email-address lookup for a LinkedIn profile')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((linkedinUrl, opts) => peopleEmailLookupCommand(linkedinUrl, opts));
+
+people
+  .command('email-status <lookupId>')
+  .description('Check the status of an email lookup (use --watch to poll until resolved)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .option('--watch', 'Poll every 5 seconds until the lookup reaches a terminal state (max 5 min)')
+  .action((lookupId, opts) => peopleEmailStatusCommand(lookupId, opts));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {
