@@ -212,7 +212,7 @@ Costs vary by which provider the operator routes the action to. Numbers below ar
 
 | Action | Typical credits | Typical USD |
 |---|---|---|
-| `search_person` / `search_company` (up to 10 results) | 7 | $0.007 |
+| `search_person` / `search_company` (up to 10 results) | 7 | $0.0084 |
 | `get_profile` cache miss | 2 | $0.040 |
 | `get_profile` cache hit | 0 | $0 |
 | `queue_email_lookup` queue accept | 3 | $0.060 |

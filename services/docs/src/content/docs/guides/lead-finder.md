@@ -92,7 +92,7 @@ To preview cost before pulling all pages, run a `page_size: 1` probe and read `t
 
 ```jsonc
 { "action": "search_person", "current_role_title": "CTO", "country": "US", "page_size": 1 }
-// → { data: { totalResultCount: 12345, ... }, usage: { creditsConsumed: 7, usdCost: 0.007 } }
+// → { data: { totalResultCount: 12345, ... }, usage: { creditsConsumed: 7, usdCost: 0.007, usdCharged: 0.0084 } }
 ```
 
 Plan your pagination based on `totalResultCount` and the typical cost-per-page shown in the [People API pricing table](/api-reference/people-api/#pricing).
