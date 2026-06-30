@@ -16,6 +16,8 @@ export interface SearchPersonRequest {
   pageSize?: number;                // capped at 100 in route layer
   nextToken?: string;
   enrichProfiles?: boolean;         // true → enrich_profiles=enrich (costs more, returns full profile)
+  // Raw NL query passthrough — when set, takes priority over structured fields (Exa slot only).
+  query?: string;
 }
 
 export interface SearchPersonResult {
@@ -37,6 +39,8 @@ export interface SearchCompanyRequest {
   pageSize?: number;
   nextToken?: string;
   enrichProfiles?: boolean;
+  // Raw NL query passthrough — when set, takes priority over structured fields (Exa slot only).
+  query?: string;
 }
 
 export interface CompanyPayload {
