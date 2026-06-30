@@ -76,7 +76,32 @@ export async function buildVideoAdapters(): Promise<Map<RouterName, RouterAdapte
   return m;
 }
 
-const videoSubmitSchema = z.object({
+const IMAGE_ALIAS_KEYS = [
+  'image',
+  'image_url',
+  'image_uri',
+  'first_frame',
+  'reference_image',
+  'input_image',
+  'starting_image',
+] as const;
+
+export const videoSubmitSchema = z.preprocess((raw) => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const src = raw as Record<string, unknown>;
+  const aliased: string[] = [];
+  for (const key of IMAGE_ALIAS_KEYS) {
+    const v = src[key];
+    if (typeof v === 'string' && v.length > 0) aliased.push(v);
+    else if (Array.isArray(v)) for (const item of v) if (typeof item === 'string' && item.length > 0) aliased.push(item);
+  }
+  if (aliased.length === 0) return raw;
+  const next = { ...src };
+  for (const key of IMAGE_ALIAS_KEYS) delete next[key];
+  const existing = Array.isArray(next.input_images) ? (next.input_images as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+  next.input_images = [...existing, ...aliased];
+  return next;
+}, z.object({
   model: z.string(),
   prompt: z.string(),
   duration: z.number().int().positive().optional(),
@@ -87,7 +112,7 @@ const videoSubmitSchema = z.object({
   input_images: z.array(z.string().url()).optional(),
   input_references: z.array(z.string().url()).optional(),
   provider: z.record(z.unknown()).optional(),
-});
+}).strict());
 
 export async function aiVideoRoutes(app: FastifyInstance) {
   const adapters = await buildVideoAdapters();

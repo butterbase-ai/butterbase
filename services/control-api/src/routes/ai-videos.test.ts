@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { buildPublicJobResponse, handleVideoError } from './ai-videos.js';
+import { buildPublicJobResponse, handleVideoError, videoSubmitSchema } from './ai-videos.js';
 import type { VideoJobRow } from '../services/ai-router/video-jobs.js';
 import { RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 
@@ -185,5 +185,64 @@ describe('handleVideoError', () => {
     expect(reply._sent.code).toBe(500);
     const body = reply._sent.body as Record<string, unknown>;
     expect(body).toBeDefined();
+  });
+});
+
+describe('videoSubmitSchema', () => {
+  const base = { model: 'kwaivgi/kling-v3.0', prompt: 'hi' };
+
+  it('rejects unknown fields with unrecognized_keys', () => {
+    const res = videoSubmitSchema.safeParse({ ...base, bogus_field: 'x' });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0].code).toBe('unrecognized_keys');
+    }
+  });
+
+  it('normalizes image_url alias into input_images', () => {
+    const res = videoSubmitSchema.parse({ ...base, image_url: 'https://example.com/x.jpg' });
+    expect(res.input_images).toEqual(['https://example.com/x.jpg']);
+    expect((res as Record<string, unknown>).image_url).toBeUndefined();
+  });
+
+  it.each([
+    ['image', 'https://example.com/a.jpg'],
+    ['image_uri', 'https://example.com/b.jpg'],
+    ['first_frame', 'https://example.com/c.jpg'],
+    ['reference_image', 'https://example.com/d.jpg'],
+    ['input_image', 'https://example.com/e.jpg'],
+    ['starting_image', 'https://example.com/f.jpg'],
+  ])('normalizes %s alias into input_images', (alias, url) => {
+    const res = videoSubmitSchema.parse({ ...base, [alias]: url });
+    expect(res.input_images).toEqual([url]);
+    expect((res as Record<string, unknown>)[alias]).toBeUndefined();
+  });
+
+  it('preserves existing input_images and appends aliases', () => {
+    const res = videoSubmitSchema.parse({
+      ...base,
+      input_images: ['https://example.com/existing.jpg'],
+      image_url: 'https://example.com/alias.jpg',
+    });
+    expect(res.input_images).toEqual([
+      'https://example.com/existing.jpg',
+      'https://example.com/alias.jpg',
+    ]);
+  });
+
+  it('accepts native input_images unchanged', () => {
+    const res = videoSubmitSchema.parse({
+      ...base,
+      input_images: ['https://example.com/a.jpg', 'https://example.com/b.jpg'],
+    });
+    expect(res.input_images).toEqual([
+      'https://example.com/a.jpg',
+      'https://example.com/b.jpg',
+    ]);
+  });
+
+  it('rejects invalid (non-URL) alias value via .url() validator', () => {
+    const res = videoSubmitSchema.safeParse({ ...base, image_url: 'not-a-url' });
+    expect(res.success).toBe(false);
   });
 });
