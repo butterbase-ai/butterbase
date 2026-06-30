@@ -159,7 +159,7 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 
 | Tool | Description |
 |------|-------------|
-| `manage_people` | Search LinkedIn people/companies with structured filters, enrich profiles by URL (with 30-day cache), and queue async work-email lookups. All metered against the user's Butterbase credits at platform pricing. See [People API](./people-api.md) for HTTP shapes, response payloads, and pricing math. |
+| `manage_people` | Search for people and companies using structured filters or natural-language queries, enrich profiles by LinkedIn URL (with 30-day cache), and queue async work-email lookups. All metered against the user's Butterbase credits at platform pricing. See [People API](./people-api.md) for HTTP shapes, response payloads, and pricing details. |
 
 Each action is routed to one of two configurable backends (`primary` or `secondary`); routing is operator-controlled at deploy time and not visible to MCP callers.
 
@@ -169,16 +169,23 @@ All actions take `{ app_id, action, ... }` where `action` selects the operation.
 
 | Action | Description |
 |--------|-------------|
-| `search_person` | Structured-filter search for people. Every filter accepts boolean syntax (`OR`, `AND`, `NOT`, parens, double-quoted phrases). Filters: `current_role_title`, `past_role_title`, `current_company_name`, `current_company_industry`, `country`, `region`, `city`, `education_school_name`, `education_degree_name`, `education_field_of_study`, plus `page_size`, `next_token`, `enrich_profiles`. Costs 3 credits per result returned. Empty searches are free. |
-| `search_company` | Structured-filter search for companies. Filters: `industry`, `country`, `employee_count_max`, plus `page_size`, `next_token`, `enrich_profiles`. |
-| `get_profile` | Fetch a full LinkedIn profile by URL with cache. Pass `linkedin_profile_url`. Optional `live_fetch: "force"` skips cache. 2 credits on a cache miss, 0 on a hit (cache TTL: 30d for hits, 7d for not-found, 1h for failed). |
-| `queue_email_lookup` | Queue an async work-email lookup. Pass `linkedin_profile_url`. Returns `lookup_id` and `status: "pending"`. Poll with `get_email_lookup`. People charges ~3 credits at queue time and 1 more when the webhook resolves. |
+| `search_person` | Search for people using structured filters, a free-form `query`, or both. When `query` is set it takes priority; otherwise structured filters are used. Structured filters: `current_role_title`, `past_role_title`, `current_company_name`, `current_company_industry`, `country`, `region`, `city`, `education_school_name`, `education_degree_name`, `education_field_of_study`, plus `page_size`, `next_token`. Boolean operators in structured fields are honored as ranking hints. Empty searches are free. |
+| `search_company` | Search for companies using structured filters, a free-form `query`, or both. Filters: `industry`, `country`, `employee_count_max`, plus `page_size`, `next_token`. |
+| `get_profile` | Fetch a full profile by LinkedIn URL with cache. Pass `linkedin_profile_url`. Optional `live_fetch: "force"` skips cache. 2 credits on a cache miss, 0 on a hit (cache TTL: 30d for hits, 7d for not-found, 1h for failed). |
+| `queue_email_lookup` | Queue an async work-email lookup. Pass `linkedin_profile_url`. Returns `lookup_id` and `status: "pending"`. Poll with `get_email_lookup`. Charged ~3 credits at queue time and 1 more when the webhook resolves. |
 | `get_email_lookup` | Poll an email lookup by `id`. Returns `{ status, email, credits_consumed }`. |
 
-### Boolean syntax examples
+### Search examples
 
 ```jsonc
-// VPs from top colleges
+// Semantic query — natural-language description of the ideal match
+{
+  "action": "search_person",
+  "query": "founder of a YC-backed AI startup based in San Francisco",
+  "page_size": 25
+}
+
+// Structured filters — boolean syntax honored as ranking hints
 {
   "action": "search_person",
   "current_role_title": "(VP OR \"Vice President\") AND NOT assistant",
@@ -187,7 +194,7 @@ All actions take `{ app_id, action, ... }` where `action` selects the operation.
   "page_size": 25
 }
 
-// CTOs at fintech startups under 200 employees
+// Company search
 {
   "action": "search_company",
   "industry": "Financial Services",
@@ -195,36 +202,40 @@ All actions take `{ app_id, action, ... }` where `action` selects the operation.
   "country": "US"
 }
 
-// Profile lookup — cache absorbs duplicates
+// Profile lookup — cache absorbs duplicates within 30 days
 { "action": "get_profile", "linkedin_profile_url": "https://www.linkedin.com/in/jane-doe-abc123" }
 ```
 
-### Pricing summary (default rate ≈ $0.02016 / People credit)
+### Pricing summary
 
-| What | Cost |
-|---|---|
-| `search_person`/`search_company` (URLs only) | 3 credits × results returned (~$0.06/result) |
-| Same with `enrich_profiles: true` | 3 + N per result (~$0.12+/result) |
-| `get_profile` cache miss | 2 credits (~$0.04) |
-| `get_profile` cache hit | 0 |
-| `queue_email_lookup` queue accept | 3 credits (~$0.06) |
-| Webhook resolution callback | 1 credit (~$0.02) |
+Costs vary by which provider the operator routes the action to. Numbers below are typical defaults; actual cost is always reported in the `x-people-*` response headers and the `usage` body. See [People API](./people-api.md#pricing) for the full table.
+
+| Action | Typical credits | Typical USD |
+|---|---|---|
+| `search_person` / `search_company` (up to 10 results) | 7 | $0.007 |
+| `get_profile` cache miss | 2 | $0.040 |
+| `get_profile` cache hit | 0 | $0 |
+| `queue_email_lookup` queue accept | 3 | $0.060 |
+| Webhook email resolution | 1 | $0.020 |
+| Empty search (0 results) | 0 | $0 |
 
 ### Errors
 
 `manage_people` returns `isError: true` with the underlying control-api error text. Common conditions:
 
-- `insufficient_credits` (402) — user's Butterbase balance is below the minimum gate ($0.05 default). No vendor call is made.
+- `insufficient_credits` (402) — user's Butterbase balance is below the minimum gate ($0.05 default). No provider call is made.
 - `forbidden` (403) — authed user doesn't own the app.
 - `people_disabled` (503) — feature flag is off on this deployment.
 - `people_unavailable` (503) — platform key not configured or `PEOPLE_WEBHOOK_HOST_URL` missing for async email.
+- `provider_not_registered` (503) — operator misconfiguration; no provider configured for the slot this action routed to.
+- `provider_action_unsupported` (503) — operator misconfiguration; the configured provider for this slot doesn't support this action.
 
 ### Conceptual notes
 
 - **Caching saves real money.** Repeated `get_profile` calls against the same normalized LinkedIn URL within 30 days cost $0. Treat the cache as durable and feel free to re-fetch on render.
-- **Searches return 0 credits charged when there are 0 results** — use a `page_size: 1` probe to preview cost (look at `data.totalResultCount`) before paginating.
+- **Searches return 0 credits when there are 0 results** — use a `page_size: 1` probe to preview cost (look at `data.totalResultCount`) before paginating.
 - **Async email is genuinely async.** The queue call returns immediately; the email lands minutes later via webhook. Plan your UI for a `pending` state.
-- **Phone numbers are not supported** — People doesn't expose them. Layer a second vendor when needed.
+- **Phone numbers are not supported** at this tier.
 
 ## KV Store
 

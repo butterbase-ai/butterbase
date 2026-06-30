@@ -1,24 +1,51 @@
 ---
 title: Lead Finder
-description: Find LinkedIn people and companies by structured filters, enrich profiles, look up work emails — billed against your Butterbase credits.
+description: Find people and companies by structured filters or natural-language query, enrich profiles, look up work emails — billed against your Butterbase credits.
 sidebar:
   order: 12
 ---
 
-Butterbase's People integration lets you search LinkedIn for people and companies, fetch enriched profiles, and look up work emails — all without managing a vendor API key, and all billed against your Butterbase credit balance at platform pricing.
+Butterbase's people search lets you find people and companies, fetch enriched profiles, and look up work emails — all without managing a provider API key, and all billed against your Butterbase credit balance at platform pricing.
 
 This guide walks through a Lead-Finder-style flow end-to-end. For raw API + MCP reference, see [People API](/api-reference/people-api/) and the `manage_people` section of [MCP Tools](/api-reference/mcp-tools/#people-people--company-search--enrichment).
 
 ## What you can build
 
-- **Lead lists** — search LinkedIn by role, company, location, education; save the matches as a list in your app.
-- **Profile enrichment** — fetch full LinkedIn profile data (name, headline, work history, education) from a LinkedIn URL.
+- **Lead lists** — search by role, company, location, education, or a natural-language description; save the matches as a list in your app.
+- **Profile enrichment** — fetch full profile data (name, headline, work history, education) from a LinkedIn URL.
 - **Work-email discovery** — find a person's work email given their LinkedIn URL (async; resolved via webhook).
 - **CRM enrichment** — backfill profile data for contacts you already have a LinkedIn URL for.
 
-## Quick example — "VPs from top colleges"
+## Quick start
 
-The headline use case. Find Vice Presidents in the US who graduated from an Ivy League school:
+### Natural-language query
+
+Pass a `query` field for free-form description of the ideal match:
+
+```jsonc
+// MCP
+{
+  "tool": "manage_people",
+  "action": "search_person",
+  "query": "founder of a YC-backed AI startup based in San Francisco",
+  "page_size": 25
+}
+```
+
+```bash
+# REST
+curl -X POST https://api.butterbase.ai/v1/$APP_ID/people/search/person \
+  -H "Authorization: Bearer $BB_SK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "founder of a YC-backed AI startup based in San Francisco",
+    "pageSize": 25
+  }'
+```
+
+### Structured filters
+
+Use individual filter fields instead of (or in addition to) `query`. When both are provided, `query` takes priority.
 
 ```jsonc
 // MCP
@@ -47,9 +74,9 @@ curl -X POST https://api.butterbase.ai/v1/$APP_ID/people/search/person \
 
 Returns up to 25 results plus `totalResultCount` (the full universe matching the filter) and a `nextPage` cursor for pagination.
 
-## The boolean syntax
+## Structured filter syntax
 
-Every filter accepts People's boolean syntax inside the string:
+Structured filter fields accept boolean operators inside the string:
 
 - `OR` between alternatives — `(CTO OR "VP Engineering")`
 - `AND` to require multiple — `senior AND engineer`
@@ -57,7 +84,7 @@ Every filter accepts People's boolean syntax inside the string:
 - Double quotes for multi-word phrases — `"Vice President"`
 - Parentheses to group — `(VP OR Director) AND NOT assistant`
 
-This makes a single field much more expressive than a flat enum.
+Boolean operators are honored where the configured search backend supports them; for semantic backends they serve as ranking hints rather than strict filters. Behavior may vary by deployment.
 
 ## Cost preview before paginating
 
@@ -65,16 +92,10 @@ To preview cost before pulling all pages, run a `page_size: 1` probe and read `t
 
 ```jsonc
 { "action": "search_person", "current_role_title": "CTO", "country": "US", "page_size": 1 }
-// → { data: { totalResultCount: 12345, ... }, usage: { creditsConsumed: 3, usdCost: 0.06 } }
+// → { data: { totalResultCount: 12345, ... }, usage: { creditsConsumed: 7, usdCost: 0.007 } }
 ```
 
-Worst-case cost to paginate the whole result set:
-
-```
-totalResultCount × $0.02016 × 3 credits/result  (URLs-only)
-```
-
-For 12,345 CTOs: ~$746 to pull every URL. Plan your pagination accordingly. With `enrich_profiles: true`, multiply by another 3–5× depending on profile completeness.
+Plan your pagination based on `totalResultCount` and the typical cost-per-page shown in the [People API pricing table](/api-reference/people-api/#pricing).
 
 ## End-to-end flow
 
@@ -84,17 +105,24 @@ A typical Lead Finder workflow:
 
 In your UI, the user types something like *"VPs of engineering at fintech startups under 200 people, US-based"*.
 
-### 2. Translate to filters
+### 2. Translate to a search
 
-Either let the user pick filters in a form, or use the AI gateway to convert NL → filter object:
+Either pass the description directly as `query`, or let the user pick filters in a form, or use the AI gateway to convert natural language to a filter object:
 
 ```jsonc
-// MCP
+// Option A — pass directly as query
+{
+  "action": "search_person",
+  "query": "VPs of engineering at fintech startups under 200 people, US-based",
+  "page_size": 25
+}
+
+// Option B — AI gateway converts NL → filters
 {
   "tool": "manage_ai",
   "action": "chat",
   "messages": [
-    { "role": "system", "content": "Convert the user's audience description into an People search_person filter object. Available fields: current_role_title, past_role_title, current_company_name, current_company_industry, country, region, city, education_school_name, education_degree_name, education_field_of_study. All fields accept boolean syntax. Reply with ONLY a JSON object." },
+    { "role": "system", "content": "Convert the user's audience description into a search_person filter object. Available fields: current_role_title, past_role_title, current_company_name, current_company_industry, country, region, city, education_school_name, education_degree_name, education_field_of_study. All fields accept boolean syntax. Reply with ONLY a JSON object." },
     { "role": "user", "content": "VPs of engineering at fintech startups under 200 people, US-based" }
   ]
 }
@@ -116,11 +144,7 @@ Run with `page_size: 1` first. Show the user `totalResultCount` and the estimate
 
 Parse `next_token` from `nextPage` and pass as `next_token` on the next call.
 
-Each result is `{ linkedinProfileUrl, profile: null, lastUpdated: null }` — URLs only. To get full profiles, either:
-- Pass `enrich_profiles: true` on the search (3 + N credits per result), or
-- Fan out `get_profile` over each URL afterwards (2 credits each, cached for 30 days)
-
-The fan-out approach is usually cheaper because the cache absorbs duplicates if the user revisits the same leads.
+Each result is a `SearchPersonResult` with a `linkedinProfileUrl` and an inline `profile` object. Fan out `get_profile` over each URL to get a fresher or more complete profile (2 credits each, cached for 30 days). The cache absorbs duplicates if the user revisits the same leads.
 
 ### 5. Save leads to your CRM
 
@@ -151,7 +175,7 @@ Apply via `manage_schema`.
 
 ### 6. Enrich on demand
 
-When the user opens a lead's detail view, call `get_profile`. The first view costs 2 credits ($0.04); subsequent views within 30 days are free:
+When the user opens a lead's detail view, call `get_profile`. The first view costs 2 credits; subsequent views within 30 days are free:
 
 ```jsonc
 {
@@ -159,14 +183,14 @@ When the user opens a lead's detail view, call `get_profile`. The first view cos
   "linkedin_profile_url": "https://www.linkedin.com/in/jane-doe-abc123"
 }
 // → { data: { fullName: "Jane Doe", headline: "VP at InwestCo", ... },
-//     usage: { cached: false, usdCharged: 0.04032 } }
+//     usage: { cached: false, usdCharged: 0.040 } }
 ```
 
 Inspect `usage.cached` to know if you hit the cache.
 
 ### 7. Look up work email (async)
 
-This is the only flow that's genuinely asynchronous. People can't return a work email synchronously — they queue the lookup at their end and POST the result to a webhook you control.
+Work-email lookups are asynchronous — the platform queues the request and waits for a provider webhook callback.
 
 ```jsonc
 {
@@ -189,25 +213,13 @@ Poll until resolved:
 
 Or, more elegantly: subscribe to changes on `people_email_lookups` via the Realtime API for instant push.
 
-Typical resolution time is **seconds to a few minutes**. There's no SLA from the vendor.
+Typical resolution time is **seconds to a few minutes**.
 
 ## Pricing summary
 
-Actual costs depend on which backend the operator routes each action to. The platform operator configures provider pricing independently via `PEOPLE_PROVIDER_<SLOT>_BASE_USD_PER_CREDIT` and `PEOPLE_PROVIDER_<SLOT>_MARKUP_PCT` for each slot.
+Costs depend on which provider the operator has routed each action to. See the [People API reference](/api-reference/people-api/#pricing) for typical defaults; actual cost per call is always reflected in the `x-people-*` response headers and the `usage` body.
 
-At default platform pricing: **~$0.02 per People credit** per slot.
-
-| Action | Credits | USD (default rate) |
-|---|---|---|
-| `search_person` / `search_company` (URLs only) | 3 per result returned | ~$0.06 per result |
-| Same with `enrich_profiles: true` | 3 + N per result (N = enriched profile size) | ~$0.12+ per result |
-| `get_profile` cache miss | 2 | ~$0.04 |
-| `get_profile` cache hit | 0 | Free |
-| `queue_email_lookup` queue accept | 3 | ~$0.06 |
-| Webhook email resolution | 1 | ~$0.02 |
-| Empty search (0 results) | 0 | Free |
-
-Cost transparency comes from response headers (`x-people-*`) and the body's `usage` object. Every call writes a `people_usage_logs` row — query directly with `select_rows` for usage analytics.
+Every call writes a `people_usage_logs` row — query directly with `select_rows` for usage analytics.
 
 ## Limits & gotchas
 
@@ -215,10 +227,10 @@ Cost transparency comes from response headers (`x-people-*`) and the body's `usa
 - **`page_size` is capped at 100** in the adapter (vendor limit).
 - **Cache is per-app.** Two apps that both look up the same LinkedIn URL each pay once. There's no cross-app cache.
 - **The cache key is the *normalized* URL** — lowercased, query/hash-stripped. `linkedin.com/in/Jane?utm=foo` and `LinkedIn.com/in/jane/` hit the same cache row.
-- **Vendor data lags reality.** Job changes can take weeks to reflect. Treat profile data as eventually consistent.
-- **`experiences[0]` is unreliable for current job** — People often keeps stale rows at the top of the experiences array while showing the current role in `occupation`/`headline`. Prefer those fields.
-- **No phone numbers.** People doesn't expose them at this tier.
-- **Email lookups can fail.** Roughly 20–40% of work-email lookups come back `status: "failed"` (vendor couldn't find one). You're not charged for the resolve credit in that case.
+- **Profile data lags reality.** Job changes can take weeks to reflect. Treat profile data as eventually consistent.
+- **`experiences[0]` is unreliable for current job** — the search backend often keeps stale rows at the top of the experiences array while showing the current role in `occupation`/`headline`. Prefer those fields.
+- **No phone numbers.** The platform does not expose them at this tier.
+- **Email lookups can fail.** Roughly 20–40% of work-email lookups come back `status: "failed"` (email not found). You're not charged for the resolve credit in that case.
 
 ## See also
 
