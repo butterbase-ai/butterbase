@@ -128,7 +128,7 @@ The platform's search backend interprets all queries semantically. Boolean opera
   "usage": {
     "creditsConsumed": 7,
     "usdCost": 0.007,
-    "usdCharged": 0.007
+    "usdCharged": 0.0084
   }
 }
 ```
@@ -186,7 +186,7 @@ Accepts the same `query` field as `search/person`. When `query` is set it takes 
     "nextPage": null,
     "totalResultCount": 94950
   },
-  "usage": { "creditsConsumed": 7, "usdCost": 0.007, "usdCharged": 0.007 }
+  "usage": { "creditsConsumed": 7, "usdCost": 0.007, "usdCharged": 0.0084 }
 }
 ```
 
