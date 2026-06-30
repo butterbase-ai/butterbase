@@ -211,12 +211,10 @@ describe('People routes', () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.usage.creditsConsumed).toBe(6);
-      expect(body.usage.usdCost).toBeCloseTo(6 * USD_PER_CREDIT);
 
       // x-people-* response headers
       expect(res.headers['x-people-provider']).toBe('primary');
       expect(res.headers['x-people-credits-consumed']).toBe('6');
-      expect(parseFloat(res.headers['x-people-usd-cost'] as string)).toBeCloseTo(6 * USD_PER_CREDIT, 4);
       expect(parseFloat(res.headers['x-people-usd-charged'] as string)).toBeCloseTo(6 * USD_PER_CREDIT, 4);
 
       // Metering
@@ -256,7 +254,6 @@ describe('People routes', () => {
       const body = res.json();
       expect(body.usage.cached).toBe(true);
       expect(body.usage.creditsConsumed).toBe(0);
-      expect(body.usage.usdCost).toBe(0);
 
       // x-people-* headers on cache hit
       expect(res.headers['x-people-provider']).toBe('primary');
@@ -398,7 +395,6 @@ describe('People routes', () => {
       // x-people-* headers present on 402 (all zero for non-success paths)
       expect(res.headers['x-people-provider']).toBe('primary');
       expect(res.headers['x-people-credits-consumed']).toBe('0');
-      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
       expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // Adapter NOT called
@@ -521,7 +517,6 @@ describe('People routes', () => {
       // x-people-* headers present on 503 (all zero for non-success paths)
       expect(res.headers['x-people-provider']).toBe('primary');
       expect(res.headers['x-people-credits-consumed']).toBe('0');
-      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
       expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // No INSERT into people_email_lookups
@@ -596,7 +591,6 @@ describe('People routes', () => {
       // x-people-* headers present on error paths (all zero)
       expect(res.headers['x-people-provider']).toBe('primary');
       expect(res.headers['x-people-credits-consumed']).toBe('0');
-      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
       expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // Audit row written with action='search_person_error', zero financials
@@ -678,7 +672,6 @@ describe('People routes', () => {
       // x-people-* headers present on 503 (all zero for non-success paths)
       expect(res.headers['x-people-provider']).toBe('primary');
       expect(res.headers['x-people-credits-consumed']).toBe('0');
-      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
       expect(res.headers['x-people-usd-charged']).toBe('0.000000');
 
       // Adapter was called (the error came FROM the adapter)
@@ -708,7 +701,6 @@ describe('People routes', () => {
       // All x-people-* headers present with zero values
       expect(res.headers['x-people-provider']).toBe('primary');
       expect(res.headers['x-people-credits-consumed']).toBe('0');
-      expect(res.headers['x-people-usd-cost']).toBe('0.000000');
       expect(res.headers['x-people-usd-charged']).toBe('0.000000');
     });
   });
