@@ -13,6 +13,7 @@ import { RealtimeClient } from '../realtime/realtime-client.js';
 import { RagClient } from '../rag/rag-client.js';
 import { IntegrationsClient } from '../integrations/integrations-client.js';
 import { PartnersClient } from '../partners/partners-client.js';
+import { PeopleClient } from '../people/people-client.js';
 
 export class ButterbaseClient {
   public readonly appId: string;
@@ -32,6 +33,7 @@ export class ButterbaseClient {
   public readonly rag: RagClient;
   public readonly integrations: IntegrationsClient;
   public readonly partners: PartnersClient;
+  public readonly people: PeopleClient;
 
   constructor(options: ButterbaseClientOptions) {
     this.appId = options.appId;
@@ -56,6 +58,7 @@ export class ButterbaseClient {
     this.rag = new RagClient(this);
     this.integrations = new IntegrationsClient(this);
     this.partners = new PartnersClient(this);
+    this.people = new PeopleClient(this);
 
     // Restore session from storage
     const restored = this.sessionManager.restoreSession();

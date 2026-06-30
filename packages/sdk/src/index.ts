@@ -23,6 +23,7 @@ export { BillingClient } from './billing/billing-client.js';
 export { RagClient } from './rag/rag-client.js';
 export { IntegrationsClient } from './integrations/integrations-client.js';
 export { PartnersClient } from './partners/partners-client.js';
+export { PeopleClient } from './people/people-client.js';
 
 // Admin client
 export { AdminClient } from './admin/admin-client.js';
@@ -154,6 +155,20 @@ export type {
   QueryChunk, QueryResult,
   CreateCollectionOptions, IngestOptions, QueryOptions,
 } from './rag/types.js';
+
+// People types
+export type {
+  SearchPersonRequest,
+  SearchPersonResponse,
+  SearchPersonResult,
+  SearchCompanyRequest,
+  SearchCompanyResponse,
+  CompanyPayload,
+  ProfilePayload,
+  PeopleMeta,
+  PeopleUsage,
+  EmailLookupResult,
+} from './people/types.js';
 
 // Realtime types
 export type {
