@@ -94,7 +94,6 @@ export interface PeopleAdapter {
   searchCompany(q: SearchCompanyRequest, opts: { apiKey: string }): Promise<EnrichResult<SearchCompanyResponse>>;
   getProfile(req: GetProfileRequest, opts: { apiKey: string }): Promise<EnrichResult<ProfilePayload | null>>;
   queueEmailLookup(req: QueueEmailRequest, opts: { apiKey: string }): Promise<EnrichResult<{ queued: true }>>;
-  getCreditBalance(opts: { apiKey: string }): Promise<EnrichResult<{ balance: number }>>;
 }
 
 export class PeopleError extends Error {

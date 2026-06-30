@@ -205,7 +205,6 @@ At default platform pricing: **~$0.02 per People credit** per slot.
 | `get_profile` cache hit | 0 | Free |
 | `queue_email_lookup` queue accept | 3 | ~$0.06 |
 | Webhook email resolution | 1 | ~$0.02 |
-| `get_credit_balance` | 0 | Free |
 | Empty search (0 results) | 0 | Free |
 
 Cost transparency comes from response headers (`x-people-*`) and the body's `usage` object. Every call writes a `people_usage_logs` row — query directly with `select_rows` for usage analytics.

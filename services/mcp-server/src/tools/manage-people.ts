@@ -22,20 +22,18 @@ Actions:
                          Queue an async email lookup job. Returns lookup_id to poll with get_email_lookup.
   - get_email_lookup    { app_id, id }
                          Poll the status of an email lookup. Returns status, email (when complete), credits used.
-  - get_credit_balance  { app_id }
-                         Read the platform's People credit balance.
   // BYOK actions are disabled — the platform manages the People key. If
   // your MCP client previously called set_byok_key/clear_byok_key they will
   // now return an error.
   // - set_byok_key   (disabled)
   // - clear_byok_key (disabled)
 
-This tool wraps the app's /v1/:app_id/people/* routes (search, profile, email lookup, BYOK, credits).`,
+This tool wraps the app's /v1/:app_id/people/* routes (search, profile, email lookup, BYOK).`,
     {
       app_id: z.string().describe('The app ID'),
       action: z.enum([
         'search_person', 'search_company', 'get_profile', 'queue_email_lookup',
-        'get_email_lookup', 'get_credit_balance', 'set_byok_key', 'clear_byok_key',
+        'get_email_lookup', 'set_byok_key', 'clear_byok_key',
       ]).describe('The action to perform'),
       // search_person fields (snake_case → camelCase body)
       current_role_title: z.string().optional().describe('Current role/job title filter (for search_person)'),
@@ -128,10 +126,6 @@ This tool wraps the app's /v1/:app_id/people/* routes (search, profile, email lo
               return { content: [{ type: 'text' as const, text: 'Error: "id" is required for "get_email_lookup".' }], isError: true as const };
             }
             result = await apiGet(`/v1/${app_id}/people/email-lookup/${encodeURIComponent(args.id)}`);
-            break;
-          }
-          case 'get_credit_balance': {
-            result = await apiGet(`/v1/${app_id}/people/credit-balance`);
             break;
           }
           case 'set_byok_key':

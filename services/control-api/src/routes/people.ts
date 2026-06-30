@@ -1,5 +1,5 @@
 // services/control-api/src/routes/people.ts
-// People sync routes: search, profile (with cache), email queue, credit-balance, BYOK.
+// People sync routes: search, profile (with cache), email queue, BYOK.
 import crypto from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type pg from 'pg';
@@ -527,44 +527,6 @@ export async function peopleRoutes(app: FastifyInstance) {
       email: row.email,
       credits_consumed: row.credits_consumed,
     });
-  });
-
-  // ── GET /v1/:appId/people/credit-balance ─────────────────────────────
-  app.get('/v1/:appId/people/credit-balance', async (request, reply) => {
-    if (!config.people.enabled) {
-      return reply.code(503).send({ error: 'people_disabled', message: 'People integration is not enabled on this deployment' });
-    }
-    const userId = requireUserId(request);
-    const { appId } = request.params as { appId: string };
-
-    // credit-balance always uses the primary slot (the platform always reports the primary balance)
-    const adapter = getPeopleAdapter('primary');
-    const providerCfg = config.people.providers.primary;
-
-    if (!adapter) {
-      setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
-      return reply.code(503).send({ error: 'provider_not_registered', slot: 'primary' });
-    }
-
-    if (!providerCfg.apiKey) {
-      setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
-      return reply.code(503).send({ error: 'people_unavailable', message: 'platform key not configured' });
-    }
-
-    const runtime = await getRuntimeDbForApp(app.controlDb, appId);
-
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
-    if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
-
-    try {
-      const r = await adapter.getCreditBalance({ apiKey: providerCfg.apiKey });
-      setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
-      return reply.send({ balance: r.data.balance });
-    } catch (err) {
-      setPeopleHeaders(reply, { slot: 'primary', creditsConsumed: 0, usdCost: 0, usdCharged: 0 });
-      if (sendPeopleError(err, reply)) return;
-      throw err;
-    }
   });
 
   // ── BYOK routes disabled per product decision ────────────────────────────

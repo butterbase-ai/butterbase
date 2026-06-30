@@ -174,7 +174,6 @@ All actions take `{ app_id, action, ... }` where `action` selects the operation.
 | `get_profile` | Fetch a full LinkedIn profile by URL with cache. Pass `linkedin_profile_url`. Optional `live_fetch: "force"` skips cache. 2 credits on a cache miss, 0 on a hit (cache TTL: 30d for hits, 7d for not-found, 1h for failed). |
 | `queue_email_lookup` | Queue an async work-email lookup. Pass `linkedin_profile_url`. Returns `lookup_id` and `status: "pending"`. Poll with `get_email_lookup`. People charges ~3 credits at queue time and 1 more when the webhook resolves. |
 | `get_email_lookup` | Poll an email lookup by `id`. Returns `{ status, email, credits_consumed }`. |
-| `get_credit_balance` | Read the platform's People credit balance (not the user's Butterbase balance). Doesn't deduct credits. |
 
 ### Boolean syntax examples
 
@@ -210,7 +209,6 @@ All actions take `{ app_id, action, ... }` where `action` selects the operation.
 | `get_profile` cache hit | 0 |
 | `queue_email_lookup` queue accept | 3 credits (~$0.06) |
 | Webhook resolution callback | 1 credit (~$0.02) |
-| `get_credit_balance` | 0 |
 
 ### Errors
 

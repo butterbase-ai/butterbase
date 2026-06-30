@@ -20,7 +20,6 @@ Every call is metered against the user's Butterbase credit balance at platform p
 | POST | /v1/\{app_id\}/people/profile | Enrich a LinkedIn profile by URL (with 30-day cache) |
 | POST | /v1/\{app_id\}/people/profile/email | Queue an async work-email lookup |
 | GET | /v1/\{app_id\}/people/email-lookup/\{lookup_id\} | Poll a pending email lookup |
-| GET | /v1/\{app_id\}/people/credit-balance | Read the platform's People credit balance |
 
 ## Response headers
 
@@ -68,7 +67,6 @@ Each adapter response includes a credit-cost header; Butterbase reads this and c
 | `profile` (cache hit) | 0 | $0 (free) |
 | `profile/email` (queue accept) | 3 | $0.06 |
 | Webhook callback resolving an email | 1 | $0.02 |
-| `credit-balance` | 0 | $0 |
 | Empty search (0 results) | 0 | $0 |
 
 ## Authentication
@@ -295,18 +293,6 @@ Authorization: Bearer {token}
 ```
 
 `email` is populated once the webhook fires. `credits_consumed` is the total billed across the queue + resolve flow.
-
-## Credit balance (platform-side passthrough)
-
-```
-GET /v1/{app_id}/people/credit-balance
-```
-
-```json
-{ "balance": 19962 }
-```
-
-This is the platform's People-side credit balance — **not** the user's Butterbase credit balance. Useful for ops dashboards. Doesn't deduct user credits.
 
 ## Audit trail
 

@@ -159,12 +159,6 @@ function makeMockAdapter(overrides: Partial<PeopleAdapter> = {}): PeopleAdapter 
       requestId: 'req-4',
       status: 200,
     }),
-    getCreditBalance: vi.fn().mockResolvedValue({
-      data: { balance: 42 },
-      creditsConsumed: 0,
-      requestId: null,
-      status: 200,
-    }),
     ...overrides,
   };
 }
@@ -559,7 +553,6 @@ describe('People routes', () => {
           { method: 'POST' as const, url: `/v1/${APP_ID}/people/profile`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
           { method: 'POST' as const, url: `/v1/${APP_ID}/people/profile/email`, payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' } },
           { method: 'GET' as const, url: `/v1/${APP_ID}/people/email-lookup/some-id` },
-          { method: 'GET' as const, url: `/v1/${APP_ID}/people/credit-balance` },
         ];
 
         for (const route of routes) {

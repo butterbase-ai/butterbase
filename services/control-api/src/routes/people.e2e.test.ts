@@ -5,7 +5,7 @@
 // Mirror of the env-var-gating pattern used in gateway.v2.e2e.test.ts.
 //
 // Harness:
-//   - Real pg.Pool for credit-balance SQL + people_email_lookups rows
+//   - Real pg.Pool for people_email_lookups rows
 //   - Full Fastify boot (peopleRoutes + peopleWebhookRoutes)
 //   - Stub adapter via setPeopleAdapter()
 //   - Routing/Redis mocked (region-resolver, runtime-pool-registry, redis)
@@ -263,12 +263,6 @@ describe.skipIf(!RUN)('people e2e smoke', () => {
         data: { queued: true },
         creditsConsumed: 0,
         requestId: 'req-email-1',
-        status: 200,
-      }),
-      getCreditBalance: vi.fn().mockResolvedValue({
-        data: { balance: 100 },
-        creditsConsumed: 0,
-        requestId: null,
         status: 200,
       }),
     };
