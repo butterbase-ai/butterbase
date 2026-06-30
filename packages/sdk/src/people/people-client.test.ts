@@ -4,7 +4,6 @@ import { PeopleClient } from './people-client';
 const defaultHeaders = {
   'x-people-provider': 'secondary',
   'x-people-credits-consumed': '6',
-  'x-people-usd-cost': '0.12',
   'x-people-usd-charged': '0.10',
 };
 
@@ -33,7 +32,7 @@ describe('PeopleClient', () => {
   it('searchPerson POSTs to /v1/app_test/people/search/person and parses meta', async () => {
     const responseBody = {
       data: { results: [], nextPage: null, totalResultCount: 0 },
-      usage: { creditsConsumed: 6, usdCost: 0.12, usdCharged: 0.10 },
+      usage: { creditsConsumed: 6, usdCharged: 0.10 },
     };
     const { fc, calls } = fakeClient(responseBody);
     const result = await new PeopleClient(fc).searchPerson({ currentRoleTitle: 'CTO', country: 'US' });
@@ -45,7 +44,6 @@ describe('PeopleClient', () => {
     expect(result.usage).toEqual(responseBody.usage);
     expect(result.meta.provider).toBe('secondary');
     expect(result.meta.creditsConsumed).toBe(6);
-    expect(result.meta.usdCost).toBeCloseTo(0.12);
     expect(result.meta.usdCharged).toBeCloseTo(0.10);
   });
 
@@ -111,7 +109,6 @@ describe('PeopleClient', () => {
     const headersNoCached = {
       'x-people-provider': 'primary',
       'x-people-credits-consumed': '1',
-      'x-people-usd-cost': '0.05',
       'x-people-usd-charged': '0.05',
     };
     const { fc } = fakeClient(responseBody, headersNoCached);

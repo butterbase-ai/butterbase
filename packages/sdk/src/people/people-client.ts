@@ -18,7 +18,6 @@ function parsePeopleMeta(headers: Headers): PeopleMeta {
   const meta: PeopleMeta = {
     provider: (headers.get('x-people-provider') ?? 'primary') as 'primary' | 'secondary',
     creditsConsumed: parseInt(headers.get('x-people-credits-consumed') ?? '0', 10),
-    usdCost: parseFloat(headers.get('x-people-usd-cost') ?? '0'),
     usdCharged: parseFloat(headers.get('x-people-usd-charged') ?? '0'),
   };
   const cachedHeader = headers.get('x-people-cached');

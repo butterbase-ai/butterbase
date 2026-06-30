@@ -29,7 +29,6 @@ Every people response (success and error) carries these headers so callers can t
 |---|---|
 | `x-people-provider` | Which provider slot served the call (`primary` or `secondary`) |
 | `x-people-credits-consumed` | Integer |
-| `x-people-usd-cost` | What Butterbase owes the configured provider |
 | `x-people-usd-charged` | What was deducted from the user |
 | `x-people-cached` | Profile route only |
 
@@ -127,7 +126,6 @@ The platform's search backend interprets all queries semantically. Boolean opera
   },
   "usage": {
     "creditsConsumed": 7,
-    "usdCost": 0.007,
     "usdCharged": 0.0084
   }
 }
@@ -186,7 +184,7 @@ Accepts the same `query` field as `search/person`. When `query` is set it takes 
     "nextPage": null,
     "totalResultCount": 94950
   },
-  "usage": { "creditsConsumed": 7, "usdCost": 0.007, "usdCharged": 0.0084 }
+  "usage": { "creditsConsumed": 7, "usdCharged": 0.0084 }
 }
 ```
 
@@ -238,7 +236,7 @@ The first call against a given normalized URL hits the configured profile provid
     "education": [ "…" ]
   },
   "status": "ok",
-  "usage": { "creditsConsumed": 2, "usdCost": 0.040, "usdCharged": 0.040, "cached": false }
+  "usage": { "creditsConsumed": 2, "usdCharged": 0.040, "cached": false }
 }
 ```
 
@@ -248,7 +246,7 @@ The first call against a given normalized URL hits the configured profile provid
 {
   "data": { "…": "same shape as above" },
   "status": "ok",
-  "usage": { "creditsConsumed": 0, "usdCost": 0, "usdCharged": 0, "cached": true }
+  "usage": { "creditsConsumed": 0, "usdCharged": 0, "cached": true }
 }
 ```
 
@@ -258,7 +256,7 @@ The first call against a given normalized URL hits the configured profile provid
 {
   "data": null,
   "status": "not_found",
-  "usage": { "creditsConsumed": 0, "usdCost": 0, "usdCharged": 0, "cached": false }
+  "usage": { "creditsConsumed": 0, "usdCharged": 0, "cached": false }
 }
 ```
 

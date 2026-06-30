@@ -84,8 +84,6 @@ export interface PeopleMeta {
   provider: 'primary' | 'secondary';
   /** Credits deducted from the account balance for this request. */
   creditsConsumed: number;
-  /** Raw USD cost of this request (before any discount). */
-  usdCost: number;
   /** USD actually charged to the account after any free-tier offsets. */
   usdCharged: number;
   /** Present on profile responses; true when returned from the local cache. */
@@ -95,7 +93,6 @@ export interface PeopleMeta {
 /** Usage summary included in every people response body. */
 export interface PeopleUsage {
   creditsConsumed: number;
-  usdCost?: number;
   usdCharged?: number;
   /** Present on profile responses. */
   cached?: boolean;
