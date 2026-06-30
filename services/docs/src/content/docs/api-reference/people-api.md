@@ -40,8 +40,8 @@ Costs vary by which provider the operator routes the action to. Numbers below ar
 
 | Action | Typical credits | Typical USD | Notes |
 |---|---|---|---|
-| `search/person` (up to 10 results) | 7 | $0.007 | Scales with result count; ~$0.001 per additional result above 10 |
-| `search/company` (up to 10 results) | 7 | $0.007 | Same scaling |
+| `search/person` (up to 10 results) | 7 | $0.0084 | Scales with result count; ~$0.0012 per additional result above 10 |
+| `search/company` (up to 10 results) | 7 | $0.0084 | Same scaling |
 | `profile` (cache miss) | 2 | $0.040 | Variable; depends on configured profile provider |
 | `profile` (cache hit, within 30 days) | 0 | $0 | Always free |
 | `profile/email` (queue) | 3 | $0.060 | Charged at queue time |
