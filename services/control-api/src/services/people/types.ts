@@ -16,7 +16,7 @@ export interface SearchPersonRequest {
   pageSize?: number;                // capped at 100 in route layer
   nextToken?: string;
   enrichProfiles?: boolean;         // true → enrich_profiles=enrich (costs more, returns full profile)
-  // Raw NL query passthrough — when set, takes priority over structured fields (Exa slot only).
+  // Raw NL query — when set, takes priority over all structured fields. Used by the search-based provider slot.
   query?: string;
 }
 
@@ -39,7 +39,7 @@ export interface SearchCompanyRequest {
   pageSize?: number;
   nextToken?: string;
   enrichProfiles?: boolean;
-  // Raw NL query passthrough — when set, takes priority over structured fields (Exa slot only).
+  // Raw NL query — when set, takes priority over all structured fields. Used by the search-based provider slot.
   query?: string;
 }
 
@@ -77,6 +77,9 @@ export interface ProfilePayload {
   country: string | null;
   experiences: unknown[];
   education: unknown[];
+  skills?: string[];
+  languages?: string[];
+  profilePicUrl?: string | null;
   raw: unknown;                         // verbatim People body, for cache + future migrations
 }
 
