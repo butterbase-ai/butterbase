@@ -49,7 +49,7 @@ export interface Deps {
  * user-level operation with no app context, so it doesn't fit cleanly.
  * Durable records already cover both outcomes:
  *   - success → `credit_grants` row with reason='auto_refill'
- *   - failure → `platform_users.auto_refill_last_failure_reason` +
+ *   - failure → `organizations.auto_refill_last_failure_reason` +
  *     `auto_refill_last_attempt_at`, plus the failure email
  * Revisit if audit semantics change (e.g. user-scoped audit category).
  */
