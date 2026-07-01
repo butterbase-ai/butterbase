@@ -57,7 +57,8 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
     // Plan gate — platform_users + plans live on controlDb
     const planResult = await controlDb.query(
       `SELECT p.features FROM platform_users pu
-       JOIN plans p ON pu.plan_id = p.id
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       JOIN plans p ON p.id = o.plan_id
        WHERE pu.id = $1`,
       [userId],
     );

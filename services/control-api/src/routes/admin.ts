@@ -85,10 +85,17 @@ export async function adminRoutes(app: FastifyInstance) {
         `SELECT count(DISTINCT app_id)::int AS c FROM function_invocations WHERE started_at >= current_date`
       ),
       app.controlDb.query(
-        `SELECT plan_id, count(*)::int AS count FROM platform_users GROUP BY plan_id ORDER BY count DESC`
+        `SELECT o.plan_id, count(*)::int AS count
+         FROM organizations o
+         WHERE o.personal = true
+         GROUP BY o.plan_id
+         ORDER BY count DESC`
       ),
       app.controlDb.query(
-        `SELECT id, email, plan_id, created_at FROM platform_users ORDER BY created_at DESC LIMIT 10`
+        `SELECT pu.id, pu.email, o.plan_id, pu.created_at
+         FROM platform_users pu
+         LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+         ORDER BY pu.created_at DESC LIMIT 10`
       ),
       fanOutQuery<{ date: string; requests: number; tokens: string; cost_usd: string }>(
         `SELECT date(created_at) AS date, count(*)::int AS requests,
@@ -169,11 +176,11 @@ export async function adminRoutes(app: FastifyInstance) {
       cidx++;
     }
     if (q.plan) {
-      controlConditions.push(`pu.plan_id = $${cidx++}`);
+      controlConditions.push(`o.plan_id = $${cidx++}`);
       controlParams.push(q.plan);
     }
     if (q.status) {
-      controlConditions.push(`pu.account_status = $${cidx++}`);
+      controlConditions.push(`o.account_status = $${cidx++}`);
       controlParams.push(q.status);
     }
     if (q.sub_status) {
@@ -202,18 +209,19 @@ export async function adminRoutes(app: FastifyInstance) {
       controlParams.push(q.joined_before);
     }
     if (q.has_stripe === 'yes') {
-      controlConditions.push(`pu.stripe_customer_id IS NOT NULL`);
+      controlConditions.push(`o.stripe_customer_id IS NOT NULL`);
     } else if (q.has_stripe === 'no') {
-      controlConditions.push(`pu.stripe_customer_id IS NULL`);
+      controlConditions.push(`o.stripe_customer_id IS NULL`);
     }
 
     const controlWhere = controlConditions.length > 0 ? `WHERE ${controlConditions.join(' AND ')}` : '';
 
     // Fetch platform_users from controlDb (platform tier)
     const usersResult = await app.controlDb.query(
-      `SELECT pu.id, pu.email, pu.display_name, pu.plan_id, pu.account_status,
-              pu.stripe_customer_id, pu.created_at
+      `SELECT pu.id, pu.email, pu.display_name, o.plan_id, o.account_status,
+              o.stripe_customer_id, pu.created_at
        FROM platform_users pu
+       LEFT JOIN organizations o ON o.id = pu.personal_organization_id
        ${controlWhere}
        ORDER BY pu.created_at DESC`,
       controlParams
@@ -870,8 +878,9 @@ export async function adminRoutes(app: FastifyInstance) {
         `SELECT s.stripe_subscription_id
          FROM subscriptions s
          JOIN platform_users pu ON pu.id = s.user_id
+         JOIN organizations o ON o.id = pu.personal_organization_id
          WHERE s.status IN ('active', 'trialing')
-           AND pu.plan_id = 'enterprise'
+           AND o.plan_id = 'enterprise'
            AND s.stripe_subscription_id IS NOT NULL`
       ),
     ]);

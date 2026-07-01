@@ -138,7 +138,8 @@ export async function initRoutes(app: FastifyInstance) {
     const planCheck = await app.controlDb.query(
       `SELECT p.max_projects
        FROM platform_users pu
-       JOIN plans p ON pu.plan_id = p.id
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       JOIN plans p ON p.id = o.plan_id
        WHERE pu.id = $1`,
       [ownerId]
     );
