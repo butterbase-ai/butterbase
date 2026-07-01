@@ -49,8 +49,8 @@ export async function grantSignupCredits(
     }
 
     const ins = await client.query(
-      `INSERT INTO credit_grants (user_id, plan_id, amount_usd, reason)
-       VALUES ($1, $2, $3, 'signup')
+      `INSERT INTO credit_grants (user_id, organization_id, plan_id, amount_usd, reason)
+       VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $1), $2, $3, 'signup')
        ON CONFLICT DO NOTHING
        RETURNING id`,
       [args.userId, args.planId, amount]
@@ -61,7 +61,7 @@ export async function grantSignupCredits(
     }
 
     await client.query(
-      `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
+      `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)`,
       [amount, args.userId]
     );
 
@@ -112,8 +112,8 @@ export async function grantAutoRefillCredits(
   try {
     await client.query('BEGIN');
     const ins = await client.query(
-      `INSERT INTO credit_grants (user_id, plan_id, amount_usd, reason, stripe_event_id)
-       VALUES ($1, NULL, $2, 'auto_refill', $3)
+      `INSERT INTO credit_grants (user_id, organization_id, plan_id, amount_usd, reason, stripe_event_id)
+       VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $1), NULL, $2, 'auto_refill', $3)
        ON CONFLICT (stripe_event_id) DO NOTHING
        RETURNING id`,
       [args.userId, args.amountUsd, args.stripeEventId]
@@ -123,7 +123,7 @@ export async function grantAutoRefillCredits(
       return { granted: 0 };
     }
     await client.query(
-      `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
+      `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)`,
       [args.amountUsd, args.userId]
     );
     await client.query('COMMIT');
