@@ -21,8 +21,10 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
   try {
     await client.query('BEGIN');
     const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string; personal_organization_id: string }>(
-      `SELECT monthly_allowance_usd, credits_usd, personal_organization_id
-       FROM platform_users WHERE id = $1 FOR UPDATE`,
+      `SELECT pu.monthly_allowance_usd, o.credits_usd, pu.personal_organization_id
+       FROM platform_users pu
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       WHERE pu.id = $1 FOR UPDATE OF pu, o`,
       [args.userId]
     );
     if (u.rows.length === 0) throw new Error(`grantLease: user ${args.userId} not found`);
@@ -62,8 +64,8 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     }
     if (topupDraw > 0) {
       await client.query(
-        `UPDATE platform_users SET credits_usd = credits_usd - $1 WHERE id = $2`,
-        [topupDraw, args.userId]
+        `UPDATE organizations SET credits_usd = credits_usd - $1 WHERE id = $2`,
+        [topupDraw, organizationId]
       );
     }
 
@@ -102,12 +104,13 @@ export async function settleLease(
     await client.query('BEGIN');
     const r = await client.query<{
       user_id: string;
+      organization_id: string;
       amount_usd: string;
       status: string;
       source_pool: 'monthly' | 'topup' | 'split';
       topup_amount_usd: string | null;
     }>(
-      `SELECT user_id, amount_usd, status, source_pool, topup_amount_usd
+      `SELECT user_id, organization_id, amount_usd, status, source_pool, topup_amount_usd
        FROM credit_leases WHERE lease_id = $1 FOR UPDATE`,
       [args.leaseId]
     );
@@ -142,8 +145,8 @@ export async function settleLease(
         );
       } else if (sourcePool === 'topup') {
         await client.query(
-          `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
-          [refund, r.rows[0].user_id]
+          `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
+          [refund, r.rows[0].organization_id]
         );
       } else {
         // split: pro-rate the refund by the original pool proportions.
@@ -157,8 +160,8 @@ export async function settleLease(
         }
         if (topupRefund > 0) {
           await client.query(
-            `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
-            [topupRefund, r.rows[0].user_id]
+            `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
+            [topupRefund, r.rows[0].organization_id]
           );
         }
       }
