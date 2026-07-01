@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveRuntimeUrls, MigrationScopeError } from './migrate.js';
+import { resolveRuntimeUrls, MigrationScopeError, parseScopeHeader } from './migrate.js';
 import pg from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -104,5 +104,26 @@ describe.skipIf(skipDb)('migrations', () => {
       client.release();
       await pool.end();
     }
+  });
+});
+
+describe('034_apps_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '034_apps_organization_id.sql');
+  const sql = fs.readFileSync(migrationPath, 'utf-8');
+
+  it('has a valid runtime scope header', () => {
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id to apps', () => {
+    expect(sql).toMatch(/ALTER TABLE apps[\s\S]+ADD COLUMN IF NOT EXISTS organization_id\s+uuid/i);
+  });
+
+  it('does NOT add a foreign key (cross-plane logical ref only)', () => {
+    expect(sql).not.toMatch(/REFERENCES\s+organizations/i);
+  });
+
+  it('creates a (organization_id, created_at DESC) index', () => {
+    expect(sql).toMatch(/CREATE INDEX[\s\S]+apps[\s\S]+\(organization_id[^)]*created_at\s+DESC\)/i);
   });
 });

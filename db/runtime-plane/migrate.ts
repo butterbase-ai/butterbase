@@ -36,7 +36,7 @@ export function resolveRuntimeUrls(
   return map;
 }
 
-function parseScopeHeader(sql: string): string {
+export function parseScopeHeader(sql: string): string {
   const lines = sql.split('\n');
   let firstNonBlank: string | null = null;
   for (const line of lines) {
