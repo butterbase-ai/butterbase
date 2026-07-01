@@ -82,13 +82,14 @@ export async function billingRoutes(app: FastifyInstance) {
       // Get user's plan and subscription
       // platform_users + plans + subscriptions live on controlDb — stay on controlDb
       const userResult = await app.controlDb.query(
-        `SELECT pu.plan_id, pu.stripe_customer_id, pu.billing_period_start, pu.account_status,
+        `SELECT o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
                 p.name as plan_name, p.price_monthly_cents,
                 p.max_storage_gb, p.max_ai_credits_usd, p.ai_credits_lifetime,
                 p.max_lambda_invocations, p.max_db_size_gb, p.max_bandwidth_gb, p.max_mau,
                 p.max_projects, p.overage_rates, p.features
          FROM platform_users pu
-         JOIN plans p ON pu.plan_id = p.id
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         JOIN plans p ON p.id = o.plan_id
          WHERE pu.id = $1`,
         [userId]
       );
@@ -504,7 +505,10 @@ export async function billingRoutes(app: FastifyInstance) {
 
     try {
       const result = await app.controlDb.query(
-        'SELECT onboarding_completed, plan_id FROM platform_users WHERE id = $1',
+        `SELECT pu.onboarding_completed, o.plan_id
+         FROM platform_users pu
+         LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [userId]
       );
 
@@ -599,7 +603,10 @@ export async function billingRoutes(app: FastifyInstance) {
     try {
     // 1. Verify user exists — platform_users is a controlDb table
     const userResult = await app.controlDb.query(
-      'SELECT id, stripe_customer_id FROM platform_users WHERE id = $1',
+      `SELECT pu.id, o.stripe_customer_id
+       FROM platform_users pu
+       LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+       WHERE pu.id = $1`,
       [userId]
     );
     if (userResult.rows.length === 0) {
