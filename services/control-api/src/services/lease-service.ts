@@ -20,12 +20,13 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
-    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-      `SELECT monthly_allowance_usd, credits_usd
+    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string; personal_organization_id: string }>(
+      `SELECT monthly_allowance_usd, credits_usd, personal_organization_id
        FROM platform_users WHERE id = $1 FOR UPDATE`,
       [args.userId]
     );
     if (u.rows.length === 0) throw new Error(`grantLease: user ${args.userId} not found`);
+    const organizationId = u.rows[0].personal_organization_id;
 
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
     const topup = parseFloat(u.rows[0].credits_usd);
@@ -67,10 +68,10 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     }
 
     const ins = await client.query<{ lease_id: string }>(
-      `INSERT INTO credit_leases (user_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd)
-       VALUES ($1, $2, $3, $4, 'active', $5, $6)
+      `INSERT INTO credit_leases (user_id, organization_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
        RETURNING lease_id`,
-      [args.userId, args.region, granted, expires, sourcePool, topupAmountColumn]
+      [args.userId, organizationId, args.region, granted, expires, sourcePool, topupAmountColumn]
     );
 
     await client.query('COMMIT');

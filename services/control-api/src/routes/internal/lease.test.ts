@@ -25,14 +25,39 @@ beforeAll(async () => {
 afterAll(async () => { await app.close(); await pool.end(); });
 
 beforeEach(async () => {
+  // Look up the previous user id before deleting so we can clean up the org after.
+  // platform_users.personal_organization_id FKs organizations, so the user row must
+  // be deleted before the org row (post-Plan-05 migration 076).
+  const prev = await pool.query(
+    `SELECT id FROM platform_users WHERE email = 'lease-route-test@example.com'`,
+  );
+  const prevUserId = prev.rows[0]?.id as string | undefined;
+
   await pool.query(`DELETE FROM credit_leases WHERE user_id = (SELECT id FROM platform_users WHERE email = 'lease-route-test@example.com')`);
   await pool.query(`DELETE FROM platform_users WHERE email = 'lease-route-test@example.com'`);
-  const ins = await pool.query(
-    `INSERT INTO platform_users (id, email, account_status, plan_id, credits_usd)
-     VALUES (gen_random_uuid(), 'lease-route-test@example.com', 'active', 'playground', 5.00)
-     RETURNING id`
+  if (prevUserId) {
+    await pool.query(`DELETE FROM organizations WHERE owner_id = $1`, [prevUserId]);
+  }
+
+  // Generate user id upfront so we can create the personal org before the user row
+  // (platform_users.personal_organization_id is NOT NULL post-Plan-05 migration 076).
+  const userId = (await pool.query(`SELECT gen_random_uuid() AS id`)).rows[0].id as string;
+  const orgResult = await pool.query(
+    `INSERT INTO organizations (
+        owner_id, name, personal,
+        plan_id, credits_usd, auto_refill_enabled, account_status
+     )
+     VALUES ($1, $2, true, 'playground', 5.00, false, 'active')
+     RETURNING id`,
+    [userId, "lease-route-test's org"],
   );
-  testUserId = ins.rows[0].id;
+  const orgId = orgResult.rows[0].id as string;
+  await pool.query(
+    `INSERT INTO platform_users (id, email, account_status, plan_id, credits_usd, personal_organization_id)
+     VALUES ($1, 'lease-route-test@example.com', 'active', 'playground', 5.00, $2)`,
+    [userId, orgId],
+  );
+  testUserId = userId;
 });
 
 describe('POST /v1/internal/lease/grant', () => {
