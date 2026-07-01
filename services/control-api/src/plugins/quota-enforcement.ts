@@ -102,7 +102,10 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
       // Cold-start fallback: seed runtime cache from platform DB
       if (!state) {
         const r = await fastify.controlDb.query(
-          `SELECT account_status, plan_id, spending_cap_usd FROM platform_users WHERE id = $1`,
+          `SELECT o.account_status, o.plan_id, o.spending_cap_usd
+           FROM organizations o
+           JOIN platform_users u ON u.personal_organization_id = o.id
+           WHERE u.id = $1`,
           [userId]
         );
         if (r.rows.length === 0) {
