@@ -10,10 +10,10 @@ export interface WriteResult {
 }
 
 /**
- * Atomically updates the listed fields on platform_users and writes a paired
- * row to user_state_outbox. Returns the assigned outbox version.
+ * Atomically updates the listed fields on the user's personal organization and
+ * writes a paired row to user_state_outbox. Returns the assigned outbox version.
  *
- * Use this for EVERY mutation of platform_users.{account_status, plan_id,
+ * Use this for EVERY mutation of organizations.{account_status, plan_id,
  * spending_cap_usd}. Do not write those columns directly with bare UPDATEs.
  *
  * Credit balance changes are handled by the lease subsystem — do not pass
@@ -39,7 +39,7 @@ export async function writeUserStateChange(
   try {
     await client.query('BEGIN');
     const upd = await client.query(
-      `UPDATE platform_users SET ${setClause} WHERE id = $1`,
+      `UPDATE organizations SET ${setClause} WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
       [userId, ...values]
     );
     if (upd.rowCount === 0) {
