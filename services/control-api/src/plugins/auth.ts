@@ -48,7 +48,7 @@ function mcpAuthRequiredBody() {
 }
 // Stripe provisioning lives in the cloud overlay; in OSS mode it's a no-op.
 async function provisionStripeCustomer(
-  ...args: [unknown, string, string]
+  ...args: [unknown, string, string, string]
 ): Promise<void> {
   try {
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -390,26 +390,26 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
 
         // Auto-provision Stripe customer + Playground subscription for new users.
         if (!stripeCustomerId) {
-          provisionStripeCustomer(fastify.controlDb, userId, claims.email).catch((err) => {
+          provisionStripeCustomer(fastify.controlDb, userId, personalOrgId, claims.email).catch((err) => {
             fastify.log.error({ err }, `Failed to provision Stripe customer for user ${userId}`);
           });
+        }
 
-          // Grant signup credits on first JIT auth. Idempotent — the partial unique
-          // index on credit_grants (user_id) WHERE reason='signup' guarantees at-most-once.
-          // Fire-and-forget: errors logged but never block auth.
-          if (isNewUser) {
-            (async () => {
-              try {
-                const { grantSignupCredits } = await import('../services/credit-grants-service.js');
-                await grantSignupCredits(fastify.controlDb, { userId, planId });
-              } catch (err) {
-                fastify.log.error(
-                  { err, userId, planId },
-                  'signup-grant: failed to grant signup credits'
-                );
-              }
-            })();
-          }
+        // Grant signup credits on first JIT auth. Idempotent — the partial unique
+        // index on credit_grants (user_id) WHERE reason='signup' guarantees at-most-once.
+        // Fire-and-forget: errors logged but never block auth.
+        if (isNewUser) {
+          (async () => {
+            try {
+              const { grantSignupCredits } = await import('../services/credit-grants-service.js');
+              await grantSignupCredits(fastify.controlDb, { userId, planId });
+            } catch (err) {
+              fastify.log.error(
+                { err, userId, planId },
+                'signup-grant: failed to grant signup credits'
+              );
+            }
+          })();
         }
 
         request.auth = {
