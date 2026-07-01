@@ -61,8 +61,10 @@ export async function maybeTriggerAutoRefill(deps: Deps, userId: string): Promis
     auto_refill_amount_usd: string | null;
     email: string;
   }>(
-    `SELECT monthly_allowance_usd, credits_usd, auto_refill_enabled, auto_refill_amount_usd, email
-     FROM platform_users WHERE id = $1`,
+    `SELECT pu.monthly_allowance_usd, o.credits_usd, o.auto_refill_enabled, o.auto_refill_amount_usd, pu.email
+     FROM platform_users pu
+     JOIN organizations o ON o.id = pu.personal_organization_id
+     WHERE pu.id = $1`,
     [userId]
   );
   if (r.rows.length === 0) return { attempted: false, reason: 'not_low' };
@@ -102,10 +104,10 @@ export async function maybeTriggerAutoRefill(deps: Deps, userId: string): Promis
     if (result.status === 'succeeded') {
       await grant(userId, amount, result.paymentIntentId);
       await deps.pool.query(
-        `UPDATE platform_users
+        `UPDATE organizations
             SET auto_refill_last_attempt_at = now(),
                 auto_refill_last_failure_reason = NULL
-          WHERE id = $1`,
+          WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
         [userId]
       );
       return { attempted: true, status: 'succeeded', reason: 'charged' };
@@ -138,11 +140,11 @@ function defaultGrant(pool: pg.Pool) {
 function defaultFlipDisabled(pool: pg.Pool) {
   return async (userId: string, reason: string) => {
     await pool.query(
-      `UPDATE platform_users
+      `UPDATE organizations
          SET auto_refill_enabled = FALSE,
              auto_refill_last_attempt_at = now(),
              auto_refill_last_failure_reason = $2
-       WHERE id = $1`,
+       WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
       [userId, reason]
     );
   };
