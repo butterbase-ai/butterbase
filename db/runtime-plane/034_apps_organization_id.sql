@@ -14,4 +14,4 @@ CREATE INDEX IF NOT EXISTS apps_organization_id_created_at_idx
   ON apps (organization_id, created_at DESC);
 
 COMMENT ON COLUMN apps.organization_id IS
-  'Logical reference to control-DB organizations.id. NOT NULL enforced after backfill in plan 02.';
+  'Logical reference to control-DB organizations.id. NOT NULL enforced in plan 04 after backfill (plan 02).';
