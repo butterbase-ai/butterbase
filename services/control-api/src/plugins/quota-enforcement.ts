@@ -7,7 +7,7 @@ import { sendBillingEmail, type BillingEmailTemplate } from '../services/auth/em
 import { quotaErrors } from '../utils/quota-errors.js';
 import { getRedisClient } from '../services/redis.js';
 import { writeUserStateChange } from '../services/state-outbox.js';
-import { readUserBillingState, applyLease, burnLease } from '../services/user-billing-state.js';
+import { readOrgBillingState, applyLease, burnLease } from '../services/org-billing-state.js';
 import { requestLeaseFromPlatform } from '../services/lease-client.js';
 import { assertRegionConfig } from '../config.js';
 
@@ -97,7 +97,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
       const region = assertRegionConfig().instanceRegion;
       const runtimePool = fastify.runtimeDb(region);
 
-      let state = await readUserBillingState(runtimePool, userId);
+      let state = await readOrgBillingState(runtimePool, userId);
 
       // Cold-start fallback: seed runtime cache from platform DB
       if (!state) {
@@ -117,7 +117,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
            ON CONFLICT (user_id) DO NOTHING`,
           [userId, r.rows[0].account_status, r.rows[0].plan_id, r.rows[0].spending_cap_usd]
         );
-        state = await readUserBillingState(runtimePool, userId);
+        state = await readOrgBillingState(runtimePool, userId);
       }
 
       const account_status = state!.account_status ?? undefined;
