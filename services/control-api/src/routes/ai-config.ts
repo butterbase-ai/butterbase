@@ -18,6 +18,7 @@ import {
 } from '../services/ai-router/schemas.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
@@ -115,22 +116,20 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
     try {
       // Verify ownership
+      try {
+        await AppResolver.resolveApp(app.controlDb, appId, userId);
+      } catch (err) {
+        if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+        throw err;
+      }
+      // Get ai_config separately
       const region = await resolveAppHomeRegion(app.controlDb, appId);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      const ownerResult = await runtimeDb.query(
-        'SELECT owner_id, ai_config FROM apps WHERE id = $1',
+      const configResult = await runtimeDb.query(
+        'SELECT ai_config FROM apps WHERE id = $1',
         [appId]
       );
-
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'App not found' });
-      }
-
-      if (ownerResult.rows[0].owner_id !== userId) {
-        return reply.code(403).send({ error: 'Not authorized' });
-      }
-
-      const aiConfig = ownerResult.rows[0].ai_config || {};
+      const aiConfig = configResult.rows[0]?.ai_config || {};
 
       // Decrypt and mask BYOK key if present
       if (aiConfig.byokKey) {
@@ -171,23 +170,21 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
     try {
       // Verify ownership
+      try {
+        await AppResolver.resolveApp(app.controlDb, appId, userId);
+      } catch (err) {
+        if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+        throw err;
+      }
+      // Get ai_config separately
       const region = await resolveAppHomeRegion(app.controlDb, appId);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      const ownerResult = await runtimeDb.query(
-        'SELECT owner_id, ai_config FROM apps WHERE id = $1',
+      const configResult = await runtimeDb.query(
+        'SELECT ai_config FROM apps WHERE id = $1',
         [appId]
       );
-
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'App not found' });
-      }
-
-      if (ownerResult.rows[0].owner_id !== userId) {
-        return reply.code(403).send({ error: 'Not authorized' });
-      }
-
       const body = aiConfigSchema.parse(request.body);
-      const currentConfig = ownerResult.rows[0].ai_config || {};
+      const currentConfig = configResult.rows[0]?.ai_config || {};
 
       // Encrypt BYOK key if provided
       if (body.byokKey) {
@@ -502,19 +499,11 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
     try {
       // Verify ownership
-      const region = await resolveAppHomeRegion(app.controlDb, appId);
-      const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      const ownerResult = await runtimeDb.query(
-        'SELECT owner_id FROM apps WHERE id = $1',
-        [appId]
-      );
-
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'App not found' });
-      }
-
-      if (ownerResult.rows[0].owner_id !== userId) {
-        return reply.code(403).send({ error: 'Not authorized' });
+      try {
+        await AppResolver.resolveApp(app.controlDb, appId, userId);
+      } catch (err) {
+        if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+        throw err;
       }
 
       // FIXME(batch-9.7): getAiUsageSummary takes a Pool and queries ai_usage_logs (runtime) — migrate service signature
