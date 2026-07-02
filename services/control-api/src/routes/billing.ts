@@ -78,10 +78,29 @@ export async function billingRoutes(app: FastifyInstance) {
   app.get('/dashboard/billing', async (request, reply) => {
     const userId = requireUserId(request);
 
+    // Optional ?org_id=<uuid>: view billing for a specific org the caller is a
+    // member of. Falls back to the caller's personal org when absent so legacy
+    // callers keep working. Membership is enforced — non-members get 403.
+    const query = (request.query ?? {}) as { org_id?: string };
+    const requestedOrgId = query.org_id;
+    let targetOrgId: string | null = null;
+    if (requestedOrgId) {
+      const membership = await app.controlDb.query(
+        `SELECT 1 FROM organization_members
+         WHERE organization_id = $1 AND user_id = $2
+         LIMIT 1`,
+        [requestedOrgId, userId]
+      );
+      if (membership.rows.length === 0) {
+        return reply.code(403).send({ error: 'Not a member of the requested organization' });
+      }
+      targetOrgId = requestedOrgId;
+    }
+
     const region = assertRegionConfig().instanceRegion;
     try {
-      // Get user's plan and subscription
-      // platform_users + plans + subscriptions live on controlDb — stay on controlDb
+      // Get billing state for the resolved org: either the ?org_id path arg
+      // (membership already checked above) or the caller's personal org.
       const userResult = await app.controlDb.query(
         `SELECT o.id AS org_id, o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
                 p.name as plan_name, p.price_monthly_cents,
@@ -89,10 +108,10 @@ export async function billingRoutes(app: FastifyInstance) {
                 p.max_lambda_invocations, p.max_db_size_gb, p.max_bandwidth_gb, p.max_mau,
                 p.max_projects, p.overage_rates, p.features
          FROM platform_users pu
-         JOIN organizations o ON o.id = pu.personal_organization_id
+         JOIN organizations o ON o.id = COALESCE($2::uuid, pu.personal_organization_id)
          JOIN plans p ON p.id = o.plan_id
          WHERE pu.id = $1`,
-        [userId]
+        [userId, targetOrgId]
       );
 
       if (userResult.rows.length === 0) {
