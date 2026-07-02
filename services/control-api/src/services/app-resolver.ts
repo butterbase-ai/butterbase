@@ -69,18 +69,45 @@ export class AppResolver {
     const region = await resolveHomeRegion(controlPool, appId);
     if (!region) throw new AppNotFoundError(appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-    const result = await runtimeDb.query(
-      `SELECT id, name, owner_id, db_name, paused, paused_reason
+    // Post-Plan-07: apps.organization_id is the source of truth for who can
+    // access the app. Any member of that org has access, not just the direct
+    // owner. Fall back to owner_id for legacy apps whose organization_id is
+    // still NULL (pre-user_app_index backfill).
+    const result = await runtimeDb.query<{
+      id: string;
+      name: string;
+      owner_id: string;
+      organization_id: string | null;
+      db_name: string;
+      paused: boolean;
+      paused_reason: string | null;
+    }>(
+      `SELECT id, name, owner_id, organization_id, db_name, paused, paused_reason
        FROM apps
-       WHERE id = $1 AND owner_id = $2`,
-      [appId, userId]
+       WHERE id = $1`,
+      [appId]
     );
 
     if (result.rows.length === 0) {
       throw new AppNotFoundError(appId);
     }
+    const row = result.rows[0];
 
-    return result.rows[0];
+    // Owner always passes.
+    if (row.owner_id === userId) return row;
+
+    // Non-owner: must be a member of the app's org (control plane).
+    if (row.organization_id) {
+      const member = await controlPool.query(
+        `SELECT 1 FROM organization_members
+         WHERE organization_id = $1 AND user_id = $2
+         LIMIT 1`,
+        [row.organization_id, userId]
+      );
+      if (member.rows.length > 0) return row;
+    }
+
+    throw new AppNotFoundError(appId);
   }
 
   /**
