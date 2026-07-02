@@ -8,6 +8,7 @@ import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
 import { addUserAppIndex, removeUserAppIndex, listUserApps } from '../services/user-app-index.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const initSchema = {
   body: {
@@ -57,7 +58,18 @@ export async function initRoutes(app: FastifyInstance) {
   app.get('/apps/:app_id/status', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     const ownerId = requireUserId(request);
-    // Look up the app's home region from the cross-region user_app_index
+
+    // Org-aware auth check
+    try {
+      await AppResolver.resolveApp(app.controlDb, app_id, ownerId);
+    } catch (err) {
+      if (err instanceof AppNotFoundError) {
+        return reply.code(404).send({ code: 'RESOURCE_NOT_FOUND', message: `App "${app_id}" not found` });
+      }
+      throw err;
+    }
+
+    // We know the app exists and user has access — get the region to query status
     // — the runtime apps row lives in that region's DB only.
     const idx = await app.controlDb.query<{ region: string }>(
       `SELECT region FROM user_app_index WHERE app_id = $1`,
@@ -70,8 +82,8 @@ export async function initRoutes(app: FastifyInstance) {
 
     const { rows } = await app.runtimeDb(region).query(
       `SELECT id, name, db_provisioned, provisioning_status, provisioning_error, created_at
-       FROM apps WHERE id = $1 AND owner_id = $2`,
-      [app_id, ownerId]
+       FROM apps WHERE id = $1`,
+      [app_id]
     );
 
     if (rows.length === 0) {
@@ -287,21 +299,24 @@ export async function initRoutes(app: FastifyInstance) {
 
   app.delete('/apps/:app_id', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
-    // Look up the app's home region + owner from the cross-region index.
-    const idx = await app.controlDb.query<{ region: string; user_id: string }>(
-      `SELECT region, user_id FROM user_app_index WHERE app_id = $1`,
-      [app_id]
-    );
-    if (idx.rows.length === 0) {
-      return reply.code(404).send({ error: 'App not found' });
-    }
-    const region = idx.rows[0].region;
-    const indexedUserId = idx.rows[0].user_id;
     const callerUserId = requireUserId(request);
-    // Ownership check via the cross-region index (apps row may be missing
-    // in the orphan-cleanup path — see below).
-    if (indexedUserId !== callerUserId) {
-      return reply.code(403).send({ error: 'Forbidden: You do not own this app' });
+
+    // Org-aware auth + get region
+    let region: string;
+    try {
+      await AppResolver.resolveApp(app.controlDb, app_id, callerUserId);
+      // Look up the app's home region from the cross-region index.
+      const idx = await app.controlDb.query<{ region: string }>(
+        `SELECT region FROM user_app_index WHERE app_id = $1`,
+        [app_id]
+      );
+      if (idx.rows.length === 0) {
+        return reply.code(404).send({ error: 'App not found' });
+      }
+      region = idx.rows[0].region;
+    } catch (err) {
+      if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+      throw err;
     }
 
     const appResult = await app.runtimeDb(region).query(
@@ -331,11 +346,7 @@ export async function initRoutes(app: FastifyInstance) {
     }
 
     const appData = appResult.rows[0];
-    // Defensive: re-check ownership against the runtime apps row in case
-    // user_app_index drifted from apps.owner_id mid-flight.
-    if (appData.owner_id !== callerUserId) {
-      return reply.code(403).send({ error: 'Forbidden: You do not own this app' });
-    }
+    // AppResolver already verified access (owner or org member) — no second check needed.
 
     // Cross-region fork_count outbox: if this is a cloned app whose source lives
     // in a different region, queue a decrement for the sweeper. The intra-region
