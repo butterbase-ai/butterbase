@@ -2,6 +2,7 @@
 import { Pool } from 'pg';
 import { incrementUsage } from './usage-metering.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
+import { resolveOrgFromApp } from './app-org-resolver.js';
 
 export interface AiUsageLog {
   appId: string;
@@ -28,10 +29,13 @@ export async function logAiUsage(db: Pool, log: AiUsageLog): Promise<void> {
     // Use actual cost from OpenRouter if provided, otherwise fall back to local estimate
     const costUsd = log.costUsd ?? calculateCost(log.model, log.promptTokens, log.completionTokens);
 
+    // Resolve organization_id from app
+    const organizationId = await resolveOrgFromApp(runtimePool, log.appId);
+
     // Insert into ai_usage_logs table (runtime-tier)
     await runtimePool.query(
-      `INSERT INTO ai_usage_logs (app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens, cost_usd, key_type, charged_to_user, request_metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO ai_usage_logs (app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens, cost_usd, key_type, charged_to_user, request_metadata, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         log.appId,
         log.userId,
@@ -44,6 +48,7 @@ export async function logAiUsage(db: Pool, log: AiUsageLog): Promise<void> {
         log.keyType,
         log.chargedToUser,
         JSON.stringify({ user_id: log.userId }),
+        organizationId,
       ]
     );
 

@@ -134,6 +134,7 @@ import { writeSubdomainMapping, writeDomainMapping } from './services/cloudflare
 import { updateUserAppIndexRegion } from './services/user-app-index.js';
 import { enqueueDeprovision } from './services/move-app/source-retention.js';
 import { invalidateAppRegion, getRuntimeDbForApp } from './services/region-resolver.js';
+import { resolveOrgFromApp } from './services/app-org-resolver.js';
 import { runtimePoolFor, listRuntimeRegions } from './services/runtime-pool-registry.js';
 import { redisFor } from './services/redis-registry.js';
 import { auditRuntimeTablesForPool } from './services/move-app/runtime-table-audit.js';
@@ -288,13 +289,21 @@ app.addHook('preHandler', async (request) => {
     const userId = request.auth?.userId ?? null;
 
     const region = assertRegionConfig().instanceRegion;
-    app.runtimeDb(region).query(
-      `INSERT INTO mcp_tool_call_log (api_key_id, user_id, tool_name, parameters, app_id)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [apiKeyId, userId, toolName, JSON.stringify(args), appId]
-    ).catch((err) => {
-      request.log.warn({ err }, 'failed to log mcp tool call');
-    });
+    // Only log if we have an app_id to attribute to an organization
+    if (appId) {
+      (async () => {
+        try {
+          const organizationId = await resolveOrgFromApp(app.runtimeDb(region), appId);
+          await app.runtimeDb(region).query(
+            `INSERT INTO mcp_tool_call_log (api_key_id, user_id, tool_name, parameters, app_id, organization_id)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [apiKeyId, userId, toolName, JSON.stringify(args), appId, organizationId]
+          );
+        } catch (err) {
+          request.log.warn({ err }, 'failed to log mcp tool call');
+        }
+      })();
+    }
   }
 });
 

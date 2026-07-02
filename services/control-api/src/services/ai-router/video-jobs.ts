@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 export interface VideoJobRow {
   id: string;
@@ -50,17 +51,19 @@ export async function insertVideoJob(
     markupPct: number;
   },
 ): Promise<string> {
+  const organizationId = await resolveOrgFromApp(pool, args.appId);
   const r = await pool.query<{ id: string }>(
     `INSERT INTO ai_video_jobs
        (app_id, user_id, end_user_sub, model, request_json, status,
         upstream_router, upstream_job_id, upstream_polling_url,
-        lease_id, estimated_cost_usd, markup_pct)
-     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10, $11)
+        lease_id, estimated_cost_usd, markup_pct, organization_id)
+     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10, $11, $12)
      RETURNING id`,
     [
       args.appId, args.userId, args.endUserSub, args.model, args.requestJson,
       args.upstreamRouter, args.upstreamJobId, args.upstreamPollingUrl,
       args.leaseId, args.estimatedCostUsd, args.markupPct,
+      organizationId,
     ],
   );
   return r.rows[0].id;

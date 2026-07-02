@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import type { RouterName } from './normalize.js';
 import { incrementUsage } from '../usage-metering.js';
+import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 export interface AiUsageRow {
   appId: string | null;
@@ -33,13 +34,14 @@ export interface AiUsageRow {
  * Legacy `provider` and `cost_usd` columns populated for one release; dropped in 067.
  */
 export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Promise<void> {
+  const organizationId = row.appId ? await resolveOrgFromApp(runtimePool, row.appId) : null;
   await runtimePool.query(
     `INSERT INTO ai_usage_logs (
        app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
        cost_usd, key_type, charged_to_user, request_metadata,
        router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id,
-       cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+       cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, organization_id
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
     [
       row.appId,
       row.userId,
@@ -61,6 +63,7 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.cacheReadInputTokens ?? 0,
       row.cacheCreationInputTokens ?? 0,
       row.reasoningTokens ?? null,
+      organizationId,
     ]
   );
 
