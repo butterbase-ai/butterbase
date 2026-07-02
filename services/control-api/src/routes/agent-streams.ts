@@ -6,6 +6,7 @@ import { streamRunEventsAsSse, streamRunEventsToWebSocket } from '../services/ag
 import { verifyEndUserStreamToken } from '../services/agent-stream-tokens.js';
 import { getOrCreateSigningKey } from '../services/auth/signing-key-service.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 async function resolveRuntime(
   app: FastifyInstance,
@@ -45,12 +46,13 @@ async function authForOwnerStream(
   runId: string,
 ): Promise<{ ok: true } | { ok: false; code: number; error: string }> {
   if (request.auth?.userId) {
-    const r = await runtimeDb.query('SELECT owner_id FROM apps WHERE id = $1', [appId]);
-    if (r.rows.length === 0) return { ok: false, code: 404, error: 'App not found' };
-    if (r.rows[0].owner_id !== request.auth.userId) {
-      return { ok: false, code: 403, error: 'Not authorized' };
+    try {
+      await AppResolver.resolveApp(app.controlDb, appId, request.auth.userId);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof AppNotFoundError) return { ok: false, code: 404, error: 'App not found' };
+      throw err;
     }
-    return { ok: true };
   }
 
   const token = (request.query as { token?: string })?.token;
