@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { resolveEligibilityForHackathon } from '../services/hackathons/eligibility.js';
 import { loadPool, countActiveKeys } from '../services/partner-proxy/pool.js';
 import { forwardRequest, type ForwardInput } from '../services/partner-proxy/forwarder.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { createAgentError } from '../services/error-handler.js';
 import { config, assertRegionConfig } from '../config.js';
 
@@ -110,15 +111,16 @@ export async function partnerProxyRoutes(fastify: FastifyInstance) {
       body: request.body as Buffer | undefined,
     };
 
+    const organizationId = await resolveOrgFromApp(fastify.runtimeDb(region), appId);
     const start = Date.now();
     const result = await forwardRequest(fastify.runtimeDb(region), pool, input);
     const latencyMs = Date.now() - start;
 
     if (result.kind === 'exhausted') {
       void fastify.runtimeDb(region).query(
-        `INSERT INTO partner_proxy_logs (pool_id, app_id, user_id, method, path, status_code, latency_ms, failover_attempts)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [pool.id, appId, userId, request.method, pathAndQuery, 503, latencyMs, result.attempts],
+        `INSERT INTO partner_proxy_logs (pool_id, app_id, organization_id, user_id, method, path, status_code, latency_ms, failover_attempts)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [pool.id, appId, organizationId, userId, request.method, pathAndQuery, 503, latencyMs, result.attempts],
       ).catch((err) => fastify.log.warn({ err }, 'partner_proxy_logs insert failed'));
 
       const errBody = createAgentError({
@@ -143,9 +145,9 @@ export async function partnerProxyRoutes(fastify: FastifyInstance) {
     });
 
     void fastify.runtimeDb(region).query(
-      `INSERT INTO partner_proxy_logs (pool_id, key_id, app_id, user_id, method, path, status_code, bytes_in, bytes_out, latency_ms, failover_attempts)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [pool.id, result.keyId, appId, userId, request.method, pathAndQuery,
+      `INSERT INTO partner_proxy_logs (pool_id, key_id, app_id, organization_id, user_id, method, path, status_code, bytes_in, bytes_out, latency_ms, failover_attempts)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [pool.id, result.keyId, appId, organizationId, userId, request.method, pathAndQuery,
        partnerRes.status, Buffer.isBuffer(input.body) ? input.body.length : null,
        bytesOut, latencyMs, result.attempts],
     ).catch((err) => fastify.log.warn({ err }, 'partner_proxy_logs insert failed'));

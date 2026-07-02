@@ -5,6 +5,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type pg from 'pg';
 import { requireUserId } from '../utils/require-auth.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { getPeopleAdapter } from '../services/people/registry.js';
 import { getPeoplePricing } from '../services/people/pricing.js';
 import { normalizeLinkedinUrl } from '../services/people/url.js';
@@ -75,12 +76,13 @@ interface AuditParams {
 }
 
 async function writeAuditRow(runtime: pg.Pool, p: AuditParams): Promise<void> {
+  const organizationId = await resolveOrgFromApp(runtime, p.appId);
   await runtime.query(
     `INSERT INTO people_usage_logs
-       (app_id, user_id, action, credits_consumed, usd_cost, usd_charged, key_type, request_id, response_status, linkedin_url, provider_slot)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       (app_id, organization_id, user_id, action, credits_consumed, usd_cost, usd_charged, key_type, request_id, response_status, linkedin_url, provider_slot)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
     [
-      p.appId, p.userId, p.action,
+      p.appId, organizationId, p.userId, p.action,
       p.creditsConsumed, p.usdCost, p.usdCharged,
       p.keyType, p.requestId, p.status, p.linkedinUrl,
       p.providerSlot,
@@ -428,10 +430,11 @@ export async function peopleRoutes(app: FastifyInstance) {
       const nonce = crypto.randomBytes(32).toString('hex');
 
       // Insert the pending row BEFORE calling the adapter.
+      const organizationId = await resolveOrgFromApp(runtime, appId);
       const lookupRow = await runtime.query<{ id: string }>(
-        `INSERT INTO people_email_lookups (app_id, user_id, normalized_url, nonce, key_type, provider_slot, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING id`,
-        [appId, userId, normalizedUrl, nonce, 'platform', slot],
+        `INSERT INTO people_email_lookups (app_id, organization_id, user_id, normalized_url, nonce, key_type, provider_slot, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending') RETURNING id`,
+        [appId, organizationId, userId, normalizedUrl, nonce, 'platform', slot],
       );
       lookupId = lookupRow.rows[0].id;
 
