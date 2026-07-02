@@ -156,7 +156,7 @@ describe('usage-metering — organization_id stamping', () => {
   // ── flushUsageToDatabase (Site 1) coverage ────────────────────────────────
 
   it('flushUsageToDatabase stamps organization_id for a known organization', async () => {
-    const key = `usage_org:${personalOrgId}:api_calls:2026-07-01`;
+    const key = `usage_org:${personalOrgId}:${userId}:api_calls:2026-07-01`;
     mockRedisClient.keys.mockResolvedValueOnce([key]);
     mockRedisClient.getdel.mockResolvedValueOnce('7');
 
@@ -165,8 +165,8 @@ describe('usage-metering — organization_id stamping', () => {
     const inserts = capturedInsertsRef[0]!;
     expect(inserts.length).toBe(1);
     const ins = inserts[0]!;
-    // params: [userId|null, organizationId, appId|null, meterType, periodStart, quantity]
-    expect(ins.params[0]).toBeNull();              // no userId in org-scoped key
+    // params: [userId, organizationId, appId|null, meterType, periodStart, quantity]
+    expect(ins.params[0]).toBe(userId);            // userId from parsed key
     expect(ins.params[1]).toBe(personalOrgId);
     expect(ins.params[2]).toBeNull();             // no appId in key
     expect(ins.params[3]).toBe('api_calls');

@@ -14,6 +14,27 @@ vi.mock('../services/region-resolver.js', () => ({
   getRuntimeDbForApp: vi.fn(),
 }));
 
+vi.mock('../services/app-resolver.js', () => {
+  class AppNotFoundError extends Error {
+    constructor(appId: string) {
+      super(`App not found: ${appId}`);
+      this.name = 'AppNotFoundError';
+    }
+  }
+  class AppResolver {
+    static resolveApp = vi.fn();
+  }
+  return { AppResolver, AppNotFoundError };
+});
+
+vi.mock('../services/org-resolver.js', () => ({
+  resolveOrganizationId: vi.fn(),
+}));
+
+vi.mock('../services/app-org-resolver.js', () => ({
+  resolveOrgFromApp: vi.fn(),
+}));
+
 vi.mock('../services/people/cache.js', () => ({
   lookupCachedProfile: vi.fn(),
   writeCachedProfile: vi.fn(),
@@ -78,6 +99,9 @@ import { getPeoplePricing } from '../services/people/pricing.js';
 import { config } from '../config.js';
 import { PeopleError, PeopleProviderError } from '../services/people/types.js';
 import type { PeopleAdapter, ProfilePayload } from '../services/people/types.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -184,6 +208,15 @@ describe('People routes', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // Default: AppResolver.resolveApp succeeds (user owns the app).
+    vi.mocked(AppResolver.resolveApp).mockResolvedValue({
+      id: APP_ID, name: 'test-app', owner_id: USER_ID,
+      db_name: 'db_test', paused: false, paused_reason: null,
+    });
+    // Default: resolveOrganizationId returns the userId (personal org).
+    vi.mocked(resolveOrganizationId).mockResolvedValue(USER_ID);
+    // Default: resolveOrgFromApp returns the appId as org (for audit rows).
+    vi.mocked(resolveOrgFromApp).mockResolvedValue(APP_ID);
     app = await buildTestApp();
   });
 
@@ -450,32 +483,30 @@ describe('People routes', () => {
     });
   });
 
-  // ── Scenario 7: IDOR — ownership 403 ─────────────────────────────────────
+  // ── Scenario 7: IDOR / app not found — AppResolver throws AppNotFoundError ──
   describe('IDOR / ownership checks', () => {
-    it('POST search/person returns 403 when authed user does not own the app', async () => {
-      const attackerApp = await buildTestApp('u_attacker');
-      const mockRuntime = makeMockRuntime('u_owner'); // app owned by u_owner, not u_attacker
+    it('POST search/person returns 404 when authed user does not own the app', async () => {
+      // AppResolver throws AppNotFoundError for both "not found" and "not a member"
+      vi.mocked(AppResolver.resolveApp).mockRejectedValue(new AppNotFoundError(APP_ID));
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
 
-      try {
-        const res = await attackerApp.inject({
-          method: 'POST',
-          url: `/v1/${APP_ID}/people/search/person`,
-          payload: { currentRoleTitle: 'CTO' },
-        });
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/search/person`,
+        payload: { currentRoleTitle: 'CTO' },
+      });
 
-        expect(res.statusCode).toBe(403);
-        expect(res.json()).toMatchObject({ error: 'forbidden' });
-        expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
-      } finally {
-        await attackerApp.close();
-      }
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ error: 'app_not_found' });
+      expect(mockAdapter.searchPerson).not.toHaveBeenCalled();
     });
 
     it('POST search/person returns 404 when app does not exist', async () => {
-      const mockRuntime = makeMockRuntime(null); // no row → app_not_found
+      vi.mocked(AppResolver.resolveApp).mockRejectedValue(new AppNotFoundError(APP_ID));
+      const mockRuntime = makeMockRuntime();
       const mockAdapter = makeMockAdapter();
       vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
       vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);

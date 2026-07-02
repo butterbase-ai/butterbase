@@ -287,13 +287,13 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
     const cost = creditCostForOp(op);
     void (async () => {
       const organizationId = await resolveOrganizationId(fastify.controlDb, ownerId);
-      await incrementUsage(organizationId, 'kv_ops', cost, appId);
+      await incrementUsage(organizationId, ownerId, 'kv_ops', cost, appId);
     })();
 
     if (sizeDelta !== 0) {
       void (async () => {
         const organizationId = await resolveOrganizationId(fastify.controlDb, ownerId);
-        await incrementUsage(organizationId, 'kv_storage_bytes', Math.abs(sizeDelta), appId);
+        await incrementUsage(organizationId, ownerId, 'kv_storage_bytes', Math.abs(sizeDelta), appId);
       })();
 
       if (region) {

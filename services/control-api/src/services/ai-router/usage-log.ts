@@ -75,7 +75,7 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
   // Pre-028 this resolved caller (row.userId) and apps.owner_id; that join missed
   // app-less gateway calls (app_id = NULL) and calls against apps the caller does
   // not own, both of which are still billed via credit_leases.
-  if (row.chargedToUser) {
-    void incrementUsage(organizationId, 'ai_tokens', row.totalTokens, row.appId);
+  if (row.chargedToUser && row.userId) {
+    void incrementUsage(organizationId, row.userId, 'ai_tokens', row.totalTokens, row.appId);
   }
 }

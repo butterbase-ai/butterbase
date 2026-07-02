@@ -55,8 +55,8 @@ export async function logAiUsage(db: Pool, log: AiUsageLog): Promise<void> {
     // Meter against the organization that owns the app. Pre-028 this
     // resolved owner_id via apps and silently skipped null-app-id rows; now
     // app-less / non-owned-app calls also land in usage_meters.
-    if (log.chargedToUser) {
-      await incrementUsage(organizationId, 'ai_tokens', log.totalTokens, log.appId ?? undefined);
+    if (log.chargedToUser && log.userId) {
+      await incrementUsage(organizationId, log.userId, 'ai_tokens', log.totalTokens, log.appId ?? undefined);
     }
   } catch (error) {
     // Don't throw - logging should never block the response

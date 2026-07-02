@@ -155,7 +155,7 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
 
         try {
           await runtimePool.query(query, [
-            null,
+            parsed.userId,
             parsed.organizationId,
             parsed.appId || null,
             parsed.meterType,
@@ -373,6 +373,7 @@ function getRedisKey(organizationId: string, meterType: MeterType, periodStart: 
 
 function parseRedisKey(key: string): {
   organizationId: string;
+  userId: string;
   appId?: string;
   meterType: MeterType;
   periodStart: string;
@@ -380,20 +381,22 @@ function parseRedisKey(key: string): {
   const parts = key.split(':');
   if (parts[0] !== 'usage_org') return null;
 
-  if (parts.length === 5) {
-    // With appId
+  if (parts.length === 6) {
+    // With appId: usage_org:orgId:userId:meterType:periodStart:appId
     return {
       organizationId: parts[1],
-      meterType: parts[2] as MeterType,
-      periodStart: parts[3],
-      appId: parts[4],
+      userId: parts[2],
+      meterType: parts[3] as MeterType,
+      periodStart: parts[4],
+      appId: parts[5],
     };
-  } else if (parts.length === 4) {
-    // Without appId
+  } else if (parts.length === 5) {
+    // Without appId: usage_org:orgId:userId:meterType:periodStart
     return {
       organizationId: parts[1],
-      meterType: parts[2] as MeterType,
-      periodStart: parts[3],
+      userId: parts[2],
+      meterType: parts[3] as MeterType,
+      periodStart: parts[4],
     };
   }
 

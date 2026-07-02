@@ -615,7 +615,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       const ownerId = fnOwnerResult.rows[0].owner_id;
       void (async () => {
         const organizationId = await resolveOrganizationId(controlDb, ownerId);
-        await incrementUsage(organizationId, 'lambda_invocations', 1, appId);
+        await incrementUsage(organizationId, ownerId, 'lambda_invocations', 1, appId);
       })();
     }
 

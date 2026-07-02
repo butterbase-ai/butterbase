@@ -446,7 +446,7 @@ export async function storageRoutes(app: FastifyInstance) {
           const ownerId = dlOwnerResult.rows[0].owner_id;
           void (async () => {
             const organizationId = await resolveOrganizationId(app.controlDb, ownerId);
-            await incrementUsage(organizationId, 'bandwidth_bytes', Number(obj.size_bytes), appId);
+            await incrementUsage(organizationId, ownerId, 'bandwidth_bytes', Number(obj.size_bytes), appId);
           })();
         }
       }

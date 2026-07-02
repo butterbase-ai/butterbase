@@ -172,7 +172,7 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, lookupRow.user_id, usdCost);
         const organizationId = await resolveOrganizationId(app.controlDb, lookupRow.user_id);
-        await incrementUsage(organizationId, 'people_credits', credits, lookupRow.app_id);
+        await incrementUsage(organizationId, lookupRow.user_id, 'people_credits', credits, lookupRow.app_id);
       }
 
       // Audit row.  Use actual key_type from the lookup row (not hardcoded 'platform').
