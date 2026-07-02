@@ -1,8 +1,10 @@
 import type pg from 'pg';
+import { resolveOrganizationId } from './org-resolver.js';
 
 export interface UserAppIndexRow {
   app_id: string;
   user_id: string;
+  organization_id: string | null;
   region: string;
   subdomain: string | null;
   app_name: string | null;
@@ -19,15 +21,16 @@ export interface AddArgs {
 }
 
 export async function addUserAppIndex(controlPool: pg.Pool, args: AddArgs): Promise<void> {
+  const organizationId = await resolveOrganizationId(controlPool, args.userId);
   await controlPool.query(
-    `INSERT INTO user_app_index (app_id, user_id, region, subdomain, app_name)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO user_app_index (app_id, user_id, organization_id, region, subdomain, app_name)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (app_id) DO UPDATE
      SET region = EXCLUDED.region,
          subdomain = COALESCE(EXCLUDED.subdomain, user_app_index.subdomain),
          app_name = COALESCE(EXCLUDED.app_name, user_app_index.app_name),
          updated_at = now()`,
-    [args.appId, args.userId, args.region, args.subdomain ?? null, args.appName ?? null],
+    [args.appId, args.userId, organizationId, args.region, args.subdomain ?? null, args.appName ?? null],
   );
 }
 
@@ -48,7 +51,7 @@ export async function updateUserAppIndexRegion(
 
 export async function listUserApps(controlPool: pg.Pool, userId: string): Promise<UserAppIndexRow[]> {
   const r = await controlPool.query<UserAppIndexRow>(
-    `SELECT app_id, user_id, region, subdomain, app_name, created_at, updated_at
+    `SELECT app_id, user_id, organization_id, region, subdomain, app_name, created_at, updated_at
      FROM user_app_index
      WHERE user_id = $1
      ORDER BY created_at DESC`,

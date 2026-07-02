@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { config } from '../config.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 /**
  * Result of a single reaper run, returned to operators / the admin endpoint
@@ -111,11 +112,12 @@ export async function reapAppIndex(controlDb: pg.Pool): Promise<AppIndexReaperRe
   for (const [region, rows] of Object.entries(appsByRegion)) {
     for (const row of rows) {
       if (indexByAppId.has(row.id)) continue;
+      const organizationId = await resolveOrganizationId(controlDb, row.owner_id);
       await controlDb.query(
-        `INSERT INTO user_app_index (app_id, user_id, region, subdomain, app_name)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO user_app_index (app_id, user_id, organization_id, region, subdomain, app_name)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (app_id) DO NOTHING`,
-        [row.id, row.owner_id, region, row.subdomain, row.name],
+        [row.id, row.owner_id, organizationId, region, row.subdomain, row.name],
       );
       missingIndexEntriesBackfilled.push({ app_id: row.id, region });
     }
