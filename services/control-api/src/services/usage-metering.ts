@@ -615,8 +615,13 @@ export interface CreditsBalance {
  * the monthly plan allowance and the prepaid top-up balance.
  */
 export async function getCreditsBalance(db: DbClient, userId: string): Promise<CreditsBalance> {
+  // Post-Plan-07: monthly_allowance_usd stays on platform_users (per-user budget),
+  // credits_usd moved to organizations (org-scoped credit balance).
   const result = await db.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-    'SELECT monthly_allowance_usd, credits_usd FROM platform_users WHERE id = $1',
+    `SELECT pu.monthly_allowance_usd, o.credits_usd
+     FROM platform_users pu
+     JOIN organizations o ON o.id = pu.personal_organization_id
+     WHERE pu.id = $1`,
     [userId]
   );
   if (result.rows.length === 0) {
@@ -636,10 +641,12 @@ export async function deductCreditsBalance(
   userId: string,
   amountUsd: number
 ): Promise<number> {
+  // credits_usd lives on organizations post-Plan-07; deduct from the caller's
+  // personal org's balance.
   const result = await db.query(
-    `UPDATE platform_users
+    `UPDATE organizations
      SET credits_usd = GREATEST(0, credits_usd - $1)
-     WHERE id = $2
+     WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)
      RETURNING credits_usd`,
     [amountUsd, userId]
   );

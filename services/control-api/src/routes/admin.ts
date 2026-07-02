@@ -1633,13 +1633,17 @@ export async function adminRoutes(app: FastifyInstance) {
       auto_refill_last_attempt_at: Date | null;
       auto_refill_last_failure_reason: string | null;
     }>(
-      `SELECT monthly_allowance_usd::text,
-              credits_usd::text,
-              auto_refill_enabled,
-              auto_refill_amount_usd::text,
-              auto_refill_last_attempt_at,
-              auto_refill_last_failure_reason
-         FROM platform_users WHERE id = $1`,
+      // Post-Plan-07: credits_usd + auto_refill_* live on organizations,
+      // monthly_allowance_usd stays on platform_users.
+      `SELECT pu.monthly_allowance_usd::text,
+              o.credits_usd::text,
+              o.auto_refill_enabled,
+              o.auto_refill_amount_usd::text,
+              o.auto_refill_last_attempt_at,
+              o.auto_refill_last_failure_reason
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
       [id]
     );
     if (r.rows.length === 0) return reply.code(404).send({ error: 'user_not_found' });
