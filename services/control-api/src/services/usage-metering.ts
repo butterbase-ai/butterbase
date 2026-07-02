@@ -4,6 +4,7 @@ import { getRedisClient } from './redis.js';
 import { config } from '../config.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { getRuntimeDbPool } from './runtime-db.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 type DbClient = Pool | PoolClient;
 
@@ -146,9 +147,10 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
         if (!runtimePool) continue; // app no longer in user_app_index — drop
 
         // Upsert into database (usage_meters is runtime-tier)
+        const organizationId = await resolveOrganizationId(db, parsed.userId);
         const query = `
-          INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+          VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT (user_id, app_id, meter_type, period_start)
           DO UPDATE SET quantity = usage_meters.quantity + EXCLUDED.quantity, updated_at = now()
         `;
@@ -156,6 +158,7 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
         try {
           await runtimePool.query(query, [
             parsed.userId,
+            organizationId,
             parsed.appId || null,
             parsed.meterType,
             parsed.periodStart,
@@ -208,12 +211,13 @@ export async function reconcileUsage(db: Pool, userId: string, periodStart: stri
   // A user may have apps in multiple regions. Reconcile each region's
   // runtime DB in its own pool — writes stay local-to-app (apps row lives
   // in the same region as its source tables) so this preserves placement.
+  const organizationId = await resolveOrganizationId(db, userId);
   for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
-    await reconcileUsageInRegion(getRuntimeDbPool(config.runtimeDb, region), userId, periodStart);
+    await reconcileUsageInRegion(getRuntimeDbPool(config.runtimeDb, region), userId, periodStart, organizationId);
   }
 }
 
-async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodStart: string): Promise<void> {
+async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodStart: string, organizationId: string): Promise<void> {
   try {
     // All source tables (storage_objects, ai_usage_logs, function_invocations, app_users,
     // apps, app_db_connections, usage_meters) are runtime-tier — use runtimePool
@@ -229,11 +233,11 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
 
     for (const row of storageResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'storage_bytes', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'storage_bytes', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -251,11 +255,11 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
 
     for (const row of aiResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'ai_tokens', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'ai_tokens', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -271,11 +275,11 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
 
     for (const row of lambdaResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'lambda_invocations', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'lambda_invocations', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -292,11 +296,11 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
 
     for (const row of mauResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'mau', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'mau', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -327,11 +331,11 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
         const dbSizeBytes = parseInt(sizeResult.rows[0].size, 10);
 
         await runtimePool.query(
-          `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-           VALUES ($1, $2, 'db_size_bytes', $3, $4)
+          `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+           VALUES ($1, $2, $3, 'db_size_bytes', $4, $5)
            ON CONFLICT (user_id, app_id, meter_type, period_start)
            DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-          [userId, appRow.id, periodStart, dbSizeBytes]
+          [userId, organizationId, appRow.id, periodStart, dbSizeBytes]
         );
       } catch (err) {
         console.error(`Failed to measure db_size for app ${appRow.id}:`, err);
