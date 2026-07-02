@@ -119,20 +119,22 @@ export async function billingRoutes(app: FastifyInstance) {
       }
 
       const user = userResult.rows[0];
+      // Resolve once — used for subscription queries and usage meter queries below.
+      const billingOrgId: string = user.org_id;
 
       // Get active subscription — subscriptions is a controlDb (platform) table
       const subscriptionResult = await app.controlDb.query(
         `SELECT stripe_subscription_id, status, current_period_start, current_period_end, cancel_at_period_end
          FROM subscriptions
-         WHERE user_id = $1 AND status IN ('active', 'trialing', 'past_due')
+         WHERE organization_id = $1 AND status IN ('active', 'trialing', 'past_due')
          ORDER BY created_at DESC
          LIMIT 1`,
-        [userId]
+        [billingOrgId]
       );
 
       let subscription = subscriptionResult.rows.length > 0 ? subscriptionResult.rows[0] : null;
 
-      // If the user is on a paid plan but has no live subscription, surface the
+      // If the org is on a paid plan but has no live subscription, surface the
       // most-recent canceled subscription so the dashboard can show "Plan ends
       // on …" instead of hiding the subscription card entirely. This makes
       // payment-failure / orphan-sub states visible to the user.
@@ -140,10 +142,10 @@ export async function billingRoutes(app: FastifyInstance) {
         const lastCanceled = await app.controlDb.query(
           `SELECT stripe_subscription_id, status, current_period_start, current_period_end, cancel_at_period_end
            FROM subscriptions
-           WHERE user_id = $1 AND status = 'canceled'
+           WHERE organization_id = $1 AND status = 'canceled'
            ORDER BY current_period_end DESC NULLS LAST, updated_at DESC
            LIMIT 1`,
-          [userId],
+          [billingOrgId],
         );
         if (lastCanceled.rows.length > 0) {
           subscription = lastCanceled.rows[0];
@@ -153,9 +155,6 @@ export async function billingRoutes(app: FastifyInstance) {
       // Get current usage for all meters — these helpers query runtime tables
       // (ai_usage_logs, apps, storage_objects, app_users, app_db_connections)
       const isLifetime = user.ai_credits_lifetime;
-      // Use org_id from the already-joined query row to scope meter queries
-      // to all org-member apps, not just the caller's personally owned apps.
-      const billingOrgId: string = user.org_id;
       const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), billingOrgId, isLifetime);
       // Project count must aggregate across ALL regions. user_app_index is the
       // authoritative cross-region index on controlDb — counting `apps` on the
