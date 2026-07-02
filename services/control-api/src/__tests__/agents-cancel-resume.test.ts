@@ -121,14 +121,14 @@ describe('POST /cancel', () => {
     setRuntimeClient(undefined);
   });
 
-  it('403 for a non-owner', async () => {
+  it('404 for a non-owner', async () => {
     const runId = await seedRun('running');
     const res = await app.inject({
       method: 'POST',
       url: `/v1/${appId}/agents/${agentName}/runs/${runId}/cancel`,
       headers: { 'x-test-user-id': OTHER_ID },
     });
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(404);
   });
 
   it('404 for a missing run', async () => {
