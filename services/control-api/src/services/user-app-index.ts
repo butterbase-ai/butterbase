@@ -49,13 +49,13 @@ export async function updateUserAppIndexRegion(
   );
 }
 
-export async function listUserApps(controlPool: pg.Pool, userId: string): Promise<UserAppIndexRow[]> {
+export async function listUserApps(controlPool: pg.Pool, organizationId: string): Promise<UserAppIndexRow[]> {
   const r = await controlPool.query<UserAppIndexRow>(
     `SELECT app_id, user_id, organization_id, region, subdomain, app_name, created_at, updated_at
      FROM user_app_index
-     WHERE user_id = $1
+     WHERE organization_id = $1
      ORDER BY created_at DESC`,
-    [userId],
+    [organizationId],
   );
   return r.rows;
 }

@@ -162,8 +162,8 @@ export async function billingRoutes(app: FastifyInstance) {
       // local runtimeDb undercounts users with apps in other regions (and shows
       // 0 when the local region has no apps for the user).
       const projectCountResult = await app.controlDb.query(
-        'SELECT COUNT(*)::int as count FROM user_app_index WHERE user_id = $1',
-        [userId]
+        'SELECT COUNT(*)::int as count FROM user_app_index WHERE organization_id = $1',
+        [billingOrgId]
       );
 
       const usage = {

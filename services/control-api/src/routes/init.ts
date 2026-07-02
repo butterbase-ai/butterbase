@@ -8,6 +8,7 @@ import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
 import { addUserAppIndex, removeUserAppIndex, listUserApps } from '../services/user-app-index.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const initSchema = {
@@ -39,7 +40,8 @@ const initSchema = {
 export async function initRoutes(app: FastifyInstance) {
   app.get('/apps', async (request) => {
     const ownerId = requireUserId(request);
-    const indexRows = await listUserApps(app.controlDb, ownerId);
+    const orgId = await resolveOrganizationId(app.controlDb, ownerId);
+    const indexRows = await listUserApps(app.controlDb, orgId);
     if (indexRows.length === 0) return { apps: [] };
 
     const regions = Array.from(new Set(indexRows.map((r) => r.region)));

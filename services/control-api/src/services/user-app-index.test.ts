@@ -26,23 +26,23 @@ beforeEach(async () => {
   await controlDb.query(`DELETE FROM user_app_index WHERE user_id = $1`, [testUserId]);
 });
 
-describe('addUserAppIndex', () => {
-  it('inserts a new row stamped with the caller’s personal_organization_id', async () => {
-    await addUserAppIndex(controlDb, { userId: testUserId, appId: 'app-1', region: 'us-east-1', subdomain: 'demo', appName: 'Demo' });
-    const apps = await listUserApps(controlDb, testUserId);
+describe(‘addUserAppIndex’, () => {
+  it(‘inserts a new row stamped with the caller’s personal_organization_id’, async () => {
+    await addUserAppIndex(controlDb, { userId: testUserId, appId: ‘app-1’, region: ‘us-east-1’, subdomain: ‘demo’, appName: ‘Demo’ });
+    const apps = await listUserApps(controlDb, personalOrgId);
     expect(apps).toHaveLength(1);
     expect(apps[0]).toMatchObject({
-      app_id: 'app-1',
-      region: 'us-east-1',
-      subdomain: 'demo',
+      app_id: ‘app-1’,
+      region: ‘us-east-1’,
+      subdomain: ‘demo’,
       organization_id: personalOrgId,
     });
   });
 
-  it('is idempotent on duplicate insert; org id remains the caller’s org', async () => {
-    await addUserAppIndex(controlDb, { userId: testUserId, appId: 'app-1', region: 'us-east-1' });
-    await addUserAppIndex(controlDb, { userId: testUserId, appId: 'app-1', region: 'us-east-1' });
-    const apps = await listUserApps(controlDb, testUserId);
+  it(‘is idempotent on duplicate insert; org id remains the caller’s org’, async () => {
+    await addUserAppIndex(controlDb, { userId: testUserId, appId: ‘app-1’, region: ‘us-east-1’ });
+    await addUserAppIndex(controlDb, { userId: testUserId, appId: ‘app-1’, region: ‘us-east-1’ });
+    const apps = await listUserApps(controlDb, personalOrgId);
     expect(apps).toHaveLength(1);
     expect(apps[0].organization_id).toBe(personalOrgId);
   });
@@ -59,7 +59,7 @@ describe('removeUserAppIndex', () => {
   it('deletes the row', async () => {
     await addUserAppIndex(controlDb, { userId: testUserId, appId: 'app-1', region: 'us-east-1' });
     await removeUserAppIndex(controlDb, 'app-1');
-    const apps = await listUserApps(controlDb, testUserId);
+    const apps = await listUserApps(controlDb, personalOrgId);
     expect(apps).toHaveLength(0);
   });
 
@@ -72,17 +72,17 @@ describe('updateUserAppIndexRegion', () => {
   it('updates the region of an existing entry', async () => {
     await addUserAppIndex(controlDb, { userId: testUserId, appId: 'app-1', region: 'us-east-1' });
     await updateUserAppIndexRegion(controlDb, 'app-1', 'eu-west-1');
-    const apps = await listUserApps(controlDb, testUserId);
+    const apps = await listUserApps(controlDb, personalOrgId);
     expect(apps[0].region).toBe('eu-west-1');
   });
 });
 
 describe('listUserApps', () => {
-  it('returns rows for the user, newest first, each carrying organization_id', async () => {
+  it('returns rows for the org, newest first, each carrying organization_id', async () => {
     await addUserAppIndex(controlDb, { userId: testUserId, appId: 'a', region: 'us-east-1' });
     await new Promise((r) => setTimeout(r, 10));
     await addUserAppIndex(controlDb, { userId: testUserId, appId: 'b', region: 'us-east-1' });
-    const apps = await listUserApps(controlDb, testUserId);
+    const apps = await listUserApps(controlDb, personalOrgId);
     expect(apps.map((a) => a.app_id)).toEqual(['b', 'a']);
     expect(apps.every((a) => a.organization_id === personalOrgId)).toBe(true);
   });
