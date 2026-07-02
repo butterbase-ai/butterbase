@@ -33,9 +33,17 @@ export async function authorizeRepoRead(
   if (res.rows.length === 0) throw new AppNotFoundError(appId);
   const row = res.rows[0];
 
-  if (requestUserId && row.owner_id === requestUserId) {
-    return { appId, region, visibility: row.visibility, isOwner: true };
+  // Try org-aware auth if user is authenticated
+  if (requestUserId) {
+    try {
+      await AppResolver.resolveApp(controlDb, appId, requestUserId);
+      return { appId, region, visibility: row.visibility, isOwner: true };
+    } catch (err) {
+      if (!(err instanceof AppNotFoundError)) throw err;
+      // Not owner/org-member — fall through to public check
+    }
   }
+
   if (row.visibility === 'public') {
     return { appId, region, visibility: 'public', isOwner: false };
   }
