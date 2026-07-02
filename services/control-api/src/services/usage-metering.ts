@@ -36,13 +36,14 @@ export class UsageMeteringError extends Error {
  */
 export async function incrementUsage(
   organizationId: string,
+  userId: string,
   meterType: MeterType,
   quantity: number = 1,
   appId?: string
 ): Promise<void> {
   try {
     const periodStart = getCurrentPeriodStart();
-    const key = getRedisKey(organizationId, meterType, periodStart, appId);
+    const key = getRedisKey(organizationId, userId, meterType, periodStart, appId);
 
     // Fire-and-forget increment
     getRedisClient().incrby(key, quantity).catch((err: Error) => {
@@ -66,15 +67,24 @@ export async function getCurrentUsage(
   db: DbClient,
   organizationId: string,
   meterType: MeterType,
-  appId?: string
+  appId?: string,
+  userId?: string
 ): Promise<number> {
   try {
     const periodStart = getCurrentPeriodStart();
 
-    // Get from Redis (hot data)
-    const redisKey = getRedisKey(organizationId, meterType, periodStart, appId);
-    const redisValue = await getRedisClient().get(redisKey);
-    const redisUsage = redisValue ? parseInt(redisValue, 10) : 0;
+    // Redis holds per-user counters (see d688aa1 — usage_meters.user_id NOT
+    // NULL means every counter must be user-attributed). When a caller
+    // requests an org-wide total (no userId), skip Redis and read the
+    // aggregated DB row (flushed from Redis every minute). The Redis-only
+    // freshness window is intentionally sacrificed for org-wide reads to
+    // avoid a SCAN across the userId dimension.
+    let redisUsage = 0;
+    if (userId) {
+      const redisKey = getRedisKey(organizationId, userId, meterType, periodStart, appId);
+      const redisValue = await getRedisClient().get(redisKey);
+      redisUsage = redisValue ? parseInt(redisValue, 10) : 0;
+    }
 
     // usage_meters is per-region. When appId is given, hit the app's home
     // region. When not (org-scoped counter — app_id IS NULL), sum across
@@ -365,10 +375,10 @@ function getCurrentPeriodStart(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 }
 
-function getRedisKey(organizationId: string, meterType: MeterType, periodStart: string, appId?: string): string {
+function getRedisKey(organizationId: string, userId: string, meterType: MeterType, periodStart: string, appId?: string): string {
   return appId
-    ? `usage_org:${organizationId}:${meterType}:${periodStart}:${appId}`
-    : `usage_org:${organizationId}:${meterType}:${periodStart}`;
+    ? `usage_org:${organizationId}:${userId}:${meterType}:${periodStart}:${appId}`
+    : `usage_org:${organizationId}:${userId}:${meterType}:${periodStart}`;
 }
 
 function parseRedisKey(key: string): {
