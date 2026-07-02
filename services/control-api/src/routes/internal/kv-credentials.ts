@@ -1,8 +1,7 @@
 import crypto from 'crypto';
 import type { FastifyPluginAsync } from 'fastify';
 import { KvCredentialsService } from '../../services/kv-credentials.js';
-import { getRuntimeDbForApp } from '../../services/region-resolver.js';
-import { AppNotFoundError } from '../../services/app-resolver.js';
+import { AppNotFoundError, AppResolver } from '../../services/app-resolver.js';
 
 const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
   const svc = new KvCredentialsService(fastify.controlDb);
@@ -46,19 +45,15 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
       if (keyResult.rows.length === 1) {
         const keyUserId = keyResult.rows[0].user_id;
 
-        let ownsApp = false;
         try {
-          const runtimePool = await getRuntimeDbForApp(fastify.controlDb, appId);
-          const ownerCheck = await runtimePool.query(
-            `SELECT 1 FROM apps WHERE id = $1 AND owner_id = $2 LIMIT 1`,
-            [appId, keyUserId],
-          );
-          ownsApp = ownerCheck.rows.length === 1;
+          await AppResolver.resolveApp(fastify.controlDb, appId, keyUserId);
         } catch (err) {
-          if (!(err instanceof AppNotFoundError)) throw err;
-          // Unknown app id — treat as not owned.
+          if (err instanceof AppNotFoundError) {
+            return reply.code(403).send({ error: 'forbidden' });
+          }
+          throw err;
         }
-        if (!ownsApp) return reply.code(403).send({ error: 'forbidden' });
+        // Ownership verified — continue to credential lookup
 
         const credResult = await fastify.controlDb.query<{
           app_id: string;
