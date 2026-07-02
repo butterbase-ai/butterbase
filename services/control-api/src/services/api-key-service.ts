@@ -118,12 +118,24 @@ export class ApiKeyService {
     const keyPrefix = fullKey.substring(0, 12);
     const dbScope = isBoth ? 'both' : (isSubstrateOnly ? 'substrate' : 'app');
 
+    // Org rollout (Plan 07 mig 077): api_keys.organization_id is NOT NULL.
+    // Legacy callers of this service don't pass org context, so resolve the
+    // caller's personal org from platform_users. Fail loudly if missing.
+    const orgLookup = await pool.query<{ personal_organization_id: string | null }>(
+      `SELECT personal_organization_id FROM platform_users WHERE id = $1`,
+      [userId]
+    );
+    const organizationId = orgLookup.rows[0]?.personal_organization_id ?? null;
+    if (!organizationId) {
+      throw new Error(`generateApiKey: user ${userId} has no personal_organization_id`);
+    }
+
     const result = await pool.query(
       `INSERT INTO api_keys
-         (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, name`,
-      [userId, keyHash, keyPrefix, name, scopes, dbScope, userId]
+      [userId, organizationId, keyHash, keyPrefix, name, scopes, dbScope, userId]
     );
 
     return {
