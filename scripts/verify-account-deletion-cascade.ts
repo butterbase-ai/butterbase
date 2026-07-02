@@ -174,9 +174,20 @@ async function main() {
       [appId]
     );
     const planRowId = plan.rows[0].id;
+
+    // Resolve organization_id for app_subscriptions and app_orders INSERTs
+    const orgResult = await runtimeClient.query<{ organization_id: string }>(
+      `SELECT organization_id FROM apps WHERE id = $1`,
+      [appId]
+    );
+    const organizationId = orgResult.rows[0]?.organization_id;
+    if (!organizationId) {
+      throw new Error(`app ${appId} has no organization_id`);
+    }
+
     const sub = await runtimeClient.query<{ id: string }>(
-      `INSERT INTO app_subscriptions (app_id, user_id, plan_id) VALUES ($1, $2, $3) RETURNING id`,
-      [appId, appUserId, planRowId]
+      `INSERT INTO app_subscriptions (organization_id, app_id, user_id, plan_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+      [organizationId, appId, appUserId, planRowId]
     );
     const subId = sub.rows[0].id;
     console.log(`✓ created app_plans + app_subscriptions`);
@@ -187,9 +198,9 @@ async function main() {
     );
     const productRowId = product.rows[0].id;
     const order = await runtimeClient.query<{ id: string }>(
-      `INSERT INTO app_orders (app_id, user_id, product_id, stripe_checkout_session_id, amount_cents, platform_fee_cents)
-         VALUES ($1, $2, $3, $4, 500, 50) RETURNING id`,
-      [appId, appUserId, productRowId, `cs_test_${TAG}`]
+      `INSERT INTO app_orders (organization_id, app_id, user_id, product_id, stripe_checkout_session_id, amount_cents, platform_fee_cents)
+         VALUES ($1, $2, $3, $4, $5, 500, 50) RETURNING id`,
+      [organizationId, appId, appUserId, productRowId, `cs_test_${TAG}`]
     );
     const orderId = order.rows[0].id;
     console.log(`✓ created app_products + app_orders`);
