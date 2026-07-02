@@ -660,6 +660,8 @@ export async function billingRoutes(app: FastifyInstance) {
     }
 
     // 2. Fetch all user's apps — apps is a runtime table
+    // grep-gate-allow: account-deletion cleanup filters personally-owned apps only;
+    // org-shared apps stay with the org after the user row is deleted.
     const appsResult = await app.runtimeDb(region).query(
       'SELECT id, db_name FROM apps WHERE owner_id = $1',
       [userId]

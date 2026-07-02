@@ -44,12 +44,21 @@ export async function initRoutes(app: FastifyInstance) {
     const indexRows = await listUserApps(app.controlDb, orgId);
     if (indexRows.length === 0) return { apps: [] };
 
-    const regions = Array.from(new Set(indexRows.map((r) => r.region)));
+
+    // Fetch runtime rows for the exact app-ids resolved by the org-scoped
+    // user_app_index — do NOT re-filter by owner_id, since org-shared apps
+    // are owned by the org's owner, not the caller. Group by region.
+    const idsByRegion = new Map<string, string[]>();
+    for (const r of indexRows) {
+      const list = idsByRegion.get(r.region) ?? [];
+      list.push(r.app_id);
+      idsByRegion.set(r.region, list);
+    }
     const allRows: any[] = [];
-    for (const region of regions) {
+    for (const [region, appIds] of idsByRegion) {
       const { rows } = await app.runtimeDb(region).query(
-        'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_user_id, substrate_autopropagate, created_at FROM apps WHERE owner_id = $1 ORDER BY created_at DESC',
-        [ownerId]
+        'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_user_id, substrate_autopropagate, created_at FROM apps WHERE id = ANY($1::text[]) ORDER BY created_at DESC',
+        [appIds]
       );
       allRows.push(...rows);
     }
