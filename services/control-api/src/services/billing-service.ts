@@ -6,6 +6,7 @@ import { invalidateUserAppLimits } from './app-plan-resolver.js';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { writeUserStateChange } from './state-outbox.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 type DbClient = Pool | PoolClient;
 
@@ -162,10 +163,11 @@ export async function suspendAccount(db: DbClient, userId: string, reason: strin
     await writeUserStateChange(db as Pool, userId, { account_status: 'suspended' });
 
     // Log billing event
+    const organizationIdSuspend = await resolveOrganizationId(db as Pool, userId);
     await db.query(
-      `INSERT INTO billing_events (user_id, event_type, metadata)
-       VALUES ($1, 'account_suspended', $2)`,
-      [userId, JSON.stringify({ reason })]
+      `INSERT INTO billing_events (user_id, organization_id, event_type, metadata)
+       VALUES ($1, $2, 'account_suspended', $3)`,
+      [userId, organizationIdSuspend, JSON.stringify({ reason })]
     );
 
     console.log(`User ${userId} suspended: ${reason}`);
@@ -196,10 +198,11 @@ export async function reactivateAccount(db: DbClient, userId: string): Promise<v
     await writeUserStateChange(db as Pool, userId, { account_status: 'active' });
 
     // Log billing event
+    const organizationIdReactivate = await resolveOrganizationId(db as Pool, userId);
     await db.query(
-      `INSERT INTO billing_events (user_id, event_type, metadata)
-       VALUES ($1, 'account_reactivated', '{}')`,
-      [userId]
+      `INSERT INTO billing_events (user_id, organization_id, event_type, metadata)
+       VALUES ($1, $2, 'account_reactivated', '{}')`,
+      [userId, organizationIdReactivate]
     );
 
     console.log(`User ${userId} reactivated`);
