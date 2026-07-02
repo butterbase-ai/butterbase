@@ -19,6 +19,7 @@ import { config } from './../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { sendBillingEmail } from './auth/email-service.js';
 import type { DigestItem, DigestDeployItem } from './auth/email-service.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 const TICK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const DIGEST_DOW = 0;   // 0 = Sunday
@@ -73,10 +74,10 @@ async function fetchOptedInUsers(controlPool: Pool): Promise<OptedInUser[]> {
 }
 
 /**
- * For one user, collect failing functions across every runtime region.
+ * For one organization, collect failing functions across every runtime region.
  * Returns top MAX_ITEMS_PER_DIGEST by failure count.
  */
-async function collectDigestItems(userId: string): Promise<DigestItem[]> {
+async function collectDigestItems(organizationId: string): Promise<DigestItem[]> {
   const items: DigestItem[] = [];
   for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
     const pool = getRuntimeDbPool(config.runtimeDb, region);
@@ -96,10 +97,10 @@ async function collectDigestItems(userId: string): Promise<DigestItem[]> {
            JOIN app_functions af ON af.id = fi.function_id
           WHERE fi.error_message IS NOT NULL
             AND fi.started_at >= now() - interval '7 days'
-            AND a.owner_id = $1
+            AND a.organization_id = $1
           GROUP BY fi.app_id, a.name, fi.function_id, af.name
           ORDER BY COUNT(*) DESC`,
-        [userId],
+        [organizationId],
       );
       for (const row of r.rows) {
         items.push({
@@ -128,7 +129,7 @@ async function collectDigestItems(userId: string): Promise<DigestItem[]> {
  */
 async function collectDeployFailures(
   _controlPool: Pool,
-  userId: string,
+  organizationId: string,
 ): Promise<DigestDeployItem[]> {
   const regions = Object.keys(config.runtimeDb.urlsByRegion);
   const items: DigestDeployItem[] = [];
@@ -154,7 +155,7 @@ async function collectDeployFailures(
              JOIN apps a ON a.id = d.app_id
             WHERE d.status = 'failed'
               AND d.created_at >= now() - interval '7 days'
-              AND a.owner_id = $1
+              AND a.organization_id = $1
             GROUP BY d.app_id, a.name
          ),
          edge AS (
@@ -169,12 +170,12 @@ async function collectDeployFailures(
              JOIN apps a ON a.id = d.app_id
             WHERE d.status = 'ERROR'
               AND d.created_at >= now() - interval '7 days'
-              AND a.owner_id = $1
+              AND a.organization_id = $1
             GROUP BY d.app_id, a.name
          )
          SELECT * FROM frontend UNION ALL SELECT * FROM edge
          ORDER BY failure_count DESC`,
-        [userId],
+        [organizationId],
       );
       for (const row of r.rows) {
         items.push({
@@ -202,9 +203,10 @@ export async function sendDigestForUser(
   user: OptedInUser,
   log?: Log,
 ): Promise<{ sent: boolean; itemCount: number; deployCount: number }> {
+  const organizationId = await resolveOrganizationId(controlPool, user.user_id);
   const [items, deploys] = await Promise.all([
-    collectDigestItems(user.user_id),
-    collectDeployFailures(controlPool, user.user_id),
+    collectDigestItems(organizationId),
+    collectDeployFailures(controlPool, organizationId),
   ]);
   await sendBillingEmail(user.email, 'weekly_digest', {
     itemsJson: JSON.stringify(items),
