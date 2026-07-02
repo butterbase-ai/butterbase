@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { resolveOrganizationId } from '../org-resolver.js';
 
 export const HAPPY_PATH_ORDER = [
   'requested',
@@ -42,10 +43,11 @@ export interface CreateArgs {
 }
 
 export async function createMigration(controlPool: pg.Pool, args: CreateArgs): Promise<string> {
+  const organizationId = await resolveOrganizationId(controlPool, args.userId);
   const r = await controlPool.query<{ id: string }>(
-    `INSERT INTO app_migrations (app_id, user_id, source_region, dest_region)
-     VALUES ($1, $2, $3, $4) RETURNING id`,
-    [args.appId, args.userId, args.sourceRegion, args.destRegion],
+    `INSERT INTO app_migrations (app_id, user_id, organization_id, source_region, dest_region)
+     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    [args.appId, args.userId, organizationId, args.sourceRegion, args.destRegion],
   );
   return r.rows[0].id;
 }

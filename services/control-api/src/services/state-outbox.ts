@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { resolveOrganizationId } from './org-resolver.js';
 
 export const OUTBOX_FIELDS = ['account_status', 'plan_id', 'spending_cap_usd'] as const;
 export type OutboxField = typeof OUTBOX_FIELDS[number];
@@ -45,11 +46,12 @@ export async function writeUserStateChange(
     if (upd.rowCount === 0) {
       throw new Error(`writeUserStateChange: user ${userId} not found`);
     }
+    const organizationId = await resolveOrganizationId(platformPool, userId);
     const ins = await client.query<{ version: string }>(
-      `INSERT INTO user_state_outbox (user_id, fields_changed)
-       VALUES ($1, $2::jsonb)
+      `INSERT INTO user_state_outbox (user_id, organization_id, fields_changed)
+       VALUES ($1, $2, $3::jsonb)
        RETURNING version`,
-      [userId, JSON.stringify(change)]
+      [userId, organizationId, JSON.stringify(change)]
     );
     await client.query('COMMIT');
     return { version: parseInt(ins.rows[0].version, 10) };
