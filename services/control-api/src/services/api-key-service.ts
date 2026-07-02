@@ -207,15 +207,25 @@ export class ApiKeyService {
   }
 
   /**
-   * List all API keys for a user (never returns hashes)
-   * Optionally filter by scope: 'app' | 'substrate'
+   * List all API keys for an organization (never returns hashes).
+   * Optionally filter by key type scope: 'app' | 'substrate' | 'both'.
+   * Pass userId to narrow to a single org member's own keys (scope=me equivalent).
    */
-  static async listKeys(pool: Pool, userId: string, scope?: 'app' | 'substrate' | 'both') {
-    const params: unknown[] = [userId];
-    let where = `user_id = $1 AND revoked_at IS NULL`;
+  static async listKeys(
+    pool: Pool,
+    organizationId: string,
+    scope?: 'app' | 'substrate' | 'both',
+    userId?: string,
+  ) {
+    const params: unknown[] = [organizationId];
+    let where = `organization_id = $1 AND revoked_at IS NULL`;
     if (scope === 'app' || scope === 'substrate' || scope === 'both') {
       params.push(scope);
       where += ` AND scope = $${params.length}`;
+    }
+    if (userId) {
+      params.push(userId);
+      where += ` AND user_id = $${params.length}`;
     }
     const result = await pool.query(
       `SELECT id, key_prefix, name, scopes, scope, substrate_user_id, substrate_organization_id,

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { ApiKeyService, ScopeValidationError } from '../services/api-key-service.js';
 import { requireUserId } from '../utils/require-auth.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 
@@ -104,13 +105,17 @@ export async function apiKeyRoutes(app: FastifyInstance) {
     }
   });
 
-  // GET /api-keys — List user's API keys
+  // GET /api-keys — List organization's API keys
+  // Optional ?scope=app|substrate|both filters by key type.
+  // Optional ?scope=me narrows to the caller's own keys within the org.
   app.get('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);
     const { scope } = request.query as { scope?: string };
+    const organizationId = await resolveOrganizationId(app.controlDb, userId);
     const filterScope =
       scope === 'app' || scope === 'substrate' || scope === 'both' ? scope : undefined;
-    const keys = await ApiKeyService.listKeys(app.controlDb, userId, filterScope);
+    const narrowToUser = scope === 'me' ? userId : undefined;
+    const keys = await ApiKeyService.listKeys(app.controlDb, organizationId, filterScope, narrowToUser);
     return { keys };
   });
 
