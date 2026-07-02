@@ -10,14 +10,34 @@ vi.mock('./redis.js', () => ({
   }),
 }));
 
+// The pool stub handles two queries in generateApiKey:
+//   1. orgLookup  — SELECT personal_organization_id FROM platform_users ...
+//   2. INSERT     — INSERT INTO api_keys ...
+// We detect by SQL text so the captured.args always reflects the INSERT params.
+const TEST_ORG_ID = 'org_test_1';
+
 function makePoolStub(captured: { args?: unknown[] }) {
   return {
-    query: vi.fn(async (_sql: string, args: unknown[]) => {
+    query: vi.fn(async (sql: string, args: unknown[]) => {
+      if (sql.includes('personal_organization_id')) {
+        return { rows: [{ personal_organization_id: TEST_ORG_ID }] };
+      }
       captured.args = args;
-      return { rows: [{ id: 'key_test', name: args[3] }] };
+      return { rows: [{ id: 'key_test', name: args[4] }] };
     }),
   } as any;
 }
+
+// INSERT param layout after Plan 07 (organization_id) + Plan 10.3 (substrate_organization_id):
+//   $1  args[0]  user_id
+//   $2  args[1]  organization_id
+//   $3  args[2]  key_hash
+//   $4  args[3]  key_prefix
+//   $5  args[4]  name
+//   $6  args[5]  scopes
+//   $7  args[6]  scope (dbScope)
+//   $8  args[7]  substrate_user_id
+//   $9  args[8]  substrate_organization_id (null when scope='app')
 
 describe('ApiKeyService.generateApiKey scopes', () => {
   let captured: { args?: unknown[] };
@@ -27,14 +47,14 @@ describe('ApiKeyService.generateApiKey scopes', () => {
     await ApiKeyService.generateApiKey(makePoolStub(captured), 'u1', 'k', {
       keyScope: 'account',
     });
-    expect(captured.args![4]).toEqual(['*']);
-    expect(captured.args![5]).toBe('app');
+    expect(captured.args![5]).toEqual(['*']);
+    expect(captured.args![6]).toBe('app');
   });
 
   it("omitting options entirely defaults to scopes ['*'] and scope 'app'", async () => {
     await ApiKeyService.generateApiKey(makePoolStub(captured), 'u1', 'k');
-    expect(captured.args![4]).toEqual(['*']);
-    expect(captured.args![5]).toBe('app');
+    expect(captured.args![5]).toEqual(['*']);
+    expect(captured.args![6]).toBe('app');
   });
 
   it("rejects an invalid keyScope value", async () => {
@@ -50,7 +70,7 @@ describe('ApiKeyService.generateApiKey scopes', () => {
       keyScope: 'app',
       targetAppId: 'app_abc',
     });
-    expect(captured.args![4]).toEqual(['app:app_abc', 'ai:gateway']);
+    expect(captured.args![5]).toEqual(['app:app_abc', 'ai:gateway']);
   });
 
   it("keyScope 'app' + additionalScopes appends in order", async () => {
@@ -59,7 +79,7 @@ describe('ApiKeyService.generateApiKey scopes', () => {
       targetAppId: 'app_abc',
       additionalScopes: ['substrate'],
     });
-    expect(captured.args![4]).toEqual(['app:app_abc', 'ai:gateway', 'substrate']);
+    expect(captured.args![5]).toEqual(['app:app_abc', 'ai:gateway', 'substrate']);
   });
 
   it.each([
@@ -77,7 +97,7 @@ describe('ApiKeyService.generateApiKey scopes', () => {
         targetAppId: keyScope === 'app' ? 'app_abc' : undefined,
         substrateAccess,
       });
-      expect(captured.args![5]).toBe(expected);
+      expect(captured.args![6]).toBe(expected);
     }
   );
 
@@ -118,4 +138,18 @@ describe('ApiKeyService.generateApiKey scopes', () => {
       })
     ).rejects.toMatchObject({ code: 'UNKNOWN_SCOPE' });
   });
+
+  it.each([
+    ['substrate', TEST_ORG_ID],
+    ['both', TEST_ORG_ID],
+    ['app', null],
+  ] as const)(
+    "substrateAccess=%s writes substrate_organization_id=%s",
+    async (substrateAccess, expectedOrgId) => {
+      await ApiKeyService.generateApiKey(makePoolStub(captured), 'u1', 'k', {
+        substrateAccess,
+      });
+      expect(captured.args![8]).toBe(expectedOrgId);
+    }
+  );
 });

@@ -130,12 +130,14 @@ export class ApiKeyService {
       throw new Error(`generateApiKey: user ${userId} has no personal_organization_id`);
     }
 
+    const substrateOrganizationId = (isSubstrateOnly || isBoth) ? organizationId : null;
+
     const result = await pool.query(
       `INSERT INTO api_keys
-         (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id, substrate_organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, name`,
-      [userId, organizationId, keyHash, keyPrefix, name, scopes, dbScope, userId]
+      [userId, organizationId, keyHash, keyPrefix, name, scopes, dbScope, userId, substrateOrganizationId]
     );
 
     return {
@@ -216,7 +218,7 @@ export class ApiKeyService {
       where += ` AND scope = $${params.length}`;
     }
     const result = await pool.query(
-      `SELECT id, key_prefix, name, scopes, scope, substrate_user_id,
+      `SELECT id, key_prefix, name, scopes, scope, substrate_user_id, substrate_organization_id,
               last_used_at, expires_at, created_at
        FROM api_keys
        WHERE ${where}
