@@ -599,6 +599,29 @@ export async function billingRoutes(app: FastifyInstance) {
   app.delete('/dashboard/account', async (request, reply) => {
     const userId = requireUserId(request);
 
+    // User-delete guard (Plan 08): refuse if the caller is sole owner of any
+    // non-personal org. Personal orgs get cleaned up after the user row is deleted.
+    const ownedOrgs = await app.controlDb.query<{ id: string }>(
+      `SELECT o.id
+         FROM organizations o
+        WHERE o.owner_id = $1
+          AND o.personal = false
+          AND NOT EXISTS (
+            SELECT 1 FROM organization_members om
+             WHERE om.organization_id = o.id
+               AND om.role = 'owner'
+               AND om.user_id <> $1
+          )`,
+      [userId],
+    );
+    if (ownedOrgs.rows.length > 0) {
+      return reply.code(409).send({
+        error: 'sole_owner_of_org',
+        organizations: ownedOrgs.rows.map((r) => r.id),
+        message: 'cannot delete account while sole owner of these organizations. Transfer ownership or delete the orgs first.',
+      });
+    }
+
     const region = assertRegionConfig().instanceRegion;
     try {
     // 1. Verify user exists — platform_users is a controlDb table
@@ -678,6 +701,14 @@ export async function billingRoutes(app: FastifyInstance) {
 
     // 5. Delete the user — ON DELETE CASCADE handles apps, api_keys, subscriptions, etc.
     await app.controlDb.query('DELETE FROM platform_users WHERE id = $1', [userId]);
+
+    // Plan 08: personal-org row's owner_id has no FK cascade, so clean it up
+    // explicitly (personal orgs are the only orgs that reach this point given
+    // the guard above).
+    await app.controlDb.query(
+      `DELETE FROM organizations WHERE owner_id = $1 AND personal = true`,
+      [userId],
+    );
 
     return reply.send({ deleted: true });
     } catch (error) {
