@@ -188,11 +188,11 @@ export async function billingRoutes(app: FastifyInstance) {
            SUM(total_tokens) as tokens,
            SUM(cost_usd) as cost
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+         WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
            AND DATE(created_at) >= $2
            AND DATE(created_at) <= $3
          GROUP BY key_type`,
-        [userId, periodStart, periodEnd]
+        [billingOrgId, periodStart, periodEnd]
       );
 
       const aiUsageBreakdown = {
@@ -343,6 +343,7 @@ export async function billingRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     try {
+      const organizationId = await resolveOrganizationId(app.controlDb, userId);
       const query = usageQuerySchema.parse(request.query);
 
       // Default to last 30 days
@@ -353,9 +354,9 @@ export async function billingRoutes(app: FastifyInstance) {
       let sqlQuery = `
         SELECT meter_type, period_start, SUM(quantity) as total
         FROM usage_meters
-        WHERE user_id = $1 AND period_start >= $2 AND period_start <= $3
+        WHERE organization_id = $1 AND period_start >= $2 AND period_start <= $3
       `;
-      const params: any[] = [userId, startDate, endDate];
+      const params: any[] = [organizationId, startDate, endDate];
 
       if (query.meterType) {
         sqlQuery += ` AND meter_type = $4`;
