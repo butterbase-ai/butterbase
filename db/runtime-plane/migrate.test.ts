@@ -127,3 +127,22 @@ describe('034_apps_organization_id migration', () => {
     expect(sql).toMatch(/CREATE INDEX[\s\S]+apps[\s\S]+\(organization_id[^)]*created_at\s+DESC\)/i);
   });
 });
+
+describe('035_apps_substrate_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '035_apps_substrate_organization_id.sql');
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable substrate_organization_id on apps', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/ALTER TABLE\s+apps[\s\S]+ADD COLUMN[\s\S]+substrate_organization_id\s+uuid/i);
+  });
+
+  it('adds partial index on substrate_organization_id', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE INDEX[\s\S]+apps_substrate_org_id_idx[\s\S]+apps[\s\S]+\(substrate_organization_id\)[\s\S]+WHERE substrate_organization_id IS NOT NULL/i);
+  });
+});
