@@ -9,7 +9,7 @@
 import { vi, describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
 // ── hoisted mock state (available before vi.mock factories run) ───────────────
-const { capturedInsertsRef, mockQueryFn } = vi.hoisted(() => {
+const { capturedInsertsRef, mockQueryFn, mockRedisClient } = vi.hoisted(() => {
   const capturedInsertsRef: Array<{ sql: string; params: unknown[] }>[] = [[]];
   const defaultImpl = async (sql: string, params: unknown[]) => {
     if (typeof sql === 'string' && sql.includes('INSERT INTO usage_meters')) {
@@ -22,20 +22,25 @@ const { capturedInsertsRef, mockQueryFn } = vi.hoisted(() => {
     return { rows: [] };
   };
   const mockQueryFn = vi.fn().mockImplementation(defaultImpl);
-  return { capturedInsertsRef, mockQueryFn };
+
+  // Stable Redis client reference so tests can override individual methods.
+  const mockRedisClient = {
+    get: vi.fn().mockResolvedValue(null),
+    getdel: vi.fn().mockResolvedValue(null),
+    keys: vi.fn().mockResolvedValue([]),
+    set: vi.fn().mockResolvedValue('OK'),
+    expire: vi.fn().mockResolvedValue(1),
+    incrby: vi.fn().mockResolvedValue(1),
+    setex: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(0),
+  };
+
+  return { capturedInsertsRef, mockQueryFn, mockRedisClient };
 });
 
 // ── mock redis ────────────────────────────────────────────────────────────────
 vi.mock('../services/redis.js', () => ({
-  getRedisClient: () => ({
-    get: vi.fn().mockResolvedValue(null),
-    getdel: vi.fn().mockResolvedValue(null),
-    keys: vi.fn().mockResolvedValue([]),
-    set: vi.fn(),
-    expire: vi.fn(),
-    incrby: vi.fn(),
-    setex: vi.fn().mockResolvedValue('OK'),
-  }),
+  getRedisClient: () => mockRedisClient,
 }));
 
 // ── mock config to expose a single fake region ────────────────────────────────
@@ -61,7 +66,7 @@ vi.mock('../services/region-resolver.js', () => ({
 
 // ── real controlDb for resolveOrganizationId integration ─────────────────────
 import { controlDb, seedUser, setupTestDb } from './test-helpers/control-db.js';
-import { reconcileUsage } from '../services/usage-metering.js';
+import { reconcileUsage, flushUsageToDatabase } from '../services/usage-metering.js';
 
 describe('usage-metering — organization_id stamping', () => {
   let userId: string;
@@ -89,6 +94,10 @@ describe('usage-metering — organization_id stamping', () => {
       }
       return { rows: [] };
     });
+    // Reset Redis mocks to safe no-op defaults between tests
+    mockRedisClient.keys.mockReset().mockResolvedValue([]);
+    mockRedisClient.getdel.mockReset().mockResolvedValue(null);
+    mockRedisClient.get.mockReset().mockResolvedValue(null);
   });
 
   it('fresh insert stamps organization_id in the params', async () => {
@@ -103,7 +112,7 @@ describe('usage-metering — organization_id stamping', () => {
     expect(ins.sql).toContain('organization_id');
   });
 
-  it('on-conflict update: organization_id is present in every INSERT emission', async () => {
+  it('every reconcileUsage emission carries organization_id (both call rounds)', async () => {
     // Call twice — second would trigger ON CONFLICT in a real DB
     await reconcileUsage(controlDb, userId, '2026-07-01');
     await reconcileUsage(controlDb, userId, '2026-07-01');
@@ -142,5 +151,35 @@ describe('usage-metering — organization_id stamping', () => {
     const bogusId = '00000000-0000-0000-0000-000000000000';
     await expect(reconcileUsage(controlDb, bogusId, '2026-07-01'))
       .rejects.toThrow(/not found/);
+  });
+
+  // ── flushUsageToDatabase (Site 1) coverage ────────────────────────────────
+
+  it('flushUsageToDatabase stamps organization_id for a known user', async () => {
+    const key = `usage:${userId}:api_calls:2026-07-01`;
+    mockRedisClient.keys.mockResolvedValueOnce([key]);
+    mockRedisClient.getdel.mockResolvedValueOnce('7');
+
+    await flushUsageToDatabase(controlDb);
+
+    const inserts = capturedInsertsRef[0]!;
+    expect(inserts.length).toBe(1);
+    const ins = inserts[0]!;
+    // params: [userId, organizationId, appId|null, meterType, periodStart, quantity]
+    expect(ins.params[0]).toBe(userId);
+    expect(ins.params[1]).toBe(personalOrgId);
+    expect(ins.params[2]).toBeNull();             // no appId in key
+    expect(ins.params[3]).toBe('api_calls');
+    expect(ins.params[5]).toBe(7);
+    expect(ins.sql).toContain('organization_id');
+  });
+
+  it('flushUsageToDatabase throws (not swallows) when org resolution fails for unknown user', async () => {
+    const bogusId = '00000000-0000-0000-0000-000000000001';
+    const key = `usage:${bogusId}:api_calls:2026-07-01`;
+    mockRedisClient.keys.mockResolvedValueOnce([key]);
+    mockRedisClient.getdel.mockResolvedValueOnce('3');
+
+    await expect(flushUsageToDatabase(controlDb)).rejects.toThrow(/resolveOrganizationId/);
   });
 });

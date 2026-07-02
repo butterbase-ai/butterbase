@@ -126,6 +126,9 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
     // out reads, so the placement region just needs to be stable.
     const eastPool = getRuntimeDbPool(config.runtimeDb, 'us-east-1');
 
+    // Cache org IDs per userId to avoid N lookups for the same user in one batch run.
+    const orgIdCache = new Map<string, string>();
+
     // Process in batches of 100
     const batchSize = 100;
     for (let i = 0; i < keys.length; i += batchSize) {
@@ -146,8 +149,14 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
           : eastPool;
         if (!runtimePool) continue; // app no longer in user_app_index — drop
 
-        // Upsert into database (usage_meters is runtime-tier)
-        const organizationId = await resolveOrganizationId(db, parsed.userId);
+        // Resolve org ID (with per-run cache to avoid redundant lookups).
+        // resolveOrganizationId throws on missing/corrupt user data — let it
+        // propagate to the outer catch, which will re-throw it so the flush
+        // worker can surface the corruption rather than silently swallow it.
+        if (!orgIdCache.has(parsed.userId)) {
+          orgIdCache.set(parsed.userId, await resolveOrganizationId(db, parsed.userId));
+        }
+        const organizationId = orgIdCache.get(parsed.userId)!;
         const query = `
           INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
           VALUES ($1, $2, $3, $4, $5, $6)
@@ -178,6 +187,11 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
 
     console.log(`Flushed ${keys.length} usage counters to database`);
   } catch (error) {
+    // Org-resolution failures indicate missing/corrupt user data and must
+    // bubble out — never silently swallow them.
+    if (error instanceof Error && /resolveOrganizationId:/.test(error.message)) {
+      throw error;
+    }
     console.error('Failed to flush usage to database:', error);
     // Don't throw - let the next flush attempt handle it
   }
