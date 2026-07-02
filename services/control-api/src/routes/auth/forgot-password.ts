@@ -8,6 +8,7 @@ import { logAuditEvent } from '../../services/auth/audit-service.js';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
+import { resolveOrgFromApp } from '../../services/app-org-resolver.js';
 
 const forgotPasswordSchema = z.object({
   email: z.string().email(),
@@ -58,10 +59,12 @@ export async function forgotPasswordRoutes(app: FastifyInstance) {
         const expiresAt = new Date();
         expiresAt.setHours(expiresAt.getHours() + 1);
 
+        const organizationId = await resolveOrgFromApp(runtimeDb, app_id);
+
         await runtimeDb.query(
-          `INSERT INTO app_verification_codes (app_id, user_id, type, code_hash, expires_at)
-           VALUES ($1, $2, 'password_reset', $3, $4)`,
-          [app_id, user.id, codeHash, expiresAt]
+          `INSERT INTO app_verification_codes (app_id, user_id, type, code_hash, expires_at, organization_id)
+           VALUES ($1, $2, 'password_reset', $3, $4, $5)`,
+          [app_id, user.id, codeHash, expiresAt, organizationId]
         );
 
         // Send reset email
