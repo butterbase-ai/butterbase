@@ -256,7 +256,7 @@ describe('People routes', () => {
         USER_ID,
         6 * USD_PER_CREDIT,
       );
-      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 6, APP_ID);
+      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 6, APP_ID);
 
       // Audit row
       const auditCall = mockRuntime.query.mock.calls.find(
@@ -358,7 +358,7 @@ describe('People routes', () => {
 
       // Charged
       expect(deductCreditsBalance).toHaveBeenCalledWith(expect.anything(), USER_ID, 5 * USD_PER_CREDIT);
-      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 5, APP_ID);
+      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 5, APP_ID);
     });
   });
 
@@ -465,14 +465,15 @@ describe('People routes', () => {
       expect(insertCall).toBeDefined();
 
       // The nonce in the INSERT params matches the nonce in the callbackUrl passed to adapter
+      // params: [appId, organizationId, userId, normalizedUrl, nonce, key_type, slot]
       const insertParams = insertCall![1] as string[];
-      const nonce = insertParams[3]; // [appId, userId, normalizedUrl, nonce, key_type, slot]
+      const nonce = insertParams[4]; // nonce is at index 4 (organization_id added at [1])
       expect(nonce).toMatch(/^[0-9a-f]{64}$/); // 32 bytes = 64 hex chars
 
       // Platform key → key_type='platform' stored in lookup row
-      expect(insertParams[4]).toBe('platform');
+      expect(insertParams[5]).toBe('platform');
       // provider_slot also stored
-      expect(insertParams[5]).toBe('primary');
+      expect(insertParams[6]).toBe('primary');
 
       expect(mockAdapter.queueEmailLookup).toHaveBeenCalledWith(
         expect.objectContaining({
