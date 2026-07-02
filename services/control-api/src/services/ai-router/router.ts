@@ -246,16 +246,18 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         ctx.userId,
       ).catch((err) => console.error('[router] auto-refill check failed:', err));
       maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
-      writeAiUsageRow(ctx.runtimePool, {
-        appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
-        promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
-        totalTokens: usage.promptTokens + usage.completionTokens,
-        providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
-        keyType: 'platform', chargedToUser: true,
-        cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
-        cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
-      }).catch(err => console.error('[router] usage-log write failed:', err));
+      if (ctx.appId) {
+        writeAiUsageRow(ctx.runtimePool, {
+          appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
+          promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+          totalTokens: usage.promptTokens + usage.completionTokens,
+          providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
+          markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+          keyType: 'platform', chargedToUser: true,
+          cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
+          cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
+        }).catch(err => console.error('[router] usage-log write failed:', err));
+      }
       const t1 = Date.now();
       console.log(JSON.stringify({
         level: 'info',
@@ -287,16 +289,18 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     ctx.userId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
-  writeAiUsageRow(ctx.runtimePool, {
-    appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
-    promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
-    totalTokens: usage.promptTokens + usage.completionTokens,
-    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
-    keyType: 'platform', chargedToUser: true,
-    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
-    cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
-  }).catch(err => console.error('[router] usage-log write failed:', err));
+  if (ctx.appId) {
+    writeAiUsageRow(ctx.runtimePool, {
+      appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+      promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+      totalTokens: usage.promptTokens + usage.completionTokens,
+      providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+      markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+      keyType: 'platform', chargedToUser: true,
+      cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+      cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+    }).catch(err => console.error('[router] usage-log write failed:', err));
+  }
   const t1 = Date.now();
   console.log(JSON.stringify({
     level: 'info',
@@ -455,16 +459,18 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     ctx.userId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
-  writeAiUsageRow(ctx.runtimePool, {
-    appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
-    promptTokens: usage.promptTokens, completionTokens: 0,
-    totalTokens: usage.promptTokens,
-    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
-    keyType: 'platform', chargedToUser: true,
-    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
-    cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
-  }).catch(err => console.error('[router] usage-log write failed:', err));
+  if (ctx.appId) {
+    writeAiUsageRow(ctx.runtimePool, {
+      appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+      promptTokens: usage.promptTokens, completionTokens: 0,
+      totalTokens: usage.promptTokens,
+      providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+      markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+      keyType: 'platform', chargedToUser: true,
+      cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+      cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+    }).catch(err => console.error('[router] usage-log write failed:', err));
+  }
   const t1 = Date.now();
   console.log(JSON.stringify({
     level: 'info',
@@ -777,13 +783,15 @@ export async function settleVideoJob(
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
     (err) => console.error('[router] credits-email failed:', err),
   );
-  writeAiUsageRow(ctx.runtimePool, {
-    appId: ctx.appId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
-    promptTokens: 0, completionTokens: 0, totalTokens: 0,
-    providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
-    keyType: 'platform', chargedToUser: true,
-  }).catch(err => console.error('[router] usage-log write failed:', err));
+  if (ctx.appId) {
+    writeAiUsageRow(ctx.runtimePool, {
+      appId: ctx.appId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
+      markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+      keyType: 'platform', chargedToUser: true,
+    }).catch(err => console.error('[router] usage-log write failed:', err));
+  }
   console.log(JSON.stringify({
     level: 'info',
     type: 'ai_router.call',

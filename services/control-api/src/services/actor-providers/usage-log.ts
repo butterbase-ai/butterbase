@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 export interface ActorUsageRow {
-  appId: string | null;
+  appId: string;
   userId: string | null;
   providerKey: string;
   actorId: string;
@@ -25,7 +25,10 @@ export async function writeActorUsageRow(
   runtimePool: pg.Pool,
   row: ActorUsageRow,
 ): Promise<boolean> {
-  const organizationId = row.appId ? await resolveOrgFromApp(runtimePool, row.appId) : null;
+  if (!row.appId) {
+    throw new Error('writeActorUsageRow: row missing appId; cannot resolve organization_id');
+  }
+  const organizationId = await resolveOrgFromApp(runtimePool, row.appId);
   const res = await runtimePool.query(
     `INSERT INTO actor_usage_logs (
        app_id, user_id, provider_key, actor_id, dimension, seconds,

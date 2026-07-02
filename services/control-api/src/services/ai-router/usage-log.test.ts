@@ -71,27 +71,25 @@ describeDb('writeAiUsageRow', () => {
     expect(got.rows[0].fallback_chain).toEqual(['provider-primary:rate_limit', 'provider-secondary:transport']);
   });
 
-  it('accepts null appId and inserts NULL into app_id', async () => {
-    await writeAiUsageRow(pool, {
-      appId: null,
-      userId: null,
-      model: 'anthropic/claude-opus-4.7',
-      router: 'openrouter',
-      promptTokens: 10,
-      completionTokens: 5,
-      totalTokens: 15,
-      providerCostUsd: 0.0001,
-      chargedCreditsUsd: 0.00012,
-      markupPct: 20,
-      fallbackChain: [],
-      leaseId: null,
-      keyType: 'platform',
-      chargedToUser: true,
-    });
-    const r = await pool.query(
-      `SELECT app_id FROM ai_usage_logs ORDER BY created_at DESC LIMIT 1`,
-    );
-    expect(r.rows[0].app_id).toBeNull();
+  it('throws when appId is null (fail-loud contract)', async () => {
+    await expect(
+      writeAiUsageRow(pool, {
+        appId: null as any,
+        userId: null,
+        model: 'anthropic/claude-opus-4.7',
+        router: 'openrouter',
+        promptTokens: 10,
+        completionTokens: 5,
+        totalTokens: 15,
+        providerCostUsd: 0.0001,
+        chargedCreditsUsd: 0.00012,
+        markupPct: 20,
+        fallbackChain: [],
+        leaseId: null,
+        keyType: 'platform',
+        chargedToUser: true,
+      })
+    ).rejects.toThrow(/writeAiUsageRow: row missing appId/);
   });
 
   it('persists cache_read and cache_creation token counts', async () => {
