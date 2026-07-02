@@ -10,6 +10,7 @@ import { writeUserStateChange } from '../services/state-outbox.js';
 import { readOrgBillingState, applyLease, burnLease } from '../services/org-billing-state.js';
 import { requestLeaseFromPlatform } from '../services/lease-client.js';
 import { assertRegionConfig } from '../config.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 
 // Cache for plan limits (5 minute TTL)
 const PLAN_CACHE_TTL = 300; // 5 minutes
@@ -92,6 +93,11 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
 
     const userId = request.auth.userId;
 
+    // Resolve the organization that owns this user so meter queries
+    // include apps created by all org members, not just this caller.
+    // Fail loud — a missing org is data corruption, not a soft error.
+    const organizationId = await resolveOrganizationId(fastify.controlDb, userId);
+
     try {
       // Get user's account status and plan from local runtime DB cache
       const region = assertRegionConfig().instanceRegion;
@@ -155,7 +161,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
         if (includedCredits === -1) return; // unlimited (enterprise)
 
         // Playground uses lifetime credits; paid tiers use monthly billing period
-        const creditsUsed = await getAiCreditsUsed(fastify.controlDb, userId, limits.aiCreditsLifetime);
+        const creditsUsed = await getAiCreditsUsed(fastify.controlDb, organizationId, limits.aiCreditsLifetime);
         const isPlayground = plan_id === 'playground';
 
         if (creditsUsed >= includedCredits) {
@@ -207,7 +213,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
 
       // For all other meters, check via usage counters or source-of-truth queries
       const currentUsage = meterType === 'storage_bytes'
-        ? await getStorageUsed(fastify.controlDb, userId)
+        ? await getStorageUsed(fastify.controlDb, organizationId)
         : await getCurrentUsage(fastify.controlDb, userId, meterType);
       const limit = getLimitForMeter(limits, meterType);
 

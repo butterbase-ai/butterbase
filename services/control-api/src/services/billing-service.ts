@@ -52,11 +52,14 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
       maxMau: planResult.rows[0].max_mau,
     };
 
+    // Resolve the org so meter queries cover all org-member apps.
+    const organizationId = await resolveOrganizationId(db as Pool, userId);
+
     // Check each limit
     const violations: string[] = [];
 
     // Check storage (source-of-truth query)
-    const storageBytes = await getStorageUsed(db, userId);
+    const storageBytes = await getStorageUsed(db, organizationId);
     const storageLimitBytes = limits.maxStorageGb * 1024 * 1024 * 1024;
     if (limits.maxStorageGb !== -1 && storageBytes > storageLimitBytes) {
       violations.push(`storage: ${(storageBytes / 1024 / 1024 / 1024).toFixed(2)}GB/${limits.maxStorageGb}GB`);
@@ -64,7 +67,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check database size (source-of-truth query)
     if (limits.maxDbSizeGb !== -1) {
-      const dbSizeBytes = await getDbSize(db, userId);
+      const dbSizeBytes = await getDbSize(db, organizationId);
       const dbSizeLimitBytes = limits.maxDbSizeGb * 1024 * 1024 * 1024;
       if (dbSizeBytes > dbSizeLimitBytes) {
         violations.push(`db_size: ${(dbSizeBytes / 1024 / 1024 / 1024).toFixed(2)}GB/${limits.maxDbSizeGb}GB`);
@@ -93,7 +96,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check MAU (source-of-truth query)
     if (limits.maxMau !== -1) {
-      const mauCount = await getMAU(db, userId);
+      const mauCount = await getMAU(db, organizationId);
       if (mauCount > limits.maxMau) {
         violations.push(`mau: ${mauCount}/${limits.maxMau}`);
       }
@@ -331,7 +334,8 @@ export async function getSpendingCapStatus(
   }
 
   const includedCredits = parseFloat(row.max_ai_credits_usd);
-  const totalUsed = await getAiCreditsUsed(db, userId, false);
+  const organizationId = await resolveOrganizationId(db as Pool, userId);
+  const totalUsed = await getAiCreditsUsed(db, organizationId, false);
   const overageSpentUsd = Math.max(0, totalUsed - includedCredits);
   const remainingUsd = Math.max(0, capUsd - overageSpentUsd);
 

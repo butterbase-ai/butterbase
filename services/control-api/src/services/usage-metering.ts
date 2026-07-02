@@ -240,9 +240,9 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
     const storageResult = await runtimePool.query(
       `SELECT app_id, COALESCE(SUM(size_bytes), 0) as total
        FROM storage_objects
-       WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+       WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
        GROUP BY app_id`,
-      [userId]
+      [organizationId]
     );
 
     for (const row of storageResult.rows) {
@@ -281,10 +281,10 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
     const lambdaResult = await runtimePool.query(
       `SELECT app_id, COUNT(*) as total
        FROM function_invocations
-       WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+       WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
          AND DATE(started_at) >= $2
        GROUP BY app_id`,
-      [userId, periodStart]
+      [organizationId, periodStart]
     );
 
     for (const row of lambdaResult.rows) {
@@ -302,10 +302,10 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
       `SELECT a.id as app_id, COUNT(DISTINCT au.id) as total
        FROM app_users au
        JOIN apps a ON au.app_id = a.id
-       WHERE a.owner_id = $1
+       WHERE a.organization_id = $1
          AND au.last_sign_in_at >= $2
        GROUP BY a.id`,
-      [userId, periodStart]
+      [organizationId, periodStart]
     );
 
     for (const row of mauResult.rows) {
@@ -323,8 +323,8 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
       `SELECT a.id, a.db_name, adc.connection_string
        FROM apps a
        LEFT JOIN app_db_connections adc ON adc.app_id = a.id
-       WHERE a.owner_id = $1 AND a.db_provisioned = true`,
-      [userId]
+       WHERE a.organization_id = $1 AND a.db_provisioned = true`,
+      [organizationId]
     );
 
     for (const appRow of dbAppsResult.rows) {
@@ -432,16 +432,16 @@ export function startFlushWorker(db: Pool, intervalMs: number = 60000): NodeJS.T
 }
 
 /**
- * Get total AI credits (USD) used by a user for the current billing period.
+ * Get total AI credits (USD) used by an organization for the current billing period.
  * All tiers now use monthly billing periods (V1 pricing).
  * Queries ai_usage_logs directly (source of truth) and caches for 30 seconds.
  * Only counts platform key usage (not BYOK).
  */
-export async function getAiCreditsUsed(db: DbClient, userId: string, lifetime: boolean = false): Promise<number> {
+export async function getAiCreditsUsed(db: DbClient, organizationId: string, lifetime: boolean = false): Promise<number> {
   const periodStart = getCurrentPeriodStart();
   const cacheKey = lifetime
-    ? `ai_credits_lifetime:${userId}`
-    : `ai_credits:${userId}:${periodStart}`;
+    ? `ai_credits_org_lifetime:${organizationId}`
+    : `ai_credits_org:${organizationId}:${periodStart}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -458,17 +458,17 @@ export async function getAiCreditsUsed(db: DbClient, userId: string, lifetime: b
       ? await runtimePool.query(
           `SELECT COALESCE(SUM(cost_usd), 0) as total
            FROM ai_usage_logs
-           WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+           WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
              AND key_type = 'platform'`,
-          [userId]
+          [organizationId]
         )
       : await runtimePool.query(
           `SELECT COALESCE(SUM(cost_usd), 0) as total
            FROM ai_usage_logs
-           WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+           WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
              AND key_type = 'platform'
              AND DATE(created_at) >= $2`,
-          [userId, periodStart]
+          [organizationId, periodStart]
         );
     total += parseFloat(result.rows[0].total);
   }
@@ -478,11 +478,11 @@ export async function getAiCreditsUsed(db: DbClient, userId: string, lifetime: b
 }
 
 /**
- * Get total storage bytes used across all apps owned by a user.
+ * Get total storage bytes used across all apps in an organization.
  * Queries storage_objects directly (source of truth) and caches for 30 seconds.
  */
-export async function getStorageUsed(db: DbClient, userId: string): Promise<number> {
-  const cacheKey = `storage_used:${userId}`;
+export async function getStorageUsed(db: DbClient, organizationId: string): Promise<number> {
+  const cacheKey = `storage_used_org:${organizationId}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -498,8 +498,8 @@ export async function getStorageUsed(db: DbClient, userId: string): Promise<numb
     const result = await runtimePool.query(
       `SELECT COALESCE(SUM(size_bytes), 0) as total
        FROM storage_objects
-       WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)`,
-      [userId]
+       WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)`,
+      [organizationId]
     );
     total += parseFloat(result.rows[0].total);
   }
@@ -509,13 +509,13 @@ export async function getStorageUsed(db: DbClient, userId: string): Promise<numb
 }
 
 /**
- * Get monthly active users (MAU) across all apps owned by a user.
+ * Get monthly active users (MAU) across all apps in an organization.
  * Counts distinct app_users who signed in during the current billing period.
  * Queries app_users directly (source of truth) and caches for 60 seconds.
  */
-export async function getMAU(db: DbClient, userId: string): Promise<number> {
+export async function getMAU(db: DbClient, organizationId: string): Promise<number> {
   const periodStart = getCurrentPeriodStart();
-  const cacheKey = `mau:${userId}:${periodStart}`;
+  const cacheKey = `mau_org:${organizationId}:${periodStart}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -531,9 +531,9 @@ export async function getMAU(db: DbClient, userId: string): Promise<number> {
     const result = await runtimePool.query(
       `SELECT COUNT(DISTINCT au.id) as total
        FROM app_users au
-       WHERE au.app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+       WHERE au.app_id IN (SELECT id FROM apps WHERE organization_id = $1)
          AND au.last_sign_in_at >= $2`,
-      [userId, periodStart]
+      [organizationId, periodStart]
     );
     total += parseInt(result.rows[0].total, 10);
   }
@@ -543,12 +543,12 @@ export async function getMAU(db: DbClient, userId: string): Promise<number> {
 }
 
 /**
- * Get total database size (bytes) across all provisioned app databases for a user.
+ * Get total database size (bytes) across all provisioned app databases for an organization.
  * Connects to each app's database to run pg_database_size (source of truth).
  * Caches for 300 seconds (5 minutes) since this is an expensive operation.
  */
-export async function getDbSize(db: DbClient, userId: string): Promise<number> {
-  const cacheKey = `db_size:${userId}`;
+export async function getDbSize(db: DbClient, organizationId: string): Promise<number> {
+  const cacheKey = `db_size_org:${organizationId}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -558,7 +558,7 @@ export async function getDbSize(db: DbClient, userId: string): Promise<number> {
   }
 
   // apps + app_db_connections are per-region — gather every region's
-  // provisioned apps for this owner, then size each data DB.
+  // provisioned apps for this org, then size each data DB.
   const allApps: Array<{ id: string; db_name: string; connection_string: string | null }> = [];
   for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
     const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
@@ -566,8 +566,8 @@ export async function getDbSize(db: DbClient, userId: string): Promise<number> {
       `SELECT a.id, a.db_name, adc.connection_string
        FROM apps a
        LEFT JOIN app_db_connections adc ON adc.app_id = a.id
-       WHERE a.owner_id = $1 AND a.db_provisioned = true`,
-      [userId]
+       WHERE a.organization_id = $1 AND a.db_provisioned = true`,
+      [organizationId]
     );
     allApps.push(...appsResult.rows);
   }

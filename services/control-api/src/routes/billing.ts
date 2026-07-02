@@ -4,6 +4,7 @@ import { isHttpError } from '../services/error-handler.js';
 import { z } from 'zod';
 import { getCurrentUsage, getAiCreditsUsed, getStorageUsed, getDbSize, getMAU, getCreditsBalance, type MeterType } from '../services/usage-metering.js';
 import { getSpendingCapStatus } from '../services/billing-service.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 
 // Stripe-backed billing functions live in the cloud overlay. In OSS mode they
 // resolve to no-op / unavailable stubs and Stripe-specific endpoints return
@@ -82,7 +83,7 @@ export async function billingRoutes(app: FastifyInstance) {
       // Get user's plan and subscription
       // platform_users + plans + subscriptions live on controlDb — stay on controlDb
       const userResult = await app.controlDb.query(
-        `SELECT o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
+        `SELECT o.id AS org_id, o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
                 p.name as plan_name, p.price_monthly_cents,
                 p.max_storage_gb, p.max_ai_credits_usd, p.ai_credits_lifetime,
                 p.max_lambda_invocations, p.max_db_size_gb, p.max_bandwidth_gb, p.max_mau,
@@ -133,7 +134,10 @@ export async function billingRoutes(app: FastifyInstance) {
       // Get current usage for all meters — these helpers query runtime tables
       // (ai_usage_logs, apps, storage_objects, app_users, app_db_connections)
       const isLifetime = user.ai_credits_lifetime;
-      const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), userId, isLifetime);
+      // Use org_id from the already-joined query row to scope meter queries
+      // to all org-member apps, not just the caller's personally owned apps.
+      const billingOrgId: string = user.org_id;
+      const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), billingOrgId, isLifetime);
       // Project count must aggregate across ALL regions. user_app_index is the
       // authoritative cross-region index on controlDb — counting `apps` on the
       // local runtimeDb undercounts users with apps in other regions (and shows
@@ -144,12 +148,12 @@ export async function billingRoutes(app: FastifyInstance) {
       );
 
       const usage = {
-        storage_bytes: await getStorageUsed(app.runtimeDb(region), userId),
+        storage_bytes: await getStorageUsed(app.runtimeDb(region), billingOrgId),
         ai_credits_usd: aiCreditsUsed,
         lambda_invocations: await getCurrentUsage(app.runtimeDb(region), userId, 'lambda_invocations'),
         bandwidth_bytes: await getCurrentUsage(app.runtimeDb(region), userId, 'bandwidth_bytes'),
-        db_size_bytes: await getDbSize(app.runtimeDb(region), userId),
-        mau: await getMAU(app.runtimeDb(region), userId),
+        db_size_bytes: await getDbSize(app.runtimeDb(region), billingOrgId),
+        mau: await getMAU(app.runtimeDb(region), billingOrgId),
         project_count: projectCountResult.rows[0].count,
       };
 
