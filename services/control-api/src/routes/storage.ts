@@ -11,8 +11,9 @@ import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { createAgentError, getDocUrl, agentErrorFromEndUserJwtVerification } from '../services/error-handler.js';
 import { incrementUsage } from '../services/usage-metering.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
-import { AppPausedError } from '../services/app-resolver.js';
+import { AppPausedError, AppNotFoundError, AppResolver } from '../services/app-resolver.js';
 import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { APP_PAUSED } from '@butterbase/shared/error-types';
 
@@ -52,20 +53,19 @@ async function resolveAppAndUser(
       storageConfig: appResult.rows[0]?.storage_config,
     };
   } else {
-    // Platform auth — check ownership in the runtime apps table
-    const appResult = await runtimeDb.query(
-      'SELECT id, paused, paused_reason FROM apps WHERE id = $1 AND owner_id = $2',
-      [appId, auth.userId]
-    );
-
-    if (appResult.rows[0]?.paused) {
-      throw new AppPausedError(appId, appResult.rows[0].paused_reason ?? null);
+    // Platform auth — use org-aware AppResolver
+    try {
+      const resolved = await AppResolver.resolveApp(controlDb, appId, auth.userId);
+      if (resolved.paused) {
+        throw new AppPausedError(appId, resolved.paused_reason ?? null);
+      }
+      return { appExists: true, userId: auth.userId };
+    } catch (err) {
+      if (err instanceof AppNotFoundError) {
+        return { appExists: false, userId: auth.userId };
+      }
+      throw err;
     }
-
-    return {
-      appExists: appResult.rows.length > 0,
-      userId: auth.userId,
-    };
   }
 }
 
@@ -443,7 +443,11 @@ export async function storageRoutes(app: FastifyInstance) {
           [appId]
         );
         if (dlOwnerResult.rows.length > 0) {
-          incrementUsage(dlOwnerResult.rows[0].owner_id, 'bandwidth_bytes', Number(obj.size_bytes), appId);
+          const ownerId = dlOwnerResult.rows[0].owner_id;
+          void (async () => {
+            const organizationId = await resolveOrganizationId(app.controlDb, ownerId);
+            await incrementUsage(organizationId, 'bandwidth_bytes', Number(obj.size_bytes), appId);
+          })();
         }
       }
 
