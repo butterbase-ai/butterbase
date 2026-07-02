@@ -13,13 +13,17 @@ export async function checkMoveAppEligibility(
   opts: CheckOptions = {},
 ): Promise<EligibilityResult> {
   const r = await controlPool.query<{ plan_id: string | null; active_count: number; region: string }>(
-    `SELECT pu.plan_id,
+    // Post-Plan-07: plan_id lives on organizations. Resolve via
+    // user_app_index.organization_id when present (post-fix), else fall
+    // back to the owner's personal org.
+    `SELECT o.plan_id,
             uai.region,
             (SELECT count(*)::int FROM app_migrations am
              WHERE am.app_id = uai.app_id
                AND am.current_step NOT IN ('completed','aborted','failed')) AS active_count
      FROM user_app_index uai
      JOIN platform_users pu ON pu.id = uai.user_id
+     JOIN organizations o ON o.id = COALESCE(uai.organization_id, pu.personal_organization_id)
      WHERE uai.app_id = $1`,
     [appId],
   );

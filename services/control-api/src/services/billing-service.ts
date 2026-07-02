@@ -136,7 +136,13 @@ export async function autoRestoreSoftLockedUsers(db: Pool): Promise<void> {
   try {
     // Get all soft-locked users
     const result = await db.query(
-      `SELECT id FROM platform_users WHERE account_status = 'soft_locked' AND plan_id = 'playground'`
+      // account_status + plan_id live on organizations post-Plan-07.
+      // Returns user IDs so downstream checkAndApplySoftLock (already
+      // org-aware) can operate as before.
+      `SELECT pu.id
+       FROM platform_users pu
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       WHERE o.account_status = 'soft_locked' AND o.plan_id = 'playground'`
     );
 
     console.log(`Checking ${result.rows.length} soft-locked users for auto-restore`);
@@ -300,10 +306,12 @@ export async function getSpendingCapStatus(
   db: DbClient,
   userId: string
 ): Promise<{ capUsd: number | null; overageSpentUsd: number; remainingUsd: number | null; isAtCap: boolean }> {
+  // Post-Plan-07: spending_cap_usd + plan_id live on organizations, not platform_users.
   const userResult = await db.query(
-    `SELECT pu.spending_cap_usd, pu.plan_id, p.max_ai_credits_usd, p.default_spending_cap_usd
+    `SELECT o.spending_cap_usd, o.plan_id, p.max_ai_credits_usd, p.default_spending_cap_usd
      FROM platform_users pu
-     JOIN plans p ON pu.plan_id = p.id
+     JOIN organizations o ON o.id = pu.personal_organization_id
+     JOIN plans p ON p.id = o.plan_id
      WHERE pu.id = $1`,
     [userId]
   );

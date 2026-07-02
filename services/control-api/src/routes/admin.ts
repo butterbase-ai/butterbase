@@ -1312,7 +1312,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // platform_users → controlDb; ai_usage_logs + apps fan out per region.
     const [userResult, byModelRows, byRouterRows, byAppRows, dailyRows] = await Promise.all([
       app.controlDb.query(
-        `SELECT id, email, plan_id FROM platform_users WHERE id = $1`,
+        // plan_id lives on organizations post-Plan-07.
+        `SELECT pu.id, pu.email, o.plan_id
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [id]
       ),
       fanOutQuery<{ model: string; provider: string; router: string | null; requests: number; tokens: string; cost_usd: string }>(
@@ -1562,7 +1566,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const [userResult, subResult, eventsResult] = await Promise.all([
       app.controlDb.query(
-        `SELECT id, email, plan_id, stripe_customer_id FROM platform_users WHERE id = $1`,
+        // plan_id + stripe_customer_id live on organizations post-Plan-07.
+        `SELECT pu.id, pu.email, o.plan_id, o.stripe_customer_id
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [id]
       ),
       app.controlDb.query(

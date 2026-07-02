@@ -37,9 +37,13 @@ export async function getLimitsForApp(
     );
     if (appRow.rows.length > 0 && appRow.rows[0].owner_id) {
       const ownerId = appRow.rows[0].owner_id;
-      // Step 2: get plan_id from platform DB (platform_users is a platform-tier table)
+      // Step 2: get plan_id from the owner's personal org (Plan 07 moved
+      // plan_id from platform_users to organizations).
       const userRow = await controlDb.query<{ plan_id: string }>(
-        'SELECT plan_id FROM platform_users WHERE id = $1',
+        `SELECT o.plan_id
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [ownerId]
       );
       if (userRow.rows.length > 0 && userRow.rows[0].plan_id) {
