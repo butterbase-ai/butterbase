@@ -12,6 +12,7 @@ import {
 } from '@butterbase/shared';
 import type { App, InitResponse } from '@butterbase/shared';
 import { KvCredentialsService } from './kv-credentials.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 const generateId = customAlphabet(APP_ID_ALPHABET, APP_ID_LENGTH);
 
@@ -80,15 +81,14 @@ export async function insertAppRow(
     return { app: existing.rows[0], isExisting: true };
   }
 
-  // Validate owner exists in platform_users (platform-tier, stays on controlDb)
-  const ownerExists = await controlDb.query('SELECT 1 FROM platform_users WHERE id = $1', [ownerId]);
-  if (ownerExists.rows.length === 0) throw new Error(`Owner ${ownerId} not found in platform_users`);
+  // Validate owner exists and resolve their org (platform-tier, stays on controlDb)
+  const organizationId = await resolveOrganizationId(controlDb, ownerId);
 
   const dbName = appId;
   await runtimeDb.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, db_provisioned, provisioning_status, region, deployment_backend)
-     VALUES ($1, $2, $3, $4, false, 'provisioning', $5, $6)`,
-    [appId, name, ownerId, dbName, region, config.deployment.defaultBackend]
+    `INSERT INTO apps (id, name, owner_id, organization_id, db_name, db_provisioned, provisioning_status, region, deployment_backend)
+     VALUES ($1, $2, $3, $4, $5, false, 'provisioning', $6, $7)`,
+    [appId, name, ownerId, organizationId, dbName, region, config.deployment.defaultBackend]
   );
 
   // Provision KV credentials on the control-plane. The control-plane apps row
@@ -258,17 +258,16 @@ export async function provisionApp(
     return formatResponse(app, runtimeDb);
   }
 
-  // Validate owner exists in platform_users (platform-tier, stays on controlDb)
-  const ownerExists = await controlDb.query('SELECT 1 FROM platform_users WHERE id = $1', [ownerId]);
-  if (ownerExists.rows.length === 0) throw new Error(`Owner ${ownerId} not found in platform_users`);
+  // Validate owner exists and resolve their org (platform-tier, stays on controlDb)
+  const organizationId = await resolveOrganizationId(controlDb, ownerId);
 
   const dbName = appId;
 
   // Insert app record with db_provisioned = false
   await runtimeDb.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, db_provisioned, region, deployment_backend)
-     VALUES ($1, $2, $3, $4, false, $5, $6)`,
-    [appId, name, ownerId, dbName, region, config.deployment.defaultBackend]
+    `INSERT INTO apps (id, name, owner_id, organization_id, db_name, db_provisioned, region, deployment_backend)
+     VALUES ($1, $2, $3, $4, $5, false, $6, $7)`,
+    [appId, name, ownerId, organizationId, dbName, region, config.deployment.defaultBackend]
   );
 
   if (config.neon.enabled) {
