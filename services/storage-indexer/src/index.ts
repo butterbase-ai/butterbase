@@ -144,9 +144,17 @@ async function processEvent(
 
   // Upsert into the app's home-region runtime DB.
   const sql = neon(runtimeDbUrl);
+
+  // Resolve organization_id for this app
+  const orgResult = await sql`SELECT organization_id FROM apps WHERE id = ${metadata.appId}`;
+  if (orgResult.length === 0 || !orgResult[0].organization_id) {
+    throw new Error(`Failed to resolve organization_id for app ${metadata.appId}`);
+  }
+  const organizationId = orgResult[0].organization_id;
+
   await sql`
-    INSERT INTO storage_objects (id, app_id, user_id, bucket, key, filename, content_type, size_bytes, created_at)
-    VALUES (gen_random_uuid(), ${metadata.appId}, ${metadata.userId}, ${bucket}, ${key}, ${originalFilename}, ${contentType}, ${size}, now())
+    INSERT INTO storage_objects (id, app_id, organization_id, user_id, bucket, key, filename, content_type, size_bytes, created_at)
+    VALUES (gen_random_uuid(), ${metadata.appId}, ${organizationId}, ${metadata.userId}, ${bucket}, ${key}, ${originalFilename}, ${contentType}, ${size}, now())
     ON CONFLICT (app_id, bucket, key) DO UPDATE SET
       size_bytes = EXCLUDED.size_bytes,
       content_type = EXCLUDED.content_type

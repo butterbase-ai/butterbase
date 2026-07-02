@@ -222,12 +222,19 @@ export async function seedKitchenSinkApp(): Promise<KitchenSinkApp> {
     ).catch(() => null);
 
     // storage_objects (runtime-plane; col is "key" not "object_key")
-    await queryRuntimeDb(
-      REGION,
-      `INSERT INTO storage_objects (id, app_id, bucket, key, size_bytes)
-       VALUES (gen_random_uuid(), $1, 'default', 'avatars/sink.png', 100)`,
+    const orgIdResult = await runtimePool.query(
+      `SELECT organization_id FROM apps WHERE id = $1`,
       [appId],
     ).catch(() => null);
+    const organizationId = orgIdResult?.rows[0]?.organization_id;
+    if (organizationId) {
+      await queryRuntimeDb(
+        REGION,
+        `INSERT INTO storage_objects (id, app_id, organization_id, bucket, key, size_bytes)
+         VALUES (gen_random_uuid(), $1, $2, 'default', 'avatars/sink.png', 100)`,
+        [appId, organizationId],
+      ).catch(() => null);
+    }
 
     // app_integration_configs (runtime-plane; toolkit_slug + composio_auth_config_id, not provider+config)
     await queryRuntimeDb(

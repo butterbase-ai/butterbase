@@ -13,6 +13,7 @@ import { createAgentError, getDocUrl, agentErrorFromEndUserJwtVerification } fro
 import { incrementUsage } from '../services/usage-metering.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { AppPausedError } from '../services/app-resolver.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { APP_PAUSED } from '@butterbase/shared/error-types';
 
 const uploadRequestSchema = z.object({
@@ -204,12 +205,15 @@ export async function storageRoutes(app: FastifyInstance) {
       // Platform/service auth: user_id is a platform user (not in app_users), so store NULL
       const storageUserId = request.auth.authMethod === 'end_user_jwt' ? userId : null;
 
+      // Resolve organization_id for this app
+      const organizationId = await resolveOrgFromApp(runtimeDb, appId);
+
       // Create database record immediately
       const dbResult = await runtimeDb.query(
-        `INSERT INTO storage_objects (app_id, user_id, bucket, key, filename, content_type, size_bytes, public)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO storage_objects (app_id, organization_id, user_id, bucket, key, filename, content_type, size_bytes, public)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
-        [appId, storageUserId, config.s3.bucket, result.objectKey, body.filename, body.contentType, body.sizeBytes, body.public]
+        [appId, organizationId, storageUserId, config.s3.bucket, result.objectKey, body.filename, body.contentType, body.sizeBytes, body.public]
       );
 
       // Calculate storage quota info
