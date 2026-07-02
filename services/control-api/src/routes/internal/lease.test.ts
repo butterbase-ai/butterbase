@@ -52,9 +52,10 @@ beforeEach(async () => {
     [userId, "lease-route-test's org"],
   );
   const orgId = orgResult.rows[0].id as string;
+  // Post-migration 079 dropped billing cols from platform_users; billing on orgs.
   await pool.query(
-    `INSERT INTO platform_users (id, email, account_status, plan_id, credits_usd, personal_organization_id)
-     VALUES ($1, 'lease-route-test@example.com', 'active', 'playground', 5.00, $2)`,
+    `INSERT INTO platform_users (id, email, personal_organization_id)
+     VALUES ($1, 'lease-route-test@example.com', $2)`,
     [userId, orgId],
   );
   testUserId = userId;
