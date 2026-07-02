@@ -225,16 +225,16 @@ export async function reactivateAccount(db: DbClient, userId: string): Promise<v
 
 /**
  * Calculate monthly AI billing for platform key users
- * Returns total cost for users who used platform OpenRouter key
+ * Returns total cost for all apps owned by the organization.
  */
 export async function calculateMonthlyAiBilling(
   db: DbClient,
-  userId: string,
+  organizationId: string,
   periodStart: string,
   periodEnd: string
 ): Promise<{ totalCost: number; requestCount: number }> {
   try {
-    // ai_usage_logs and apps are per-region runtime tables — a user may
+    // ai_usage_logs and apps are per-region runtime tables — an org may
     // have apps in multiple regions, so sum across every configured region.
     let totalCost = 0;
     let requestCount = 0;
@@ -243,12 +243,12 @@ export async function calculateMonthlyAiBilling(
       const result = await runtimePool.query(
         `SELECT COUNT(*) as requests, COALESCE(SUM(cost_usd), 0) as total_cost
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+         WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
            AND key_type = 'platform'
            AND charged_to_user = true
            AND DATE(created_at) >= $2
            AND DATE(created_at) <= $3`,
-        [userId, periodStart, periodEnd]
+        [organizationId, periodStart, periodEnd]
       );
       totalCost += parseFloat(result.rows[0].total_cost);
       requestCount += parseInt(result.rows[0].requests, 10);
@@ -268,7 +268,7 @@ export async function calculateMonthlyAiBilling(
  */
 export async function markAiUsageAsBilled(
   db: DbClient,
-  userId: string,
+  organizationId: string,
   periodStart: string,
   periodEnd: string
 ): Promise<void> {
@@ -284,13 +284,13 @@ export async function markAiUsageAsBilled(
            '{billed}',
            'true'
          )
-         WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+         WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
            AND key_type = 'platform'
            AND charged_to_user = true
            AND DATE(created_at) >= $2
            AND DATE(created_at) <= $3
            AND (request_metadata->>'billed' IS NULL OR request_metadata->>'billed' = 'false')`,
-        [userId, periodStart, periodEnd]
+        [organizationId, periodStart, periodEnd]
       );
     }
   } catch (error) {
