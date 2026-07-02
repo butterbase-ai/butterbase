@@ -27,6 +27,7 @@ import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-reg
 import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { getPeoplePricing } from '../services/people/pricing.js';
 import { deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { config } from '../config.js';
 import type { ProviderSlot } from '../services/people/types.js';
 
@@ -170,7 +171,8 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
 
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, lookupRow.user_id, usdCost);
-        await incrementUsage(lookupRow.user_id, 'people_credits', credits, lookupRow.app_id);
+        const organizationId = await resolveOrganizationId(app.controlDb, lookupRow.user_id);
+        await incrementUsage(organizationId, 'people_credits', credits, lookupRow.app_id);
       }
 
       // Audit row.  Use actual key_type from the lookup row (not hardcoded 'platform').

@@ -35,14 +35,14 @@ export class UsageMeteringError extends Error {
  * Increment usage counter (hot path - Redis only, non-blocking)
  */
 export async function incrementUsage(
-  userId: string,
+  organizationId: string,
   meterType: MeterType,
   quantity: number = 1,
   appId?: string
 ): Promise<void> {
   try {
     const periodStart = getCurrentPeriodStart();
-    const key = getRedisKey(userId, meterType, periodStart, appId);
+    const key = getRedisKey(organizationId, meterType, periodStart, appId);
 
     // Fire-and-forget increment
     getRedisClient().incrby(key, quantity).catch((err: Error) => {
@@ -113,7 +113,7 @@ export async function getCurrentUsage(
  */
 export async function flushUsageToDatabase(db: Pool): Promise<void> {
   try {
-    const pattern = 'usage:*';
+    const pattern = 'usage_org:*';
     const keys = await getRedisClient().keys(pattern);
 
     if (keys.length === 0) {
@@ -121,13 +121,10 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
     }
 
     // usage_meters is per-region. For app-scoped counters, pick the app's
-    // home runtime DB. For user-scoped (no app_id), default to us-east-1 —
-    // user-scoped meters need consistent placement; getCurrentUsage fans
+    // home runtime DB. For org-scoped (no app_id), default to us-east-1 —
+    // org-scoped meters need consistent placement; getCurrentUsage fans
     // out reads, so the placement region just needs to be stable.
     const eastPool = getRuntimeDbPool(config.runtimeDb, 'us-east-1');
-
-    // Cache org IDs per userId to avoid N lookups for the same user in one batch run.
-    const orgIdCache = new Map<string, string>();
 
     // Process in batches of 100
     const batchSize = 100;
@@ -149,14 +146,6 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
           : eastPool;
         if (!runtimePool) continue; // app no longer in user_app_index — drop
 
-        // Resolve org ID (with per-run cache to avoid redundant lookups).
-        // resolveOrganizationId throws on missing/corrupt user data — let it
-        // propagate to the outer catch, which will re-throw it so the flush
-        // worker can surface the corruption rather than silently swallow it.
-        if (!orgIdCache.has(parsed.userId)) {
-          orgIdCache.set(parsed.userId, await resolveOrganizationId(db, parsed.userId));
-        }
-        const organizationId = orgIdCache.get(parsed.userId)!;
         const query = `
           INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
           VALUES ($1, $2, $3, $4, $5, $6)
@@ -166,8 +155,8 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
 
         try {
           await runtimePool.query(query, [
-            parsed.userId,
-            organizationId,
+            null,
+            parsed.organizationId,
             parsed.appId || null,
             parsed.meterType,
             parsed.periodStart,
@@ -205,7 +194,7 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
  */
 export async function purgeAppUsage(appId: string): Promise<number> {
   try {
-    const pattern = `usage:*:${appId}:*`;
+    const pattern = `usage_org:*:*:*:${appId}`;
     const keys = await getRedisClient().keys(pattern);
     if (keys.length > 0) {
       await getRedisClient().del(...keys);
@@ -378,31 +367,31 @@ function getCurrentPeriodStart(): string {
 
 function getRedisKey(organizationId: string, meterType: MeterType, periodStart: string, appId?: string): string {
   return appId
-    ? `usage_org:${organizationId}:${appId}:${meterType}:${periodStart}`
+    ? `usage_org:${organizationId}:${meterType}:${periodStart}:${appId}`
     : `usage_org:${organizationId}:${meterType}:${periodStart}`;
 }
 
 function parseRedisKey(key: string): {
-  userId: string;
+  organizationId: string;
   appId?: string;
   meterType: MeterType;
   periodStart: string;
 } | null {
   const parts = key.split(':');
-  if (parts[0] !== 'usage') return null;
+  if (parts[0] !== 'usage_org') return null;
 
   if (parts.length === 5) {
     // With appId
     return {
-      userId: parts[1],
-      appId: parts[2],
-      meterType: parts[3] as MeterType,
-      periodStart: parts[4],
+      organizationId: parts[1],
+      meterType: parts[2] as MeterType,
+      periodStart: parts[3],
+      appId: parts[4],
     };
   } else if (parts.length === 4) {
     // Without appId
     return {
-      userId: parts[1],
+      organizationId: parts[1],
       meterType: parts[2] as MeterType,
       periodStart: parts[3],
     };

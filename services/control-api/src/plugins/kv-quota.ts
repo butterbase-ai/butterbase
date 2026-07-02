@@ -28,6 +28,7 @@ import { kvRateLimited, kvCreditsExhausted, kvStorageFull } from '../utils/quota
 import { getCreditsBalance, incrementUsage } from '../services/usage-metering.js';
 import { kvRedisFor } from '../services/kv/redis-registry.js';
 import { wrap } from '../services/kv/redis-client.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { getRedisClient } from '../services/redis.js';
 import { isKvBlocked } from '../services/kv/migration-sentinel.js';
 
@@ -284,10 +285,16 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
 
     // Non-blocking credit accounting: Redis counter flushed to usage_meters every 60s
     const cost = creditCostForOp(op);
-    void incrementUsage(ownerId, 'kv_ops', cost, appId);
+    void (async () => {
+      const organizationId = await resolveOrganizationId(fastify.controlDb, ownerId);
+      await incrementUsage(organizationId, 'kv_ops', cost, appId);
+    })();
 
     if (sizeDelta !== 0) {
-      void incrementUsage(ownerId, 'kv_storage_bytes', Math.abs(sizeDelta), appId);
+      void (async () => {
+        const organizationId = await resolveOrganizationId(fastify.controlDb, ownerId);
+        await incrementUsage(organizationId, 'kv_storage_bytes', Math.abs(sizeDelta), appId);
+      })();
 
       if (region) {
         const kvR = wrap(kvRedisFor(region));

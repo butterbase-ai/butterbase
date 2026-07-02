@@ -155,8 +155,8 @@ describe('usage-metering — organization_id stamping', () => {
 
   // ── flushUsageToDatabase (Site 1) coverage ────────────────────────────────
 
-  it('flushUsageToDatabase stamps organization_id for a known user', async () => {
-    const key = `usage:${userId}:api_calls:2026-07-01`;
+  it('flushUsageToDatabase stamps organization_id for a known organization', async () => {
+    const key = `usage_org:${personalOrgId}:api_calls:2026-07-01`;
     mockRedisClient.keys.mockResolvedValueOnce([key]);
     mockRedisClient.getdel.mockResolvedValueOnce('7');
 
@@ -165,8 +165,8 @@ describe('usage-metering — organization_id stamping', () => {
     const inserts = capturedInsertsRef[0]!;
     expect(inserts.length).toBe(1);
     const ins = inserts[0]!;
-    // params: [userId, organizationId, appId|null, meterType, periodStart, quantity]
-    expect(ins.params[0]).toBe(userId);
+    // params: [userId|null, organizationId, appId|null, meterType, periodStart, quantity]
+    expect(ins.params[0]).toBeNull();              // no userId in org-scoped key
     expect(ins.params[1]).toBe(personalOrgId);
     expect(ins.params[2]).toBeNull();             // no appId in key
     expect(ins.params[3]).toBe('api_calls');
@@ -174,12 +174,14 @@ describe('usage-metering — organization_id stamping', () => {
     expect(ins.sql).toContain('organization_id');
   });
 
-  it('flushUsageToDatabase throws (not swallows) when org resolution fails for unknown user', async () => {
-    const bogusId = '00000000-0000-0000-0000-000000000001';
-    const key = `usage:${bogusId}:api_calls:2026-07-01`;
+  it('flushUsageToDatabase ignores malformed Redis keys', async () => {
+    const key = `usage:${userId}:api_calls:2026-07-01`;
     mockRedisClient.keys.mockResolvedValueOnce([key]);
     mockRedisClient.getdel.mockResolvedValueOnce('3');
 
-    await expect(flushUsageToDatabase(controlDb)).rejects.toThrow(/resolveOrganizationId/);
+    await flushUsageToDatabase(controlDb);
+
+    const inserts = capturedInsertsRef[0]!;
+    expect(inserts.length).toBe(0);  // old format keys are skipped
   });
 });

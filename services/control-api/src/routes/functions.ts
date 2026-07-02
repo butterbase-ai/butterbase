@@ -10,6 +10,7 @@ import { config } from '../config.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { requireUserId } from '../utils/require-auth.js';
 import { incrementUsage } from '../services/usage-metering.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 
 const triggerEnum = z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']);
@@ -611,7 +612,11 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       [appId]
     );
     if (fnOwnerResult.rows.length > 0) {
-      incrementUsage(fnOwnerResult.rows[0].owner_id, 'lambda_invocations', 1, appId);
+      const ownerId = fnOwnerResult.rows[0].owner_id;
+      void (async () => {
+        const organizationId = await resolveOrganizationId(controlDb, ownerId);
+        await incrementUsage(organizationId, 'lambda_invocations', 1, appId);
+      })();
     }
 
     // Forward to Deno runtime

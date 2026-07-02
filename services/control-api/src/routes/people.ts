@@ -17,6 +17,7 @@ import {
   deductCreditsBalance,
   incrementUsage,
 } from '../services/usage-metering.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { config } from '../config.js';
 import { PeopleError, PeopleProviderError } from '../services/people/types.js';
 import type { ProviderSlot, SearchPersonRequest, SearchCompanyRequest } from '../services/people/types.js';
@@ -148,7 +149,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -223,7 +225,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -337,7 +340,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -449,7 +453,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
