@@ -18,13 +18,17 @@ vi.mock('../app-resolver.js', () => ({
       this.name = 'AppNotFoundError';
     }
   },
+  AppResolver: {
+    resolveApp: vi.fn(),
+  },
 }));
 
 import { verifyEndUserJwt } from '../end-user-auth.js';
 import { getRuntimeDbForApp } from '../region-resolver.js';
-import { AppNotFoundError } from '../app-resolver.js';
+import { AppNotFoundError, AppResolver } from '../app-resolver.js';
 const mockedVerify = verifyEndUserJwt as ReturnType<typeof vi.fn>;
 const mockedResolve = getRuntimeDbForApp as ReturnType<typeof vi.fn>;
+const mockedResolveApp = AppResolver.resolveApp as ReturnType<typeof vi.fn>;
 
 const APP_ID = 'app_target';
 const OWNER_ID = 'owner-uuid';
@@ -51,10 +55,13 @@ describe('authorizeAppAiCall', () => {
   beforeEach(() => {
     mockedVerify.mockReset();
     mockedResolve.mockReset();
+    mockedResolveApp.mockReset();
     // Default: resolver returns whatever `db` the test built — keeps the
     // existing `db.query` mock in the per-test setup as the source of truth
     // for the `apps` row.
     mockedResolve.mockImplementation(async (db: Pool) => db);
+    // Default: caller is not an org member — AppResolver throws AppNotFoundError.
+    mockedResolveApp.mockRejectedValue(new AppNotFoundError(APP_ID));
   });
 
   it('returns 404 when the app does not exist in the runtime DB', async () => {
@@ -82,6 +89,23 @@ describe('authorizeAppAiCall', () => {
   it('allows the owner via bb_sk_* API key with `*` scope', async () => {
     const db = makeDb({ owner_id: OWNER_ID });
     const req = makeReq({ userId: OWNER_ID, authMethod: 'api_key', scopes: ['*'] });
+    const r = await authorizeAppAiCall(db, APP_ID, req);
+    expect(r).toEqual({ ok: true, ownerId: OWNER_ID, caller: { kind: 'owner' } });
+  });
+
+  it('allows an org member via platform JWT (billing stays on owner)', async () => {
+    const db = makeDb({ owner_id: OWNER_ID });
+    // AppResolver succeeds → caller is an org member
+    mockedResolveApp.mockResolvedValueOnce({ id: APP_ID, owner_id: OWNER_ID });
+    const req = makeReq({ userId: OTHER_ID, authMethod: 'jwt', scopes: ['*'] });
+    const r = await authorizeAppAiCall(db, APP_ID, req);
+    expect(r).toEqual({ ok: true, ownerId: OWNER_ID, caller: { kind: 'owner' } });
+  });
+
+  it('allows an org member via API key (billing stays on owner)', async () => {
+    const db = makeDb({ owner_id: OWNER_ID });
+    mockedResolveApp.mockResolvedValueOnce({ id: APP_ID, owner_id: OWNER_ID });
+    const req = makeReq({ userId: OTHER_ID, authMethod: 'api_key', scopes: ['*'] });
     const r = await authorizeAppAiCall(db, APP_ID, req);
     expect(r).toEqual({ ok: true, ownerId: OWNER_ID, caller: { kind: 'owner' } });
   });
