@@ -79,7 +79,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check lambda invocations
     if (limits.maxLambdaInvocations !== -1) {
-      const lambdaInvocations = await getCurrentUsage(db, userId, 'lambda_invocations');
+      const lambdaInvocations = await getCurrentUsage(db, organizationId, 'lambda_invocations');
       if (lambdaInvocations > limits.maxLambdaInvocations) {
         violations.push(`lambda_invocations: ${lambdaInvocations}/${limits.maxLambdaInvocations}`);
       }
@@ -87,7 +87,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check bandwidth
     if (limits.maxBandwidthGb !== -1) {
-      const bandwidthBytes = await getCurrentUsage(db, userId, 'bandwidth_bytes');
+      const bandwidthBytes = await getCurrentUsage(db, organizationId, 'bandwidth_bytes');
       const bandwidthLimitBytes = limits.maxBandwidthGb * 1024 * 1024 * 1024;
       if (bandwidthBytes > bandwidthLimitBytes) {
         violations.push(`bandwidth: ${(bandwidthBytes / 1024 / 1024 / 1024).toFixed(2)}GB/${limits.maxBandwidthGb}GB`);

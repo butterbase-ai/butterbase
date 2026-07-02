@@ -214,7 +214,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
       // For all other meters, check via usage counters or source-of-truth queries
       const currentUsage = meterType === 'storage_bytes'
         ? await getStorageUsed(fastify.controlDb, organizationId)
-        : await getCurrentUsage(fastify.controlDb, userId, meterType);
+        : await getCurrentUsage(fastify.controlDb, organizationId, meterType);
       const limit = getLimitForMeter(limits, meterType);
 
       // Check if limit is unlimited (-1)

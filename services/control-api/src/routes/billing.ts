@@ -150,8 +150,8 @@ export async function billingRoutes(app: FastifyInstance) {
       const usage = {
         storage_bytes: await getStorageUsed(app.runtimeDb(region), billingOrgId),
         ai_credits_usd: aiCreditsUsed,
-        lambda_invocations: await getCurrentUsage(app.runtimeDb(region), userId, 'lambda_invocations'),
-        bandwidth_bytes: await getCurrentUsage(app.runtimeDb(region), userId, 'bandwidth_bytes'),
+        lambda_invocations: await getCurrentUsage(app.runtimeDb(region), billingOrgId, 'lambda_invocations'),
+        bandwidth_bytes: await getCurrentUsage(app.runtimeDb(region), billingOrgId, 'bandwidth_bytes'),
         db_size_bytes: await getDbSize(app.runtimeDb(region), billingOrgId),
         mau: await getMAU(app.runtimeDb(region), billingOrgId),
         project_count: projectCountResult.rows[0].count,

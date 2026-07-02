@@ -64,7 +64,7 @@ export async function incrementUsage(
  */
 export async function getCurrentUsage(
   db: DbClient,
-  userId: string,
+  organizationId: string,
   meterType: MeterType,
   appId?: string
 ): Promise<number> {
@@ -72,27 +72,27 @@ export async function getCurrentUsage(
     const periodStart = getCurrentPeriodStart();
 
     // Get from Redis (hot data)
-    const redisKey = getRedisKey(userId, meterType, periodStart, appId);
+    const redisKey = getRedisKey(organizationId, meterType, periodStart, appId);
     const redisValue = await getRedisClient().get(redisKey);
     const redisUsage = redisValue ? parseInt(redisValue, 10) : 0;
 
     // usage_meters is per-region. When appId is given, hit the app's home
-    // region. When not (user-scoped counter — app_id IS NULL), sum across
+    // region. When not (org-scoped counter — app_id IS NULL), sum across
     // every region since the row could live in any of them.
     let dbUsage = 0;
     if (appId) {
       const runtimePool = await getRuntimeDbForApp(db as Pool, appId);
       const result = await runtimePool.query(
-        'SELECT quantity FROM usage_meters WHERE user_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id = $4',
-        [userId, meterType, periodStart, appId]
+        'SELECT quantity FROM usage_meters WHERE organization_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id = $4',
+        [organizationId, meterType, periodStart, appId]
       );
       dbUsage = result.rows.length > 0 ? parseInt(result.rows[0].quantity, 10) : 0;
     } else {
       for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
         const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
         const result = await runtimePool.query(
-          'SELECT quantity FROM usage_meters WHERE user_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id IS NULL',
-          [userId, meterType, periodStart]
+          'SELECT quantity FROM usage_meters WHERE organization_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id IS NULL',
+          [organizationId, meterType, periodStart]
         );
         if (result.rows.length > 0) dbUsage += parseInt(result.rows[0].quantity, 10);
       }
@@ -376,10 +376,10 @@ function getCurrentPeriodStart(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 }
 
-function getRedisKey(userId: string, meterType: MeterType, periodStart: string, appId?: string): string {
+function getRedisKey(organizationId: string, meterType: MeterType, periodStart: string, appId?: string): string {
   return appId
-    ? `usage:${userId}:${appId}:${meterType}:${periodStart}`
-    : `usage:${userId}:${meterType}:${periodStart}`;
+    ? `usage_org:${organizationId}:${appId}:${meterType}:${periodStart}`
+    : `usage_org:${organizationId}:${meterType}:${periodStart}`;
 }
 
 function parseRedisKey(key: string): {
