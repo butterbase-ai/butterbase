@@ -247,6 +247,12 @@ export const config = {
     url: process.env.BUILD_RUNNER_URL ?? 'http://localhost:8788/build',
     sharedSecret: process.env.BUILD_RUNNER_SHARED_SECRET ?? 'dev-shared-secret',
   },
+
+  internal: {
+    /** Shared secret for service-to-service calls on /internal/* routes (not under /v1/internal/).
+     * Used by dashboard-api to dispatch invite emails via POST /internal/email/invite. */
+    emailSecret: process.env.INTERNAL_EMAIL_SECRET ?? 'dev-internal-email-secret',
+  },
 };
 
 let runtimeDbAsserted = false;
