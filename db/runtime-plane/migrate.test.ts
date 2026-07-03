@@ -287,3 +287,35 @@ describe('040_people_organization_id migration', () => {
     }
   });
 });
+
+describe('041_remaining_org_id_not_null migration', () => {
+  const migrationPath = path.join(__dirname, '041_remaining_org_id_not_null.sql');
+  const TABLES = [
+    'usage_meters',
+    'ai_usage_logs', 'actor_usage_logs', 'ai_video_jobs',
+    'storage_objects', 'mcp_tool_call_log', 'partner_proxy_logs',
+    'app_refresh_tokens', 'app_verification_codes', 'app_subscriptions', 'app_orders',
+    'people_email_lookups', 'people_usage_logs',
+  ];
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('flips organization_id to NOT NULL on all 13 tables', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing`).toMatch(new RegExp(
+        `ALTER TABLE\\s+${t}[\\s\\S]+ALTER COLUMN\\s+organization_id\\s+SET NOT NULL`,
+        'i',
+      ));
+    }
+  });
+
+  it('does NOT drop or rename any column', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).not.toMatch(/DROP COLUMN/i);
+    expect(sql).not.toMatch(/RENAME COLUMN/i);
+  });
+});
