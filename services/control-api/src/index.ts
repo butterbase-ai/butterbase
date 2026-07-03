@@ -562,6 +562,14 @@ try {
 } catch (err) {
   app.log.info({ err: err instanceof Error ? err.message : err }, 'substrate overlay not present, skipping');
 }
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const orgs = await import('../../../cloud-overlays/dist/cloud-overlays/organizations/routes.js');
+  await app.register(orgs.organizationsRoutes);
+  app.log.info('organizations overlay routes registered');
+} catch (err) {
+  app.log.info({ err: err instanceof Error ? err.message : err }, 'organizations overlay not present, skipping');
+}
 app.register(aiConfigRoutes);
 app.register(peopleRoutes);
 app.register(peopleWebhookRoutes);
