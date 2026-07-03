@@ -726,6 +726,52 @@ export async function sendBillingEmail(
   }
 }
 
+/**
+ * Send an org-invite email to the invitee.
+ * Fire-and-forget: errors are logged, never thrown.
+ */
+export async function sendInviteEmail(input: {
+  toEmail: string;
+  orgName: string;
+  inviterEmail: string;
+  inviteUrl: string;
+  expiresAt: Date;
+}): Promise<void> {
+  const subject = `${input.inviterEmail} invited you to ${input.orgName} on Butterbase`;
+  const expiresStr = input.expiresAt.toUTCString();
+  const content = `
+<h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">You have an invite</h1>
+<p style="margin:0 0 24px 0;font-size:14px;color:#525252;line-height:1.5;">
+  <strong>${escapeHtml(input.inviterEmail)}</strong> invited you to join
+  <strong>${escapeHtml(input.orgName)}</strong> on Butterbase.
+</p>
+${renderButton({ href: input.inviteUrl, label: 'Accept invite' })}
+<p style="margin:24px 0 0 0;font-size:13px;color:#737373;">This invite expires on ${escapeHtml(expiresStr)}.</p>`;
+  const html = renderEmailLayout({
+    preheader: `${input.inviterEmail} invited you to join ${input.orgName} on Butterbase.`,
+    content,
+  });
+  const text = `${input.inviterEmail} invited you to ${input.orgName} on Butterbase.\n\nAccept: ${input.inviteUrl}\n\nExpires: ${expiresStr}`;
+
+  try {
+    await sesClient.send(new SendEmailCommand({
+      Source: `${config.ses.fromName} <${config.ses.fromEmail}>`,
+      Destination: { ToAddresses: [input.toEmail] },
+      Message: {
+        Subject: { Data: subject },
+        Body: { Html: { Data: html }, Text: { Data: text } },
+      },
+    }));
+    console.log(`[EMAIL] Invite email sent to ${input.toEmail}`);
+  } catch (error) {
+    if (config.nodeEnv === 'development') {
+      console.log(`[Invite email (dev)] to=${input.toEmail} url=${input.inviteUrl}`);
+    } else {
+      console.warn('[sendInviteEmail] failed', error);
+    }
+  }
+}
+
 const STATUS_LABELS: Record<string, string> = {
   new: 'New',
   acknowledged: 'Acknowledged',
