@@ -1,5 +1,6 @@
 // Function management routes
 import type { FastifyInstance } from 'fastify';
+import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { AppResolver } from '../services/app-resolver.js';
 import { encrypt, decrypt } from '../services/crypto.js';
@@ -681,35 +682,26 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     });
 
     if (isStream && denoResponse.body) {
-      // Passthrough SSE: hijack the reply so Fastify doesn't add a
-      // Content-Length (which would collide with Transfer-Encoding: chunked).
-      // Matches the existing pattern in routes/frontend-from-source.ts.
-      reply.raw.statusCode = denoResponse.status;
-      reply.raw.setHeader('content-type', contentType);
-      reply.raw.setHeader('cache-control', 'no-cache, no-transform');
-      reply.raw.setHeader('connection', 'keep-alive');
-      reply.raw.setHeader('x-accel-buffering', 'no');
-      reply.hijack();
-      const reader = denoResponse.body.getReader();
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          reply.raw.write(value);
-        }
-      } catch {
-        // Client disconnected mid-stream — nothing to do.
-      } finally {
-        reply.raw.end();
-      }
-      return;
+      // Passthrough SSE via reply.send(Readable.fromWeb(...)) so @fastify/cors's
+      // onSend hook fires (previously reply.hijack() bypassed it, dropping
+      // access-control-* headers) and Fastify's stream lifecycle propagates
+      // client disconnects to the underlying reader.
+      reply.header('content-type', contentType);
+      reply.header('cache-control', 'no-cache, no-transform');
+      reply.header('connection', 'keep-alive');
+      reply.header('x-accel-buffering', 'no');
+      return reply
+        .status(denoResponse.status)
+        .send(Readable.fromWeb(denoResponse.body as any));
     }
 
-    const responseBody = await denoResponse.text();
+    // Non-streaming: use arrayBuffer to preserve binary responses (image, pdf,
+    // etc). .text() previously mangled binary bodies via UTF-8 decoding.
+    const responseBuffer = Buffer.from(await denoResponse.arrayBuffer());
     return reply
       .status(denoResponse.status)
       .header('content-type', contentType)
-      .send(responseBody);
+      .send(responseBuffer);
   });
 
   // Get function logs

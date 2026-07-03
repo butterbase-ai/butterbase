@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { Readable } from 'node:stream';
 import type { Pool, PoolClient } from 'pg';
 import { getAppPoolForApp } from '../services/app-pool.js';
 import { introspectSchema } from '../services/schema-introspector.js';
@@ -610,7 +611,32 @@ export async function autoApiRoutes(app: FastifyInstance) {
         success: denoResponse.ok,
       });
 
-      // Get response as buffer to preserve binary data
+      // Streaming passthrough for SSE / chunked responses. Send via
+      // reply.send(Readable.fromWeb(...)) rather than reply.hijack() so:
+      //   - @fastify/cors's onSend hook still runs (CORS headers get injected)
+      //   - Fastify's stream lifecycle destroys the source on client disconnect,
+      //     which cancels the reader and closes our upstream to deno-runtime
+      //     (preventing wasted upstream tokens on mid-stream aborts).
+      const upstreamContentType = denoResponse.headers.get('content-type') ?? '';
+      const isStream = upstreamContentType.toLowerCase().startsWith('text/event-stream');
+
+      if (isStream && denoResponse.body) {
+        for (const [key, value] of denoResponse.headers.entries()) {
+          const lower = key.toLowerCase();
+          // content-length collides with chunked transfer; content-encoding was
+          // forced to identity upstream so nothing to propagate there either.
+          if (lower === 'content-length' || lower === 'content-encoding') continue;
+          reply.header(key, value);
+        }
+        reply.header('cache-control', 'no-cache, no-transform');
+        reply.header('connection', 'keep-alive');
+        reply.header('x-accel-buffering', 'no');
+        return reply
+          .status(denoResponse.status)
+          .send(Readable.fromWeb(denoResponse.body as any));
+      }
+
+      // Non-streaming: buffer to preserve binary data.
       const responseBuffer = Buffer.from(await denoResponse.arrayBuffer());
 
       // Propagate upstream headers faithfully. We forced accept-encoding:identity
