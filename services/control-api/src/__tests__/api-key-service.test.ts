@@ -269,5 +269,105 @@ describe('ApiKeyService', () => {
       expect(result).toHaveLength(1);
       expect(result.every((k: any) => k.scope === 'app')).toBe(true);
     });
+
+    describe('userId narrowing (scope=me equivalent)', () => {
+      let otherUserId: string;
+
+      beforeAll(async () => {
+        // Second member of the same org so we can prove the AND user_id = $N
+        // clause narrows the result to just one member's keys.
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          const otherPersonalOrg = await client.query<{ id: string }>(
+            `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, auto_refill_enabled, account_status)
+             VALUES ($1, 'other-member personal', true, 'playground', 0, false, 'active')
+             RETURNING id`,
+            [crypto.randomUUID()],
+          );
+          const otherPersonalOrgId = otherPersonalOrg.rows[0].id;
+          const other = await client.query<{ id: string }>(
+            `INSERT INTO platform_users (id, email, cognito_sub, personal_organization_id)
+             VALUES ($1, 'other-member@example.com', 'other-sub', $2)
+             RETURNING id`,
+            [otherPersonalOrgId, otherPersonalOrgId],
+          );
+          otherUserId = other.rows[0].id;
+          await client.query(
+            `INSERT INTO organization_members (organization_id, user_id, role, joined_at)
+             VALUES ($1, $2, 'member', now()) ON CONFLICT DO NOTHING`,
+            [scopeOrgId, otherUserId],
+          );
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+      });
+
+      afterAll(async () => {
+        await pool.query('DELETE FROM api_keys WHERE user_id = $1', [otherUserId]);
+        await pool.query(
+          'DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2',
+          [scopeOrgId, otherUserId],
+        );
+        const personalOrg = await pool.query<{ personal_organization_id: string }>(
+          'SELECT personal_organization_id FROM platform_users WHERE id = $1',
+          [otherUserId],
+        );
+        await pool.query('DELETE FROM platform_users WHERE id = $1', [otherUserId]);
+        if (personalOrg.rows[0]) {
+          await pool.query('DELETE FROM organizations WHERE id = $1', [personalOrg.rows[0].personal_organization_id]);
+        }
+      });
+
+      async function seedKeyFor(userId: string, scope: 'app' | 'substrate', substrateUserId: string | null) {
+        const hash = crypto.randomBytes(20).toString('hex');
+        await pool.query(
+          `INSERT INTO api_keys (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
+           VALUES ($1, $2, $3, 'bb_sk_xxx12', 'test', $4, $5, $6)`,
+          [userId, scopeOrgId, hash, ['*'], scope, substrateUserId],
+        );
+      }
+
+      beforeEach(async () => {
+        await pool.query('DELETE FROM api_keys WHERE user_id IN ($1, $2)', [scopeUserId, otherUserId]);
+      });
+
+      it('narrows to only the passed user\'s keys', async () => {
+        await seedKeyFor(scopeUserId, 'app', scopeUserId);
+        await seedKeyFor(scopeUserId, 'substrate', scopeUserId);
+        await seedKeyFor(otherUserId, 'app', otherUserId);
+
+        // No userId → all 3 org keys.
+        const all = await ApiKeyService.listKeys(pool, scopeOrgId);
+        expect(all).toHaveLength(3);
+
+        // scopeUserId → only their 2 keys.
+        const mine = await ApiKeyService.listKeys(pool, scopeOrgId, undefined, scopeUserId);
+        expect(mine).toHaveLength(2);
+
+        // otherUserId → only their 1 key.
+        const theirs = await ApiKeyService.listKeys(pool, scopeOrgId, undefined, otherUserId);
+        expect(theirs).toHaveLength(1);
+      });
+
+      it('composes with scope filter (scope + userId both narrow)', async () => {
+        await seedKeyFor(scopeUserId, 'app', scopeUserId);
+        await seedKeyFor(scopeUserId, 'substrate', scopeUserId);
+        await seedKeyFor(otherUserId, 'app', otherUserId);
+        await seedKeyFor(otherUserId, 'substrate', otherUserId);
+
+        const scopeSubstrate = await ApiKeyService.listKeys(pool, scopeOrgId, 'substrate', scopeUserId);
+        expect(scopeSubstrate).toHaveLength(1);
+        expect(scopeSubstrate[0].scope).toBe('substrate');
+
+        const otherApp = await ApiKeyService.listKeys(pool, scopeOrgId, 'app', otherUserId);
+        expect(otherApp).toHaveLength(1);
+        expect(otherApp[0].scope).toBe('app');
+      });
+    });
   });
 });
