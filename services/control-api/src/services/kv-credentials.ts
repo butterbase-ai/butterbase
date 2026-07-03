@@ -128,11 +128,12 @@ export class KvCredentialsService {
   async resolveFunctionKeyWithOwner(
     plaintextKey: string,
     appId: string,
-  ): Promise<{ app_id: string; owner_id: string } | null> {
-    const { rows } = await this.db.query<{ app_id: string; owner_id: string }>(
-      `SELECT kv.app_id, uai.user_id AS owner_id
+  ): Promise<{ app_id: string; owner_id: string; organization_id: string | null } | null> {
+    const { rows } = await this.db.query<{ app_id: string; owner_id: string; organization_id: string | null }>(
+      `SELECT kv.app_id, uai.user_id AS owner_id, a.organization_id
          FROM app_kv_credentials kv
          JOIN user_app_index uai ON uai.app_id = kv.app_id
+         JOIN apps a ON a.id = kv.app_id
         WHERE kv.kv_function_key = $1 AND kv.app_id = $2`,
       [plaintextKey, appId],
     );

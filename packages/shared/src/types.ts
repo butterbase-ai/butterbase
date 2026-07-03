@@ -113,6 +113,15 @@ export interface AuthContext {
   email?: string;
   appId?: string;   // Required when authMethod === 'function_key'; informational otherwise.
   rawToken?: string;
+  /**
+   * The organization this request is scoped to.
+   * - API-key auth: `api_keys.organization_id` (org the key was minted under).
+   * - JWT auth: caller's `platform_users.personal_organization_id`.
+   * - `end_user_jwt`, `function_key`, `anonymous`: null.
+   * Absent → the fallback path in downstream code (e.g. substrate overlay)
+   * may resolve via a control-DB lookup.
+   */
+  organizationId?: string | null;
 }
 
 /**

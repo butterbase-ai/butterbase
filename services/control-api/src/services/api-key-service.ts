@@ -168,7 +168,7 @@ export class ApiKeyService {
     }
 
     const result = await pool.query(
-      `SELECT id, user_id, scopes, revoked_at, expires_at
+      `SELECT id, user_id, organization_id, scopes, revoked_at, expires_at
        FROM api_keys
        WHERE key_hash = $1`,
       [keyHash]
@@ -196,6 +196,7 @@ export class ApiKeyService {
       authMethod: 'api_key',
       scopes: key.scopes,
       keyId: key.id,
+      organizationId: key.organization_id,
     };
 
     getRedisClient().setex(cacheKey, API_KEY_CACHE_TTL, JSON.stringify(authContext)).catch(() => {});

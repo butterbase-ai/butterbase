@@ -114,6 +114,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
           userId: testUid,
           authMethod: 'jwt',
           scopes: ['*'],
+          organizationId: null,
         };
         return;
       }
@@ -175,6 +176,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         userId: null,
         authMethod: 'anonymous',
         scopes: [],
+        organizationId: null,
       };
       return;
     }
@@ -232,6 +234,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
             authMethod: 'function_key',
             scopes: ['integrations:execute'],
             appId: resolved.app_id,
+            organizationId: resolved.organization_id,
           } as AuthContext;
           return;
         }
@@ -247,6 +250,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         userId: config.devOwnerId,
         authMethod: 'api_key',
         scopes: ['*'],
+        organizationId: null, // Dev escape hatch: substrate overlay falls back to control-DB lookup.
       };
       return;
     }
@@ -266,6 +270,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         userId: null,
         authMethod: 'anonymous',
         scopes: [],
+        organizationId: null,
       };
       return;
     }
@@ -285,6 +290,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
             authMethod: 'end_user_jwt',
             scopes: [],
             rawToken: token,
+            organizationId: null,
           } as any;
           return;
         }
@@ -417,6 +423,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
           authMethod: 'jwt',
           scopes: ['*'],
           email: claims.email,
+          organizationId: personalOrgId,
         };
       } catch (error) {
         fastify.log.error({ err: error }, 'JWT validation failed');
