@@ -18,6 +18,7 @@ import {
 } from '../services/ai-router/schemas.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
@@ -272,6 +273,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const organizationId = await resolveOrgFromApp(runtimePool, appId);
         const result = await routeChatCompletion(
           {
             platformPool: app.controlDb,
@@ -279,7 +281,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId: ownerId, region,
+            appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -393,6 +395,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const organizationId2 = await resolveOrgFromApp(runtimePool, appId);
         const result = await routeEmbedding(
           {
             platformPool: app.controlDb,
@@ -400,7 +403,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId: ownerId, region,
+            appId, organizationId: organizationId2, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );

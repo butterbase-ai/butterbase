@@ -1,8 +1,8 @@
 import type pg from 'pg';
-import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 export interface ActorUsageRow {
   appId: string;
+  organizationId: string;
   userId: string | null;
   providerKey: string;
   actorId: string;
@@ -25,10 +25,6 @@ export async function writeActorUsageRow(
   runtimePool: pg.Pool,
   row: ActorUsageRow,
 ): Promise<boolean> {
-  if (!row.appId) {
-    throw new Error('writeActorUsageRow: row missing appId; cannot resolve organization_id');
-  }
-  const organizationId = await resolveOrgFromApp(runtimePool, row.appId);
   const res = await runtimePool.query(
     `INSERT INTO actor_usage_logs (
        app_id, user_id, provider_key, actor_id, dimension, seconds,
@@ -39,7 +35,7 @@ export async function writeActorUsageRow(
       row.appId, row.userId, row.providerKey, row.actorId, row.dimension, row.seconds,
       row.usdCost, row.usdCharged, row.markupPct, row.leaseId,
       JSON.stringify(row.requestMetadata),
-      organizationId,
+      row.organizationId,
     ],
   );
   return (res.rowCount ?? 0) > 0;

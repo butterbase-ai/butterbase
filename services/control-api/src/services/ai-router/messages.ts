@@ -77,20 +77,18 @@ function wrapNativeAnthropicStreamForSettlement(
       const reasoningTokens = thinkingText.length > 0
         ? estimatePromptTokens([{ role: 'assistant', content: thinkingText }], canonicalId)
         : undefined;
-      if (ctx.appId) {
-        writeAiUsageRow(ctx.runtimePool, {
-          appId: ctx.appId, userId: ctx.userId, model: canonicalId,
-          router: chosenRouter as any,
-          promptTokens: inputTokens, completionTokens: outputTokens,
-          totalTokens: inputTokens + outputTokens,
-          providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-          markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
-          keyType: 'platform', chargedToUser: true,
-          cacheReadInputTokens: cacheReadTokens,
-          cacheCreationInputTokens: cacheCreateTokens,
-          reasoningTokens,
-        }).catch(err => console.warn('[messages] usage-log write failed:', err));
-      }
+      writeAiUsageRow(ctx.runtimePool, {
+        appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId,
+        router: chosenRouter as any,
+        promptTokens: inputTokens, completionTokens: outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+        markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+        keyType: 'platform', chargedToUser: true,
+        cacheReadInputTokens: cacheReadTokens,
+        cacheCreationInputTokens: cacheCreateTokens,
+        reasoningTokens,
+      }).catch(err => console.warn('[messages] usage-log write failed:', err));
       console.log(JSON.stringify({
         level: 'info',
         type: 'ai_router.call',
@@ -238,20 +236,18 @@ export async function routeMessages(
       .catch(err => console.error('[messages] auto-refill failed:', err));
     maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
       .catch(err => console.error('[messages] credits-email failed:', err));
-    if (ctx.appId) {
-      writeAiUsageRow(ctx.runtimePool, {
-        appId: ctx.appId, userId: ctx.userId, model: stripped,
-        router: native.router.name as any,
-        promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
-        totalTokens: usage.promptTokens + usage.completionTokens,
-        providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
-        keyType: 'platform', chargedToUser: true,
-        cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
-        cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
-        reasoningTokens: usage.reasoningTokens,
-      }).catch(err => console.error('[messages] usage-log write failed:', err));
-    }
+    writeAiUsageRow(ctx.runtimePool, {
+      appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: stripped,
+      router: native.router.name as any,
+      promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+      totalTokens: usage.promptTokens + usage.completionTokens,
+      providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+      markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+      keyType: 'platform', chargedToUser: true,
+      cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+      cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+      reasoningTokens: usage.reasoningTokens,
+    }).catch(err => console.error('[messages] usage-log write failed:', err));
     console.log(JSON.stringify({
       level: 'info',
       type: 'ai_router.call',

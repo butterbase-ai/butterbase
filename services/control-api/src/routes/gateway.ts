@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import type pg from 'pg';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { getRedisClient } from '../services/redis.js';
@@ -25,6 +26,16 @@ import { routeResponses } from '../services/ai-router/responses.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
+
+async function resolveGatewayOrg(controlDb: pg.Pool, userId: string): Promise<string> {
+  const r = await controlDb.query<{ personal_organization_id: string }>(
+    'SELECT personal_organization_id FROM platform_users WHERE id = $1',
+    [userId],
+  );
+  const id = r.rows[0]?.personal_organization_id;
+  if (!id) throw new Error(`gateway: user ${userId} has no personal_organization_id`);
+  return id;
+}
 
 export async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
@@ -219,6 +230,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
       const result = await routeChatCompletion(
         {
           platformPool: app.controlDb,
@@ -227,6 +239,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
           adapters,
           markupPct: config.aiRouter.markupPct,
           appId: null,
+          organizationId,
           userId: user.userId,
           region: user.region,
         },
@@ -291,11 +304,12 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
       const result = await routeMessages(
         {
           platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
           adapters, markupPct: config.aiRouter.markupPct,
-          appId: request.auth.appId ?? null, userId: user.userId, region: user.region,
+          appId: request.auth.appId ?? null, organizationId, userId: user.userId, region: user.region,
         },
         body,
         {
@@ -376,10 +390,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
       const result = await routeResponses(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
           adapters, markupPct: config.aiRouter.markupPct,
-          appId: request.auth.appId ?? null, userId: user.userId, region: user.region },
+          appId: request.auth.appId ?? null, organizationId, userId: user.userId, region: user.region },
         body,
       );
       if (result.stream) {
@@ -438,6 +453,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
       const result = await routeEmbedding(
         {
           platformPool: app.controlDb,
@@ -446,6 +462,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
           adapters,
           markupPct: config.aiRouter.markupPct,
           appId: null,
+          organizationId,
           userId: user.userId,
           region: user.region,
         },

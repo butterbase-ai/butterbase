@@ -53,7 +53,7 @@ async function buildTestApp(authOverride?: AuthOverride): Promise<FastifyInstanc
   const app = Fastify({ logger: false });
 
   // Minimal stub for controlDb (no DB queries made in gateway routes)
-  app.decorate('controlDb', {} as any);
+  app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
 
   // Inject auth - by default valid JWT
   const auth = authOverride ?? { userId: 'test-user', authMethod: 'jwt', scopes: [] };

@@ -5,6 +5,7 @@ import { config } from '../../config.js';
 import { pollAndSettleVideoJob, buildVideoAdapters } from '../../routes/ai-videos.js';
 import type { VideoJobRow } from './video-jobs.js';
 import type { RouteContext } from './router.js';
+import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 const SWEEP_BATCH_SIZE = 25;
 // Skip rows older than this — settle deferred but bounded; the lease will
@@ -65,10 +66,11 @@ export async function startVideoSweeper(
         app.log.info({ region, count: rows.length }, 'video-sweeper: processing batch');
 
         for (const job of rows) {
+          const organizationId = await resolveOrgFromApp(runtimePool, job.app_id);
           const ctx: RouteContext = {
             platformPool: app.controlDb, runtimePool, redis,
             adapters, markupPct: parseFloat(job.markup_pct),
-            appId: job.app_id, userId: job.user_id, region,
+            appId: job.app_id, organizationId, userId: job.user_id, region,
           };
           try {
             await pollAndSettleVideoJob(ctx, job);

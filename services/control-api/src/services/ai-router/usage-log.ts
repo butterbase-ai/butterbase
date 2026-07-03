@@ -1,10 +1,10 @@
 import type pg from 'pg';
 import type { RouterName } from './normalize.js';
 import { incrementUsage } from '../usage-metering.js';
-import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 export interface AiUsageRow {
-  appId: string;
+  appId: string | null;
+  organizationId: string;
   userId: string | null;
   model: string;             // canonical id
   router: RouterName;
@@ -34,10 +34,6 @@ export interface AiUsageRow {
  * Legacy `provider` and `cost_usd` columns populated for one release; dropped in 067.
  */
 export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Promise<void> {
-  if (!row.appId) {
-    throw new Error('writeAiUsageRow: row missing appId; cannot resolve organization_id');
-  }
-  const organizationId = await resolveOrgFromApp(runtimePool, row.appId);
   await runtimePool.query(
     `INSERT INTO ai_usage_logs (
        app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
@@ -66,7 +62,7 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.cacheReadInputTokens ?? 0,
       row.cacheCreationInputTokens ?? 0,
       row.reasoningTokens ?? null,
-      organizationId,
+      row.organizationId,
     ]
   );
 
@@ -76,6 +72,6 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
   // app-less gateway calls (app_id = NULL) and calls against apps the caller does
   // not own, both of which are still billed via credit_leases.
   if (row.chargedToUser && row.userId) {
-    void incrementUsage(organizationId, row.userId, 'ai_tokens', row.totalTokens, row.appId);
+    void incrementUsage(row.organizationId, row.userId, 'ai_tokens', row.totalTokens, row.appId ?? undefined);
   }
 }

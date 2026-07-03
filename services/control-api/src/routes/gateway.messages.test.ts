@@ -37,7 +37,7 @@ vi.mock('../config.js', async (orig) => {
 describe('POST /v1/messages', () => {
   it('200 with Anthropic-shaped body', async () => {
     const app = Fastify({ logger: false });
-    app.decorate('controlDb', {} as any);
+    app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
     app.addHook('onRequest', async (req) => {
       (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
     });
@@ -64,7 +64,7 @@ describe('POST /v1/messages', () => {
     (routeMessages as any).mockResolvedValueOnce({ status: 200, stream: errStream, chosen: 'provider-secondary' });
 
     const app = Fastify({ logger: false });
-    app.decorate('controlDb', {} as any);
+    app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
     app.addHook('onRequest', async (req) => {
       (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
     });
@@ -80,7 +80,7 @@ describe('POST /v1/messages', () => {
 
   it('rewrites pre-route 401 payloads to Anthropic shape', async () => {
     const app = Fastify({ logger: false });
-    app.decorate('controlDb', {} as any);
+    app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
     // Simulate the auth plugin rejecting with the Butterbase-shaped 401 BEFORE the route runs.
     app.addHook('onRequest', async (_req, reply) => {
       return reply.code(401).send({ error: { message: 'Invalid or revoked API key' } });
@@ -107,7 +107,7 @@ describe('POST /v1/messages', () => {
     (config.aiRouter as any).v2EndpointsEnabled = false;
     try {
       const app = Fastify({ logger: false });
-      app.decorate('controlDb', {} as any);
+      app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
       app.addHook('onRequest', async (req) => {
         (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
       });

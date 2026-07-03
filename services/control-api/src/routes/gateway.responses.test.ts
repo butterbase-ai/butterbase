@@ -48,7 +48,7 @@ describe('POST /v1/responses', () => {
     (routeResponses as any).mockResolvedValueOnce({ status: 200, stream: errStream, chosen: 'provider-secondary' });
 
     const app = Fastify({ logger: false });
-    app.decorate('controlDb', {} as any);
+    app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
     app.addHook('onRequest', async (req) => {
       (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
     });
@@ -63,7 +63,7 @@ describe('POST /v1/responses', () => {
 
   it('200 with Responses-shaped body', async () => {
     const app = Fastify({ logger: false });
-    app.decorate('controlDb', {} as any);
+    app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
     app.addHook('onRequest', async (req) => {
       (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
     });
@@ -83,7 +83,7 @@ describe('POST /v1/responses', () => {
     (config.aiRouter as any).v2EndpointsEnabled = false;
     try {
       const app = Fastify({ logger: false });
-      app.decorate('controlDb', {} as any);
+      app.decorate('controlDb', { query: async () => ({ rows: [{ personal_organization_id: 'org-test' }] }) } as any);
       app.addHook('onRequest', async (req) => {
         (req as any).auth = { appId: null, userId: 'u', authMethod: 'api_key', scopes: ['*'] };
       });
