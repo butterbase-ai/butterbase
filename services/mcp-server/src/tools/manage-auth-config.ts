@@ -210,6 +210,13 @@ Use for AI gateway, integrations, control-API surfaces.`,
           "Optional extra scope tokens to add. Allowed: 'ai:gateway', 'substrate'. " +
           "Do NOT pass 'app:<id>' or '*' — use key_scope instead. (generate_service_key only)"
         ),
+      organization_id: z.string().uuid().optional()
+        .describe(
+          "Optional organization to bind the key to. Caller must be a member. " +
+          "Defaults to the caller's personal organization when omitted. " +
+          "Use this to mint keys that operate on a shared org's substrate/quota/billing. " +
+          "(generate_service_key only)"
+        ),
     },
     {
       title: 'Manage Auth Config',
@@ -272,6 +279,7 @@ Use for AI gateway, integrations, control-API surfaces.`,
           if (args.additional_scopes && args.additional_scopes.length > 0) {
             body.additional_scopes = args.additional_scopes;
           }
+          if (args.organization_id) body.organization_id = args.organization_id;
 
           const res = await fetch(url, {
             method: 'POST',
