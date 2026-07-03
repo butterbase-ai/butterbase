@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { NotFoundError } from './api-errors.js';
 
 /**
  * Resolve the caller's personal organization id for org-scoped inserts.
@@ -18,7 +19,7 @@ export async function resolveOrganizationId(pool: Pool, userId: string): Promise
     [userId],
   );
   if (result.rows.length === 0) {
-    throw new Error(`resolveOrganizationId: user ${userId} not found`);
+    throw new NotFoundError('user', userId);
   }
   const orgId = result.rows[0].personal_organization_id;
   if (!orgId) {

@@ -7,6 +7,7 @@ import {
 } from '@butterbase/shared/constants';
 import type { AuthContext } from '@butterbase/shared/types';
 import { getRedisClient } from './redis.js';
+import { AuthorizationError } from './api-errors.js';
 
 const API_KEY_CACHE_TTL = 60;
 const API_KEY_INVALID_TTL = 10;
@@ -33,6 +34,13 @@ export interface GenerateApiKeyOptions {
   targetAppId?: string;                             // required iff keyScope === 'app'
   additionalScopes?: string[];                      // allowlisted
   substrateAccess?: 'app' | 'substrate' | 'both';   // existing axis
+  /**
+   * Bind the key to a specific organization the caller is a member of.
+   * When omitted, defaults to the caller's personal_organization_id (legacy behavior).
+   * Membership is verified against `organization_members` — an error is thrown if
+   * the caller isn't a member of the requested org.
+   */
+  organizationId?: string;
 }
 
 export class ScopeValidationError extends Error {
@@ -119,15 +127,32 @@ export class ApiKeyService {
     const dbScope = isBoth ? 'both' : (isSubstrateOnly ? 'substrate' : 'app');
 
     // Org rollout (Plan 07 mig 077): api_keys.organization_id is NOT NULL.
-    // Legacy callers of this service don't pass org context, so resolve the
-    // caller's personal org from platform_users. Fail loudly if missing.
-    const orgLookup = await pool.query<{ personal_organization_id: string | null }>(
-      `SELECT personal_organization_id FROM platform_users WHERE id = $1`,
-      [userId]
-    );
-    const organizationId = orgLookup.rows[0]?.personal_organization_id ?? null;
-    if (!organizationId) {
-      throw new Error(`generateApiKey: user ${userId} has no personal_organization_id`);
+    // Cross-org key minting (Plan 10 follow-up): if the caller supplies an
+    // `organizationId`, verify membership against `organization_members`.
+    // Otherwise fall back to the caller's personal_organization_id (legacy behavior).
+    let organizationId: string;
+    if (options.organizationId) {
+      const memberCheck = await pool.query(
+        `SELECT 1 FROM organization_members WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
+        [options.organizationId, userId],
+      );
+      if ((memberCheck.rowCount ?? 0) === 0) {
+        throw new AuthorizationError(
+          `generateApiKey: user ${userId} is not a member of organization ${options.organizationId}`,
+          'AUTH_ORG_FORBIDDEN',
+        );
+      }
+      organizationId = options.organizationId;
+    } else {
+      const orgLookup = await pool.query<{ personal_organization_id: string | null }>(
+        `SELECT personal_organization_id FROM platform_users WHERE id = $1`,
+        [userId]
+      );
+      const resolved = orgLookup.rows[0]?.personal_organization_id ?? null;
+      if (!resolved) {
+        throw new Error(`generateApiKey: user ${userId} has no personal_organization_id`);
+      }
+      organizationId = resolved;
     }
 
     const substrateOrganizationId = (isSubstrateOnly || isBoth) ? organizationId : null;

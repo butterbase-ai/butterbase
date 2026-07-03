@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { NotFoundError } from './api-errors.js';
 
 /**
  * Resolve an app's owning organization id from the runtime plane.
@@ -20,7 +21,7 @@ export async function resolveOrgFromApp(runtimePool: Pool, appId: string): Promi
     [appId],
   );
   if (result.rows.length === 0) {
-    throw new Error(`resolveOrgFromApp: app ${appId} not found`);
+    throw new NotFoundError('app', appId);
   }
   const orgId = result.rows[0].organization_id;
   if (!orgId) {

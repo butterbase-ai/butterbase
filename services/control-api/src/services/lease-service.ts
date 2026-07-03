@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { NotFoundError } from './api-errors.js';
 
 export interface GrantArgs {
   userId: string;
@@ -27,7 +28,7 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
        WHERE pu.id = $1 FOR UPDATE OF pu, o`,
       [args.userId]
     );
-    if (u.rows.length === 0) throw new Error(`grantLease: user ${args.userId} not found`);
+    if (u.rows.length === 0) throw new NotFoundError('user', args.userId);
     const organizationId = u.rows[0].personal_organization_id;
 
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
@@ -116,7 +117,7 @@ export async function settleLease(
     );
     if (r.rows.length === 0) {
       await client.query('ROLLBACK');
-      throw new Error(`settleLease: lease not found: ${args.leaseId}`);
+      throw new NotFoundError('lease', args.leaseId);
     }
     if (r.rows[0].status !== 'active') {
       await client.query('COMMIT');

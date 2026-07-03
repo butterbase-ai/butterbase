@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { resetCreditsEmailState } from './credits-email.js';
+import { NotFoundError } from './api-errors.js';
 
 export interface SignupGrantArgs {
   userId: string;
@@ -40,7 +41,7 @@ export async function grantSignupCredits(
     );
     if (plan.rows.length === 0) {
       await client.query('ROLLBACK');
-      throw new Error(`grantSignupCredits: plan ${args.planId} not found`);
+      throw new NotFoundError('plan', args.planId);
     }
     const amount = parseFloat(plan.rows[0].signup_credit_grant_usd);
     if (amount <= 0) {

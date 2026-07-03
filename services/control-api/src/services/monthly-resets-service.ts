@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { resolveOrganizationId } from './org-resolver.js';
+import { NotFoundError } from './api-errors.js';
 
 export interface ResetArgs {
   userId: string;
@@ -35,7 +36,7 @@ export async function resetMonthlyAllowanceWithClient(
     [args.planId]
   );
   if (plan.rows.length === 0) {
-    throw new Error(`resetMonthlyAllowance: plan ${args.planId} not found`);
+    throw new NotFoundError('plan', args.planId);
   }
   const grantAmount = parseFloat(plan.rows[0].monthly_credit_grant_usd);
 
@@ -44,7 +45,7 @@ export async function resetMonthlyAllowanceWithClient(
     [args.userId]
   );
   if (userRow.rows.length === 0) {
-    throw new Error(`resetMonthlyAllowance: user ${args.userId} not found`);
+    throw new NotFoundError('user', args.userId);
   }
   const previousUnspent = parseFloat(userRow.rows[0].monthly_allowance_usd);
 

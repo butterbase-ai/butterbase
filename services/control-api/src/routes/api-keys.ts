@@ -21,6 +21,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       key_scope,
       target_app_id,
       additional_scopes,
+      organization_id,
     } = request.body as {
       name?: string;
       scopes?: string[];
@@ -28,6 +29,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
       key_scope?: 'account' | 'app';
       target_app_id?: string;
       additional_scopes?: string[];
+      organization_id?: string;
     };
 
     if (!name || typeof name !== 'string') {
@@ -70,6 +72,7 @@ export async function apiKeyRoutes(app: FastifyInstance) {
           targetAppId: target_app_id,
           additionalScopes: effectiveAdditional,
           substrateAccess,
+          organizationId: organization_id,
         }
       );
 

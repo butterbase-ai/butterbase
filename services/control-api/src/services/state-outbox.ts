@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { resolveOrganizationId } from './org-resolver.js';
+import { NotFoundError } from './api-errors.js';
 
 export const OUTBOX_FIELDS = ['account_status', 'plan_id', 'spending_cap_usd'] as const;
 export type OutboxField = typeof OUTBOX_FIELDS[number];
@@ -44,7 +45,7 @@ export async function writeUserStateChange(
       [userId, ...values]
     );
     if (upd.rowCount === 0) {
-      throw new Error(`writeUserStateChange: user ${userId} not found`);
+      throw new NotFoundError('user', userId);
     }
     const organizationId = await resolveOrganizationId(platformPool, userId);
     const ins = await client.query<{ version: string }>(

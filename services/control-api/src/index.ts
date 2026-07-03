@@ -94,6 +94,7 @@ import { config, assertRegionConfig } from './config.js';
 import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
 import { AppNotFoundError, AppAuthRequiredError, AppPausedError } from './services/app-resolver.js';
+import { AuthorizationError, NotFoundError, ValidationError, ConflictError } from './services/api-errors.js';
 import { startFlushWorker, reconcileUsage } from './services/usage-metering.js';
 import { getRedisClient, shutdownRedis } from './services/redis.js';
 import { enforceExpiredGracePeriods } from './services/billing-service.js';
@@ -392,6 +393,35 @@ app.setErrorHandler((error: any, request, reply) => {
       message: error.message,
       remediation: 'Resume the app with `butterbase apps resume <app-id>` (or manage_app action="resume" via MCP).',
       details: { reason: error.reason },
+    }));
+  }
+
+  if (error instanceof AuthorizationError) {
+    return reply.status(403).send(createAgentError({
+      code: error.code,
+      message: error.message,
+      remediation: 'You do not have permission to perform this action. Check your role/membership or use a different key.',
+    }));
+  }
+  if (error instanceof NotFoundError) {
+    return reply.status(404).send(createAgentError({
+      code: 'RESOURCE_NOT_FOUND',
+      message: error.message,
+      remediation: `Verify the ${error.resourceType} id and that it exists.`,
+    }));
+  }
+  if (error instanceof ValidationError) {
+    return reply.status(400).send(createAgentError({
+      code: error.code,
+      message: error.message,
+      remediation: 'Check the input shape and required fields.',
+    }));
+  }
+  if (error instanceof ConflictError) {
+    return reply.status(409).send(createAgentError({
+      code: error.code,
+      message: error.message,
+      remediation: 'The requested operation conflicts with the current resource state.',
     }));
   }
 
