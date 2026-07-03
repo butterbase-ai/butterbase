@@ -92,7 +92,6 @@ export interface FunctionMetadata {
    */
   allow_service_key_impersonation: boolean;
   db_connection_string: string | null;
-  substrate_user_id: string | null;
   /**
    * Platform-known values surfaced to user code via ctx.env.BUTTERBASE_*
    * and the structured ctx.app mirror. Strictly platform-owned, non-secret
@@ -265,7 +264,7 @@ export async function loadFunction(
     // surfaced to user code via ctx.env.BUTTERBASE_* / ctx.app.
     const appCheck = await client.queryObject(
       `SELECT
-         db_provisioned, substrate_user_id,
+         db_provisioned,
          name, owner_id, region, subdomain,
          deployment_url, anon_key, allowed_origins,
          stripe_connect_account_id,
@@ -328,7 +327,6 @@ export async function loadFunction(
       memory_limit_mb: row.memory_limit_mb,
       allow_service_key_impersonation: row.allow_service_key_impersonation !== false,
       db_connection_string: dbConnectionString,
-      substrate_user_id: app.substrate_user_id ?? null,
       platform: {
         app_name: app.name,
         owner_id: app.owner_id,
