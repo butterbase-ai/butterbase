@@ -273,6 +273,10 @@ export async function oauthRoutes(app: FastifyInstance) {
       const t = consumed.requested_target;
       const client = await OAuthClientService.lookup(app.controlDb, body.client_id);
       const displayName = `OAuth: ${client?.client_name ?? body.client_id}`;
+      // Detect substrate scope in the granted OAuth scopes → mint with
+      // substrateAccess='both' so bb_sk_* also carries substrate_organization_id.
+      const grantedScopes = (consumed.scope ?? '').split(/\s+/).filter(Boolean);
+      const wantsSubstrate = grantedScopes.includes('mcp');
       const minted = await ApiKeyService.generateApiKey(
         app.controlDb,
         consumed.user_id,
@@ -281,6 +285,7 @@ export async function oauthRoutes(app: FastifyInstance) {
           keyScope: t.key_scope,
           targetAppId: t.target_app_id,
           additionalScopes: t.additional_scopes ?? [],
+          substrateAccess: wantsSubstrate ? 'both' : 'app',
         }
       );
 
