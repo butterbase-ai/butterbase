@@ -6,6 +6,7 @@
 
 import type { Pool } from 'pg';
 import { config } from '../config.js';
+import { ConflictError } from './api-errors.js';
 import { buildKeys, getObjectAsBuffer } from './r2.js';
 import * as EdgeSsrDeploymentService from './edge-ssr-deployment.service.js';
 import * as DeploymentService from './deployment.service.js';
@@ -110,7 +111,7 @@ export function getHandle(buildId: string): BuildHandle | undefined {
 
 export async function startBuild(pool: Pool, args: StartBuildArgs): Promise<BuildHandle> {
   if (handles.has(args.buildId)) {
-    throw new Error(`build ${args.buildId} already running`);
+    throw new ConflictError(`build ${args.buildId} already running`);
   }
   const handle = new BuildHandle(args.buildId);
   handles.set(args.buildId, handle);

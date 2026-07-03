@@ -1,5 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import { NotFoundError } from './api-errors.js';
 
 const KV_PASSWORD_BYTES = 24;
 
@@ -149,7 +150,7 @@ export class KvCredentialsService {
        RETURNING *`,
       [appId, password],
     );
-    if (rows.length === 0) throw new Error(`No KV credential for app ${appId}`);
+    if (rows.length === 0) throw new NotFoundError('KV credential', appId);
     return rows[0];
   }
 }

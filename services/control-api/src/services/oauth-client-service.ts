@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { Pool } from 'pg';
+import { ValidationError } from './api-errors.js';
 
 export interface RegisterRequest {
   client_name?: string;
@@ -19,18 +20,18 @@ const MAX_CLIENT_NAME_LEN = 200;
 
 function validate(req: RegisterRequest): void {
   if (!Array.isArray(req.redirect_uris) || req.redirect_uris.length < 1) {
-    throw new Error('redirect_uris must contain at least 1 entry');
+    throw new ValidationError('redirect_uris must contain at least 1 entry');
   }
   if (req.redirect_uris.length > MAX_REDIRECT_URIS) {
-    throw new Error(`redirect_uris must contain at most ${MAX_REDIRECT_URIS} entries`);
+    throw new ValidationError(`redirect_uris must contain at most ${MAX_REDIRECT_URIS} entries`);
   }
   for (const uri of req.redirect_uris) {
     if (typeof uri !== 'string' || uri.length === 0 || uri.length > MAX_REDIRECT_URI_LEN) {
-      throw new Error('redirect_uri must be a non-empty string ≤2048 chars');
+      throw new ValidationError('redirect_uri must be a non-empty string ≤2048 chars');
     }
     let parsed: URL;
-    try { parsed = new URL(uri); } catch { throw new Error(`invalid redirect_uri: ${uri}`); }
-    if (parsed.hash) throw new Error('redirect_uri must not contain a fragment');
+    try { parsed = new URL(uri); } catch { throw new ValidationError(`invalid redirect_uri: ${uri}`); }
+    if (parsed.hash) throw new ValidationError('redirect_uri must not contain a fragment');
     // RFC 8252 (OAuth 2.0 for Native Apps) explicitly permits three redirect_uri
     // categories: (1) https://, (2) loopback http on 127.0.0.1 / localhost / [::1],
     // (3) private-use URI schemes (e.g. `cursor://…`, `com.example.app:/cb`,
@@ -40,17 +41,17 @@ function validate(req: RegisterRequest): void {
     if (parsed.protocol === 'https:') continue;
     if (parsed.protocol === 'http:') {
       if (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '[::1]') continue;
-      throw new Error(`redirect_uri http:// is only allowed on loopback (127.0.0.1 / localhost / [::1]): ${uri}`);
+      throw new ValidationError(`redirect_uri http:// is only allowed on loopback (127.0.0.1 / localhost / [::1]): ${uri}`);
     }
     // Any other scheme is treated as a private-use URI scheme per RFC 8252 §7.1.
     // Require it to be at least 2 chars to avoid accepting nonsense like `a:`.
     const scheme = parsed.protocol.replace(/:$/, '');
     if (scheme.length < 2 || !/^[a-z][a-z0-9+.\-]*$/i.test(scheme)) {
-      throw new Error(`redirect_uri scheme is invalid: ${uri}`);
+      throw new ValidationError(`redirect_uri scheme is invalid: ${uri}`);
     }
   }
   if (req.client_name !== undefined && (typeof req.client_name !== 'string' || req.client_name.length > MAX_CLIENT_NAME_LEN)) {
-    throw new Error(`client_name must be a string ≤${MAX_CLIENT_NAME_LEN} chars`);
+    throw new ValidationError(`client_name must be a string ≤${MAX_CLIENT_NAME_LEN} chars`);
   }
 }
 
