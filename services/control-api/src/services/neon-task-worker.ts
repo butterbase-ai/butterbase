@@ -836,18 +836,25 @@ async function executeClone(
         '[clone] auth_hook_function binding step complete',
       );
 
-      // Step 6c: Replay substrate link — binds dest's apps.substrate_user_id to
-      // the CLONER (not the source owner) so cloned apps using ctx.substrate
-      // don't 403 SUBSTRATE_NOT_LINKED. Runs under the same 'replaying_config'
-      // step tag.
-      const substrateResult = await replaySubstrateLink(
-        sourceRuntimePool,
-        destRuntimePool,
-        job.source_app_id,
-        resolvedDestAppId,
-        job.requested_by_user_id,
-        logger,
+      // Step 6c: Replay substrate link — binds dest's apps.substrate_organization_id
+      // to the CLONER's org (not the source owner) so cloned apps using
+      // ctx.substrate don't 403 SUBSTRATE_NOT_LINKED. Runs under the same
+      // 'replaying_config' step tag.
+      const clonerOrgLookup = await controlDb.query<{ personal_organization_id: string | null }>(
+        `SELECT personal_organization_id FROM platform_users WHERE id = $1`,
+        [job.requested_by_user_id],
       );
+      const clonerOrgId = clonerOrgLookup.rows[0]?.personal_organization_id ?? null;
+      const substrateResult = clonerOrgId
+        ? await replaySubstrateLink(
+            sourceRuntimePool,
+            destRuntimePool,
+            job.source_app_id,
+            resolvedDestAppId,
+            clonerOrgId,
+            logger,
+          )
+        : { warnings: [`substrate link skipped: cloner ${job.requested_by_user_id} has no personal_organization_id`] };
       if (substrateResult.warnings.length > 0) {
         await appendCloneJobWarnings(controlDb, jobId, substrateResult.warnings);
       }
