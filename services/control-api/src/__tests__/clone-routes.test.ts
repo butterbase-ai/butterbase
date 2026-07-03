@@ -115,7 +115,7 @@ async function buildCloneApp() {
         return { rows: [{ c: 0 }] };
       }
       // name collision check
-      if (sql.includes('user_app_index')) {
+      if (sql.includes('org_app_index')) {
         return { rows: [] };
       }
       return { rows: [] };

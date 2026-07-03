@@ -84,7 +84,7 @@ async function seedApp(ownerId: string, region: string): Promise<string> {
   const appId = `idem-e2e-app-${stamp}`;
   const subdomain = `idem-e2e-${stamp}`;
   await controlPool.query(
-    `INSERT INTO user_app_index (app_id, user_id, region) VALUES ($1, $2, $3)`,
+    `INSERT INTO org_app_index (app_id, organization_id, region) VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $2), $3)`,
     [appId, ownerId, region],
   );
   await runtimePool.query(

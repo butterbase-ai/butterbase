@@ -71,7 +71,7 @@ describe('authorizeAppAiCall', () => {
     expect(r).toEqual({ ok: false, status: 404, body: { error: 'app_not_found', code: 'APP_NOT_FOUND' } });
   });
 
-  it('returns 404 when the app has no user_app_index entry (AppNotFoundError)', async () => {
+  it('returns 404 when the app has no org_app_index entry (AppNotFoundError)', async () => {
     const db = makeDb({ owner_id: OWNER_ID });
     mockedResolve.mockRejectedValueOnce(new AppNotFoundError(APP_ID));
     const req = makeReq({ userId: OWNER_ID, authMethod: 'jwt' });

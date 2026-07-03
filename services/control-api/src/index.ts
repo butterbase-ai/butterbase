@@ -133,7 +133,7 @@ import reverseMoveRoutes from './routes/apps/reverse-move.js';
 import sourceReplicaRoutes from './routes/apps/source-replicas.js';
 import regionsRoutes from './routes/regions.js';
 import { writeSubdomainMapping, writeDomainMapping } from './services/cloudflare-wfp.js';
-import { updateUserAppIndexRegion } from './services/user-app-index.js';
+import { updateOrgAppIndexRegion } from './services/org-app-index.js';
 import { enqueueDeprovision } from './services/move-app/source-retention.js';
 import { invalidateAppRegion, getRuntimeDbForApp } from './services/region-resolver.js';
 import { resolveOrgFromApp } from './services/app-org-resolver.js';
@@ -691,7 +691,7 @@ app.decorate('moveAppCtx', {
       try { await invalidateAppRegion(redisFor(region), appId); } catch {}
     }
   },
-  updateUserAppIndexRegion,
+  updateOrgAppIndexRegion,
   ...(process.env.MOVE_APP_REPLICATION_ENABLED === 'true'
     ? {
         waitForReplicationCaughtUp: (region: string, appId: string, migrationId: string) =>

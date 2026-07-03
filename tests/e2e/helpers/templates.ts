@@ -104,7 +104,7 @@ export async function seedUserAndApp(
   const subdomain = `${prefix}-${stamp}`;
 
   await controlPool.query(
-    `INSERT INTO user_app_index (app_id, user_id, region) VALUES ($1, $2, $3)`,
+    `INSERT INTO org_app_index (app_id, organization_id, region) VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $2), $3)`,
     [appId, userId, region],
   );
   await runtimePool.query(

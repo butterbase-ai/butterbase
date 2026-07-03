@@ -16,7 +16,7 @@ BUTTERBASE_REGIONS = "us-east-1,us-west-2"
 
 # Secrets (set via `wrangler secret put`):
 #   CONTROL_DB_URL                    — platform/control DB URL; the indexer
-#                                       reads user_app_index here to find each
+#                                       reads org_app_index here to find each
 #                                       app's home region
 #   NEON_RUNTIME_PROJECT_ID_US_EAST_1 — runtime DB URL for us-east-1
 #   NEON_RUNTIME_PROJECT_ID_US_WEST_2 — runtime DB URL for us-west-2

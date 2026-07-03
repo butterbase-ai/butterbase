@@ -5,7 +5,7 @@ import { NotFoundError } from './api-errors.js';
  * Resolve an app's owning organization id from the runtime plane.
  *
  * Plan 11.2 backfilled every apps row's organization_id from the Plan 04
- * user_app_index / owner mapping. Plan 11.5 will flip apps.organization_id
+ * org_app_index / owner mapping. Plan 11.5 will flip apps.organization_id
  * NOT NULL. A null return here means Plan 11.2 hasn't run OR data is
  * corrupt — fail loudly, do NOT paper over.
  *

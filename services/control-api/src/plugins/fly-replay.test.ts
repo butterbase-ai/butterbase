@@ -18,7 +18,7 @@ describe('fly-replay plugin', () => {
     process.env.BUTTERBASE_REGION = 'us-east-1';
 
     app = Fastify();
-    // resolveAppRegion now queries control DB's user_app_index (not the
+    // resolveAppRegion now queries control DB's org_app_index (not the
     // per-region runtime DB), so decorate controlDb.
     const controlPool: any = {
       query: vi.fn().mockImplementation(async (_sql: string, [appId]: [string]) => {

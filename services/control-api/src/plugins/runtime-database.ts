@@ -13,7 +13,7 @@ declare module 'fastify' {
      */
     runtimeDb: (region: string) => pg.Pool;
     /**
-     * Resolves the app's home region (via user_app_index, Redis-cached) and
+     * Resolves the app's home region (via org_app_index, Redis-cached) and
      * returns the runtime DB pool for that region. Use this for every per-app
      * query instead of computing the region from the local machine — apps may
      * live in any configured region regardless of which machine handles the

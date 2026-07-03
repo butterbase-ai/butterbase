@@ -128,9 +128,9 @@ describe('Phase 6 — move-app happy path us-east-1 → eu-west-1 (real replicat
     );
     expect(destApp.rows[0]).toMatchObject({ region: 'eu-west-1', provisioning_status: 'ready' });
 
-    // Verify user_app_index flipped on control plane
+    // Verify org_app_index flipped on control plane
     const ix = await env.controlPool.query<{ region: string }>(
-      `SELECT region FROM user_app_index WHERE app_id = $1`, [seeded.appId],
+      `SELECT region FROM org_app_index WHERE app_id = $1`, [seeded.appId],
     );
     expect(ix.rows[0].region).toBe('eu-west-1');
 

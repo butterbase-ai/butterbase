@@ -2,7 +2,7 @@ import { neon } from '@neondatabase/serverless';
 
 interface Env {
   STORAGE_BUCKET: R2Bucket;
-  // Control plane DB — holds the cross-region user_app_index used to find
+  // Control plane DB — holds the cross-region org_app_index used to find
   // each app's home region.
   CONTROL_DB_URL: string;
   // Comma-separated list of configured regions (e.g. "us-east-1,us-west-2").
@@ -81,14 +81,14 @@ function regionToEnvSuffix(region: string): string {
 }
 
 /**
- * Looks up the app's home region via user_app_index on the control DB, then
+ * Looks up the app's home region via org_app_index on the control DB, then
  * returns the runtime-DB connection URL for that region. Returns null when
  * the app has no index entry (not yet provisioned, or already deleted).
  */
 async function resolveRuntimeDbUrl(appId: string, env: Env): Promise<string | null> {
   const sql = neon(env.CONTROL_DB_URL);
   const rows = (await sql`
-    SELECT region FROM user_app_index WHERE app_id = ${appId} LIMIT 1
+    SELECT region FROM org_app_index WHERE app_id = ${appId} LIMIT 1
   `) as Array<{ region: string }>;
   if (rows.length === 0) return null;
   const region = rows[0].region;
@@ -124,7 +124,7 @@ async function processEvent(
   // the row from the app's data plane and break manage_storage list/download.
   const runtimeDbUrl = await resolveRuntimeDbUrl(metadata.appId, env);
   if (!runtimeDbUrl) {
-    console.warn(`Skipping index: app ${metadata.appId} not in user_app_index`);
+    console.warn(`Skipping index: app ${metadata.appId} not in org_app_index`);
     return;
   }
 

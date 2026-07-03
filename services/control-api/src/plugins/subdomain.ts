@@ -55,10 +55,10 @@ const subdomainPlugin: FastifyPluginAsync = async (fastify) => {
       return;
     }
 
-    // DB lookup — user_app_index is the cross-region authoritative map of
+    // DB lookup — org_app_index is the cross-region authoritative map of
     // subdomain → app, so we don't need to know the home region first.
     const result = await fastify.controlDb.query(
-      `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
+      `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
       [subdomain]
     );
 

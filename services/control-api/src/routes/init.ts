@@ -7,7 +7,7 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
-import { addUserAppIndex, removeUserAppIndex, listUserApps } from '../services/user-app-index.js';
+import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
 import { resolveOrganizationId } from '../services/org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
@@ -46,7 +46,7 @@ export async function initRoutes(app: FastifyInstance) {
 
 
     // Fetch runtime rows for the exact app-ids resolved by the org-scoped
-    // user_app_index — do NOT re-filter by owner_id, since org-shared apps
+    // org_app_index — do NOT re-filter by owner_id, since org-shared apps
     // are owned by the org's owner, not the caller. Group by region.
     const idsByRegion = new Map<string, string[]>();
     for (const r of indexRows) {
@@ -83,7 +83,7 @@ export async function initRoutes(app: FastifyInstance) {
     // We know the app exists and user has access — get the region to query status
     // — the runtime apps row lives in that region's DB only.
     const idx = await app.controlDb.query<{ region: string }>(
-      `SELECT region FROM user_app_index WHERE app_id = $1`,
+      `SELECT region FROM org_app_index WHERE app_id = $1`,
       [app_id]
     );
     if (idx.rows.length === 0) {
@@ -150,13 +150,13 @@ export async function initRoutes(app: FastifyInstance) {
     // Use authenticated user ID as owner
     const ownerId = requireUserId(request);
     // All per-app runtime writes happen in the TARGET region's runtime DB
-    // (where the app is homed), not the local machine's. user_app_index on
+    // (where the app is homed), not the local machine's. org_app_index on
     // the control DB is the cross-region map.
     const region = provisionRegion;
 
     // Enforce project limit for the user's plan.
     // Cross-tier: platform_users + plans live on controlDb; apps count comes
-    // from user_app_index (cross-region — counts a user's apps in all regions,
+    // from org_app_index (cross-region — counts a user's apps in all regions,
     // not just this region's runtime DB).
     const planCheck = await app.controlDb.query(
       `SELECT p.max_projects
@@ -167,7 +167,7 @@ export async function initRoutes(app: FastifyInstance) {
       [ownerId]
     );
     const appsCountResult = await app.controlDb.query(
-      `SELECT COUNT(app_id)::int AS current_projects FROM user_app_index WHERE user_id = $1`,
+      `SELECT COUNT(app_id)::int AS current_projects FROM org_app_index WHERE organization_id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
       [ownerId]
     );
     const limitCheck = {
@@ -188,7 +188,7 @@ export async function initRoutes(app: FastifyInstance) {
 
     // Check subdomain uniqueness — auto-suffix with a butter-themed word if taken
     const existing = await app.controlDb.query(
-      `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
+      `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
       [subdomain]
     );
     if (existing.rows.length > 0) {
@@ -209,7 +209,7 @@ export async function initRoutes(app: FastifyInstance) {
 
       // If still taken (unlikely), add a short random number
       const stillTaken = await app.controlDb.query(
-        `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
+        `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
         [subdomain]
       );
       if (stillTaken.rows.length > 0) {
@@ -243,13 +243,14 @@ export async function initRoutes(app: FastifyInstance) {
       [subdomain, appId]
     );
 
-    await addUserAppIndex(app.controlDb, {
-      userId: ownerId,
+    const orgId = await resolveOrganizationId(app.controlDb, ownerId);
+    await addOrgAppIndex(app.controlDb, {
+      organizationId: orgId,
       appId,
       region: provisionRegion,
       subdomain,
       appName: name,
-    }).catch((err) => app.log.warn({ err, appId }, 'user_app_index add failed; backfill will repair'));
+    }).catch((err) => app.log.warn({ err, appId }, 'org_app_index add failed; backfill will repair'));
 
     if (config.neon.enabled) {
       // Enqueue to task queue — worker serializes Neon API calls
@@ -318,7 +319,7 @@ export async function initRoutes(app: FastifyInstance) {
       await AppResolver.resolveApp(app.controlDb, app_id, callerUserId);
       // Look up the app's home region from the cross-region index.
       const idx = await app.controlDb.query<{ region: string }>(
-        `SELECT region FROM user_app_index WHERE app_id = $1`,
+        `SELECT region FROM org_app_index WHERE app_id = $1`,
         [app_id]
       );
       if (idx.rows.length === 0) {
@@ -335,13 +336,13 @@ export async function initRoutes(app: FastifyInstance) {
       [app_id]
     );
 
-    // Orphan-cleanup path: user_app_index pointed somewhere but the apps row
+    // Orphan-cleanup path: org_app_index pointed somewhere but the apps row
     // is gone (prior deprovision deleted it; the safety-net index cleanup
     // failed). Just remove the index entry and return success — no Neon DB,
     // no Cloudflare resources, no neon_tasks queue entry to enqueue.
     if (appResult.rows.length === 0) {
-      await removeUserAppIndex(app.controlDb, app_id).catch((err) =>
-        app.log.warn({ err, app_id }, 'orphan user_app_index remove failed'),
+      await removeOrgAppIndex(app.controlDb, app_id).catch((err) =>
+        app.log.warn({ err, app_id }, 'orphan org_app_index remove failed'),
       );
       logFromRequest(request, {
         appId: app_id,
@@ -388,8 +389,8 @@ export async function initRoutes(app: FastifyInstance) {
     );
 
     // Remove from index early so dashboard reflects deletion immediately (idempotent)
-    await removeUserAppIndex(app.controlDb, app_id)
-      .catch((err) => app.log.warn({ err, app_id }, 'user_app_index remove failed; orphan reaper will clean'));
+    await removeOrgAppIndex(app.controlDb, app_id)
+      .catch((err) => app.log.warn({ err, app_id }, 'org_app_index remove failed; orphan reaper will clean'));
 
     // Run fast, non-Neon cleanup inline (Cloudflare + Redis)
     const cleanupTasks: Promise<void>[] = [];

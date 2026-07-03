@@ -27,7 +27,7 @@ describe('checkMoveAppEligibility', () => {
   it('returns ok=false when app is not indexed (404)', async () => {
     const controlPool: any = fakePool([]);
     const r = await checkMoveAppEligibility(controlPool, 'missing', 'eu-west-1');
-    expect(r).toEqual({ ok: false, reason: 'App not found in user_app_index.' });
+    expect(r).toEqual({ ok: false, reason: 'App not found in org_app_index.' });
   });
 
   it('returns ok=false when source and dest regions are equal', async () => {

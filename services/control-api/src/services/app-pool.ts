@@ -62,17 +62,17 @@ export async function getAppPoolForApp(
     return cached.pool;
   }
 
-  // Find the app's home region from the cross-region user_app_index. The
+  // Find the app's home region from the cross-region org_app_index. The
   // per-region runtime DB only stores app_db_connections rows for apps
   // homed in that region — a local-region lookup misses cross-region apps
   // and falls back to PgBouncer/localhost (ECONNREFUSED in production).
   const idx = await controlDb.query<{ region: string }>(
-    'SELECT region FROM user_app_index WHERE app_id = $1',
+    'SELECT region FROM org_app_index WHERE app_id = $1',
     [appId]
   );
   const region = idx.rows[0]?.region;
   if (!region) {
-    throw new Error(`app ${appId} not in user_app_index`);
+    throw new Error(`app ${appId} not in org_app_index`);
   }
   const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
   const result = await runtimeDb.query<{ connection_string: string }>(

@@ -43,7 +43,7 @@ export type AppAiAuthResult =
  * The `apps` table lives in the per-region runtime DB (post-cutover migration
  * 061), so the owner lookup resolves the app's home region first and queries
  * the runtime pool. Pass the control-plane pool — it's used for the
- * `user_app_index` lookup inside `getRuntimeDbForApp`.
+ * `org_app_index` lookup inside `getRuntimeDbForApp`.
  *
  * Returns `{ ok: true, ownerId }` on success, or a `{ status, body }` payload
  * the route handler should `reply.code(status).send(body)`.

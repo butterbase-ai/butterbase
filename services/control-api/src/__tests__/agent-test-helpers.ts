@@ -116,7 +116,7 @@ export function installAgentTestMocks(): void {
   });
 
   // Mock AppResolver so that assertOwner uses the test pool's apps rows
-  // directly without needing user_app_index. Non-owner access throws
+  // directly without needing org_app_index. Non-owner access throws
   // AppNotFoundError, which routes surface as 404.
   vi.mock('../services/app-resolver.js', async () => {
     class AppNotFoundError extends Error {

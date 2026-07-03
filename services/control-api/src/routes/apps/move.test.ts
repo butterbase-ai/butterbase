@@ -21,8 +21,8 @@ beforeAll(async () => {
   );
   userId = r.rows[0].id;
   await pool.query(
-    `INSERT INTO user_app_index (app_id, user_id, region)
-     VALUES ('app-move-test', $1, 'us-east-1')
+    `INSERT INTO org_app_index (app_id, organization_id, region)
+     VALUES ('app-move-test', (SELECT personal_organization_id FROM platform_users WHERE id = $1), 'us-east-1')
      ON CONFLICT (app_id) DO UPDATE SET region = EXCLUDED.region`,
     [userId],
   );
@@ -39,7 +39,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await pool.query(`DELETE FROM app_migrations WHERE user_id = $1`, [userId]);
-  await pool.query(`DELETE FROM user_app_index WHERE app_id = 'app-move-test'`);
+  await pool.query(`DELETE FROM org_app_index WHERE app_id = 'app-move-test'`);
   await pool.query(`DELETE FROM platform_users WHERE id = $1`, [userId]);
   await app.close();
   await pool.end();

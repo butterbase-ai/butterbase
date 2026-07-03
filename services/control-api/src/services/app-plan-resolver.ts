@@ -80,9 +80,12 @@ export async function invalidateUserAppLimits(
   userId: string
 ): Promise<void> {
   try {
-    // user_app_index is the cross-region map of (user → apps).
+    // org_app_index is the cross-region map of (org → apps).
     const { rows } = await controlDb.query<{ app_id: string }>(
-      'SELECT app_id FROM user_app_index WHERE user_id = $1',
+      `SELECT oai.app_id
+       FROM org_app_index oai
+       JOIN platform_users pu ON pu.personal_organization_id = oai.organization_id
+       WHERE pu.id = $1`,
       [userId]
     );
     if (rows.length === 0) return;

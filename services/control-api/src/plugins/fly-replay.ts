@@ -42,7 +42,7 @@ const flyReplayPlugin: FastifyPluginAsync = async (fastify) => {
     }
 
     const localRegion = resolveLocalRegion();
-    // resolveAppRegion now queries user_app_index on the control/platform DB
+    // resolveAppRegion now queries org_app_index on the control/platform DB
     // (cross-region authoritative map). Pass app.controlDb instead of the
     // per-region runtime pool — the runtime apps table doesn't have rows for
     // apps homed in other regions, so the old lookup 404'd cross-region.

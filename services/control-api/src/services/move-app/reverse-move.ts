@@ -13,7 +13,7 @@ export interface ReverseMoveCtx {
   writeDomainMapping: (hostname: string, appId: string, region: string) => Promise<void>;
   listCustomDomains: (region: string, appId: string) => Promise<Array<{ hostname: string }>>;
   invalidateCacheAllRegions: (appId: string) => Promise<void>;
-  updateUserAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
+  updateOrgAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
   waitForReplicationCaughtUp: (region: string, appId: string, migrationId: string) => Promise<void>;
   promoteSourceToPrimary: (region: string, appId: string, migrationId: string) => Promise<void>;
   /** Optional log surface — fast path emits info on success and error on failure. */
@@ -97,7 +97,7 @@ export async function runReverseMove(
     throw err;
   }
 
-  await ctx.updateUserAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
+  await ctx.updateOrgAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
   const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string }>(
     `SELECT subdomain FROM apps WHERE id = $1`, [forward.app_id],
   );

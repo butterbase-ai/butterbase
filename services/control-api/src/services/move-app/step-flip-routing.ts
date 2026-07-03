@@ -5,7 +5,7 @@ export interface FlipCtx {
   writeDomainMapping?: (hostname: string, appId: string, region: string) => Promise<void>;
   listCustomDomains?: (region: string, appId: string) => Promise<Array<{ hostname: string }>>;
   invalidateCacheAllRegions?: (appId: string) => Promise<void>;
-  updateUserAppIndexRegion?: (controlPool: any, appId: string, region: string) => Promise<void>;
+  updateOrgAppIndexRegion?: (controlPool: any, appId: string, region: string) => Promise<void>;
 }
 
 export const executeFlipRouting: StepHandler = async (ctx, m) => {
@@ -16,9 +16,9 @@ export const executeFlipRouting: StepHandler = async (ctx, m) => {
   // (1) Confirm dest apps.region is correct
   await destPool.query(`UPDATE apps SET region = $1 WHERE id = $2`, [m.dest_region, m.app_id]);
 
-  // (2) Update platform DB user_app_index
-  if (!cx.updateUserAppIndexRegion) throw new Error('updateUserAppIndexRegion not injected');
-  await cx.updateUserAppIndexRegion(ctx.controlPool, m.app_id, m.dest_region);
+  // (2) Update platform DB org_app_index
+  if (!cx.updateOrgAppIndexRegion) throw new Error('updateOrgAppIndexRegion not injected');
+  await cx.updateOrgAppIndexRegion(ctx.controlPool, m.app_id, m.dest_region);
 
   // (3) Update Cloudflare KV
   const subRes = await destPool.query<{ subdomain: string }>(

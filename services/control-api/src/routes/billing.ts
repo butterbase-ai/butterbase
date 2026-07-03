@@ -156,12 +156,12 @@ export async function billingRoutes(app: FastifyInstance) {
       // (ai_usage_logs, apps, storage_objects, app_users, app_db_connections)
       const isLifetime = user.ai_credits_lifetime;
       const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), billingOrgId, isLifetime);
-      // Project count must aggregate across ALL regions. user_app_index is the
+      // Project count must aggregate across ALL regions. org_app_index is the
       // authoritative cross-region index on controlDb — counting `apps` on the
       // local runtimeDb undercounts users with apps in other regions (and shows
       // 0 when the local region has no apps for the user).
       const projectCountResult = await app.controlDb.query(
-        'SELECT COUNT(*)::int as count FROM user_app_index WHERE organization_id = $1',
+        'SELECT COUNT(*)::int as count FROM org_app_index WHERE organization_id = $1',
         [billingOrgId]
       );
 

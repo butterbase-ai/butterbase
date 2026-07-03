@@ -106,8 +106,8 @@ function sizeOfBody(body: unknown): number {
 // Resolve owner ID for an app.
 //
 // Strategy (cheapest first):
-//   1. user_app_index on the control DB (cross-region map, always on platform tier)
-//   2. apps on the control DB (works in test envs where harness inserts to control DB)
+//   1. org_app_index on the control DB joined to platform_users (cross-region map)
+//   2. Falls through to null if not found
 //
 // Cached in Redis for 5 minutes.
 // ---------------------------------------------------------------------------
@@ -123,30 +123,17 @@ async function resolveOwnerId(controlDb: Pool, appId: string): Promise<string | 
     // Redis failure — fall through to DB lookup
   }
 
-  // Try user_app_index (platform-tier, authoritative in production)
+  // Try org_app_index (platform-tier, authoritative in production)
   try {
     const r = await controlDb.query<{ user_id: string }>(
-      'SELECT user_id FROM user_app_index WHERE app_id = $1',
+      `SELECT pu.id AS user_id
+       FROM org_app_index oai
+       JOIN platform_users pu ON pu.personal_organization_id = oai.organization_id
+       WHERE oai.app_id = $1`,
       [appId],
     );
     if (r.rows.length > 0) {
       const ownerId = r.rows[0].user_id;
-      getRedisClient().setex(cacheKey, OWNER_CACHE_TTL, ownerId).catch(() => {});
-      return ownerId;
-    }
-  } catch {
-    // Fall through
-  }
-
-  // Fallback: user_app_index on the control DB (cross-region projection;
-  // the apps table itself was moved to per-region runtime DBs in Phase 2).
-  try {
-    const r = await controlDb.query<{ owner_id: string }>(
-      'SELECT user_id AS owner_id FROM user_app_index WHERE app_id = $1',
-      [appId],
-    );
-    if (r.rows.length > 0 && r.rows[0].owner_id) {
-      const ownerId = r.rows[0].owner_id;
       getRedisClient().setex(cacheKey, OWNER_CACHE_TTL, ownerId).catch(() => {});
       return ownerId;
     }

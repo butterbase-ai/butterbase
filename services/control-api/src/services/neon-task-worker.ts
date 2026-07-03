@@ -8,7 +8,8 @@ import { getDataProjectIdForRegion } from './neon-projects.js';
 import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed } from './failure-notifications.service.js';
-import { addUserAppIndex, removeUserAppIndex } from './user-app-index.js';
+import { addOrgAppIndex, removeOrgAppIndex } from './org-app-index.js';
+import { resolveOrganizationId } from './org-resolver.js';
 import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings } from './clone-jobs.js';
 import {
   getManifestJson,
@@ -333,7 +334,7 @@ async function executeDeprovision(
   // which IS the app's home region — neon_tasks is per-region and
   // enqueued by the delete route after resolving the app's region. Use
   // the local runtime pool directly: getRuntimeDbForApp would read
-  // user_app_index, but the delete route already removed that entry
+  // org_app_index, but the delete route already removed that entry
   // before enqueueing (init.ts:346), so cross-region lookup fails with
   // 'App not found'.
   const runtimePool = getRuntimeDbPool(config.runtimeDb, assertRegionConfig().instanceRegion);
@@ -376,9 +377,9 @@ async function executeDeprovision(
   await runtimePool.query('DELETE FROM apps WHERE id = $1', [appId]);
   logger.info({ appId }, '[neon-task-worker] App row deleted');
 
-  // Safety-net: remove from user_app_index (idempotent — no-op if already removed by the DELETE route)
-  await removeUserAppIndex(controlDb, appId).catch((err) =>
-    console.warn('[neon-task-worker] user_app_index remove failed', { err, appId }),
+  // Safety-net: remove from org_app_index (idempotent — no-op if already removed by the DELETE route)
+  await removeOrgAppIndex(controlDb, appId).catch((err) =>
+    console.warn('[neon-task-worker] org_app_index remove failed', { err, appId }),
   );
 }
 
@@ -393,7 +394,7 @@ async function waitForDestReady(
   timeoutMs: number = 5 * 60 * 1000,
 ): Promise<void> {
   // Use the region from the job row directly — getRuntimeDbForApp would go
-  // through user_app_index, which provisionAppBackground populates only after
+  // through org_app_index, which provisionAppBackground populates only after
   // it finishes. We know the region at job-create time, so skip the lookup.
   const appPool = getRuntimeDbPool(config.runtimeDb, destRegion);
   const start = Date.now();
@@ -516,7 +517,7 @@ async function executeClone(
         await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
         // Reserve a subdomain for the dest. Mirrors routes/init.ts: derive
-        // from the app name, check global uniqueness against user_app_index,
+        // from the app name, check global uniqueness against org_app_index,
         // and append a short random suffix on collision. Required by the
         // WfP deploy path (deployViaWfp throws "requires app.subdomain"
         // without it) and by the dashboard's URL display, so we set it at
@@ -525,7 +526,7 @@ async function executeClone(
         const baseSlug = destName.toLowerCase().replace(/_/g, '-').replace(/[^a-z0-9-]/g, '-');
         let destSubdomain = baseSlug;
         const taken = await controlDb.query<{ app_id: string }>(
-          `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
+          `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
           [destSubdomain],
         );
         if (taken.rows.length > 0) {
@@ -535,14 +536,15 @@ async function executeClone(
         // Cross-region index so authorizeRepoRead/Write and other lookups can
         // resolve the dest app's region. Init route does the same step after
         // its insertAppRow; the clone worker is the equivalent caller here.
-        await addUserAppIndex(controlDb, {
-          userId: job.requested_by_user_id,
+        const destOrgId = await resolveOrganizationId(controlDb, job.requested_by_user_id);
+        await addOrgAppIndex(controlDb, {
+          organizationId: destOrgId,
           appId: destAppId,
           region: job.dest_region,
           subdomain: destSubdomain,
           appName: destName,
         }).catch((err) => {
-          logger.warn({ err, destAppId }, '[clone] user_app_index add failed; backfill will repair');
+          logger.warn({ err, destAppId }, '[clone] org_app_index add failed; backfill will repair');
         });
 
         // Record template lineage on the dest app row (column added by Phase 1 migration).

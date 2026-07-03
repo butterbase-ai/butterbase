@@ -66,13 +66,13 @@ export class KvCredentialsService {
     }>(
       `SELECT
          ak.user_id IS NOT NULL  AS key_valid,
-         uai.app_id IS NOT NULL  AS owns_app,
-         uai.app_id              AS app_id,
-         uai.region              AS region,
+         oai.app_id IS NOT NULL  AS owns_app,
+         oai.app_id              AS app_id,
+         oai.region              AS region,
          kv.redis_password
        FROM api_keys ak
-       LEFT JOIN user_app_index uai ON uai.app_id = $2 AND uai.user_id = ak.user_id
-       LEFT JOIN app_kv_credentials kv ON kv.app_id = uai.app_id
+       LEFT JOIN org_app_index oai ON oai.app_id = $2 AND oai.organization_id = (SELECT personal_organization_id FROM platform_users WHERE id = ak.user_id)
+       LEFT JOIN app_kv_credentials kv ON kv.app_id = oai.app_id
        WHERE ak.key_hash = $1
          AND ak.revoked_at IS NULL
          AND (ak.expires_at IS NULL OR ak.expires_at > now())
@@ -122,18 +122,18 @@ export class KvCredentialsService {
   /**
    * Like resolveFunctionKey, but also returns the app owner's user_id for use
    * as AuthContext.userId when this key authenticates a request from the Deno
-   * runtime. The owner_id is sourced from user_app_index (the control-DB
-   * owner-lookup table) and matches the userId that a bb_sk_* minted by that
-   * owner would carry.
+   * runtime. The owner_id is sourced from org_app_index (the control-DB
+   * owner-lookup table) joined to platform_users, and matches the userId that
+   * a bb_sk_* minted by that owner would carry.
    */
   async resolveFunctionKeyWithOwner(
     plaintextKey: string,
     appId: string,
   ): Promise<{ app_id: string; owner_id: string; organization_id: string | null } | null> {
     const { rows } = await this.db.query<{ app_id: string; owner_id: string; organization_id: string | null }>(
-      `SELECT kv.app_id, uai.user_id AS owner_id, a.organization_id
+      `SELECT kv.app_id, (SELECT id FROM platform_users WHERE personal_organization_id = oai.organization_id) AS owner_id, a.organization_id
          FROM app_kv_credentials kv
-         JOIN user_app_index uai ON uai.app_id = kv.app_id
+         JOIN org_app_index oai ON oai.app_id = kv.app_id
          JOIN apps a ON a.id = kv.app_id
         WHERE kv.kv_function_key = $1 AND kv.app_id = $2`,
       [plaintextKey, appId],

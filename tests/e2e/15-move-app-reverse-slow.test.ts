@@ -7,7 +7,7 @@
  *   - The 202 response carries path='slow'
  *   - The saga driver picks up the swapped-direction migration
  *   - The reverse saga reaches current_step='completed'
- *   - user_app_index is back on the original region (us-east-1)
+ *   - org_app_index is back on the original region (us-east-1)
  */
 
 // Must be set BEFORE any module that might fork pg_dump/psql resolves PATH.
@@ -150,7 +150,7 @@ describe('Phase 6 — slow-path reverse-move', () => {
 
     // Routing flipped back to us-east-1.
     const ix = await env.controlPool.query<{ region: string }>(
-      `SELECT region FROM user_app_index WHERE app_id = $1`, [seeded.appId],
+      `SELECT region FROM org_app_index WHERE app_id = $1`, [seeded.appId],
     );
     expect(ix.rows[0].region).toBe('us-east-1');
   }, 200_000);

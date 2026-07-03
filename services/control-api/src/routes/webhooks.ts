@@ -83,7 +83,7 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
           }
 
           // Resolve routing — try the new index first, fall back to legacy controlDb
-          // app_deployments JOIN user_app_index for any in-flight pre-cutover deploys.
+          // app_deployments JOIN org_app_index for any in-flight pre-cutover deploys.
           const idx = await client.query<{ app_id: string; region: string }>(
             `SELECT app_id, region FROM cloudflare_deployment_index WHERE cloudflare_deployment_id = $1`,
             [body.deployment_id]
@@ -96,9 +96,9 @@ export async function registerWebhookRoutes(fastify: FastifyInstance) {
             region = idx.rows[0].region;
           } else {
             const fb = await client.query<{ app_id: string; region: string | null }>(
-              `SELECT ad.app_id, uai.region
+              `SELECT ad.app_id, oai.region
                  FROM app_deployments ad
-                 LEFT JOIN user_app_index uai ON uai.app_id = ad.app_id
+                 LEFT JOIN org_app_index oai ON oai.app_id = ad.app_id
                 WHERE ad.cloudflare_deployment_id = $1`,
               [body.deployment_id]
             );

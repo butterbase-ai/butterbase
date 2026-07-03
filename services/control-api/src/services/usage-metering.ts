@@ -154,7 +154,7 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
         const runtimePool = parsed.appId
           ? await getRuntimeDbForApp(db, parsed.appId).catch(() => null)
           : eastPool;
-        if (!runtimePool) continue; // app no longer in user_app_index — drop
+        if (!runtimePool) continue; // app no longer in org_app_index — drop
 
         const query = `
           INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)

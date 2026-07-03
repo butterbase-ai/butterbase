@@ -3,13 +3,13 @@ import { config } from '../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 
 /**
- * Resolve the app's home region from the cross-region user_app_index on
+ * Resolve the app's home region from the cross-region org_app_index on
  * the control DB. Returns null when the app isn't indexed. Callers that
  * need the per-region runtime DB should look up the region here first.
  */
 async function resolveHomeRegion(controlPool: Pool, appId: string): Promise<string | null> {
   const r = await controlPool.query<{ region: string }>(
-    `SELECT region FROM user_app_index WHERE app_id = $1`,
+    `SELECT region FROM org_app_index WHERE app_id = $1`,
     [appId]
   );
   return r.rows[0]?.region ?? null;
@@ -72,7 +72,7 @@ export class AppResolver {
     // Post-Plan-07: apps.organization_id is the source of truth for who can
     // access the app. Any member of that org has access, not just the direct
     // owner. Fall back to owner_id for legacy apps whose organization_id is
-    // still NULL (pre-user_app_index backfill).
+    // still NULL (pre-org_app_index backfill).
     const result = await runtimeDb.query<{
       id: string;
       name: string;

@@ -94,7 +94,7 @@ export async function insertAppRow(
   // Provision KV credentials on the control-plane. The control-plane apps row
   // (Phase 1 cutover) no longer exists; app_kv_credentials has no FK to it.
   // Authoritative app row is the runtime DB INSERT above; cross-region projection
-  // is user_app_index, written by the init route after this helper returns.
+  // is org_app_index, written by the init route after this helper returns.
   const client = await controlDb.connect();
   try {
     await client.query('BEGIN');
@@ -106,7 +106,7 @@ export async function insertAppRow(
     // Roll back the runtime DB insert as well to keep both DBs consistent
     await runtimeDb.query('DELETE FROM apps WHERE id = $1', [appId]).catch((deleteErr) => {
       // Compensating DELETE failed after a control-plane transaction rollback. The runtimeDb apps row is now orphaned.
-      // The orphan-cleanup service will not pick this up because user_app_index is written after insertAppRow returns.
+      // The orphan-cleanup service will not pick this up because org_app_index is written after insertAppRow returns.
       console.error({ err: deleteErr, appId }, '[insertAppRow] compensating runtimeDb DELETE failed; row may be orphaned');
     });
     throw err;

@@ -441,7 +441,7 @@ export async function hackathonsMcpRoutes(app: FastifyInstance) {
 
     // Resolve app_id: prefer an explicit body.app_id, otherwise try to derive
     // it from the participant's deployed-project URL. We look up
-    // user_app_index (the cross-region authoritative app catalog) by the
+    // org_app_index (the cross-region authoritative app catalog) by the
     // URL's subdomain, scoped to the requesting user — so a participant can
     // only auto-bind to an app they own.
     let appId: string | null = body.app_id ?? null;
@@ -450,8 +450,8 @@ export async function hackathonsMcpRoutes(app: FastifyInstance) {
       const subdomain = extractButterbaseSubdomain(data[urlKey]);
       if (subdomain) {
         const { rows: appRows } = await app.controlDb.query<{ app_id: string }>(
-          `SELECT app_id FROM user_app_index
-            WHERE subdomain = $1 AND user_id = $2
+          `SELECT app_id FROM org_app_index
+            WHERE subdomain = $1 AND organization_id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)
             ORDER BY created_at DESC
             LIMIT 1`,
           [subdomain, userId]
