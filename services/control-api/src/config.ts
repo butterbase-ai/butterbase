@@ -255,6 +255,24 @@ export const config = {
   },
 };
 
+/**
+ * Assert that INTERNAL_EMAIL_SECRET is not the dev default in staging/production.
+ * Call this from the server startup path (index.ts) to catch misconfiguration before
+ * the server accepts traffic.
+ */
+export function assertInternalEmailSecret(): void {
+  const env = (process.env.NODE_ENV ?? process.env.ENV ?? 'development').toLowerCase();
+  if (
+    (env === 'staging' || env === 'production') &&
+    config.internal.emailSecret === 'dev-internal-email-secret'
+  ) {
+    throw new Error(
+      'INTERNAL_EMAIL_SECRET is still the dev default in a non-dev environment. ' +
+      'Set INTERNAL_EMAIL_SECRET to a strong random value before deploying.'
+    );
+  }
+}
+
 let runtimeDbAsserted = false;
 
 export function assertRuntimeDbConfig(): void {

@@ -90,7 +90,7 @@ import { realtimeRoutes } from './routes/realtime.js';
 import { CognitoAuthProvider } from './services/cognito-auth-provider.js';
 import { LocalAuthProvider } from './services/local-auth-provider.js';
 import type { AuthProvider } from './services/auth-provider.js';
-import { config, assertRegionConfig } from './config.js';
+import { config, assertRegionConfig, assertInternalEmailSecret } from './config.js';
 import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
 import { AppNotFoundError, AppAuthRequiredError, AppPausedError } from './services/app-resolver.js';
@@ -161,6 +161,9 @@ console.log(`Starting in region ${regionConfig.instanceRegion} (allowed: ${regio
 
 // Fail fast if any Neon data/runtime project IDs are missing for configured regions.
 assertNeonProjectsConfig();
+
+// Fail fast if INTERNAL_EMAIL_SECRET is still the dev default in staging/production.
+assertInternalEmailSecret();
 
 
 // Fail-closed: prevent startup with default secrets in production

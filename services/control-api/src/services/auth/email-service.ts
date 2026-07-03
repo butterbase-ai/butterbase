@@ -737,7 +737,8 @@ export async function sendInviteEmail(input: {
   inviteUrl: string;
   expiresAt: Date;
 }): Promise<void> {
-  const subject = `${input.inviterEmail} invited you to ${input.orgName} on Butterbase`;
+  const inviterDisplay = input.inviterEmail || 'A Butterbase organization owner';
+  const subject = `${inviterDisplay} invited you to ${input.orgName} on Butterbase`;
   const expiresStr = input.expiresAt.toUTCString();
   const content = `
 <h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">You have an invite</h1>
