@@ -201,7 +201,7 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         // Cache key MUST include both appId and token hash. Cross-app keying
         // prevents a stale entry for app A from authorising a request to app B.
         const cacheKey = `auth:fnkey:${urlAppId}:${tokenHash}`;
-        let resolved: { app_id: string; owner_id: string } | null = null;
+        let resolved: { app_id: string; owner_id: string; organization_id: string | null } | null = null;
         let usedCache = false;
 
         try {
