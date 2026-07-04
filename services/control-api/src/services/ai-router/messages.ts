@@ -70,7 +70,7 @@ function wrapNativeAnthropicStreamForSettlement(
       const providerCost = estimateWorstCaseUsd(pricing, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens);
       const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
-      maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
+      maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
         .catch(err => console.warn('[messages] auto-refill failed:', err));
       maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
         .catch(err => console.warn('[messages] credits-email failed:', err));
@@ -232,7 +232,7 @@ export async function routeMessages(
     const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
     await settleAfterCall(ctx.platformPool, lease, chargedCredits);
-    maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
+    maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
       .catch(err => console.error('[messages] auto-refill failed:', err));
     maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
       .catch(err => console.error('[messages] credits-email failed:', err));

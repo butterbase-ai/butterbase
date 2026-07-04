@@ -94,14 +94,20 @@ export async function getCreditGrants(
 }
 
 export interface AutoRefillGrantArgs {
-  userId: string;
+  organizationId: string;
   amountUsd: number;
   stripeEventId: string;
 }
 
 /**
- * Add an auto-refill credit grant. Idempotent on stripe_event_id (the
- * PaymentIntent id) via the partial unique index on credit_grants.
+ * Add an auto-refill credit grant against a specific org (personal OR team).
+ * Idempotent on stripe_event_id (the PaymentIntent id) via the partial unique
+ * index on credit_grants.
+ *
+ * Records the org's owner_id in credit_grants.user_id for provenance so the
+ * ledger still surfaces "who was charged" for personal orgs. Team-org grants
+ * carry the org's owner_id — which is the account holder that authorized the
+ * card on that org's Stripe Customer.
  */
 export async function grantAutoRefillCredits(
   pool: pg.Pool,
@@ -114,21 +120,25 @@ export async function grantAutoRefillCredits(
     await client.query('BEGIN');
     const ins = await client.query(
       `INSERT INTO credit_grants (user_id, organization_id, plan_id, amount_usd, reason, stripe_event_id)
-       VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $1), NULL, $2, 'auto_refill', $3)
-       ON CONFLICT (stripe_event_id) DO NOTHING
-       RETURNING id`,
-      [args.userId, args.amountUsd, args.stripeEventId]
+       SELECT o.owner_id, o.id, NULL, $2, 'auto_refill', $3
+         FROM organizations o
+        WHERE o.id = $1
+       ON CONFLICT (stripe_event_id) WHERE stripe_event_id IS NOT NULL DO NOTHING
+       RETURNING user_id AS owner_id`,
+      [args.organizationId, args.amountUsd, args.stripeEventId]
     );
     if (ins.rows.length === 0) {
       await client.query('COMMIT');
       return { granted: 0 };
     }
+    const ownerId = ins.rows[0].owner_id as string;
     await client.query(
-      `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)`,
-      [args.amountUsd, args.userId]
+      `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
+      [args.amountUsd, args.organizationId]
     );
     await client.query('COMMIT');
-    await resetCreditsEmailState(pool, args.userId);
+    // Reset the credits-email debounce for the org owner (who was charged).
+    await resetCreditsEmailState(pool, ownerId);
     return { granted: args.amountUsd };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

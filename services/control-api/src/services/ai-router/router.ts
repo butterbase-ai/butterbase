@@ -244,7 +244,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill(
         { pool: ctx.platformPool, redis: ctx.redis },
-        ctx.userId,
+        ctx.organizationId,
       ).catch((err) => console.error('[router] auto-refill check failed:', err));
       maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
       writeAiUsageRow(ctx.runtimePool, {
@@ -285,7 +285,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
-    ctx.userId,
+    ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
@@ -453,7 +453,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
-    ctx.userId,
+    ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
@@ -773,7 +773,7 @@ export async function settleVideoJob(
   );
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
-    ctx.userId,
+    ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
     (err) => console.error('[router] credits-email failed:', err),
