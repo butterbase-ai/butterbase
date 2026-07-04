@@ -128,7 +128,8 @@ async function resolveOwnerId(controlDb: Pool, appId: string): Promise<string | 
     const r = await controlDb.query<{ user_id: string }>(
       `SELECT pu.id AS user_id
        FROM org_app_index oai
-       JOIN platform_users pu ON pu.personal_organization_id = oai.organization_id
+       JOIN organizations o ON o.id = oai.organization_id
+       LEFT JOIN platform_users pu ON pu.id = o.owner_id
        WHERE oai.app_id = $1`,
       [appId],
     );

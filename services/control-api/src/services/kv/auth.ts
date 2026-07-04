@@ -200,7 +200,8 @@ async function tryPlatformOwnerJwt(
   const r = await controlDb.query<{ region: string; redis_password: string }>(
     `SELECT akc.region, akc.redis_password
        FROM platform_users pu
-       JOIN org_app_index oai ON oai.organization_id = pu.personal_organization_id AND oai.app_id = $2
+       JOIN organizations o ON o.owner_id = pu.id
+       JOIN org_app_index oai ON oai.organization_id = o.id AND oai.app_id = $2
        JOIN app_kv_credentials akc ON akc.app_id = oai.app_id
       WHERE pu.cognito_sub = $1
       LIMIT 1`,

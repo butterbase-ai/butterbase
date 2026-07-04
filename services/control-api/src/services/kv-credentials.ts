@@ -131,7 +131,7 @@ export class KvCredentialsService {
     appId: string,
   ): Promise<{ app_id: string; owner_id: string; organization_id: string | null } | null> {
     const { rows } = await this.db.query<{ app_id: string; owner_id: string; organization_id: string | null }>(
-      `SELECT kv.app_id, (SELECT id FROM platform_users WHERE personal_organization_id = oai.organization_id) AS owner_id, a.organization_id
+      `SELECT kv.app_id, (SELECT o.owner_id FROM organizations o WHERE o.id = oai.organization_id) AS owner_id, a.organization_id
          FROM app_kv_credentials kv
          JOIN org_app_index oai ON oai.app_id = kv.app_id
          JOIN apps a ON a.id = kv.app_id
