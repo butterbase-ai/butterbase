@@ -63,7 +63,7 @@ export const config = {
       v2EndpointsEnabled: process.env.AI_GATEWAY_V2_ENDPOINTS_ENABLED === 'true',
       defaultRegion: process.env.AI_ROUTER_DEFAULT_REGION ?? 'us-east-1',
       markupPct,
-      platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-3-5-sonnet',
+      platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-sonnet-4.6',
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
       providerPrimaryApiKey: process.env.AI_PROVIDER_PRIMARY_API_KEY ?? '',
       providerPrimaryBaseUrl: process.env.AI_PROVIDER_PRIMARY_BASE_URL || undefined,
