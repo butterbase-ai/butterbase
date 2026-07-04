@@ -30,6 +30,10 @@ vi.mock('../region-resolver.js', () => ({
   resolveAppHomeRegion: vi.fn(async () => 'us-east-1'),
 }));
 
+vi.mock('../org-resolver.js', () => ({
+  resolveOrganizationId: vi.fn(async () => 'org_1'),
+}));
+
 import { runAnalyticsPullerOnce } from '../cf-analytics-puller.js';
 
 function makeMockDb() {
@@ -93,13 +97,19 @@ describe('runAnalyticsPullerOnce', () => {
 
     const inserts = m.queries.filter((q) => q.text.includes('INSERT INTO usage_meters'));
     // One row per meter type for the matching app.
-    const meters = inserts.map((q) => q.values[2]); // meter_type column
+    const meters = inserts.map((q) => q.values[3]); // meter_type column (index 3 after organization_id at [1])
     expect(meters).toEqual(expect.arrayContaining(['do_requests', 'do_cpu_ms']));
 
-    // The do_requests insert carries quantity 42.
-    const reqInsert = inserts.find((q) => q.values[2] === 'do_requests');
+    // The do_requests insert carries quantity 42 and includes organization_id.
+    const reqInsert = inserts.find((q) => q.values[3] === 'do_requests');
     expect(reqInsert!.values).toEqual(
-      expect.arrayContaining(['user_1', 'app_xyz', 'do_requests', expect.any(Number)]),
+      expect.arrayContaining(['org_1', 'user_1', 'app_xyz', 'do_requests', expect.any(Number)]),
+    );
+
+    // The do_cpu_ms insert also includes organization_id.
+    const cpuInsert = inserts.find((q) => q.values[3] === 'do_cpu_ms');
+    expect(cpuInsert!.values).toEqual(
+      expect.arrayContaining(['org_1', 'user_1', 'app_xyz', 'do_cpu_ms', expect.any(Number)]),
     );
   });
 

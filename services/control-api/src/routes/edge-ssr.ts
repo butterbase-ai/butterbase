@@ -58,7 +58,7 @@ export async function registerEdgeSsrRoutes(fastify: FastifyInstance) {
     const body = createDeploymentSchema.parse(request.body);
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     if (!config.cloudflare.enabled) {
       return reply.status(503).send(createAgentError({
@@ -108,7 +108,7 @@ export async function registerEdgeSsrRoutes(fastify: FastifyInstance) {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await EdgeSsrDeploymentService.startDeployment(
@@ -147,7 +147,7 @@ export async function registerEdgeSsrRoutes(fastify: FastifyInstance) {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await EdgeSsrDeploymentService.syncDeploymentStatus(
@@ -198,7 +198,7 @@ export async function registerEdgeSsrRoutes(fastify: FastifyInstance) {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await EdgeSsrDeploymentService.cancelDeployment(
@@ -237,7 +237,7 @@ export async function registerEdgeSsrRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/edge-ssr/deployments', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId } = request.params as { appId: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT
@@ -275,7 +275,7 @@ export async function registerEdgeSsrRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/edge-ssr/deployments/:deploymentId', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT * FROM app_edge_ssr_deployments WHERE id = $1 AND app_id = $2`,
@@ -318,7 +318,7 @@ export async function registerEdgeSsrRoutes(fastify: FastifyInstance) {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       await EdgeSsrDeploymentService.deleteDeployment(controlDb, appId, deploymentId);

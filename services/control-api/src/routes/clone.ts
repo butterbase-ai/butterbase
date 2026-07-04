@@ -70,7 +70,7 @@ export function cloneRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
-    // user_app_index. We translate to the same generic 404 we use for the
+    // org_app_index. We translate to the same generic 404 we use for the
     // non-public case below, to avoid leaking existence information.
     let sourcePool;
     try {
@@ -115,8 +115,8 @@ export function cloneRoutes(app: FastifyInstance) {
     }
 
     // Reject if ANY user in ANY region already owns an app with the
-    // requested name. user_app_index is the cross-region platform-tier
-    // projection of (user_id, region, app_name), so a single lookup against
+    // requested name. org_app_index is the cross-region platform-tier
+    // projection of (organization_id, region, app_name), so a single lookup against
     // it catches global collisions without fanning out to every regional
     // runtime DB. We need global uniqueness because the CF Pages project
     // name is derived from the app name and CF Pages projects share one
@@ -127,7 +127,7 @@ export function cloneRoutes(app: FastifyInstance) {
     if (typeof body.name === 'string' && body.name.trim().length > 0) {
       const requestedName = body.name.trim();
       const collision = await app.controlDb.query<{ app_id: string }>(
-        `SELECT app_id FROM user_app_index WHERE app_name = $1 LIMIT 1`,
+        `SELECT app_id FROM org_app_index WHERE app_name = $1 LIMIT 1`,
         [requestedName],
       );
       if (collision.rows.length > 0) {

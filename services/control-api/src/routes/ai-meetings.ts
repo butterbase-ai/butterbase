@@ -20,6 +20,7 @@ import {
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
 import { requireUserId } from '../utils/require-auth.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
@@ -46,20 +47,15 @@ async function resolveGatewayUser(
     e.gatewayStatus = 403; e.gatewayCode = 'insufficient_scope';
     throw e;
   }
-  const runtimeDb = await getRuntimeDbForApp((app as any).controlDb, appId);
-  const ownerResult = await runtimeDb.query(
-    'SELECT owner_id FROM apps WHERE id = $1',
-    [appId],
-  );
-  if (ownerResult.rows.length === 0) {
-    const e: any = new Error('app_not_found');
-    e.gatewayStatus = 404; e.gatewayCode = 'app_not_found';
-    throw e;
-  }
-  if (ownerResult.rows[0].owner_id !== userId) {
-    const e: any = new Error('not_authorized');
-    e.gatewayStatus = 403; e.gatewayCode = 'not_authorized';
-    throw e;
+  try {
+    await AppResolver.resolveApp((app as any).controlDb, appId, userId, req.auth?.organizationId ?? null);
+  } catch (err) {
+    if (err instanceof AppNotFoundError) {
+      const e: any = new Error('app_not_found');
+      e.gatewayStatus = 404; e.gatewayCode = 'app_not_found';
+      throw e;
+    }
+    throw err;
   }
   return { userId, appId, region: config.aiRouter.defaultRegion };
 }

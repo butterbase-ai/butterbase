@@ -18,6 +18,8 @@ import {
 } from '../services/ai-router/schemas.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
@@ -37,8 +39,12 @@ export async function readAutoRefillState(controlPool: pg.Pool, userId: string):
     monthly_allowance_usd: string;
     credits_usd: string;
   }>(
-    `SELECT auto_refill_enabled, auto_refill_amount_usd, monthly_allowance_usd, credits_usd
-     FROM platform_users WHERE id = $1`,
+    // Post-Plan-07: auto_refill_* + credits_usd live on organizations,
+    // monthly_allowance_usd stays on platform_users.
+    `SELECT o.auto_refill_enabled, o.auto_refill_amount_usd, pu.monthly_allowance_usd, o.credits_usd
+     FROM platform_users pu
+     JOIN organizations o ON o.id = pu.personal_organization_id
+     WHERE pu.id = $1`,
     [userId]
   );
   if (r.rows.length === 0) {
@@ -111,22 +117,20 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
     try {
       // Verify ownership
+      try {
+        await AppResolver.resolveApp(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
+      } catch (err) {
+        if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+        throw err;
+      }
+      // Get ai_config separately
       const region = await resolveAppHomeRegion(app.controlDb, appId);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      const ownerResult = await runtimeDb.query(
-        'SELECT owner_id, ai_config FROM apps WHERE id = $1',
+      const configResult = await runtimeDb.query(
+        'SELECT ai_config FROM apps WHERE id = $1',
         [appId]
       );
-
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'App not found' });
-      }
-
-      if (ownerResult.rows[0].owner_id !== userId) {
-        return reply.code(403).send({ error: 'Not authorized' });
-      }
-
-      const aiConfig = ownerResult.rows[0].ai_config || {};
+      const aiConfig = configResult.rows[0]?.ai_config || {};
 
       // Decrypt and mask BYOK key if present
       if (aiConfig.byokKey) {
@@ -167,23 +171,21 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
     try {
       // Verify ownership
+      try {
+        await AppResolver.resolveApp(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
+      } catch (err) {
+        if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+        throw err;
+      }
+      // Get ai_config separately
       const region = await resolveAppHomeRegion(app.controlDb, appId);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      const ownerResult = await runtimeDb.query(
-        'SELECT owner_id, ai_config FROM apps WHERE id = $1',
+      const configResult = await runtimeDb.query(
+        'SELECT ai_config FROM apps WHERE id = $1',
         [appId]
       );
-
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'App not found' });
-      }
-
-      if (ownerResult.rows[0].owner_id !== userId) {
-        return reply.code(403).send({ error: 'Not authorized' });
-      }
-
       const body = aiConfigSchema.parse(request.body);
-      const currentConfig = ownerResult.rows[0].ai_config || {};
+      const currentConfig = configResult.rows[0]?.ai_config || {};
 
       // Encrypt BYOK key if provided
       if (body.byokKey) {
@@ -271,6 +273,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const organizationId = await resolveOrgFromApp(runtimePool, appId);
         const result = await routeChatCompletion(
           {
             platformPool: app.controlDb,
@@ -278,7 +281,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId: ownerId, region,
+            appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -392,6 +395,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const organizationId2 = await resolveOrgFromApp(runtimePool, appId);
         const result = await routeEmbedding(
           {
             platformPool: app.controlDb,
@@ -399,7 +403,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, userId: ownerId, region,
+            appId, organizationId: organizationId2, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -498,19 +502,11 @@ export async function aiConfigRoutes(app: FastifyInstance) {
 
     try {
       // Verify ownership
-      const region = await resolveAppHomeRegion(app.controlDb, appId);
-      const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      const ownerResult = await runtimeDb.query(
-        'SELECT owner_id FROM apps WHERE id = $1',
-        [appId]
-      );
-
-      if (ownerResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'App not found' });
-      }
-
-      if (ownerResult.rows[0].owner_id !== userId) {
-        return reply.code(403).send({ error: 'Not authorized' });
+      try {
+        await AppResolver.resolveApp(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
+      } catch (err) {
+        if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+        throw err;
       }
 
       // FIXME(batch-9.7): getAiUsageSummary takes a Pool and queries ai_usage_logs (runtime) — migrate service signature

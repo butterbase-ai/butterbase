@@ -98,10 +98,11 @@ const kvAdminStatsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (metric === 'storage') {
         const r = await ctrl.query(
-          `SELECT s.app_id, uai.user_id AS owner_id, u.email AS owner_email, s.region, s.bytes_used, s.keys_total, s.snapshot_at
+          `SELECT s.app_id, u.id AS owner_id, u.email AS owner_email, s.region, s.bytes_used, s.keys_total, s.snapshot_at
              FROM kv_app_usage_snapshot s
-             JOIN user_app_index uai ON uai.app_id = s.app_id
-             JOIN platform_users u ON u.id = uai.user_id
+             JOIN org_app_index oai ON oai.app_id = s.app_id
+             JOIN organizations o ON o.id = oai.organization_id
+             LEFT JOIN platform_users u ON u.id = o.owner_id
             ORDER BY s.bytes_used DESC
             LIMIT $1`, [limit]);
         return { metric, apps: r.rows };
@@ -109,12 +110,13 @@ const kvAdminStatsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (metric === 'ops') {
         const r = await ctrl.query(
-          `SELECT m.app_id, uai.user_id AS owner_id, u.email AS owner_email, uai.region, SUM(m.quantity)::bigint AS value
+          `SELECT m.app_id, u.id AS owner_id, u.email AS owner_email, oai.region, SUM(m.quantity)::bigint AS value
              FROM usage_meters m
-             JOIN user_app_index uai ON uai.app_id = m.app_id
-             JOIN platform_users u ON u.id = uai.user_id
+             JOIN org_app_index oai ON oai.app_id = m.app_id
+             JOIN organizations o ON o.id = oai.organization_id
+             LEFT JOIN platform_users u ON u.id = o.owner_id
             WHERE m.meter_type = 'kv_ops' AND m.period_start >= CURRENT_DATE
-            GROUP BY m.app_id, uai.user_id, u.email, uai.region
+            GROUP BY m.app_id, u.id, u.email, oai.region
             ORDER BY value DESC
             LIMIT $1`, [limit]);
         return { metric, apps: r.rows };
@@ -122,14 +124,15 @@ const kvAdminStatsRoutes: FastifyPluginAsync = async (fastify) => {
 
       // errors
       const r = await ctrl.query(
-        `SELECT al.app_id, uai.user_id AS owner_id, u.email AS owner_email, uai.region, COUNT(*)::bigint AS value
+        `SELECT al.app_id, u.id AS owner_id, u.email AS owner_email, oai.region, COUNT(*)::bigint AS value
            FROM audit_logs al
-           JOIN user_app_index uai ON uai.app_id = al.app_id
-           JOIN platform_users u ON u.id = uai.user_id
+           JOIN org_app_index oai ON oai.app_id = al.app_id
+           JOIN organizations o ON o.id = oai.organization_id
+           LEFT JOIN platform_users u ON u.id = o.owner_id
           WHERE al.path LIKE '/v1/%/kv/%'
             AND al.status_code >= 400
             AND al.at > now() - interval '24 hours'
-          GROUP BY al.app_id, uai.user_id, u.email, uai.region
+          GROUP BY al.app_id, u.id, u.email, oai.region
           ORDER BY value DESC
           LIMIT $1`, [limit]);
       return { metric, apps: r.rows };
@@ -144,9 +147,9 @@ const kvAdminStatsRoutes: FastifyPluginAsync = async (fastify) => {
     const storage = await ctrl.query(
       `SELECT s.app_id, s.region, s.bytes_used, p.kv_max_storage_bytes AS max_storage_bytes, s.snapshot_at
          FROM kv_app_usage_snapshot s
-         JOIN user_app_index uai ON uai.app_id = s.app_id
-         JOIN platform_users u ON u.id = uai.user_id
-         LEFT JOIN plans p ON p.id = u.plan_id
+         JOIN org_app_index oai ON oai.app_id = s.app_id
+         JOIN organizations o ON o.id = oai.organization_id
+         LEFT JOIN plans p ON p.id = o.plan_id
         WHERE p.kv_max_storage_bytes IS NOT NULL
           AND s.bytes_used >= 0.9 * p.kv_max_storage_bytes`,
     );

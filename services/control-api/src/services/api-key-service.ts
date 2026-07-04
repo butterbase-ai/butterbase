@@ -7,6 +7,7 @@ import {
 } from '@butterbase/shared/constants';
 import type { AuthContext } from '@butterbase/shared/types';
 import { getRedisClient } from './redis.js';
+import { AuthorizationError } from './api-errors.js';
 
 const API_KEY_CACHE_TTL = 60;
 const API_KEY_INVALID_TTL = 10;
@@ -33,6 +34,13 @@ export interface GenerateApiKeyOptions {
   targetAppId?: string;                             // required iff keyScope === 'app'
   additionalScopes?: string[];                      // allowlisted
   substrateAccess?: 'app' | 'substrate' | 'both';   // existing axis
+  /**
+   * Bind the key to a specific organization the caller is a member of.
+   * When omitted, defaults to the caller's personal_organization_id (legacy behavior).
+   * Membership is verified against `organization_members` — an error is thrown if
+   * the caller isn't a member of the requested org.
+   */
+  organizationId?: string;
 }
 
 export class ScopeValidationError extends Error {
@@ -118,12 +126,43 @@ export class ApiKeyService {
     const keyPrefix = fullKey.substring(0, 12);
     const dbScope = isBoth ? 'both' : (isSubstrateOnly ? 'substrate' : 'app');
 
+    // Org rollout (Plan 07 mig 077): api_keys.organization_id is NOT NULL.
+    // Cross-org key minting (Plan 10 follow-up): if the caller supplies an
+    // `organizationId`, verify membership against `organization_members`.
+    // Otherwise fall back to the caller's personal_organization_id (legacy behavior).
+    let organizationId: string;
+    if (options.organizationId) {
+      const memberCheck = await pool.query(
+        `SELECT 1 FROM organization_members WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
+        [options.organizationId, userId],
+      );
+      if ((memberCheck.rowCount ?? 0) === 0) {
+        throw new AuthorizationError(
+          `generateApiKey: user ${userId} is not a member of organization ${options.organizationId}`,
+          'AUTH_ORG_FORBIDDEN',
+        );
+      }
+      organizationId = options.organizationId;
+    } else {
+      const orgLookup = await pool.query<{ personal_organization_id: string | null }>(
+        `SELECT personal_organization_id FROM platform_users WHERE id = $1`,
+        [userId]
+      );
+      const resolved = orgLookup.rows[0]?.personal_organization_id ?? null;
+      if (!resolved) {
+        throw new Error(`generateApiKey: user ${userId} has no personal_organization_id`);
+      }
+      organizationId = resolved;
+    }
+
+    const substrateOrganizationId = (isSubstrateOnly || isBoth) ? organizationId : null;
+
     const result = await pool.query(
       `INSERT INTO api_keys
-         (user_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, name`,
-      [userId, keyHash, keyPrefix, name, scopes, dbScope, userId]
+      [userId, organizationId, keyHash, keyPrefix, name, scopes, dbScope, substrateOrganizationId]
     );
 
     return {
@@ -154,7 +193,7 @@ export class ApiKeyService {
     }
 
     const result = await pool.query(
-      `SELECT id, user_id, scopes, revoked_at, expires_at
+      `SELECT id, user_id, organization_id, scopes, revoked_at, expires_at
        FROM api_keys
        WHERE key_hash = $1`,
       [keyHash]
@@ -182,6 +221,7 @@ export class ApiKeyService {
       authMethod: 'api_key',
       scopes: key.scopes,
       keyId: key.id,
+      organizationId: key.organization_id,
     };
 
     getRedisClient().setex(cacheKey, API_KEY_CACHE_TTL, JSON.stringify(authContext)).catch(() => {});
@@ -193,18 +233,28 @@ export class ApiKeyService {
   }
 
   /**
-   * List all API keys for a user (never returns hashes)
-   * Optionally filter by scope: 'app' | 'substrate'
+   * List all API keys for an organization (never returns hashes).
+   * Optionally filter by key type scope: 'app' | 'substrate' | 'both'.
+   * Pass userId to narrow to a single org member's own keys (scope=me equivalent).
    */
-  static async listKeys(pool: Pool, userId: string, scope?: 'app' | 'substrate' | 'both') {
-    const params: unknown[] = [userId];
-    let where = `user_id = $1 AND revoked_at IS NULL`;
+  static async listKeys(
+    pool: Pool,
+    organizationId: string,
+    scope?: 'app' | 'substrate' | 'both',
+    userId?: string,
+  ) {
+    const params: unknown[] = [organizationId];
+    let where = `organization_id = $1 AND revoked_at IS NULL`;
     if (scope === 'app' || scope === 'substrate' || scope === 'both') {
       params.push(scope);
       where += ` AND scope = $${params.length}`;
     }
+    if (userId) {
+      params.push(userId);
+      where += ` AND user_id = $${params.length}`;
+    }
     const result = await pool.query(
-      `SELECT id, key_prefix, name, scopes, scope, substrate_user_id,
+      `SELECT id, key_prefix, name, scopes, scope, substrate_organization_id,
               last_used_at, expires_at, created_at
        FROM api_keys
        WHERE ${where}

@@ -1,6 +1,6 @@
 import type pg from 'pg';
 
-export interface UserBillingState {
+export interface OrgBillingState {
   user_id: string;
   plan_id: string | null;
   account_status: string | null;
@@ -10,11 +10,11 @@ export interface UserBillingState {
   last_outbox_version: number | string;
 }
 
-export async function readUserBillingState(
+export async function readOrgBillingState(
   runtimePool: pg.Pool,
   userId: string
-): Promise<UserBillingState | null> {
-  const r = await runtimePool.query<UserBillingState>(
+): Promise<OrgBillingState | null> {
+  const r = await runtimePool.query<OrgBillingState>(
     `SELECT user_id, plan_id, account_status, spending_cap_usd,
             topup_lease_remaining_usd, lease_expires_at, last_outbox_version
      FROM user_billing_state WHERE user_id = $1`,
@@ -61,7 +61,7 @@ export async function burnLease(
     [userId, amountUsd]
   );
   if (r.rows.length === 0) {
-    const cur = await readUserBillingState(runtimePool, userId);
+    const cur = await readOrgBillingState(runtimePool, userId);
     return {
       allowed: false,
       remaining: cur ? parseFloat(String(cur.topup_lease_remaining_usd)) : 0,

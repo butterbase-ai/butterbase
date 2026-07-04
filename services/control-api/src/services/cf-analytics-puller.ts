@@ -7,6 +7,7 @@
 import type { Pool } from 'pg';
 import { config } from '../config.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 const CF_GQL_ENDPOINT = 'https://api.cloudflare.com/client/v4/graphql';
 const POLL_INTERVAL_MS = 15 * 60 * 1000;
@@ -52,25 +53,27 @@ async function fetchAndUpsert(controlPool: Pool, scriptRows: ScriptRow[]): Promi
     const ownerId = owner.rows[0]?.owner_id as string | undefined;
     if (!ownerId) continue;
 
+    const organizationId = await resolveOrganizationId(controlPool, ownerId);
+
     // Idempotent UPSERT — adds delta to running monthly counter.
     // Note: this insert WILL double-count if the same window is polled twice.
     // For v1 we accept that; v2 should track per-window high-watermarks.
     if (row.sum.requests > 0) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = usage_meters.quantity + EXCLUDED.quantity, updated_at = now()`,
-        [ownerId, appId, 'do_requests', periodStart, row.sum.requests],
+        [ownerId, organizationId, appId, 'do_requests', periodStart, row.sum.requests],
       );
     }
     if (row.sum.durationCpu > 0) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = usage_meters.quantity + EXCLUDED.quantity, updated_at = now()`,
-        [ownerId, appId, 'do_cpu_ms', periodStart, row.sum.durationCpu],
+        [ownerId, organizationId, appId, 'do_cpu_ms', periodStart, row.sum.durationCpu],
       );
     }
   }

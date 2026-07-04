@@ -4,6 +4,7 @@ import { isHttpError } from '../services/error-handler.js';
 import { z } from 'zod';
 import { getCurrentUsage, getAiCreditsUsed, getStorageUsed, getDbSize, getMAU, getCreditsBalance, type MeterType } from '../services/usage-metering.js';
 import { getSpendingCapStatus } from '../services/billing-service.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 
 // Stripe-backed billing functions live in the cloud overlay. In OSS mode they
 // resolve to no-op / unavailable stubs and Stripe-specific endpoints return
@@ -77,20 +78,40 @@ export async function billingRoutes(app: FastifyInstance) {
   app.get('/dashboard/billing', async (request, reply) => {
     const userId = requireUserId(request);
 
+    // Optional ?org_id=<uuid>: view billing for a specific org the caller is a
+    // member of. Falls back to the caller's personal org when absent so legacy
+    // callers keep working. Membership is enforced — non-members get 403.
+    const query = (request.query ?? {}) as { org_id?: string };
+    const requestedOrgId = query.org_id;
+    let targetOrgId: string | null = null;
+    if (requestedOrgId) {
+      const membership = await app.controlDb.query(
+        `SELECT 1 FROM organization_members
+         WHERE organization_id = $1 AND user_id = $2
+         LIMIT 1`,
+        [requestedOrgId, userId]
+      );
+      if (membership.rows.length === 0) {
+        return reply.code(403).send({ error: 'Not a member of the requested organization' });
+      }
+      targetOrgId = requestedOrgId;
+    }
+
     const region = assertRegionConfig().instanceRegion;
     try {
-      // Get user's plan and subscription
-      // platform_users + plans + subscriptions live on controlDb — stay on controlDb
+      // Get billing state for the resolved org: either the ?org_id path arg
+      // (membership already checked above) or the caller's personal org.
       const userResult = await app.controlDb.query(
-        `SELECT pu.plan_id, pu.stripe_customer_id, pu.billing_period_start, pu.account_status,
+        `SELECT o.id AS org_id, o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
                 p.name as plan_name, p.price_monthly_cents,
                 p.max_storage_gb, p.max_ai_credits_usd, p.ai_credits_lifetime,
                 p.max_lambda_invocations, p.max_db_size_gb, p.max_bandwidth_gb, p.max_mau,
                 p.max_projects, p.overage_rates, p.features
          FROM platform_users pu
-         JOIN plans p ON pu.plan_id = p.id
+         JOIN organizations o ON o.id = COALESCE($2::uuid, pu.personal_organization_id)
+         JOIN plans p ON p.id = o.plan_id
          WHERE pu.id = $1`,
-        [userId]
+        [userId, targetOrgId]
       );
 
       if (userResult.rows.length === 0) {
@@ -98,20 +119,22 @@ export async function billingRoutes(app: FastifyInstance) {
       }
 
       const user = userResult.rows[0];
+      // Resolve once — used for subscription queries and usage meter queries below.
+      const billingOrgId: string = user.org_id;
 
       // Get active subscription — subscriptions is a controlDb (platform) table
       const subscriptionResult = await app.controlDb.query(
         `SELECT stripe_subscription_id, status, current_period_start, current_period_end, cancel_at_period_end
          FROM subscriptions
-         WHERE user_id = $1 AND status IN ('active', 'trialing', 'past_due')
+         WHERE organization_id = $1 AND status IN ('active', 'trialing', 'past_due')
          ORDER BY created_at DESC
          LIMIT 1`,
-        [userId]
+        [billingOrgId]
       );
 
       let subscription = subscriptionResult.rows.length > 0 ? subscriptionResult.rows[0] : null;
 
-      // If the user is on a paid plan but has no live subscription, surface the
+      // If the org is on a paid plan but has no live subscription, surface the
       // most-recent canceled subscription so the dashboard can show "Plan ends
       // on …" instead of hiding the subscription card entirely. This makes
       // payment-failure / orphan-sub states visible to the user.
@@ -119,10 +142,10 @@ export async function billingRoutes(app: FastifyInstance) {
         const lastCanceled = await app.controlDb.query(
           `SELECT stripe_subscription_id, status, current_period_start, current_period_end, cancel_at_period_end
            FROM subscriptions
-           WHERE user_id = $1 AND status = 'canceled'
+           WHERE organization_id = $1 AND status = 'canceled'
            ORDER BY current_period_end DESC NULLS LAST, updated_at DESC
            LIMIT 1`,
-          [userId],
+          [billingOrgId],
         );
         if (lastCanceled.rows.length > 0) {
           subscription = lastCanceled.rows[0];
@@ -132,23 +155,23 @@ export async function billingRoutes(app: FastifyInstance) {
       // Get current usage for all meters — these helpers query runtime tables
       // (ai_usage_logs, apps, storage_objects, app_users, app_db_connections)
       const isLifetime = user.ai_credits_lifetime;
-      const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), userId, isLifetime);
-      // Project count must aggregate across ALL regions. user_app_index is the
+      const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), billingOrgId, isLifetime);
+      // Project count must aggregate across ALL regions. org_app_index is the
       // authoritative cross-region index on controlDb — counting `apps` on the
       // local runtimeDb undercounts users with apps in other regions (and shows
       // 0 when the local region has no apps for the user).
       const projectCountResult = await app.controlDb.query(
-        'SELECT COUNT(*)::int as count FROM user_app_index WHERE user_id = $1',
-        [userId]
+        'SELECT COUNT(*)::int as count FROM org_app_index WHERE organization_id = $1',
+        [billingOrgId]
       );
 
       const usage = {
-        storage_bytes: await getStorageUsed(app.runtimeDb(region), userId),
+        storage_bytes: await getStorageUsed(app.runtimeDb(region), billingOrgId),
         ai_credits_usd: aiCreditsUsed,
-        lambda_invocations: await getCurrentUsage(app.runtimeDb(region), userId, 'lambda_invocations'),
-        bandwidth_bytes: await getCurrentUsage(app.runtimeDb(region), userId, 'bandwidth_bytes'),
-        db_size_bytes: await getDbSize(app.runtimeDb(region), userId),
-        mau: await getMAU(app.runtimeDb(region), userId),
+        lambda_invocations: await getCurrentUsage(app.runtimeDb(region), billingOrgId, 'lambda_invocations'),
+        bandwidth_bytes: await getCurrentUsage(app.runtimeDb(region), billingOrgId, 'bandwidth_bytes'),
+        db_size_bytes: await getDbSize(app.runtimeDb(region), billingOrgId),
+        mau: await getMAU(app.runtimeDb(region), billingOrgId),
         project_count: projectCountResult.rows[0].count,
       };
 
@@ -183,11 +206,11 @@ export async function billingRoutes(app: FastifyInstance) {
            SUM(total_tokens) as tokens,
            SUM(cost_usd) as cost
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+         WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
            AND DATE(created_at) >= $2
            AND DATE(created_at) <= $3
          GROUP BY key_type`,
-        [userId, periodStart, periodEnd]
+        [billingOrgId, periodStart, periodEnd]
       );
 
       const aiUsageBreakdown = {
@@ -338,6 +361,7 @@ export async function billingRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     try {
+      const organizationId = await resolveOrganizationId(app.controlDb, userId);
       const query = usageQuerySchema.parse(request.query);
 
       // Default to last 30 days
@@ -348,9 +372,9 @@ export async function billingRoutes(app: FastifyInstance) {
       let sqlQuery = `
         SELECT meter_type, period_start, SUM(quantity) as total
         FROM usage_meters
-        WHERE user_id = $1 AND period_start >= $2 AND period_start <= $3
+        WHERE organization_id = $1 AND period_start >= $2 AND period_start <= $3
       `;
-      const params: any[] = [userId, startDate, endDate];
+      const params: any[] = [organizationId, startDate, endDate];
 
       if (query.meterType) {
         sqlQuery += ` AND meter_type = $4`;
@@ -504,7 +528,10 @@ export async function billingRoutes(app: FastifyInstance) {
 
     try {
       const result = await app.controlDb.query(
-        'SELECT onboarding_completed, plan_id FROM platform_users WHERE id = $1',
+        `SELECT pu.onboarding_completed, o.plan_id
+         FROM platform_users pu
+         LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [userId]
       );
 
@@ -595,11 +622,37 @@ export async function billingRoutes(app: FastifyInstance) {
   app.delete('/dashboard/account', async (request, reply) => {
     const userId = requireUserId(request);
 
+    // User-delete guard (Plan 08): refuse if the caller is sole owner of any
+    // non-personal org. Personal orgs get cleaned up after the user row is deleted.
+    const ownedOrgs = await app.controlDb.query<{ id: string }>(
+      `SELECT o.id
+         FROM organizations o
+        WHERE o.owner_id = $1
+          AND o.personal = false
+          AND NOT EXISTS (
+            SELECT 1 FROM organization_members om
+             WHERE om.organization_id = o.id
+               AND om.role = 'owner'
+               AND om.user_id <> $1
+          )`,
+      [userId],
+    );
+    if (ownedOrgs.rows.length > 0) {
+      return reply.code(409).send({
+        error: 'sole_owner_of_org',
+        organizations: ownedOrgs.rows.map((r) => r.id),
+        message: 'cannot delete account while sole owner of these organizations. Transfer ownership or delete the orgs first.',
+      });
+    }
+
     const region = assertRegionConfig().instanceRegion;
     try {
     // 1. Verify user exists — platform_users is a controlDb table
     const userResult = await app.controlDb.query(
-      'SELECT id, stripe_customer_id FROM platform_users WHERE id = $1',
+      `SELECT pu.id, o.stripe_customer_id
+       FROM platform_users pu
+       LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+       WHERE pu.id = $1`,
       [userId]
     );
     if (userResult.rows.length === 0) {
@@ -607,6 +660,8 @@ export async function billingRoutes(app: FastifyInstance) {
     }
 
     // 2. Fetch all user's apps — apps is a runtime table
+    // grep-gate-allow: account-deletion cleanup filters personally-owned apps only;
+    // org-shared apps stay with the org after the user row is deleted.
     const appsResult = await app.runtimeDb(region).query(
       'SELECT id, db_name FROM apps WHERE owner_id = $1',
       [userId]
@@ -671,6 +726,14 @@ export async function billingRoutes(app: FastifyInstance) {
 
     // 5. Delete the user — ON DELETE CASCADE handles apps, api_keys, subscriptions, etc.
     await app.controlDb.query('DELETE FROM platform_users WHERE id = $1', [userId]);
+
+    // Plan 08: personal-org row's owner_id has no FK cascade, so clean it up
+    // explicitly (personal orgs are the only orgs that reach this point given
+    // the guard above).
+    await app.controlDb.query(
+      `DELETE FROM organizations WHERE owner_id = $1 AND personal = true`,
+      [userId],
+    );
 
     return reply.send({ deleted: true });
     } catch (error) {

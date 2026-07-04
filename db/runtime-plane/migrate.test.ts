@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveRuntimeUrls, MigrationScopeError } from './migrate.js';
+import { resolveRuntimeUrls, MigrationScopeError, parseScopeHeader } from './migrate.js';
 import pg from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -104,5 +104,218 @@ describe.skipIf(skipDb)('migrations', () => {
       client.release();
       await pool.end();
     }
+  });
+});
+
+describe('034_apps_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '034_apps_organization_id.sql');
+  const sql = fs.readFileSync(migrationPath, 'utf-8');
+
+  it('has a valid runtime scope header', () => {
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id to apps', () => {
+    expect(sql).toMatch(/ALTER TABLE apps[\s\S]+ADD COLUMN IF NOT EXISTS organization_id\s+uuid/i);
+  });
+
+  it('does NOT add a foreign key (cross-plane logical ref only)', () => {
+    expect(sql).not.toMatch(/REFERENCES\s+organizations/i);
+  });
+
+  it('creates a (organization_id, created_at DESC) index', () => {
+    expect(sql).toMatch(/CREATE INDEX[\s\S]+apps[\s\S]+\(organization_id[^)]*created_at\s+DESC\)/i);
+  });
+});
+
+describe('035_apps_substrate_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '035_apps_substrate_organization_id.sql');
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable substrate_organization_id on apps', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/ALTER TABLE\s+apps[\s\S]+ADD COLUMN[\s\S]+substrate_organization_id\s+uuid/i);
+  });
+
+  it('adds partial index on substrate_organization_id', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE INDEX[\s\S]+apps_substrate_org_id_idx[\s\S]+apps[\s\S]+\(substrate_organization_id\)[\s\S]+WHERE substrate_organization_id IS NOT NULL/i);
+  });
+});
+
+describe('036_usage_meters_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '036_usage_meters_organization_id.sql');
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id on usage_meters (no FK - cross-plane)', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/ALTER TABLE\s+usage_meters[\s\S]+ADD COLUMN[\s\S]+organization_id\s+uuid/i);
+    // Explicitly assert NO REFERENCES clause on the column add
+    expect(sql).not.toMatch(/organization_id\s+uuid[\s\S]{0,50}REFERENCES/i);
+  });
+
+  it('adds partial index', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE INDEX[\s\S]+usage_meters_organization_id_idx[\s\S]+usage_meters[\s\S]+\(organization_id\)[\s\S]+WHERE organization_id IS NOT NULL/i);
+  });
+});
+
+describe('037_ai_and_actor_logs_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '037_ai_and_actor_logs_organization_id.sql');
+  const TABLES = ['ai_usage_logs', 'actor_usage_logs', 'ai_video_jobs'];
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id on all 3 tables', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing`).toMatch(new RegExp(
+        `ALTER TABLE\\s+${t}[\\s\\S]+ADD COLUMN[\\s\\S]+organization_id\\s+uuid`,
+        'i',
+      ));
+    }
+  });
+
+  it('adds partial index per table', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing index`).toMatch(new RegExp(
+        `CREATE INDEX[\\s\\S]+${t}_organization_id_idx[\\s\\S]+${t}[\\s\\S]+\\(organization_id\\)`,
+        'i',
+      ));
+    }
+  });
+});
+
+describe('038_storage_and_proxy_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '038_storage_and_proxy_organization_id.sql');
+  const TABLES = ['storage_objects', 'mcp_tool_call_log', 'partner_proxy_logs'];
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id on all 3 tables', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing`).toMatch(new RegExp(
+        `ALTER TABLE\\s+${t}[\\s\\S]+ADD COLUMN[\\s\\S]+organization_id\\s+uuid`,
+        'i',
+      ));
+    }
+  });
+
+  it('adds partial index per table', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing index`).toMatch(new RegExp(
+        `CREATE INDEX[\\s\\S]+${t}_organization_id_idx[\\s\\S]+${t}[\\s\\S]+\\(organization_id\\)`,
+        'i',
+      ));
+    }
+  });
+});
+
+describe('039_app_enduser_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '039_app_enduser_organization_id.sql');
+  const TABLES = ['app_refresh_tokens', 'app_verification_codes', 'app_subscriptions', 'app_orders'];
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id on all 4 tables', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing`).toMatch(new RegExp(
+        `ALTER TABLE\\s+${t}[\\s\\S]+ADD COLUMN[\\s\\S]+organization_id\\s+uuid`,
+        'i',
+      ));
+    }
+  });
+
+  it('adds partial index per table', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing index`).toMatch(new RegExp(
+        `CREATE INDEX[\\s\\S]+${t}_organization_id_idx[\\s\\S]+${t}[\\s\\S]+\\(organization_id\\)`,
+        'i',
+      ));
+    }
+  });
+});
+
+describe('040_people_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '040_people_organization_id.sql');
+  const TABLES = ['people_email_lookups', 'people_usage_logs'];
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id on all existing people-related tables', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing`).toMatch(new RegExp(
+        `ALTER TABLE\\s+${t}[\\s\\S]+ADD COLUMN[\\s\\S]+organization_id\\s+uuid`,
+        'i',
+      ));
+    }
+  });
+
+  it('adds partial index per table', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing index`).toMatch(new RegExp(
+        `CREATE INDEX[\\s\\S]+${t}_organization_id_idx[\\s\\S]+${t}[\\s\\S]+\\(organization_id\\)`,
+        'i',
+      ));
+    }
+  });
+});
+
+describe('041_remaining_org_id_not_null migration', () => {
+  const migrationPath = path.join(__dirname, '041_remaining_org_id_not_null.sql');
+  const TABLES = [
+    'usage_meters',
+    'ai_usage_logs', 'actor_usage_logs', 'ai_video_jobs',
+    'storage_objects', 'mcp_tool_call_log', 'partner_proxy_logs',
+    'app_refresh_tokens', 'app_verification_codes', 'app_subscriptions', 'app_orders',
+    'people_email_lookups', 'people_usage_logs',
+  ];
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('flips organization_id to NOT NULL on all 13 tables', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    for (const t of TABLES) {
+      expect(sql, `${t} missing`).toMatch(new RegExp(
+        `ALTER TABLE\\s+${t}[\\s\\S]+ALTER COLUMN\\s+organization_id\\s+SET NOT NULL`,
+        'i',
+      ));
+    }
+  });
+
+  it('does NOT drop or rename any column', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).not.toMatch(/DROP COLUMN/i);
+    expect(sql).not.toMatch(/RENAME COLUMN/i);
   });
 });

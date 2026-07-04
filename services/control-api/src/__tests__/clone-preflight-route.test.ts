@@ -5,7 +5,7 @@
 //   200 — public app, returns function env var key names + conventions
 //   200 — private app whose owner is the authenticated caller
 //   403 — private app + caller is NOT the owner
-//   404 — app not found in user_app_index (resolveAppHomeRegion throws)
+//   404 — app not found in org_app_index (resolveAppHomeRegion throws)
 
 process.env.AUTH_ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
@@ -148,7 +148,7 @@ describe('GET /v1/templates/:source_app_id/clone-preflight', () => {
     expect(res.json().error.code).toBe('AUTH_INSUFFICIENT_PERMISSIONS');
   });
 
-  it('returns 404 when the app is not found in user_app_index', async () => {
+  it('returns 404 when the app is not found in org_app_index', async () => {
     testUserId = null;
 
     const res = await app.inject({ method: 'GET', url: '/v1/templates/app_unknown/clone-preflight' });

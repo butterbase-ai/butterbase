@@ -15,11 +15,12 @@ export async function reclaimExpiredLeases(
     const { rows } = await client.query<{
       lease_id: string;
       user_id: string;
+      organization_id: string;
       amount_usd: string;
       source_pool: 'monthly' | 'topup' | 'split';
       topup_amount_usd: string | null;
     }>(
-      `SELECT lease_id, user_id, amount_usd, source_pool, topup_amount_usd
+      `SELECT lease_id, user_id, organization_id, amount_usd, source_pool, topup_amount_usd
        FROM credit_leases
        WHERE status = 'active'
          AND expires_at + ($1 || ' seconds')::interval < now()
@@ -43,8 +44,8 @@ export async function reclaimExpiredLeases(
         );
       } else if (sourcePool === 'topup') {
         await client.query(
-          `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
-          [amt, row.user_id]
+          `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
+          [amt, row.organization_id]
         );
       } else {
         // split: refund the original portions exactly.
@@ -56,8 +57,8 @@ export async function reclaimExpiredLeases(
         }
         if (topupPortion > 0) {
           await client.query(
-            `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
-            [topupPortion, row.user_id]
+            `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
+            [topupPortion, row.organization_id]
           );
         }
       }

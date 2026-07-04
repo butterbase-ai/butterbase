@@ -1,19 +1,20 @@
 import type pg from 'pg';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { config } from '../config.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 /**
  * Result of a single reaper run, returned to operators / the admin endpoint
  * so they can audit what changed.
  */
 export interface AppIndexReaperReport {
-  /** Apps that existed in user_app_index but the apps row is missing in every
+  /** Apps that existed in org_app_index but the apps row is missing in every
    *  region — these index entries were deleted. */
   orphanIndexEntriesDeleted: string[];
-  /** Apps that existed in a region's apps table but had no user_app_index
+  /** Apps that existed in a region's apps table but had no org_app_index
    *  entry — these were backfilled. */
   missingIndexEntriesBackfilled: Array<{ app_id: string; region: string }>;
-  /** Apps where user_app_index.region disagreed with the region that actually
+  /** Apps where org_app_index.region disagreed with the region that actually
    *  has the apps row — the index entry was updated to the correct region. */
   wrongRegionFixed: Array<{ app_id: string; from: string; to: string }>;
   /** Per-region apps counts that the reaper saw at the start of the run. */
@@ -22,7 +23,6 @@ export interface AppIndexReaperReport {
 
 interface IndexRow {
   app_id: string;
-  user_id: string;
   region: string;
   subdomain: string | null;
   app_name: string | null;
@@ -36,17 +36,17 @@ interface AppRow {
 }
 
 /**
- * Reconciles `user_app_index` (control DB) with every region's `apps` table
+ * Reconciles `org_app_index` (control DB) with every region's `apps` table
  * (runtime DB). Fixes three classes of drift:
  *
  *   1. **Orphan index entries** — index says the app exists somewhere but
  *      no region's runtime DB has the apps row. The deprovision worker
- *      cleaned the row but failed the safety-net removeUserAppIndex.
+ *      cleaned the row but failed the safety-net removeOrgAppIndex.
  *      → DELETE the orphan index entry.
  *
  *   2. **Missing index entries** — a region has an apps row but the index
- *      doesn't know about it. Pre-Phase-1 apps from before user_app_index
- *      backfill, or failed addUserAppIndex calls.
+ *      doesn't know about it. Pre-Phase-1 apps from before org_app_index
+ *      backfill, or failed addOrgAppIndex calls.
  *      → INSERT the index entry with the correct region.
  *
  *   3. **Wrong-region index entries** — index points at one region but the
@@ -78,9 +78,9 @@ export async function reapAppIndex(controlDb: pg.Pool): Promise<AppIndexReaperRe
     }
   }
 
-  // 2) snapshot user_app_index
+  // 2) snapshot org_app_index
   const { rows: indexRows } = await controlDb.query<IndexRow>(
-    'SELECT app_id, user_id, region, subdomain, app_name FROM user_app_index',
+    'SELECT app_id, region, subdomain, app_name FROM org_app_index',
   );
   const indexByAppId = new Map<string, IndexRow>(indexRows.map((r) => [r.app_id, r]));
 
@@ -93,14 +93,14 @@ export async function reapAppIndex(controlDb: pg.Pool): Promise<AppIndexReaperRe
     const owner = appOwningRegion.get(idx.app_id);
     if (!owner) {
       // Orphan: no region has the apps row.
-      await controlDb.query('DELETE FROM user_app_index WHERE app_id = $1', [idx.app_id]);
+      await controlDb.query('DELETE FROM org_app_index WHERE app_id = $1', [idx.app_id]);
       orphanIndexEntriesDeleted.push(idx.app_id);
       continue;
     }
     if (owner.region !== idx.region) {
       // Wrong region: index points at one region, apps row is in another.
       await controlDb.query(
-        'UPDATE user_app_index SET region = $2, updated_at = now() WHERE app_id = $1',
+        'UPDATE org_app_index SET region = $2, updated_at = now() WHERE app_id = $1',
         [idx.app_id, owner.region],
       );
       wrongRegionFixed.push({ app_id: idx.app_id, from: idx.region, to: owner.region });
@@ -111,11 +111,12 @@ export async function reapAppIndex(controlDb: pg.Pool): Promise<AppIndexReaperRe
   for (const [region, rows] of Object.entries(appsByRegion)) {
     for (const row of rows) {
       if (indexByAppId.has(row.id)) continue;
+      const organizationId = await resolveOrganizationId(controlDb, row.owner_id);
       await controlDb.query(
-        `INSERT INTO user_app_index (app_id, user_id, region, subdomain, app_name)
+        `INSERT INTO org_app_index (app_id, organization_id, region, subdomain, app_name)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (app_id) DO NOTHING`,
-        [row.id, row.owner_id, region, row.subdomain, row.name],
+        [row.id, organizationId, region, row.subdomain, row.name],
       );
       missingIndexEntriesBackfilled.push({ app_id: row.id, region });
     }

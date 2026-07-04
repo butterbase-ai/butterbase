@@ -6,6 +6,7 @@ import { invalidateUserAppLimits } from './app-plan-resolver.js';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { writeUserStateChange } from './state-outbox.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 type DbClient = Pool | PoolClient;
 
@@ -51,11 +52,14 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
       maxMau: planResult.rows[0].max_mau,
     };
 
+    // Resolve the org so meter queries cover all org-member apps.
+    const organizationId = await resolveOrganizationId(db as Pool, userId);
+
     // Check each limit
     const violations: string[] = [];
 
     // Check storage (source-of-truth query)
-    const storageBytes = await getStorageUsed(db, userId);
+    const storageBytes = await getStorageUsed(db, organizationId);
     const storageLimitBytes = limits.maxStorageGb * 1024 * 1024 * 1024;
     if (limits.maxStorageGb !== -1 && storageBytes > storageLimitBytes) {
       violations.push(`storage: ${(storageBytes / 1024 / 1024 / 1024).toFixed(2)}GB/${limits.maxStorageGb}GB`);
@@ -63,7 +67,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check database size (source-of-truth query)
     if (limits.maxDbSizeGb !== -1) {
-      const dbSizeBytes = await getDbSize(db, userId);
+      const dbSizeBytes = await getDbSize(db, organizationId);
       const dbSizeLimitBytes = limits.maxDbSizeGb * 1024 * 1024 * 1024;
       if (dbSizeBytes > dbSizeLimitBytes) {
         violations.push(`db_size: ${(dbSizeBytes / 1024 / 1024 / 1024).toFixed(2)}GB/${limits.maxDbSizeGb}GB`);
@@ -75,7 +79,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check lambda invocations
     if (limits.maxLambdaInvocations !== -1) {
-      const lambdaInvocations = await getCurrentUsage(db, userId, 'lambda_invocations');
+      const lambdaInvocations = await getCurrentUsage(db, organizationId, 'lambda_invocations');
       if (lambdaInvocations > limits.maxLambdaInvocations) {
         violations.push(`lambda_invocations: ${lambdaInvocations}/${limits.maxLambdaInvocations}`);
       }
@@ -83,7 +87,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check bandwidth
     if (limits.maxBandwidthGb !== -1) {
-      const bandwidthBytes = await getCurrentUsage(db, userId, 'bandwidth_bytes');
+      const bandwidthBytes = await getCurrentUsage(db, organizationId, 'bandwidth_bytes');
       const bandwidthLimitBytes = limits.maxBandwidthGb * 1024 * 1024 * 1024;
       if (bandwidthBytes > bandwidthLimitBytes) {
         violations.push(`bandwidth: ${(bandwidthBytes / 1024 / 1024 / 1024).toFixed(2)}GB/${limits.maxBandwidthGb}GB`);
@@ -92,7 +96,7 @@ export async function checkAndApplySoftLock(db: DbClient, userId: string): Promi
 
     // Check MAU (source-of-truth query)
     if (limits.maxMau !== -1) {
-      const mauCount = await getMAU(db, userId);
+      const mauCount = await getMAU(db, organizationId);
       if (mauCount > limits.maxMau) {
         violations.push(`mau: ${mauCount}/${limits.maxMau}`);
       }
@@ -135,7 +139,13 @@ export async function autoRestoreSoftLockedUsers(db: Pool): Promise<void> {
   try {
     // Get all soft-locked users
     const result = await db.query(
-      `SELECT id FROM platform_users WHERE account_status = 'soft_locked' AND plan_id = 'playground'`
+      // account_status + plan_id live on organizations post-Plan-07.
+      // Returns user IDs so downstream checkAndApplySoftLock (already
+      // org-aware) can operate as before.
+      `SELECT pu.id
+       FROM platform_users pu
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       WHERE o.account_status = 'soft_locked' AND o.plan_id = 'playground'`
     );
 
     console.log(`Checking ${result.rows.length} soft-locked users for auto-restore`);
@@ -162,10 +172,11 @@ export async function suspendAccount(db: DbClient, userId: string, reason: strin
     await writeUserStateChange(db as Pool, userId, { account_status: 'suspended' });
 
     // Log billing event
+    const organizationIdSuspend = await resolveOrganizationId(db as Pool, userId);
     await db.query(
-      `INSERT INTO billing_events (user_id, event_type, metadata)
-       VALUES ($1, 'account_suspended', $2)`,
-      [userId, JSON.stringify({ reason })]
+      `INSERT INTO billing_events (user_id, organization_id, event_type, metadata)
+       VALUES ($1, $2, 'account_suspended', $3)`,
+      [userId, organizationIdSuspend, JSON.stringify({ reason })]
     );
 
     console.log(`User ${userId} suspended: ${reason}`);
@@ -196,10 +207,11 @@ export async function reactivateAccount(db: DbClient, userId: string): Promise<v
     await writeUserStateChange(db as Pool, userId, { account_status: 'active' });
 
     // Log billing event
+    const organizationIdReactivate = await resolveOrganizationId(db as Pool, userId);
     await db.query(
-      `INSERT INTO billing_events (user_id, event_type, metadata)
-       VALUES ($1, 'account_reactivated', '{}')`,
-      [userId]
+      `INSERT INTO billing_events (user_id, organization_id, event_type, metadata)
+       VALUES ($1, $2, 'account_reactivated', '{}')`,
+      [userId, organizationIdReactivate]
     );
 
     console.log(`User ${userId} reactivated`);
@@ -213,16 +225,16 @@ export async function reactivateAccount(db: DbClient, userId: string): Promise<v
 
 /**
  * Calculate monthly AI billing for platform key users
- * Returns total cost for users who used platform OpenRouter key
+ * Returns total cost for all apps owned by the organization.
  */
 export async function calculateMonthlyAiBilling(
   db: DbClient,
-  userId: string,
+  organizationId: string,
   periodStart: string,
   periodEnd: string
 ): Promise<{ totalCost: number; requestCount: number }> {
   try {
-    // ai_usage_logs and apps are per-region runtime tables — a user may
+    // ai_usage_logs and apps are per-region runtime tables — an org may
     // have apps in multiple regions, so sum across every configured region.
     let totalCost = 0;
     let requestCount = 0;
@@ -231,12 +243,12 @@ export async function calculateMonthlyAiBilling(
       const result = await runtimePool.query(
         `SELECT COUNT(*) as requests, COALESCE(SUM(cost_usd), 0) as total_cost
          FROM ai_usage_logs
-         WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+         WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
            AND key_type = 'platform'
            AND charged_to_user = true
            AND DATE(created_at) >= $2
            AND DATE(created_at) <= $3`,
-        [userId, periodStart, periodEnd]
+        [organizationId, periodStart, periodEnd]
       );
       totalCost += parseFloat(result.rows[0].total_cost);
       requestCount += parseInt(result.rows[0].requests, 10);
@@ -256,7 +268,7 @@ export async function calculateMonthlyAiBilling(
  */
 export async function markAiUsageAsBilled(
   db: DbClient,
-  userId: string,
+  organizationId: string,
   periodStart: string,
   periodEnd: string
 ): Promise<void> {
@@ -272,13 +284,13 @@ export async function markAiUsageAsBilled(
            '{billed}',
            'true'
          )
-         WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+         WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
            AND key_type = 'platform'
            AND charged_to_user = true
            AND DATE(created_at) >= $2
            AND DATE(created_at) <= $3
            AND (request_metadata->>'billed' IS NULL OR request_metadata->>'billed' = 'false')`,
-        [userId, periodStart, periodEnd]
+        [organizationId, periodStart, periodEnd]
       );
     }
   } catch (error) {
@@ -297,10 +309,12 @@ export async function getSpendingCapStatus(
   db: DbClient,
   userId: string
 ): Promise<{ capUsd: number | null; overageSpentUsd: number; remainingUsd: number | null; isAtCap: boolean }> {
+  // Post-Plan-07: spending_cap_usd + plan_id live on organizations, not platform_users.
   const userResult = await db.query(
-    `SELECT pu.spending_cap_usd, pu.plan_id, p.max_ai_credits_usd, p.default_spending_cap_usd
+    `SELECT o.spending_cap_usd, o.plan_id, p.max_ai_credits_usd, p.default_spending_cap_usd
      FROM platform_users pu
-     JOIN plans p ON pu.plan_id = p.id
+     JOIN organizations o ON o.id = pu.personal_organization_id
+     JOIN plans p ON p.id = o.plan_id
      WHERE pu.id = $1`,
     [userId]
   );
@@ -320,7 +334,8 @@ export async function getSpendingCapStatus(
   }
 
   const includedCredits = parseFloat(row.max_ai_credits_usd);
-  const totalUsed = await getAiCreditsUsed(db, userId, false);
+  const organizationId = await resolveOrganizationId(db as Pool, userId);
+  const totalUsed = await getAiCreditsUsed(db, organizationId, false);
   const overageSpentUsd = Math.max(0, totalUsed - includedCredits);
   const remainingUsd = Math.max(0, capUsd - overageSpentUsd);
 

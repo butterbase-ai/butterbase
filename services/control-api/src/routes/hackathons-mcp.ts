@@ -441,21 +441,37 @@ export async function hackathonsMcpRoutes(app: FastifyInstance) {
 
     // Resolve app_id: prefer an explicit body.app_id, otherwise try to derive
     // it from the participant's deployed-project URL. We look up
-    // user_app_index (the cross-region authoritative app catalog) by the
-    // URL's subdomain, scoped to the requesting user — so a participant can
-    // only auto-bind to an app they own.
+    // org_app_index (the cross-region authoritative app catalog) by the
+    // URL's subdomain, scoped to the caller's active org — so a participant
+    // can only auto-bind to an app in the org their key/session is scoped to.
+    // Using membership enumeration here would let a personal-org key silently
+    // bind a hackathon submission to a team-org app that key can't otherwise
+    // touch, violating the docstring guarantee above.
     let appId: string | null = body.app_id ?? null;
     if (!appId) {
       const urlKey = getUrlFieldKey(h.field_schema) ?? 'demo_url';
       const subdomain = extractButterbaseSubdomain(data[urlKey]);
       if (subdomain) {
-        const { rows: appRows } = await app.controlDb.query<{ app_id: string }>(
-          `SELECT app_id FROM user_app_index
-            WHERE subdomain = $1 AND user_id = $2
-            ORDER BY created_at DESC
-            LIMIT 1`,
-          [subdomain, userId]
-        );
+        const activeOrgId = (request.auth?.organizationId as string | null | undefined)
+          ?? null;
+        const { rows: appRows } = activeOrgId
+          ? await app.controlDb.query<{ app_id: string }>(
+              `SELECT oai.app_id FROM org_app_index oai
+                WHERE oai.subdomain = $1 AND oai.organization_id = $2
+                ORDER BY oai.created_at DESC
+                LIMIT 1`,
+              [subdomain, activeOrgId]
+            )
+          : await app.controlDb.query<{ app_id: string }>(
+              `SELECT oai.app_id FROM org_app_index oai
+                WHERE oai.subdomain = $1
+                  AND oai.organization_id = (
+                    SELECT personal_organization_id FROM platform_users WHERE id = $2
+                  )
+                ORDER BY oai.created_at DESC
+                LIMIT 1`,
+              [subdomain, userId]
+            );
         if (appRows[0]) appId = appRows[0].app_id;
       }
     }

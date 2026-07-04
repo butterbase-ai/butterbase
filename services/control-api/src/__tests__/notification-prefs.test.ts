@@ -25,9 +25,22 @@ let pool: pg.Pool;
 
 async function makeUser(): Promise<string> {
   const id = randomUUID();
+  // Create the personal org before the user row — organizations.owner_id has no FK
+  // to platform_users, so this is safe. platform_users.personal_organization_id is
+  // NOT NULL post-Plan-05 migration 076, so the org must exist before the user INSERT.
+  const orgResult = await pool.query(
+    `INSERT INTO organizations (
+        owner_id, name, personal,
+        plan_id, credits_usd, auto_refill_enabled, account_status
+     )
+     VALUES ($1, $2, true, 'playground', 0.00, false, 'active')
+     RETURNING id`,
+    [id, `${id}'s org`],
+  );
+  const orgId = orgResult.rows[0].id as string;
   await pool.query(
-    `INSERT INTO platform_users (id, email) VALUES ($1, $2)`,
-    [id, `${id}@test.local`],
+    `INSERT INTO platform_users (id, email, personal_organization_id) VALUES ($1, $2, $3)`,
+    [id, `${id}@test.local`, orgId],
   );
   return id;
 }

@@ -1,8 +1,7 @@
 import crypto from 'crypto';
 import type { FastifyPluginAsync } from 'fastify';
 import { KvCredentialsService } from '../../services/kv-credentials.js';
-import { getRuntimeDbForApp } from '../../services/region-resolver.js';
-import { AppNotFoundError } from '../../services/app-resolver.js';
+import { AppNotFoundError, AppResolver } from '../../services/app-resolver.js';
 
 const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
   const svc = new KvCredentialsService(fastify.controlDb);
@@ -34,8 +33,8 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
       // Falls back to the per-app function key path when the user-supplied
       // value isn't a valid hashed API key.
       const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
-      const keyResult = await fastify.controlDb.query<{ user_id: string }>(
-        `SELECT user_id FROM api_keys
+      const keyResult = await fastify.controlDb.query<{ user_id: string; organization_id: string | null }>(
+        `SELECT user_id, organization_id FROM api_keys
          WHERE key_hash = $1
            AND revoked_at IS NULL
            AND (expires_at IS NULL OR expires_at > now())
@@ -45,20 +44,19 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (keyResult.rows.length === 1) {
         const keyUserId = keyResult.rows[0].user_id;
+        const keyOrganizationId = keyResult.rows[0].organization_id;
 
-        let ownsApp = false;
         try {
-          const runtimePool = await getRuntimeDbForApp(fastify.controlDb, appId);
-          const ownerCheck = await runtimePool.query(
-            `SELECT 1 FROM apps WHERE id = $1 AND owner_id = $2 LIMIT 1`,
-            [appId, keyUserId],
-          );
-          ownsApp = ownerCheck.rows.length === 1;
+          // Strict per-key-org scoping: the api key is bound to a specific
+          // organization; the app MUST live in that same org.
+          await AppResolver.resolveApp(fastify.controlDb, appId, keyUserId, keyOrganizationId);
         } catch (err) {
-          if (!(err instanceof AppNotFoundError)) throw err;
-          // Unknown app id — treat as not owned.
+          if (err instanceof AppNotFoundError) {
+            return reply.code(403).send({ error: 'forbidden' });
+          }
+          throw err;
         }
-        if (!ownsApp) return reply.code(403).send({ error: 'forbidden' });
+        // Ownership verified — continue to credential lookup
 
         const credResult = await fastify.controlDb.query<{
           app_id: string;

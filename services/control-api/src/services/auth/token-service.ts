@@ -9,6 +9,7 @@ import {
 } from '@butterbase/shared/constants';
 import type { EndUserClaims } from '@butterbase/shared/types';
 import { getRuntimeDbForApp } from '../region-resolver.js';
+import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 /**
  * Signs an access token (JWT) using RS256
@@ -56,10 +57,12 @@ export async function createRefreshToken(
 
   const runtimePool = await getRuntimeDbForApp(controlPool, appId);
 
+  const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
   await runtimePool.query(
-    `INSERT INTO app_refresh_tokens (app_id, user_id, token_hash, expires_at)
-     VALUES ($1, $2, $3, $4)`,
-    [appId, userId, tokenHash, expiresAt]
+    `INSERT INTO app_refresh_tokens (app_id, user_id, token_hash, expires_at, organization_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [appId, userId, tokenHash, expiresAt, organizationId]
   );
 
   return token;

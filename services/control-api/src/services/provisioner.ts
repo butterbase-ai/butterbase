@@ -12,6 +12,7 @@ import {
 } from '@butterbase/shared';
 import type { App, InitResponse } from '@butterbase/shared';
 import { KvCredentialsService } from './kv-credentials.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 const generateId = customAlphabet(APP_ID_ALPHABET, APP_ID_LENGTH);
 
@@ -80,21 +81,20 @@ export async function insertAppRow(
     return { app: existing.rows[0], isExisting: true };
   }
 
-  // Validate owner exists in platform_users (platform-tier, stays on controlDb)
-  const ownerExists = await controlDb.query('SELECT 1 FROM platform_users WHERE id = $1', [ownerId]);
-  if (ownerExists.rows.length === 0) throw new Error(`Owner ${ownerId} not found in platform_users`);
+  // Validate owner exists and resolve their org (platform-tier, stays on controlDb)
+  const organizationId = await resolveOrganizationId(controlDb, ownerId);
 
   const dbName = appId;
   await runtimeDb.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, db_provisioned, provisioning_status, region, deployment_backend)
-     VALUES ($1, $2, $3, $4, false, 'provisioning', $5, $6)`,
-    [appId, name, ownerId, dbName, region, config.deployment.defaultBackend]
+    `INSERT INTO apps (id, name, owner_id, organization_id, db_name, db_provisioned, provisioning_status, region, deployment_backend)
+     VALUES ($1, $2, $3, $4, $5, false, 'provisioning', $6, $7)`,
+    [appId, name, ownerId, organizationId, dbName, region, config.deployment.defaultBackend]
   );
 
   // Provision KV credentials on the control-plane. The control-plane apps row
   // (Phase 1 cutover) no longer exists; app_kv_credentials has no FK to it.
   // Authoritative app row is the runtime DB INSERT above; cross-region projection
-  // is user_app_index, written by the init route after this helper returns.
+  // is org_app_index, written by the init route after this helper returns.
   const client = await controlDb.connect();
   try {
     await client.query('BEGIN');
@@ -106,7 +106,7 @@ export async function insertAppRow(
     // Roll back the runtime DB insert as well to keep both DBs consistent
     await runtimeDb.query('DELETE FROM apps WHERE id = $1', [appId]).catch((deleteErr) => {
       // Compensating DELETE failed after a control-plane transaction rollback. The runtimeDb apps row is now orphaned.
-      // The orphan-cleanup service will not pick this up because user_app_index is written after insertAppRow returns.
+      // The orphan-cleanup service will not pick this up because org_app_index is written after insertAppRow returns.
       console.error({ err: deleteErr, appId }, '[insertAppRow] compensating runtimeDb DELETE failed; row may be orphaned');
     });
     throw err;
@@ -258,17 +258,16 @@ export async function provisionApp(
     return formatResponse(app, runtimeDb);
   }
 
-  // Validate owner exists in platform_users (platform-tier, stays on controlDb)
-  const ownerExists = await controlDb.query('SELECT 1 FROM platform_users WHERE id = $1', [ownerId]);
-  if (ownerExists.rows.length === 0) throw new Error(`Owner ${ownerId} not found in platform_users`);
+  // Validate owner exists and resolve their org (platform-tier, stays on controlDb)
+  const organizationId = await resolveOrganizationId(controlDb, ownerId);
 
   const dbName = appId;
 
   // Insert app record with db_provisioned = false
   await runtimeDb.query(
-    `INSERT INTO apps (id, name, owner_id, db_name, db_provisioned, region, deployment_backend)
-     VALUES ($1, $2, $3, $4, false, $5, $6)`,
-    [appId, name, ownerId, dbName, region, config.deployment.defaultBackend]
+    `INSERT INTO apps (id, name, owner_id, organization_id, db_name, db_provisioned, region, deployment_backend)
+     VALUES ($1, $2, $3, $4, $5, false, $6, $7)`,
+    [appId, name, ownerId, organizationId, dbName, region, config.deployment.defaultBackend]
   );
 
   if (config.neon.enabled) {

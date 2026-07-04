@@ -5,7 +5,7 @@ import { getRuntimeDbForApp } from '../region-resolver.js';
 /**
  * All functions here operate on per-app rows in `app_users` (a runtime
  * table). Each one takes the control DB pool + appId so it can resolve
- * the app's home region from user_app_index and write/read against the
+ * the app's home region from org_app_index and write/read against the
  * correct regional runtime DB. A us-east-1 machine handling a us-west-2
  * app must hit the us-west-2 runtime DB, not its own.
  */

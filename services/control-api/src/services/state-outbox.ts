@@ -1,4 +1,6 @@
 import type pg from 'pg';
+import { resolveOrganizationId } from './org-resolver.js';
+import { NotFoundError } from './api-errors.js';
 
 export const OUTBOX_FIELDS = ['account_status', 'plan_id', 'spending_cap_usd'] as const;
 export type OutboxField = typeof OUTBOX_FIELDS[number];
@@ -10,10 +12,10 @@ export interface WriteResult {
 }
 
 /**
- * Atomically updates the listed fields on platform_users and writes a paired
- * row to user_state_outbox. Returns the assigned outbox version.
+ * Atomically updates the listed fields on the user's personal organization and
+ * writes a paired row to user_state_outbox. Returns the assigned outbox version.
  *
- * Use this for EVERY mutation of platform_users.{account_status, plan_id,
+ * Use this for EVERY mutation of organizations.{account_status, plan_id,
  * spending_cap_usd}. Do not write those columns directly with bare UPDATEs.
  *
  * Credit balance changes are handled by the lease subsystem — do not pass
@@ -39,17 +41,18 @@ export async function writeUserStateChange(
   try {
     await client.query('BEGIN');
     const upd = await client.query(
-      `UPDATE platform_users SET ${setClause} WHERE id = $1`,
+      `UPDATE organizations SET ${setClause} WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
       [userId, ...values]
     );
     if (upd.rowCount === 0) {
-      throw new Error(`writeUserStateChange: user ${userId} not found`);
+      throw new NotFoundError('user', userId);
     }
+    const organizationId = await resolveOrganizationId(platformPool, userId);
     const ins = await client.query<{ version: string }>(
-      `INSERT INTO user_state_outbox (user_id, fields_changed)
-       VALUES ($1, $2::jsonb)
+      `INSERT INTO user_state_outbox (user_id, organization_id, fields_changed)
+       VALUES ($1, $2, $3::jsonb)
        RETURNING version`,
-      [userId, JSON.stringify(change)]
+      [userId, organizationId, JSON.stringify(change)]
     );
     await client.query('COMMIT');
     return { version: parseInt(ins.rows[0].version, 10) };

@@ -30,6 +30,7 @@ describeDb('writeAiUsageRow', () => {
   it('writes a row with all new router columns populated', async () => {
     const row: AiUsageRow = {
       appId,
+      organizationId: '00000000-0000-0000-0000-000000000001',
       userId: null,
       model: 'anthropic/claude-3-5-sonnet',
       router: 'provider-primary',
@@ -61,7 +62,7 @@ describeDb('writeAiUsageRow', () => {
 
   it('stores fallback_chain when fallbacks happened', async () => {
     await writeAiUsageRow(pool, {
-      appId, userId: null, model: 'm', router: 'openrouter',
+      appId, organizationId: '00000000-0000-0000-0000-000000000001', userId: null, model: 'm', router: 'openrouter',
       promptTokens: 1, completionTokens: 1, totalTokens: 2,
       providerCostUsd: 0.0001, chargedCreditsUsd: 0.00012, markupPct: 20,
       fallbackChain: ['provider-primary:rate_limit', 'provider-secondary:transport'],
@@ -71,9 +72,10 @@ describeDb('writeAiUsageRow', () => {
     expect(got.rows[0].fallback_chain).toEqual(['provider-primary:rate_limit', 'provider-secondary:transport']);
   });
 
-  it('accepts null appId and inserts NULL into app_id', async () => {
+  it('successfully writes a row with organizationId provided', async () => {
     await writeAiUsageRow(pool, {
-      appId: null,
+      appId,
+      organizationId: '00000000-0000-0000-0000-000000000001',
       userId: null,
       model: 'anthropic/claude-opus-4.7',
       router: 'openrouter',
@@ -88,15 +90,17 @@ describeDb('writeAiUsageRow', () => {
       keyType: 'platform',
       chargedToUser: true,
     });
-    const r = await pool.query(
-      `SELECT app_id FROM ai_usage_logs ORDER BY created_at DESC LIMIT 1`,
+    const got = await pool.query(
+      `SELECT organization_id FROM ai_usage_logs WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [appId]
     );
-    expect(r.rows[0].app_id).toBeNull();
+    expect(got.rows[0].organization_id).toBe('00000000-0000-0000-0000-000000000001');
   });
 
   it('persists cache_read and cache_creation token counts', async () => {
     await writeAiUsageRow(pool, {
       appId,
+      organizationId: '00000000-0000-0000-0000-000000000001',
       userId: null,
       model: 'anthropic/claude-sonnet-4-6',
       router: 'provider-primary',
@@ -125,6 +129,7 @@ describeDb('writeAiUsageRow', () => {
   it('defaults cache token counts to 0 when omitted', async () => {
     await writeAiUsageRow(pool, {
       appId,
+      organizationId: '00000000-0000-0000-0000-000000000001',
       userId: null,
       model: 'openai/gpt-4o',
       router: 'provider-primary',

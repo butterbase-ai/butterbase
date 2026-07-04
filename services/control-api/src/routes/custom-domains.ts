@@ -50,14 +50,15 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/:appId/custom-domains', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     const region = await resolveAppHomeRegion(controlDb, appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
     // Plan gate — platform_users + plans live on controlDb
     const planResult = await controlDb.query(
       `SELECT p.features FROM platform_users pu
-       JOIN plans p ON pu.plan_id = p.id
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       JOIN plans p ON p.id = o.plan_id
        WHERE pu.id = $1`,
       [userId],
     );
@@ -206,7 +207,7 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/custom-domains', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     const region = await resolveAppHomeRegion(controlDb, appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -226,7 +227,7 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/custom-domains/:domainId/status', async (request, reply) => {
     const { appId, domainId } = request.params as { appId: string; domainId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     const region = await resolveAppHomeRegion(controlDb, appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -292,7 +293,7 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/:appId/custom-domains/:domainId/verify', async (request, reply) => {
     const { appId, domainId } = request.params as { appId: string; domainId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     const region = await resolveAppHomeRegion(controlDb, appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -381,7 +382,7 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
   fastify.delete('/v1/:appId/custom-domains/:domainId', async (request, reply) => {
     const { appId, domainId } = request.params as { appId: string; domainId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     const region = await resolveAppHomeRegion(controlDb, appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 

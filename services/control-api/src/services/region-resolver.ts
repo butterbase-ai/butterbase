@@ -11,14 +11,14 @@ const cacheKey = (appId: string) => `app-region:${appId}`;
 type RedisLike = Pick<Redis, 'get' | 'setex' | 'del'>;
 
 /**
- * Resolves the app's home region. Queries the cross-region `user_app_index`
+ * Resolves the app's home region. Queries the cross-region `org_app_index`
  * on the platform/control DB so the lookup works from any region.
  *
  * The per-region `apps` table only contains rows for apps homed in that
  * region — a us-east-1 machine querying its local runtime DB for a
  * us-west-2 app finds nothing and would 404 the request instead of
- * fly-replaying it. `user_app_index` is the authoritative cross-region
- * map (written by addUserAppIndex on init, updated by move-app).
+ * fly-replaying it. `org_app_index` is the authoritative cross-region
+ * map (written by addOrgAppIndex on init, updated by move-app).
  */
 export async function resolveAppRegion(
   controlPool: pg.Pool,
@@ -29,7 +29,7 @@ export async function resolveAppRegion(
   if (cached) return cached;
 
   const r = await controlPool.query<{ region: string }>(
-    `SELECT region FROM user_app_index WHERE app_id = $1`,
+    `SELECT region FROM org_app_index WHERE app_id = $1`,
     [appId],
   );
   if (r.rows.length === 0) return null;
@@ -69,7 +69,7 @@ export async function resolveAppHomeRegion(
  * for any route handler / service that needs to read or write a per-app
  * row keyed by app_id.
  *
- * Throws AppNotFoundError when the app isn't in user_app_index.
+ * Throws AppNotFoundError when the app isn't in org_app_index.
  *
  * Use this instead of `app.runtimeDb(assertRegionConfig().instanceRegion)`
  * for any per-app query. Code that operates on neon_tasks /

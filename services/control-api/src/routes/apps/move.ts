@@ -33,7 +33,7 @@ const moveAppRoutes: FastifyPluginAsync = async (fastify) => {
       const ownerId = requireUserId(request);
 
       const ix = await fastify.controlDb.query<{ region: string }>(
-        `SELECT region FROM user_app_index WHERE app_id = $1`,
+        `SELECT region FROM org_app_index WHERE app_id = $1`,
         [app_id],
       );
       if (ix.rows.length === 0) return reply.code(404).send({ error: 'app not found' });

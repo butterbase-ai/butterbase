@@ -262,9 +262,11 @@ async function cleanupOldDeployments(
     if (ownerId) {
       // 2. Get the owner's plan retention limit from control DB
       const planResult = await controlPool.query(
+        // Post-Plan-07: plan_id lives on organizations.
         `SELECT p.max_deployments
          FROM platform_users pu
-         JOIN plans p ON pu.plan_id = p.id
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         JOIN plans p ON p.id = o.plan_id
          WHERE pu.id = $1`,
         [ownerId],
       );

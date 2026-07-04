@@ -5,7 +5,7 @@ const appIndexReaperRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * POST /v1/internal/reap-app-index
    *
-   * Reconciles user_app_index (control DB) with every region's apps table.
+   * Reconciles org_app_index (control DB) with every region's apps table.
    * Auto-fixes three classes of drift: orphan index entries (no apps row in
    * any region), missing index entries (apps row but no index), and wrong-
    * region entries (index points at the wrong region).

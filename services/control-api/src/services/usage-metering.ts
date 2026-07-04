@@ -4,6 +4,7 @@ import { getRedisClient } from './redis.js';
 import { config } from '../config.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { getRuntimeDbPool } from './runtime-db.js';
+import { resolveOrganizationId } from './org-resolver.js';
 
 type DbClient = Pool | PoolClient;
 
@@ -34,6 +35,7 @@ export class UsageMeteringError extends Error {
  * Increment usage counter (hot path - Redis only, non-blocking)
  */
 export async function incrementUsage(
+  organizationId: string,
   userId: string,
   meterType: MeterType,
   quantity: number = 1,
@@ -41,7 +43,7 @@ export async function incrementUsage(
 ): Promise<void> {
   try {
     const periodStart = getCurrentPeriodStart();
-    const key = getRedisKey(userId, meterType, periodStart, appId);
+    const key = getRedisKey(organizationId, userId, meterType, periodStart, appId);
 
     // Fire-and-forget increment
     getRedisClient().incrby(key, quantity).catch((err: Error) => {
@@ -63,35 +65,44 @@ export async function incrementUsage(
  */
 export async function getCurrentUsage(
   db: DbClient,
-  userId: string,
+  organizationId: string,
   meterType: MeterType,
-  appId?: string
+  appId?: string,
+  userId?: string
 ): Promise<number> {
   try {
     const periodStart = getCurrentPeriodStart();
 
-    // Get from Redis (hot data)
-    const redisKey = getRedisKey(userId, meterType, periodStart, appId);
-    const redisValue = await getRedisClient().get(redisKey);
-    const redisUsage = redisValue ? parseInt(redisValue, 10) : 0;
+    // Redis holds per-user counters (see d688aa1 — usage_meters.user_id NOT
+    // NULL means every counter must be user-attributed). When a caller
+    // requests an org-wide total (no userId), skip Redis and read the
+    // aggregated DB row (flushed from Redis every minute). The Redis-only
+    // freshness window is intentionally sacrificed for org-wide reads to
+    // avoid a SCAN across the userId dimension.
+    let redisUsage = 0;
+    if (userId) {
+      const redisKey = getRedisKey(organizationId, userId, meterType, periodStart, appId);
+      const redisValue = await getRedisClient().get(redisKey);
+      redisUsage = redisValue ? parseInt(redisValue, 10) : 0;
+    }
 
     // usage_meters is per-region. When appId is given, hit the app's home
-    // region. When not (user-scoped counter — app_id IS NULL), sum across
+    // region. When not (org-scoped counter — app_id IS NULL), sum across
     // every region since the row could live in any of them.
     let dbUsage = 0;
     if (appId) {
       const runtimePool = await getRuntimeDbForApp(db as Pool, appId);
       const result = await runtimePool.query(
-        'SELECT quantity FROM usage_meters WHERE user_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id = $4',
-        [userId, meterType, periodStart, appId]
+        'SELECT quantity FROM usage_meters WHERE organization_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id = $4',
+        [organizationId, meterType, periodStart, appId]
       );
       dbUsage = result.rows.length > 0 ? parseInt(result.rows[0].quantity, 10) : 0;
     } else {
       for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
         const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
         const result = await runtimePool.query(
-          'SELECT quantity FROM usage_meters WHERE user_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id IS NULL',
-          [userId, meterType, periodStart]
+          'SELECT quantity FROM usage_meters WHERE organization_id = $1 AND meter_type = $2 AND period_start = $3 AND app_id IS NULL',
+          [organizationId, meterType, periodStart]
         );
         if (result.rows.length > 0) dbUsage += parseInt(result.rows[0].quantity, 10);
       }
@@ -112,7 +123,7 @@ export async function getCurrentUsage(
  */
 export async function flushUsageToDatabase(db: Pool): Promise<void> {
   try {
-    const pattern = 'usage:*';
+    const pattern = 'usage_org:*';
     const keys = await getRedisClient().keys(pattern);
 
     if (keys.length === 0) {
@@ -120,8 +131,8 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
     }
 
     // usage_meters is per-region. For app-scoped counters, pick the app's
-    // home runtime DB. For user-scoped (no app_id), default to us-east-1 —
-    // user-scoped meters need consistent placement; getCurrentUsage fans
+    // home runtime DB. For org-scoped (no app_id), default to us-east-1 —
+    // org-scoped meters need consistent placement; getCurrentUsage fans
     // out reads, so the placement region just needs to be stable.
     const eastPool = getRuntimeDbPool(config.runtimeDb, 'us-east-1');
 
@@ -143,12 +154,11 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
         const runtimePool = parsed.appId
           ? await getRuntimeDbForApp(db, parsed.appId).catch(() => null)
           : eastPool;
-        if (!runtimePool) continue; // app no longer in user_app_index — drop
+        if (!runtimePool) continue; // app no longer in org_app_index — drop
 
-        // Upsert into database (usage_meters is runtime-tier)
         const query = `
-          INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+          VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT (user_id, app_id, meter_type, period_start)
           DO UPDATE SET quantity = usage_meters.quantity + EXCLUDED.quantity, updated_at = now()
         `;
@@ -156,6 +166,7 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
         try {
           await runtimePool.query(query, [
             parsed.userId,
+            parsed.organizationId,
             parsed.appId || null,
             parsed.meterType,
             parsed.periodStart,
@@ -175,6 +186,11 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
 
     console.log(`Flushed ${keys.length} usage counters to database`);
   } catch (error) {
+    // Org-resolution failures indicate missing/corrupt user data and must
+    // bubble out — never silently swallow them.
+    if (error instanceof Error && /resolveOrganizationId:/.test(error.message)) {
+      throw error;
+    }
     console.error('Failed to flush usage to database:', error);
     // Don't throw - let the next flush attempt handle it
   }
@@ -188,7 +204,7 @@ export async function flushUsageToDatabase(db: Pool): Promise<void> {
  */
 export async function purgeAppUsage(appId: string): Promise<number> {
   try {
-    const pattern = `usage:*:${appId}:*`;
+    const pattern = `usage_org:*:*:*:${appId}`;
     const keys = await getRedisClient().keys(pattern);
     if (keys.length > 0) {
       await getRedisClient().del(...keys);
@@ -208,12 +224,13 @@ export async function reconcileUsage(db: Pool, userId: string, periodStart: stri
   // A user may have apps in multiple regions. Reconcile each region's
   // runtime DB in its own pool — writes stay local-to-app (apps row lives
   // in the same region as its source tables) so this preserves placement.
+  const organizationId = await resolveOrganizationId(db, userId);
   for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
-    await reconcileUsageInRegion(getRuntimeDbPool(config.runtimeDb, region), userId, periodStart);
+    await reconcileUsageInRegion(getRuntimeDbPool(config.runtimeDb, region), userId, periodStart, organizationId);
   }
 }
 
-async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodStart: string): Promise<void> {
+async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodStart: string, organizationId: string): Promise<void> {
   try {
     // All source tables (storage_objects, ai_usage_logs, function_invocations, app_users,
     // apps, app_db_connections, usage_meters) are runtime-tier — use runtimePool
@@ -222,18 +239,18 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
     const storageResult = await runtimePool.query(
       `SELECT app_id, COALESCE(SUM(size_bytes), 0) as total
        FROM storage_objects
-       WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+       WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
        GROUP BY app_id`,
-      [userId]
+      [organizationId]
     );
 
     for (const row of storageResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'storage_bytes', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'storage_bytes', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -251,11 +268,11 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
 
     for (const row of aiResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'ai_tokens', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'ai_tokens', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -263,19 +280,19 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
     const lambdaResult = await runtimePool.query(
       `SELECT app_id, COUNT(*) as total
        FROM function_invocations
-       WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+       WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
          AND DATE(started_at) >= $2
        GROUP BY app_id`,
-      [userId, periodStart]
+      [organizationId, periodStart]
     );
 
     for (const row of lambdaResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'lambda_invocations', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'lambda_invocations', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -284,19 +301,19 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
       `SELECT a.id as app_id, COUNT(DISTINCT au.id) as total
        FROM app_users au
        JOIN apps a ON au.app_id = a.id
-       WHERE a.owner_id = $1
+       WHERE a.organization_id = $1
          AND au.last_sign_in_at >= $2
        GROUP BY a.id`,
-      [userId, periodStart]
+      [organizationId, periodStart]
     );
 
     for (const row of mauResult.rows) {
       await runtimePool.query(
-        `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-         VALUES ($1, $2, 'mau', $3, $4)
+        `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+         VALUES ($1, $2, $3, 'mau', $4, $5)
          ON CONFLICT (user_id, app_id, meter_type, period_start)
          DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [userId, row.app_id, periodStart, row.total]
+        [userId, organizationId, row.app_id, periodStart, row.total]
       );
     }
 
@@ -305,8 +322,8 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
       `SELECT a.id, a.db_name, adc.connection_string
        FROM apps a
        LEFT JOIN app_db_connections adc ON adc.app_id = a.id
-       WHERE a.owner_id = $1 AND a.db_provisioned = true`,
-      [userId]
+       WHERE a.organization_id = $1 AND a.db_provisioned = true`,
+      [organizationId]
     );
 
     for (const appRow of dbAppsResult.rows) {
@@ -327,11 +344,11 @@ async function reconcileUsageInRegion(runtimePool: Pool, userId: string, periodS
         const dbSizeBytes = parseInt(sizeResult.rows[0].size, 10);
 
         await runtimePool.query(
-          `INSERT INTO usage_meters (user_id, app_id, meter_type, period_start, quantity)
-           VALUES ($1, $2, 'db_size_bytes', $3, $4)
+          `INSERT INTO usage_meters (user_id, organization_id, app_id, meter_type, period_start, quantity)
+           VALUES ($1, $2, $3, 'db_size_bytes', $4, $5)
            ON CONFLICT (user_id, app_id, meter_type, period_start)
            DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-          [userId, appRow.id, periodStart, dbSizeBytes]
+          [userId, organizationId, appRow.id, periodStart, dbSizeBytes]
         );
       } catch (err) {
         console.error(`Failed to measure db_size for app ${appRow.id}:`, err);
@@ -358,35 +375,38 @@ function getCurrentPeriodStart(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 }
 
-function getRedisKey(userId: string, meterType: MeterType, periodStart: string, appId?: string): string {
+function getRedisKey(organizationId: string, userId: string, meterType: MeterType, periodStart: string, appId?: string): string {
   return appId
-    ? `usage:${userId}:${appId}:${meterType}:${periodStart}`
-    : `usage:${userId}:${meterType}:${periodStart}`;
+    ? `usage_org:${organizationId}:${userId}:${meterType}:${periodStart}:${appId}`
+    : `usage_org:${organizationId}:${userId}:${meterType}:${periodStart}`;
 }
 
 function parseRedisKey(key: string): {
+  organizationId: string;
   userId: string;
   appId?: string;
   meterType: MeterType;
   periodStart: string;
 } | null {
   const parts = key.split(':');
-  if (parts[0] !== 'usage') return null;
+  if (parts[0] !== 'usage_org') return null;
 
-  if (parts.length === 5) {
-    // With appId
+  if (parts.length === 6) {
+    // With appId: usage_org:orgId:userId:meterType:periodStart:appId
     return {
-      userId: parts[1],
-      appId: parts[2],
+      organizationId: parts[1],
+      userId: parts[2],
       meterType: parts[3] as MeterType,
       periodStart: parts[4],
+      appId: parts[5],
     };
-  } else if (parts.length === 4) {
-    // Without appId
+  } else if (parts.length === 5) {
+    // Without appId: usage_org:orgId:userId:meterType:periodStart
     return {
-      userId: parts[1],
-      meterType: parts[2] as MeterType,
-      periodStart: parts[3],
+      organizationId: parts[1],
+      userId: parts[2],
+      meterType: parts[3] as MeterType,
+      periodStart: parts[4],
     };
   }
 
@@ -414,16 +434,16 @@ export function startFlushWorker(db: Pool, intervalMs: number = 60000): NodeJS.T
 }
 
 /**
- * Get total AI credits (USD) used by a user for the current billing period.
+ * Get total AI credits (USD) used by an organization for the current billing period.
  * All tiers now use monthly billing periods (V1 pricing).
  * Queries ai_usage_logs directly (source of truth) and caches for 30 seconds.
  * Only counts platform key usage (not BYOK).
  */
-export async function getAiCreditsUsed(db: DbClient, userId: string, lifetime: boolean = false): Promise<number> {
+export async function getAiCreditsUsed(db: DbClient, organizationId: string, lifetime: boolean = false): Promise<number> {
   const periodStart = getCurrentPeriodStart();
   const cacheKey = lifetime
-    ? `ai_credits_lifetime:${userId}`
-    : `ai_credits:${userId}:${periodStart}`;
+    ? `ai_credits_org_lifetime:${organizationId}`
+    : `ai_credits_org:${organizationId}:${periodStart}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -440,17 +460,17 @@ export async function getAiCreditsUsed(db: DbClient, userId: string, lifetime: b
       ? await runtimePool.query(
           `SELECT COALESCE(SUM(cost_usd), 0) as total
            FROM ai_usage_logs
-           WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+           WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
              AND key_type = 'platform'`,
-          [userId]
+          [organizationId]
         )
       : await runtimePool.query(
           `SELECT COALESCE(SUM(cost_usd), 0) as total
            FROM ai_usage_logs
-           WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+           WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)
              AND key_type = 'platform'
              AND DATE(created_at) >= $2`,
-          [userId, periodStart]
+          [organizationId, periodStart]
         );
     total += parseFloat(result.rows[0].total);
   }
@@ -460,11 +480,11 @@ export async function getAiCreditsUsed(db: DbClient, userId: string, lifetime: b
 }
 
 /**
- * Get total storage bytes used across all apps owned by a user.
+ * Get total storage bytes used across all apps in an organization.
  * Queries storage_objects directly (source of truth) and caches for 30 seconds.
  */
-export async function getStorageUsed(db: DbClient, userId: string): Promise<number> {
-  const cacheKey = `storage_used:${userId}`;
+export async function getStorageUsed(db: DbClient, organizationId: string): Promise<number> {
+  const cacheKey = `storage_used_org:${organizationId}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -480,8 +500,8 @@ export async function getStorageUsed(db: DbClient, userId: string): Promise<numb
     const result = await runtimePool.query(
       `SELECT COALESCE(SUM(size_bytes), 0) as total
        FROM storage_objects
-       WHERE app_id IN (SELECT id FROM apps WHERE owner_id = $1)`,
-      [userId]
+       WHERE app_id IN (SELECT id FROM apps WHERE organization_id = $1)`,
+      [organizationId]
     );
     total += parseFloat(result.rows[0].total);
   }
@@ -491,13 +511,13 @@ export async function getStorageUsed(db: DbClient, userId: string): Promise<numb
 }
 
 /**
- * Get monthly active users (MAU) across all apps owned by a user.
+ * Get monthly active users (MAU) across all apps in an organization.
  * Counts distinct app_users who signed in during the current billing period.
  * Queries app_users directly (source of truth) and caches for 60 seconds.
  */
-export async function getMAU(db: DbClient, userId: string): Promise<number> {
+export async function getMAU(db: DbClient, organizationId: string): Promise<number> {
   const periodStart = getCurrentPeriodStart();
-  const cacheKey = `mau:${userId}:${periodStart}`;
+  const cacheKey = `mau_org:${organizationId}:${periodStart}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -513,9 +533,9 @@ export async function getMAU(db: DbClient, userId: string): Promise<number> {
     const result = await runtimePool.query(
       `SELECT COUNT(DISTINCT au.id) as total
        FROM app_users au
-       WHERE au.app_id IN (SELECT id FROM apps WHERE owner_id = $1)
+       WHERE au.app_id IN (SELECT id FROM apps WHERE organization_id = $1)
          AND au.last_sign_in_at >= $2`,
-      [userId, periodStart]
+      [organizationId, periodStart]
     );
     total += parseInt(result.rows[0].total, 10);
   }
@@ -525,12 +545,12 @@ export async function getMAU(db: DbClient, userId: string): Promise<number> {
 }
 
 /**
- * Get total database size (bytes) across all provisioned app databases for a user.
+ * Get total database size (bytes) across all provisioned app databases for an organization.
  * Connects to each app's database to run pg_database_size (source of truth).
  * Caches for 300 seconds (5 minutes) since this is an expensive operation.
  */
-export async function getDbSize(db: DbClient, userId: string): Promise<number> {
-  const cacheKey = `db_size:${userId}`;
+export async function getDbSize(db: DbClient, organizationId: string): Promise<number> {
+  const cacheKey = `db_size_org:${organizationId}`;
 
   try {
     const cached = await getRedisClient().get(cacheKey);
@@ -540,7 +560,7 @@ export async function getDbSize(db: DbClient, userId: string): Promise<number> {
   }
 
   // apps + app_db_connections are per-region — gather every region's
-  // provisioned apps for this owner, then size each data DB.
+  // provisioned apps for this org, then size each data DB.
   const allApps: Array<{ id: string; db_name: string; connection_string: string | null }> = [];
   for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
     const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
@@ -548,8 +568,8 @@ export async function getDbSize(db: DbClient, userId: string): Promise<number> {
       `SELECT a.id, a.db_name, adc.connection_string
        FROM apps a
        LEFT JOIN app_db_connections adc ON adc.app_id = a.id
-       WHERE a.owner_id = $1 AND a.db_provisioned = true`,
-      [userId]
+       WHERE a.organization_id = $1 AND a.db_provisioned = true`,
+      [organizationId]
     );
     allApps.push(...appsResult.rows);
   }
@@ -597,8 +617,13 @@ export interface CreditsBalance {
  * the monthly plan allowance and the prepaid top-up balance.
  */
 export async function getCreditsBalance(db: DbClient, userId: string): Promise<CreditsBalance> {
+  // Post-Plan-07: monthly_allowance_usd stays on platform_users (per-user budget),
+  // credits_usd moved to organizations (org-scoped credit balance).
   const result = await db.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-    'SELECT monthly_allowance_usd, credits_usd FROM platform_users WHERE id = $1',
+    `SELECT pu.monthly_allowance_usd, o.credits_usd
+     FROM platform_users pu
+     JOIN organizations o ON o.id = pu.personal_organization_id
+     WHERE pu.id = $1`,
     [userId]
   );
   if (result.rows.length === 0) {
@@ -618,10 +643,12 @@ export async function deductCreditsBalance(
   userId: string,
   amountUsd: number
 ): Promise<number> {
+  // credits_usd lives on organizations post-Plan-07; deduct from the caller's
+  // personal org's balance.
   const result = await db.query(
-    `UPDATE platform_users
+    `UPDATE organizations
      SET credits_usd = GREATEST(0, credits_usd - $1)
-     WHERE id = $2
+     WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)
      RETURNING credits_usd`,
     [amountUsd, userId]
   );

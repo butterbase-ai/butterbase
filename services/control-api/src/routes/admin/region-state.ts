@@ -7,7 +7,7 @@ const regionStateRoutes: FastifyPluginAsync = async (fastify) => {
 
     const r = await fastify.controlDb.query<{ region: string; c: number }>(
       `SELECT region, count(*)::int AS c
-       FROM user_app_index
+       FROM org_app_index
        GROUP BY region`
     );
     const appCountByRegion: Record<string, number> = {};

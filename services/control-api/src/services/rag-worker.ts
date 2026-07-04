@@ -7,6 +7,7 @@ import { downloadObject } from './s3.js';
 import { parseDocument } from './rag-parsers.js';
 import { chunkText } from './rag-chunker.js';
 import { proxyEmbedding } from './openrouter-gateway.js';
+import { NotFoundError } from './api-errors.js';
 
 interface RagTask {
   id: string;
@@ -147,7 +148,7 @@ async function processDocument(controlDb: pg.Pool, task: RagTask, logger: Logger
     'SELECT db_name FROM apps WHERE id = $1',
     [task.app_id],
   );
-  if (appRow.rows.length === 0) throw new Error(`App not found: ${task.app_id}`);
+  if (appRow.rows.length === 0) throw new NotFoundError('app', task.app_id);
   const appPool = await getAppPoolForApp(controlDb, task.app_id, appRow.rows[0].db_name);
 
   // Get the document details
@@ -163,7 +164,7 @@ async function processDocument(controlDb: pg.Pool, task: RagTask, logger: Logger
     'SELECT id, collection_id, source_type, s3_key, content_type, user_id, metadata FROM _rag_documents WHERE id = $1',
     [task.document_id],
   );
-  if (docResult.rows.length === 0) throw new Error(`Document not found: ${task.document_id}`);
+  if (docResult.rows.length === 0) throw new NotFoundError('document', task.document_id);
   const doc = docResult.rows[0];
 
   // Update document status to processing
@@ -182,7 +183,7 @@ async function processDocument(controlDb: pg.Pool, task: RagTask, logger: Logger
     'SELECT embedding_model, embedding_dimensions, chunk_size, chunk_overlap FROM _rag_collections WHERE id = $1',
     [doc.collection_id],
   );
-  if (collResult.rows.length === 0) throw new Error(`Collection not found: ${doc.collection_id}`);
+  if (collResult.rows.length === 0) throw new NotFoundError('rag_collection', doc.collection_id);
   const collection = collResult.rows[0];
 
   // Step 1: Download and parse the document

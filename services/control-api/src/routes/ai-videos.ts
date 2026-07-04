@@ -7,6 +7,7 @@ import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js'
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRedisClient } from '../services/redis.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import {
   routeVideoSubmit, routeVideoPoll, settleVideoJob,
   billedVideoCostUsd,
@@ -129,11 +130,12 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const body = videoSubmitSchema.parse(request.body);
       const region = await resolveAppHomeRegion(app.controlDb, appId);
       const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+      const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
       const submit = await routeVideoSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
           adapters, markupPct: config.aiRouter.markupPct,
-          appId, userId: ownerId, region },
+          appId, organizationId, userId: ownerId, region },
         body,
       );
 
@@ -201,10 +203,11 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       }
 
       const region = await resolveAppHomeRegion(app.controlDb, appId);
+      const organizationId = await resolveOrgFromApp(runtimePool, appId);
       const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
-        appId, userId: ownerId, region,
+        appId, organizationId, userId: ownerId, region,
       };
       const result = await pollAndSettleVideoJob(ctx, job);
 

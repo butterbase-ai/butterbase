@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import type { FastifyRequest } from 'fastify';
 import { verifyEndUserJwt } from '../end-user-auth.js';
 import { getRuntimeDbForApp } from '../region-resolver.js';
-import { AppNotFoundError } from '../app-resolver.js';
+import { AppNotFoundError, AppResolver } from '../app-resolver.js';
 
 /**
  * Identifies *who* made an authorized per-app AI call. Routes that persist
@@ -43,7 +43,7 @@ export type AppAiAuthResult =
  * The `apps` table lives in the per-region runtime DB (post-cutover migration
  * 061), so the owner lookup resolves the app's home region first and queries
  * the runtime pool. Pass the control-plane pool — it's used for the
- * `user_app_index` lookup inside `getRuntimeDbForApp`.
+ * `org_app_index` lookup inside `getRuntimeDbForApp`.
  *
  * Returns `{ ok: true, ownerId }` on success, or a `{ status, body }` payload
  * the route handler should `reply.code(status).send(body)`.
@@ -73,14 +73,28 @@ export async function authorizeAppAiCall(
 
   const { userId, authMethod, scopes, rawToken } = request.auth;
 
-  // 1. Direct ownership (platform JWT or owner-minted API key).
+  // 1. Direct ownership or org membership (platform JWT or owner-minted API key).
   // Only platform-credential auth methods can claim owner status by virtue of
   // userId === ownerId. Restricted-scope auth methods (e.g. function_key,
   // which carries the owner UUID for downstream attribution but is scoped
   // only to /integrations/execute) must NOT collect this grant — otherwise
   // a leaked FSK would drain the owner's AI credits.
-  if (userId && userId === ownerId && (authMethod === 'api_key' || authMethod === 'jwt')) {
-    return { ok: true, ownerId, caller: { kind: 'owner' } };
+  if (userId && (authMethod === 'api_key' || authMethod === 'jwt')) {
+    if (userId === ownerId) {
+      return { ok: true, ownerId, caller: { kind: 'owner' } };
+    }
+    // Non-owner platform credential: check org membership via AppResolver.
+    // AppResolver throws AppNotFoundError when the user is neither the owner
+    // nor a member of the app's org, so we fall through to checks 2 and 3.
+    try {
+      await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
+      return { ok: true, ownerId, caller: { kind: 'owner' } };
+    } catch (err) {
+      if (!(err instanceof AppNotFoundError)) {
+        throw err;
+      }
+      // Not an org member — fall through to checks 2 and 3.
+    }
   }
 
   // 2. End-user JWT issued by this app

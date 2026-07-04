@@ -11,6 +11,7 @@ import { fireAuthHook } from '../../services/auth/auth-hook-service.js';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
+import { resolveOrgFromApp } from '../../services/app-org-resolver.js';
 
 const sendSchema = z.object({
   email: z.string().email(),
@@ -96,10 +97,12 @@ export async function magicLinkRoutes(app: FastifyInstance) {
       const expiresAt = new Date();
       expiresAt.setMinutes(expiresAt.getMinutes() + 15);
 
+      const organizationId = await resolveOrgFromApp(runtimeDb, app_id);
+
       await runtimeDb.query(
-        `INSERT INTO app_verification_codes (app_id, user_id, type, code_hash, expires_at)
-         VALUES ($1, $2, 'magic_link', $3, $4)`,
-        [app_id, user.id, codeHash, expiresAt]
+        `INSERT INTO app_verification_codes (app_id, user_id, type, code_hash, expires_at, organization_id)
+         VALUES ($1, $2, 'magic_link', $3, $4, $5)`,
+        [app_id, user.id, codeHash, expiresAt, organizationId]
       );
 
       // Send email (non-blocking)

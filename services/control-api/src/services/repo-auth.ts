@@ -21,6 +21,7 @@ export async function authorizeRepoRead(
   controlDb: Pool,
   appId: string,
   requestUserId: string | null,
+  activeOrganizationId: string | null = null,
 ): Promise<RepoReadContext> {
   const region = await resolveAppHomeRegion(controlDb, appId).catch(() => null);
   if (!region) throw new AppNotFoundError(appId);
@@ -33,9 +34,17 @@ export async function authorizeRepoRead(
   if (res.rows.length === 0) throw new AppNotFoundError(appId);
   const row = res.rows[0];
 
-  if (requestUserId && row.owner_id === requestUserId) {
-    return { appId, region, visibility: row.visibility, isOwner: true };
+  // Try org-aware auth if user is authenticated
+  if (requestUserId) {
+    try {
+      await AppResolver.resolveApp(controlDb, appId, requestUserId, activeOrganizationId);
+      return { appId, region, visibility: row.visibility, isOwner: true };
+    } catch (err) {
+      if (!(err instanceof AppNotFoundError)) throw err;
+      // Not owner/org-member — fall through to public check
+    }
   }
+
   if (row.visibility === 'public') {
     return { appId, region, visibility: 'public', isOwner: false };
   }
@@ -49,8 +58,9 @@ export async function authorizeRepoWrite(
   controlDb: Pool,
   appId: string,
   requestUserId: string,
+  activeOrganizationId: string | null = null,
 ): Promise<RepoReadContext> {
-  const resolved = await AppResolver.resolveApp(controlDb, appId, requestUserId);
+  const resolved = await AppResolver.resolveApp(controlDb, appId, requestUserId, activeOrganizationId);
   const region = await resolveAppHomeRegion(controlDb, resolved.id);
   const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
   const res = await runtimeDb.query<{ visibility: 'public' | 'private' }>(

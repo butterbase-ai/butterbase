@@ -5,6 +5,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type pg from 'pg';
 import { requireUserId } from '../utils/require-auth.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { getPeopleAdapter } from '../services/people/registry.js';
 import { getPeoplePricing } from '../services/people/pricing.js';
 import { normalizeLinkedinUrl } from '../services/people/url.js';
@@ -16,10 +17,12 @@ import {
   deductCreditsBalance,
   incrementUsage,
 } from '../services/usage-metering.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { config } from '../config.js';
 import { PeopleError, PeopleProviderError } from '../services/people/types.js';
 import type { ProviderSlot, SearchPersonRequest, SearchCompanyRequest } from '../services/people/types.js';
 import { resolveSlot } from '../services/people/routing.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,21 +46,20 @@ function setPeopleHeaders(reply: FastifyReply, p: {
  * Returns { ok: true } on success, or a reply descriptor on failure.
  */
 async function assertAppOwnership(
-  runtimeDb: pg.Pool,
+  controlDb: pg.Pool,
   appId: string,
   userId: string,
+  activeOrganizationId: string | null = null,
 ): Promise<{ ok: true } | { ok: false; reply: { code: number; body: { error: string; message?: string } } }> {
-  const r = await runtimeDb.query<{ owner_id: string }>(
-    'SELECT owner_id FROM apps WHERE id = $1',
-    [appId],
-  );
-  if (r.rows.length === 0) {
-    return { ok: false, reply: { code: 404, body: { error: 'app_not_found' } } };
+  try {
+    await AppResolver.resolveApp(controlDb, appId, userId, activeOrganizationId);
+    return { ok: true };
+  } catch (err) {
+    if (err instanceof AppNotFoundError) {
+      return { ok: false, reply: { code: 404, body: { error: 'app_not_found' } } };
+    }
+    throw err;
   }
-  if (r.rows[0].owner_id !== userId) {
-    return { ok: false, reply: { code: 403, body: { error: 'forbidden' } } };
-  }
-  return { ok: true };
 }
 
 interface AuditParams {
@@ -75,12 +77,13 @@ interface AuditParams {
 }
 
 async function writeAuditRow(runtime: pg.Pool, p: AuditParams): Promise<void> {
+  const organizationId = await resolveOrgFromApp(runtime, p.appId);
   await runtime.query(
     `INSERT INTO people_usage_logs
-       (app_id, user_id, action, credits_consumed, usd_cost, usd_charged, key_type, request_id, response_status, linkedin_url, provider_slot)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       (app_id, organization_id, user_id, action, credits_consumed, usd_cost, usd_charged, key_type, request_id, response_status, linkedin_url, provider_slot)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
     [
-      p.appId, p.userId, p.action,
+      p.appId, organizationId, p.userId, p.action,
       p.creditsConsumed, p.usdCost, p.usdCharged,
       p.keyType, p.requestId, p.status, p.linkedinUrl,
       p.providerSlot,
@@ -124,7 +127,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const pricing = getPeoplePricing(slot);
@@ -146,7 +149,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -200,7 +204,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const pricing = getPeoplePricing(slot);
@@ -221,7 +225,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -284,7 +289,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     // Cache-first (unless force-live)
@@ -335,7 +340,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -410,7 +416,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const pricing = getPeoplePricing(slot);
@@ -428,10 +434,11 @@ export async function peopleRoutes(app: FastifyInstance) {
       const nonce = crypto.randomBytes(32).toString('hex');
 
       // Insert the pending row BEFORE calling the adapter.
+      const organizationId = await resolveOrgFromApp(runtime, appId);
       const lookupRow = await runtime.query<{ id: string }>(
-        `INSERT INTO people_email_lookups (app_id, user_id, normalized_url, nonce, key_type, provider_slot, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING id`,
-        [appId, userId, normalizedUrl, nonce, 'platform', slot],
+        `INSERT INTO people_email_lookups (app_id, organization_id, user_id, normalized_url, nonce, key_type, provider_slot, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending') RETURNING id`,
+        [appId, organizationId, userId, normalizedUrl, nonce, 'platform', slot],
       );
       lookupId = lookupRow.rows[0].id;
 
@@ -446,7 +453,8 @@ export async function peopleRoutes(app: FastifyInstance) {
       let usdCharged = 0;
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        await incrementUsage(userId, 'people_credits', result.creditsConsumed, appId);
+        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
       await writeAuditRow(runtime, {
@@ -499,7 +507,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(runtime, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const r = await runtime.query<{

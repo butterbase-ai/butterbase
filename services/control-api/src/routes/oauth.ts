@@ -153,14 +153,14 @@ export async function oauthRoutes(app: FastifyInstance) {
       }
 
       // The authoritative `apps` row lives in the regional runtime DB after
-      // migration 061. `user_app_index` is the control-plane projection used
+      // migration 061. `org_app_index` is the control-plane projection used
       // for cross-region "list my apps" — exactly what the consent screen
       // needs. Eventually consistent but fine for picking a target app.
       const apps = await app.controlDb.query<{ id: string; name: string }>(
-        `SELECT app_id AS id, COALESCE(app_name, app_id) AS name
-           FROM user_app_index
-          WHERE user_id = $1
-          ORDER BY created_at DESC`,
+        `SELECT oai.app_id AS id, COALESCE(oai.app_name, oai.app_id) AS name
+           FROM org_app_index oai
+           JOIN organization_members om ON om.organization_id = oai.organization_id AND om.user_id = $1
+          ORDER BY oai.created_at DESC`,
         [request.auth.userId]
       );
 
@@ -273,6 +273,10 @@ export async function oauthRoutes(app: FastifyInstance) {
       const t = consumed.requested_target;
       const client = await OAuthClientService.lookup(app.controlDb, body.client_id);
       const displayName = `OAuth: ${client?.client_name ?? body.client_id}`;
+      // Detect substrate scope in the granted OAuth scopes → mint with
+      // substrateAccess='both' so bb_sk_* also carries substrate_organization_id.
+      const grantedScopes = (consumed.scope ?? '').split(/\s+/).filter(Boolean);
+      const wantsSubstrate = grantedScopes.includes('mcp');
       const minted = await ApiKeyService.generateApiKey(
         app.controlDb,
         consumed.user_id,
@@ -281,6 +285,7 @@ export async function oauthRoutes(app: FastifyInstance) {
           keyScope: t.key_scope,
           targetAppId: t.target_app_id,
           additionalScopes: t.additional_scopes ?? [],
+          substrateAccess: wantsSubstrate ? 'both' : 'app',
         }
       );
 

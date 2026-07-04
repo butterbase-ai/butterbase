@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { NotFoundError, ConflictError } from '../api-errors.js';
 import { getMigration, createMigration, markCompleted } from './migration-store.js';
 import { runReverseMoveSlowPath } from './reverse-move-slow-path.js';
 import { dumpKvFromRegion as defaultDumpKvFromRegion } from './step-dump-kv.js';
@@ -12,7 +13,7 @@ export interface ReverseMoveCtx {
   writeDomainMapping: (hostname: string, appId: string, region: string) => Promise<void>;
   listCustomDomains: (region: string, appId: string) => Promise<Array<{ hostname: string }>>;
   invalidateCacheAllRegions: (appId: string) => Promise<void>;
-  updateUserAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
+  updateOrgAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
   waitForReplicationCaughtUp: (region: string, appId: string, migrationId: string) => Promise<void>;
   promoteSourceToPrimary: (region: string, appId: string, migrationId: string) => Promise<void>;
   /** Optional log surface — fast path emits info on success and error on failure. */
@@ -30,9 +31,9 @@ export async function runReverseMove(
   args: { forwardMigrationId: string; userId: string },
 ): Promise<{ migrationId: string; path: 'fast' | 'slow' }> {
   const forward = await getMigration(ctx.controlPool, args.forwardMigrationId);
-  if (!forward) throw new Error(`forward migration ${args.forwardMigrationId} not found`);
+  if (!forward) throw new NotFoundError('migration', args.forwardMigrationId);
   if (forward.current_step !== 'completed') {
-    throw new Error('reverse-move requires the forward migration to be completed');
+    throw new ConflictError('reverse-move requires the forward migration to be completed');
   }
 
   if (forward.source_replica_state !== 'replicating') {
@@ -96,7 +97,7 @@ export async function runReverseMove(
     throw err;
   }
 
-  await ctx.updateUserAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
+  await ctx.updateOrgAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
   const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string }>(
     `SELECT subdomain FROM apps WHERE id = $1`, [forward.app_id],
   );

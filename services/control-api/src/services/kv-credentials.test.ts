@@ -136,7 +136,7 @@ describeDb('resolveFunctionKeyWithOwner', () => {
 
   beforeAll(async () => {
     if (!RUN_DB_TESTS) return;
-    // Insert a platform user so we can create user_app_index entries with a real owner.
+    // Insert a platform user so we can create org_app_index entries with a real owner.
     testOwnerId = randomUUID();
     await pool.query(
       `INSERT INTO platform_users (id, email, account_status, plan_id)
@@ -145,13 +145,14 @@ describeDb('resolveFunctionKeyWithOwner', () => {
       [testOwnerId, `kv-owner-${testOwnerId}@kv-test.example.com`],
     );
 
-    // Register two apps in user_app_index (the control-DB owner-lookup table;
+    // Register two apps in org_app_index (the control-DB owner-lookup table;
     // the `apps` table itself lives on a separate DB and is not present here).
     testAppId = `kv-test-owner-${Date.now()}-a`;
     otherAppId = `kv-test-owner-${Date.now()}-b`;
     await pool.query(
-      `INSERT INTO user_app_index (app_id, user_id, region)
-       VALUES ($1, $3, 'us'), ($2, $3, 'us')`,
+      `INSERT INTO org_app_index (app_id, organization_id, region)
+       VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $3), 'us'),
+              ($2, (SELECT personal_organization_id FROM platform_users WHERE id = $3), 'us')`,
       [testAppId, otherAppId, testOwnerId],
     );
   });
@@ -162,7 +163,7 @@ describeDb('resolveFunctionKeyWithOwner', () => {
       testAppId,
       otherAppId,
     ]);
-    await pool.query(`DELETE FROM user_app_index WHERE app_id IN ($1, $2)`, [
+    await pool.query(`DELETE FROM org_app_index WHERE app_id IN ($1, $2)`, [
       testAppId,
       otherAppId,
     ]);

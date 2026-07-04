@@ -114,4 +114,49 @@ export function installAgentTestMocks(): void {
       }),
     };
   });
+
+  // Mock AppResolver so that assertOwner uses the test pool's apps rows
+  // directly without needing org_app_index. Non-owner access throws
+  // AppNotFoundError, which routes surface as 404.
+  vi.mock('../services/app-resolver.js', async () => {
+    class AppNotFoundError extends Error {
+      constructor(appId: string) {
+        super(`App not found: ${appId}`);
+        this.name = 'AppNotFoundError';
+      }
+    }
+    const AppResolver = {
+      resolveApp: vi.fn(async (controlPool: any, appId: string, userId: string) => {
+        const r = await controlPool.query(
+          `SELECT id, name, owner_id, db_name,
+                  COALESCE(paused, false) AS paused,
+                  paused_reason
+             FROM apps WHERE id = $1`,
+          [appId],
+        );
+        if (r.rows.length === 0) throw new AppNotFoundError(appId);
+        const row = r.rows[0];
+        if (row.owner_id !== userId) throw new AppNotFoundError(appId);
+        return row;
+      }),
+      resolveAppPublic: vi.fn(async (controlPool: any, appId: string) => {
+        const r = await controlPool.query(
+          `SELECT id, db_name, access_mode,
+                  COALESCE(paused, false) AS paused,
+                  paused_reason
+             FROM apps WHERE id = $1`,
+          [appId],
+        );
+        if (r.rows.length === 0) throw new AppNotFoundError(appId);
+        return r.rows[0];
+      }),
+    };
+    return {
+      AppResolver,
+      AppNotFoundError,
+      AppAuthRequiredError: class AppAuthRequiredError extends Error {},
+      AppPausedError: class AppPausedError extends Error { reason: string | null = null; },
+      assertAppNotPaused: (_app: any) => {},
+    };
+  });
 }

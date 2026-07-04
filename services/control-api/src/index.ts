@@ -90,10 +90,11 @@ import { realtimeRoutes } from './routes/realtime.js';
 import { CognitoAuthProvider } from './services/cognito-auth-provider.js';
 import { LocalAuthProvider } from './services/local-auth-provider.js';
 import type { AuthProvider } from './services/auth-provider.js';
-import { config, assertRegionConfig } from './config.js';
+import { config, assertRegionConfig, assertInternalEmailSecret } from './config.js';
 import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
 import { AppNotFoundError, AppAuthRequiredError, AppPausedError } from './services/app-resolver.js';
+import { AuthorizationError, NotFoundError, ValidationError, ConflictError } from './services/api-errors.js';
 import { startFlushWorker, reconcileUsage } from './services/usage-metering.js';
 import { getRedisClient, shutdownRedis } from './services/redis.js';
 import { enforceExpiredGracePeriods } from './services/billing-service.js';
@@ -115,6 +116,7 @@ import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
 import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
 import kvResolveJwtRoutes from './routes/internal/kv-resolve-jwt.js';
+import { internalEmailRoutes } from './routes/internal-email.js';
 import kvQuotaPlugin from './plugins/kv-quota.js';
 import kvAuditWriter from './plugins/kv-audit-writer.js';
 import kvDataRoutes from './routes/v1/kv-data.js';
@@ -131,9 +133,11 @@ import reverseMoveRoutes from './routes/apps/reverse-move.js';
 import sourceReplicaRoutes from './routes/apps/source-replicas.js';
 import regionsRoutes from './routes/regions.js';
 import { writeSubdomainMapping, writeDomainMapping } from './services/cloudflare-wfp.js';
-import { updateUserAppIndexRegion } from './services/user-app-index.js';
+import { updateOrgAppIndexRegion } from './services/org-app-index.js';
 import { enqueueDeprovision } from './services/move-app/source-retention.js';
 import { invalidateAppRegion, getRuntimeDbForApp } from './services/region-resolver.js';
+import { resolveOrgFromApp } from './services/app-org-resolver.js';
+import { resolveOrgFromApiKey } from './services/api-key-org-resolver.js';
 import { runtimePoolFor, listRuntimeRegions } from './services/runtime-pool-registry.js';
 import { redisFor } from './services/redis-registry.js';
 import { auditRuntimeTablesForPool } from './services/move-app/runtime-table-audit.js';
@@ -157,6 +161,9 @@ console.log(`Starting in region ${regionConfig.instanceRegion} (allowed: ${regio
 
 // Fail fast if any Neon data/runtime project IDs are missing for configured regions.
 assertNeonProjectsConfig();
+
+// Fail fast if INTERNAL_EMAIL_SECRET is still the dev default in staging/production.
+assertInternalEmailSecret();
 
 
 // Fail-closed: prevent startup with default secrets in production
@@ -288,13 +295,31 @@ app.addHook('preHandler', async (request) => {
     const userId = request.auth?.userId ?? null;
 
     const region = assertRegionConfig().instanceRegion;
-    app.runtimeDb(region).query(
-      `INSERT INTO mcp_tool_call_log (api_key_id, user_id, tool_name, parameters, app_id)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [apiKeyId, userId, toolName, JSON.stringify(args), appId]
-    ).catch((err) => {
-      request.log.warn({ err }, 'failed to log mcp tool call');
-    });
+    // Attribute every MCP tool call. If app_id is present, use apps.organization_id.
+    // Otherwise fall back to the api key's organization_id — both are NOT NULL post
+    // Plan 07 (api_keys) / Plan 11.5 (apps), so we always land a row.
+    (async () => {
+      try {
+        let organizationId: string;
+        if (appId) {
+          organizationId = await resolveOrgFromApp(app.runtimeDb(region), appId);
+        } else if (apiKeyId) {
+          organizationId = await resolveOrgFromApiKey(app.controlDb, apiKeyId);
+        } else {
+          // No api key and no app_id: this is a session-authenticated path that
+          // shouldn't reach the public /mcp endpoint. Log and skip.
+          request.log.warn({ toolName }, 'mcp tool call with no apiKeyId and no app_id — skipped');
+          return;
+        }
+        await app.runtimeDb(region).query(
+          `INSERT INTO mcp_tool_call_log (api_key_id, user_id, tool_name, parameters, app_id, organization_id)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [apiKeyId, userId, toolName, JSON.stringify(args), appId, organizationId]
+        );
+      } catch (err) {
+        request.log.warn({ err }, 'failed to log mcp tool call');
+      }
+    })();
   }
 });
 
@@ -383,6 +408,35 @@ app.setErrorHandler((error: any, request, reply) => {
       message: error.message,
       remediation: 'Resume the app with `butterbase apps resume <app-id>` (or manage_app action="resume" via MCP).',
       details: { reason: error.reason },
+    }));
+  }
+
+  if (error instanceof AuthorizationError) {
+    return reply.status(403).send(createAgentError({
+      code: error.code,
+      message: error.message,
+      remediation: 'You do not have permission to perform this action. Check your role/membership or use a different key.',
+    }));
+  }
+  if (error instanceof NotFoundError) {
+    return reply.status(404).send(createAgentError({
+      code: 'RESOURCE_NOT_FOUND',
+      message: error.message,
+      remediation: `Verify the ${error.resourceType} id and that it exists.`,
+    }));
+  }
+  if (error instanceof ValidationError) {
+    return reply.status(400).send(createAgentError({
+      code: error.code,
+      message: error.message,
+      remediation: 'Check the input shape and required fields.',
+    }));
+  }
+  if (error instanceof ConflictError) {
+    return reply.status(409).send(createAgentError({
+      code: error.code,
+      message: error.message,
+      remediation: 'The requested operation conflicts with the current resource state.',
     }));
   }
 
@@ -489,6 +543,7 @@ try {
 app.register(internalLeaseRoutes);
 app.register(kvCredentialsRoutes);
 app.register(kvResolveJwtRoutes);
+app.register(internalEmailRoutes);
 // kv-quota MUST be registered before kv-data/expose/admin routes so the
 // preHandler hook and kvAccount decoration are available when those routes mount.
 app.register(kvQuotaPlugin);
@@ -552,6 +607,14 @@ try {
   app.log.info('app-substrate link routes registered');
 } catch (err) {
   app.log.info({ err: err instanceof Error ? err.message : err }, 'substrate overlay not present, skipping');
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const orgs = await import('../../../cloud-overlays/dist/cloud-overlays/organizations/routes.js');
+  await app.register(orgs.organizationsRoutes);
+  app.log.info('organizations overlay routes registered');
+} catch (err) {
+  app.log.info({ err: err instanceof Error ? err.message : err }, 'organizations overlay not present, skipping');
 }
 app.register(aiConfigRoutes);
 app.register(peopleRoutes);
@@ -631,7 +694,7 @@ app.decorate('moveAppCtx', {
       try { await invalidateAppRegion(redisFor(region), appId); } catch {}
     }
   },
-  updateUserAppIndexRegion,
+  updateOrgAppIndexRegion,
   ...(process.env.MOVE_APP_REPLICATION_ENABLED === 'true'
     ? {
         waitForReplicationCaughtUp: (region: string, appId: string, migrationId: string) =>

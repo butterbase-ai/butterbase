@@ -63,7 +63,7 @@ export const config = {
       v2EndpointsEnabled: process.env.AI_GATEWAY_V2_ENDPOINTS_ENABLED === 'true',
       defaultRegion: process.env.AI_ROUTER_DEFAULT_REGION ?? 'us-east-1',
       markupPct,
-      platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-3-5-sonnet',
+      platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-sonnet-4.6',
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
       providerPrimaryApiKey: process.env.AI_PROVIDER_PRIMARY_API_KEY ?? '',
       providerPrimaryBaseUrl: process.env.AI_PROVIDER_PRIMARY_BASE_URL || undefined,
@@ -247,7 +247,31 @@ export const config = {
     url: process.env.BUILD_RUNNER_URL ?? 'http://localhost:8788/build',
     sharedSecret: process.env.BUILD_RUNNER_SHARED_SECRET ?? 'dev-shared-secret',
   },
+
+  internal: {
+    /** Shared secret for service-to-service calls on /internal/* routes (not under /v1/internal/).
+     * Used by dashboard-api to dispatch invite emails via POST /internal/email/invite. */
+    emailSecret: process.env.INTERNAL_EMAIL_SECRET ?? 'dev-internal-email-secret',
+  },
 };
+
+/**
+ * Assert that INTERNAL_EMAIL_SECRET is not the dev default in staging/production.
+ * Call this from the server startup path (index.ts) to catch misconfiguration before
+ * the server accepts traffic.
+ */
+export function assertInternalEmailSecret(): void {
+  const env = (process.env.NODE_ENV ?? process.env.ENV ?? 'development').toLowerCase();
+  if (
+    (env === 'staging' || env === 'production') &&
+    config.internal.emailSecret === 'dev-internal-email-secret'
+  ) {
+    throw new Error(
+      'INTERNAL_EMAIL_SECRET is still the dev default in a non-dev environment. ' +
+      'Set INTERNAL_EMAIL_SECRET to a strong random value before deploying.'
+    );
+  }
+}
 
 let runtimeDbAsserted = false;
 

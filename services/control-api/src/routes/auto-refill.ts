@@ -19,9 +19,11 @@ export async function autoRefillRoutes(app: FastifyInstance) {
         auto_refill_last_attempt_at: Date | null;
         auto_refill_last_failure_reason: string | null;
       }>(
-        `SELECT auto_refill_enabled, auto_refill_amount_usd,
-                auto_refill_last_attempt_at, auto_refill_last_failure_reason
-         FROM platform_users WHERE id = $1`,
+        `SELECT o.auto_refill_enabled, o.auto_refill_amount_usd,
+                o.auto_refill_last_attempt_at, o.auto_refill_last_failure_reason
+         FROM organizations o
+         JOIN platform_users u ON u.personal_organization_id = o.id
+         WHERE u.id = $1`,
         [userId]
       );
       if (r.rows.length === 0) {
@@ -51,7 +53,10 @@ export async function autoRefillRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: 'amount_required', code: 'AMOUNT_REQUIRED' });
         }
         const cust = await app.controlDb.query<{ stripe_customer_id: string | null }>(
-          `SELECT stripe_customer_id FROM platform_users WHERE id = $1`,
+          `SELECT o.stripe_customer_id
+           FROM organizations o
+           JOIN platform_users u ON u.personal_organization_id = o.id
+           WHERE u.id = $1`,
           [userId]
         );
         if (!cust.rows[0]?.stripe_customer_id) {
@@ -64,11 +69,11 @@ export async function autoRefillRoutes(app: FastifyInstance) {
       }
 
       await app.controlDb.query(
-        `UPDATE platform_users
-           SET auto_refill_enabled = $1,
-               auto_refill_amount_usd = $2,
-               auto_refill_last_failure_reason = CASE WHEN $1 THEN NULL ELSE auto_refill_last_failure_reason END
-         WHERE id = $3`,
+        `UPDATE organizations SET
+           auto_refill_enabled = $1,
+           auto_refill_amount_usd = $2,
+           auto_refill_last_failure_reason = CASE WHEN $1 THEN NULL ELSE auto_refill_last_failure_reason END
+         WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $3)`,
         [body.enabled, body.amount_usd ?? null, userId]
       );
 

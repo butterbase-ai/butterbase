@@ -1,5 +1,6 @@
 // Function management routes
 import type { FastifyInstance } from 'fastify';
+import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { AppResolver } from '../services/app-resolver.js';
 import { encrypt, decrypt } from '../services/crypto.js';
@@ -10,6 +11,7 @@ import { config } from '../config.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { requireUserId } from '../utils/require-auth.js';
 import { incrementUsage } from '../services/usage-metering.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 
 const triggerEnum = z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']);
@@ -101,7 +103,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const body = parsed.data;
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Check if handler function is exported (Deno will validate actual syntax)
     if (!body.code.includes('export') || !body.code.includes('handler')) {
@@ -259,7 +261,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const body = request.body as { envVars: Record<string, string> };
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Validate envVars
     if (!body.envVars || typeof body.envVars !== 'object') {
@@ -350,7 +352,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const { appId, name } = request.params as { appId: string; name: string };
     const body = request.body as { allow_service_key_impersonation?: boolean };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     if (body.allow_service_key_impersonation === undefined) {
       return reply.code(400).send(createAgentError({
@@ -409,7 +411,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const { appId } = request.params as { appId: string };
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT
@@ -479,7 +481,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/functions/:name', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT f.*,
@@ -544,7 +546,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
   fastify.delete('/v1/:appId/functions/:name', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     await (await runtimeDb(appId)).query(
       `UPDATE app_functions SET deleted_at = now() WHERE app_id = $1 AND name = $2`,
@@ -578,7 +580,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/:appId/functions/:name/invoke', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Optional impersonation: caller may pass X-Butterbase-As-User to invoke
     // the function with ctx.user set to that id. Gated by the per-function
@@ -611,7 +613,11 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       [appId]
     );
     if (fnOwnerResult.rows.length > 0) {
-      incrementUsage(fnOwnerResult.rows[0].owner_id, 'lambda_invocations', 1, appId);
+      const ownerId = fnOwnerResult.rows[0].owner_id;
+      void (async () => {
+        const organizationId = await resolveOrganizationId(controlDb, ownerId);
+        await incrementUsage(organizationId, ownerId, 'lambda_invocations', 1, appId);
+      })();
     }
 
     // Forward to Deno runtime
@@ -676,35 +682,26 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     });
 
     if (isStream && denoResponse.body) {
-      // Passthrough SSE: hijack the reply so Fastify doesn't add a
-      // Content-Length (which would collide with Transfer-Encoding: chunked).
-      // Matches the existing pattern in routes/frontend-from-source.ts.
-      reply.raw.statusCode = denoResponse.status;
-      reply.raw.setHeader('content-type', contentType);
-      reply.raw.setHeader('cache-control', 'no-cache, no-transform');
-      reply.raw.setHeader('connection', 'keep-alive');
-      reply.raw.setHeader('x-accel-buffering', 'no');
-      reply.hijack();
-      const reader = denoResponse.body.getReader();
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          reply.raw.write(value);
-        }
-      } catch {
-        // Client disconnected mid-stream — nothing to do.
-      } finally {
-        reply.raw.end();
-      }
-      return;
+      // Passthrough SSE via reply.send(Readable.fromWeb(...)) so @fastify/cors's
+      // onSend hook fires (previously reply.hijack() bypassed it, dropping
+      // access-control-* headers) and Fastify's stream lifecycle propagates
+      // client disconnects to the underlying reader.
+      reply.header('content-type', contentType);
+      reply.header('cache-control', 'no-cache, no-transform');
+      reply.header('connection', 'keep-alive');
+      reply.header('x-accel-buffering', 'no');
+      return reply
+        .status(denoResponse.status)
+        .send(Readable.fromWeb(denoResponse.body as any));
     }
 
-    const responseBody = await denoResponse.text();
+    // Non-streaming: use arrayBuffer to preserve binary responses (image, pdf,
+    // etc). .text() previously mangled binary bodies via UTF-8 decoding.
+    const responseBuffer = Buffer.from(await denoResponse.arrayBuffer());
     return reply
       .status(denoResponse.status)
       .header('content-type', contentType)
-      .send(responseBody);
+      .send(responseBuffer);
   });
 
   // Get function logs
@@ -717,7 +714,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       include_deleted?: boolean | string;
     };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const includeDeleted = include_deleted === true || include_deleted === 'true';
 
@@ -797,7 +794,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
         level?: 'error' | 'all';
       };
 
-      await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+      await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
       const fnResult = await (await runtimeDb(appId)).query(
         'SELECT id FROM app_functions WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL',

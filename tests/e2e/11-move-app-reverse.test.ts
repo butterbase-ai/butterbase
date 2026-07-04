@@ -118,7 +118,7 @@ describe('Phase 6 — reverse-move on top of real forward saga', () => {
 
     // Routing flipped back
     const ix = await env.controlPool.query<{ region: string }>(
-      `SELECT region FROM user_app_index WHERE app_id = $1`, [seeded.appId],
+      `SELECT region FROM org_app_index WHERE app_id = $1`, [seeded.appId],
     );
     expect(ix.rows[0].region).toBe('us-east-1');
 

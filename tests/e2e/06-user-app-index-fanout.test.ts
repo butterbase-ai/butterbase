@@ -1,8 +1,8 @@
 /**
- * Phase 4 E2E — GET /apps user_app_index regional fan-out
+ * Phase 4 E2E — GET /apps org_app_index regional fan-out
  *
  * The /apps route (services/control-api/src/routes/init.ts) reads
- * user_app_index to determine which regions a user has apps in, then queries
+ * org_app_index to determine which regions a user has apps in, then queries
  * ONLY those regions' runtime pools. This test verifies that fan-out actually
  * respects the index — apps in regions the user doesn't have entries for are
  * NOT returned, and apps from multiple regions ARE merged.
@@ -36,7 +36,7 @@ afterAll(async () => {
   await env.shutdown();
 }, 120_000);
 
-describe('Phase 4 — GET /apps fans out by user_app_index', () => {
+describe('Phase 4 — GET /apps fans out by org_app_index', () => {
   it('user with apps only in us-east-1 sees only us-east-1 results', async () => {
     const a = await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'fanout' });
     await seedApp(env.controlPool, { region: 'us-east-1', emailPrefix: 'fanout' });
@@ -63,7 +63,7 @@ describe('Phase 4 — GET /apps fans out by user_app_index', () => {
     const stamp = `${Date.now()}_eu_${Math.random().toString(36).slice(2, 6)}`;
     const euAppId = `e2e-app-${stamp}`;
     await env.controlPool.query(
-      `INSERT INTO user_app_index (app_id, user_id, region) VALUES ($1, $2, 'eu-west-1')`,
+      `INSERT INTO org_app_index (app_id, organization_id, region) VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $2), 'eu-west-1')`,
       [euAppId, a.userId],
     );
     const eu = runtimePoolFor('eu-west-1');

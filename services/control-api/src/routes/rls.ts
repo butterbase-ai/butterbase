@@ -105,11 +105,7 @@ export async function rlsRoutes(app: FastifyInstance) {
     if (isReservedTable(table_name)) return reservedTableReply(reply, table_name);
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
@@ -309,11 +305,7 @@ export async function rlsRoutes(app: FastifyInstance) {
     const { app_id } = request.params as { app_id: string };
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
@@ -407,11 +399,7 @@ export async function rlsRoutes(app: FastifyInstance) {
     }
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
@@ -624,11 +612,7 @@ export async function rlsRoutes(app: FastifyInstance) {
     }
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
       // 404 if the named policy does not exist on this table
@@ -735,11 +719,7 @@ export async function rlsRoutes(app: FastifyInstance) {
     if (isReservedTable(table_name)) return reservedTableReply(reply, table_name);
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
@@ -814,11 +794,7 @@ export async function rlsRoutes(app: FastifyInstance) {
     if (isReservedTable(table)) return reservedTableReply(reply, table);
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
@@ -906,11 +882,7 @@ export async function rlsRoutes(app: FastifyInstance) {
     }
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 

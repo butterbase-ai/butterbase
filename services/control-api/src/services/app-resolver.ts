@@ -3,13 +3,13 @@ import { config } from '../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 
 /**
- * Resolve the app's home region from the cross-region user_app_index on
+ * Resolve the app's home region from the cross-region org_app_index on
  * the control DB. Returns null when the app isn't indexed. Callers that
  * need the per-region runtime DB should look up the region here first.
  */
 async function resolveHomeRegion(controlPool: Pool, appId: string): Promise<string | null> {
   const r = await controlPool.query<{ region: string }>(
-    `SELECT region FROM user_app_index WHERE app_id = $1`,
+    `SELECT region FROM org_app_index WHERE app_id = $1`,
     [appId]
   );
   return r.rows[0]?.region ?? null;
@@ -64,23 +64,72 @@ export class AppResolver {
   static async resolveApp(
     controlPool: Pool,
     appId: string,
-    userId: string
+    userId: string,
+    /**
+     * Optional: the caller's ACTIVE organization scope. When set (bb_sk_*
+     * API-key path or JWT session with x-organization-id header), access is
+     * restricted to apps in this exact org — even if the user is a member of
+     * other orgs that own the app. Enforces the Plan 07 strict per-key-org
+     * scoping model.
+     *
+     * When omitted (legacy JWT sessions without an active-org signal), falls
+     * back to the membership-enumeration check for backwards compatibility.
+     */
+    activeOrganizationId?: string | null,
   ): Promise<{ id: string; name: string; owner_id: string; db_name: string; paused: boolean; paused_reason: string | null }> {
     const region = await resolveHomeRegion(controlPool, appId);
     if (!region) throw new AppNotFoundError(appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-    const result = await runtimeDb.query(
-      `SELECT id, name, owner_id, db_name, paused, paused_reason
+    const result = await runtimeDb.query<{
+      id: string;
+      name: string;
+      owner_id: string;
+      organization_id: string | null;
+      db_name: string;
+      paused: boolean;
+      paused_reason: string | null;
+    }>(
+      `SELECT id, name, owner_id, organization_id, db_name, paused, paused_reason
        FROM apps
-       WHERE id = $1 AND owner_id = $2`,
-      [appId, userId]
+       WHERE id = $1`,
+      [appId]
     );
 
     if (result.rows.length === 0) {
       throw new AppNotFoundError(appId);
     }
+    const row = result.rows[0];
 
-    return result.rows[0];
+    // STRICT PATH: when the caller's active org is known (bb_sk_* keys always
+    // supply it; JWT sessions may set x-organization-id), the app MUST live
+    // in that exact org. This blocks the cross-org membership escalation
+    // where a personal-org key could reach team-org apps the user happens to
+    // belong to. Only exception is legacy apps with NULL organization_id
+    // (pre-backfill), which fall through to the ownership check.
+    if (activeOrganizationId && row.organization_id) {
+      if (row.organization_id !== activeOrganizationId) {
+        throw new AppNotFoundError(appId);
+      }
+      // App is in caller's active org — access granted.
+      return row;
+    }
+
+    // LEGACY / FALLBACK PATH — no active-org signal on the request.
+    // Owner always passes.
+    if (row.owner_id === userId) return row;
+
+    // Non-owner: must be a member of the app's org (control plane).
+    if (row.organization_id) {
+      const member = await controlPool.query(
+        `SELECT 1 FROM organization_members
+         WHERE organization_id = $1 AND user_id = $2
+         LIMIT 1`,
+        [row.organization_id, userId]
+      );
+      if (member.rows.length > 0) return row;
+    }
+
+    throw new AppNotFoundError(appId);
   }
 
   /**

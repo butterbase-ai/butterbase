@@ -244,5 +244,15 @@ export async function createButterbaseMcpServer() {
     // OSS mode: no substrate overlay. Silently skip.
   }
 
+  // Cloud overlay: organizations tool (proxies to dashboard-api).
+  try {
+    const overlayPath = '../../../cloud-overlays/dist/cloud-overlays/organizations/mcp-tools/index.js';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const orgsOverlay = await (Function('p', 'return import(p)')(overlayPath) as Promise<any>);
+    orgsOverlay.registerOrganizationsMcpTools(server);
+  } catch {
+    // OSS mode: no organizations overlay. Silently skip.
+  }
+
   return server;
 }

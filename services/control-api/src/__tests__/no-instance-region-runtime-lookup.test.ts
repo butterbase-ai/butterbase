@@ -8,7 +8,7 @@ import path from 'node:path';
  * The bug shape: a per-app query against the local machine's runtime DB pool.
  * Symptom: cross-region apps return 404 (or worse, writes land in the wrong
  * DB and stay invisible). Fix: resolve the app's home region from
- * user_app_index first, then pick the runtime pool — see
+ * org_app_index first, then pick the runtime pool — see
  * services/region-resolver.ts (resolveAppHomeRegion / getRuntimeDbForApp).
  *
  * This test scans the source tree for the lexical pattern that re-introduces

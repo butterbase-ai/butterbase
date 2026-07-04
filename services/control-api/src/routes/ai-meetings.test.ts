@@ -1,5 +1,5 @@
 // services/control-api/src/routes/ai-meetings.test.ts
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, beforeAll } from 'vitest';
 import Fastify from 'fastify';
 import { aiMeetingsRoutes } from './ai-meetings.js';
 import {
@@ -20,6 +20,18 @@ vi.mock('../services/region-resolver.js', () => ({
     query: vi.fn(async () => ({ rows: [{ owner_id: 'u_1' }] })),
   })),
 }));
+vi.mock('../services/app-resolver.js', () => ({
+  AppResolver: {
+    resolveApp: vi.fn(async () => ({ id: 'app_1', name: 'Test App', owner_id: 'u_1', db_name: 'app_1_db', paused: false, paused_reason: null })),
+  },
+  AppNotFoundError: class AppNotFoundError extends Error {
+    constructor(appId: string) { super(`App not found: ${appId}`); this.name = 'AppNotFoundError'; }
+  },
+}));
+
+beforeAll(() => {
+  process.env.AUTH_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+});
 
 function buildApp(provider?: ActorProvider) {
   _resetRegistryForTests();
@@ -38,7 +50,7 @@ describe('POST /v1/ai/meetings', () => {
   it('501s when no adapter is registered', async () => {
     const app = buildApp();
     const res = await app.inject({
-      method: 'POST', url: '/v1/ai/meetings',
+      method: 'POST', url: '/v1/app_1/ai/meetings',
       payload: { meetingUrl: 'https://meet.google.com/abc-defg-hij' },
     });
     expect(res.statusCode).toBe(501);
@@ -58,7 +70,7 @@ describe('POST /v1/ai/meetings', () => {
       start, get: vi.fn(), stop: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })),
     } as unknown as ActorProvider);
     const res = await app.inject({
-      method: 'POST', url: '/v1/ai/meetings',
+      method: 'POST', url: '/v1/app_1/ai/meetings',
       payload: {
         meetingUrl: 'https://meet.google.com/abc-defg-hij',
         metadata: { dealId: 'd1' },
@@ -83,7 +95,7 @@ describe('POST /v1/ai/meetings', () => {
       start, get: vi.fn(), stop: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })),
     } as unknown as ActorProvider);
     const res = await app.inject({
-      method: 'POST', url: '/v1/ai/meetings',
+      method: 'POST', url: '/v1/app_1/ai/meetings',
       payload: { meetingUrl: 'https://meet.google.com/abc-defg-hij' },
     });
     expect(res.statusCode).toBe(500);
@@ -93,7 +105,7 @@ describe('POST /v1/ai/meetings', () => {
   it('400s when metadata key starts with bb_', async () => {
     const app = buildApp({ key: 'meetings' } as any);
     const res = await app.inject({
-      method: 'POST', url: '/v1/ai/meetings',
+      method: 'POST', url: '/v1/app_1/ai/meetings',
       payload: {
         meetingUrl: 'https://meet.google.com/abc-defg-hij',
         metadata: { bb_app_id: 'naughty' },
@@ -111,7 +123,7 @@ describe('GET /v1/ai/meetings/:id', () => {
       recordingUrl: 'https://...', transcriptUrl: 'https://...', metadata: {},
     }));
     const app = buildApp({ key: 'meetings', get, start: vi.fn(), stop: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })) } as unknown as ActorProvider);
-    const res = await app.inject({ method: 'GET', url: '/v1/ai/meetings/bot_abc' });
+    const res = await app.inject({ method: 'GET', url: '/v1/app_1/ai/meetings/bot_abc' });
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).durationSeconds).toBe(3600);
   });
@@ -121,7 +133,7 @@ describe('DELETE /v1/ai/meetings/:id', () => {
   it('calls provider.stop and returns 204', async () => {
     const stop = vi.fn(async () => {});
     const app = buildApp({ key: 'meetings', stop, start: vi.fn(), get: vi.fn(), list: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })) } as unknown as ActorProvider);
-    const res = await app.inject({ method: 'DELETE', url: '/v1/ai/meetings/bot_abc' });
+    const res = await app.inject({ method: 'DELETE', url: '/v1/app_1/ai/meetings/bot_abc' });
     expect(res.statusCode).toBe(204);
     expect(stop).toHaveBeenCalled();
   });
@@ -133,7 +145,7 @@ describe('GET /v1/ai/meetings', () => {
       bots: [{ id: 'bot_a', status: 'done' } as any], nextCursor: 'cur1',
     }));
     const app = buildApp({ key: 'meetings', list, start: vi.fn(), get: vi.fn(), stop: vi.fn(), estimateCost: vi.fn(() => ({ usd: 0 })) } as unknown as ActorProvider);
-    const res = await app.inject({ method: 'GET', url: '/v1/ai/meetings?limit=5' });
+    const res = await app.inject({ method: 'GET', url: '/v1/app_1/ai/meetings?limit=5' });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.bots).toHaveLength(1);
@@ -151,7 +163,7 @@ describe('GET /v1/ai/meetings/_estimate', () => {
       start: vi.fn(), get: vi.fn(), stop: vi.fn(), list: vi.fn(),
       estimateCost,
     } as unknown as ActorProvider);
-    const res = await app.inject({ method: 'GET', url: '/v1/ai/meetings/_estimate?durationMinutes=60' });
+    const res = await app.inject({ method: 'GET', url: '/v1/app_1/ai/meetings/_estimate?durationMinutes=60' });
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ usd: 0.075 });
     expect(estimateCost).toHaveBeenCalledWith(expect.objectContaining({ durationMinutes: 60 }));

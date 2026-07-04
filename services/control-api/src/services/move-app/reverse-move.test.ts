@@ -40,7 +40,7 @@ describe('runReverseMove', () => {
     const writeDomainMapping = vi.fn().mockResolvedValue(undefined);
     const listCustomDomains = vi.fn().mockResolvedValue([{ hostname: 'a.example.com' }]);
     const invalidateCacheAllRegions = vi.fn().mockResolvedValue(undefined);
-    const updateUserAppIndexRegion = vi.fn().mockResolvedValue(undefined);
+    const updateOrgAppIndexRegion = vi.fn().mockResolvedValue(undefined);
     const waitForReplicationCaughtUp = vi.fn().mockResolvedValue(undefined);
     const promoteSourceToPrimary = vi.fn().mockResolvedValue(undefined);
 
@@ -51,7 +51,7 @@ describe('runReverseMove', () => {
       writeDomainMapping,
       listCustomDomains,
       invalidateCacheAllRegions,
-      updateUserAppIndexRegion,
+      updateOrgAppIndexRegion,
       waitForReplicationCaughtUp,
       promoteSourceToPrimary,
       dumpKvFromRegion: vi.fn().mockResolvedValue({ key: 'move-app/fwd-1-reverse/dump.kv.jsonl.gz', records: 0 }),
@@ -65,7 +65,7 @@ describe('runReverseMove', () => {
     expect(res.path).toBe('fast');
     expect(waitForReplicationCaughtUp).toHaveBeenCalledWith('us-east-1', 'app-x', 'fwd-1');
     expect(promoteSourceToPrimary).toHaveBeenCalledWith('us-east-1', 'app-x', 'fwd-1');
-    expect(updateUserAppIndexRegion).toHaveBeenCalledWith(controlPool, 'app-x', 'us-east-1');
+    expect(updateOrgAppIndexRegion).toHaveBeenCalledWith(controlPool, 'app-x', 'us-east-1');
     expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'us-east-1');
     expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'us-east-1');
     expect(invalidateCacheAllRegions).toHaveBeenCalledWith('app-x');
@@ -88,7 +88,7 @@ describe('runReverseMove', () => {
     expect(unarchiveCall).toBeTruthy();
   });
 
-  it('fast path: dumps, clears, restores KV between promoteSourceToPrimary and updateUserAppIndexRegion', async () => {
+  it('fast path: dumps, clears, restores KV between promoteSourceToPrimary and updateOrgAppIndexRegion', async () => {
     (getMigration as any).mockResolvedValue({
       id: 'fwd-kv-1',
       app_id: 'app-x',
@@ -132,7 +132,7 @@ describe('runReverseMove', () => {
       expect(opts.key).toBe('move-app/fwd-kv-1-reverse/dump.kv.jsonl.gz');
       return { records: 3 };
     });
-    const updateUserAppIndexRegion = vi.fn().mockImplementation(async () => { order.push('updateIndex'); });
+    const updateOrgAppIndexRegion = vi.fn().mockImplementation(async () => { order.push('updateIndex'); });
 
     const ctx: any = {
       controlPool: { query: vi.fn().mockResolvedValue({ rows: [] }) },
@@ -141,7 +141,7 @@ describe('runReverseMove', () => {
       writeDomainMapping: vi.fn(),
       listCustomDomains: vi.fn().mockResolvedValue([]),
       invalidateCacheAllRegions: vi.fn(),
-      updateUserAppIndexRegion,
+      updateOrgAppIndexRegion,
       waitForReplicationCaughtUp: vi.fn(),
       promoteSourceToPrimary,
       dumpKvFromRegion,
@@ -179,7 +179,7 @@ describe('runReverseMove', () => {
       writeDomainMapping: vi.fn(),
       listCustomDomains: vi.fn().mockResolvedValue([]),
       invalidateCacheAllRegions: vi.fn(),
-      updateUserAppIndexRegion: vi.fn(),
+      updateOrgAppIndexRegion: vi.fn(),
       waitForReplicationCaughtUp: vi.fn(),
       promoteSourceToPrimary: vi.fn(),
       dumpKvFromRegion: vi.fn().mockRejectedValue(new Error('s3 boom')),
@@ -213,7 +213,7 @@ describe('runReverseMove', () => {
       writeDomainMapping: vi.fn(),
       listCustomDomains: vi.fn(),
       invalidateCacheAllRegions: vi.fn(),
-      updateUserAppIndexRegion: vi.fn(),
+      updateOrgAppIndexRegion: vi.fn(),
       waitForReplicationCaughtUp: vi.fn(),
       promoteSourceToPrimary: vi.fn(),
     };
@@ -240,7 +240,7 @@ describe('runReverseMove', () => {
       writeDomainMapping: vi.fn(),
       listCustomDomains: vi.fn().mockResolvedValue([]),
       invalidateCacheAllRegions: vi.fn(),
-      updateUserAppIndexRegion: vi.fn(),
+      updateOrgAppIndexRegion: vi.fn(),
       waitForReplicationCaughtUp: vi.fn(),
       promoteSourceToPrimary: vi.fn(),
     };

@@ -151,7 +151,7 @@ describe('GET /events.json', () => {
     expect(body.events[0].seq).toBe(3);
   });
 
-  it('returns 403 for non-owner', async () => {
+  it('returns 404 for non-owner', async () => {
     const runId = await seedRun();
     await seedEvents(runId, 5);
 
@@ -161,7 +161,7 @@ describe('GET /events.json', () => {
       headers: { 'x-test-user-id': OTHER_ID },
     });
 
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(404);
   });
 
   it('returns 404 for missing run', async () => {

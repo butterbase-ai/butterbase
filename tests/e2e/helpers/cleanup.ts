@@ -11,7 +11,7 @@ export async function cleanupAll(controlPool: pg.Pool): Promise<void> {
 
   if (userIds.length > 0) {
     await controlPool.query(`DELETE FROM app_migrations WHERE user_id = ANY($1)`, [userIds]);
-    await controlPool.query(`DELETE FROM user_app_index WHERE user_id = ANY($1)`, [userIds]);
+    await controlPool.query(`DELETE FROM org_app_index WHERE organization_id = ANY(SELECT personal_organization_id FROM platform_users WHERE id = ANY($1))`, [userIds]);
     await controlPool.query(`DELETE FROM subscriptions WHERE user_id = ANY($1)`, [userIds]).catch(()=>{});
     await controlPool.query(`DELETE FROM usage_meters WHERE user_id = ANY($1)`, [userIds]).catch(()=>{});
     await controlPool.query(`DELETE FROM neon_tasks WHERE app_id LIKE 'e2e-app-%'`).catch(()=>{});

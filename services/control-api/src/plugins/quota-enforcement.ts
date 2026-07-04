@@ -7,9 +7,10 @@ import { sendBillingEmail, type BillingEmailTemplate } from '../services/auth/em
 import { quotaErrors } from '../utils/quota-errors.js';
 import { getRedisClient } from '../services/redis.js';
 import { writeUserStateChange } from '../services/state-outbox.js';
-import { readUserBillingState, applyLease, burnLease } from '../services/user-billing-state.js';
+import { readOrgBillingState, applyLease, burnLease } from '../services/org-billing-state.js';
 import { requestLeaseFromPlatform } from '../services/lease-client.js';
 import { assertRegionConfig } from '../config.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 
 // Cache for plan limits (5 minute TTL)
 const PLAN_CACHE_TTL = 300; // 5 minutes
@@ -92,17 +93,25 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
 
     const userId = request.auth.userId;
 
+    // Resolve the organization that owns this user so meter queries
+    // include apps created by all org members, not just this caller.
+    // Fail loud — a missing org is data corruption, not a soft error.
+    const organizationId = await resolveOrganizationId(fastify.controlDb, userId);
+
     try {
       // Get user's account status and plan from local runtime DB cache
       const region = assertRegionConfig().instanceRegion;
       const runtimePool = fastify.runtimeDb(region);
 
-      let state = await readUserBillingState(runtimePool, userId);
+      let state = await readOrgBillingState(runtimePool, userId);
 
       // Cold-start fallback: seed runtime cache from platform DB
       if (!state) {
         const r = await fastify.controlDb.query(
-          `SELECT account_status, plan_id, spending_cap_usd FROM platform_users WHERE id = $1`,
+          `SELECT o.account_status, o.plan_id, o.spending_cap_usd
+           FROM organizations o
+           JOIN platform_users u ON u.personal_organization_id = o.id
+           WHERE u.id = $1`,
           [userId]
         );
         if (r.rows.length === 0) {
@@ -114,7 +123,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
            ON CONFLICT (user_id) DO NOTHING`,
           [userId, r.rows[0].account_status, r.rows[0].plan_id, r.rows[0].spending_cap_usd]
         );
-        state = await readUserBillingState(runtimePool, userId);
+        state = await readOrgBillingState(runtimePool, userId);
       }
 
       const account_status = state!.account_status ?? undefined;
@@ -152,7 +161,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
         if (includedCredits === -1) return; // unlimited (enterprise)
 
         // Playground uses lifetime credits; paid tiers use monthly billing period
-        const creditsUsed = await getAiCreditsUsed(fastify.controlDb, userId, limits.aiCreditsLifetime);
+        const creditsUsed = await getAiCreditsUsed(fastify.controlDb, organizationId, limits.aiCreditsLifetime);
         const isPlayground = plan_id === 'playground';
 
         if (creditsUsed >= includedCredits) {
@@ -204,8 +213,8 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
 
       // For all other meters, check via usage counters or source-of-truth queries
       const currentUsage = meterType === 'storage_bytes'
-        ? await getStorageUsed(fastify.controlDb, userId)
-        : await getCurrentUsage(fastify.controlDb, userId, meterType);
+        ? await getStorageUsed(fastify.controlDb, organizationId)
+        : await getCurrentUsage(fastify.controlDb, organizationId, meterType, undefined, userId);
       const limit = getLimitForMeter(limits, meterType);
 
       // Check if limit is unlimited (-1)

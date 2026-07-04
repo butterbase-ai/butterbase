@@ -70,7 +70,7 @@ function wrapNativeAnthropicStreamForSettlement(
       const providerCost = estimateWorstCaseUsd(pricing, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens);
       const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
-      maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
+      maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
         .catch(err => console.warn('[messages] auto-refill failed:', err));
       maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
         .catch(err => console.warn('[messages] credits-email failed:', err));
@@ -78,7 +78,7 @@ function wrapNativeAnthropicStreamForSettlement(
         ? estimatePromptTokens([{ role: 'assistant', content: thinkingText }], canonicalId)
         : undefined;
       writeAiUsageRow(ctx.runtimePool, {
-        appId: ctx.appId, userId: ctx.userId, model: canonicalId,
+        appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId,
         router: chosenRouter as any,
         promptTokens: inputTokens, completionTokens: outputTokens,
         totalTokens: inputTokens + outputTokens,
@@ -232,12 +232,12 @@ export async function routeMessages(
     const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
     await settleAfterCall(ctx.platformPool, lease, chargedCredits);
-    maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.userId)
+    maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
       .catch(err => console.error('[messages] auto-refill failed:', err));
     maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
       .catch(err => console.error('[messages] credits-email failed:', err));
     writeAiUsageRow(ctx.runtimePool, {
-      appId: ctx.appId, userId: ctx.userId, model: stripped,
+      appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: stripped,
       router: native.router.name as any,
       promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
       totalTokens: usage.promptTokens + usage.completionTokens,

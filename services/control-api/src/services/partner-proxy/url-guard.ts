@@ -66,30 +66,32 @@ function isPrivateIPv6(rawHost: string): boolean {
   return false;
 }
 
+import { ValidationError } from '../api-errors.js';
+
 export function assertPublicHttpsUrl(urlString: string): void {
   let parsed: URL;
   try {
     parsed = new URL(urlString);
   } catch {
-    throw new Error('base_url is not a valid URL');
+    throw new ValidationError('base_url is not a valid URL');
   }
   // Scheme must be lowercase https://. Reject mixed case, http, etc.
   if (parsed.protocol !== 'https:') {
-    throw new Error('base_url must use the https:// scheme');
+    throw new ValidationError('base_url must use the https:// scheme');
   }
   if (!urlString.startsWith('https://')) {
-    throw new Error('base_url must begin with lowercase "https://"');
+    throw new ValidationError('base_url must begin with lowercase "https://"');
   }
   const host = parsed.hostname;
-  if (!host) throw new Error('base_url is missing a hostname');
+  if (!host) throw new ValidationError('base_url is missing a hostname');
   const lower = host.toLowerCase();
   if (lower === 'localhost' || lower.endsWith('.localhost')) {
-    throw new Error('base_url host "localhost" is not allowed');
+    throw new ValidationError('base_url host "localhost" is not allowed');
   }
   if (isPrivateIPv4(host)) {
-    throw new Error(`base_url host ${host} is a private IPv4 address`);
+    throw new ValidationError(`base_url host ${host} is a private IPv4 address`);
   }
   if (isPrivateIPv6(host)) {
-    throw new Error(`base_url host ${host} is a private IPv6 address`);
+    throw new ValidationError(`base_url host ${host} is a private IPv6 address`);
   }
 }

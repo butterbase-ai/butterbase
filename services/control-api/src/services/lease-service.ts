@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { NotFoundError } from './api-errors.js';
 
 export interface GrantArgs {
   userId: string;
@@ -20,12 +21,15 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
-    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-      `SELECT monthly_allowance_usd, credits_usd
-       FROM platform_users WHERE id = $1 FOR UPDATE`,
+    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string; personal_organization_id: string }>(
+      `SELECT pu.monthly_allowance_usd, o.credits_usd, pu.personal_organization_id
+       FROM platform_users pu
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       WHERE pu.id = $1 FOR UPDATE OF pu, o`,
       [args.userId]
     );
-    if (u.rows.length === 0) throw new Error(`grantLease: user ${args.userId} not found`);
+    if (u.rows.length === 0) throw new NotFoundError('user', args.userId);
+    const organizationId = u.rows[0].personal_organization_id;
 
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
     const topup = parseFloat(u.rows[0].credits_usd);
@@ -61,16 +65,16 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     }
     if (topupDraw > 0) {
       await client.query(
-        `UPDATE platform_users SET credits_usd = credits_usd - $1 WHERE id = $2`,
-        [topupDraw, args.userId]
+        `UPDATE organizations SET credits_usd = credits_usd - $1 WHERE id = $2`,
+        [topupDraw, organizationId]
       );
     }
 
     const ins = await client.query<{ lease_id: string }>(
-      `INSERT INTO credit_leases (user_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd)
-       VALUES ($1, $2, $3, $4, 'active', $5, $6)
+      `INSERT INTO credit_leases (user_id, organization_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
        RETURNING lease_id`,
-      [args.userId, args.region, granted, expires, sourcePool, topupAmountColumn]
+      [args.userId, organizationId, args.region, granted, expires, sourcePool, topupAmountColumn]
     );
 
     await client.query('COMMIT');
@@ -101,18 +105,19 @@ export async function settleLease(
     await client.query('BEGIN');
     const r = await client.query<{
       user_id: string;
+      organization_id: string;
       amount_usd: string;
       status: string;
       source_pool: 'monthly' | 'topup' | 'split';
       topup_amount_usd: string | null;
     }>(
-      `SELECT user_id, amount_usd, status, source_pool, topup_amount_usd
+      `SELECT user_id, organization_id, amount_usd, status, source_pool, topup_amount_usd
        FROM credit_leases WHERE lease_id = $1 FOR UPDATE`,
       [args.leaseId]
     );
     if (r.rows.length === 0) {
       await client.query('ROLLBACK');
-      throw new Error(`settleLease: lease not found: ${args.leaseId}`);
+      throw new NotFoundError('lease', args.leaseId);
     }
     if (r.rows[0].status !== 'active') {
       await client.query('COMMIT');
@@ -141,8 +146,8 @@ export async function settleLease(
         );
       } else if (sourcePool === 'topup') {
         await client.query(
-          `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
-          [refund, r.rows[0].user_id]
+          `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
+          [refund, r.rows[0].organization_id]
         );
       } else {
         // split: pro-rate the refund by the original pool proportions.
@@ -156,8 +161,8 @@ export async function settleLease(
         }
         if (topupRefund > 0) {
           await client.query(
-            `UPDATE platform_users SET credits_usd = credits_usd + $1 WHERE id = $2`,
-            [topupRefund, r.rows[0].user_id]
+            `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
+            [topupRefund, r.rows[0].organization_id]
           );
         }
       }

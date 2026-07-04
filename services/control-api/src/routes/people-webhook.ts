@@ -24,8 +24,10 @@
 
 import type { FastifyInstance } from 'fastify';
 import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-registry.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { getPeoplePricing } from '../services/people/pricing.js';
 import { deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
 import { config } from '../config.js';
 import type { ProviderSlot } from '../services/people/types.js';
 
@@ -169,17 +171,20 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
 
       if (usdCost > 0) {
         usdCharged = await deductCreditsBalance(app.controlDb, lookupRow.user_id, usdCost);
-        await incrementUsage(lookupRow.user_id, 'people_credits', credits, lookupRow.app_id);
+        const organizationId = await resolveOrganizationId(app.controlDb, lookupRow.user_id);
+        await incrementUsage(organizationId, lookupRow.user_id, 'people_credits', credits, lookupRow.app_id);
       }
 
       // Audit row.  Use actual key_type from the lookup row (not hardcoded 'platform').
+      const organizationId = await resolveOrgFromApp(runtimePool, lookupRow.app_id);
       await runtimePool.query(
         `INSERT INTO people_usage_logs
-           (app_id, user_id, action, credits_consumed, usd_cost, usd_charged,
+           (app_id, organization_id, user_id, action, credits_consumed, usd_cost, usd_charged,
             key_type, request_id, response_status, linkedin_url, provider_slot)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
         [
           lookupRow.app_id,
+          organizationId,
           lookupRow.user_id,
           email ? 'profile_email_resolved' : 'profile_email_failed',
           credits,

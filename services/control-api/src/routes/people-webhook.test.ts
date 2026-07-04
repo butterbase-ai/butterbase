@@ -24,6 +24,14 @@ vi.mock('../services/people/pricing.js', () => ({
   })),
 }));
 
+vi.mock('../services/org-resolver.js', () => ({
+  resolveOrganizationId: vi.fn(),
+}));
+
+vi.mock('../services/app-org-resolver.js', () => ({
+  resolveOrgFromApp: vi.fn(),
+}));
+
 vi.mock('../config.js', () => ({
   config: {
     people: {
@@ -63,6 +71,8 @@ import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-reg
 import { deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
 import { getPeoplePricing } from '../services/people/pricing.js';
 import { config } from '../config.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -136,6 +146,10 @@ describe('POST /v1/webhooks/people/email', () => {
       markupPct: 20,
       usdPerCredit: USD_PER_CREDIT,
     });
+    // Default: resolveOrganizationId returns USER_ID (personal org).
+    vi.mocked(resolveOrganizationId).mockResolvedValue(USER_ID);
+    // Default: resolveOrgFromApp returns APP_ID (app's org id).
+    vi.mocked(resolveOrgFromApp).mockResolvedValue(APP_ID);
     app = await buildTestApp();
     vi.mocked(listRuntimeRegions).mockReturnValue(['local']);
   });
@@ -166,7 +180,7 @@ describe('POST /v1/webhooks/people/email', () => {
       USER_ID,
       1 * USD_PER_CREDIT, // 1 credit × USD_PER_CREDIT
     );
-    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 1, APP_ID);
+    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 1, APP_ID);
 
     // audit log written
     const auditCall = pool.query.mock.calls.find(
@@ -532,7 +546,7 @@ describe('POST /v1/webhooks/people/email', () => {
         USER_ID,
         7 * USD_PER_CREDIT,
       );
-      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 7, APP_ID);
+      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 7, APP_ID);
 
       // Audit row records provider_slot='secondary'
       const auditCall = pool.query.mock.calls.find(
@@ -568,6 +582,6 @@ describe('POST /v1/webhooks/people/email', () => {
       USER_ID,
       5 * USD_PER_CREDIT, // 5 credits from header
     );
-    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, 'people_credits', 5, APP_ID);
+    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 5, APP_ID);
   });
 });

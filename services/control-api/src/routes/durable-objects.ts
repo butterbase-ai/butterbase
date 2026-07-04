@@ -121,7 +121,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     const { appId } = request.params as { appId: string };
     const body = registerSchema.parse(request.body);
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await Service.registerDurableObject((await runtimeDb(appId)), appId, userId, body);
@@ -156,7 +156,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
   // GET: list DO classes
   fastify.get('/v1/:appId/durable-objects', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
     const rows = await Service.listDurableObjects((await runtimeDb(appId)), appId);
     return reply.send({ durable_objects: rows });
   });
@@ -164,7 +164,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
   // GET: one DO (with source)
   fastify.get('/v1/:appId/durable-objects/:name', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
     const row = await Service.getDurableObject((await runtimeDb(appId)), appId, name);
     if (!row) {
       return reply.status(404).send(createAgentError({
@@ -181,7 +181,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
   fastify.delete('/v1/:appId/durable-objects/:name', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     try {
       await Service.deleteDurableObject((await runtimeDb(appId)), appId, name);
       logFromRequest(request, {
@@ -212,7 +212,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
   // GET: usage
   fastify.get('/v1/:appId/durable-objects/:name/usage', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
     // usage_meters is a control-plane table — query via controlDb (not runtimeDb)
     const usage = await Service.getDurableObjectUsage(controlDb, appId, name, periodStartCurrentMonth());
     return reply.send(usage);
@@ -221,7 +221,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
   // GET: list env var keys (values are write-only — never returned by API)
   fastify.get('/v1/:appId/durable-objects/env', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId } = request.params as { appId: string };
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
     const keys = await Service.listDoEnvVarKeys((await runtimeDb(appId)), appId);
     return reply.send({ keys });
   });
@@ -230,7 +230,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
   fastify.put('/v1/:appId/durable-objects/env/:key', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, key } = request.params as { appId: string; key: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     const body = setEnvSchema.parse(request.body);
 
     try {
@@ -265,7 +265,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
   fastify.delete('/v1/:appId/durable-objects/env/:key', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, key } = request.params as { appId: string; key: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await Service.deleteDoEnvVar((await runtimeDb(appId)), appId, key);

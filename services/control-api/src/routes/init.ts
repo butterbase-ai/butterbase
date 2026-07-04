@@ -7,7 +7,9 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
-import { addUserAppIndex, removeUserAppIndex, listUserApps } from '../services/user-app-index.js';
+import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const initSchema = {
   body: {
@@ -38,15 +40,32 @@ const initSchema = {
 export async function initRoutes(app: FastifyInstance) {
   app.get('/apps', async (request) => {
     const ownerId = requireUserId(request);
-    const indexRows = await listUserApps(app.controlDb, ownerId);
+    // Scope to the caller's active org (Plan 07 org-scoped auth):
+    //   - bb_sk_* API keys carry their own organization_id → that's the scope.
+    //   - JWT callers may set x-organization-id (populated on request.auth) to
+    //     pick an org they belong to; otherwise fall back to the personal org.
+    // Cross-org apps are only visible with a key/session scoped to that org —
+    // this preserves the per-key strict scoping model.
+    const activeOrgId = request.auth?.organizationId
+      ?? await resolveOrganizationId(app.controlDb, ownerId);
+    const indexRows = await listUserApps(app.controlDb, activeOrgId);
     if (indexRows.length === 0) return { apps: [] };
 
-    const regions = Array.from(new Set(indexRows.map((r) => r.region)));
+
+    // Fetch runtime rows for the exact app-ids resolved by the org-scoped
+    // org_app_index — do NOT re-filter by owner_id, since org-shared apps
+    // are owned by the org's owner, not the caller. Group by region.
+    const idsByRegion = new Map<string, string[]>();
+    for (const r of indexRows) {
+      const list = idsByRegion.get(r.region) ?? [];
+      list.push(r.app_id);
+      idsByRegion.set(r.region, list);
+    }
     const allRows: any[] = [];
-    for (const region of regions) {
+    for (const [region, appIds] of idsByRegion) {
       const { rows } = await app.runtimeDb(region).query(
-        'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_user_id, substrate_autopropagate, created_at FROM apps WHERE owner_id = $1 ORDER BY created_at DESC',
-        [ownerId]
+        'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_organization_id, substrate_autopropagate, created_at FROM apps WHERE id = ANY($1::text[]) ORDER BY created_at DESC',
+        [appIds]
       );
       allRows.push(...rows);
     }
@@ -57,10 +76,21 @@ export async function initRoutes(app: FastifyInstance) {
   app.get('/apps/:app_id/status', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     const ownerId = requireUserId(request);
-    // Look up the app's home region from the cross-region user_app_index
+
+    // Org-aware auth check
+    try {
+      await AppResolver.resolveApp(app.controlDb, app_id, ownerId, request.auth?.organizationId ?? null);
+    } catch (err) {
+      if (err instanceof AppNotFoundError) {
+        return reply.code(404).send({ code: 'RESOURCE_NOT_FOUND', message: `App "${app_id}" not found` });
+      }
+      throw err;
+    }
+
+    // We know the app exists and user has access — get the region to query status
     // — the runtime apps row lives in that region's DB only.
     const idx = await app.controlDb.query<{ region: string }>(
-      `SELECT region FROM user_app_index WHERE app_id = $1`,
+      `SELECT region FROM org_app_index WHERE app_id = $1`,
       [app_id]
     );
     if (idx.rows.length === 0) {
@@ -70,8 +100,8 @@ export async function initRoutes(app: FastifyInstance) {
 
     const { rows } = await app.runtimeDb(region).query(
       `SELECT id, name, db_provisioned, provisioning_status, provisioning_error, created_at
-       FROM apps WHERE id = $1 AND owner_id = $2`,
-      [app_id, ownerId]
+       FROM apps WHERE id = $1`,
+      [app_id]
     );
 
     if (rows.length === 0) {
@@ -127,23 +157,27 @@ export async function initRoutes(app: FastifyInstance) {
     // Use authenticated user ID as owner
     const ownerId = requireUserId(request);
     // All per-app runtime writes happen in the TARGET region's runtime DB
-    // (where the app is homed), not the local machine's. user_app_index on
+    // (where the app is homed), not the local machine's. org_app_index on
     // the control DB is the cross-region map.
     const region = provisionRegion;
 
     // Enforce project limit for the user's plan.
     // Cross-tier: platform_users + plans live on controlDb; apps count comes
-    // from user_app_index (cross-region — counts a user's apps in all regions,
+    // from org_app_index (cross-region — counts a user's apps in all regions,
     // not just this region's runtime DB).
     const planCheck = await app.controlDb.query(
       `SELECT p.max_projects
        FROM platform_users pu
-       JOIN plans p ON pu.plan_id = p.id
+       JOIN organizations o ON o.id = pu.personal_organization_id
+       JOIN plans p ON p.id = o.plan_id
        WHERE pu.id = $1`,
       [ownerId]
     );
     const appsCountResult = await app.controlDb.query(
-      `SELECT COUNT(app_id)::int AS current_projects FROM user_app_index WHERE user_id = $1`,
+      `SELECT COUNT(oai.app_id)::int AS current_projects
+       FROM org_app_index oai
+       JOIN organization_members om ON om.organization_id = oai.organization_id
+       WHERE om.user_id = $1`,
       [ownerId]
     );
     const limitCheck = {
@@ -164,7 +198,7 @@ export async function initRoutes(app: FastifyInstance) {
 
     // Check subdomain uniqueness — auto-suffix with a butter-themed word if taken
     const existing = await app.controlDb.query(
-      `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
+      `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
       [subdomain]
     );
     if (existing.rows.length > 0) {
@@ -185,7 +219,7 @@ export async function initRoutes(app: FastifyInstance) {
 
       // If still taken (unlikely), add a short random number
       const stillTaken = await app.controlDb.query(
-        `SELECT app_id FROM user_app_index WHERE subdomain = $1`,
+        `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
         [subdomain]
       );
       if (stillTaken.rows.length > 0) {
@@ -219,13 +253,14 @@ export async function initRoutes(app: FastifyInstance) {
       [subdomain, appId]
     );
 
-    await addUserAppIndex(app.controlDb, {
-      userId: ownerId,
+    const orgId = await resolveOrganizationId(app.controlDb, ownerId);
+    await addOrgAppIndex(app.controlDb, {
+      organizationId: orgId,
       appId,
       region: provisionRegion,
       subdomain,
       appName: name,
-    }).catch((err) => app.log.warn({ err, appId }, 'user_app_index add failed; backfill will repair'));
+    }).catch((err) => app.log.warn({ err, appId }, 'org_app_index add failed; backfill will repair'));
 
     if (config.neon.enabled) {
       // Enqueue to task queue — worker serializes Neon API calls
@@ -286,21 +321,24 @@ export async function initRoutes(app: FastifyInstance) {
 
   app.delete('/apps/:app_id', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
-    // Look up the app's home region + owner from the cross-region index.
-    const idx = await app.controlDb.query<{ region: string; user_id: string }>(
-      `SELECT region, user_id FROM user_app_index WHERE app_id = $1`,
-      [app_id]
-    );
-    if (idx.rows.length === 0) {
-      return reply.code(404).send({ error: 'App not found' });
-    }
-    const region = idx.rows[0].region;
-    const indexedUserId = idx.rows[0].user_id;
     const callerUserId = requireUserId(request);
-    // Ownership check via the cross-region index (apps row may be missing
-    // in the orphan-cleanup path — see below).
-    if (indexedUserId !== callerUserId) {
-      return reply.code(403).send({ error: 'Forbidden: You do not own this app' });
+
+    // Org-aware auth + get region
+    let region: string;
+    try {
+      await AppResolver.resolveApp(app.controlDb, app_id, callerUserId, request.auth?.organizationId ?? null);
+      // Look up the app's home region from the cross-region index.
+      const idx = await app.controlDb.query<{ region: string }>(
+        `SELECT region FROM org_app_index WHERE app_id = $1`,
+        [app_id]
+      );
+      if (idx.rows.length === 0) {
+        return reply.code(404).send({ error: 'App not found' });
+      }
+      region = idx.rows[0].region;
+    } catch (err) {
+      if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
+      throw err;
     }
 
     const appResult = await app.runtimeDb(region).query(
@@ -308,13 +346,13 @@ export async function initRoutes(app: FastifyInstance) {
       [app_id]
     );
 
-    // Orphan-cleanup path: user_app_index pointed somewhere but the apps row
+    // Orphan-cleanup path: org_app_index pointed somewhere but the apps row
     // is gone (prior deprovision deleted it; the safety-net index cleanup
     // failed). Just remove the index entry and return success — no Neon DB,
     // no Cloudflare resources, no neon_tasks queue entry to enqueue.
     if (appResult.rows.length === 0) {
-      await removeUserAppIndex(app.controlDb, app_id).catch((err) =>
-        app.log.warn({ err, app_id }, 'orphan user_app_index remove failed'),
+      await removeOrgAppIndex(app.controlDb, app_id).catch((err) =>
+        app.log.warn({ err, app_id }, 'orphan org_app_index remove failed'),
       );
       logFromRequest(request, {
         appId: app_id,
@@ -330,11 +368,7 @@ export async function initRoutes(app: FastifyInstance) {
     }
 
     const appData = appResult.rows[0];
-    // Defensive: re-check ownership against the runtime apps row in case
-    // user_app_index drifted from apps.owner_id mid-flight.
-    if (appData.owner_id !== callerUserId) {
-      return reply.code(403).send({ error: 'Forbidden: You do not own this app' });
-    }
+    // AppResolver already verified access (owner or org member) — no second check needed.
 
     // Cross-region fork_count outbox: if this is a cloned app whose source lives
     // in a different region, queue a decrement for the sweeper. The intra-region
@@ -365,8 +399,8 @@ export async function initRoutes(app: FastifyInstance) {
     );
 
     // Remove from index early so dashboard reflects deletion immediately (idempotent)
-    await removeUserAppIndex(app.controlDb, app_id)
-      .catch((err) => app.log.warn({ err, app_id }, 'user_app_index remove failed; orphan reaper will clean'));
+    await removeOrgAppIndex(app.controlDb, app_id)
+      .catch((err) => app.log.warn({ err, app_id }, 'org_app_index remove failed; orphan reaper will clean'));
 
     // Run fast, non-Neon cleanup inline (Cloudflare + Redis)
     const cleanupTasks: Promise<void>[] = [];

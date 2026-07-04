@@ -46,7 +46,7 @@ let tmpHomeDir: string;
 let pushedSnapshotId: string;
 let workTmpDir: string;
 
-/** Seed user + user_app_index + runtime apps row (mirrors helpers/seed.ts but for the running stack). */
+/** Seed user + org_app_index + runtime apps row (mirrors helpers/seed.ts but for the running stack). */
 async function seedUserAndApp(): Promise<{ userId: string; appId: string }> {
   const stamp = Date.now() + Math.random().toString(36).slice(2, 6);
   const ownerEmail = `cli-e2e-${stamp}@example.com`;
@@ -62,7 +62,7 @@ async function seedUserAndApp(): Promise<{ userId: string; appId: string }> {
   const userId = u.rows[0].id;
 
   await controlPool.query(
-    `INSERT INTO user_app_index (app_id, user_id, region) VALUES ($1, $2, $3)`,
+    `INSERT INTO org_app_index (app_id, organization_id, region) VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $2), $3)`,
     [appId, userId, region],
   );
 

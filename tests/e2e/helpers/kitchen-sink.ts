@@ -197,20 +197,34 @@ export async function seedKitchenSinkApp(): Promise<KitchenSinkApp> {
     const appUserId: string | null = appUserRow?.rows[0]?.id ?? null;
 
     // app_refresh_tokens (runtime-plane; token_hash NOT token; user_id is required NOT NULL)
-    await queryRuntimeDb(
-      REGION,
-      `INSERT INTO app_refresh_tokens (id, app_id, user_id, token_hash, expires_at)
-       VALUES (gen_random_uuid(), $1, $2, 'SECRET-REFRESH-HASH', now() + interval '1 hour')`,
-      [appId, appUserId ?? '00000000-0000-0000-0000-000000000099'],
+    const appRefreshTokensOrgResult = await runtimePool.query(
+      `SELECT organization_id FROM apps WHERE id = $1`,
+      [appId],
     ).catch(() => null);
+    const appRefreshTokensOrgId = appRefreshTokensOrgResult?.rows[0]?.organization_id;
+    if (appRefreshTokensOrgId) {
+      await queryRuntimeDb(
+        REGION,
+        `INSERT INTO app_refresh_tokens (id, app_id, user_id, token_hash, expires_at, organization_id)
+         VALUES (gen_random_uuid(), $1, $2, 'SECRET-REFRESH-HASH', now() + interval '1 hour', $3)`,
+        [appId, appUserId ?? '00000000-0000-0000-0000-000000000099', appRefreshTokensOrgId],
+      ).catch(() => null);
+    }
 
     // app_verification_codes (runtime-plane; has user_id + type + code_hash; no plain "code" col)
-    await queryRuntimeDb(
-      REGION,
-      `INSERT INTO app_verification_codes (id, app_id, user_id, type, code_hash, expires_at)
-       VALUES (gen_random_uuid(), $1, $2, 'email_verify', 'SECRET-CODE-HASH', now() + interval '1 hour')`,
-      [appId, appUserId ?? '00000000-0000-0000-0000-000000000099'],
+    const appVerificationCodesOrgResult = await runtimePool.query(
+      `SELECT organization_id FROM apps WHERE id = $1`,
+      [appId],
     ).catch(() => null);
+    const appVerificationCodesOrgId = appVerificationCodesOrgResult?.rows[0]?.organization_id;
+    if (appVerificationCodesOrgId) {
+      await queryRuntimeDb(
+        REGION,
+        `INSERT INTO app_verification_codes (id, app_id, user_id, type, code_hash, expires_at, organization_id)
+         VALUES (gen_random_uuid(), $1, $2, 'email_verify', 'SECRET-CODE-HASH', now() + interval '1 hour', $3)`,
+        [appId, appUserId ?? '00000000-0000-0000-0000-000000000099', appVerificationCodesOrgId],
+      ).catch(() => null);
+    }
 
     // function_invocations (runtime-plane; no "status" col — omit it)
     await queryRuntimeDb(
@@ -222,12 +236,19 @@ export async function seedKitchenSinkApp(): Promise<KitchenSinkApp> {
     ).catch(() => null);
 
     // storage_objects (runtime-plane; col is "key" not "object_key")
-    await queryRuntimeDb(
-      REGION,
-      `INSERT INTO storage_objects (id, app_id, bucket, key, size_bytes)
-       VALUES (gen_random_uuid(), $1, 'default', 'avatars/sink.png', 100)`,
+    const orgIdResult = await runtimePool.query(
+      `SELECT organization_id FROM apps WHERE id = $1`,
       [appId],
     ).catch(() => null);
+    const organizationId = orgIdResult?.rows[0]?.organization_id;
+    if (organizationId) {
+      await queryRuntimeDb(
+        REGION,
+        `INSERT INTO storage_objects (id, app_id, organization_id, bucket, key, size_bytes)
+         VALUES (gen_random_uuid(), $1, $2, 'default', 'avatars/sink.png', 100)`,
+        [appId, organizationId],
+      ).catch(() => null);
+    }
 
     // app_integration_configs (runtime-plane; toolkit_slug + composio_auth_config_id, not provider+config)
     await queryRuntimeDb(

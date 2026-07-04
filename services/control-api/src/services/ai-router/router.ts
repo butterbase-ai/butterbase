@@ -106,6 +106,7 @@ export interface RouteContext {
   adapters: Map<RouterName, RouterAdapter>;
   markupPct: number;
   appId: string | null;
+  organizationId: string;
   userId: string;
   region: string;
   /**
@@ -243,11 +244,11 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill(
         { pool: ctx.platformPool, redis: ctx.redis },
-        ctx.userId,
+        ctx.organizationId,
       ).catch((err) => console.error('[router] auto-refill check failed:', err));
       maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
       writeAiUsageRow(ctx.runtimePool, {
-        appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
+        appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         totalTokens: usage.promptTokens + usage.completionTokens,
         providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
@@ -284,11 +285,11 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
-    ctx.userId,
+    ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
-    appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+    appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
     totalTokens: usage.promptTokens + usage.completionTokens,
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
@@ -452,11 +453,11 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
-    ctx.userId,
+    ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
-    appId: ctx.appId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+    appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: 0,
     totalTokens: usage.promptTokens,
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
@@ -772,13 +773,13 @@ export async function settleVideoJob(
   );
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
-    ctx.userId,
+    ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
     (err) => console.error('[router] credits-email failed:', err),
   );
   writeAiUsageRow(ctx.runtimePool, {
-    appId: ctx.appId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
+    appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
     markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,

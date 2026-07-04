@@ -85,10 +85,17 @@ export async function adminRoutes(app: FastifyInstance) {
         `SELECT count(DISTINCT app_id)::int AS c FROM function_invocations WHERE started_at >= current_date`
       ),
       app.controlDb.query(
-        `SELECT plan_id, count(*)::int AS count FROM platform_users GROUP BY plan_id ORDER BY count DESC`
+        `SELECT o.plan_id, count(*)::int AS count
+         FROM organizations o
+         WHERE o.personal = true
+         GROUP BY o.plan_id
+         ORDER BY count DESC`
       ),
       app.controlDb.query(
-        `SELECT id, email, plan_id, created_at FROM platform_users ORDER BY created_at DESC LIMIT 10`
+        `SELECT pu.id, pu.email, o.plan_id, pu.created_at
+         FROM platform_users pu
+         LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+         ORDER BY pu.created_at DESC LIMIT 10`
       ),
       fanOutQuery<{ date: string; requests: number; tokens: string; cost_usd: string }>(
         `SELECT date(created_at) AS date, count(*)::int AS requests,
@@ -169,11 +176,11 @@ export async function adminRoutes(app: FastifyInstance) {
       cidx++;
     }
     if (q.plan) {
-      controlConditions.push(`pu.plan_id = $${cidx++}`);
+      controlConditions.push(`o.plan_id = $${cidx++}`);
       controlParams.push(q.plan);
     }
     if (q.status) {
-      controlConditions.push(`pu.account_status = $${cidx++}`);
+      controlConditions.push(`o.account_status = $${cidx++}`);
       controlParams.push(q.status);
     }
     if (q.sub_status) {
@@ -202,18 +209,19 @@ export async function adminRoutes(app: FastifyInstance) {
       controlParams.push(q.joined_before);
     }
     if (q.has_stripe === 'yes') {
-      controlConditions.push(`pu.stripe_customer_id IS NOT NULL`);
+      controlConditions.push(`o.stripe_customer_id IS NOT NULL`);
     } else if (q.has_stripe === 'no') {
-      controlConditions.push(`pu.stripe_customer_id IS NULL`);
+      controlConditions.push(`o.stripe_customer_id IS NULL`);
     }
 
     const controlWhere = controlConditions.length > 0 ? `WHERE ${controlConditions.join(' AND ')}` : '';
 
     // Fetch platform_users from controlDb (platform tier)
     const usersResult = await app.controlDb.query(
-      `SELECT pu.id, pu.email, pu.display_name, pu.plan_id, pu.account_status,
-              pu.stripe_customer_id, pu.created_at
+      `SELECT pu.id, pu.email, pu.display_name, o.plan_id, o.account_status,
+              o.stripe_customer_id, pu.created_at
        FROM platform_users pu
+       LEFT JOIN organizations o ON o.id = pu.personal_organization_id
        ${controlWhere}
        ORDER BY pu.created_at DESC`,
       controlParams
@@ -870,8 +878,9 @@ export async function adminRoutes(app: FastifyInstance) {
         `SELECT s.stripe_subscription_id
          FROM subscriptions s
          JOIN platform_users pu ON pu.id = s.user_id
+         JOIN organizations o ON o.id = pu.personal_organization_id
          WHERE s.status IN ('active', 'trialing')
-           AND pu.plan_id = 'enterprise'
+           AND o.plan_id = 'enterprise'
            AND s.stripe_subscription_id IS NOT NULL`
       ),
     ]);
@@ -1303,7 +1312,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // platform_users → controlDb; ai_usage_logs + apps fan out per region.
     const [userResult, byModelRows, byRouterRows, byAppRows, dailyRows] = await Promise.all([
       app.controlDb.query(
-        `SELECT id, email, plan_id FROM platform_users WHERE id = $1`,
+        // plan_id lives on organizations post-Plan-07.
+        `SELECT pu.id, pu.email, o.plan_id
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [id]
       ),
       fanOutQuery<{ model: string; provider: string; router: string | null; requests: number; tokens: string; cost_usd: string }>(
@@ -1553,7 +1566,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const [userResult, subResult, eventsResult] = await Promise.all([
       app.controlDb.query(
-        `SELECT id, email, plan_id, stripe_customer_id FROM platform_users WHERE id = $1`,
+        // plan_id + stripe_customer_id live on organizations post-Plan-07.
+        `SELECT pu.id, pu.email, o.plan_id, o.stripe_customer_id
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [id]
       ),
       app.controlDb.query(
@@ -1624,13 +1641,17 @@ export async function adminRoutes(app: FastifyInstance) {
       auto_refill_last_attempt_at: Date | null;
       auto_refill_last_failure_reason: string | null;
     }>(
-      `SELECT monthly_allowance_usd::text,
-              credits_usd::text,
-              auto_refill_enabled,
-              auto_refill_amount_usd::text,
-              auto_refill_last_attempt_at,
-              auto_refill_last_failure_reason
-         FROM platform_users WHERE id = $1`,
+      // Post-Plan-07: credits_usd + auto_refill_* live on organizations,
+      // monthly_allowance_usd stays on platform_users.
+      `SELECT pu.monthly_allowance_usd::text,
+              o.credits_usd::text,
+              o.auto_refill_enabled,
+              o.auto_refill_amount_usd::text,
+              o.auto_refill_last_attempt_at,
+              o.auto_refill_last_failure_reason
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
       [id]
     );
     if (r.rows.length === 0) return reply.code(404).send({ error: 'user_not_found' });

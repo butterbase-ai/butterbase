@@ -22,11 +22,11 @@ describe('resolveAppRegion', () => {
     };
   });
 
-  it('reads from user_app_index on cache miss and caches', async () => {
+  it('reads from org_app_index on cache miss and caches', async () => {
     const r = await resolveAppRegion(pool, redis, 'app-1');
     expect(r).toBe('us-east-1');
     expect(pool.query).toHaveBeenCalledTimes(1);
-    expect(pool.query.mock.calls[0][0]).toMatch(/user_app_index/);
+    expect(pool.query.mock.calls[0][0]).toMatch(/org_app_index/);
     expect(redis.setex).toHaveBeenCalledWith('app-region:app-1', 300, 'us-east-1');
   });
 
