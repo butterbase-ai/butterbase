@@ -7,7 +7,7 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
-import { addOrgAppIndex, removeOrgAppIndex, listUserApps, listAppsForUserMemberships } from '../services/org-app-index.js';
+import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
 import { resolveOrganizationId } from '../services/org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
@@ -40,10 +40,15 @@ const initSchema = {
 export async function initRoutes(app: FastifyInstance) {
   app.get('/apps', async (request) => {
     const ownerId = requireUserId(request);
-    // Enumerate across every org the caller is a member of — personal + team.
-    // Filtering by personal_organization_id alone would hide team-owned apps
-    // the caller has legitimate access to.
-    const indexRows = await listAppsForUserMemberships(app.controlDb, ownerId);
+    // Scope to the caller's active org (Plan 07 org-scoped auth):
+    //   - bb_sk_* API keys carry their own organization_id → that's the scope.
+    //   - JWT callers may set x-organization-id (populated on request.auth) to
+    //     pick an org they belong to; otherwise fall back to the personal org.
+    // Cross-org apps are only visible with a key/session scoped to that org —
+    // this preserves the per-key strict scoping model.
+    const activeOrgId = request.auth?.organizationId
+      ?? await resolveOrganizationId(app.controlDb, ownerId);
+    const indexRows = await listUserApps(app.controlDb, activeOrgId);
     if (indexRows.length === 0) return { apps: [] };
 
 

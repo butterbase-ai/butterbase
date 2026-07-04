@@ -73,11 +73,7 @@ export class KvCredentialsService {
        FROM api_keys ak
        LEFT JOIN org_app_index oai
          ON oai.app_id = $2
-         AND EXISTS (
-           SELECT 1 FROM organization_members om
-           WHERE om.organization_id = oai.organization_id
-             AND om.user_id = ak.user_id
-         )
+         AND oai.organization_id = ak.organization_id
        LEFT JOIN app_kv_credentials kv ON kv.app_id = oai.app_id
        WHERE ak.key_hash = $1
          AND ak.revoked_at IS NULL

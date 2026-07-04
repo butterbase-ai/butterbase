@@ -57,19 +57,3 @@ export async function listUserApps(controlPool: pg.Pool, organizationId: string)
   return r.rows;
 }
 
-/**
- * List every app the given user can see via their organization memberships —
- * personal org plus any team orgs they belong to. Used by the /apps endpoint
- * so team-owned apps are surfaced to their members, not just the org owner.
- */
-export async function listAppsForUserMemberships(controlPool: pg.Pool, userId: string): Promise<OrgAppIndexRow[]> {
-  const r = await controlPool.query<OrgAppIndexRow>(
-    `SELECT oai.app_id, oai.organization_id, oai.region, oai.subdomain, oai.app_name, oai.created_at, oai.updated_at
-     FROM org_app_index oai
-     JOIN organization_members om ON om.organization_id = oai.organization_id
-     WHERE om.user_id = $1
-     ORDER BY oai.created_at DESC`,
-    [userId],
-  );
-  return r.rows;
-}
