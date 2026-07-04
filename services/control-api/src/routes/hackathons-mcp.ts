@@ -450,9 +450,10 @@ export async function hackathonsMcpRoutes(app: FastifyInstance) {
       const subdomain = extractButterbaseSubdomain(data[urlKey]);
       if (subdomain) {
         const { rows: appRows } = await app.controlDb.query<{ app_id: string }>(
-          `SELECT app_id FROM org_app_index
-            WHERE subdomain = $1 AND organization_id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)
-            ORDER BY created_at DESC
+          `SELECT oai.app_id FROM org_app_index oai
+            JOIN organization_members om ON om.organization_id = oai.organization_id
+            WHERE oai.subdomain = $1 AND om.user_id = $2
+            ORDER BY oai.created_at DESC
             LIMIT 1`,
           [subdomain, userId]
         );

@@ -159,7 +159,7 @@ export async function oauthRoutes(app: FastifyInstance) {
       const apps = await app.controlDb.query<{ id: string; name: string }>(
         `SELECT oai.app_id AS id, COALESCE(oai.app_name, oai.app_id) AS name
            FROM org_app_index oai
-          WHERE oai.organization_id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)
+           JOIN organization_members om ON om.organization_id = oai.organization_id AND om.user_id = $1
           ORDER BY oai.created_at DESC`,
         [request.auth.userId]
       );

@@ -167,7 +167,10 @@ export async function initRoutes(app: FastifyInstance) {
       [ownerId]
     );
     const appsCountResult = await app.controlDb.query(
-      `SELECT COUNT(app_id)::int AS current_projects FROM org_app_index WHERE organization_id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
+      `SELECT COUNT(oai.app_id)::int AS current_projects
+       FROM org_app_index oai
+       JOIN organization_members om ON om.organization_id = oai.organization_id
+       WHERE om.user_id = $1`,
       [ownerId]
     );
     const limitCheck = {
