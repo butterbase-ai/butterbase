@@ -54,7 +54,7 @@ export async function repoRoutes(app: FastifyInstance) {
   }, async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     try {
-      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request));
+      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       let manifest;
       try {
@@ -133,7 +133,7 @@ export async function repoRoutes(app: FastifyInstance) {
   app.post('/v1/:app_id/repo/snapshots/commit', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     try {
-      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request));
+      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const manifest = validateManifest((request.body as any)?.manifest);
 
@@ -245,7 +245,7 @@ export async function repoRoutes(app: FastifyInstance) {
     const { app_id } = request.params as { app_id: string };
     try {
       const userId = tryGetUserId(request);
-      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId, request.auth?.organizationId ?? null);
 
       const latestId = await getLatestSnapshotId(ctx.appId);
       if (!latestId) return reply.code(404).send(createAgentError({
@@ -275,7 +275,7 @@ export async function repoRoutes(app: FastifyInstance) {
     const { app_id } = request.params as { app_id: string };
     try {
       const userId = tryGetUserId(request);
-      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId, request.auth?.organizationId ?? null);
 
       const snapshots = await listSnapshots(ctx.appId);
       // Sort newest-first; this is what every consumer will want.
@@ -305,7 +305,7 @@ export async function repoRoutes(app: FastifyInstance) {
     }
     try {
       const userId = tryGetUserId(request);
-      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId, request.auth?.organizationId ?? null);
 
       const json = await getManifestJson(ctx.appId, snapshot_id);
       if (!json) return reply.code(404).send(createAgentError({
@@ -335,7 +335,7 @@ export async function repoRoutes(app: FastifyInstance) {
     }
     try {
       const userId = tryGetUserId(request);
-      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId, request.auth?.organizationId ?? null);
 
       const head = await headBlob(ctx.appId, sha256);
       if (!head.exists) return reply.code(404).send(createAgentError({
@@ -385,7 +385,7 @@ export async function repoRoutes(app: FastifyInstance) {
     }
     try {
       const userId = tryGetUserId(request);
-      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId);
+      const ctx = await authorizeRepoRead(app.controlDb, app_id, userId, request.auth?.organizationId ?? null);
 
       const heads = await headBlobs(ctx.appId, shas as string[]);
       const present = [...heads.entries()].filter(([, h]) => h.exists);
@@ -405,7 +405,7 @@ export async function repoRoutes(app: FastifyInstance) {
   app.delete('/v1/:app_id/repo', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     try {
-      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request));
+      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       await wipeRepo(ctx.appId);
 
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, ctx.region);

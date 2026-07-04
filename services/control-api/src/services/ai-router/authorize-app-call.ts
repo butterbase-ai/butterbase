@@ -87,7 +87,7 @@ export async function authorizeAppAiCall(
     // AppResolver throws AppNotFoundError when the user is neither the owner
     // nor a member of the app's org, so we fall through to checks 2 and 3.
     try {
-      await AppResolver.resolveApp(controlDb, appId, userId);
+      await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
       return { ok: true, ownerId, caller: { kind: 'owner' } };
     } catch (err) {
       if (!(err instanceof AppNotFoundError)) {

@@ -36,7 +36,7 @@ async function resolveRealtimeAuth(
     assertAppNotPaused(app);
     return { dbName: app.db_name, role: 'butterbase_user', userId: endUserClaims.sub };
   } else if (auth.authMethod === 'api_key' || auth.authMethod === 'jwt') {
-    const app = await AppResolver.resolveApp(controlDb, appId, auth.userId!);
+    const app = await AppResolver.resolveApp(controlDb, appId, auth.userId!, auth.organizationId ?? null);
     assertAppNotPaused(app);
     return { dbName: app.db_name, role: 'butterbase_service', userId: null };
   } else {
@@ -321,7 +321,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
       }
 
       // Resolve app + verify ownership
-      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!);
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!, request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
@@ -390,7 +390,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
     try {
       // Resolve app
       if (request.auth.authMethod === 'api_key' || request.auth.authMethod === 'jwt') {
-        await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!);
+        await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!, request.auth?.organizationId ?? null);
       } else {
         await AppResolver.resolveAppPublic(app.controlDb, app_id);
       }
@@ -491,7 +491,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
     const { app_id, table_name } = request.params as { app_id: string; table_name: string };
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!);
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!, request.auth?.organizationId ?? null);
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
 
       // Disable the trigger in the app DB

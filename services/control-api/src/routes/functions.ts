@@ -103,7 +103,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const body = parsed.data;
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Check if handler function is exported (Deno will validate actual syntax)
     if (!body.code.includes('export') || !body.code.includes('handler')) {
@@ -261,7 +261,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const body = request.body as { envVars: Record<string, string> };
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Validate envVars
     if (!body.envVars || typeof body.envVars !== 'object') {
@@ -352,7 +352,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const { appId, name } = request.params as { appId: string; name: string };
     const body = request.body as { allow_service_key_impersonation?: boolean };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     if (body.allow_service_key_impersonation === undefined) {
       return reply.code(400).send(createAgentError({
@@ -411,7 +411,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     const { appId } = request.params as { appId: string };
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT
@@ -481,7 +481,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/functions/:name', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT f.*,
@@ -546,7 +546,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
   fastify.delete('/v1/:appId/functions/:name', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     await (await runtimeDb(appId)).query(
       `UPDATE app_functions SET deleted_at = now() WHERE app_id = $1 AND name = $2`,
@@ -580,7 +580,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/:appId/functions/:name/invoke', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Optional impersonation: caller may pass X-Butterbase-As-User to invoke
     // the function with ctx.user set to that id. Gated by the per-function
@@ -714,7 +714,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       include_deleted?: boolean | string;
     };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const includeDeleted = include_deleted === true || include_deleted === 'true';
 
@@ -794,7 +794,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
         level?: 'error' | 'all';
       };
 
-      await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+      await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
       const fnResult = await (await runtimeDb(appId)).query(
         'SELECT id FROM app_functions WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL',

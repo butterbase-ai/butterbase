@@ -55,7 +55,7 @@ async function resolveAppAndUser(
   } else {
     // Platform auth — use org-aware AppResolver
     try {
-      const resolved = await AppResolver.resolveApp(controlDb, appId, auth.userId);
+      const resolved = await AppResolver.resolveApp(controlDb, appId, auth.userId, auth.organizationId ?? null);
       if (resolved.paused) {
         throw new AppPausedError(appId, resolved.paused_reason ?? null);
       }

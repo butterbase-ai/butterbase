@@ -118,7 +118,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     try {
       // Verify ownership
       try {
-        await AppResolver.resolveApp(app.controlDb, appId, userId);
+        await AppResolver.resolveApp(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
       } catch (err) {
         if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
         throw err;
@@ -172,7 +172,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     try {
       // Verify ownership
       try {
-        await AppResolver.resolveApp(app.controlDb, appId, userId);
+        await AppResolver.resolveApp(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
       } catch (err) {
         if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
         throw err;
@@ -503,7 +503,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     try {
       // Verify ownership
       try {
-        await AppResolver.resolveApp(app.controlDb, appId, userId);
+        await AppResolver.resolveApp(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
       } catch (err) {
         if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'App not found' });
         throw err;

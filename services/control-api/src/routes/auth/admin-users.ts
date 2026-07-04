@@ -52,7 +52,7 @@ export async function adminAuthUsersRoutes(app: FastifyInstance) {
     try {
       const region = await resolveAppHomeRegion(app.controlDb, app_id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!);
+      await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!, request.auth?.organizationId ?? null);
 
       const limit = Math.min(Math.max(parseInt(rawLimit ?? '50', 10) || 50, 1), 200);
 
@@ -121,7 +121,7 @@ export async function adminAuthUsersRoutes(app: FastifyInstance) {
     try {
       const region = await resolveAppHomeRegion(app.controlDb, app_id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-      await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!);
+      await AppResolver.resolveApp(app.controlDb, app_id, request.auth.userId!, request.auth?.organizationId ?? null);
 
       const result = await runtimeDb.query<{ email: string }>(
         `DELETE FROM app_users WHERE app_id = $1 AND id = $2 RETURNING email`,

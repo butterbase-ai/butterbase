@@ -67,11 +67,7 @@ export async function oauthConfigRoutes(app: FastifyInstance) {
     const region = await resolveAppHomeRegion(app.controlDb, app_id);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       // Auto-fill URLs and scopes from provider registry for known providers
       const providerDef = getProviderDefinition(provider);
@@ -157,11 +153,7 @@ export async function oauthConfigRoutes(app: FastifyInstance) {
     const region = await resolveAppHomeRegion(app.controlDb, app_id);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       // app_oauth_configs is a runtime table
       const result = await runtimeDb.query(
@@ -200,11 +192,7 @@ export async function oauthConfigRoutes(app: FastifyInstance) {
     const region = await resolveAppHomeRegion(app.controlDb, app_id);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       // app_oauth_configs is a runtime table
       const result = await runtimeDb.query(
@@ -265,11 +253,7 @@ export async function oauthConfigRoutes(app: FastifyInstance) {
     const region = await resolveAppHomeRegion(app.controlDb, app_id);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       // Build dynamic update query
       const updateFields: string[] = [];
@@ -393,11 +377,7 @@ export async function oauthConfigRoutes(app: FastifyInstance) {
     const region = await resolveAppHomeRegion(app.controlDb, app_id);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       // app_oauth_configs is a runtime table
       const result = await runtimeDb.query(

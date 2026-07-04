@@ -31,11 +31,7 @@ export async function cloneWebhookConfigRoutes(app: FastifyInstance) {
     }
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       if ('clear' in parseResult.data && parseResult.data.clear === true) {
         await deleteCloneWebhook(app.controlDb, resolvedApp.id);

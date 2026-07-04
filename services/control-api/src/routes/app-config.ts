@@ -54,11 +54,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     const { app_id } = request.params as { app_id: string };
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -121,11 +117,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     const { allowed_origins } = parseResult.data;
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -204,11 +196,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     }
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -289,11 +277,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     }
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -376,11 +360,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     const { post_auth_function } = parseResult.data;
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -459,11 +439,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     const { access_mode } = parseResult.data;
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -525,11 +501,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     const { visibility, listed } = parseResult.data;
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -604,11 +576,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     const { paused, reason } = parseResult.data;
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
@@ -680,11 +648,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
     const { tables } = parseResult.data;
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 

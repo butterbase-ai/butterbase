@@ -84,7 +84,7 @@ async function resolveAuth(
       userId: endUserClaims.sub,
     };
   } else if (auth.authMethod === 'api_key' || auth.authMethod === 'jwt') {
-    const resolved = await AppResolver.resolveApp(controlDb, appId, auth.userId!);
+    const resolved = await AppResolver.resolveApp(controlDb, appId, auth.userId!, auth.organizationId ?? null);
     return {
       pool: await getAppPoolForApp(controlDb, resolved.id, resolved.db_name),
       role: 'butterbase_service',

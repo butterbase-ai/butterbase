@@ -49,9 +49,10 @@ async function assertAppOwnership(
   controlDb: pg.Pool,
   appId: string,
   userId: string,
+  activeOrganizationId: string | null = null,
 ): Promise<{ ok: true } | { ok: false; reply: { code: number; body: { error: string; message?: string } } }> {
   try {
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, activeOrganizationId);
     return { ok: true };
   } catch (err) {
     if (err instanceof AppNotFoundError) {
@@ -126,7 +127,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const pricing = getPeoplePricing(slot);
@@ -203,7 +204,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const pricing = getPeoplePricing(slot);
@@ -288,7 +289,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     // Cache-first (unless force-live)
@@ -415,7 +416,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const pricing = getPeoplePricing(slot);
@@ -506,7 +507,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
 
-    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId);
+    const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
 
     const r = await runtime.query<{

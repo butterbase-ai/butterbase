@@ -47,7 +47,7 @@ async function authForOwnerStream(
 ): Promise<{ ok: true } | { ok: false; code: number; error: string }> {
   if (request.auth?.userId) {
     try {
-      await AppResolver.resolveApp(app.controlDb, appId, request.auth.userId);
+      await AppResolver.resolveApp(app.controlDb, appId, request.auth.userId, request.auth?.organizationId ?? null);
       return { ok: true };
     } catch (err) {
       if (err instanceof AppNotFoundError) return { ok: false, code: 404, error: 'App not found' };

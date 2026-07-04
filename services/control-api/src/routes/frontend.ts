@@ -60,7 +60,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
     const userId = requireUserId(request);
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     // Check if Cloudflare is enabled
     if (!config.cloudflare.enabled) {
@@ -112,7 +112,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
     const userId = requireUserId(request);
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await DeploymentService.startDeployment(
@@ -151,7 +151,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await DeploymentService.syncDeploymentStatus(
@@ -200,7 +200,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       const result = await DeploymentService.cancelDeployment(
@@ -238,7 +238,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
     const { appId } = request.params as { appId: string };
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT
@@ -272,7 +272,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/frontend/deployments/:deploymentId', async (request, reply) => {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     let result = await (await runtimeDb(appId)).query(
       `SELECT * FROM app_deployments WHERE id = $1 AND app_id = $2`,
@@ -329,7 +329,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
     const body = setFrontendEnvSchema.parse(request.body);
 
     // Validate app ownership
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Validate envVars
     if (!body || typeof body !== 'object' || Object.keys(body).length === 0) {
@@ -388,7 +388,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/:appId/frontend/env', async (request, reply) => {
     const { appId } = request.params as { appId: string };
 
-    await AppResolver.resolveApp(controlDb, appId, requireUserId(request));
+    await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     const result = await (await runtimeDb(appId)).query(
       `SELECT key, created_at, updated_at
@@ -412,7 +412,7 @@ export async function registerFrontendRoutes(fastify: FastifyInstance) {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
 
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
       await DeploymentService.deleteDeployment(controlDb, appId, deploymentId);

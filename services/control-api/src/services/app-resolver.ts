@@ -64,15 +64,22 @@ export class AppResolver {
   static async resolveApp(
     controlPool: Pool,
     appId: string,
-    userId: string
+    userId: string,
+    /**
+     * Optional: the caller's ACTIVE organization scope. When set (bb_sk_*
+     * API-key path or JWT session with x-organization-id header), access is
+     * restricted to apps in this exact org — even if the user is a member of
+     * other orgs that own the app. Enforces the Plan 07 strict per-key-org
+     * scoping model.
+     *
+     * When omitted (legacy JWT sessions without an active-org signal), falls
+     * back to the membership-enumeration check for backwards compatibility.
+     */
+    activeOrganizationId?: string | null,
   ): Promise<{ id: string; name: string; owner_id: string; db_name: string; paused: boolean; paused_reason: string | null }> {
     const region = await resolveHomeRegion(controlPool, appId);
     if (!region) throw new AppNotFoundError(appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-    // Post-Plan-07: apps.organization_id is the source of truth for who can
-    // access the app. Any member of that org has access, not just the direct
-    // owner. Fall back to owner_id for legacy apps whose organization_id is
-    // still NULL (pre-org_app_index backfill).
     const result = await runtimeDb.query<{
       id: string;
       name: string;
@@ -93,6 +100,21 @@ export class AppResolver {
     }
     const row = result.rows[0];
 
+    // STRICT PATH: when the caller's active org is known (bb_sk_* keys always
+    // supply it; JWT sessions may set x-organization-id), the app MUST live
+    // in that exact org. This blocks the cross-org membership escalation
+    // where a personal-org key could reach team-org apps the user happens to
+    // belong to. Only exception is legacy apps with NULL organization_id
+    // (pre-backfill), which fall through to the ownership check.
+    if (activeOrganizationId && row.organization_id) {
+      if (row.organization_id !== activeOrganizationId) {
+        throw new AppNotFoundError(appId);
+      }
+      // App is in caller's active org — access granted.
+      return row;
+    }
+
+    // LEGACY / FALLBACK PATH — no active-org signal on the request.
     // Owner always passes.
     if (row.owner_id === userId) return row;
 

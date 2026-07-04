@@ -63,7 +63,7 @@ export async function registerFrontendFromSourceRoutes(fastify: FastifyInstance)
   fastify.post('/v1/:appId/frontend/deployments/from-source', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     const buildId = crypto.randomUUID();
 
@@ -116,7 +116,7 @@ export async function registerFrontendFromSourceRoutes(fastify: FastifyInstance)
   fastify.post('/v1/:appId/frontend/deployments/from-source/:deploymentId/start', async (request, reply) => {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     const body = startSchema.parse(request.body ?? {});
 
@@ -202,7 +202,7 @@ export async function registerFrontendFromSourceRoutes(fastify: FastifyInstance)
   fastify.get('/v1/:appId/frontend/deployments/from-source/:deploymentId/logs', async (request, reply) => {
     const { appId, deploymentId } = request.params as { appId: string; deploymentId: string };
     const userId = requireUserId(request);
-    await AppResolver.resolveApp(controlDb, appId, userId);
+    await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     const job = await controlDb.query(
       `SELECT id, status, log_r2_key FROM app_build_jobs

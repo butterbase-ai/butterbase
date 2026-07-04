@@ -48,7 +48,7 @@ async function resolveGatewayUser(
     throw e;
   }
   try {
-    await AppResolver.resolveApp((app as any).controlDb, appId, userId);
+    await AppResolver.resolveApp((app as any).controlDb, appId, userId, req.auth?.organizationId ?? null);
   } catch (err) {
     if (err instanceof AppNotFoundError) {
       const e: any = new Error('app_not_found');

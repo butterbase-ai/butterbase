@@ -44,7 +44,7 @@ export async function auditLogRoutes(app: FastifyInstance) {
     };
 
     try {
-      await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request));
+      await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       // Build the unified view: audit_events UNION legacy auth_audit_logs
       // (legacy rows get category='auth' and actor fields derived from user_id)

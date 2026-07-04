@@ -79,7 +79,7 @@ export async function initRoutes(app: FastifyInstance) {
 
     // Org-aware auth check
     try {
-      await AppResolver.resolveApp(app.controlDb, app_id, ownerId);
+      await AppResolver.resolveApp(app.controlDb, app_id, ownerId, request.auth?.organizationId ?? null);
     } catch (err) {
       if (err instanceof AppNotFoundError) {
         return reply.code(404).send({ code: 'RESOURCE_NOT_FOUND', message: `App "${app_id}" not found` });
@@ -326,7 +326,7 @@ export async function initRoutes(app: FastifyInstance) {
     // Org-aware auth + get region
     let region: string;
     try {
-      await AppResolver.resolveApp(app.controlDb, app_id, callerUserId);
+      await AppResolver.resolveApp(app.controlDb, app_id, callerUserId, request.auth?.organizationId ?? null);
       // Look up the app's home region from the cross-region index.
       const idx = await app.controlDb.query<{ region: string }>(
         `SELECT region FROM org_app_index WHERE app_id = $1`,

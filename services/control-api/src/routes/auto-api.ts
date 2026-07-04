@@ -143,7 +143,7 @@ async function resolveAppAndPool(
     };
   } else if (auth.authMethod === 'api_key' || auth.authMethod === 'jwt') {
     // Platform auth (API key or platform JWT)
-    const resolvedApp = await AppResolver.resolveApp(controlDb, appId, auth.userId!);
+    const resolvedApp = await AppResolver.resolveApp(controlDb, appId, auth.userId!, auth.organizationId ?? null);
     assertAppNotPaused(resolvedApp);
     const pool = await getAppPoolForApp(controlDb, resolvedApp.id, resolvedApp.db_name);
 

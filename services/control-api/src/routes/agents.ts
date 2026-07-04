@@ -98,6 +98,7 @@ async function assertOwner(
   app: FastifyInstance,
   appId: string,
   userId: string,
+  activeOrganizationId: string | null = null,
 ): Promise<
   | { ok: true; runtimeDb: Pool; region: string }
   | { ok: false; code: number; error: string }
@@ -122,7 +123,7 @@ async function assertOwner(
     throw err;
   }
   try {
-    await AppResolver.resolveApp(app.controlDb, appId, userId);
+    await AppResolver.resolveApp(app.controlDb, appId, userId, activeOrganizationId);
   } catch (err) {
     if (err instanceof AppNotFoundError) return { ok: false, code: 404, error: 'App not found' };
     throw err;
@@ -134,7 +135,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.get('/v1/:appId/agents', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     try {
       const agents = await listAgents(own.runtimeDb, appId);
@@ -148,7 +149,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.post('/v1/:appId/agents', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const parsed = createBody.safeParse(request.body);
     if (!parsed.success) {
@@ -179,7 +180,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.get('/v1/:appId/agents/:name', async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const agent = await getAgent(own.runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
@@ -189,7 +190,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.patch('/v1/:appId/agents/:name', async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const parsed = patchBody.safeParse(request.body);
     if (!parsed.success) {
@@ -217,7 +218,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.delete('/v1/:appId/agents/:name', async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const ok = await deleteAgent(own.runtimeDb, appId, name);
     if (!ok) return reply.code(404).send({ error: 'Agent not found' });
@@ -227,7 +228,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.post('/v1/:appId/agents/:name/validate', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const parsed = z.object({ graph_spec: graphSpecSchema })
       .safeParse(request.body);
@@ -240,7 +241,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.get('/v1/:appId/mcp-servers', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const servers = await listMcpServers(own.runtimeDb, appId);
     return { servers };
@@ -249,7 +250,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.post('/v1/:appId/mcp-servers', async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const parsed = mcpServerCreateBody.safeParse(request.body);
     if (!parsed.success) {
@@ -269,7 +270,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.delete('/v1/:appId/mcp-servers/:id', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const ok = await deleteMcpServer(own.runtimeDb, appId, id);
     if (!ok) return reply.code(404).send({ error: 'MCP server not found' });
@@ -279,7 +280,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.post('/v1/:appId/mcp-servers/:id/probe', async (request, reply) => {
     const { appId, id } = request.params as { appId: string; id: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
 
     const result = await probeMcpServer(own.runtimeDb, appId, id, _injectedProbeFn);
@@ -297,7 +298,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.post('/v1/:appId/agents/:name/runs', async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
 
     const parsed = runCreateBody.safeParse(request.body);
@@ -365,7 +366,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.get('/v1/:appId/agents/:name/runs/:id', async (request, reply) => {
     const { appId, name, id } = request.params as { appId: string; name: string; id: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const agent = await getAgent(own.runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
@@ -379,7 +380,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.get('/v1/:appId/agents/:name/runs', async (request, reply) => {
     const { appId, name } = request.params as { appId: string; name: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const agent = await getAgent(own.runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
@@ -390,7 +391,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.post('/v1/:appId/agents/:name/runs/:id/cancel', async (request, reply) => {
     const { appId, name, id } = request.params as { appId: string; name: string; id: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const agent = await getAgent(own.runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
@@ -408,7 +409,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.post('/v1/:appId/agents/:name/runs/:id/resume', async (request, reply) => {
     const { appId, name, id } = request.params as { appId: string; name: string; id: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const agent = await getAgent(own.runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
@@ -430,7 +431,7 @@ export async function agentsRoutes(app: FastifyInstance) {
   app.get('/v1/:appId/agents/:name/runs/:id/events.json', async (request, reply) => {
     const { appId, name, id } = request.params as { appId: string; name: string; id: string };
     const userId = requireUserId(request);
-    const own = await assertOwner(app, appId, userId);
+    const own = await assertOwner(app, appId, userId, request.auth?.organizationId ?? null);
     if (!own.ok) return reply.code(own.code).send({ error: own.error });
     const agent = await getAgent(own.runtimeDb, appId, name);
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });

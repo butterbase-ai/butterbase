@@ -131,7 +131,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
-      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId);
+      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId, auth.organizationId ?? null);
       const configs = await listIntegrationConfigs(app.controlDb, resolved.id);
 
       return reply.send({ app_id: resolved.id, integrations: configs });
@@ -162,7 +162,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         ));
       }
       const body = parsed.data;
-      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId);
+      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId, auth.organizationId ?? null);
 
       try {
         const integration = await configureIntegration(
@@ -242,7 +242,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         ));
       }
       const body = parsed.data;
-      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId);
+      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId, auth.organizationId ?? null);
 
       try {
         const integration = await rotateIntegrationCredentials(
@@ -306,7 +306,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
-      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId);
+      const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId, auth.organizationId ?? null);
       await disableIntegration(app.controlDb, resolved.id, toolkit);
 
       await logAuditEvent(app.controlDb, {

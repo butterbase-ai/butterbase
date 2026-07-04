@@ -15,11 +15,7 @@ export async function schemaRoutes(app: FastifyInstance) {
     const { app_id } = request.params as { app_id: string };
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
       const schema = await introspectSchema(pool);
@@ -75,11 +71,7 @@ export async function schemaRoutes(app: FastifyInstance) {
     let pool: Awaited<ReturnType<typeof getAppPoolForApp>> | undefined;
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       // Validate DSL input
       const parseResult = SchemaDSLSchema.safeParse(body.schema);
@@ -273,11 +265,7 @@ export async function schemaRoutes(app: FastifyInstance) {
     const { app_id } = request.params as { app_id: string };
 
     try {
-      const resolvedApp = await AppResolver.resolveApp(
-        app.controlDb,
-        app_id,
-        requireUserId(request)
-      );
+      const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
 
       const pool = await getAppPoolForApp(app.controlDb, resolvedApp.id, resolvedApp.db_name);
       const result = await pool.query(`

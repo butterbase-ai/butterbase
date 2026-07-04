@@ -33,8 +33,8 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
       // Falls back to the per-app function key path when the user-supplied
       // value isn't a valid hashed API key.
       const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
-      const keyResult = await fastify.controlDb.query<{ user_id: string }>(
-        `SELECT user_id FROM api_keys
+      const keyResult = await fastify.controlDb.query<{ user_id: string; organization_id: string | null }>(
+        `SELECT user_id, organization_id FROM api_keys
          WHERE key_hash = $1
            AND revoked_at IS NULL
            AND (expires_at IS NULL OR expires_at > now())
@@ -44,9 +44,12 @@ const kvCredentialsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (keyResult.rows.length === 1) {
         const keyUserId = keyResult.rows[0].user_id;
+        const keyOrganizationId = keyResult.rows[0].organization_id;
 
         try {
-          await AppResolver.resolveApp(fastify.controlDb, appId, keyUserId);
+          // Strict per-key-org scoping: the api key is bound to a specific
+          // organization; the app MUST live in that same org.
+          await AppResolver.resolveApp(fastify.controlDb, appId, keyUserId, keyOrganizationId);
         } catch (err) {
           if (err instanceof AppNotFoundError) {
             return reply.code(403).send({ error: 'forbidden' });
