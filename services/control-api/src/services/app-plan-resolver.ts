@@ -84,8 +84,8 @@ export async function invalidateUserAppLimits(
     const { rows } = await controlDb.query<{ app_id: string }>(
       `SELECT oai.app_id
        FROM org_app_index oai
-       JOIN platform_users pu ON pu.personal_organization_id = oai.organization_id
-       WHERE pu.id = $1`,
+       JOIN organization_members om ON om.organization_id = oai.organization_id
+       WHERE om.user_id = $1`,
       [userId]
     );
     if (rows.length === 0) return;
