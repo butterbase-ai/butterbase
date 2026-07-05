@@ -284,12 +284,14 @@ export async function loadFunction(
   return withRuntimeClient(async (client): Promise<FunctionMetadata | null> => {
     const result = await client.queryObject(
       `SELECT
-        id, app_id, name, code, encrypted_env_vars,
-        timeout_ms, memory_limit_mb,
-        allow_service_key_impersonation,
-        deployed_at
-       FROM app_functions
-       WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
+        f.id, f.app_id, f.name, f.code, f.encrypted_env_vars,
+        f.timeout_ms, f.memory_limit_mb,
+        f.allow_service_key_impersonation,
+        f.deployed_at,
+        a.encrypted_env_vars AS app_encrypted_env_vars
+       FROM app_functions f
+       LEFT JOIN app_env_vars a ON a.app_id = f.app_id
+       WHERE f.app_id = $1 AND f.name = $2 AND f.deleted_at IS NULL`,
       [appId, functionName]
     );
 
@@ -327,8 +329,11 @@ export async function loadFunction(
       );
     }
 
-    // Decrypt environment variables
-    const envVars = decryptEnvVars(row.encrypted_env_vars, ENCRYPTION_KEY);
+    // Merge: app-level vars first, then per-function vars override. Platform
+    // BUTTERBASE_* vars are spread AFTER this in worker-executor.ts and always win.
+    const appEnv      = decryptEnvVars(row.app_encrypted_env_vars, ENCRYPTION_KEY);
+    const functionEnv = decryptEnvVars(row.encrypted_env_vars,     ENCRYPTION_KEY);
+    const envVars = { ...appEnv, ...functionEnv };
 
     // Fetch the per-app function key so ctx.kv and ctx.integrations can
     // authenticate against the gateway. Stored on metadata.internal_fn_key
@@ -386,8 +391,8 @@ export async function loadFunction(
 
     // Add to cache (LRU eviction if full)
     if (cache.size >= MAX_CACHE_SIZE) {
-      const firstKey = cache.keys().next().value;
-      cache.delete(firstKey);
+      const firstKey = cache.keys().next().value as string | undefined;
+      if (firstKey !== undefined) cache.delete(firstKey);
     }
 
     cache.set(cacheKey, {
