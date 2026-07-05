@@ -187,6 +187,72 @@ const adminActivityRoutes: FastifyPluginAsync = async (fastify) => {
     }));
   });
 
+  // ───── GET /admin/activity/timeseries/active-users?days=N ─────
+  // Daily count of distinct platform users with any activity.
+  fastify.get('/admin/activity/timeseries/active-users', { config: { public: true } }, async (request, reply) => {
+    if (!(await checkAdmin(request, reply))) return;
+
+    const days = parseIntParam((request.query as Record<string, string>).days, 30, 90);
+
+    const result = await fastify.controlDb.query<{ day: string; count: number }>(
+      `SELECT day::text AS day, count(DISTINCT user_id)::int AS count
+       FROM platform_user_activity_daily
+       WHERE day >= CURRENT_DATE - ($1::int - 1)
+       GROUP BY day
+       ORDER BY day ASC`,
+      [days],
+    );
+
+    return result.rows;
+  });
+
+  // ───── GET /admin/activity/timeseries/deploys?days=N ─────
+  // Daily count of deployments across all regions.
+  fastify.get('/admin/activity/timeseries/deploys', { config: { public: true } }, async (request, reply) => {
+    if (!(await checkAdmin(request, reply))) return;
+
+    const days = parseIntParam((request.query as Record<string, string>).days, 30, 90);
+
+    const rows = await fanOutQuery<{ day: string; count: number }>(
+      `SELECT date_trunc('day', created_at)::date::text AS day, count(*)::int AS count
+       FROM app_deployments
+       WHERE created_at >= CURRENT_DATE - ($1::int - 1)
+       GROUP BY day
+       ORDER BY day ASC`,
+      [days],
+    );
+
+    const byDay = new Map<string, number>();
+    for (const row of rows) {
+      byDay.set(row.day, (byDay.get(row.day) ?? 0) + row.count);
+    }
+
+    return Array.from(byDay.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([day, count]) => ({ day, count }));
+  });
+
+  // ───── GET /admin/activity/timeseries/frontend-visits?days=N ─────
+  // Daily sum of requests + unique visitors across all apps.
+  fastify.get('/admin/activity/timeseries/frontend-visits', { config: { public: true } }, async (request, reply) => {
+    if (!(await checkAdmin(request, reply))) return;
+
+    const days = parseIntParam((request.query as Record<string, string>).days, 30, 90);
+
+    const result = await fastify.controlDb.query<{ day: string; request_count: number; unique_visitor_count: number }>(
+      `SELECT day::text AS day,
+              sum(request_count)::int AS request_count,
+              sum(unique_visitor_count)::int AS unique_visitor_count
+       FROM frontend_visit_daily
+       WHERE day >= CURRENT_DATE - ($1::int - 1)
+       GROUP BY day
+       ORDER BY day ASC`,
+      [days],
+    );
+
+    return result.rows;
+  });
+
   // ───── GET /admin/activity/recent?limit=N ─────
   // This reads only control-plane audit events (platform_user actor).
   // Cross-region end-user audit events would require fanOutQuery + heap merge — deferred.
