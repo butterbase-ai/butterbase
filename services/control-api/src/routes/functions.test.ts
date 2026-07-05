@@ -58,6 +58,9 @@ describe('app-level env vars', () => {
   let envVarsStore: Record<string, string> = {};
 
   beforeEach(async () => {
+    // AES-256 needs a 32-byte key; hex string is 64 chars.
+    vi.stubEnv('AUTH_ENCRYPTION_KEY', '00'.repeat(32));
+
     envVarsStore = {};
     app = Fastify();
     app.decorate('controlDb', {});
@@ -93,6 +96,7 @@ describe('app-level env vars', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await app.close();
   });
 
@@ -144,6 +148,9 @@ describe('Functions Routes - Reserved Key Validation', () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
+    // AES-256 needs a 32-byte key; hex string is 64 chars.
+    vi.stubEnv('AUTH_ENCRYPTION_KEY', '00'.repeat(32));
+
     app = Fastify();
 
     // Create mock controlDb
@@ -159,6 +166,7 @@ describe('Functions Routes - Reserved Key Validation', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await app.close();
   });
 
