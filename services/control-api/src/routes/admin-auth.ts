@@ -3,6 +3,7 @@ import type { AuthProvider } from '../services/auth-provider.js';
 import { CognitoAuthProvider } from '../services/cognito-auth-provider.js';
 import { LocalAuthProvider } from '../services/local-auth-provider.js';
 import { config } from '../config.js';
+import { recordPlatformUserLogin } from '../services/activity-service.js';
 
 // Use the same auth provider as the main auth plugin
 const authProvider: AuthProvider = config.cognito.userPoolId
@@ -27,7 +28,7 @@ export async function adminAuthRoutes(app: FastifyInstance) {
 
       // Look up user by cognito_sub and check is_admin
       const result = await app.controlDb.query(
-        'SELECT id, email, display_name, is_admin FROM platform_users WHERE cognito_sub = $1',
+        'SELECT id, email, display_name, is_admin, last_login_at FROM platform_users WHERE cognito_sub = $1',
         [claims.sub]
       );
 
@@ -38,6 +39,13 @@ export async function adminAuthRoutes(app: FastifyInstance) {
 
       if (!user.is_admin) {
         return reply.code(403).send({ error: 'Not authorized as admin' });
+      }
+
+      // Throttle: only re-record if we haven't seen this admin in 5 minutes.
+      const LOGIN_RECORD_INTERVAL_MS = 5 * 60_000;
+      const lastLogin = user.last_login_at ? new Date(user.last_login_at).getTime() : 0;
+      if (Date.now() - lastLogin > LOGIN_RECORD_INTERVAL_MS) {
+        void recordPlatformUserLogin(app.controlDb, user.id);
       }
 
       return { id: user.id, email: user.email, display_name: user.display_name, is_admin: true };

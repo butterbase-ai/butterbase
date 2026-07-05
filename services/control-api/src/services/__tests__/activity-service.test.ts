@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { controlDb, setupTestDb, seedUser } from '../../__tests__/test-helpers/control-db.js';
 import { recordPlatformUserLogin, recordPlatformUserAction } from '../activity-service.js';
+import { logAuditEvent } from '../audit/audit-events-service.js';
 
 describe('activity-service', () => {
   beforeEach(setupTestDb);
@@ -81,5 +82,51 @@ describe('activity-service', () => {
     );
     expect(rows.length).toBe(1);
     expect(rows[0]!.action_count).toBe(2);
+  });
+
+  it('logAuditEvent records platform-user action on successful insert', async () => {
+    const user = await seedUser('audit-hook@x.com');
+    await logAuditEvent(controlDb, {
+      appId: randomUUID(),
+      category: 'admin',
+      eventType: 'test.hook',
+      actorType: 'platform_user',
+      actorId: user.id,
+      success: true,
+    });
+
+    const { rows: dailyRows } = await controlDb.query<{ action_count: number }>(
+      `SELECT action_count FROM platform_user_activity_daily
+       WHERE user_id = $1 AND day = CURRENT_DATE`,
+      [user.id],
+    );
+    expect(dailyRows.length).toBe(1);
+    expect(dailyRows[0]!.action_count).toBe(1);
+
+    const { rows: userRows } = await controlDb.query<{ last_activity_at: Date | null }>(
+      `SELECT last_activity_at FROM platform_users WHERE id = $1`,
+      [user.id],
+    );
+    const fiveSecondsAgo = new Date(Date.now() - 5000);
+    expect(userRows[0]!.last_activity_at).not.toBeNull();
+    expect(userRows[0]!.last_activity_at!.getTime()).toBeGreaterThan(fiveSecondsAgo.getTime());
+  });
+
+  it('logAuditEvent does NOT record activity when actor is not a platform user', async () => {
+    const user = await seedUser('non-platform-actor@x.com');
+    await logAuditEvent(controlDb, {
+      appId: randomUUID(),
+      category: 'admin',
+      eventType: 'test.system',
+      actorType: 'system',
+      actorId: null,
+      success: true,
+    });
+
+    const { rows } = await controlDb.query(
+      `SELECT 1 FROM platform_user_activity_daily WHERE user_id = $1`,
+      [user.id],
+    );
+    expect(rows.length).toBe(0);
   });
 });
