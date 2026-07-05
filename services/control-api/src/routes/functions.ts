@@ -13,6 +13,7 @@ import { requireUserId } from '../utils/require-auth.js';
 import { incrementUsage } from '../services/usage-metering.js';
 import { resolveOrganizationId } from '../services/org-resolver.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
+import { validateEnvKeys } from '../lib/env-vars.js';
 
 const triggerEnum = z.enum(['http', 'cron', 's3_upload', 'webhook', 'websocket']);
 
@@ -264,12 +265,31 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     await AppResolver.resolveApp(controlDb, appId, requireUserId(request), request.auth?.organizationId ?? null);
 
     // Validate envVars
-    if (!body.envVars || typeof body.envVars !== 'object') {
+    if (!body.envVars || typeof body.envVars !== 'object' || Array.isArray(body.envVars)) {
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
-        message: 'envVars must be an object',
-        remediation: 'Provide envVars as a key-value object. Example: {"API_KEY": "secret123"}',
+        message: 'envVars must be a non-empty object',
+        remediation: 'Provide envVars as a key-value object with at least one key. Example: {"API_KEY": "secret123"}',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA)
+      }));
+    }
+
+    if (Object.keys(body.envVars).length === 0) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'envVars must contain at least one key',
+        remediation: 'Include at least one key to set (STRING) or delete (null).',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA)
+      }));
+    }
+
+    const badKey = validateEnvKeys(Object.keys(body.envVars));
+    if (badKey) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: `Reserved key: "${badKey.key}" — keys starting with BUTTERBASE_ are reserved for platform use`,
+        remediation: 'Rename the key. Platform values like BUTTERBASE_APP_ID cannot be overridden.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     }
 

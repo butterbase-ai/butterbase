@@ -105,6 +105,39 @@ describe.skipIf(skipDb)('migrations', () => {
       await pool.end();
     }
   });
+
+  it('043 creates app_env_vars table', async () => {
+    const dbUrl = process.env.TEST_DATABASE_URL!;
+    const pool = new pg.Pool({ connectionString: dbUrl });
+    const client = await pool.connect();
+    try {
+      // Load and apply the migration
+      const migrationPath = path.join(__dirname, '043_app_env_vars.sql');
+      const migrationSql = fs.readFileSync(migrationPath, 'utf-8');
+
+      // Skip the @scope comment line and apply the rest
+      const sqlLines = migrationSql.split('\n').filter(line => !line.startsWith('-- @scope'));
+      await client.query(sqlLines.join('\n'));
+
+      // Query the columns from information_schema
+      const { rows } = await client.query(
+        `SELECT column_name, data_type, is_nullable
+         FROM information_schema.columns
+         WHERE table_name = 'app_env_vars'
+         ORDER BY column_name`
+      );
+
+      expect(rows).toEqual([
+        { column_name: 'app_id',             data_type: 'text',                      is_nullable: 'NO' },
+        { column_name: 'encrypted_env_vars', data_type: 'text',                      is_nullable: 'NO' },
+        { column_name: 'updated_at',         data_type: 'timestamp with time zone', is_nullable: 'NO' },
+        { column_name: 'updated_by',         data_type: 'text',                      is_nullable: 'YES' },
+      ]);
+    } finally {
+      client.release();
+      await pool.end();
+    }
+  });
 });
 
 describe('034_apps_organization_id migration', () => {

@@ -104,6 +104,64 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 Use `ctx.env`, not `Deno.env.get()` for function-specific environment variables.
 :::
 
+## Environment variables
+
+`ctx.env` is populated from three layers, merged in this order (later wins):
+
+1. **App-level** — one shared set per app. Every function in the app inherits these.
+2. **Function-level** — per-function `envVars` on `deploy_function` or `manage_function.update_env`. Overrides app-level for that function only.
+3. **Platform** — `BUTTERBASE_*` keys the runtime injects (see [Platform context](#platform-context)). Always wins.
+
+So a value set only at the app level shows up in every function; a per-function value shadows the app value just for that function; and `BUTTERBASE_APP_ID` can never be shadowed by either.
+
+### App-level
+
+Set once, inherited by every function:
+
+```bash
+# Via MCP
+manage_app({ action: "update_env", app_id, env: { STRIPE_SECRET: "sk_live_…", SENTRY_DSN: "…" } })
+
+# Via HTTP
+PATCH /v1/{appId}/env
+{ "envVars": { "STRIPE_SECRET": "sk_live_…", "SENTRY_DSN": "…" } }
+
+# Pass value `null` to delete a key:
+{ "envVars": { "SENTRY_DSN": null } }
+```
+
+- Encrypted at rest (AES-256-GCM); values are **never** returned by any read — `GET /v1/{appId}/env` returns only `{ keys, updatedAt }`.
+- Keys matching `/^BUTTERBASE_/i` are rejected at write time as reserved.
+- Updates fan out cache invalidation to every function in the app in one request; the response lists which functions were invalidated. Next invocation of each function picks up the new values.
+- In the dashboard: **App Settings → Environment variables**. The Function detail page splits its env card into an "Inherited from app" section (read-only, marks overridden keys) and a "Function-level" section (editable).
+
+### Function-level
+
+Set at deploy time or updated in place. Values live only on that function.
+
+```bash
+# On deploy
+deploy_function({ app_id, name, code, envVars: { API_KEY: "…" } })
+
+# Update without redeploying code
+manage_function({ action: "update_env", app_id, function_name, env: { API_KEY: "…", OLD_KEY: null } })
+```
+
+- Same encryption / never-returned / reserved-prefix guarantees as app-level.
+- Function-level entries override app-level entries with the same key.
+
+### Precedence in code
+
+```ts
+export async function handler(req, ctx) {
+  // If STRIPE_SECRET is set at both levels, the function-level value wins.
+  const stripe = ctx.env.STRIPE_SECRET;
+
+  // Platform value — always the real app id, even if a user "sets" it at either level (writes are rejected).
+  const appId = ctx.env.BUTTERBASE_APP_ID;
+}
+```
+
 ## Platform context
 
 The runtime auto-injects platform-known values so you don't have to set them as env vars yourself. Two surfaces, same source of truth:
