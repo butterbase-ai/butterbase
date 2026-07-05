@@ -319,7 +319,7 @@ Common errors:
         case 'get_env': {
           const err = need(args.app_id, '"app_id" is required for this action.');
           if (err) return err;
-          const r = await apiGet(`/v1/${args.app_id}/env`);
+          const r = await apiGet<{ keys: string[]; updatedAt: string | null }>(`/v1/${args.app_id}/env`);
           return { content: [{ type: 'text' as const, text: JSON.stringify({ keys: r.keys, updated_at: r.updatedAt }, null, 2) }] };
         }
         case 'update_env': {
@@ -336,7 +336,7 @@ Common errors:
               };
             }
           }
-          const r = await apiPatch(`/v1/${args.app_id}/env`, { envVars: args.env });
+          const r = await apiPatch<{ updatedKeys: string[]; invalidated: { functions: string[]; failed?: string[]; count: number } }>(`/v1/${args.app_id}/env`, { envVars: args.env });
           return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_keys: r.updatedKeys, invalidated: r.invalidated }, null, 2) }] };
         }
       }
