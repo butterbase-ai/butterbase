@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import { requireAdmin } from '../admin-auth.js';
-import { getRuntimeDbForApp } from '../../services/region-resolver.js';
+import { getRuntimeDbForApp, fanOutQuery } from '../../services/region-resolver.js';
 
 function parseIntParam(value: string | undefined, fallback: number, max: number): number {
   const raw = parseInt(value ?? '', 10);
@@ -19,14 +19,14 @@ const adminActivityRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/admin/activity/overview', { config: { public: true } }, async (request, reply) => {
     if (!(await checkAdmin(request, reply))) return;
 
-    const [activeUsers7d, activeUsers30d, deploys7d, visits7d] = await Promise.all([
+    const [activeUsers7d, activeUsers30d, deploysRows, visits7d] = await Promise.all([
       fastify.controlDb.query<{ c: number }>(
         `SELECT count(*)::int AS c FROM platform_users WHERE last_activity_at >= now() - interval '7 days'`,
       ),
       fastify.controlDb.query<{ c: number }>(
         `SELECT count(*)::int AS c FROM platform_users WHERE last_activity_at >= now() - interval '30 days'`,
       ),
-      fastify.controlDb.query<{ c: number }>(
+      fanOutQuery<{ c: number }>(
         `SELECT count(*)::int AS c FROM apps WHERE last_deployed_at >= now() - interval '7 days'`,
       ),
       fastify.controlDb.query<{ c: number }>(
@@ -34,10 +34,12 @@ const adminActivityRoutes: FastifyPluginAsync = async (fastify) => {
       ),
     ]);
 
+    const deploys_7d = deploysRows.reduce((s, r) => s + r.c, 0);
+
     return {
       active_platform_users_7d: activeUsers7d.rows[0]?.c ?? 0,
       active_platform_users_30d: activeUsers30d.rows[0]?.c ?? 0,
-      deploys_7d: deploys7d.rows[0]?.c ?? 0,
+      deploys_7d,
       total_visits_7d: visits7d.rows[0]?.c ?? 0,
     };
   });
@@ -84,16 +86,20 @@ const adminActivityRoutes: FastifyPluginAsync = async (fastify) => {
 
     const { id } = request.params as { id: string };
 
-    const appResult = await fastify.controlDb.query<{ id: string; region: string; last_deployed_at: Date | null }>(
-      'SELECT id, region, last_deployed_at FROM apps WHERE id = $1',
+    let runtimePool;
+    try {
+      runtimePool = await getRuntimeDbForApp(fastify.controlDb, id);
+    } catch {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+    const appResult = await runtimePool.query<{ id: string; last_deployed_at: Date | null }>(
+      'SELECT id, last_deployed_at FROM apps WHERE id = $1',
       [id],
     );
     if (!appResult.rows[0]) {
       return reply.code(404).send({ error: 'not_found' });
     }
     const appRow = appResult.rows[0];
-
-    const runtimePool = await getRuntimeDbForApp(fastify.controlDb, id);
 
     const [signups7d, activeUsers7d, visits7d, visits30d, visitDaily] = await Promise.all([
       runtimePool.query<{ c: number }>(
@@ -142,15 +148,12 @@ const adminActivityRoutes: FastifyPluginAsync = async (fastify) => {
     const { id } = request.params as { id: string };
     const limit = parseIntParam((request.query as Record<string, string>).limit, 50, 200);
 
-    const appResult = await fastify.controlDb.query(
-      'SELECT id FROM apps WHERE id = $1',
-      [id],
-    );
-    if (!appResult.rows[0]) {
+    let runtimePool;
+    try {
+      runtimePool = await getRuntimeDbForApp(fastify.controlDb, id);
+    } catch {
       return reply.code(404).send({ error: 'not_found' });
     }
-
-    const runtimePool = await getRuntimeDbForApp(fastify.controlDb, id);
     const result = await runtimePool.query<{
       app_user_id: string;
       email: string;

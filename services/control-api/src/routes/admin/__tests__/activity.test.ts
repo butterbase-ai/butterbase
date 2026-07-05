@@ -12,10 +12,11 @@ vi.mock('../../admin-auth.js', () => ({
 // Mock region-resolver so tests don't need a real runtime pool.
 vi.mock('../../../services/region-resolver.js', () => ({
   getRuntimeDbForApp: vi.fn(),
+  fanOutQuery: vi.fn(),
 }));
 
 import { requireAdmin } from '../../admin-auth.js';
-import { getRuntimeDbForApp } from '../../../services/region-resolver.js';
+import { getRuntimeDbForApp, fanOutQuery } from '../../../services/region-resolver.js';
 import adminActivityRoutes from '../activity.js';
 
 const PLATFORM_URL =
@@ -32,6 +33,7 @@ let testAuditIds: string[] = [];
 
 const mockRequireAdmin = vi.mocked(requireAdmin);
 const mockGetRuntimeDbForApp = vi.mocked(getRuntimeDbForApp);
+const mockFanOutQuery = vi.mocked(fanOutQuery);
 
 beforeAll(async () => {
   pool = new pg.Pool({ connectionString: PLATFORM_URL });
@@ -50,8 +52,8 @@ beforeAll(async () => {
 
   await pool.query(
     `INSERT INTO platform_users
-       (id, email, account_status, personal_organization_id, last_login_at, last_activity_at)
-     VALUES ($1, 'test-activity-user@example.com', 'active', $2, now(), now() - interval '1 day')`,
+       (id, email, personal_organization_id, last_login_at, last_activity_at)
+     VALUES ($1, 'test-activity-user@example.com', $2, now(), now() - interval '1 day')`,
     [testUserId, testOrgId],
   );
 
@@ -65,12 +67,9 @@ beforeAll(async () => {
     [testUserId],
   );
 
-  // Seed an app (owner_id only; other columns have defaults or are nullable).
+  // apps lives in the runtime DB (migration 061 dropped it from control-plane).
+  // We only need a stable UUID for frontend_visit_daily and audit_events inserts.
   testAppId = randomUUID();
-  await pool.query(
-    `INSERT INTO apps (id, owner_id) VALUES ($1, $2)`,
-    [testAppId, testUserId],
-  );
 
   // A frontend visit row so overview total_visits_7d reflects at least 1.
   await pool.query(
@@ -107,7 +106,6 @@ afterAll(async () => {
   }
   if (testAppId) {
     await pool.query(`DELETE FROM frontend_visit_daily WHERE app_id = $1`, [testAppId]);
-    await pool.query(`DELETE FROM apps WHERE id = $1`, [testAppId]);
   }
   if (testUserId) {
     await pool.query(`DELETE FROM platform_user_activity_daily WHERE user_id = $1`, [testUserId]);
@@ -123,6 +121,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Default: auth passes.
   mockRequireAdmin.mockResolvedValue('test-admin-id');
+  // Default: fanOutQuery returns empty (no runtime regions in test env).
+  mockFanOutQuery.mockResolvedValue([]);
 });
 
 // ─── 1. Non-admin → 401 ─────────────────────────────────────────────────────
@@ -201,6 +201,8 @@ describe('GET /admin/activity/apps/:id/end-users', () => {
   });
 
   it('returns 404 for unknown app id', async () => {
+    // getRuntimeDbForApp throws when the app is not found in org_app_index.
+    mockGetRuntimeDbForApp.mockRejectedValueOnce(new Error('App not found'));
     const r = await app.inject({
       method: 'GET',
       url: '/admin/activity/apps/00000000-0000-0000-0000-000000000000/end-users',
