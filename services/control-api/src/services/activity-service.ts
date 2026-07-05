@@ -7,14 +7,18 @@ import type { Pool } from 'pg';
  */
 export async function recordPlatformUserLogin(controlDb: Pool, userId: string): Promise<void> {
   try {
-    await controlDb.query(
-      `UPDATE platform_users SET last_login_at = NOW(), last_activity_at = NOW() WHERE id = $1`,
+    const result = await controlDb.query(
+      `UPDATE platform_users
+         SET last_login_at = NOW(), last_activity_at = NOW()
+         WHERE id = $1
+           AND (last_login_at IS NULL OR last_login_at < NOW() - INTERVAL '5 minutes')`,
       [userId],
     );
+    if (result.rowCount === 0) return; // throttled OR user gone → skip the daily bump
     await controlDb.query(
-      `INSERT INTO platform_user_activity_daily (user_id, day, action_count)
-       VALUES ($1, CURRENT_DATE, 1)
-       ON CONFLICT (user_id, day) DO UPDATE
+      `INSERT INTO platform_user_activity_daily(user_id, day, action_count)
+         VALUES ($1, CURRENT_DATE, 1)
+         ON CONFLICT (user_id, day) DO UPDATE
          SET action_count = platform_user_activity_daily.action_count + 1`,
       [userId],
     );

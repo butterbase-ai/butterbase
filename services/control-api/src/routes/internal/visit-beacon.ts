@@ -45,7 +45,8 @@ const visitBeaconRoutes: FastifyPluginAsync = async (fastify) => {
 
       await fastify.controlDb.query(
         `INSERT INTO frontend_visit_daily(app_id, day, request_count, unique_visitor_count)
-           VALUES ($1, CURRENT_DATE, $2, $3)
+           SELECT $1, CURRENT_DATE, $2, $3
+           WHERE EXISTS (SELECT 1 FROM org_app_index WHERE app_id = $1)
            ON CONFLICT (app_id, day) DO UPDATE
            SET request_count = frontend_visit_daily.request_count + EXCLUDED.request_count,
                unique_visitor_count = frontend_visit_daily.unique_visitor_count + EXCLUDED.unique_visitor_count`,

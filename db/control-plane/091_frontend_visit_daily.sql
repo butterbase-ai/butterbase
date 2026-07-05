@@ -3,8 +3,10 @@
 -- worker's beacon; read by admin dashboard for the 'is this project active?' view.
 -- `unique_visitor_count` is an approximation — batched from the edge, dedupe is per-batch not per-day.
 
+-- apps now lives in per-region runtime DBs (dropped from platform DB in 061).
+-- The FK cannot cross DB tiers; app existence is validated at write time via user_app_index.
 CREATE TABLE IF NOT EXISTS frontend_visit_daily (
-    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL,
     day DATE NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 0,
     unique_visitor_count INTEGER NOT NULL DEFAULT 0,

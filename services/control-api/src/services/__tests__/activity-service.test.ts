@@ -70,9 +70,10 @@ describe('activity-service', () => {
     expect(rows.length).toBe(0);
   });
 
-  it('recordPlatformUserLogin twice in one day yields action_count = 2', async () => {
-    const user = await seedUser('double-login@x.com');
+  it('recordPlatformUserLogin called twice within 5 minutes only increments daily count once', async () => {
+    const user = await seedUser('throttle-login@x.com');
     await recordPlatformUserLogin(controlDb, user.id);
+    // Second call — last_login_at is now set to NOW(), so the WHERE clause won't match
     await recordPlatformUserLogin(controlDb, user.id);
 
     const { rows } = await controlDb.query<{ action_count: number }>(
@@ -81,7 +82,7 @@ describe('activity-service', () => {
       [user.id],
     );
     expect(rows.length).toBe(1);
-    expect(rows[0]!.action_count).toBe(2);
+    expect(rows[0]!.action_count).toBe(1);
   });
 
   it('logAuditEvent records platform-user action on successful insert', async () => {

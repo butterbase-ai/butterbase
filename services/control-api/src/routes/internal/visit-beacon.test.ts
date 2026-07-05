@@ -32,20 +32,21 @@ beforeAll(async () => {
     await pool.query(`DELETE FROM organizations WHERE owner_id = $1 AND personal = true`, [prevId]);
   }
 
-  // Seed a platform user + personal org (required by apps.owner_id FK)
-  const { id: ownerId } = await seedUser('visit-beacon-test@x.com');
+  // Seed a platform user + personal org
+  const { personalOrgId } = await seedUser('visit-beacon-test@x.com');
 
-  // Seed a test app — minimal columns only
+  // Seed a test app into org_app_index (apps lives in runtime DB; control-side
+  // existence is tracked via org_app_index, which is what the beacon guard checks).
   testAppId = 'test-visit-beacon-app';
   await pool.query(
-    `INSERT INTO apps (id, owner_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-    [testAppId, ownerId]
+    `INSERT INTO org_app_index (app_id, organization_id, region) VALUES ($1, $2, 'local') ON CONFLICT (app_id) DO NOTHING`,
+    [testAppId, personalOrgId]
   );
 });
 
 afterAll(async () => {
   await pool.query(`DELETE FROM frontend_visit_daily WHERE app_id LIKE 'test-visit-%'`);
-  await pool.query(`DELETE FROM apps WHERE id LIKE 'test-visit-%'`);
+  await pool.query(`DELETE FROM org_app_index WHERE app_id LIKE 'test-visit-%'`);
   // seedUser uses @x.com — the shared cleanup in control-db.ts covers it, but we also
   // clean up explicitly so this test is self-contained.
   const { rows } = await pool.query<{ id: string }>(
@@ -99,7 +100,7 @@ describe('POST /v1/internal/visit-beacon', () => {
   it('dedupes unique_hashes within a single batch', async () => {
     const appId = 'test-visit-dedupe';
     await pool.query(
-      `INSERT INTO apps (id, owner_id) SELECT $1, owner_id FROM apps WHERE id = $2 ON CONFLICT (id) DO NOTHING`,
+      `INSERT INTO org_app_index (app_id, organization_id, region) SELECT $1, organization_id, region FROM org_app_index WHERE app_id = $2 ON CONFLICT (app_id) DO NOTHING`,
       [appId, testAppId]
     );
 
@@ -118,10 +119,27 @@ describe('POST /v1/internal/visit-beacon', () => {
     expect(rows[0]?.unique_visitor_count).toBe(2);
   });
 
+  it('returns 204 and creates no row for a nonexistent app_id', async () => {
+    const nonexistentAppId = 'test-visit-nonexistent';
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/internal/visit-beacon',
+      headers: SECRET_HEADER,
+      payload: { app_id: nonexistentAppId, count: 5, unique_hashes: ['a', 'b'] },
+    });
+    expect(r.statusCode).toBe(204);
+
+    const { rows } = await pool.query(
+      `SELECT 1 FROM frontend_visit_daily WHERE app_id = $1`,
+      [nonexistentAppId]
+    );
+    expect(rows.length).toBe(0);
+  });
+
   it('accumulates request_count and unique_visitor_count across two batches', async () => {
     const appId = 'test-visit-accumulate';
     await pool.query(
-      `INSERT INTO apps (id, owner_id) SELECT $1, owner_id FROM apps WHERE id = $2 ON CONFLICT (id) DO NOTHING`,
+      `INSERT INTO org_app_index (app_id, organization_id, region) SELECT $1, organization_id, region FROM org_app_index WHERE app_id = $2 ON CONFLICT (app_id) DO NOTHING`,
       [appId, testAppId]
     );
 
