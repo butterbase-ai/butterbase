@@ -418,12 +418,37 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
           })();
         }
 
+        // Active-org resolution for JWT sessions:
+        //   - If X-Organization-Id header is present AND user is a member of
+        //     that org: use it (strict-scopes AppResolver to that org).
+        //   - Otherwise: null (AppResolver falls back to legacy multi-org
+        //     membership enumeration — restores team-org members' ability to
+        //     access apps their team owns even without an explicit org header).
+        //
+        // Falling back to `personalOrgId` here — as we did pre-orgs — would
+        // strict-scope every JWT session to personal, blocking team-org apps.
+        let activeOrgId: string | null = null;
+        const rawHeaderOrgId = request.headers['x-organization-id'];
+        const headerOrgId = Array.isArray(rawHeaderOrgId) ? rawHeaderOrgId[0] : rawHeaderOrgId;
+        if (headerOrgId && typeof headerOrgId === 'string' && headerOrgId.length > 0) {
+          const member = await fastify.controlDb.query(
+            `SELECT 1 FROM organization_members WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
+            [headerOrgId, userId]
+          );
+          if (member.rows.length > 0) {
+            activeOrgId = headerOrgId;
+          }
+          // Silently ignore an X-Organization-Id the caller isn't a member of;
+          // downstream AppResolver still enforces per-app authz, and returning
+          // an error here would leak org membership to unauth'd callers.
+        }
+
         request.auth = {
           userId,
           authMethod: 'jwt',
           scopes: ['*'],
           email: claims.email,
-          organizationId: personalOrgId,
+          organizationId: activeOrgId,
         };
       } catch (error) {
         fastify.log.error({ err: error }, 'JWT validation failed');

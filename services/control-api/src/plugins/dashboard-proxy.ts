@@ -16,6 +16,15 @@ const dashboardProxyPlugin: FastifyPluginAsync = async (fastify) => {
     if (request.headers.authorization) {
       headers['authorization'] = request.headers.authorization;
     }
+    // Forward org-context + as-user headers so downstream services (dashboard-api,
+    // and eventually control-api's own AppResolver) can honour explicit org
+    // scoping. Stripping these here caused team-org members to hit 404 on
+    // /dashboard/apps/:id/* routes when browsing an app in an org other than
+    // their personal one.
+    const orgHeader = request.headers['x-organization-id'];
+    if (typeof orgHeader === 'string' && orgHeader) headers['x-organization-id'] = orgHeader;
+    const asUser = request.headers['x-butterbase-as-user'];
+    if (typeof asUser === 'string' && asUser) headers['x-butterbase-as-user'] = asUser;
 
     const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
 
