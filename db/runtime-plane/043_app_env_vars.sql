@@ -1,3 +1,4 @@
+-- @scope: runtime
 -- 043_app_env_vars.sql
 -- Per-app encrypted environment variables. Merged into ctx.env at function load
 -- time, overridden by per-function encrypted_env_vars, then by platform BUTTERBASE_*.
