@@ -133,9 +133,15 @@ describe('activity-service', () => {
 
 describe('recordAppUserAction', () => {
   afterAll(async () => {
-    await runtimeDb.query("DELETE FROM app_user_activity_daily WHERE app_id LIKE 'test-activity-%'");
-    await runtimeDb.query("DELETE FROM app_users WHERE app_id LIKE 'test-activity-%'");
-    await runtimeDb.query("DELETE FROM apps WHERE id LIKE 'test-activity-%'");
+    await runtimeDb.query(
+      "DELETE FROM app_user_activity_daily WHERE app_id LIKE 'test-activity-%' OR app_id LIKE 'test-hook-%'",
+    );
+    await runtimeDb.query(
+      "DELETE FROM app_users WHERE app_id LIKE 'test-activity-%' OR app_id LIKE 'test-hook-%'",
+    );
+    await runtimeDb.query(
+      "DELETE FROM apps WHERE id LIKE 'test-activity-%' OR id LIKE 'test-hook-%'",
+    );
   });
 
   it("sets last_activity_at and creates today's daily row", async () => {
@@ -206,5 +212,45 @@ describe('recordAppUserAction', () => {
     expect(consoleSpy).not.toHaveBeenCalled();
 
     consoleSpy.mockRestore();
+  });
+
+  it('logAuditEvent records app-user action on successful insert', async () => {
+    const appId = `test-hook-${randomUUID()}`;
+    const appUserId = randomUUID();
+    await runtimeDb.query(
+      `INSERT INTO apps (id, name, owner_id, db_name) VALUES ($1, $1, $2, $1)`,
+      [appId, randomUUID()],
+    );
+    await runtimeDb.query(
+      `INSERT INTO app_users (id, app_id, email) VALUES ($1, $2, $3)`,
+      [appUserId, appId, `user-${appUserId}@test.invalid`],
+    );
+
+    await logAuditEvent(runtimeDb, {
+      appId,
+      category: 'auth',
+      eventType: 'login',
+      actorType: 'app_user',
+      actorId: appUserId,
+      success: true,
+    });
+
+    // logAuditEvent fires recordAppUserAction as void (fire-and-forget); wait a tick
+    await new Promise((r) => setTimeout(r, 50));
+
+    const { rows: dailyRows } = await runtimeDb.query<{ action_count: number }>(
+      `SELECT action_count FROM app_user_activity_daily WHERE app_user_id = $1 AND day = CURRENT_DATE`,
+      [appUserId],
+    );
+    expect(dailyRows.length).toBe(1);
+    expect(dailyRows[0]!.action_count).toBe(1);
+
+    const { rows: userRows } = await runtimeDb.query<{ last_activity_at: Date | null }>(
+      `SELECT last_activity_at FROM app_users WHERE id = $1`,
+      [appUserId],
+    );
+    const fiveSecondsAgo = new Date(Date.now() - 5000);
+    expect(userRows[0]!.last_activity_at).not.toBeNull();
+    expect(userRows[0]!.last_activity_at!.getTime()).toBeGreaterThan(fiveSecondsAgo.getTime());
   });
 });
