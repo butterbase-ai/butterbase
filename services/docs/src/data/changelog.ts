@@ -21,6 +21,14 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-07-05',
+    category: 'functions',
+    title: 'App-level environment variables',
+    description: 'Set an env var once at the app level and every function inherits it via `ctx.env.<KEY>` — no need to duplicate `STRIPE_SECRET` across every function that talks to Stripe. Per-function values still override on collision, and platform `BUTTERBASE_*` values still win overall. Change a shared key once and every function in the app picks it up on next invoke. Manage from the App Settings → Environment variables card, `manage_app` MCP actions `get_env`/`update_env`, or `PATCH /v1/:appId/env`. Values are encrypted at rest and never returned by any read; `BUTTERBASE_*` keys are rejected as reserved.',
+    href: '/core-concepts/functions/#environment-variables',
+    icon: '🔐',
+  },
+  {
     date: '2026-06-14',
     category: 'functions',
     title: 'ctx.invoke for same-app function-to-function calls',

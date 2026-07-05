@@ -8,6 +8,7 @@
 
 ### Added
 
+- **Functions**: App-level environment variables. Set a key once at the app level and every function inherits it via `ctx.env.<KEY>`; per-function values still override on collision, and platform `BUTTERBASE_*` values always win. Managed via `manage_app` MCP actions `get_env` / `update_env`, control-api `GET`/`PATCH /v1/:appId/env`, or the dashboard's App Settings → Environment variables card. Reserved-prefix (`BUTTERBASE_*`) keys are rejected at both app-level and per-function PATCH endpoints. Cache invalidation fans out to every function in the app in one request; values are AES-256-GCM encrypted at rest and never returned by any GET endpoint or logged in any audit event.
 - **CLI**: `bb keys generate --app <id>` flag (required when `--scope app`; auto-resolved from a `bb.config` in the current directory when absent).
 - **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
 - **MCP**: `manage_auth_config:generate_service_key` accepts `key_scope` and `additional_scopes`; requires `app_id` when `key_scope === 'app'`.
