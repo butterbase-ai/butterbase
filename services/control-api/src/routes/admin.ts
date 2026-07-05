@@ -937,8 +937,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const [userResult, suggestionsResult] = await Promise.all([
       app.controlDb.query(
-        `SELECT id, email, display_name, plan_id, account_status, stripe_customer_id, created_at
-         FROM platform_users WHERE id = $1`,
+        `SELECT pu.id, pu.email, pu.display_name, pu.created_at,
+                o.plan_id, o.account_status, o.stripe_customer_id
+         FROM platform_users pu
+         LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
         [id]
       ),
       app.controlDb.query(
