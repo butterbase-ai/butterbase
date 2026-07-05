@@ -588,7 +588,7 @@ function buildWorkerCode(
         id: metadata.app_id,
         name: metadata.platform.app_name,
         ownerId: metadata.platform.owner_id,
-        substrateUserId: metadata.substrate_user_id,
+        substrateOrganizationId: metadata.substrate_organization_id,
         region: metadata.platform.region,
         subdomain: metadata.platform.subdomain,
         anonKey: metadata.platform.anon_key,
@@ -889,7 +889,7 @@ function buildWorkerCode(
       },
     };
 
-    ${metadata.substrate_user_id ? `
+    ${metadata.substrate_organization_id ? `
     ctx.substrate = {
       async propose(capability, payload, opts) {
         const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/propose', {
@@ -991,7 +991,7 @@ function buildWorkerCode(
         return await this.propose('merge_entities', { loser_id, winner_id, reason });
       },
     };
-    ` : '/* ctx.substrate: substrate_user_id not set — substrate omitted */'}
+    ` : '/* ctx.substrate: substrate_organization_id not set — substrate omitted */'}
 
     // Execute handler
     try {

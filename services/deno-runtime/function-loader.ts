@@ -93,6 +93,12 @@ export interface FunctionMetadata {
   allow_service_key_impersonation: boolean;
   db_connection_string: string | null;
   /**
+   * Non-null when the app is linked to an org substrate — worker-executor
+   * uses this as the gate for injecting ctx.substrate. Replaces the legacy
+   * substrate_user_id gate that was dropped with runtime migration 042.
+   */
+  substrate_organization_id: string | null;
+  /**
    * Platform-known values surfaced to user code via ctx.env.BUTTERBASE_*
    * and the structured ctx.app mirror. Strictly platform-owned, non-secret
    * values pulled from the apps row. Any field may be null when not
@@ -264,7 +270,7 @@ export async function loadFunction(
     // surfaced to user code via ctx.env.BUTTERBASE_* / ctx.app.
     const appCheck = await client.queryObject(
       `SELECT
-         db_provisioned,
+         db_provisioned, substrate_organization_id,
          name, owner_id, region, subdomain,
          deployment_url, anon_key, allowed_origins,
          stripe_connect_account_id,
@@ -327,6 +333,7 @@ export async function loadFunction(
       memory_limit_mb: row.memory_limit_mb,
       allow_service_key_impersonation: row.allow_service_key_impersonation !== false,
       db_connection_string: dbConnectionString,
+      substrate_organization_id: app.substrate_organization_id ?? null,
       platform: {
         app_name: app.name,
         owner_id: app.owner_id,
