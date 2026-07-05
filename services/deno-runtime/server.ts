@@ -1,6 +1,6 @@
 // Butterbase Deno Runtime Server
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { loadFunction, invalidateCache } from "./function-loader.ts";
+import { loadFunction, invalidateCache, warmupRuntimePool } from "./function-loader.ts";
 import { executeFunction } from "./worker-executor.ts";
 import { logInvocation } from "./invocation-logger.ts";
 import { startRedisSubscriber } from "./redis-subscriber.ts";
@@ -29,6 +29,19 @@ const MAX_CONCURRENT_WORKERS = parseInt(
 
 console.log(`🦕 Butterbase Deno Runtime starting on port ${PORT}...`);
 startRedisSubscriber();
+
+// Prove the runtime DB pool is ready BEFORE we start listening. Fly's
+// health-check begins probing the moment the port is open; if we accept
+// traffic before the pool completes its first TCP+TLS handshake, a cron
+// dispatch that lands in that window will get an empty result set from
+// app_functions and 404 the caller. Blocking here means Fly's grace_period
+// covers the warmup window and traffic only cuts over once we can serve.
+try {
+  await warmupRuntimePool();
+} catch (err) {
+  console.error("[runtime] warmup failed; exiting so Fly restarts us:", err);
+  Deno.exit(1);
+}
 
 serve(async (req: Request) => {
   const url = new URL(req.url);

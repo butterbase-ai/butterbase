@@ -197,6 +197,40 @@ async function withRuntimeClient<T>(fn: (client: PoolClient) => Promise<T>): Pro
   throw new Error("withRuntimeClient: exhausted retries");
 }
 
+/**
+ * Prove the runtime DB pool can serve queries before we let Fly's health
+ * check pass. Without this, a fresh machine starts listening on /health
+ * (returning 200 immediately) while runtimePool.connect() is still doing
+ * its first TCP + TLS + auth roundtrip; a cron dispatch that lands in
+ * that window sees an empty result for `SELECT ... FROM app_functions`
+ * and 404s "Function not found". Cost: one round-trip on boot, ~50ms.
+ * Retries with backoff so a slow Neon cold-start doesn't kill the
+ * machine — Fly will restart us anyway after grace_period expires.
+ */
+export async function warmupRuntimePool(): Promise<void> {
+  const start = Date.now();
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await withRuntimeClient(async (client) => {
+        await client.queryObject("SELECT 1");
+      });
+      console.log(`[function-loader] runtime pool warm (${Date.now() - start}ms, attempt ${attempt + 1})`);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const backoffMs = 500 * (attempt + 1);
+      console.warn(
+        `[function-loader] warmup attempt ${attempt + 1} failed: ${(err as Error).message}; retrying in ${backoffMs}ms`,
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  }
+  throw new Error(
+    `runtime pool warmup failed after 5 attempts: ${(lastErr as Error)?.message ?? lastErr}`,
+  );
+}
+
 function getCacheKey(appId: string, functionName: string): string {
   return `${appId}:${functionName}`;
 }
