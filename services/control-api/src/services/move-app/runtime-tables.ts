@@ -22,6 +22,7 @@ export const MOVE_APP_RUNTIME_TABLES = [
 
   // Functions
   'app_functions',
+  'app_env_vars',
   'function_triggers',
   'function_invocations',
 

@@ -112,7 +112,7 @@ export async function runReverseMove(
   const sourcePool = ctx.runtimePoolFor(forward.source_region);
   const tables = [
     'app_users','app_refresh_tokens','app_verification_codes','app_signing_keys',
-    'app_oauth_configs','app_custom_domains','app_functions','function_triggers',
+    'app_oauth_configs','app_custom_domains','app_functions','app_env_vars','function_triggers',
     'app_edge_ssr_deployments','app_durable_objects','app_realtime_config',
     'app_integration_configs','storage_objects','app_db_connections',
     'app_orders','app_plans','app_products','app_subscriptions',
