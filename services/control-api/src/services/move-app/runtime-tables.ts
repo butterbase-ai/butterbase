@@ -49,6 +49,7 @@ export const MOVE_APP_RUNTIME_TABLES = [
 
   // Observability
   'audit_events',
+  'app_user_activity_daily',
   'ai_usage_logs',
   'ai_video_jobs',
   'actor_usage_logs',

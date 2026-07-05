@@ -82,7 +82,8 @@ export async function logInvocation(
   metadata: FunctionMetadata,
   request: Request,
   result: ExecutionResult,
-  userId?: string
+  userId?: string,
+  callerType?: "service_key" | "end_user_jwt" | "loopback" | "anonymous"
 ): Promise<void> {
   try {
     const requestBodySize = request.headers.get("content-length")
@@ -95,6 +96,10 @@ export async function logInvocation(
     // otherwise mirror what server.ts returns to the caller for thrown / timeout errors.
     const statusCode = result.response?.status ?? (result.timeout ? 504 : (result.success ? null : 500));
 
+    // app_user_id is only populated for genuine end-user JWT calls; service-key
+    // impersonation also populates user_id but is NOT a real end-user action.
+    const appUserId = callerType === "end_user_jwt" && userId ? userId : null;
+
     // Billed duration: round up to nearest 100ms
     const billedDuration = Math.ceil(result.metrics.duration_ms / 100) * 100;
 
@@ -105,16 +110,17 @@ export async function logInvocation(
     await withLoggingClient(async (client) => {
       await client.queryObject(
         `INSERT INTO function_invocations (
-          function_id, app_id, user_id, method, path, headers,
+          function_id, app_id, user_id, app_user_id, method, path, headers,
           request_body_size_bytes, status_code, response_body_size_bytes,
           duration_ms, memory_used_mb, error_message, error_stack,
           started_at, completed_at, billed_duration_ms, billed_memory_mb,
           console_logs
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
         [
           metadata.id,
           metadata.app_id,
           userId || null,
+          appUserId,
           request.method,
           new URL(request.url).pathname,
           JSON.stringify(Object.fromEntries(request.headers.entries())),

@@ -145,7 +145,7 @@ serve(async (req: Request) => {
       const result = await executeFunction(metadata, req, userId, caller);
 
       // Log invocation (async, fire-and-forget)
-      logInvocation(metadata, req, result, userId).catch((err) =>
+      logInvocation(metadata, req, result, userId, callerType).catch((err) =>
         console.error("Failed to log invocation:", err)
       );
 

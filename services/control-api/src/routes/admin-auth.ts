@@ -3,6 +3,7 @@ import type { AuthProvider } from '../services/auth-provider.js';
 import { CognitoAuthProvider } from '../services/cognito-auth-provider.js';
 import { LocalAuthProvider } from '../services/local-auth-provider.js';
 import { config } from '../config.js';
+import { recordPlatformUserLogin } from '../services/activity-service.js';
 
 // Use the same auth provider as the main auth plugin
 const authProvider: AuthProvider = config.cognito.userPoolId
@@ -39,6 +40,8 @@ export async function adminAuthRoutes(app: FastifyInstance) {
       if (!user.is_admin) {
         return reply.code(403).send({ error: 'Not authorized as admin' });
       }
+
+      void recordPlatformUserLogin(app.controlDb, user.id);
 
       return { id: user.id, email: user.email, display_name: user.display_name, is_admin: true };
     } catch {

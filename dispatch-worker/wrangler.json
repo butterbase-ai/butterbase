@@ -9,7 +9,8 @@
     }
   ],
   "vars": {
-    "BUTTERBASE_REGION": "us-east-1"
+    "BUTTERBASE_REGION": "us-east-1",
+    "CONTROL_API_URL": ""
   },
   "kv_namespaces": [
     {

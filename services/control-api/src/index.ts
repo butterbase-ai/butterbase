@@ -117,6 +117,7 @@ import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
 import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
 import kvResolveJwtRoutes from './routes/internal/kv-resolve-jwt.js';
+import visitBeaconRoutes from './routes/internal/visit-beacon.js';
 import { internalEmailRoutes } from './routes/internal-email.js';
 import kvQuotaPlugin from './plugins/kv-quota.js';
 import kvAuditWriter from './plugins/kv-audit-writer.js';
@@ -129,6 +130,7 @@ import regionStateRoutes from './routes/admin/region-state.js';
 import activeMigrationsRoutes from './routes/admin/active-migrations.js';
 import kvAdminStatsRoutes from './routes/admin/kv-admin-stats.js';
 import wapaMetricsRoutes from './routes/admin/wapa-metrics.js';
+import adminActivityRoutes from './routes/admin/activity.js';
 import moveAppRoutes from './routes/apps/move.js';
 import reverseMoveRoutes from './routes/apps/reverse-move.js';
 import sourceReplicaRoutes from './routes/apps/source-replicas.js';
@@ -544,6 +546,7 @@ try {
 app.register(internalLeaseRoutes);
 app.register(kvCredentialsRoutes);
 app.register(kvResolveJwtRoutes);
+app.register(visitBeaconRoutes);
 app.register(internalEmailRoutes);
 // kv-quota MUST be registered before kv-data/expose/admin routes so the
 // preHandler hook and kvAccount decoration are available when those routes mount.
@@ -560,6 +563,7 @@ app.register(regionStateRoutes);
 app.register(activeMigrationsRoutes);
 app.register(kvAdminStatsRoutes);
 app.register(wapaMetricsRoutes);
+app.register(adminActivityRoutes);
 app.register(subdomainPlugin);
 app.register(authPlugin);
 app.register(quotaEnforcementPlugin);

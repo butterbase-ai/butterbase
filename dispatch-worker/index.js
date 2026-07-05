@@ -44,6 +44,39 @@ function withMime(url, res) {
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }
 
+/**
+ * Hash the visitor's IP + User-Agent to a short opaque token. Same visitor in
+ * the same batch collapses to one unique_hash; the control-api dedupes within
+ * a batch (not across batches — known trade-off).
+ */
+export async function hashVisitor(ip, userAgent) {
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(`${ip || ''}|${userAgent || ''}`));
+  const hex = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  return hex.slice(0, 16);
+}
+
+/**
+ * Fire-and-forget POST to control-api's visit beacon. Never throws.
+ * Silently no-ops when required env vars are missing (dev environments).
+ */
+export async function beaconVisit(env, appId, ip, userAgent) {
+  try {
+    if (!env.CONTROL_API_URL || !env.BUTTERBASE_INTERNAL_SECRET) return;
+    const hash = await hashVisitor(ip, userAgent);
+    await fetch(`${env.CONTROL_API_URL}/v1/internal/visit-beacon`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-butterbase-internal-secret': env.BUTTERBASE_INTERNAL_SECRET,
+      },
+      body: JSON.stringify({ app_id: appId, count: 1, unique_hashes: [hash] }),
+    });
+  } catch {
+    // swallow — telemetry must never break the user's page load
+  }
+}
+
 // Parse a KV value into a {appId, region} route. Tolerates both new-format
 // JSON values (written by Task 9) and legacy raw-string `appId` values
 // (pre-Task 11 backfill); legacy values are assumed to live in the worker's
@@ -61,7 +94,7 @@ export function parseKvValue(raw, env) {
   return { appId: raw, region: env.BUTTERBASE_REGION };
 }
 
-export async function handleRequest(request, env) {
+export async function handleRequest(request, env, ctx) {
     const baseDomain = env.BASE_DOMAIN || 'butterbase.dev';
 
     // CF for SaaS (custom hostnames) rewrites the host header to a zone-local
@@ -130,6 +163,14 @@ export async function handleRequest(request, env) {
     try {
       const res = await worker.fetch(request);
       if (res.status === 101) return res;
+
+      // Fire-and-forget visit beacon — only for successful, non-DO page views.
+      if (!isDo && res.status < 400 && ctx?.waitUntil) {
+        const ip = request.headers.get('cf-connecting-ip');
+        const ua = request.headers.get('user-agent');
+        ctx.waitUntil(beaconVisit(env, appId, ip, ua));
+      }
+
       return withMime(request.url, res);
     } catch (err) {
       if (err.message?.includes('Worker not found')) {

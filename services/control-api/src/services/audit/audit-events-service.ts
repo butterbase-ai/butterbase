@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import type { AuditEventInput } from './types.js';
+import { recordPlatformUserAction, recordAppUserAction } from '../activity-service.js';
 
 /**
  * Insert a clone lifecycle event into auth_audit_logs, scoped to the SOURCE
@@ -66,6 +67,12 @@ export async function logAuditEvent(
         event.correlationId ?? null,
       ]
     );
+    // Post-insert: bump activity aggregates per actor type.
+    if (event.actorType === 'platform_user' && event.actorId) {
+      void recordPlatformUserAction(db, event.actorId);
+    } else if (event.actorType === 'app_user' && event.actorId) {
+      void recordAppUserAction(db, event.actorId);
+    }
   } catch (error) {
     console.error('[AUDIT] Failed to log event:', error);
   }
