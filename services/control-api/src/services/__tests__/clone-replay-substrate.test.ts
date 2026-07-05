@@ -8,12 +8,23 @@ const describeDb = RUN_DB_TESTS ? describe : describe.skip;
 const noopLogger = { info() {}, warn() {} };
 
 describeDb('replaySubstrateLink', () => {
-  async function seedApps(ownerId: string, slug: string, sourceSubstrateUserId: string | null) {
+  async function seedApps(ownerId: string, slug: string, sourceSubstrateOrgId: string | null) {
     const srcId = `app_subs_src_${slug}`;
     const destId = `app_subs_dst_${slug}`;
+    // Owner needs a personal org (NOT NULL post-orgs migration). Create it
+    // first, then upsert the user pointing at it.
+    const orgIns = await controlDb.query<{ id: string }>(
+      `INSERT INTO organizations (owner_id, name, personal, plan_id, account_status)
+       VALUES ($1, $2, true, 'playground', 'active')
+       RETURNING id`,
+      [ownerId, `subs-${slug}-org`],
+    );
+    const personalOrgId = orgIns.rows[0].id;
     await controlDb.query(
-      `INSERT INTO platform_users (id, email, email_verified) VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING`,
-      [ownerId, `subs-${ownerId}@x.com`],
+      `INSERT INTO platform_users (id, email, email_verified, personal_organization_id)
+       VALUES ($1, $2, true, $3)
+       ON CONFLICT (id) DO UPDATE SET personal_organization_id = EXCLUDED.personal_organization_id`,
+      [ownerId, `subs-${ownerId}@x.com`, personalOrgId],
     );
     for (const id of [srcId, destId]) {
       await runtimeDb.query(
@@ -23,11 +34,11 @@ describeDb('replaySubstrateLink', () => {
       );
     }
     await runtimeDb.query(
-      `UPDATE apps SET substrate_user_id = $1 WHERE id = $2`,
-      [sourceSubstrateUserId, srcId],
+      `UPDATE apps SET substrate_organization_id = $1 WHERE id = $2`,
+      [sourceSubstrateOrgId, srcId],
     );
     await runtimeDb.query(
-      `UPDATE apps SET substrate_user_id = NULL WHERE id = $1`,
+      `UPDATE apps SET substrate_organization_id = NULL WHERE id = $1`,
       [destId],
     );
     return { srcId, destId };
@@ -35,55 +46,58 @@ describeDb('replaySubstrateLink', () => {
 
   async function cleanup(srcId: string, destId: string, ownerId: string) {
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
+    // Delete order: user first (its personal_organization_id references the
+    // org), then the org itself.
     await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
+    await controlDb.query(`DELETE FROM organizations WHERE owner_id = $1 AND personal = true`, [ownerId]);
   }
 
-  it('links the dest to the cloner when source had any substrate link', async () => {
+  it('links the dest to the cloner org when source had any substrate link', async () => {
     const ownerId = randomUUID();
-    const clonerId = randomUUID();
-    const sourceSubstrateUserId = randomUUID();
+    const clonerOrgId = randomUUID();
+    const sourceSubstrateOrgId = randomUUID();
     const slug = ownerId.slice(0, 8);
-    const { srcId, destId } = await seedApps(ownerId, slug, sourceSubstrateUserId);
+    const { srcId, destId } = await seedApps(ownerId, slug, sourceSubstrateOrgId);
 
-    const result = await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerId, noopLogger);
+    const result = await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerOrgId, noopLogger);
     expect(result.warnings).toEqual([]);
 
-    const row = await runtimeDb.query<{ substrate_user_id: string | null }>(
-      `SELECT substrate_user_id FROM apps WHERE id = $1`,
+    const row = await runtimeDb.query<{ substrate_organization_id: string | null }>(
+      `SELECT substrate_organization_id FROM apps WHERE id = $1`,
       [destId],
     );
-    expect(row.rows[0].substrate_user_id, 'dest must link to cloner, not source owner').toBe(clonerId);
-    expect(row.rows[0].substrate_user_id).not.toBe(sourceSubstrateUserId);
+    expect(row.rows[0].substrate_organization_id, 'dest must link to cloner org, not source').toBe(clonerOrgId);
+    expect(row.rows[0].substrate_organization_id).not.toBe(sourceSubstrateOrgId);
 
     await cleanup(srcId, destId, ownerId);
   });
 
   it('is a no-op when source was never linked', async () => {
     const ownerId = randomUUID();
-    const clonerId = randomUUID();
+    const clonerOrgId = randomUUID();
     const slug = ownerId.slice(0, 8);
     const { srcId, destId } = await seedApps(ownerId, slug, null);
 
-    const result = await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerId, noopLogger);
+    const result = await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerOrgId, noopLogger);
     expect(result.warnings).toEqual([]);
 
-    const row = await runtimeDb.query<{ substrate_user_id: string | null }>(
-      `SELECT substrate_user_id FROM apps WHERE id = $1`,
+    const row = await runtimeDb.query<{ substrate_organization_id: string | null }>(
+      `SELECT substrate_organization_id FROM apps WHERE id = $1`,
       [destId],
     );
-    expect(row.rows[0].substrate_user_id, 'dest must stay NULL when source had no link').toBeNull();
+    expect(row.rows[0].substrate_organization_id, 'dest must stay NULL when source had no link').toBeNull();
 
     await cleanup(srcId, destId, ownerId);
   });
 
-  it('is idempotent: re-running does not overwrite if dest already linked to cloner', async () => {
+  it('is idempotent: re-running does not overwrite if dest already linked to cloner org', async () => {
     const ownerId = randomUUID();
-    const clonerId = randomUUID();
-    const sourceSubstrateUserId = randomUUID();
+    const clonerOrgId = randomUUID();
+    const sourceSubstrateOrgId = randomUUID();
     const slug = ownerId.slice(0, 8);
-    const { srcId, destId } = await seedApps(ownerId, slug, sourceSubstrateUserId);
+    const { srcId, destId } = await seedApps(ownerId, slug, sourceSubstrateOrgId);
 
-    await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerId, noopLogger);
+    await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerOrgId, noopLogger);
     const firstUpdated = await runtimeDb.query<{ updated_at: Date }>(
       `SELECT updated_at FROM apps WHERE id = $1`,
       [destId],
@@ -92,14 +106,14 @@ describeDb('replaySubstrateLink', () => {
     // Sleep a tick so a second UPDATE would visibly bump updated_at if it ran.
     await new Promise((r) => setTimeout(r, 50));
 
-    const second = await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerId, noopLogger);
+    const second = await replaySubstrateLink(runtimeDb, runtimeDb, srcId, destId, clonerOrgId, noopLogger);
     expect(second.warnings).toEqual([]);
 
-    const after = await runtimeDb.query<{ substrate_user_id: string | null; updated_at: Date }>(
-      `SELECT substrate_user_id, updated_at FROM apps WHERE id = $1`,
+    const after = await runtimeDb.query<{ substrate_organization_id: string | null; updated_at: Date }>(
+      `SELECT substrate_organization_id, updated_at FROM apps WHERE id = $1`,
       [destId],
     );
-    expect(after.rows[0].substrate_user_id).toBe(clonerId);
+    expect(after.rows[0].substrate_organization_id).toBe(clonerOrgId);
     expect(after.rows[0].updated_at.getTime(), 'must not bump updated_at on idempotent re-run').toBe(
       firstUpdated.rows[0].updated_at.getTime(),
     );

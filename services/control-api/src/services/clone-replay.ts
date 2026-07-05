@@ -406,22 +406,28 @@ export async function replayFunctions(
       [...keys].some(k => AUTO_MINT_CONVENTION_KEYS.includes(k)),
     );
   if (anyFnNeedsMint) {
+    // Preconditions that make the mint IMPOSSIBLE rather than just failed:
+    // hard-fail so the caller sees the problem instead of silently continuing
+    // with an app whose intra-fn calls will 401. The mint call itself can
+    // still fail transiently (network, Neon hiccup) — that stays a warning
+    // so the rest of the clone (schema, RLS, storage, etc.) still lands.
     if (!opts?.controlPool || !opts?.destAppOwnerId) {
-      sharedMintError = 'auto-mint required but controlPool or destAppOwnerId missing';
-      logger.warn({ destAppId }, `[clone] ${sharedMintError}; skipping shared key mint`);
-    } else {
-      try {
-        const minted = await mintApiKeyForClone(opts.controlPool, {
-          ownerId: opts.destAppOwnerId,
-          destAppId,
-        });
-        sharedMintedKey = minted.key;
-        logger.info({ destAppId, keyId: minted.keyId }, '[clone] shared API key minted for clone');
-      } catch (mintErr) {
-        sharedMintError = `shared key mint failed: ${(mintErr as Error).message}`;
-        warnings.push(sharedMintError);
-        logger.warn({ err: mintErr, destAppId }, '[clone] shared key mint failed; per-function keys will remain unfilled');
-      }
+      throw new Error(
+        `auto-mint precondition missing (controlPool=${!!opts?.controlPool}, destAppOwnerId=${!!opts?.destAppOwnerId}). ` +
+          `Cloned functions require BUTTERBASE_API_KEY / BB_SUBSTRATE_KEY; refusing to complete clone with 401 baked in.`,
+      );
+    }
+    try {
+      const minted = await mintApiKeyForClone(opts.controlPool, {
+        ownerId: opts.destAppOwnerId,
+        destAppId,
+      });
+      sharedMintedKey = minted.key;
+      logger.info({ destAppId, keyId: minted.keyId }, '[clone] shared API key minted for clone');
+    } catch (mintErr) {
+      sharedMintError = `shared key mint failed: ${(mintErr as Error).message}`;
+      warnings.push(sharedMintError);
+      logger.warn({ err: mintErr, destAppId }, '[clone] shared key mint failed; per-function keys will remain unfilled');
     }
   }
 

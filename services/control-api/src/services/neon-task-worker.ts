@@ -710,15 +710,21 @@ async function executeClone(
 
       // Resolve dest owner id (needed for auto-mint — bb_sk_* is minted under the
       // dest owner's user_id). One round-trip; cached for the rest of this step.
-      let destAppOwnerId: string | undefined;
-      try {
-        const ownerRow = await destRuntimePool.query<{ owner_id: string }>(
-          `SELECT owner_id FROM apps WHERE id = $1`,
-          [resolvedDestAppId],
+      // The dest app was created by an earlier step in this same worker, so we
+      // must be able to read its owner back — an empty result here means the
+      // runtime DB is inconsistent with what we just wrote. Hard-fail rather
+      // than silently skip auto-mint (which downstream would already throw
+      // via the tightened precondition check in replayFunctions, but failing
+      // here gives a more precise error).
+      const ownerRow = await destRuntimePool.query<{ owner_id: string }>(
+        `SELECT owner_id FROM apps WHERE id = $1`,
+        [resolvedDestAppId],
+      );
+      const destAppOwnerId = ownerRow.rows[0]?.owner_id;
+      if (!destAppOwnerId) {
+        throw new Error(
+          `[clone] dest app ${resolvedDestAppId} has no owner_id in runtime DB — clone flow inconsistent`,
         );
-        destAppOwnerId = ownerRow.rows[0]?.owner_id;
-      } catch (err) {
-        logger.warn({ err, destAppId: resolvedDestAppId }, '[clone] failed to resolve dest owner_id; auto-mint will be skipped');
       }
 
       const fnResult = await replayFunctions(
@@ -842,21 +848,48 @@ async function executeClone(
       // to the CLONER's org (not the source owner) so cloned apps using
       // ctx.substrate don't 403 SUBSTRATE_NOT_LINKED. Runs under the same
       // 'replaying_config' step tag.
+      //
+      // Preconditions:
+      //   1. cloner has a personal_organization_id (guaranteed by the orgs
+      //      signup hook; every prod user has one). If missing, the substrate
+      //      link CANNOT be replayed — hard-fail rather than continue with a
+      //      silent warning that leaves the clone's ctx.substrate broken.
+      //   2. If source was never linked, we no-op regardless of cloner state
+      //      (nothing to replay). The check below handles both branches.
       const clonerOrgLookup = await controlDb.query<{ personal_organization_id: string | null }>(
         `SELECT personal_organization_id FROM platform_users WHERE id = $1`,
         [job.requested_by_user_id],
       );
       const clonerOrgId = clonerOrgLookup.rows[0]?.personal_organization_id ?? null;
-      const substrateResult = clonerOrgId
-        ? await replaySubstrateLink(
-            sourceRuntimePool,
-            destRuntimePool,
-            job.source_app_id,
-            resolvedDestAppId,
-            clonerOrgId,
-            logger,
-          )
-        : { warnings: [`substrate link skipped: cloner ${job.requested_by_user_id} has no personal_organization_id`] };
+      let substrateResult: { warnings: string[] };
+      if (clonerOrgId) {
+        substrateResult = await replaySubstrateLink(
+          sourceRuntimePool,
+          destRuntimePool,
+          job.source_app_id,
+          resolvedDestAppId,
+          clonerOrgId,
+          logger,
+        );
+      } else {
+        // Check whether the source is actually substrate-linked. If not, silent
+        // no-op is correct — the cloner not having a personal org doesn't matter
+        // when there's nothing to replay. If it IS linked, we cannot proceed
+        // and must fail the whole clone step so the cloner sees the problem.
+        const srcCheck = await sourceRuntimePool.query<{ substrate_organization_id: string | null }>(
+          `SELECT substrate_organization_id FROM apps WHERE id = $1`,
+          [job.source_app_id],
+        );
+        const sourceIsLinked = !!srcCheck.rows[0]?.substrate_organization_id;
+        if (sourceIsLinked) {
+          throw new Error(
+            `substrate-link replay: cloner ${job.requested_by_user_id} has no personal_organization_id, ` +
+              `but source app ${job.source_app_id} is substrate-linked. Cannot silently drop the link on clone; ` +
+              `provision the cloner's personal org (re-auth via signup hook) and retry.`,
+          );
+        }
+        substrateResult = { warnings: [] };
+      }
       if (substrateResult.warnings.length > 0) {
         await appendCloneJobWarnings(controlDb, jobId, substrateResult.warnings);
       }
