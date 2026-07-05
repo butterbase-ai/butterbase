@@ -68,9 +68,9 @@ export interface DetectedConvention {
 }
 
 // Both keys mint the SAME credential shape — a bb_sk_* scoped to the dest app.
-// Every bb_sk_ carries substrate_user_id = owner, so it works on both the app
-// plane (BUTTERBASE_API_KEY) and the caller's substrate (BB_SUBSTRATE_KEY).
-// See api-key-service.ts:42-45 for the cross-surface guarantee.
+// Every bb_sk_ carries substrate_organization_id = owner's active org, so it
+// works on both the app plane (BUTTERBASE_API_KEY) and the caller's substrate
+// (BB_SUBSTRATE_KEY). See api-key-service.ts:42-45 for the cross-surface guarantee.
 const CONVENTIONS: Record<string, DetectedConvention['convention']> = {
   BUTTERBASE_API_KEY: 'butterbase_api_key',
   BB_SUBSTRATE_KEY: 'butterbase_api_key',

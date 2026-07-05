@@ -10,7 +10,7 @@ const PLATFORM_APP_ID = '_platform';
 export async function apiKeyRoutes(app: FastifyInstance) {
   // POST /api-keys — Generate new API key
   // body.scope='substrate' mints a bb_sub_ key bound to the caller's
-  // substrate_user_id; otherwise (default) mints a regular bb_sk_ app key.
+  // substrate_organization_id; otherwise (default) mints a regular bb_sk_ app key.
   // New fields: key_scope ('account'|'app'), target_app_id, additional_scopes.
   app.post('/api-keys', async (request, reply) => {
     const userId = requireUserId(request);

@@ -3824,9 +3824,9 @@ Verdict values: \`auto_approved\`, \`auto_approved_yolo\`, \`requires_approval\`
 
 \`idempotency_key\` is an optional string field on the propose body (and the third-arg \`opts\` on \`ctx.substrate.propose\`). When set, the substrate deduplicates retries against the action ledger.
 
-- **Scope:** per substrate user. Two different users can share a key without collision.
+- **Scope:** per substrate organization. Two different orgs can share a key without collision.
 - **Window:** forever. Keys are never aged out. A stable, meaningful key (e.g. \`meeting_id + ":" + capability\`) is correct; a per-call UUID defeats the purpose.
-- **Collision behavior:** if a prior action with the same \`(substrate_user_id, idempotency_key)\` exists, the propose returns that prior action without re-executing the capability.
+- **Collision behavior:** if a prior action with the same \`(substrate_organization_id, idempotency_key)\` exists, the propose returns that prior action without re-executing the capability.
 - **Response shape on replay:** same \`action_id\`, same \`verdict\` (\`conflicts\` always empty), same \`result\`. \`requires_approval\` reflects the action's **current** status. The response gains \`"replay": true\` so callers can distinguish a replay from a fresh propose.
 
 \`ctx.substrate.propose\` already forwards the key — no extra wiring needed:
