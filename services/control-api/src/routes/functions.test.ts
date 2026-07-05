@@ -137,6 +137,20 @@ describe('app-level env vars', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('PATCH rejects empty envVars body', async () => {
+    const res = await app.inject({ method: 'PATCH', url: `/v1/${appId}/env`, headers: authHeaders,
+      payload: { envVars: {} } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('at least one key');
+  });
+
+  it('PATCH rejects array envVars body', async () => {
+    const res = await app.inject({ method: 'PATCH', url: `/v1/${appId}/env`, headers: authHeaders,
+      payload: { envVars: ['STRIPE_SECRET'] } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('non-empty object');
+  });
+
   it('GET never returns values, only keys', async () => {
     await app.inject({ method: 'PATCH', url: `/v1/${appId}/env`, headers: authHeaders,
       payload: { envVars: { SECRET: 'plaintext-should-never-leak' } } });

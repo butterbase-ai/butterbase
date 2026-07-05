@@ -32,7 +32,14 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
     try {
       const decoded = JSON.parse(decrypt(row.rows[0].encrypted_env_vars, process.env.AUTH_ENCRYPTION_KEY!));
       keys = Object.keys(decoded);
-    } catch {
+    } catch (err) {
+      // Corrupt blob or rotated encryption key. Return empty keys (safe) but
+      // warn so ops can spot silent-corruption before a user re-enters and
+      // overwrites the still-recoverable ciphertext.
+      request.log.warn(
+        { app_id: appId, err: err instanceof Error ? err.message : String(err) },
+        '[app-env] decrypt failed on GET — returning empty keys'
+      );
       keys = [];
     }
     return reply.send({ keys, updatedAt: row.rows[0].updated_at });
@@ -46,11 +53,20 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
 
     await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
-    if (!body.envVars || typeof body.envVars !== 'object') {
+    if (!body.envVars || typeof body.envVars !== 'object' || Array.isArray(body.envVars)) {
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
-        message: 'envVars must be an object',
-        remediation: 'Provide envVars as a key-value object. Example: {"STRIPE_SECRET": "sk_..."}',
+        message: 'envVars must be a non-empty object',
+        remediation: 'Provide envVars as a key-value object with at least one key. Example: {"STRIPE_SECRET": "sk_..."}',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+
+    if (Object.keys(body.envVars).length === 0) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'envVars must contain at least one key',
+        remediation: 'Include at least one key to set (STRING) or delete (null).',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     }
@@ -79,9 +95,16 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
       } catch { merged = {}; }
     }
 
+    const setKeys: string[] = [];
+    const deletedKeys: string[] = [];
     for (const [k, v] of Object.entries(body.envVars)) {
-      if (v === null || v === undefined) delete merged[k];
-      else merged[k] = v;
+      if (v === null || v === undefined) {
+        delete merged[k];
+        deletedKeys.push(k);
+      } else {
+        merged[k] = v;
+        setKeys.push(k);
+      }
     }
 
     const encrypted = encrypt(JSON.stringify(merged), process.env.AUTH_ENCRYPTION_KEY!);
@@ -127,7 +150,7 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
       action: 'update',
       resourceType: 'app',
       resourceId: appId,
-      eventData: { env_var_keys: Object.keys(body.envVars) },
+      eventData: { env_var_keys: Object.keys(body.envVars), set_keys: setKeys, deleted_keys: deletedKeys },
       success: true,
     });
 
