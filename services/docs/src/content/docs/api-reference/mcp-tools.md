@@ -33,6 +33,8 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `clone` | Clone a public app's repo snapshot into a new app you own. Pass `source_app_id` and optionally `name` and `region`. Returns `{ job_id, status: "pending" }`. |
 | `get_clone_job` | Poll the status of a clone job by `job_id`. Returns `status` (`pending`, `completed`, or `failed`), `dest_app_id` when completed, and `error_message` when failed. |
 | `set_clone_webhook` | Configure a webhook that fires when someone clones this app. Pass `webhook_url` and `webhook_secret`, or `clear_webhook: true` to remove. |
+| `get_env` | Read the app-level environment variable **key names** (values are never returned). Returns `{ keys: string[], updated_at }`. See [Environment variables](/core-concepts/functions/#environment-variables). |
+| `update_env` | Merge app-level env vars in one call. Pass `env: { KEY: "value" }` to set/upsert, or `env: { KEY: null }` to delete. Values live for every function in the app via `ctx.env.<KEY>`. Response reports `updated_keys` plus the list of functions whose cache was invalidated. Keys matching `/^BUTTERBASE_/i` are rejected as reserved. |
 
 ## Schema & Migrations
 
@@ -94,7 +96,7 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `list_functions` | List deployed functions. |
 | `invoke_function` | Test-invoke a function. |
 | `delete_function` | Delete a function. |
-| `update_function_env` | Update environment variables. |
+| `update_function_env` | Update **function-level** environment variables (overrides app-level values on collision). For env vars shared across every function in the app, use `manage_app.update_env` instead. See [Environment variables](/core-concepts/functions/#environment-variables). |
 | `get_function_logs` | View invocation logs. |
 
 ## Frontend Deployment
