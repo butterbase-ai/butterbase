@@ -45,3 +45,34 @@ export async function recordPlatformUserAction(controlDb: Pool, userId: string):
     console.error('[ACTIVITY] Failed to record action for user %s:', userId, error);
   }
 }
+
+/**
+ * Called for any meaningful action by an end-user (app_user). Sets
+ * last_activity_at to NOW() and increments today's action_count in
+ * app_user_activity_daily. No-op if the user row is gone. Fire-and-forget:
+ * failures are logged with [ACTIVITY] prefix and swallowed.
+ *
+ * Note: last_sign_in_at is already maintained by services/auth/user-service.ts
+ * on login. This function only touches last_activity_at + the daily rollup.
+ */
+export async function recordAppUserAction(runtimeDb: Pool, appUserId: string): Promise<void> {
+  try {
+    const { rows } = await runtimeDb.query<{ app_id: string }>(
+      `UPDATE app_users SET last_activity_at = NOW() WHERE id = $1 RETURNING app_id`,
+      [appUserId],
+    );
+    if (rows.length === 0) {
+      return;
+    }
+    const appId = rows[0]!.app_id;
+    await runtimeDb.query(
+      `INSERT INTO app_user_activity_daily(app_id, app_user_id, day, action_count)
+       VALUES ($1, $2, CURRENT_DATE, 1)
+       ON CONFLICT (app_user_id, day) DO UPDATE
+         SET action_count = app_user_activity_daily.action_count + 1`,
+      [appId, appUserId],
+    );
+  } catch (error) {
+    console.error('[ACTIVITY] Failed to record app-user action for %s:', appUserId, error);
+  }
+}

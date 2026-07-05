@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { controlDb, setupTestDb, seedUser } from '../../__tests__/test-helpers/control-db.js';
-import { recordPlatformUserLogin, recordPlatformUserAction } from '../activity-service.js';
+import { controlDb, runtimeDb, setupTestDb, seedUser } from '../../__tests__/test-helpers/control-db.js';
+import { recordPlatformUserLogin, recordPlatformUserAction, recordAppUserAction } from '../activity-service.js';
 import { logAuditEvent } from '../audit/audit-events-service.js';
 
 describe('activity-service', () => {
@@ -112,7 +112,7 @@ describe('activity-service', () => {
     expect(userRows[0]!.last_activity_at!.getTime()).toBeGreaterThan(fiveSecondsAgo.getTime());
   });
 
-  it('logAuditEvent does NOT record activity when actor is not a platform user', async () => {
+  it('logAuditEvent does NOT record activity when actor is not a platform_user', async () => {
     const user = await seedUser('non-platform-actor@x.com');
     await logAuditEvent(controlDb, {
       appId: randomUUID(),
@@ -128,5 +128,83 @@ describe('activity-service', () => {
       [user.id],
     );
     expect(rows.length).toBe(0);
+  });
+});
+
+describe('recordAppUserAction', () => {
+  afterAll(async () => {
+    await runtimeDb.query("DELETE FROM app_user_activity_daily WHERE app_id LIKE 'test-activity-%'");
+    await runtimeDb.query("DELETE FROM app_users WHERE app_id LIKE 'test-activity-%'");
+    await runtimeDb.query("DELETE FROM apps WHERE id LIKE 'test-activity-%'");
+  });
+
+  it("sets last_activity_at and creates today's daily row", async () => {
+    const appId = `test-activity-${randomUUID()}`;
+    const appUserId = randomUUID();
+    await runtimeDb.query(
+      `INSERT INTO apps (id, name, owner_id, db_name) VALUES ($1, $1, $2, $1)`,
+      [appId, randomUUID()],
+    );
+    await runtimeDb.query(
+      `INSERT INTO app_users (id, app_id, email) VALUES ($1, $2, $3)`,
+      [appUserId, appId, `user-${appUserId}@test.invalid`],
+    );
+
+    await recordAppUserAction(runtimeDb, appUserId);
+
+    const { rows: userRows } = await runtimeDb.query<{ last_activity_at: Date | null }>(
+      `SELECT last_activity_at FROM app_users WHERE id = $1`,
+      [appUserId],
+    );
+    expect(userRows.length).toBe(1);
+    expect(userRows[0]!.last_activity_at).not.toBeNull();
+    const fiveSecondsAgo = new Date(Date.now() - 5000);
+    expect(userRows[0]!.last_activity_at!.getTime()).toBeGreaterThan(fiveSecondsAgo.getTime());
+
+    const { rows: dailyRows } = await runtimeDb.query<{ action_count: number }>(
+      `SELECT action_count FROM app_user_activity_daily WHERE app_user_id = $1 AND day = CURRENT_DATE`,
+      [appUserId],
+    );
+    expect(dailyRows.length).toBe(1);
+    expect(dailyRows[0]!.action_count).toBe(1);
+  });
+
+  it('two calls increment action_count to 2 in one day', async () => {
+    const appId = `test-activity-${randomUUID()}`;
+    const appUserId = randomUUID();
+    await runtimeDb.query(
+      `INSERT INTO apps (id, name, owner_id, db_name) VALUES ($1, $1, $2, $1)`,
+      [appId, randomUUID()],
+    );
+    await runtimeDb.query(
+      `INSERT INTO app_users (id, app_id, email) VALUES ($1, $2, $3)`,
+      [appUserId, appId, `user-${appUserId}@test.invalid`],
+    );
+
+    await recordAppUserAction(runtimeDb, appUserId);
+    await recordAppUserAction(runtimeDb, appUserId);
+
+    const { rows } = await runtimeDb.query<{ action_count: number }>(
+      `SELECT action_count FROM app_user_activity_daily WHERE app_user_id = $1 AND day = CURRENT_DATE`,
+      [appUserId],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.action_count).toBe(2);
+  });
+
+  it('is a silent no-op for a missing app_user — no log, no daily row', async () => {
+    const nonExistentId = randomUUID();
+    const consoleSpy = vi.spyOn(console, 'error');
+
+    await expect(recordAppUserAction(runtimeDb, nonExistentId)).resolves.toBeUndefined();
+
+    const { rows } = await runtimeDb.query(
+      `SELECT 1 FROM app_user_activity_daily WHERE app_user_id = $1`,
+      [nonExistentId],
+    );
+    expect(rows.length).toBe(0);
+    expect(consoleSpy).not.toHaveBeenCalled();
+
+    consoleSpy.mockRestore();
   });
 });
