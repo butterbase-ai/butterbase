@@ -58,3 +58,44 @@ describe('manage_app: move actions', () => {
     expect(JSON.parse(result.content[0].text).status).toBe('torn_down');
   });
 });
+
+describe('manage_app: env actions', () => {
+  let server: McpServer;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    server = new McpServer({ name: 'test', version: '0.0.0' });
+    registerManageApp(server);
+  });
+
+  it('action get_env returns { keys, updated_at }', async () => {
+    vi.mocked(apiClient.apiGet).mockResolvedValue({ keys: ['A'], updatedAt: '2026-07-05T00:00:00Z' });
+    const handler = getHandler(server, 'manage_app');
+    const result = await handler({ action: 'get_env', app_id: 'app_abc' });
+    expect(apiClient.apiGet).toHaveBeenCalledWith('/v1/app_abc/env');
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.keys).toEqual(['A']);
+    expect(parsed.updated_at).toBe('2026-07-05T00:00:00Z');
+  });
+
+  it('action update_env forwards body and returns invalidation summary', async () => {
+    vi.mocked(apiClient.apiPatch).mockResolvedValue({
+      message: 'ok',
+      updatedKeys: ['A'],
+      invalidated: { functions: ['hello'], count: 1 },
+    });
+    const handler = getHandler(server, 'manage_app');
+    const result = await handler({ action: 'update_env', app_id: 'app_abc', env: { A: '1' } });
+    expect(apiClient.apiPatch).toHaveBeenCalledWith('/v1/app_abc/env', { envVars: { A: '1' } });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.updated_keys).toEqual(['A']);
+    expect(parsed.invalidated.count).toBe(1);
+  });
+
+  it('action update_env rejects reserved keys before hitting control-api', async () => {
+    const handler = getHandler(server, 'manage_app');
+    const result = await handler({ action: 'update_env', app_id: 'app_abc', env: { BUTTERBASE_X: 'y' } });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/reserved/i);
+    expect(apiClient.apiPatch).not.toHaveBeenCalled();
+  });
+});

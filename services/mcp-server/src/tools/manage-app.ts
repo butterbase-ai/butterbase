@@ -27,6 +27,8 @@ Actions:
   - "move":                    Migrate an app to a different region. Returns migration_id + initial status "queued".
   - "move_status":             Get the current status of an in-progress migration.
   - "teardown_source_replica": After a completed move, decommission the retained source-region replica.
+  - "get_env":              Get app-level environment variables. Returns { keys, updated_at }.
+  - "update_env":           Update app-level environment variables. Values null delete a key. Returns { updated_keys, invalidated }.
 
 Parameters by action:
   list:                    { action: "list" }
@@ -48,12 +50,14 @@ Parameters by action:
   move:                    { action: "move", app_id, dest_region }
   move_status:             { action: "move_status", app_id, migration_id }
   teardown_source_replica: { action: "teardown_source_replica", migration_id }
+  get_env:                 { action: "get_env", app_id }
+  update_env:              { action: "update_env", app_id, env }
 
 Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica', 'get_env', 'update_env'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -98,6 +102,9 @@ Common errors:
       // move / move_status / teardown_source_replica params
       dest_region: z.string().optional().describe('Required for "move". Target region slug (e.g. "us-west-2").'),
       migration_id: z.string().optional().describe('Required for "move_status" and "teardown_source_replica". The migration ID returned by action: "move".'),
+      // get_env / update_env params
+      env: z.record(z.string(), z.union([z.string(), z.null()])).optional()
+        .describe('Required for "update_env". App-level env vars to merge. Value null deletes a key.'),
     },
     {
       title: 'Manage App',
@@ -308,6 +315,29 @@ Common errors:
           if (err) return err;
           const result = await apiDelete(`/v1/source-replicas/${args.migration_id}`);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'get_env': {
+          const err = need(args.app_id, '"app_id" is required for this action.');
+          if (err) return err;
+          const r = await apiGet(`/v1/${args.app_id}/env`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ keys: r.keys, updated_at: r.updatedAt }, null, 2) }] };
+        }
+        case 'update_env': {
+          const err = need(args.app_id, '"app_id" is required for this action.');
+          if (err) return err;
+          const err2 = need(args.env, '"env" is required for the "update_env" action.');
+          if (err2) return err2;
+          // Client-side reserved-key check for a nicer error (server also rejects)
+          for (const k of Object.keys(args.env!)) {
+            if (/^BUTTERBASE_/i.test(k)) {
+              return {
+                content: [{ type: 'text' as const, text: `Error: reserved key: "${k}" — keys starting with BUTTERBASE_ are reserved` }],
+                isError: true as const,
+              };
+            }
+          }
+          const r = await apiPatch(`/v1/${args.app_id}/env`, { envVars: args.env });
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_keys: r.updatedKeys, invalidated: r.invalidated }, null, 2) }] };
         }
       }
     }
