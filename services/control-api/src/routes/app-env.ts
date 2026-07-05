@@ -96,13 +96,29 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
       [appId, encrypted, userId]
     );
 
-    // Fan out cache invalidation to every function in this app
+    // Fan out cache invalidation to every function in this app.
+    // Use allSettled so a Redis blip on one key does not fail the whole request —
+    // the 5-min LRU TTL is the durability backstop.
     const fns = await db.query(
       `SELECT name FROM app_functions WHERE app_id = $1 AND deleted_at IS NULL`,
       [appId]
     );
     const fnNames = fns.rows.map((r: { name: string }) => r.name);
-    await Promise.all(fnNames.map((n) => invalidateFunctionCache(appId, n)));
+    const settled = await Promise.allSettled(fnNames.map((n) => invalidateFunctionCache(appId, n)));
+
+    const invalidatedFns: string[] = [];
+    const failedFns: string[] = [];
+    for (let i = 0; i < settled.length; i++) {
+      if (settled[i].status === 'fulfilled') {
+        invalidatedFns.push(fnNames[i]);
+      } else {
+        failedFns.push(fnNames[i]);
+        console.warn(
+          `[app-env] cache invalidation failed for app=${appId} fn=${fnNames[i]}:`,
+          (settled[i] as PromiseRejectedResult).reason
+        );
+      }
+    }
 
     logFromRequest(request, {
       appId,
@@ -118,7 +134,11 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
     return reply.send({
       message: 'App-level environment variables updated successfully',
       updatedKeys: Object.keys(merged),
-      invalidated: { functions: fnNames, count: fnNames.length },
+      invalidated: {
+        functions: invalidatedFns,
+        ...(failedFns.length > 0 ? { failed: failedFns } : {}),
+        count: invalidatedFns.length,
+      },
     });
   });
 }

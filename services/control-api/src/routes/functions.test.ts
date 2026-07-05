@@ -119,6 +119,8 @@ describe('app-level env vars', () => {
     expect(body.updatedKeys.sort()).toEqual(['SENTRY_DSN', 'STRIPE_SECRET']);
     expect(body.invalidated.functions).toContain('hello');
     expect(body.invalidated.count).toBeGreaterThanOrEqual(1);
+    // On the happy path, no cache invalidations should have failed.
+    expect(body.invalidated.failed ?? []).toEqual([]);
   });
 
   it('PATCH with null value deletes the key', async () => {
