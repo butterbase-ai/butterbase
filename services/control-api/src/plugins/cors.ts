@@ -63,7 +63,14 @@ const corsPlugin: FastifyPluginAsync = async (fastify) => {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Signup-Source', 'X-Signup-Referrer'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Signup-Source',
+      'X-Signup-Referrer',
+      'X-Organization-Id',
+      'X-Butterbase-As-User',
+    ],
   });
 };
 
