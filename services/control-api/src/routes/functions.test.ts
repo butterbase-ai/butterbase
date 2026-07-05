@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { FastifyInstance } from 'fastify';
 
 // Mock AppResolver
 vi.mock('../services/app-resolver.js', () => ({
@@ -48,7 +49,7 @@ import { registerFunctionRoutes } from './functions.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 
 describe('Functions Routes - Reserved Key Validation', () => {
-  let app: any;
+  let app: FastifyInstance;
 
   beforeEach(async () => {
     app = Fastify();
@@ -56,30 +57,17 @@ describe('Functions Routes - Reserved Key Validation', () => {
     // Create mock controlDb
     app.decorate('controlDb', {});
 
-    // Mock the runtimeDb to return a function record
-    const mockQuery = vi.fn().mockImplementation((sql: string) => {
-      if (sql.includes('encrypted_env_vars FROM app_functions')) {
-        return Promise.resolve({
-          rows: [{ encrypted_env_vars: null, id: 'fn_123', name: 'hello' }],
-        });
-      }
-      if (sql.includes('UPDATE app_functions')) {
-        return Promise.resolve({
-          rows: [{ id: 'fn_123', name: 'hello', updated_at: new Date() }],
-        });
-      }
-      return Promise.resolve({ rows: [], rowCount: 0 });
-    });
-
-    const mockRuntimeDb = { query: mockQuery };
-
-    // Mock getRuntimeDbForApp to return a Promise that resolves to the mock DB
-    (getRuntimeDbForApp as any).mockImplementation((_controlDb: any, _appId: string) => {
-      return Promise.resolve(mockRuntimeDb);
+    // Mock getRuntimeDbForApp (never invoked due to early validation error)
+    (getRuntimeDbForApp as any).mockImplementation(() => {
+      return Promise.resolve({ query: vi.fn() });
     });
 
     app.register(registerFunctionRoutes);
     await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
   });
 
   it('PATCH /v1/:appId/functions/:name/env rejects BUTTERBASE_* keys', async () => {
@@ -89,8 +77,9 @@ describe('Functions Routes - Reserved Key Validation', () => {
       headers: { authorization: 'Bearer test-token' },
       payload: { envVars: { BUTTERBASE_FOO: 'x' } },
     });
+    const body = res.json();
     expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('VALIDATION_INVALID_SCHEMA');
-    expect(res.json().error.message).toContain('BUTTERBASE_FOO');
+    expect(body.error.code).toBe('VALIDATION_INVALID_SCHEMA');
+    expect(body.error.message).toContain('BUTTERBASE_FOO');
   });
 });
