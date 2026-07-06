@@ -132,11 +132,16 @@ export class KvCredentialsService {
     plaintextKey: string,
     appId: string,
   ): Promise<{ app_id: string; owner_id: string; organization_id: string | null } | null> {
+    // NOTE: keep this query control-plane-only. `apps` lives in the runtime
+    // plane (moved out in runtime-plane migration 061) and joining it here
+    // throws `relation "apps" does not exist`. Organization id is already on
+    // org_app_index post-migration 090 — read it from there.
     const { rows } = await this.db.query<{ app_id: string; owner_id: string; organization_id: string | null }>(
-      `SELECT kv.app_id, (SELECT o.owner_id FROM organizations o WHERE o.id = oai.organization_id) AS owner_id, a.organization_id
+      `SELECT kv.app_id,
+              (SELECT o.owner_id FROM organizations o WHERE o.id = oai.organization_id) AS owner_id,
+              oai.organization_id
          FROM app_kv_credentials kv
          JOIN org_app_index oai ON oai.app_id = kv.app_id
-         JOIN apps a ON a.id = kv.app_id
         WHERE kv.kv_function_key = $1 AND kv.app_id = $2`,
       [plaintextKey, appId],
     );

@@ -131,29 +131,58 @@ describeDb('KvCredentialsService', () => {
 
 describeDb('resolveFunctionKeyWithOwner', () => {
   let testOwnerId: string;
+  let testOrgId: string;
   let testAppId: string;
   let otherAppId: string;
 
   beforeAll(async () => {
     if (!RUN_DB_TESTS) return;
-    // Insert a platform user so we can create org_app_index entries with a real owner.
+    // Post-Plan-05 platform_users.personal_organization_id is NOT NULL, so
+    // seed the org first, then the user pointing at it, then the owner
+    // membership row. Mirrors seedUser() in test-helpers/control-db.ts.
     testOwnerId = randomUUID();
-    await pool.query(
-      `INSERT INTO platform_users (id, email, account_status, plan_id)
-       VALUES ($1, $2, 'active', 'playground')
-       ON CONFLICT (id) DO NOTHING`,
-      [testOwnerId, `kv-owner-${testOwnerId}@kv-test.example.com`],
-    );
+    const email = `kv-owner-${testOwnerId}@kv-test.example.com`;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const orgRes = await client.query<{ id: string }>(
+        `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, auto_refill_enabled, account_status)
+         VALUES ($1, $2, true, 'playground', 0, false, 'active')
+         RETURNING id`,
+        [testOwnerId, `kv-test org ${testOwnerId}`],
+      );
+      testOrgId = orgRes.rows[0].id;
+      await client.query(
+        `INSERT INTO platform_users (id, email, created_at, personal_organization_id, account_status, plan_id)
+         VALUES ($1, $2, now(), $3, 'active', 'playground')`,
+        [testOwnerId, email, testOrgId],
+      );
+      await client.query(
+        `INSERT INTO organization_members (organization_id, user_id, role, joined_at)
+         VALUES ($1, $2, 'owner', now())
+         ON CONFLICT (organization_id, user_id) DO NOTHING`,
+        [testOrgId, testOwnerId],
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
 
     // Register two apps in org_app_index (the control-DB owner-lookup table;
-    // the `apps` table itself lives on a separate DB and is not present here).
+    // the `apps` table itself lives on the runtime plane and is not present
+    // on controlDb. resolveFunctionKeyWithOwner MUST NOT reference `apps`.
+    // See runtime-plane migration 061 and the 2026-07-05 regression that
+    // reintroduced the JOIN and broke every ctx.invoke → function_key auth.
     testAppId = `kv-test-owner-${Date.now()}-a`;
     otherAppId = `kv-test-owner-${Date.now()}-b`;
     await pool.query(
       `INSERT INTO org_app_index (app_id, organization_id, region)
-       VALUES ($1, (SELECT personal_organization_id FROM platform_users WHERE id = $3), 'us'),
-              ($2, (SELECT personal_organization_id FROM platform_users WHERE id = $3), 'us')`,
-      [testAppId, otherAppId, testOwnerId],
+       VALUES ($1, $3, 'us'),
+              ($2, $3, 'us')`,
+      [testAppId, otherAppId, testOrgId],
     );
   });
 
@@ -167,15 +196,23 @@ describeDb('resolveFunctionKeyWithOwner', () => {
       testAppId,
       otherAppId,
     ]);
+    await pool.query(`DELETE FROM organization_members WHERE organization_id = $1`, [testOrgId]);
     await pool.query(`DELETE FROM platform_users WHERE id = $1`, [testOwnerId]);
+    await pool.query(`DELETE FROM organizations WHERE id = $1`, [testOrgId]);
   });
 
-  it('returns { owner_id, app_id } when the key matches the app', async () => {
+  it('returns { owner_id, app_id, organization_id } when the key matches the app', async () => {
     const cred = await svc.provision(testAppId, 'us-east-1');
     const result = await svc.resolveFunctionKeyWithOwner(cred.kv_function_key, testAppId);
     expect(result).not.toBeNull();
     expect(result!.app_id).toBe(testAppId);
     expect(result!.owner_id).toBe(testOwnerId);
+    // organization_id must be sourced from org_app_index (control-plane), not
+    // apps (runtime-plane). If a future edit reintroduces `JOIN apps`, this
+    // whole method throws `relation "apps" does not exist` on the control DB
+    // and the assertion below never runs — but the query above will already
+    // have thrown, failing the test. That's the regression guard.
+    expect(result!.organization_id).toBe(testOrgId);
   });
 
   it('returns null when the key is correct but for a different app', async () => {
