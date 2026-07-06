@@ -29,6 +29,7 @@ export default defineConfig({
       'src/__tests__/runtime-db-smoke.test.ts',
       'src/__tests__/schema.test.ts',
       'src/routes/storage.test.ts',
+      'src/services/dashboard-agent/__tests__/store.test.ts',
       'src/services/fork-count-sweeper.test.ts',
       'src/services/kv/kv-scope.test.ts',
     ],
