@@ -219,7 +219,8 @@ export async function adminRoutes(app: FastifyInstance) {
     // Fetch platform_users from controlDb (platform tier)
     const usersResult = await app.controlDb.query(
       `SELECT pu.id, pu.email, pu.display_name, o.plan_id, o.account_status,
-              o.stripe_customer_id, pu.created_at
+              o.stripe_customer_id, pu.created_at,
+              pu.signup_source, pu.signup_referrer
        FROM platform_users pu
        LEFT JOIN organizations o ON o.id = pu.personal_organization_id
        ${controlWhere}
@@ -938,6 +939,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const [userResult, suggestionsResult] = await Promise.all([
       app.controlDb.query(
         `SELECT pu.id, pu.email, pu.display_name, pu.created_at,
+                pu.signup_source, pu.signup_referrer,
                 o.plan_id, o.account_status, o.stripe_customer_id
          FROM platform_users pu
          LEFT JOIN organizations o ON o.id = pu.personal_organization_id
