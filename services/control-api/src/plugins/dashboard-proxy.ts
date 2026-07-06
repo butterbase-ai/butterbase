@@ -25,6 +25,14 @@ const dashboardProxyPlugin: FastifyPluginAsync = async (fastify) => {
     if (typeof orgHeader === 'string' && orgHeader) headers['x-organization-id'] = orgHeader;
     const asUser = request.headers['x-butterbase-as-user'];
     if (typeof asUser === 'string' && asUser) headers['x-butterbase-as-user'] = asUser;
+    // Forward first-touch signup attribution headers so dashboard-api's auth
+    // middleware can persist them on the platform_users INSERT. Without this
+    // pass-through the browser's captured utm_* values are dropped at the
+    // proxy boundary and every new signup gets signup_source = NULL.
+    const signupSource = request.headers['x-signup-source'];
+    if (typeof signupSource === 'string' && signupSource) headers['x-signup-source'] = signupSource;
+    const signupReferrer = request.headers['x-signup-referrer'];
+    if (typeof signupReferrer === 'string' && signupReferrer) headers['x-signup-referrer'] = signupReferrer;
 
     const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
 
