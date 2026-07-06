@@ -602,6 +602,66 @@ ${section('Deployments', deployRows)}
     });
   }
 
+  if (template === 'clone_failed') {
+    const appName = data.appName || data.appId;
+    const errorMsg = truncateError(data.errorMessage || '(no message captured)');
+    const retryUrl = `${dashboardUrl}/templates`;
+    const appUrl = `${dashboardUrl}/apps/${escapeHtml(data.appId)}`;
+    const stageLine = data.stalledStage
+      ? `<p style="margin:0 0 4px 0;font-size:13px;color:#737373;">Stalled at stage <span style="color:#0a0a0a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.stalledStage)}</span></p>`
+      : '';
+    const content = `
+<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">Clone didn&rsquo;t finish</h1>
+<p style="margin:0 0 24px 0;font-size:14px;color:#737373;">
+We couldn&rsquo;t finish cloning &ldquo;${escapeHtml(appName)}&rdquo; from template <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.sourceAppId || '')}</span>.
+</p>
+${renderButton({ href: retryUrl, label: 'Try cloning again' })}
+<p style="margin:32px 0 8px 0;font-size:13px;font-weight:600;color:#0a0a0a;">What happened</p>
+${stageLine}
+<pre style="margin:0;padding:16px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:#0a0a0a;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;">${escapeHtml(errorMsg)}</pre>
+<p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.6;">
+The destination app was created but the code (frontend + functions) may not be fully in place. You can retry the clone from the template gallery, or delete the partial app and start fresh — <a href="${appUrl}" style="color:#525252;text-decoration:underline;">manage the partial app</a>.
+</p>
+<p style="margin:16px 0 0 0;font-size:12px;color:#a3a3a3;line-height:1.5;">
+Job ID <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.jobId || '')}</span>
+</p>`;
+    return renderEmailLayout({
+      preheader: `We couldn't finish cloning "${appName}". Retry from the template gallery.`,
+      content,
+    });
+  }
+
+  if (template === 'clone_reaper_digest') {
+    let details: Array<{ jobId: string; destAppId: string | null; stalledStage: string; ageMinutes: number }> = [];
+    try {
+      details = JSON.parse(data.detailsJson || '[]');
+    } catch {
+      // fall through with empty list
+    }
+    const rows = details.map((d) => {
+      const appLink = d.destAppId
+        ? `<a href="${dashboardUrl}/apps/${escapeHtml(d.destAppId)}" style="color:#0a0a0a;text-decoration:none;">${escapeHtml(d.destAppId)}</a>`
+        : '<span style="color:#a3a3a3;">(no dest app)</span>';
+      return `<tr><td style="padding:14px 0;border-bottom:1px solid #f0f0f0;">
+<div style="font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;color:#0a0a0a;margin-bottom:4px;">${escapeHtml(d.jobId)}</div>
+<div style="font-size:12px;color:#737373;">${appLink} &nbsp;·&nbsp; stalled at <span style="color:#0a0a0a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(d.stalledStage)}</span> &nbsp;·&nbsp; ${escapeHtml(String(d.ageMinutes))}m old</div>
+</td></tr>`;
+    }).join('');
+    const content = `
+<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">${escapeHtml(data.reapedCount || '?')} stuck clone job${data.reapedCount === '1' ? '' : 's'} swept</h1>
+<p style="margin:0 0 24px 0;font-size:14px;color:#737373;">
+The clone-jobs reaper flipped these jobs to <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;color:#0a0a0a;">failed</span> after they stalled mid-pipeline. A multi-job reap usually points at a systemic issue (deploy race, worker crash, or region blip).
+</p>
+${rows ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">${rows}</table>` : ''}
+<p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.6;">
+Users of each app have been notified individually via clone_failed emails.
+</p>`;
+    return renderEmailLayout({
+      preheader: `${data.reapedCount} stuck clone job${data.reapedCount === '1' ? '' : 's'} flipped to failed.`,
+      content,
+    });
+  }
+
   if (template === 'function_failed') {
     const streak = data.streakLen || '3';
     const fn = data.functionName || 'a function';
@@ -662,6 +722,14 @@ export function buildBillingEmailSubject(
     const fn = data.functionName || 'a function';
     const streak = data.streakLen || '3';
     return `[${app}] "${fn}" failed ${streak} times in a row`;
+  }
+  if (template === 'clone_failed') {
+    const app = data.appName || data.appId || 'your app';
+    return `Clone failed: "${app}"`;
+  }
+  if (template === 'clone_reaper_digest') {
+    const n = data.reapedCount || '?';
+    return `[butterbase] Reaped ${n} stuck clone job${n === '1' ? '' : 's'}`;
   }
   if (template === 'weekly_digest') {
     const total = digestTotalCount(data);

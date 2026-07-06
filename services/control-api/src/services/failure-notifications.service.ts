@@ -122,7 +122,7 @@ export async function notifyCloneFailed(
     if (opsSet) {
       await sendBillingEmail(opsRecipient, 'clone_failed', {
         appId: args.appId,
-        appName: `(ops alert) ${args.appId}`,
+        appName: args.appId,
         sourceAppId: args.sourceAppId,
         jobId: args.jobId,
         errorMessage: args.errorMessage,
