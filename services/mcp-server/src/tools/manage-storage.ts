@@ -12,14 +12,14 @@ Actions:
   - "download_url":  Get a presigned GET URL for a stored file (expires in 1 hour)
   - "list":          List all objects in app storage with metadata
   - "delete":        Permanently delete an object from S3 + database
-  - "update_config": Update storage config (publicReadEnabled and/or per-app storage cap)
+  - "update_config": Update storage config (publicReadEnabled, per-app storage cap, per-file size cap)
 
 Parameters by action:
   upload_url:    { app_id, action: "upload_url", filename, content_type, size_bytes, public? }
   download_url:  { app_id, action: "download_url", object_id }
   list:          { app_id, action: "list" }
   delete:        { app_id, action: "delete", object_id }
-  update_config: { app_id, action: "update_config", publicReadEnabled?, storageLimitBytes? }
+  update_config: { app_id, action: "update_config", publicReadEnabled?, storageLimitBytes?, maxFileSizeMb? }
 
 object_id is the UUID returned from upload or list. Do NOT pass the s3_key / bucket path
 (e.g. app_id/user_id/uuid_file.jpg) — that is metadata only and is not a usable URL.
@@ -42,10 +42,15 @@ storageLimitBytes (update_config):
   - Must be a positive integer and cannot exceed the org's plan cap
     (rejected with VALIDATION_INVALID_SCHEMA if it does). To raise it above the
     plan cap, upgrade the plan via manage_billing.
-  - At least one of publicReadEnabled or storageLimitBytes must be supplied.
+
+maxFileSizeMb (update_config):
+  - Per-file size cap in megabytes. Defaults to 10 MB when unset.
+  - Raise this to accept larger uploads (e.g. video/audio). Must be a positive integer.
+
+At least one of publicReadEnabled, storageLimitBytes, or maxFileSizeMb must be supplied.
 
 Limits & errors:
-  - Files: max 10 MB each (QUOTA_FILE_SIZE_EXCEEDED)
+  - Files: default max 10 MB each; raise via maxFileSizeMb (QUOTA_FILE_SIZE_EXCEEDED)
   - QUOTA_STORAGE_EXCEEDED: delete unused files or upgrade plan
   - RESOURCE_NOT_FOUND: app or object doesn't exist (verify object_id, not s3_key)
   - delete is idempotent (no-op if already deleted); upload/download URL generation is not (new URL each call)
@@ -61,6 +66,7 @@ Warning: "delete" cannot be undone. Update DB references (e.g. users.avatar_id) 
       object_id: z.string().optional().describe('Required for download_url and delete. Storage object UUID — not the s3_key path.'),
       publicReadEnabled: z.boolean().optional().describe('Optional for update_config. Enable/disable app-wide public read.'),
       storageLimitBytes: z.number().int().positive().optional().describe('Optional for update_config. Per-app total storage cap in bytes. Cannot exceed the plan cap.'),
+      maxFileSizeMb: z.number().int().positive().optional().describe('Optional for update_config. Per-file size cap in megabytes. Default 10 MB.'),
     },
     {
       title: 'Manage Storage',
@@ -109,13 +115,16 @@ Warning: "delete" cannot be undone. Update DB references (e.g. users.avatar_id) 
         }
         case 'update_config': {
           const err = need(
-            args.publicReadEnabled !== undefined || args.storageLimitBytes !== undefined,
-            '"publicReadEnabled" or "storageLimitBytes" is required for update_config.',
+            args.publicReadEnabled !== undefined ||
+              args.storageLimitBytes !== undefined ||
+              args.maxFileSizeMb !== undefined,
+            '"publicReadEnabled", "storageLimitBytes", or "maxFileSizeMb" is required for update_config.',
           );
           if (err) return err;
           const body: Record<string, unknown> = {};
           if (args.publicReadEnabled !== undefined) body.publicReadEnabled = args.publicReadEnabled;
           if (args.storageLimitBytes !== undefined) body.storageLimitBytes = args.storageLimitBytes;
+          if (args.maxFileSizeMb !== undefined) body.maxFileSizeMb = args.maxFileSizeMb;
           const result = await apiPatch(`/v1/${app_id}/config/storage`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }

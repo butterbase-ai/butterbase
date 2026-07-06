@@ -22,9 +22,13 @@ const updateJwtConfigSchema = z.object({
 const updateStorageConfigSchema = z.object({
   publicReadEnabled: z.boolean().optional(),
   storageLimitBytes: z.number().int().positive().optional(),
+  maxFileSizeMb: z.number().int().positive().optional(),
 }).refine(
-  (v) => v.publicReadEnabled !== undefined || v.storageLimitBytes !== undefined,
-  { message: 'At least one of publicReadEnabled or storageLimitBytes must be provided' },
+  (v) =>
+    v.publicReadEnabled !== undefined ||
+    v.storageLimitBytes !== undefined ||
+    v.maxFileSizeMb !== undefined,
+  { message: 'At least one of publicReadEnabled, storageLimitBytes, or maxFileSizeMb must be provided' },
 );
 
 const updateAuthHooksSchema = z.object({
@@ -275,7 +279,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
         message: 'Invalid request body',
-        remediation: 'Review the validation errors in the details field. Ensure publicReadEnabled is a boolean and/or storageLimitBytes is a positive integer.',
+        remediation: 'Review the validation errors in the details field. Ensure publicReadEnabled is a boolean, storageLimitBytes is a positive integer, and/or maxFileSizeMb is a positive integer.',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
         details: parseResult.error.errors
       }));
@@ -350,6 +354,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
         eventData: {
           publicReadEnabled: newConfig.publicReadEnabled,
           storageLimitBytes: newConfig.storageLimitBytes,
+          maxFileSizeMb: newConfig.maxFileSizeMb,
         },
         success: true,
       });
