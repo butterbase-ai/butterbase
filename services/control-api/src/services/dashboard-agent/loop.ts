@@ -332,6 +332,7 @@ export async function* runAgentTurn(input: {
     // and left as empty string on subsequent rows — this keeps the assistant text
     // visible without duplicating it, and the gateway reconstruction in
     // toGatewayMessages groups them back per-call anyway.
+    const allowedToolNames = new Set(tools.map((t) => t.name));
     const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
     for (let i = 0; i < pendingToolCalls.length; i++) {
       const tc = pendingToolCalls[i];
@@ -347,6 +348,25 @@ export async function* runAgentTurn(input: {
       });
 
       yield { type: 'tool_call', ...tc };
+
+      // Allowlist guard — reject tool names not in the catalog without hitting MCP.
+      if (!allowedToolNames.has(tc.name)) {
+        const errorMsg = `Tool "${tc.name}" is not available in this agent's catalog.`;
+        const resultPayload = { error: errorMsg };
+        toolCallResults.push({ id: tc.id, ...resultPayload });
+        yield { type: 'tool_result', id: tc.id, ...resultPayload };
+
+        // Persist the tool result row so history stays consistent
+        await appendMessage(input.pool, input.conversationId, {
+          role: 'tool',
+          content: '',
+          toolCallId: tc.id,
+          toolName: tc.name,
+          toolArgs: tc.args,
+          toolResult: { error: errorMsg },
+        });
+        continue;
+      }
 
       // Execute the tool via MCP
       const call = await callMcpTool(tc.name, tc.args, input.jwt);

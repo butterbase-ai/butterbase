@@ -57,6 +57,16 @@ const postMessageBody = z.object({
 // ---------------------------------------------------------------------------
 
 export async function dashboardAgentRoutes(app: FastifyInstance) {
+  // ── Startup env warnings ─────────────────────────────────────────────────
+  if (process.env.DASHBOARD_ASSISTANT_ENABLED === '1') {
+    if (!process.env.AI_GATEWAY_URL) {
+      app.log.warn('DASHBOARD_ASSISTANT_ENABLED=1 but AI_GATEWAY_URL is unset; dashboard-agent chat turns will fail at runtime (defaulting to http://localhost:3000).');
+    }
+    if (!process.env.MCP_SERVER_URL) {
+      app.log.warn('DASHBOARD_ASSISTANT_ENABLED=1 but MCP_SERVER_URL is unset; dashboard-agent tool calls will fail at runtime (defaulting to http://localhost:3010).');
+    }
+  }
+
   // ── POST /conversations ──────────────────────────────────────────────────
   app.post('/conversations', async (request, reply) => {
     if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });

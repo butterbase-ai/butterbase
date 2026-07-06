@@ -474,6 +474,57 @@ describe('runAgentTurn — two tool calls in one pass (Fix 1)', () => {
   });
 });
 
+describe('runAgentTurn — tool not in catalog (I-1 allowlist guard)', () => {
+  it('yields tool_call + tool_result(error) without calling MCP; second pass produces final assistant_message + done', async () => {
+    // First pass: model tries to call manage_organizations (NOT in catalog)
+    const firstPass = gatewayResponse([
+      {
+        choices: [
+          {
+            delta: { tool_calls: [{ index: 0, id: 'call-blocked', function: { name: 'manage_organizations', arguments: '' } }] },
+            finish_reason: null,
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: { tool_calls: [{ index: 0, function: { arguments: '{"action":"list"}' } }] },
+            finish_reason: null,
+          },
+        ],
+      },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ]);
+
+    // Second pass: model adapts and returns plain text
+    const secondPass = gatewayResponse([
+      { choices: [{ delta: { content: 'I cannot do that.' }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ]);
+
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(firstPass)
+      .mockResolvedValueOnce(secondPass);
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    // First event: tool_call emitted for visibility
+    expect(events[0]).toEqual({ type: 'tool_call', id: 'call-blocked', name: 'manage_organizations', args: { action: 'list' } });
+
+    // Second event: tool_result with allowlist error
+    expect(events[1]).toMatchObject({ type: 'tool_result', id: 'call-blocked' });
+    expect((events[1] as { type: 'tool_result'; error?: string }).error).toMatch(/not available/);
+
+    // MCP was NEVER invoked
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+
+    // Second pass produces clean termination
+    expect(events.at(-2)).toEqual({ type: 'assistant_message', content: 'I cannot do that.' });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+});
+
 describe('runAgentTurn — gateway HTTP error (Fix 2)', () => {
   it('yields a single error event with status info, no done event, no throw', async () => {
     // Mock fetch to return a non-2xx response — streamChatCompletion throws "gateway 500"
