@@ -56,6 +56,7 @@ import { registerFrontendFromSourceRoutes } from './routes/frontend-from-source.
 import { registerDurableObjectRoutes } from './routes/durable-objects.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { agentsRoutes } from './routes/agents.js';
+import { dashboardAgentRoutes } from './routes/dashboard-agent.js';
 import { agentPublicRoutes } from './routes/agent-public.js';
 import { agentStreamsRoutes } from './routes/agent-streams.js';
 import { internalAgentToolsRoutes } from './routes/internal-agent-tools.js';
@@ -656,6 +657,7 @@ app.register(registerFrontendFromSourceRoutes);
 app.register(registerDurableObjectRoutes);
 app.register(registerWebhookRoutes);
 app.register(agentsRoutes);
+app.register(dashboardAgentRoutes, { prefix: '/v1/dashboard-agent' });
 app.register(agentPublicRoutes);
 app.register(agentStreamsRoutes);
 app.register(internalAgentToolsRoutes);
