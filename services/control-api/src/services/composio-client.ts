@@ -594,10 +594,14 @@ export async function searchToolkits(
   search: string,
 ): Promise<ToolkitListing[]> {
   const composio = getComposioClient();
-  // toolkits.get(params) returns a paginated list; the SDK doesn't support
-  // free-text search, so we fetch a page and filter client-side.
-  const result = await composio.toolkits.get({ limit: 100 });
-  // SDK returns an array directly (not { items: [] })
+  // The @composio/core wrapper's toolkits.get() strips next_cursor from the
+  // response, so true pagination through the wrapper isn't possible. Fetch the
+  // SDK-max page sorted by usage, so widely-used toolkits (instagram, tiktok,
+  // etc.) land in the returned set even though Composio's catalog is >1000
+  // toolkits. Long-tail toolkits may still be missed; if that becomes an issue,
+  // switch to the low-level @composio/client which supports a server-side
+  // `search` query param.
+  const result = await composio.toolkits.get({ limit: 1000, sortBy: 'usage' });
   const items: any[] = Array.isArray(result) ? result : ((result as any)?.items || []);
   const query = search.toLowerCase();
   return items

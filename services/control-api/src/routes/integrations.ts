@@ -346,8 +346,11 @@ export async function integrationRoutes(app: FastifyInstance) {
         try {
           const result = await searchToolkits(search);
           return reply.send({ integrations: result });
-        } catch {
-          // Fall back to curated only
+        } catch (err) {
+          request.log.warn(
+            { err, search },
+            'composio catalog search failed; falling back to curated list'
+          );
         }
       }
 
