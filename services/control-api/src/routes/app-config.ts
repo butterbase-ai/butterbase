@@ -8,6 +8,7 @@ import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
+import { getLimitsForApp } from '../services/app-plan-resolver.js';
 
 const updateCorsSchema = z.object({
   allowed_origins: z.array(z.string().url()).min(1),
@@ -19,8 +20,12 @@ const updateJwtConfigSchema = z.object({
 });
 
 const updateStorageConfigSchema = z.object({
-  publicReadEnabled: z.boolean(),
-});
+  publicReadEnabled: z.boolean().optional(),
+  storageLimitBytes: z.number().int().positive().optional(),
+}).refine(
+  (v) => v.publicReadEnabled !== undefined || v.storageLimitBytes !== undefined,
+  { message: 'At least one of publicReadEnabled or storageLimitBytes must be provided' },
+);
 
 const updateAuthHooksSchema = z.object({
   post_auth_function: z.string().nullable(),
@@ -270,7 +275,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
         message: 'Invalid request body',
-        remediation: 'Review the validation errors in the details field. Ensure publicReadEnabled is a boolean.',
+        remediation: 'Review the validation errors in the details field. Ensure publicReadEnabled is a boolean and/or storageLimitBytes is a positive integer.',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
         details: parseResult.error.errors
       }));
@@ -280,6 +285,34 @@ export async function appConfigRoutes(app: FastifyInstance) {
       const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
+
+      // Clamp storageLimitBytes to the app's plan cap. Without this the per-app
+      // override in apps.storage_config would silently exceed what the org's
+      // plan actually allows — checkStorageQuota reads storageLimitBytes
+      // directly, so a rogue value would be honoured until the org-wide plan
+      // check catches up.
+      if (parseResult.data.storageLimitBytes !== undefined) {
+        const limits = await getLimitsForApp(app.controlDb, resolvedApp.id);
+        if (limits.maxStorageGb !== -1) {
+          const planCapBytes = limits.maxStorageGb * 1024 * 1024 * 1024;
+          if (parseResult.data.storageLimitBytes > planCapBytes) {
+            return reply.code(400).send(createAgentError({
+              code: VALIDATION_INVALID_SCHEMA,
+              message: 'storageLimitBytes exceeds the plan cap',
+              remediation:
+                `Requested ${parseResult.data.storageLimitBytes} bytes exceeds ` +
+                `the plan cap of ${planCapBytes} bytes (${limits.maxStorageGb} GB). ` +
+                `Set a value at or below the plan cap, or upgrade the plan via billing.`,
+              documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+              details: {
+                requested_bytes: parseResult.data.storageLimitBytes,
+                plan_cap_bytes: planCapBytes,
+                plan_max_storage_gb: limits.maxStorageGb,
+              },
+            }));
+          }
+        }
+      }
 
       // Get current storage config
       const currentResult = await runtimeDb.query(
@@ -314,7 +347,10 @@ export async function appConfigRoutes(app: FastifyInstance) {
         action: 'update',
         resourceType: 'app_config',
         resourceId: 'storage',
-        eventData: { publicReadEnabled: newConfig.publicReadEnabled },
+        eventData: {
+          publicReadEnabled: newConfig.publicReadEnabled,
+          storageLimitBytes: newConfig.storageLimitBytes,
+        },
         success: true,
       });
 
