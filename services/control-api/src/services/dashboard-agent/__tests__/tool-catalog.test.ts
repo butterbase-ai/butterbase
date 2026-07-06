@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { getToolCatalog } from '../tool-catalog.js';
 
 describe('Tool Catalog', () => {
-  it('getToolCatalog() returns manage_app with correct shape', () => {
+  it('getToolCatalog() returns manage_app with flat schema (no params wrapper)', () => {
     const catalog = getToolCatalog();
 
     expect(catalog).toHaveLength(1);
@@ -15,33 +15,30 @@ describe('Tool Catalog', () => {
     expect(tool.description.length).toBeGreaterThan(0);
 
     // Parameters must be a valid JSON schema
-    const params = tool.parameters;
+    const params = tool.parameters as Record<string, unknown>;
     expect(params).toHaveProperty('type', 'object');
     expect(params).toHaveProperty('properties');
     expect(params).toHaveProperty('required');
+    expect(params).toHaveProperty('additionalProperties', true);
 
-    // Properties must include action and params
-    const properties = (params as Record<string, unknown>).properties as Record<
-      string,
-      unknown
-    >;
+    // Properties must include action but NOT params (flat schema)
+    const properties = params.properties as Record<string, unknown>;
     expect(properties).toHaveProperty('action');
-    expect(properties).toHaveProperty('params');
+    expect(properties).not.toHaveProperty('params');
 
-    // action must be an enum
+    // action must be an enum with all 20+ actions
     const actionSchema = properties.action as Record<string, unknown>;
     expect(actionSchema).toHaveProperty('type', 'string');
     expect(actionSchema).toHaveProperty('enum');
     expect(Array.isArray(actionSchema.enum)).toBe(true);
-    expect((actionSchema.enum as string[]).length).toBeGreaterThan(0);
+    const enumValues = actionSchema.enum as string[];
+    expect(enumValues.length).toBeGreaterThan(0);
+    expect(enumValues).toContain('list');
+    expect(enumValues).toContain('get_config');
+    expect(enumValues).toContain('clone');
 
-    // params must allow additional properties
-    const paramsSchema = properties.params as Record<string, unknown>;
-    expect(paramsSchema).toHaveProperty('type', 'object');
-    expect(paramsSchema).toHaveProperty('additionalProperties', true);
-
-    // required must include action
-    const required = (params as Record<string, unknown>).required as string[];
+    // required must include only action
+    const required = params.required as string[];
     expect(required).toContain('action');
   });
 });

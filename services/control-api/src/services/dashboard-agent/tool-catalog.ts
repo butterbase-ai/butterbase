@@ -45,14 +45,9 @@ export function getToolCatalog(): ToolSpec[] {
             ],
             description: 'The action to perform',
           },
-          params: {
-            type: 'object',
-            additionalProperties: true,
-            description:
-              'Action-specific parameters. See tool description for required fields per action.',
-          },
         },
         required: ['action'],
+        additionalProperties: true,
       },
     },
   ];
