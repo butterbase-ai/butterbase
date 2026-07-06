@@ -290,6 +290,10 @@ describe('runAgentTurn — tool cap', () => {
 
     // done should NOT be emitted — error is the terminal event
     expect(events.find((e) => e.type === 'done')).toBeUndefined();
+
+    // Fix 3: assert persistence count.
+    // 1 user row + 8 × (1 assistant row + 1 tool row) = 17 total calls.
+    expect(mockAppendMessage).toHaveBeenCalledTimes(17);
   });
 });
 
@@ -367,5 +371,128 @@ describe('runAgentTurn — MCP failure', () => {
     const toolMsg = secondBody.messages.find((m) => m.role === 'tool');
     expect(toolMsg).toBeDefined();
     expect(JSON.parse(toolMsg!.content ?? '{}')).toEqual({ error: 'boom' });
+  });
+});
+
+describe('runAgentTurn — two tool calls in one pass (Fix 1)', () => {
+  it('processes both tool calls, emits tool_call+tool_result pairs for each, sends correct OpenAI multi-call history', async () => {
+    // First gateway pass: emits TWO tool_call fragments (distinct ids/indices)
+    const firstPass = gatewayResponse([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, id: 'call-A', function: { name: 'manage_app', arguments: '' } },
+                { index: 1, id: 'call-B', function: { name: 'manage_app', arguments: '' } },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, function: { arguments: '{"action":"list"}' } },
+                { index: 1, function: { arguments: '{"action":"get_config","id":"app_x"}' } },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ]);
+
+    // Second gateway pass: plain text after receiving both results
+    const secondPass = gatewayResponse([
+      { choices: [{ delta: { content: 'Here are your apps and config.' }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ]);
+
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(firstPass)
+      .mockResolvedValueOnce(secondPass);
+
+    // Return different results per call
+    mockCallMcpTool
+      .mockResolvedValueOnce({ ok: true, result: { apps: ['myapp'] } })   // call-A
+      .mockResolvedValueOnce({ ok: true, result: { config: { plan: 'pro' } } }); // call-B
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    // Expect two tool_call + two tool_result events before the final text
+    expect(events[0]).toEqual({ type: 'tool_call', id: 'call-A', name: 'manage_app', args: { action: 'list' } });
+    expect(events[1]).toEqual({ type: 'tool_result', id: 'call-A', result: { apps: ['myapp'] } });
+    expect(events[2]).toEqual({ type: 'tool_call', id: 'call-B', name: 'manage_app', args: { action: 'get_config', id: 'app_x' } });
+    expect(events[3]).toEqual({ type: 'tool_result', id: 'call-B', result: { config: { plan: 'pro' } } });
+    expect(events[4]).toEqual({ type: 'token', text: 'Here are your apps and config.' });
+    expect(events[5]).toEqual({ type: 'assistant_message', content: 'Here are your apps and config.' });
+    expect(events[6]).toEqual({ type: 'done' });
+
+    // Two MCP calls with the correct arguments
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
+    expect(mockCallMcpTool).toHaveBeenNthCalledWith(1, 'manage_app', { action: 'list' }, 'test-jwt');
+    expect(mockCallMcpTool).toHaveBeenNthCalledWith(2, 'manage_app', { action: 'get_config', id: 'app_x' }, 'test-jwt');
+
+    // Persistence: 1 user + 2 assistant (one per tool_call) + 2 tool + 1 final assistant = 6
+    expect(mockAppendMessage).toHaveBeenCalledTimes(6);
+    expect(mockAppendMessage).toHaveBeenNthCalledWith(
+      2, stubPool, 'conv-1',
+      expect.objectContaining({ role: 'assistant', toolCallId: 'call-A' }),
+    );
+    expect(mockAppendMessage).toHaveBeenNthCalledWith(
+      3, stubPool, 'conv-1',
+      expect.objectContaining({ role: 'tool', toolCallId: 'call-A', toolResult: { apps: ['myapp'] } }),
+    );
+    expect(mockAppendMessage).toHaveBeenNthCalledWith(
+      4, stubPool, 'conv-1',
+      expect.objectContaining({ role: 'assistant', toolCallId: 'call-B' }),
+    );
+    expect(mockAppendMessage).toHaveBeenNthCalledWith(
+      5, stubPool, 'conv-1',
+      expect.objectContaining({ role: 'tool', toolCallId: 'call-B', toolResult: { config: { plan: 'pro' } } }),
+    );
+
+    // OpenAI multi-call order: second fetch body must have one assistant message
+    // with tool_calls array, followed by two tool messages in order.
+    const secondFetchCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[1];
+    const secondBody = JSON.parse(secondFetchCall[1].body as string) as {
+      messages: Array<{ role: string; tool_calls?: unknown[]; tool_call_id?: string }>;
+    };
+    const assistantMsg = secondBody.messages.find((m) => m.role === 'assistant' && Array.isArray(m.tool_calls));
+    expect(assistantMsg).toBeDefined();
+    expect((assistantMsg!.tool_calls as unknown[]).length).toBe(2);
+
+    const toolMsgs = secondBody.messages.filter((m) => m.role === 'tool');
+    expect(toolMsgs.length).toBe(2);
+    expect(toolMsgs[0].tool_call_id).toBe('call-A');
+    expect(toolMsgs[1].tool_call_id).toBe('call-B');
+  });
+});
+
+describe('runAgentTurn — gateway HTTP error (Fix 2)', () => {
+  it('yields a single error event with status info, no done event, no throw', async () => {
+    // Mock fetch to return a non-2xx response — streamChatCompletion throws "gateway 500"
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      body: null,
+    } as unknown as Response);
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    // Exactly one error event, message mentions status
+    const errorEvents = events.filter((e) => e.type === 'error');
+    expect(errorEvents.length).toBe(1);
+    expect((errorEvents[0] as { type: 'error'; message: string }).message).toMatch(/500/);
+
+    // No 'done' event
+    expect(events.find((e) => e.type === 'done')).toBeUndefined();
+
+    // Generator terminates cleanly (collect() would have thrown if it escaped)
   });
 });

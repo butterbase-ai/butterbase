@@ -265,7 +265,10 @@ export async function* runAgentTurn(input: {
   // 2. Agentic loop — cap at TOOL_CALL_LIMIT steps
   for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
     let assistantText = '';
-    let pendingToolCall: { id: string; name: string; args: unknown } | null = null;
+    // Fix 1: collect ALL tool calls emitted in one gateway pass, not just the last.
+    // streamChatCompletion correctly yields every accumulated tool_call once per stream,
+    // so we must process N of them rather than overwriting with the last.
+    const pendingToolCalls: Array<{ id: string; name: string; args: unknown }> = [];
 
     const stream = streamChatCompletion({
       model: input.model,
@@ -274,18 +277,42 @@ export async function* runAgentTurn(input: {
       jwt: input.jwt,
     });
 
-    for await (const chunk of stream) {
-      if (chunk.type === 'token') {
-        assistantText += chunk.text;
-        yield { type: 'token', text: chunk.text };
-      } else if (chunk.type === 'tool_call') {
-        // Keep only the last tool call emitted in this stream pass
-        pendingToolCall = chunk;
+    // Fix 2: wrap the gateway stream in try/catch so HTTP errors (non-2xx thrown
+    // by streamChatCompletion) are surfaced as 'error' events instead of unhandled
+    // rejections. Startup errors (appendMessage/listMessages) above intentionally
+    // still propagate as thrown exceptions (Task-4 will get a 500).
+    try {
+      for await (const chunk of stream) {
+        if (chunk.type === 'token') {
+          assistantText += chunk.text;
+          yield { type: 'token', text: chunk.text };
+        } else if (chunk.type === 'tool_call') {
+          pendingToolCalls.push(chunk);
+        }
       }
+    } catch (err: unknown) {
+      // Best-effort: persist any partial text the assistant streamed before the error.
+      if (assistantText) {
+        try {
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'assistant',
+            content: assistantText,
+            toolCallId: null,
+            toolName: null,
+            toolArgs: null,
+            toolResult: null,
+          });
+        } catch {
+          // Swallow the persistence error so the original error message survives.
+        }
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      yield { type: 'error', message };
+      return;
     }
 
     // No tool call — assistant is done
-    if (!pendingToolCall) {
+    if (pendingToolCalls.length === 0) {
       await appendMessage(input.pool, input.conversationId, {
         role: 'assistant',
         content: assistantText,
@@ -299,55 +326,69 @@ export async function* runAgentTurn(input: {
       return;
     }
 
-    // Persist the assistant's tool-calling message
-    await appendMessage(input.pool, input.conversationId, {
-      role: 'assistant',
-      content: assistantText,
-      toolCallId: pendingToolCall.id,
-      toolName: pendingToolCall.name,
-      toolArgs: pendingToolCall.args,
-      toolResult: null,
-    });
-    yield { type: 'tool_call', ...pendingToolCall };
+    // Fix 1 (multi-call persistence strategy):
+    // The store schema has one tool_call_id/tool_name/tool_args per row, so we
+    // write one assistant row per tool_call.  Content is placed on the first row
+    // and left as empty string on subsequent rows — this keeps the assistant text
+    // visible without duplicating it, and the gateway reconstruction in
+    // toGatewayMessages groups them back per-call anyway.
+    const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
+    for (let i = 0; i < pendingToolCalls.length; i++) {
+      const tc = pendingToolCalls[i];
 
-    // Execute the tool via MCP
-    const call = await callMcpTool(pendingToolCall.name, pendingToolCall.args, input.jwt);
-    yield {
-      type: 'tool_result',
-      id: pendingToolCall.id,
-      ...(call.ok ? { result: call.result } : { error: call.error }),
-    };
+      // Persist assistant row (content only on first row for clarity)
+      await appendMessage(input.pool, input.conversationId, {
+        role: 'assistant',
+        content: i === 0 ? assistantText : '',
+        toolCallId: tc.id,
+        toolName: tc.name,
+        toolArgs: tc.args,
+        toolResult: null,
+      });
 
-    // Persist the tool result row
-    await appendMessage(input.pool, input.conversationId, {
-      role: 'tool',
-      content: '',
-      toolCallId: pendingToolCall.id,
-      toolName: pendingToolCall.name,
-      toolArgs: pendingToolCall.args,
-      toolResult: call.ok ? call.result : { error: call.error },
-    });
+      yield { type: 'tool_call', ...tc };
 
-    // Append to in-memory message history for next gateway call
+      // Execute the tool via MCP
+      const call = await callMcpTool(tc.name, tc.args, input.jwt);
+      const resultPayload = call.ok ? { result: call.result } : { error: call.error };
+      toolCallResults.push({ id: tc.id, ...resultPayload });
+      yield { type: 'tool_result', id: tc.id, ...resultPayload };
+
+      // Persist the tool result row
+      await appendMessage(input.pool, input.conversationId, {
+        role: 'tool',
+        content: '',
+        toolCallId: tc.id,
+        toolName: tc.name,
+        toolArgs: tc.args,
+        toolResult: call.ok ? call.result : { error: call.error },
+      });
+    }
+
+    // Fix 1 (OpenAI multi-tool-call ordering):
+    // OpenAI protocol requires ONE assistant message containing ALL tool_calls,
+    // followed by one 'tool' message per result in matching order.
     messages.push({
       role: 'assistant',
       content: assistantText || null,
-      tool_calls: [
-        {
-          id: pendingToolCall.id,
-          type: 'function',
-          function: {
-            name: pendingToolCall.name,
-            arguments: JSON.stringify(pendingToolCall.args),
-          },
+      tool_calls: pendingToolCalls.map((tc) => ({
+        id: tc.id,
+        type: 'function' as const,
+        function: {
+          name: tc.name,
+          arguments: JSON.stringify(tc.args),
         },
-      ],
+      })),
     });
-    messages.push({
-      role: 'tool',
-      tool_call_id: pendingToolCall.id,
-      content: JSON.stringify(call.ok ? call.result : { error: call.error }),
-    });
+    for (let i = 0; i < pendingToolCalls.length; i++) {
+      const tc = pendingToolCalls[i];
+      const res = toolCallResults[i];
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
+      });
+    }
   }
 
   // Reached the tool call cap
