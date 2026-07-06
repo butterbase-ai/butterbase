@@ -8,7 +8,7 @@ import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
 import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
-import { resolveOrganizationId } from '../services/org-resolver.js';
+import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const initSchema = {
@@ -29,6 +29,10 @@ const initSchema = {
         pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$',
       },
       region: {
+        type: 'string',
+        minLength: 1,
+      },
+      organization_id: {
         type: 'string',
         minLength: 1,
       },
@@ -253,7 +257,22 @@ export async function initRoutes(app: FastifyInstance) {
       [subdomain, appId]
     );
 
-    const orgId = await resolveOrganizationId(app.controlDb, ownerId);
+    // Resolve target org. Precedence:
+    //   1. Explicit body.organization_id — gated by membership check.
+    //   2. Auth-bound org (bb_sk_* key's org, or JWT x-organization-id).
+    //   3. Caller's personal org.
+    // NOTE: for now we only check membership, not per-key scope — a bb_sk_*
+    // key can create an app in any org its owning user belongs to. Tighten
+    // later if we want strict per-key org locking.
+    const bodyOrgId = (request.body as { organization_id?: string }).organization_id;
+    let orgId: string;
+    if (bodyOrgId) {
+      await assertOrgMember(app.controlDb, ownerId, bodyOrgId);
+      orgId = bodyOrgId;
+    } else {
+      orgId = request.auth?.organizationId
+        ?? await resolveOrganizationId(app.controlDb, ownerId);
+    }
     await addOrgAppIndex(app.controlDb, {
       organizationId: orgId,
       appId,
