@@ -21,7 +21,7 @@ import {
 import { RESOURCE_NOT_FOUND, VALIDATION_TABLE_NOT_FOUND, VALIDATION_INVALID_SCHEMA, VALIDATION_INVALID_TYPE, APP_PAUSED } from '@butterbase/shared/error-types';
 import { config } from '../config.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
-import { logAuditEvent } from '../services/audit/audit-events-service.js';
+import { logAuditEventFromControlDb } from '../services/audit/audit-events-service.js';
 import { decrypt } from '../services/crypto.js';
 import { verifyStripe, verifyGithub, verifyCustomHmac } from '../services/webhook-verifiers.js';
 import { getRedisClient } from '../services/redis.js';
@@ -586,7 +586,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
       );
       const durationMs = Date.now() - invokeStart;
 
-      void logAuditEvent(app.controlDb, {
+      void logAuditEventFromControlDb(app.controlDb, {
         appId: app_id,
         category: 'function',
         eventType: 'function.invoke',
@@ -676,7 +676,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
         app.log.error({ err: error }, 'Function execution error');
       }
 
-      void logAuditEvent(app.controlDb, {
+      void logAuditEventFromControlDb(app.controlDb, {
         appId: app_id,
         category: 'function',
         eventType: 'function.invoke',
