@@ -73,6 +73,7 @@ import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
 import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
+import { startCloneJobsReaper } from './services/clone-jobs-reaper.js';
 import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { aiMeetingsRoutes } from './routes/ai-meetings.js';
@@ -747,6 +748,9 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).cloneJobsPrunerHandle) {
         await (app as any).cloneJobsPrunerHandle.stop();
       }
+      if ((app as any).cloneJobsReaperHandle) {
+        await (app as any).cloneJobsReaperHandle.stop();
+      }
       if ((app as any).cloneWebhookSweeperHandle) {
         await (app as any).cloneWebhookSweeperHandle.stop();
       }
@@ -943,6 +947,16 @@ Promise.resolve(app.ready())
       app.log.info('Clone-jobs pruner started (24h interval)');
     }
 
+    // Clone-jobs reaper: flips template_clone_jobs stuck in a mid-stage
+    // status (>15 min, no live neon_task) to 'failed' and notifies the
+    // owner + ops. Backstops the neon_tasks retry logic for scenarios
+    // where a control-api instance died mid-pipeline (runs every 5 min).
+    if (process.env.SKIP_CLONE_JOBS_REAPER !== '1') {
+      const cloneJobsReaperHandle = startCloneJobsReaper(app.controlDb, app.log);
+      (app as any).cloneJobsReaperHandle = cloneJobsReaperHandle;
+      app.log.info('Clone-jobs reaper started (5m interval)');
+    }
+
     // Clone-webhook sweeper: delivers clone_webhook_outbox rows with HMAC-SHA256
     // signing and 3-attempt exponential-backoff retry (runs every 30 s).
     if (process.env.SKIP_CLONE_WEBHOOK_SWEEPER !== '1') {
@@ -1009,6 +1023,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});
       if ((app as any).cloneJobsPrunerHandle) await (app as any).cloneJobsPrunerHandle.stop().catch(() => {});
+      if ((app as any).cloneJobsReaperHandle) await (app as any).cloneJobsReaperHandle.stop().catch(() => {});
       if ((app as any).cloneWebhookSweeperHandle) await (app as any).cloneWebhookSweeperHandle.stop().catch(() => {});
 
       // Timeout: force exit if shutdown hangs

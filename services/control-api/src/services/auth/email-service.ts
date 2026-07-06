@@ -152,6 +152,8 @@ export type BillingEmailTemplate =
   | 'hard_limit_exceeded'
   | 'deployment_failed'
   | 'provisioning_failed'
+  | 'clone_failed'
+  | 'clone_reaper_digest'
   | 'function_failed'
   | 'auth_hook_failed'
   | 'auto_refill_failed'
@@ -169,6 +171,8 @@ const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   hard_limit_exceeded: 'Action Required: Plan Limit Reached',
   deployment_failed: 'Deployment failed',
   provisioning_failed: 'App setup failed',
+  clone_failed: 'Clone failed',
+  clone_reaper_digest: '[butterbase] Clone reaper flipped stuck jobs to failed',
   function_failed: 'A function in your app is failing',
   auth_hook_failed: 'Your auth hook is failing',
   auto_refill_failed: 'Action Required: Auto-Refill Failed',
@@ -285,6 +289,45 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
         '',
         `View app: ${dashboardUrl}/apps/${data.appId}`,
       ].join('\n');
+
+    case 'clone_failed': {
+      const stageLine = data.stalledStage
+        ? `Stalled at stage: ${data.stalledStage}`
+        : '';
+      return [
+        `We couldn't finish cloning "${data.appName || data.appId}" from template ${data.sourceAppId}.`,
+        '',
+        `Job ID: ${data.jobId}`,
+        stageLine,
+        `Error: ${data.errorMessage || '(no message captured)'}`,
+        '',
+        'The destination app was created but the code (frontend + functions) may not be fully in place. You can:',
+        `  • Try cloning again: ${dashboardUrl}/templates`,
+        `  • Delete the partial app: ${dashboardUrl}/apps/${data.appId}`,
+        `  • Contact support if this keeps happening.`,
+      ].filter(Boolean).join('\n');
+    }
+
+    case 'clone_reaper_digest': {
+      let details: Array<{ jobId: string; destAppId: string | null; stalledStage: string; ageMinutes: number }> = [];
+      try {
+        details = JSON.parse(data.detailsJson || '[]');
+      } catch {
+        // Fall through with empty list — the reapedCount is still informative.
+      }
+      const lines: string[] = [
+        `The clone-jobs reaper marked ${data.reapedCount} stuck job(s) as failed this tick.`,
+        '',
+        'This usually means a control-api instance died mid-pipeline (deploy, OOM, or unhandled exception past the neon_tasks max_attempts).',
+        '',
+      ];
+      for (const d of details) {
+        lines.push(`• ${d.jobId} → ${d.destAppId ?? '(no dest)'} — stalled at ${d.stalledStage} (${d.ageMinutes}m)`);
+      }
+      lines.push('');
+      lines.push('Users have been notified individually via clone_failed emails.');
+      return lines.join('\n');
+    }
 
     case 'weekly_digest': {
       const items = parseDigestItems(data.itemsJson);

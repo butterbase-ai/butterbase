@@ -14,6 +14,19 @@ export type CloneJobStatus =
   | 'completed'
   | 'failed';
 
+/**
+ * Statuses at which the pipeline is finished for good. Any other status —
+ * including mid-flight ones like 'replaying_rls' — is resumable and must NOT
+ * short-circuit executeClone on retry (see neon-task-worker.ts). A prior
+ * version of the re-entry guard treated everything except 'pending'/'processing'
+ * as terminal, which silently orphaned jobs after their first mid-stage crash.
+ */
+export const TERMINAL_CLONE_STATUSES: ReadonlyArray<CloneJobStatus> = ['completed', 'failed'];
+
+export function isTerminalCloneStatus(status: CloneJobStatus): boolean {
+  return TERMINAL_CLONE_STATUSES.includes(status);
+}
+
 export interface CloneJob {
   id: string;
   source_app_id: string;

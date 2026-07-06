@@ -92,6 +92,108 @@ export async function notifyDeploymentFailed(
 }
 
 /**
+ * Clone job failed — called from neon-task-worker.ts (terminal fail path) and
+ * from the clone-jobs reaper. Dedup key: failure_notif:clone:{jobId} — once
+ * per job attempt lifetime (a job that terminally fails via the worker and
+ * then also gets swept by the reaper produces one email, not two).
+ *
+ * Also CCs an ops-side alert to OPS_ALERT_EMAIL (defaults to ken@butterbase.ai)
+ * with a separate dedup key so operator visibility isn't gated by the user
+ * email's silence rules or dedup.
+ */
+export async function notifyCloneFailed(
+  controlPool: Pool,
+  runtimePool: Pool,
+  args: {
+    appId: string;
+    jobId: string;
+    sourceAppId: string;
+    errorMessage: string;
+    stalledStage?: string;
+  },
+  log?: { warn: (payload: Record<string, unknown>, message: string) => void }
+): Promise<void> {
+  // Ops alert: fire independently of the user email so operators still see the
+  // failure when the dest app has no owner, is deleted, or has silences on.
+  const opsRecipient = process.env.OPS_ALERT_EMAIL || 'ken@butterbase.ai';
+  const opsKey = `failure_notif:clone:ops:${args.jobId}`;
+  try {
+    const opsSet = await getRedisClient().set(opsKey, '1', 'EX', NOTIF_TTL_SECONDS, 'NX');
+    if (opsSet) {
+      await sendBillingEmail(opsRecipient, 'clone_failed', {
+        appId: args.appId,
+        appName: `(ops alert) ${args.appId}`,
+        sourceAppId: args.sourceAppId,
+        jobId: args.jobId,
+        errorMessage: args.errorMessage,
+        stalledStage: args.stalledStage || '',
+      }).catch((err) => {
+        log?.warn({ err, jobId: args.jobId }, 'failure-notifications: clone ops send failed');
+      });
+    }
+  } catch {
+    // Don't let ops-alert plumbing break the user email path below.
+  }
+
+  const key = `failure_notif:clone:${args.jobId}`;
+  try {
+    const wasSet = await getRedisClient().set(key, '1', 'EX', NOTIF_TTL_SECONDS, 'NX');
+    if (!wasSet) return;
+
+    const owner = await getOwnerEmailAndAppName(controlPool, runtimePool, args.appId);
+    if (!owner) {
+      log?.warn({ appId: args.appId, jobId: args.jobId }, 'failure-notifications: clone skipped (no owner email)');
+      await getRedisClient().del(key).catch(() => {});
+      return;
+    }
+
+    await sendBillingEmail(owner.email, 'clone_failed', {
+      appId: args.appId,
+      appName: owner.appName,
+      sourceAppId: args.sourceAppId,
+      jobId: args.jobId,
+      errorMessage: args.errorMessage,
+      stalledStage: args.stalledStage || '',
+    }, {
+      controlPool,
+      userId: owner.userId,
+      scope: { appId: args.appId },
+    }).catch((err) => {
+      log?.warn({ err, appId: args.appId, jobId: args.jobId }, 'failure-notifications: clone send failed');
+    });
+  } catch {
+    // Notifications must never block their callers.
+  }
+}
+
+/**
+ * Send an ops-only digest when the clone-jobs reaper flips one or more
+ * stuck jobs to 'failed' in a single tick. Complements the per-job
+ * notifyCloneFailed emails: if 10 jobs get reaped in one tick you want
+ * one summary in the ops inbox in addition to the 10 individual emails,
+ * because a multi-job reap points at a systemic issue (worker crash,
+ * deploy race, region outage) that the individual emails don't convey.
+ * No dedup — every non-empty reap tick sends one email.
+ */
+export async function notifyCloneReaperDigest(
+  args: { reapedJobIds: string[]; details: Array<{ jobId: string; destAppId: string | null; stalledStage: string; ageMinutes: number }> },
+  log?: { warn: (payload: Record<string, unknown>, message: string) => void }
+): Promise<void> {
+  if (args.reapedJobIds.length === 0) return;
+  const opsRecipient = process.env.OPS_ALERT_EMAIL || 'ken@butterbase.ai';
+  try {
+    await sendBillingEmail(opsRecipient, 'clone_reaper_digest', {
+      reapedCount: String(args.reapedJobIds.length),
+      detailsJson: JSON.stringify(args.details),
+    }).catch((err) => {
+      log?.warn({ err, reapedCount: args.reapedJobIds.length }, 'failure-notifications: reaper digest send failed');
+    });
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
  * App provisioning failed — synchronous, called from provisioner.ts and neon-task-worker.ts.
  * Dedup key: failure_notif:provision:{appId}:{UTC date} — once per app per day.
  */

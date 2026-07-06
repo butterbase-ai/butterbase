@@ -7,10 +7,10 @@ import * as neonClient from './neon-client.js';
 import { getDataProjectIdForRegion } from './neon-projects.js';
 import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
-import { notifyProvisioningFailed } from './failure-notifications.service.js';
+import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notifications.service.js';
 import { addOrgAppIndex, removeOrgAppIndex } from './org-app-index.js';
 import { resolveOrganizationId } from './org-resolver.js';
-import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings } from './clone-jobs.js';
+import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus } from './clone-jobs.js';
 import {
   getManifestJson,
   putManifest,
@@ -434,10 +434,15 @@ async function executeClone(
 
   const job = await getCloneJob(controlDb, jobId);
   if (!job) throw new Error(`Clone job ${jobId} not found`);
-  if (job.status !== 'pending' && job.status !== 'processing') {
+  if (isTerminalCloneStatus(job.status)) {
     logger.info({ jobId, status: job.status }, '[clone] job in terminal status; skipping');
     return;
   }
+  // Any non-terminal status (including mid-stage: replaying_schema, replaying_rls,
+  // seeding_data, replaying_functions, replaying_config, copying_repo) is a
+  // resumable state. Each stage below is idempotent and its own guard decides
+  // whether to skip or redo the work.
+  const resumedFromStatus = job.status;
 
   await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
 
@@ -456,6 +461,8 @@ async function executeClone(
     scope.setTag('clone_job_id', jobId);
     scope.setTag('source_app_id', job.source_app_id);
     scope.setTag('target_app_id', 'pending');
+    scope.setTag('resumed_from_status', resumedFromStatus);
+    scope.setTag('attempt', String(task.attempts));
 
     try {
       scope.setTag('step', 'provisioning');
@@ -1013,6 +1020,27 @@ async function executeClone(
           eventType: 'template_clone_failed',
           metadata: { job_id: jobId, dest_app_id: destAppId ?? null, dest_region: job.dest_region, error: msg },
         }).catch((auditErr) => logger.error({ auditErr }, '[clone] audit log failed event insert failed'));
+
+        // Notify the dest owner (and ops) that their clone permanently failed. The dest app
+        // exists at this point (destAppId is set once provisioning succeeds); if provisioning
+        // itself failed, notifyProvisioningFailed already fired from the same catch path via
+        // the ambient provisioning task, so we skip to avoid a duplicate email.
+        if (destAppId) {
+          const destRuntimePool = await getRuntimeDbForApp(controlDb, destAppId).catch(() => null);
+          if (destRuntimePool) {
+            notifyCloneFailed(
+              controlDb,
+              destRuntimePool,
+              {
+                appId: destAppId,
+                jobId,
+                sourceAppId: job.source_app_id,
+                errorMessage: msg,
+              },
+              logger,
+            ).catch((notifyErr) => logger.error({ notifyErr, jobId }, '[clone] notifyCloneFailed failed'));
+          }
+        }
       } else {
         // Surface the last error to the user but keep the job alive for the next attempt.
         await setCloneJobStatus(controlDb, jobId, { error_message: msg }).catch(() => {});
