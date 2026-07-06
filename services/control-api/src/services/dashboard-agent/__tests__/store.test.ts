@@ -227,4 +227,34 @@ describe('Dashboard Agent Store', () => {
     messages = await listMessages(pool, conv.id);
     expect(messages.length).toBe(0);
   });
+
+  it('appendMessage and listMessages preserve tool args and result as objects (JSONB)', async () => {
+    const conv = await createConversation(pool, testUserId, 'Tool Test', 'gpt-4');
+
+    const toolArgs = { action: 'list', filter: { status: 'active' } };
+    const toolResult = { apps: [{ id: 'app_x', name: 'App X' }], count: 1 };
+
+    // Append a tool message with non-null args and result
+    const appended = await appendMessage(pool, conv.id, {
+      role: 'tool',
+      content: 'Tool output',
+      toolCallId: 'call_123',
+      toolName: 'list_apps',
+      toolArgs,
+      toolResult,
+    });
+
+    // Verify appendMessage returns the objects as-is (not stringified)
+    expect(appended.toolCallId).toBe('call_123');
+    expect(appended.toolName).toBe('list_apps');
+    expect(appended.toolArgs).toEqual(toolArgs);
+    expect(appended.toolResult).toEqual(toolResult);
+
+    // Verify listMessages returns the same objects intact
+    const messages = await listMessages(pool, conv.id);
+    expect(messages.length).toBe(1);
+    const retrieved = messages[0];
+    expect(retrieved.toolArgs).toEqual(toolArgs);
+    expect(retrieved.toolResult).toEqual(toolResult);
+  });
 });

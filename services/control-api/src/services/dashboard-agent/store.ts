@@ -170,8 +170,8 @@ export async function appendMessage(
       content: msgRow.content,
       toolCallId: msgRow.tool_call_id,
       toolName: msgRow.tool_name,
-      toolArgs: msgRow.tool_args ? JSON.parse(msgRow.tool_args) : null,
-      toolResult: msgRow.tool_result ? JSON.parse(msgRow.tool_result) : null,
+      toolArgs: msgRow.tool_args ?? null,
+      toolResult: msgRow.tool_result ?? null,
       createdAt: new Date(msgRow.created_at),
     };
   } catch (err) {
@@ -204,8 +204,8 @@ export async function listMessages(
     content: row.content,
     toolCallId: row.tool_call_id,
     toolName: row.tool_name,
-    toolArgs: row.tool_args ? JSON.parse(row.tool_args) : null,
-    toolResult: row.tool_result ? JSON.parse(row.tool_result) : null,
+    toolArgs: row.tool_args ?? null,
+    toolResult: row.tool_result ?? null,
     createdAt: new Date(row.created_at),
   }));
 }
