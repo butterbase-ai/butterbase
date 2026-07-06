@@ -43,6 +43,7 @@ The response includes _meta.next_actions with recommended next steps.`,
     {
       name: z.string().min(1).max(63).describe('App name (lowercase alphanumeric, hyphens, underscores)'),
       region: z.string().min(1).optional().describe('Region to provision in (e.g. "us-east-1", "us-west-2"). Defaults to the control-api\'s home region.'),
+      organization_id: z.string().min(1).optional().describe('Organization to create the app under. Requires membership. Defaults to the API key\'s bound org, or the caller\'s personal org.'),
     },
     {
       title: 'Initialize App',
@@ -51,7 +52,7 @@ The response includes _meta.next_actions with recommended next steps.`,
       idempotentHint: false,
       openWorldHint: true,
     },
-    async ({ name, region }) => {
+    async ({ name, region, organization_id }) => {
       // Auto-slugify: "My Cool App" → "my-cool-app"
       const slug = name
         .toLowerCase()
@@ -61,8 +62,9 @@ The response includes _meta.next_actions with recommended next steps.`,
         .replace(/^[^a-z0-9]+/, '')
         .slice(0, 63);
 
-      const body: { name: string; region?: string } = { name: slug };
+      const body: { name: string; region?: string; organization_id?: string } = { name: slug };
       if (region) body.region = region;
+      if (organization_id) body.organization_id = organization_id;
       const result = await apiPost<InitResponse>('/init', body);
 
       // Poll until provisioned (max ~60s)
