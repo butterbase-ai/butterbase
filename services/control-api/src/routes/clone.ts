@@ -216,28 +216,30 @@ export function cloneRoutes(app: FastifyInstance) {
     // is provided, fall back to the operator-configured default before the
     // source region — the source may be at capacity while the default has
     // headroom (Neon's 500-databases-per-branch limit).
-    const destRegion =
+    const requestedDestRegion =
       body.dest_region ??
       body.region ??
       process.env.BUTTERBASE_DEFAULT_REGION ??
       src.region;
 
-    // Reject clones targeting a region temporarily closed to new apps.
-    // BUTTERBASE_PROVISION_ALLOWED_REGIONS is a subset of BUTTERBASE_REGIONS
-    // — the latter controls serving, the former controls new writes. When
-    // unset, all serving regions accept new apps (existing behavior).
-    const provisionAllowedRaw =
+    // If the caller pinned a region temporarily closed to new apps (e.g.
+    // dashboard clone form defaults to source.region), silently redirect
+    // to the first open region rather than 400ing. Silent-failing clones
+    // during a hackathon is worse UX than a transparent cross-region
+    // clone. We log the override so operators can audit it.
+    const provisionAllowed = (
       process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
         ?? process.env.BUTTERBASE_REGIONS
-        ?? '';
-    const provisionAllowed = provisionAllowedRaw.split(',').map((s) => s.trim()).filter(Boolean);
+        ?? ''
+    ).split(',').map((s) => s.trim()).filter(Boolean);
+    let destRegion = requestedDestRegion;
     if (provisionAllowed.length > 0 && !provisionAllowed.includes(destRegion)) {
-      return reply.code(400).send(createAgentError({
-        code: VALIDATION_INVALID_SCHEMA,
-        message: `Region "${destRegion}" is not currently accepting new apps.`,
-        remediation: `Pass an explicit dest_region from: ${provisionAllowed.join(', ')}.`,
-        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-      }));
+      const fallback = provisionAllowed[0];
+      request.log.warn(
+        { requestedDestRegion, destRegion: fallback, sourceRegion: src.region, allowed: provisionAllowed },
+        '[clone] redirecting new clone to open region',
+      );
+      destRegion = fallback;
     }
     const job = await createCloneJob(app.controlDb, {
       sourceAppId: source_app_id,
