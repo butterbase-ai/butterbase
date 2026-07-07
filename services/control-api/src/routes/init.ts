@@ -151,24 +151,33 @@ export async function initRoutes(app: FastifyInstance) {
         ?? ''
     ).split(',').map((s) => s.trim()).filter(Boolean);
     const bodyRegion = (request.body as { region?: string } | undefined)?.region;
-    const provisionRegion =
+    const requestedRegion =
       bodyRegion ??
       process.env.BUTTERBASE_DEFAULT_REGION ??
       provisionAllowed[0] ??
       allowedRegions[0] ??
       'local';
 
-    if (!allowedRegions.includes(provisionRegion)) {
+    if (!allowedRegions.includes(requestedRegion)) {
       return reply.code(400).send({
-        error: `Region "${provisionRegion}" is not in BUTTERBASE_REGIONS`,
+        error: `Region "${requestedRegion}" is not in BUTTERBASE_REGIONS`,
         allowed: allowedRegions,
       });
     }
-    if (!provisionAllowed.includes(provisionRegion)) {
-      return reply.code(400).send({
-        error: `Region "${provisionRegion}" is not currently accepting new apps`,
-        allowed: provisionAllowed,
-      });
+    // If the caller asked for a region that's temporarily closed to new
+    // apps, silently redirect to the first open region rather than 400ing.
+    // Dashboard/CLI flows often pin a region from the template's source and
+    // failing them mid-hackathon is worse UX than a transparent move. The
+    // response body doesn't currently expose region, so callers see nothing
+    // surprising; we log the override so operators can audit it.
+    let provisionRegion = requestedRegion;
+    if (provisionAllowed.length > 0 && !provisionAllowed.includes(requestedRegion)) {
+      const fallback = provisionAllowed[0];
+      request.log.warn(
+        { requestedRegion, provisionRegion: fallback, allowed: provisionAllowed },
+        '[init] redirecting new app to open region',
+      );
+      provisionRegion = fallback;
     }
     try {
       getDataProjectIdForRegion(provisionRegion);
