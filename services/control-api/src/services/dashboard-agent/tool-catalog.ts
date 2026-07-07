@@ -61,7 +61,7 @@ export function getToolCatalog(): ToolSpec[] {
     {
       name: 'manage_schema',
       description:
-        'Design or modify an app\'s database schema declaratively. Actions: "get" | "apply" | "dry_run" | "list_migrations" (NOTE: "dry_run" not "preview"). Required for apply/dry_run: `schema` as a nested OBJECT (NOT a string), shaped like:\n' +
+        'Design or modify an app\'s database schema declaratively. Actions: "get" | "apply" | "dry_run" | "list_migrations" (NOTE: "dry_run" not "preview"). CRITICAL: `schema` must be a NESTED JSON OBJECT — DO NOT stringify it, DO NOT wrap it in quotes. Shape:\n' +
         '  {\n' +
         '    "tables": {\n' +
         '      "posts": {\n' +

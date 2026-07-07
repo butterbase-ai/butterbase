@@ -15,6 +15,32 @@ export type McpCallResult = {
 };
 
 /**
+ * Some models (notably Claude Haiku 4.5 over OpenRouter) stringify nested
+ * object args when they emit tool_calls — passing `schema: "{...}"` instead
+ * of `schema: { ... }`. The MCP server then rejects with:
+ *   `Expected object, received string`.
+ *
+ * Recover by best-effort JSON-parsing any string value at the top level of
+ * args whose payload looks like a JSON object or array. Leaves scalars,
+ * plain string values, and already-parsed nested objects untouched.
+ */
+function normalizeToolArgs(args: unknown): unknown {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const out: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+  for (const [key, value] of Object.entries(out)) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
+    try {
+      out[key] = JSON.parse(trimmed);
+    } catch {
+      // Not JSON — leave as-is.
+    }
+  }
+  return out;
+}
+
+/**
  * Call an MCP tool via the HTTP endpoint.
  * @param name - The MCP tool name (e.g., 'manage_app')
  * @param args - Tool arguments as an object
@@ -27,6 +53,7 @@ export async function callMcpTool(
   jwt: string,
 ): Promise<McpCallResult> {
   const url = `${process.env.MCP_SERVER_URL ?? 'http://localhost:3010'}/mcp`;
+  const normalizedArgs = normalizeToolArgs(args);
 
   try {
     const res = await fetch(url, {
@@ -42,7 +69,7 @@ export async function callMcpTool(
         jsonrpc: '2.0',
         id: 1,
         method: 'tools/call',
-        params: { name, arguments: args },
+        params: { name, arguments: normalizedArgs },
       }),
     });
 
