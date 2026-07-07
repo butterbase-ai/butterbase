@@ -389,86 +389,181 @@ export async function* runAgentTurn(
 
   // 2. Agentic loop -------------------------------------------------------
   let terminated = false;
-  outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
-    let assistantText = '';
-    const pendingToolCalls: Array<{ id: string; name: string; args: unknown }> = [];
+  try {
+    outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
+      let assistantText = '';
+      const pendingToolCalls: Array<{ id: string; name: string; args: unknown }> = [];
 
-    const stream = streamChatCompletion({
-      model: input.model,
-      messages,
-      tools,
-      jwt: input.jwt,
-    });
+      const stream = streamChatCompletion({
+        model: input.model,
+        messages,
+        tools,
+        jwt: input.jwt,
+      });
 
-    try {
-      for await (const chunk of stream) {
-        if (chunk.type === 'token') {
-          assistantText += chunk.text;
-          yield { type: 'token', text: chunk.text };
-        } else if (chunk.type === 'tool_call') {
-          pendingToolCalls.push(chunk);
-        } else if (chunk.type === 'usage') {
-          gatewayPromptTokens += chunk.prompt_tokens;
-          gatewayCompletionTokens += chunk.completion_tokens;
+      try {
+        for await (const chunk of stream) {
+          if (chunk.type === 'token') {
+            assistantText += chunk.text;
+            yield { type: 'token', text: chunk.text };
+          } else if (chunk.type === 'tool_call') {
+            pendingToolCalls.push(chunk);
+          } else if (chunk.type === 'usage') {
+            gatewayPromptTokens += chunk.prompt_tokens;
+            gatewayCompletionTokens += chunk.completion_tokens;
+          }
         }
+      } catch (err: unknown) {
+        if (assistantText) {
+          try {
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'assistant',
+              content: assistantText,
+              toolCallId: null,
+              toolName: null,
+              toolArgs: null,
+              toolResult: null,
+            });
+          } catch {
+            // Swallow persistence error so original error survives.
+          }
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        yield { type: 'error', message };
+        terminated = true;
+        break outer;
       }
-    } catch (err: unknown) {
-      if (assistantText) {
-        try {
+
+      // No tool call — assistant is done
+      if (pendingToolCalls.length === 0) {
+        await appendMessage(input.pool, input.conversationId, {
+          role: 'assistant',
+          content: assistantText,
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+        yield { type: 'assistant_message', content: assistantText };
+        yield { type: 'done' };
+        terminated = true;
+        break outer;
+      }
+
+      const allowedToolNames = new Set(tools.map((t) => t.name));
+      const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
+      for (let i = 0; i < pendingToolCalls.length; i++) {
+        const tc = pendingToolCalls[i];
+
+        await appendMessage(input.pool, input.conversationId, {
+          role: 'assistant',
+          content: i === 0 ? assistantText : '',
+          toolCallId: tc.id,
+          toolName: tc.name,
+          toolArgs: tc.args,
+          toolResult: null,
+        });
+
+        yield { type: 'tool_call', ...tc };
+
+        // Allowlist guard
+        if (!allowedToolNames.has(tc.name)) {
+          const errorMsg = `Tool "${tc.name}" is not available in this agent's catalog.`;
+          const resultPayload = { error: errorMsg };
+          toolCallResults.push({ id: tc.id, ...resultPayload });
+          yield { type: 'tool_result', id: tc.id, ...resultPayload };
           await appendMessage(input.pool, input.conversationId, {
-            role: 'assistant',
-            content: assistantText,
-            toolCallId: null,
-            toolName: null,
-            toolArgs: null,
-            toolResult: null,
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: { error: errorMsg },
           });
-        } catch {
-          // Swallow persistence error so original error survives.
+          continue;
         }
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      yield { type: 'error', message };
-      terminated = true;
-      break outer;
-    }
 
-    // No tool call — assistant is done
-    if (pendingToolCalls.length === 0) {
-      await appendMessage(input.pool, input.conversationId, {
-        role: 'assistant',
-        content: assistantText,
-        toolCallId: null,
-        toolName: null,
-        toolArgs: null,
-        toolResult: null,
-      });
-      yield { type: 'assistant_message', content: assistantText };
-      yield { type: 'done' };
-      terminated = true;
-      break outer;
-    }
+        // ---- Route: file-op tools (in-process) ----------------------------
+        if (isFileOpTool(tc.name)) {
+          const args = (tc.args ?? {}) as { app_id?: string };
+          toolCallsCount++;
+          if (args.app_id) touchedApps.add(args.app_id);
+          const r = await fileOps.execute(tc.name as FileOpName, args, {
+            convId: input.conversationId,
+            jwt: input.jwt,
+          });
+          // Drain any file_change / active_app_change events emitted during exec.
+          for (const evt of drainPending()) yield evt;
 
-    const allowedToolNames = new Set(tools.map((t) => t.name));
-    const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
-    for (let i = 0; i < pendingToolCalls.length; i++) {
-      const tc = pendingToolCalls[i];
+          const payload: { result?: unknown; error?: string } = r.ok
+            ? { result: r.data }
+            : { error: r.error };
+          if (r.ok && tc.name === 'write_file') fileWritesCount++;
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: r.ok ? r.data : { error: r.error },
+          });
+          continue;
+        }
 
-      await appendMessage(input.pool, input.conversationId, {
-        role: 'assistant',
-        content: i === 0 ? assistantText : '',
-        toolCallId: tc.id,
-        toolName: tc.name,
-        toolArgs: tc.args,
-        toolResult: null,
-      });
+        // ---- Route: deploy tool (in-process) ------------------------------
+        if (isDeployTool(tc.name)) {
+          const args = (tc.args ?? {}) as { app_id?: string };
+          toolCallsCount++;
+          if (!args.app_id) {
+            const err = 'app_id is required';
+            toolCallResults.push({ id: tc.id, error: err });
+            yield { type: 'tool_result', id: tc.id, error: err };
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: { error: err },
+            });
+            continue;
+          }
+          // Ensure the workspace is hydrated before bundling.
+          try {
+            await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
+          } catch {
+            // Fall through — deployer will report "no files" if truly empty.
+          }
+          touchedApps.add(args.app_id);
+          const r = await deployer.deploy({
+            convId: input.conversationId,
+            appId: args.app_id,
+            jwt: input.jwt,
+          });
+          for (const evt of drainPending()) yield evt;
+          const payload: { result?: unknown; error?: string } = r.ok
+            ? { result: { deployment_id: r.deployment_id, url: r.url } }
+            : { error: r.error };
+          if (r.ok) deploymentsCount++;
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error ? { error: payload.error } : (payload.result ?? {}),
+          });
+          continue;
+        }
 
-      yield { type: 'tool_call', ...tc };
-
-      // Allowlist guard
-      if (!allowedToolNames.has(tc.name)) {
-        const errorMsg = `Tool "${tc.name}" is not available in this agent's catalog.`;
-        const resultPayload = { error: errorMsg };
+        // ---- Default: MCP tool -------------------------------------------
+        toolCallsCount++;
+        const call = await callMcpTool(tc.name, tc.args, input.jwt);
+        const resultPayload = call.ok ? { result: call.result } : { error: call.error };
         toolCallResults.push({ id: tc.id, ...resultPayload });
         yield { type: 'tool_result', id: tc.id, ...resultPayload };
         await appendMessage(input.pool, input.conversationId, {
@@ -477,159 +572,71 @@ export async function* runAgentTurn(
           toolCallId: tc.id,
           toolName: tc.name,
           toolArgs: tc.args,
-          toolResult: { error: errorMsg },
+          toolResult: call.ok ? call.result : { error: call.error },
         });
-        continue;
       }
 
-      // ---- Route: file-op tools (in-process) ----------------------------
-      if (isFileOpTool(tc.name)) {
-        const args = (tc.args ?? {}) as { app_id?: string };
-        const r = await fileOps.execute(tc.name as FileOpName, args, {
-          convId: input.conversationId,
-          jwt: input.jwt,
-        });
-        // Drain any file_change / active_app_change events emitted during exec.
-        for (const evt of drainPending()) yield evt;
-
-        toolCallsCount++;
-        if (args.app_id) touchedApps.add(args.app_id);
-        const payload: { result?: unknown; error?: string } = r.ok
-          ? { result: r.data }
-          : { error: r.error };
-        if (r.ok && tc.name === 'write_file') fileWritesCount++;
-        toolCallResults.push({ id: tc.id, ...payload });
-        yield { type: 'tool_result', id: tc.id, ...payload };
-        await appendMessage(input.pool, input.conversationId, {
-          role: 'tool',
-          content: '',
-          toolCallId: tc.id,
-          toolName: tc.name,
-          toolArgs: tc.args,
-          toolResult: r.ok ? r.data : { error: r.error },
-        });
-        continue;
-      }
-
-      // ---- Route: deploy tool (in-process) ------------------------------
-      if (isDeployTool(tc.name)) {
-        const args = (tc.args ?? {}) as { app_id?: string };
-        toolCallsCount++;
-        if (!args.app_id) {
-          const err = 'app_id is required';
-          toolCallResults.push({ id: tc.id, error: err });
-          yield { type: 'tool_result', id: tc.id, error: err };
-          await appendMessage(input.pool, input.conversationId, {
-            role: 'tool',
-            content: '',
-            toolCallId: tc.id,
-            toolName: tc.name,
-            toolArgs: tc.args,
-            toolResult: { error: err },
-          });
-          continue;
-        }
-        // Ensure the workspace is hydrated before bundling.
-        try {
-          await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
-        } catch {
-          // Fall through — deployer will report "no files" if truly empty.
-        }
-        touchedApps.add(args.app_id);
-        const r = await deployer.deploy({
-          convId: input.conversationId,
-          appId: args.app_id,
-          jwt: input.jwt,
-        });
-        for (const evt of drainPending()) yield evt;
-        const payload: { result?: unknown; error?: string } = r.ok
-          ? { result: { deployment_id: r.deployment_id, url: r.url } }
-          : { error: r.error };
-        if (r.ok) deploymentsCount++;
-        toolCallResults.push({ id: tc.id, ...payload });
-        yield { type: 'tool_result', id: tc.id, ...payload };
-        await appendMessage(input.pool, input.conversationId, {
-          role: 'tool',
-          content: '',
-          toolCallId: tc.id,
-          toolName: tc.name,
-          toolArgs: tc.args,
-          toolResult: payload.error ? { error: payload.error } : (payload.result ?? {}),
-        });
-        continue;
-      }
-
-      // ---- Default: MCP tool -------------------------------------------
-      toolCallsCount++;
-      const call = await callMcpTool(tc.name, tc.args, input.jwt);
-      const resultPayload = call.ok ? { result: call.result } : { error: call.error };
-      toolCallResults.push({ id: tc.id, ...resultPayload });
-      yield { type: 'tool_result', id: tc.id, ...resultPayload };
-      await appendMessage(input.pool, input.conversationId, {
-        role: 'tool',
-        content: '',
-        toolCallId: tc.id,
-        toolName: tc.name,
-        toolArgs: tc.args,
-        toolResult: call.ok ? call.result : { error: call.error },
-      });
-    }
-
-    messages.push({
-      role: 'assistant',
-      content: assistantText || null,
-      tool_calls: pendingToolCalls.map((tc) => ({
-        id: tc.id,
-        type: 'function' as const,
-        function: {
-          name: tc.name,
-          arguments: JSON.stringify(tc.args),
-        },
-      })),
-    });
-    for (let i = 0; i < pendingToolCalls.length; i++) {
-      const tc = pendingToolCalls[i];
-      const res = toolCallResults[i];
       messages.push({
-        role: 'tool',
-        tool_call_id: tc.id,
-        content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
+        role: 'assistant',
+        content: assistantText || null,
+        tool_calls: pendingToolCalls.map((tc) => ({
+          id: tc.id,
+          type: 'function' as const,
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.args),
+          },
+        })),
       });
+      for (let i = 0; i < pendingToolCalls.length; i++) {
+        const tc = pendingToolCalls[i];
+        const res = toolCallResults[i];
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
+        });
+      }
     }
-  }
 
-  // Reached the tool call cap
-  if (!terminated) {
-    yield { type: 'error', message: 'Tool call limit reached (8).' };
-  }
+    // Reached the tool call cap
+    if (!terminated) {
+      yield { type: 'error', message: 'Tool call limit reached (8).' };
+    }
+  } catch (err: unknown) {
+    // Tool invocation threw an uncaught exception.
+    // Emit error frame and proceed to end-of-turn cleanup.
+    const message = err instanceof Error ? err.message : String(err);
+    yield { type: 'error', message };
+  } finally {
+    // End-of-turn: flush touched apps + record usage (guaranteed to run)
+    for (const appId of touchedApps) {
+      const baseline = baselineByApp.get(appId) ?? new Map<string, string>();
+      try {
+        await repoSync.flush({
+          convId: input.conversationId,
+          appId,
+          jwt: input.jwt,
+          baseline,
+        });
+      } catch {
+        // Best-effort; loop should not hard-fail because of a flush error.
+      }
+    }
 
-  // End-of-turn: flush touched apps + record usage ------------------------
-  for (const appId of touchedApps) {
-    const baseline = baselineByApp.get(appId) ?? new Map<string, string>();
     try {
-      await repoSync.flush({
-        convId: input.conversationId,
-        appId,
-        jwt: input.jwt,
-        baseline,
+      await recordUsage(input.pool, {
+        userId: input.userId,
+        conversationId: input.conversationId,
+        model: input.model,
+        promptTokens: gatewayPromptTokens,
+        completionTokens: gatewayCompletionTokens,
+        toolCallsCount,
+        fileWritesCount,
+        deploymentsCount,
       });
     } catch {
-      // Best-effort; loop should not hard-fail because of a flush error.
+      // Telemetry is best-effort in v1.
     }
-  }
-
-  try {
-    await recordUsage(input.pool, {
-      userId: input.userId,
-      conversationId: input.conversationId,
-      model: input.model,
-      promptTokens: gatewayPromptTokens,
-      completionTokens: gatewayCompletionTokens,
-      toolCallsCount,
-      fileWritesCount,
-      deploymentsCount,
-    });
-  } catch {
-    // Telemetry is best-effort in v1.
   }
 }

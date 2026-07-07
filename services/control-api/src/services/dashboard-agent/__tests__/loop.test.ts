@@ -797,4 +797,42 @@ describe('runAgentTurn — Task 7 file-op integration', () => {
       deploymentsCount: 1,
     });
   });
+
+  it('runs end-of-turn flush + recordUsage even when a tool invocation throws', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('call-w', 'write_file', '{"app_id":"app_1","path":"src/App.tsx","content":"code"}'))
+      .mockResolvedValueOnce(textPass('done'));
+
+    const cache = new WorkingTreeCache();
+    const flushSpy = vi.fn(async () => ({ pushed: 0, deleted: 0 }));
+    const recordUsageSpy = vi.fn(async () => {});
+
+    const throwingFileOps = {
+      execute: vi.fn(async () => { throw new Error('fileOps error'); }),
+    };
+
+    const repoSync = {
+      pullLatest: vi.fn().mockResolvedValue({ hydrated: true }),
+      flush: flushSpy,
+    };
+
+    const events = await collect(
+      runAgentTurn(baseInput, {
+        cache,
+        repoSync: repoSync as any,
+        recordUsage: recordUsageSpy,
+        loadTemplate: vi.fn().mockResolvedValue([]),
+        fileOpsFactory: () => throwingFileOps as any,
+      }),
+    );
+
+    // Even though fileOps.execute threw, end-of-turn must have run
+    expect(flushSpy).toHaveBeenCalled();
+    expect(recordUsageSpy).toHaveBeenCalled();
+
+    // Should have an error event for the thrown exception
+    const errorEvent = events.find((e) => e.type === 'error');
+    expect(errorEvent).toBeDefined();
+    expect((errorEvent as { type: 'error'; message: string }).message).toContain('fileOps error');
+  });
 });
