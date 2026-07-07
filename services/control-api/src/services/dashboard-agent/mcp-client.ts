@@ -50,7 +50,35 @@ export async function callMcpTool(
       return { ok: false, error: `mcp ${res.status}` };
     }
 
-    const body = await res.json() as { result?: unknown; error?: { message?: string } };
+    // MCP StreamableHTTP transport MAY respond with SSE (`text/event-stream`)
+    // instead of `application/json`, even for single-response `tools/call`.
+    // Parse both.
+    const contentType = res.headers.get('content-type') ?? '';
+    let body: { result?: unknown; error?: { message?: string } };
+    if (contentType.startsWith('text/event-stream')) {
+      const text = await res.text();
+      // SSE frames are `event:...\ndata: <json>\n\n`. Concatenate multi-line
+      // data lines per frame (per SSE spec), then JSON.parse. We only care
+      // about the frame carrying the JSON-RPC response for our id.
+      let jsonRpc: { result?: unknown; error?: { message?: string } } | null = null;
+      for (const frame of text.split(/\r?\n\r?\n/)) {
+        const dataLines = frame
+          .split(/\r?\n/)
+          .filter((l) => l.startsWith('data:'))
+          .map((l) => l.slice(5).trimStart());
+        if (dataLines.length === 0) continue;
+        try {
+          const parsed = JSON.parse(dataLines.join('\n'));
+          if (parsed && typeof parsed === 'object' && ('result' in parsed || 'error' in parsed)) {
+            jsonRpc = parsed;
+          }
+        } catch { /* skip non-JSON frames like heartbeats */ }
+      }
+      if (!jsonRpc) return { ok: false, error: 'mcp: no JSON-RPC response frame found' };
+      body = jsonRpc;
+    } else {
+      body = await res.json() as { result?: unknown; error?: { message?: string } };
+    }
 
     if (body.error) {
       return { ok: false, error: String(body.error.message ?? body.error) };
