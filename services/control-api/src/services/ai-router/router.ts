@@ -78,9 +78,15 @@ export async function acquireWithAudit(
 
 export async function maybeFireCreditsEmail(pool: pg.Pool, userId: string): Promise<void> {
   try {
+    // credits_usd lives on organizations (moved during Plan 07/11.5 org-scoping
+    // refactor), not on platform_users. Read via the personal-org join, matching
+    // the pattern in lease-service.grantLease.
     const r = await pool.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-      `SELECT monthly_allowance_usd::text, credits_usd::text
-         FROM platform_users WHERE id = $1`,
+      `SELECT pu.monthly_allowance_usd::text,
+              COALESCE(o.credits_usd, 0)::text AS credits_usd
+         FROM platform_users pu
+         LEFT JOIN organizations o ON o.id = pu.personal_organization_id
+         WHERE pu.id = $1`,
       [userId],
     );
     if (r.rows.length === 0) return;
