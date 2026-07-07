@@ -212,8 +212,15 @@ export function cloneRoutes(app: FastifyInstance) {
       }
     }
 
-    // Accept dest_region (preferred) or the legacy region alias.
-    const destRegion = body.dest_region ?? body.region ?? src.region;
+    // Accept dest_region (preferred) or the legacy region alias. When neither
+    // is provided, fall back to the operator-configured default before the
+    // source region — the source may be at capacity while the default has
+    // headroom (Neon's 500-databases-per-branch limit).
+    const destRegion =
+      body.dest_region ??
+      body.region ??
+      process.env.BUTTERBASE_DEFAULT_REGION ??
+      src.region;
     const job = await createCloneJob(app.controlDb, {
       sourceAppId: source_app_id,
       sourceSnapshotId: src.repo_latest_snapshot,
