@@ -58,7 +58,25 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'list_regions', description: 'List available Butterbase regions. Use before init_app if the user hasn\'t chosen one.', parameters: flatOpen() },
 
     // ---- Schema, RLS, migrations ----
-    { name: 'manage_schema', description: 'Design or modify an app\'s database schema declaratively. Common actions: "preview", "apply", "get". Requires app_id.', parameters: flatActionParams() },
+    {
+      name: 'manage_schema',
+      description:
+        'Design or modify an app\'s database schema declaratively. Actions: "get" | "apply" | "dry_run" | "list_migrations" (NOTE: "dry_run" not "preview"). Required for apply/dry_run: `schema` as a nested OBJECT (NOT a string), shaped like:\n' +
+        '  {\n' +
+        '    "tables": {\n' +
+        '      "posts": {\n' +
+        '        "columns": {\n' +
+        '          "id":        { "type": "uuid", "primaryKey": true, "default": "gen_random_uuid()" },\n' +
+        '          "title":     { "type": "text", "nullable": false },\n' +
+        '          "author_id": { "type": "uuid", "references": { "table": "users", "column": "id", "onDelete": "CASCADE" } },\n' +
+        '          "created_at":{ "type": "timestamptz", "default": "now()" }\n' +
+        '        }\n' +
+        '      }\n' +
+        '    }\n' +
+        '  }\n' +
+        '`tables` is a MAP keyed by table name (not an array). Types: "uuid", "text", "int8", "boolean", "timestamptz", "jsonb", etc. Requires app_id.',
+      parameters: flatActionParams(),
+    },
     { name: 'manage_rls', description: 'Configure Row-Level Security policies. Actions include "enable", "create_user_isolation", "create_policy". Requires app_id.', parameters: flatActionParams() },
     { name: 'manage_migrations', description: 'Manage schema migrations for an app: status, apply, abort, reverse, teardown source replicas.', parameters: flatActionParams() },
 
