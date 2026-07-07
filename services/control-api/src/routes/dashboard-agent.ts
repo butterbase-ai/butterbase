@@ -25,6 +25,7 @@ import {
   listConversations,
   getConversation,
   deleteConversation,
+  updateConversationModel,
   listMessages,
 } from '../services/dashboard-agent/store.js';
 import { runAgentTurn } from '../services/dashboard-agent/loop.js';
@@ -128,6 +129,22 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
 
     await deleteConversation(app.controlDb, id, userId);
     return reply.code(204).send();
+  });
+
+  // ── PATCH /conversations/:id — update model (persists picker choice) ────
+  const patchConversationBody = z.object({
+    model: z.string().min(1).max(200),
+  });
+  app.patch('/conversations/:id', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+    const body = patchConversationBody.parse(request.body);
+
+    const updated = await updateConversationModel(app.controlDb, id, userId, body.model);
+    if (!updated) return reply.code(404).send({ error: 'conversation not found' });
+    return reply.send({ conversation: updated });
   });
 
   // ── POST /messages (SSE agent turn) ─────────────────────────────────────

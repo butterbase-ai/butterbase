@@ -1,6 +1,12 @@
 /**
  * Tool catalog for the dashboard assistant.
- * Exposes a curated list of MCP tools to the agent.
+ * Exposes every MCP tool the mcp-server registers, with a flat/permissive
+ * JSON-schema per tool. The MCP server enforces the real Zod schema at
+ * dispatch time; we just need to let the LLM know each tool exists and
+ * the shape it takes.
+ *
+ * Every tool listed here is also allowlisted for dispatch (see the loop's
+ * tool-name guard).
  */
 
 export type ToolSpec = {
@@ -9,46 +15,96 @@ export type ToolSpec = {
   parameters: object; // JSON schema
 };
 
+// Shared "flat, permissive" params shape: LLM passes `action` (when the tool
+// has one) plus any additional tool-specific fields — mirroring the actual
+// MCP tool Zod schemas which take flat args, not `{params: {...}}` wrappers.
+function flatActionParams(): object {
+  return {
+    type: 'object',
+    properties: {
+      action: { type: 'string', description: 'Action to perform (see description for allowed values).' },
+    },
+    required: ['action'],
+    additionalProperties: true,
+  };
+}
+function flatOpen(): object {
+  return { type: 'object', properties: {}, additionalProperties: true };
+}
+
 export function getToolCatalog(): ToolSpec[] {
   return [
+    // ---- App lifecycle & discovery ----
     {
       name: 'manage_app',
       description:
-        'Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, update CORS, clone, find templates, and migrate regions. Actions: "list", "delete", "pause", "get_config", "set_visibility", "update_access_mode", "secure", "update_cors", "preview_clone_env_vars", "clone", "get_clone_job", "find_templates", "set_clone_webhook", "link_substrate", "unlink_substrate", "set_substrate_autopropagate", "move", "move_status", "teardown_source_replica", "get_env", "update_env".',
+        'Manage EXISTING app lifecycle. Actions: "list", "delete", "pause", "get_config", "set_visibility", "update_access_mode", "secure", "update_cors", "preview_clone_env_vars", "clone", "get_clone_job", "find_templates", "set_clone_webhook", "link_substrate", "unlink_substrate", "set_substrate_autopropagate", "move", "move_status", "teardown_source_replica", "get_env", "update_env". Call action="list" first in a new conversation.',
+      parameters: flatActionParams(),
+    },
+    {
+      name: 'init_app',
+      description:
+        'Create a NEW Butterbase app. Required: `name`, `region` (e.g. "us-east-1", "eu-west-1"). Returns the new app_id. Use this when the user asks to "create", "start", "make", or "build" a new app.',
       parameters: {
         type: 'object',
         properties: {
-          action: {
-            type: 'string',
-            enum: [
-              'list',
-              'delete',
-              'pause',
-              'get_config',
-              'set_visibility',
-              'update_access_mode',
-              'secure',
-              'update_cors',
-              'preview_clone_env_vars',
-              'clone',
-              'get_clone_job',
-              'find_templates',
-              'set_clone_webhook',
-              'link_substrate',
-              'unlink_substrate',
-              'set_substrate_autopropagate',
-              'move',
-              'move_status',
-              'teardown_source_replica',
-              'get_env',
-              'update_env',
-            ],
-            description: 'The action to perform',
-          },
+          name: { type: 'string', description: 'Human-friendly app name.' },
+          region: { type: 'string', description: 'Butterbase region, e.g. "us-east-1" or "eu-west-1".' },
         },
-        required: ['action'],
+        required: ['name'],
         additionalProperties: true,
       },
     },
+    { name: 'list_regions', description: 'List available Butterbase regions. Use before init_app if the user hasn\'t chosen one.', parameters: flatOpen() },
+
+    // ---- Schema, RLS, migrations ----
+    { name: 'manage_schema', description: 'Design or modify an app\'s database schema declaratively. Common actions: "preview", "apply", "get". Requires app_id.', parameters: flatActionParams() },
+    { name: 'manage_rls', description: 'Configure Row-Level Security policies. Actions include "enable", "create_user_isolation", "create_policy". Requires app_id.', parameters: flatActionParams() },
+    { name: 'manage_migrations', description: 'Manage schema migrations for an app: status, apply, abort, reverse, teardown source replicas.', parameters: flatActionParams() },
+
+    // ---- Auth ----
+    { name: 'manage_auth_config', description: 'Configure end-user auth for an app: JWT lifetimes, OAuth providers, custom auth hooks. Requires app_id.', parameters: flatActionParams() },
+    { name: 'manage_auth_users', description: 'Manage end-users of an app: list, create, update, delete. Requires app_id.', parameters: flatActionParams() },
+    { name: 'manage_oauth', description: 'Configure OAuth providers (Google, GitHub, Apple, X, etc.) for an app.', parameters: flatActionParams() },
+    { name: 'manage_api_keys', description: 'Manage bb_sk_ API keys for an app or org.', parameters: flatActionParams() },
+
+    // ---- Functions ----
+    { name: 'deploy_function', description: 'Deploy or update a serverless function on an app. Requires app_id, function name, and code.', parameters: flatActionParams() },
+    { name: 'manage_function', description: 'Inspect, list, or delete existing functions on an app. Requires app_id.', parameters: flatActionParams() },
+    { name: 'invoke_function', description: 'Invoke a deployed function on an app. Requires app_id and function name.', parameters: flatActionParams() },
+
+    // ---- Data ----
+    { name: 'select_rows', description: 'Read rows from an app\'s database table. Requires app_id and table name. Supports where filters, limit, order.', parameters: flatActionParams() },
+    { name: 'insert_row', description: 'Insert a single row into an app\'s database table. Requires app_id, table name, values.', parameters: flatActionParams() },
+    { name: 'seed_database', description: 'Bulk-seed rows into a table. Requires app_id, table name, and rows array.', parameters: flatActionParams() },
+
+    // ---- Storage / KV / realtime / DO / edge-ssr ----
+    { name: 'manage_storage', description: 'Configure storage buckets and file ACLs on an app. Requires app_id.', parameters: flatActionParams() },
+    { name: 'manage_kv', description: 'Configure KV (key-value) config, credentials, and usage per app.', parameters: flatActionParams() },
+    { name: 'manage_realtime', description: 'Enable WebSocket realtime subscriptions on tables. Requires app_id.', parameters: flatActionParams() },
+    { name: 'manage_durable_objects', description: 'Deploy and manage Durable Object classes (per-key stateful actors).', parameters: flatActionParams() },
+    { name: 'manage_edge_ssr', description: 'Configure edge SSR (server-side rendering) for a frontend deployment.', parameters: flatActionParams() },
+
+    // ---- Frontend ----
+    { name: 'manage_frontend', description: 'Manage frontend deployments: list, get status, start_deployment. Requires app_id.', parameters: flatActionParams() },
+    { name: 'create_frontend_deployment', description: 'Create a new frontend deployment for an app (upload dist archive, set live URL). Requires app_id.', parameters: flatActionParams() },
+
+    // ---- AI / RAG / agents ----
+    { name: 'manage_ai', description: 'Manage the app\'s AI gateway: chat completions, embeddings, list models, configure defaults, BYOK, read usage.', parameters: flatActionParams() },
+    { name: 'manage_rag_content', description: 'Manage RAG content collections and document ingestion. Requires app_id.', parameters: flatActionParams() },
+    { name: 'rag_query', description: 'Run a RAG query against ingested content. Requires app_id and query text.', parameters: flatActionParams() },
+    { name: 'manage_agents', description: 'CRUD for LangGraph agents on an app; create runs; attach MCP servers; apply tool overrides.', parameters: flatActionParams() },
+
+    // ---- Integrations / people / repo / billing / audits ----
+    { name: 'manage_integrations', description: 'Manage third-party SaaS integrations (Composio-backed): email, SMS, calendar, CRM, docs, project management.', parameters: flatActionParams() },
+    { name: 'manage_people', description: 'Manage the app\'s "people" (contacts) list with provider identifiers and slots.', parameters: flatActionParams() },
+    { name: 'manage_repo', description: 'Link and manage the app\'s source repository.', parameters: flatActionParams() },
+    { name: 'manage_billing', description: 'Read the org\'s billing state. Use sparingly; write operations are gated.', parameters: flatActionParams() },
+    { name: 'query_audit_logs', description: 'Query audit logs for an app or org. Read-only.', parameters: flatActionParams() },
+
+    // ---- Docs / meta ----
+    { name: 'butterbase_docs', description: 'Fetch Butterbase documentation for a capability/topic. Use when unsure how a feature works.', parameters: flatOpen() },
+    { name: 'list_partner_apis', description: 'List available partner APIs that can be proxied from a Butterbase app.', parameters: flatOpen() },
+    { name: 'submit_suggestion', description: 'Submit a product suggestion / feedback item.', parameters: flatOpen() },
   ];
 }

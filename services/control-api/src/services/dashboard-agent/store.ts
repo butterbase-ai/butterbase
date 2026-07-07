@@ -108,6 +108,36 @@ export async function getConversation(
 }
 
 /**
+ * Update a conversation's model, scoped to a user. Returns the updated row
+ * (or null if the conversation doesn't exist / isn't owned by the caller).
+ */
+export async function updateConversationModel(
+  pool: pg.Pool,
+  id: string,
+  userId: string,
+  model: string
+): Promise<Conversation | null> {
+  const result = await pool.query(
+    `UPDATE dashboard_agent_conversations
+        SET model = $3, updated_at = NOW()
+      WHERE id = $1 AND user_id = $2
+      RETURNING id, user_id, title, model, created_at, updated_at, last_message_at`,
+    [id, userId, model]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    userId: row.user_id,
+    title: row.title,
+    model: row.model,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
+  };
+}
+
+/**
  * Delete a conversation, scoped to a user (messages cascade delete)
  */
 export async function deleteConversation(
