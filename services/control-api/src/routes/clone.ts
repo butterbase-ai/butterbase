@@ -236,8 +236,35 @@ export function cloneRoutes(app: FastifyInstance) {
       }
     }
 
-    // Accept dest_region (preferred) or the legacy region alias.
-    const destRegion = body.dest_region ?? body.region ?? src.region;
+    // Accept dest_region (preferred) or the legacy region alias. When neither
+    // is provided, fall back to the operator-configured default before the
+    // source region — the source may be at capacity while the default has
+    // headroom (Neon's 500-databases-per-branch limit).
+    const requestedDestRegion =
+      body.dest_region ??
+      body.region ??
+      process.env.BUTTERBASE_DEFAULT_REGION ??
+      src.region;
+
+    // If the caller pinned a region temporarily closed to new apps (e.g.
+    // dashboard clone form defaults to source.region), silently redirect
+    // to the first open region rather than 400ing. Silent-failing clones
+    // during a hackathon is worse UX than a transparent cross-region
+    // clone. We log the override so operators can audit it.
+    const provisionAllowed = (
+      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
+        ?? process.env.BUTTERBASE_REGIONS
+        ?? ''
+    ).split(',').map((s) => s.trim()).filter(Boolean);
+    let destRegion = requestedDestRegion;
+    if (provisionAllowed.length > 0 && !provisionAllowed.includes(destRegion)) {
+      const fallback = provisionAllowed[0];
+      request.log.warn(
+        { requestedDestRegion, destRegion: fallback, sourceRegion: src.region, allowed: provisionAllowed },
+        '[clone] redirecting new clone to open region',
+      );
+      destRegion = fallback;
+    }
     const job = await createCloneJob(app.controlDb, {
       sourceAppId: source_app_id,
       sourceSnapshotId: src.repo_latest_snapshot,
