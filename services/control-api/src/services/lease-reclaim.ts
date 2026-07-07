@@ -39,8 +39,8 @@ export async function reclaimExpiredLeases(
 
       if (sourcePool === 'monthly') {
         await client.query(
-          `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-          [amt, row.user_id]
+          `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
+          [amt, row.organization_id]
         );
       } else if (sourcePool === 'topup') {
         await client.query(
@@ -51,8 +51,8 @@ export async function reclaimExpiredLeases(
         // split: refund the original portions exactly.
         if (monthlyPortion > 0) {
           await client.query(
-            `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-            [monthlyPortion, row.user_id]
+            `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
+            [monthlyPortion, row.organization_id]
           );
         }
         if (topupPortion > 0) {

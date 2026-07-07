@@ -617,10 +617,12 @@ export interface CreditsBalance {
  * the monthly plan allowance and the prepaid top-up balance.
  */
 export async function getCreditsBalance(db: DbClient, userId: string): Promise<CreditsBalance> {
-  // Post-Plan-07: monthly_allowance_usd stays on platform_users (per-user budget),
-  // credits_usd moved to organizations (org-scoped credit balance).
+  // Both monthly_allowance_usd and credits_usd live on organizations
+  // (migration 093 moved monthly_allowance off platform_users). This still
+  // keys on the personal org; team-org billing views should call a variant
+  // that takes an explicit orgId once the caller sites thread it through.
   const result = await db.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-    `SELECT pu.monthly_allowance_usd, o.credits_usd
+    `SELECT o.monthly_allowance_usd, o.credits_usd
      FROM platform_users pu
      JOIN organizations o ON o.id = pu.personal_organization_id
      WHERE pu.id = $1`,

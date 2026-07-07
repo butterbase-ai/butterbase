@@ -79,8 +79,10 @@ export async function acquireWithAudit(
 export async function maybeFireCreditsEmail(pool: pg.Pool, userId: string): Promise<void> {
   try {
     const r = await pool.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-      `SELECT monthly_allowance_usd::text, credits_usd::text
-         FROM platform_users WHERE id = $1`,
+      `SELECT o.monthly_allowance_usd::text, o.credits_usd::text
+         FROM platform_users pu
+         JOIN organizations o ON o.id = pu.personal_organization_id
+        WHERE pu.id = $1`,
       [userId],
     );
     if (r.rows.length === 0) return;

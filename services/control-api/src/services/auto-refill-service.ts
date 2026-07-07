@@ -67,12 +67,11 @@ export async function maybeTriggerAutoRefill(deps: Deps, organizationId: string)
     auto_refill_enabled: boolean;
     auto_refill_amount_usd: string | null;
   }>(
-    `SELECT COALESCE(pu.monthly_allowance_usd, 0)::text AS monthly_allowance_usd,
+    `SELECT o.monthly_allowance_usd::text AS monthly_allowance_usd,
             o.credits_usd,
             o.auto_refill_enabled,
             o.auto_refill_amount_usd
        FROM organizations o
-       LEFT JOIN platform_users pu ON pu.id = o.owner_id
       WHERE o.id = $1`,
     [organizationId]
   );

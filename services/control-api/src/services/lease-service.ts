@@ -21,11 +21,17 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
+    // Read the caller's personal-org billing row. The monthly pool now lives
+    // on organizations.monthly_allowance_usd (migration 093); before 093 it
+    // was on platform_users. This code path always keys on the personal org
+    // because grantLease is currently invoked without an explicit org (AI
+    // gateway, function invocation). Team-org AI billing is a follow-up:
+    // when we thread activeOrgId through, this SELECT should key on that org.
     const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string; personal_organization_id: string }>(
-      `SELECT pu.monthly_allowance_usd, o.credits_usd, pu.personal_organization_id
+      `SELECT o.monthly_allowance_usd, o.credits_usd, pu.personal_organization_id
        FROM platform_users pu
        JOIN organizations o ON o.id = pu.personal_organization_id
-       WHERE pu.id = $1 FOR UPDATE OF pu, o`,
+       WHERE pu.id = $1 FOR UPDATE OF o`,
       [args.userId]
     );
     if (u.rows.length === 0) throw new NotFoundError('user', args.userId);
@@ -59,8 +65,8 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
 
     if (monthlyDraw > 0) {
       await client.query(
-        `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd - $1 WHERE id = $2`,
-        [monthlyDraw, args.userId]
+        `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd - $1 WHERE id = $2`,
+        [monthlyDraw, organizationId]
       );
     }
     if (topupDraw > 0) {
@@ -141,8 +147,8 @@ export async function settleLease(
     if (refund > 0) {
       if (sourcePool === 'monthly') {
         await client.query(
-          `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-          [refund, r.rows[0].user_id]
+          `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
+          [refund, r.rows[0].organization_id]
         );
       } else if (sourcePool === 'topup') {
         await client.query(
@@ -155,8 +161,8 @@ export async function settleLease(
         const topupRefund = +(refund - monthlyRefund).toFixed(4); // preserve total via remainder
         if (monthlyRefund > 0) {
           await client.query(
-            `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-            [monthlyRefund, r.rows[0].user_id]
+            `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
+            [monthlyRefund, r.rows[0].organization_id]
           );
         }
         if (topupRefund > 0) {

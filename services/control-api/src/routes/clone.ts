@@ -16,6 +16,9 @@ import { createCloneJob, getCloneJob, incrementRetry } from '../services/clone-j
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { AppNotFoundError } from '../services/app-resolver.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
+import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
+import { checkProjectQuota } from '../services/project-quota.js';
+import { quotaErrors } from '../utils/quota-errors.js';
 import {
   VALIDATION_INVALID_SCHEMA,
   RESOURCE_NOT_FOUND,
@@ -64,10 +67,31 @@ export function cloneRoutes(app: FastifyInstance) {
       name?: string;
       region?: string;
       dest_region?: string;
+      organization_id?: string;
       env_var_values?: Record<string, Record<string, string>>;
       auto_mint_api_key?: { fn_name: string; key: string }[];
     };
     const userId = requireUserId(request);
+
+    // Resolve target org for the destination app. Precedence mirrors /init:
+    //   1. Explicit body.organization_id — gated by membership check.
+    //   2. Auth-bound org (bb_sk_* key's org, or JWT x-organization-id).
+    //   3. Caller's personal org.
+    let destOrgId: string;
+    if (body.organization_id) {
+      await assertOrgMember(app.controlDb, userId, body.organization_id);
+      destOrgId = body.organization_id;
+    } else {
+      destOrgId = request.auth?.organizationId
+        ?? await resolveOrganizationId(app.controlDb, userId);
+    }
+
+    // Enforce project limit against the destination org's plan. Blocks up-front
+    // so a queued clone can't silently push the org over max_projects.
+    const quota = await checkProjectQuota(app.controlDb, destOrgId);
+    if (!quota.ok) {
+      return reply.code(403).send(quotaErrors.projectLimitReached(quota.current, quota.limit));
+    }
 
     // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
     // org_app_index. We translate to the same generic 404 we use for the
@@ -220,6 +244,7 @@ export function cloneRoutes(app: FastifyInstance) {
       sourceRegion: src.region,
       destRegion,
       requestedByUserId: userId,
+      destOrganizationId: destOrgId,
       destAppName: body.name,
       pendingEnvVarValues: body.env_var_values,
       autoMintRequests: body.auto_mint_api_key,

@@ -39,9 +39,10 @@ export async function readAutoRefillState(controlPool: pg.Pool, userId: string):
     monthly_allowance_usd: string;
     credits_usd: string;
   }>(
-    // Post-Plan-07: auto_refill_* + credits_usd live on organizations,
-    // monthly_allowance_usd stays on platform_users.
-    `SELECT o.auto_refill_enabled, o.auto_refill_amount_usd, pu.monthly_allowance_usd, o.credits_usd
+    // Post-093: monthly_allowance_usd now lives on organizations too.
+    // Reads the caller's personal-org row; team-org variants must key on
+    // an explicit orgId once callers thread it through.
+    `SELECT o.auto_refill_enabled, o.auto_refill_amount_usd, o.monthly_allowance_usd, o.credits_usd
      FROM platform_users pu
      JOIN organizations o ON o.id = pu.personal_organization_id
      WHERE pu.id = $1`,

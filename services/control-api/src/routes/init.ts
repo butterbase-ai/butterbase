@@ -9,6 +9,7 @@ import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
 import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
+import { checkProjectQuota } from '../services/project-quota.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const initSchema = {
@@ -165,36 +166,27 @@ export async function initRoutes(app: FastifyInstance) {
     // the control DB is the cross-region map.
     const region = provisionRegion;
 
-    // Enforce project limit for the user's plan.
-    // Cross-tier: platform_users + plans live on controlDb; apps count comes
-    // from org_app_index (cross-region — counts a user's apps in all regions,
-    // not just this region's runtime DB).
-    const planCheck = await app.controlDb.query(
-      `SELECT p.max_projects
-       FROM platform_users pu
-       JOIN organizations o ON o.id = pu.personal_organization_id
-       JOIN plans p ON p.id = o.plan_id
-       WHERE pu.id = $1`,
-      [ownerId]
-    );
-    const appsCountResult = await app.controlDb.query(
-      `SELECT COUNT(oai.app_id)::int AS current_projects
-       FROM org_app_index oai
-       JOIN organization_members om ON om.organization_id = oai.organization_id
-       WHERE om.user_id = $1`,
-      [ownerId]
-    );
-    const limitCheck = {
-      rows: planCheck.rows.length > 0
-        ? [{ max_projects: planCheck.rows[0].max_projects, current_projects: appsCountResult.rows[0]?.current_projects ?? 0 }]
-        : [],
-    };
+    // Resolve target org up-front so both quota + placement key on the same
+    // subject. Precedence:
+    //   1. Explicit body.organization_id — gated by membership check.
+    //   2. Auth-bound org (bb_sk_* key's org, or JWT x-organization-id).
+    //   3. Caller's personal org.
+    const bodyOrgId = (request.body as { organization_id?: string }).organization_id;
+    let orgId: string;
+    if (bodyOrgId) {
+      await assertOrgMember(app.controlDb, ownerId, bodyOrgId);
+      orgId = bodyOrgId;
+    } else {
+      orgId = request.auth?.organizationId
+        ?? await resolveOrganizationId(app.controlDb, ownerId);
+    }
 
-    if (limitCheck.rows.length > 0) {
-      const { max_projects, current_projects } = limitCheck.rows[0];
-      if (max_projects !== -1 && current_projects >= max_projects) {
-        return reply.code(403).send(quotaErrors.projectLimitReached(current_projects, max_projects));
-      }
+    // Enforce project limit against the TARGET org's plan (not the caller's
+    // personal org). A user on playground personal can still create apps
+    // in a team org up to that org's cap.
+    const quota = await checkProjectQuota(app.controlDb, orgId);
+    if (!quota.ok) {
+      return reply.code(403).send(quotaErrors.projectLimitReached(quota.current, quota.limit));
     }
 
     // Default subdomain to name with underscores replaced by hyphens
@@ -257,22 +249,10 @@ export async function initRoutes(app: FastifyInstance) {
       [subdomain, appId]
     );
 
-    // Resolve target org. Precedence:
-    //   1. Explicit body.organization_id — gated by membership check.
-    //   2. Auth-bound org (bb_sk_* key's org, or JWT x-organization-id).
-    //   3. Caller's personal org.
+    // orgId was resolved above (pre-quota-check); reuse it for placement.
     // NOTE: for now we only check membership, not per-key scope — a bb_sk_*
     // key can create an app in any org its owning user belongs to. Tighten
     // later if we want strict per-key org locking.
-    const bodyOrgId = (request.body as { organization_id?: string }).organization_id;
-    let orgId: string;
-    if (bodyOrgId) {
-      await assertOrgMember(app.controlDb, ownerId, bodyOrgId);
-      orgId = bodyOrgId;
-    } else {
-      orgId = request.auth?.organizationId
-        ?? await resolveOrganizationId(app.controlDb, ownerId);
-    }
     await addOrgAppIndex(app.controlDb, {
       organizationId: orgId,
       appId,
