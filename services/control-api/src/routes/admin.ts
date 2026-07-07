@@ -1646,9 +1646,9 @@ export async function adminRoutes(app: FastifyInstance) {
       auto_refill_last_attempt_at: Date | null;
       auto_refill_last_failure_reason: string | null;
     }>(
-      // Post-Plan-07: credits_usd + auto_refill_* live on organizations,
-      // monthly_allowance_usd stays on platform_users.
-      `SELECT pu.monthly_allowance_usd::text,
+      // Post-093: monthly_allowance_usd moved to organizations. Reads the
+      // caller's personal-org billing row.
+      `SELECT o.monthly_allowance_usd::text,
               o.credits_usd::text,
               o.auto_refill_enabled,
               o.auto_refill_amount_usd::text,

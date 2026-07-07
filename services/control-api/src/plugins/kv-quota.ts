@@ -227,12 +227,20 @@ const kvQuotaPlugin: FastifyPluginAsync = async (fastify) => {
 
     // Skip the balance gate when the op has no credit cost (KV is not metered).
     // If creditCostForOp is changed to return a non-zero cost in the future,
-    // the gate re-engages automatically.
+    // the gate re-engages automatically. Per-org billing: check the app's
+    // owning-org balance, not the owner user's personal balance — a team
+    // org that owns the app is what pays.
     if (creditCostForOp(op) > 0) {
-      const bal = await getCreditsBalance(fastify.controlDb, ownerId);
-      if (bal.totalUsd <= 0) {
-        const r = kvCreditsExhausted();
-        return reply.code(r.statusCode).send(r.body);
+      const orgRow = await fastify.controlDb.query<{ organization_id: string }>(
+        'SELECT organization_id FROM org_app_index WHERE app_id = $1',
+        [appId],
+      );
+      if (orgRow.rows.length > 0) {
+        const bal = await getCreditsBalance(fastify.controlDb, orgRow.rows[0].organization_id);
+        if (bal.totalUsd <= 0) {
+          const r = kvCreditsExhausted();
+          return reply.code(r.statusCode).send(r.body);
+        }
       }
     }
 

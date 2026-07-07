@@ -80,6 +80,7 @@ Common errors:
       source_app_id: z.string().optional().describe('Required for "clone" and "preview_clone_env_vars". The id of the public app to clone.'),
       name: z.string().optional().describe('Optional for "clone". A name for the new app; defaults to `Clone of <source_app_id>`.'),
       region: z.string().optional().describe('Optional for "clone". The region for the new app; defaults to the source app\'s region.'),
+      organization_id: z.string().min(1).optional().describe('Optional for "clone". Organization to create the destination app under. Requires membership. Defaults to the caller\'s personal org.'),
       env_var_values: z.record(z.string(), z.record(z.string(), z.string())).optional()
         .describe('Optional for "clone". Per-function env var values: { fn_name: { KEY: "value" } }. Use preview_clone_env_vars to see what keys the source needs.'),
       auto_mint_api_key: z.array(z.object({
@@ -187,11 +188,13 @@ Common errors:
           const body: {
             name?: string;
             region?: string;
+            organization_id?: string;
             env_var_values?: Record<string, Record<string, string>>;
             auto_mint_api_key?: { fn_name: string; key: string }[];
           } = {};
           if (args.name) body.name = args.name;
           if (args.region) body.region = args.region;
+          if (args.organization_id) body.organization_id = args.organization_id;
           if (args.env_var_values) body.env_var_values = args.env_var_values;
           if (args.auto_mint_api_key) body.auto_mint_api_key = args.auto_mint_api_key;
 

@@ -89,6 +89,10 @@ Common errors:
         .string()
         .optional()
         .describe('Meter type to filter usage by, e.g. "compute", "storage" (used with "usage")'),
+      org_id: z
+        .string()
+        .optional()
+        .describe('Organization id to view billing for. Requires membership. Defaults to the caller\'s personal org. Applies to "status" and "usage".'),
     },
     {
       title: 'Manage Billing',
@@ -98,11 +102,13 @@ Common errors:
       openWorldHint: true,
     },
     async (args) => {
-      const { action, amount, raise_by, start_date, end_date, meter } = args;
+      const { action, amount, raise_by, start_date, end_date, meter, org_id } = args;
 
       switch (action) {
         case 'status': {
-          const res = await fetch(`${getBaseUrl()}/dashboard/billing`, {
+          const url = new URL(`${getBaseUrl()}/dashboard/billing`);
+          if (org_id) url.searchParams.set('org_id', org_id);
+          const res = await fetch(url.toString(), {
             headers: getHeaders(),
           });
           const data = await res.json();

@@ -543,7 +543,12 @@ async function executeClone(
         // Cross-region index so authorizeRepoRead/Write and other lookups can
         // resolve the dest app's region. Init route does the same step after
         // its insertAppRow; the clone worker is the equivalent caller here.
-        const destOrgId = await resolveOrganizationId(controlDb, job.requested_by_user_id);
+        //
+        // Prefer the job's dest_organization_id (set by the clone route from
+        // the same precedence /init uses). Fall back to the requester's
+        // personal org for legacy jobs written before migration 092.
+        const destOrgId = job.dest_organization_id
+          ?? await resolveOrganizationId(controlDb, job.requested_by_user_id);
         await addOrgAppIndex(controlDb, {
           organizationId: destOrgId,
           appId: destAppId,

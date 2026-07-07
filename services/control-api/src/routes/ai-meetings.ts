@@ -21,10 +21,11 @@ import { logAuditEvent } from '../services/audit/audit-events-service.js';
 import { requireUserId } from '../utils/require-auth.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
+import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
-interface GatewayUser { userId: string; appId: string; region: string; }
+interface GatewayUser { userId: string; appId: string; organizationId: string; region: string; }
 
 // appId comes from the URL path (e.g. /v1/:appId/ai/meetings). The route
 // must verify that the authenticated caller owns the app before any
@@ -57,7 +58,11 @@ async function resolveGatewayUser(
     }
     throw err;
   }
-  return { userId, appId, region: config.aiRouter.defaultRegion };
+  // Per-org billing: resolve the app's owning org so downstream credit
+  // reservations debit the correct pool.
+  const runtimePool = await getRuntimeDbForApp((app as any).controlDb, appId);
+  const organizationId = await resolveOrgFromApp(runtimePool, appId);
+  return { userId, appId, organizationId, region: config.aiRouter.defaultRegion };
 }
 
 function openaiError(message: string, type: string, code: string, extra?: Record<string, unknown>) {
@@ -98,7 +103,7 @@ export async function aiMeetingsRoutes(app: FastifyInstance) {
       const body = startMeetingsRequestSchema.parse(req.body);
       const provider = getActorProvider('meetings');
       const handle = await reserveActorCredits((app as any).controlDb, {
-        userId: user.userId, region: user.region,
+        userId: user.userId, organizationId: user.organizationId, region: user.region,
         recordingUsdPerSecond: provider.recordingUsdPerSecond,
         transcriptionUsdPerSecond: provider.transcriptionUsdPerSecond,
         transcript: body.transcript,

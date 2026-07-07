@@ -29,6 +29,7 @@ async function refillLease(
   fastify: any,
   runtimePool: Pool,
   userId: string,
+  organizationId: string,
   region: string
 ): Promise<{ amountGranted: number }> {
   const platformRegion = process.env.BUTTERBASE_PLATFORM_REGION;
@@ -37,7 +38,7 @@ async function refillLease(
 
   if (platformRegion === region) {
     const { grantLease } = await import('../services/lease-service.js');
-    const grant = await grantLease(fastify.controlDb, { userId, region, amountUsd: leaseSize, ttlSeconds: ttl });
+    const grant = await grantLease(fastify.controlDb, { userId, organizationId, region, amountUsd: leaseSize, ttlSeconds: ttl });
     if (grant.amountGranted > 0) await applyLease(runtimePool, userId, grant.amountGranted, grant.expiresAt);
     return { amountGranted: grant.amountGranted };
   }
@@ -46,6 +47,7 @@ async function refillLease(
   if (!platformUrl) throw new Error('CONTROL_PLANE_URL_PLATFORM_REGION required');
   const grant = await requestLeaseFromPlatform({
     userId,
+    organizationId,
     amountUsd: leaseSize,
     platformControlApiUrl: platformUrl,
   });
@@ -176,7 +178,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
 
           let burn = await burnLease(runtimePool, userId, costUsd);
           if (!burn.allowed) {
-            await refillLease(fastify, runtimePool, userId, region);
+            await refillLease(fastify, runtimePool, userId, organizationId, region);
             burn = await burnLease(runtimePool, userId, costUsd);
             if (!burn.allowed) {
               const spendingCap = state!.spending_cap_usd !== null
@@ -191,7 +193,7 @@ const quotaEnforcementPlugin: FastifyPluginAsync = async (fastify) => {
           // Below-threshold proactive refill (fire-and-forget)
           const threshold = requireEnvNumber('BUTTERBASE_LEASE_REFILL_THRESHOLD_USD');
           if (burn.allowed && burn.remaining < threshold) {
-            void refillLease(fastify, runtimePool, userId, region).catch((e) => {
+            void refillLease(fastify, runtimePool, userId, organizationId, region).catch((e) => {
               fastify.log.warn({ e }, 'lease refill failed');
             });
           }
