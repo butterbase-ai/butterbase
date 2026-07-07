@@ -124,5 +124,66 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'butterbase_docs', description: 'Fetch Butterbase documentation for a capability/topic. Use when unsure how a feature works.', parameters: flatOpen() },
     { name: 'list_partner_apis', description: 'List available partner APIs that can be proxied from a Butterbase app.', parameters: flatOpen() },
     { name: 'submit_suggestion', description: 'Submit a product suggestion / feedback item.', parameters: flatOpen() },
+
+    // ---- File-op primitives (loop-internal, NOT dispatched via MCP) ----
+    {
+      name: 'write_file',
+      description:
+        'Create or overwrite a file in the current frontend workspace. Files are React+Vite+Tailwind sources. Do NOT edit package.json or package-lock.json; the dep set is fixed (react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/client).',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id', 'path', 'content'],
+        properties: {
+          app_id: { type: 'string', description: 'The Butterbase app id whose workspace to edit.' },
+          path: { type: 'string', description: 'Relative path from the project root, e.g. "src/App.tsx".' },
+          content: { type: 'string', description: 'Full file contents.' },
+        },
+      },
+    },
+    {
+      name: 'read_file',
+      description: 'Read the current contents of a file in the frontend workspace.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id', 'path'],
+        properties: {
+          app_id: { type: 'string' },
+          path: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'list_files',
+      description: 'List every file in the frontend workspace with its size in bytes.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id'],
+        properties: { app_id: { type: 'string' } },
+      },
+    },
+    {
+      name: 'delete_file',
+      description: 'Delete a file from the frontend workspace.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id', 'path'],
+        properties: {
+          app_id: { type: 'string' },
+          path: { type: 'string' },
+        },
+      },
+    },
   ];
+}
+
+/**
+ * Returns true for the four file-op tool names that are dispatched in-process
+ * by the loop (Task 7), not forwarded to mcp-client.
+ */
+export function isFileOpTool(name: string): name is 'write_file' | 'read_file' | 'list_files' | 'delete_file' {
+  return name === 'write_file' || name === 'read_file' || name === 'list_files' || name === 'delete_file'
 }

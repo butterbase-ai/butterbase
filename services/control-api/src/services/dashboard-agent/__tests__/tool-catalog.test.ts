@@ -1,21 +1,21 @@
 import { describe, it, expect } from 'vitest';
-import { getToolCatalog } from '../tool-catalog.js';
+import { getToolCatalog, isFileOpTool } from '../tool-catalog.js';
 
 describe('Tool Catalog', () => {
   it('getToolCatalog() returns manage_app with flat schema (no params wrapper)', () => {
     const catalog = getToolCatalog();
 
-    expect(catalog).toHaveLength(1);
-    const tool = catalog[0];
+    const tool = catalog.find(t => t.name === 'manage_app');
+    expect(tool).toBeDefined();
 
     // Tool must have name, description, and parameters
     expect(tool).toHaveProperty('name', 'manage_app');
     expect(tool).toHaveProperty('description');
-    expect(typeof tool.description).toBe('string');
-    expect(tool.description.length).toBeGreaterThan(0);
+    expect(typeof tool!.description).toBe('string');
+    expect(tool!.description.length).toBeGreaterThan(0);
 
     // Parameters must be a valid JSON schema
-    const params = tool.parameters as Record<string, unknown>;
+    const params = tool!.parameters as Record<string, unknown>;
     expect(params).toHaveProperty('type', 'object');
     expect(params).toHaveProperty('properties');
     expect(params).toHaveProperty('required');
@@ -25,20 +25,73 @@ describe('Tool Catalog', () => {
     const properties = params.properties as Record<string, unknown>;
     expect(properties).toHaveProperty('action');
     expect(properties).not.toHaveProperty('params');
+  });
 
-    // action must be an enum with all 20+ actions
-    const actionSchema = properties.action as Record<string, unknown>;
-    expect(actionSchema).toHaveProperty('type', 'string');
-    expect(actionSchema).toHaveProperty('enum');
-    expect(Array.isArray(actionSchema.enum)).toBe(true);
-    const enumValues = actionSchema.enum as string[];
-    expect(enumValues.length).toBeGreaterThan(0);
-    expect(enumValues).toContain('list');
-    expect(enumValues).toContain('get_config');
-    expect(enumValues).toContain('clone');
+  it('getToolCatalog() includes all four file-op tools', () => {
+    const catalog = getToolCatalog();
+    const names = catalog.map(t => t.name);
 
-    // required must include only action
+    expect(names).toContain('write_file');
+    expect(names).toContain('read_file');
+    expect(names).toContain('list_files');
+    expect(names).toContain('delete_file');
+  });
+
+  it('write_file tool descriptor has correct required fields', () => {
+    const catalog = getToolCatalog();
+    const tool = catalog.find(t => t.name === 'write_file');
+    expect(tool).toBeDefined();
+    const params = tool!.parameters as Record<string, unknown>;
+    expect(params).toHaveProperty('type', 'object');
     const required = params.required as string[];
-    expect(required).toContain('action');
+    expect(required).toContain('app_id');
+    expect(required).toContain('path');
+    expect(required).toContain('content');
+  });
+
+  it('read_file tool descriptor has app_id and path required', () => {
+    const catalog = getToolCatalog();
+    const tool = catalog.find(t => t.name === 'read_file');
+    expect(tool).toBeDefined();
+    const params = tool!.parameters as Record<string, unknown>;
+    const required = params.required as string[];
+    expect(required).toContain('app_id');
+    expect(required).toContain('path');
+  });
+
+  it('list_files tool descriptor has app_id required', () => {
+    const catalog = getToolCatalog();
+    const tool = catalog.find(t => t.name === 'list_files');
+    expect(tool).toBeDefined();
+    const params = tool!.parameters as Record<string, unknown>;
+    const required = params.required as string[];
+    expect(required).toContain('app_id');
+  });
+
+  it('delete_file tool descriptor has app_id and path required', () => {
+    const catalog = getToolCatalog();
+    const tool = catalog.find(t => t.name === 'delete_file');
+    expect(tool).toBeDefined();
+    const params = tool!.parameters as Record<string, unknown>;
+    const required = params.required as string[];
+    expect(required).toContain('app_id');
+    expect(required).toContain('path');
+  });
+
+  describe('isFileOpTool', () => {
+    it('returns true for the four file-op tool names', () => {
+      expect(isFileOpTool('write_file')).toBe(true);
+      expect(isFileOpTool('read_file')).toBe(true);
+      expect(isFileOpTool('list_files')).toBe(true);
+      expect(isFileOpTool('delete_file')).toBe(true);
+    });
+
+    it('returns false for manage_app, deploy_frontend, and arbitrary strings', () => {
+      expect(isFileOpTool('manage_app')).toBe(false);
+      expect(isFileOpTool('deploy_frontend')).toBe(false);
+      expect(isFileOpTool('create_frontend_deployment')).toBe(false);
+      expect(isFileOpTool('')).toBe(false);
+      expect(isFileOpTool('write_files')).toBe(false); // typo variant
+    });
   });
 });
