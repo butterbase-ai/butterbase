@@ -139,10 +139,22 @@ export async function initRoutes(app: FastifyInstance) {
     // app provisioned in us-west-2 even when they didn't pick a region.
     // The default needs to be deterministic across machines.
     const allowedRegions = (process.env.BUTTERBASE_REGIONS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    // Regions that accept NEW app provisioning. Defaults to allowedRegions
+    // (BUTTERBASE_REGIONS gates both serving and provisioning). Setting
+    // BUTTERBASE_PROVISION_ALLOWED_REGIONS to a subset (e.g. "us-west-2")
+    // lets operators temporarily close a region to new writes without
+    // breaking traffic to apps already homed there — needed when one
+    // region has hit an infra ceiling (Neon's 500 databases-per-branch).
+    const provisionAllowed = (
+      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
+        ?? process.env.BUTTERBASE_REGIONS
+        ?? ''
+    ).split(',').map((s) => s.trim()).filter(Boolean);
     const bodyRegion = (request.body as { region?: string } | undefined)?.region;
     const provisionRegion =
       bodyRegion ??
       process.env.BUTTERBASE_DEFAULT_REGION ??
+      provisionAllowed[0] ??
       allowedRegions[0] ??
       'local';
 
@@ -150,6 +162,12 @@ export async function initRoutes(app: FastifyInstance) {
       return reply.code(400).send({
         error: `Region "${provisionRegion}" is not in BUTTERBASE_REGIONS`,
         allowed: allowedRegions,
+      });
+    }
+    if (!provisionAllowed.includes(provisionRegion)) {
+      return reply.code(400).send({
+        error: `Region "${provisionRegion}" is not currently accepting new apps`,
+        allowed: provisionAllowed,
       });
     }
     try {
