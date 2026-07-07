@@ -29,6 +29,7 @@ import {
   listMessages,
 } from '../services/dashboard-agent/store.js';
 import { runAgentTurn } from '../services/dashboard-agent/loop.js';
+import { listUsage } from '../services/dashboard-agent/usage-store.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -212,5 +213,24 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     } finally {
       reply.raw.end();
     }
+  });
+
+  // ── GET /v1/dashboard-agent/usage ────────────────────────────────────────
+  app.get('/v1/dashboard-agent/usage', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const q = (request.query ?? {}) as { user_id?: string; conversation_id?: string };
+
+    // V1: users only see their own rows (no admin gate yet).
+    const filterUserId = q.user_id ?? userId;
+    if (filterUserId !== userId) return reply.code(403).send({ error: 'forbidden' });
+
+    const rows = await listUsage(app.controlDb, {
+      userId: filterUserId,
+      conversationId: q.conversation_id,
+    });
+
+    return reply.send({ rows });
   });
 }
