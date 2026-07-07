@@ -57,14 +57,19 @@ describe('deploy_frontend', () => {
   it('reports failed status on build failure', async () => {
     const cache = new WorkingTreeCache()
     cache.write(CONV, APP, 'package.json', '{}')
+    const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn(async () => new Response('', { status: 200 }) as any) as any
     const mcp = makeMcp({
       create_from_source: () => ({ deployment_id: 'dep_2', upload_url: 'https://s3/put' }),
       start_from_source: () => ({ deployment_id: 'dep_2', status: 'queued' }),
       list_deployments: () => ({ deployments: [{ id: 'dep_2', status: 'failed', error: 'build error' }] }),
     })
-    const d = createDeployer({ cache, mcp, onDeploymentProgress: () => {}, pollIntervalMs: 1, maxWaitMs: 5000 })
-    const r = await d.deploy({ convId: CONV, appId: APP, jwt: JWT })
-    expect(r).toMatchObject({ ok: false })
+    try {
+      const d = createDeployer({ cache, mcp, onDeploymentProgress: () => {}, pollIntervalMs: 1, maxWaitMs: 5000 })
+      const r = await d.deploy({ convId: CONV, appId: APP, jwt: JWT })
+      expect(r).toMatchObject({ ok: false })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
