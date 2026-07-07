@@ -221,6 +221,24 @@ export function cloneRoutes(app: FastifyInstance) {
       body.region ??
       process.env.BUTTERBASE_DEFAULT_REGION ??
       src.region;
+
+    // Reject clones targeting a region temporarily closed to new apps.
+    // BUTTERBASE_PROVISION_ALLOWED_REGIONS is a subset of BUTTERBASE_REGIONS
+    // — the latter controls serving, the former controls new writes. When
+    // unset, all serving regions accept new apps (existing behavior).
+    const provisionAllowedRaw =
+      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
+        ?? process.env.BUTTERBASE_REGIONS
+        ?? '';
+    const provisionAllowed = provisionAllowedRaw.split(',').map((s) => s.trim()).filter(Boolean);
+    if (provisionAllowed.length > 0 && !provisionAllowed.includes(destRegion)) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: `Region "${destRegion}" is not currently accepting new apps.`,
+        remediation: `Pass an explicit dest_region from: ${provisionAllowed.join(', ')}.`,
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
     const job = await createCloneJob(app.controlDb, {
       sourceAppId: source_app_id,
       sourceSnapshotId: src.repo_latest_snapshot,
