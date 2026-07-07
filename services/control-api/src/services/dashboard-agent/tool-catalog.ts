@@ -103,10 +103,6 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'manage_durable_objects', description: 'Deploy and manage Durable Object classes (per-key stateful actors).', parameters: flatActionParams() },
     { name: 'manage_edge_ssr', description: 'Configure edge SSR (server-side rendering) for a frontend deployment.', parameters: flatActionParams() },
 
-    // ---- Frontend ----
-    { name: 'manage_frontend', description: 'Manage frontend deployments: list, get status, start_deployment. Requires app_id.', parameters: flatActionParams() },
-    { name: 'create_frontend_deployment', description: 'Create a new frontend deployment for an app (upload dist archive, set live URL). Requires app_id.', parameters: flatActionParams() },
-
     // ---- AI / RAG / agents ----
     { name: 'manage_ai', description: 'Manage the app\'s AI gateway: chat completions, embeddings, list models, configure defaults, BYOK, read usage.', parameters: flatActionParams() },
     { name: 'manage_rag_content', description: 'Manage RAG content collections and document ingestion. Requires app_id.', parameters: flatActionParams() },

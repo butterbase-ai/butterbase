@@ -54,22 +54,44 @@ describe('repo-sync', () => {
     expect(cache.get(CONV, APP)).toBeUndefined()
   })
 
-  it('flush pushes only changed files, base64-encoded', async () => {
+  it('flush pushes the FULL current tree (manage_repo.push replaces manifest — no inheritance)', async () => {
     const cache = new WorkingTreeCache()
     cache.write(CONV, APP, 'a.ts', 'A')
     cache.write(CONV, APP, 'b.ts', 'B')
     const baseline = cache.snapshotBaseline(CONV, APP)
-    cache.write(CONV, APP, 'a.ts', 'A2')
-    cache.write(CONV, APP, 'c.ts', 'C')
+    cache.write(CONV, APP, 'a.ts', 'A2') // change
+    cache.write(CONV, APP, 'c.ts', 'C')  // add
     let received: any = null
     const mcp = mkMcp({ push: (args) => { received = args; return { snapshot_id: 'snap_2' } } })
     const sync = createRepoSync({ cache, mcp })
     const r = await sync.flush({ convId: CONV, appId: APP, jwt: JWT, baseline })
-    expect(r.pushed).toBe(2)
+    expect(r.pushed).toBe(3)
     const paths = received.files.map((f: any) => f.path).sort()
-    expect(paths).toEqual(['a.ts', 'c.ts'])
+    expect(paths).toEqual(['a.ts', 'b.ts', 'c.ts'])
     const a = received.files.find((f: any) => f.path === 'a.ts')
     expect(Buffer.from(a.content_base64, 'base64').toString('utf8')).toBe('A2')
+    // b.ts (unchanged) MUST also be present — anti-regression assertion
+    const b = received.files.find((f: any) => f.path === 'b.ts')
+    expect(Buffer.from(b.content_base64, 'base64').toString('utf8')).toBe('B')
+  })
+
+  it('turn 2 flush preserves files that were untouched this turn', async () => {
+    const cache = new WorkingTreeCache()
+    // Simulate hydrated state from prior turn's push
+    cache.write(CONV, APP, 'src/App.tsx', 'v1')
+    cache.write(CONV, APP, 'package.json', '{}')
+    cache.write(CONV, APP, 'vite.config.ts', '// vite')
+    // Turn 2 begins — baseline snapshot taken now
+    const baseline = cache.snapshotBaseline(CONV, APP)
+    // Turn 2 edits ONE file
+    cache.write(CONV, APP, 'src/App.tsx', 'v2')
+    let received: any = null
+    const mcp = mkMcp({ push: (args) => { received = args; return { snapshot_id: 'snap_3' } } })
+    const sync = createRepoSync({ cache, mcp })
+    const r = await sync.flush({ convId: CONV, appId: APP, jwt: JWT, baseline })
+    expect(r.pushed).toBe(3)
+    const paths = received.files.map((f: any) => f.path).sort()
+    expect(paths).toEqual(['package.json', 'src/App.tsx', 'vite.config.ts'])
   })
 
   it('flush is a no-op when nothing changed', async () => {

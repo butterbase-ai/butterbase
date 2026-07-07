@@ -492,7 +492,9 @@ export async function* runAgentTurn(
         if (isFileOpTool(tc.name)) {
           const args = (tc.args ?? {}) as { app_id?: string };
           toolCallsCount++;
-          if (args.app_id) touchedApps.add(args.app_id);
+          if (args.app_id && (tc.name === 'write_file' || tc.name === 'delete_file')) {
+            touchedApps.add(args.app_id);
+          }
           const r = await fileOps.execute(tc.name as FileOpName, args, {
             convId: input.conversationId,
             jwt: input.jwt,

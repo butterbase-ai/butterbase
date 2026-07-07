@@ -32,13 +32,23 @@ export function createRepoSync(deps: { cache: WorkingTreeCache; mcp: Mcp }): Rep
 
     async flush({ convId, appId, jwt, baseline }) {
       const { changed, deleted } = cache.diff(convId, appId, baseline)
-      if (changed.length === 0) return { pushed: 0, deleted: deleted.length }
-      const files = changed.map(f => ({
+      // Fast-path: no changes and no deletes → no push
+      if (changed.length === 0 && deleted.length === 0) {
+        return { pushed: 0, deleted: 0 }
+      }
+      const tree = cache.get(convId, appId)
+      if (!tree || tree.size === 0) {
+        return { pushed: 0, deleted: deleted.length }
+      }
+      // manage_repo.push replaces the entire snapshot manifest — no inheritance
+      // from prior snapshots. We must always send the full current tree so that
+      // files untouched this turn are not silently dropped on the next pull.
+      const files = Array.from(tree.values()).map(f => ({
         path: f.path,
         content_base64: Buffer.from(f.content, 'utf8').toString('base64'),
       }))
       await mcp.call('manage_repo', { action: 'push', app_id: appId, files }, jwt)
-      return { pushed: changed.length, deleted: deleted.length }
+      return { pushed: files.length, deleted: deleted.length }
     },
   }
 }
