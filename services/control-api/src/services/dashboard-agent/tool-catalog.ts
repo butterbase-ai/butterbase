@@ -125,7 +125,7 @@ export function getToolCatalog(): ToolSpec[] {
     {
       name: 'write_file',
       description:
-        'Create or overwrite a file in the current frontend workspace. Files are React+Vite+Tailwind sources. Do NOT edit package.json or package-lock.json; the dep set is fixed (react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/client).',
+        'Create or overwrite a file in the current frontend workspace. Files are React+Vite+Tailwind sources. Do NOT edit package.json or package-lock.json; the dep set is fixed (react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/sdk).',
       parameters: {
         type: 'object',
         additionalProperties: true,

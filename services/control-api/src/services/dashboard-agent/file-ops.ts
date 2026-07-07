@@ -23,7 +23,7 @@ export type FileOpDeps = {
 const MANAGED_PATHS = new Set(['package.json', 'package-lock.json'])
 const MAX_BYTES = 512 * 1024
 const ALLOWLIST_MSG =
-  'package.json is managed. Use one of the allowlisted libraries: react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/client.'
+  'package.json is managed. Use one of the allowlisted libraries: react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/sdk.'
 
 function validatePath(path: string): string | null {
   if (!path || path.startsWith('/') || path.includes('..')) return `invalid path: ${path}`

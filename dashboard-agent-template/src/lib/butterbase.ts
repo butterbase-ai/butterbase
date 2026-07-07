@@ -1,4 +1,4 @@
-import { createClient } from '@butterbase/client'
+import { createClient } from '@butterbase/sdk'
 
 export const bb = createClient({
   appId: import.meta.env.VITE_APP_ID,

@@ -28,7 +28,7 @@ describe('loadTemplate', () => {
     const files = await loadTemplate({ appId: 'x', apiUrl: 'x' })
     const pkg = JSON.parse(files.find(f => f.path === 'package.json')!.content)
     const allowlist = new Set([
-      'react', 'react-dom', '@butterbase/client', 'tailwindcss', 'autoprefixer', 'postcss',
+      'react', 'react-dom', '@butterbase/sdk', 'tailwindcss', 'autoprefixer', 'postcss',
       'vite', '@vitejs/plugin-react', 'lucide-react', 'clsx', 'tailwind-merge',
       'class-variance-authority', 'typescript',
     ])

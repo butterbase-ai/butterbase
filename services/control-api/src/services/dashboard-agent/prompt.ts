@@ -14,7 +14,7 @@ You can write, read, list, and delete files in the frontend workspace of any But
 
 The workspace is a React + Vite + Tailwind starter. On first \`write_file\` against a new app, it is scaffolded from the standard template — you do NOT need to write \`package.json\`, \`vite.config.ts\`, \`tailwind.config.ts\`, \`postcss.config.js\`, \`index.html\`, \`src/main.tsx\`, \`src/index.css\`, or \`src/lib/butterbase.ts\`. They already exist.
 
-**Never edit \`package.json\` or \`package-lock.json\`.** The dep set is fixed: react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/client. Anything else, don't reach for it.
+**Never edit \`package.json\` or \`package-lock.json\`.** The dep set is fixed: react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/sdk. Anything else, don't reach for it.
 
 **shadcn components:** copy them into \`src/components/ui/\` on demand — the template does not include them.
 
