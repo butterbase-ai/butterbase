@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getToolCatalog, isFileOpTool } from '../tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool } from '../tool-catalog.js';
 
 describe('Tool Catalog', () => {
   it('getToolCatalog() returns manage_app with flat schema (no params wrapper)', () => {
@@ -92,6 +92,35 @@ describe('Tool Catalog', () => {
       expect(isFileOpTool('create_frontend_deployment')).toBe(false);
       expect(isFileOpTool('')).toBe(false);
       expect(isFileOpTool('write_files')).toBe(false); // typo variant
+    });
+  });
+
+  it('getToolCatalog() includes deploy_frontend', () => {
+    const catalog = getToolCatalog();
+    const names = catalog.map(t => t.name);
+    expect(names).toContain('deploy_frontend');
+  });
+
+  it('deploy_frontend tool descriptor has app_id required', () => {
+    const catalog = getToolCatalog();
+    const tool = catalog.find(t => t.name === 'deploy_frontend');
+    expect(tool).toBeDefined();
+    const params = tool!.parameters as Record<string, unknown>;
+    expect(params).toHaveProperty('type', 'object');
+    const required = params.required as string[];
+    expect(required).toContain('app_id');
+  });
+
+  describe('isDeployTool', () => {
+    it('returns true for deploy_frontend', () => {
+      expect(isDeployTool('deploy_frontend')).toBe(true);
+    });
+
+    it('returns false for other tool names', () => {
+      expect(isDeployTool('manage_app')).toBe(false);
+      expect(isDeployTool('write_file')).toBe(false);
+      expect(isDeployTool('create_frontend_deployment')).toBe(false);
+      expect(isDeployTool('')).toBe(false);
     });
   });
 });

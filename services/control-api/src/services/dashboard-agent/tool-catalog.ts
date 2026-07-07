@@ -177,6 +177,19 @@ export function getToolCatalog(): ToolSpec[] {
         },
       },
     },
+
+    // ---- Deploy primitive (loop-internal, NOT dispatched via MCP) ----
+    {
+      name: 'deploy_frontend',
+      description:
+        'Bundle the current frontend workspace and deploy it. Returns a live URL like https://<subdomain>.butterbase.dev. Use this when the user asks to ship, deploy, publish, or make live.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id'],
+        properties: { app_id: { type: 'string', description: 'The Butterbase app id to deploy.' } },
+      },
+    },
   ];
 }
 
@@ -186,4 +199,12 @@ export function getToolCatalog(): ToolSpec[] {
  */
 export function isFileOpTool(name: string): name is 'write_file' | 'read_file' | 'list_files' | 'delete_file' {
   return name === 'write_file' || name === 'read_file' || name === 'list_files' || name === 'delete_file'
+}
+
+/**
+ * Returns true for the deploy tool name that is dispatched in-process
+ * by the loop (Task 7), not forwarded to mcp-client.
+ */
+export function isDeployTool(name: string): name is 'deploy_frontend' {
+  return name === 'deploy_frontend'
 }
