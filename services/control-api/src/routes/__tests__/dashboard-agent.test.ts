@@ -285,6 +285,41 @@ describe('dashboard-agent routes', () => {
         }),
       );
     });
+
+    it('forwards Task-7 builder-mode SSE frames (file_change, active_app_change, deployment_progress)', async () => {
+      vi.mocked(getConversation).mockResolvedValueOnce(SAMPLE_CONVERSATION);
+
+      async function* mockGen() {
+        yield { type: 'active_app_change', app_id: 'app_1' };
+        yield { type: 'file_change', app_id: 'app_1', path: 'src/App.tsx', kind: 'write', sha256: 'abc' };
+        yield { type: 'deployment_progress', deployment_id: 'dep_1', status: 'live', url: 'https://x' };
+        yield { type: 'done' };
+      }
+      vi.mocked(runAgentTurn).mockReturnValueOnce(mockGen() as any);
+
+      const r = await app.inject({
+        method: 'POST',
+        url: '/messages',
+        payload: {
+          conversation_id: SAMPLE_CONVERSATION.id,
+          message: 'ship it',
+          model: 'claude-sonnet-4-5',
+        },
+        headers: { authorization: 'Bearer test-jwt-token' },
+      });
+
+      expect(r.statusCode).toBe(200);
+      const frames = r.body
+        .split('\n\n')
+        .filter((f: string) => f.startsWith('data: '))
+        .map((f: string) => JSON.parse(f.slice(6)));
+
+      expect(frames).toHaveLength(4);
+      expect(frames[0]).toEqual({ type: 'active_app_change', app_id: 'app_1' });
+      expect(frames[1]).toMatchObject({ type: 'file_change', app_id: 'app_1', path: 'src/App.tsx', kind: 'write' });
+      expect(frames[2]).toMatchObject({ type: 'deployment_progress', deployment_id: 'dep_1', status: 'live', url: 'https://x' });
+      expect(frames[3]).toEqual({ type: 'done' });
+    });
   });
 
   // ── Case 7: POST /messages — invalid conversation_id → 404 ──────────────

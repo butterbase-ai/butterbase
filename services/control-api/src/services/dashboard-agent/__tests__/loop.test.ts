@@ -36,7 +36,35 @@ vi.mock('../tool-catalog.js', () => ({
         additionalProperties: true,
       },
     },
+    {
+      name: 'write_file',
+      description: 'write file',
+      parameters: { type: 'object', additionalProperties: true, required: ['app_id', 'path', 'content'] },
+    },
+    {
+      name: 'read_file',
+      description: 'read file',
+      parameters: { type: 'object', additionalProperties: true, required: ['app_id', 'path'] },
+    },
+    {
+      name: 'list_files',
+      description: 'list files',
+      parameters: { type: 'object', additionalProperties: true, required: ['app_id'] },
+    },
+    {
+      name: 'delete_file',
+      description: 'delete file',
+      parameters: { type: 'object', additionalProperties: true, required: ['app_id', 'path'] },
+    },
+    {
+      name: 'deploy_frontend',
+      description: 'deploy',
+      parameters: { type: 'object', additionalProperties: true, required: ['app_id'] },
+    },
   ]),
+  isFileOpTool: (name: string) =>
+    name === 'write_file' || name === 'read_file' || name === 'list_files' || name === 'delete_file',
+  isDeployTool: (name: string) => name === 'deploy_frontend',
 }));
 
 // ---------------------------------------------------------------------------
@@ -545,5 +573,228 @@ describe('runAgentTurn — gateway HTTP error (Fix 2)', () => {
     expect(events.find((e) => e.type === 'done')).toBeUndefined();
 
     // Generator terminates cleanly (collect() would have thrown if it escaped)
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 7: builder-mode integration tests
+// ---------------------------------------------------------------------------
+
+import { WorkingTreeCache } from '../working-tree.js';
+import { createFileOps } from '../file-ops.js';
+import { createDeployer } from '../deploy.js';
+
+/** Emit a single-tool-call gateway pass. */
+function toolCallPass(id: string, name: string, argsJson: string) {
+  return gatewayResponse([
+    {
+      choices: [
+        {
+          delta: { tool_calls: [{ index: 0, id, function: { name, arguments: '' } }] },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      choices: [
+        {
+          delta: { tool_calls: [{ index: 0, function: { arguments: argsJson } }] },
+          finish_reason: null,
+        },
+      ],
+    },
+    { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+  ]);
+}
+
+/** Emit a plain-text gateway pass with an optional final usage frame. */
+function textPass(text: string, usage?: { prompt_tokens: number; completion_tokens: number }) {
+  const deltas: object[] = [
+    { choices: [{ delta: { content: text }, finish_reason: null }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+  ];
+  if (usage) deltas.push({ choices: [], usage });
+  return gatewayResponse(deltas);
+}
+
+describe('runAgentTurn — Task 7 file-op integration', () => {
+  it('routes write_file to fileOps (not MCP) and emits file_change', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('call-w', 'write_file', '{"app_id":"app_1","path":"src/App.tsx","content":"export default () => <div/>"}'))
+      .mockResolvedValueOnce(textPass('done'));
+
+    const cache = new WorkingTreeCache();
+    const repoSync = {
+      pullLatest: vi.fn().mockResolvedValue({ hydrated: true }),
+      flush: vi.fn().mockResolvedValue({ pushed: 1, deleted: 0 }),
+    };
+    const recordUsageSpy = vi.fn().mockResolvedValue(undefined);
+    const loadTemplateSpy = vi.fn().mockResolvedValue([]);
+
+    const events = await collect(
+      runAgentTurn(baseInput, {
+        cache,
+        repoSync: repoSync as any,
+        recordUsage: recordUsageSpy,
+        loadTemplate: loadTemplateSpy,
+      }),
+    );
+
+    const fileChange = events.find((e) => e.type === 'file_change') as any;
+    expect(fileChange).toBeDefined();
+    expect(fileChange.app_id).toBe('app_1');
+    expect(fileChange.path).toBe('src/App.tsx');
+    expect(fileChange.kind).toBe('write');
+
+    // MCP was NOT hit for write_file
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    // Cache was populated
+    expect(cache.read('conv-1', 'app_1', 'src/App.tsx')).toContain('export default');
+  });
+
+  it('scaffolds from template on first write_file against an empty app', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('call-w', 'write_file', '{"app_id":"app_new","path":"src/App.tsx","content":"hello"}'))
+      .mockResolvedValueOnce(textPass('done'));
+
+    const cache = new WorkingTreeCache();
+    const repoSync = {
+      pullLatest: vi.fn().mockResolvedValue({ hydrated: false }),
+      flush: vi.fn().mockResolvedValue({ pushed: 1, deleted: 0 }),
+    };
+    const loadTemplateSpy = vi.fn().mockResolvedValue([
+      { path: 'package.json', content: '{}' },
+      { path: 'src/main.tsx', content: 'import App from "./App"' },
+      { path: 'src/lib/butterbase.ts', content: 'export const client = {}' },
+    ]);
+
+    await collect(
+      runAgentTurn(baseInput, {
+        cache,
+        repoSync: repoSync as any,
+        recordUsage: vi.fn().mockResolvedValue(undefined),
+        loadTemplate: loadTemplateSpy,
+      }),
+    );
+
+    expect(loadTemplateSpy).toHaveBeenCalledTimes(1);
+    expect(cache.read('conv-1', 'app_new', 'src/main.tsx')).toContain('import App');
+    expect(cache.read('conv-1', 'app_new', 'src/lib/butterbase.ts')).toContain('client');
+    // The user's own write also landed
+    expect(cache.read('conv-1', 'app_new', 'src/App.tsx')).toBe('hello');
+  });
+
+  it('flushes repoSync for every touched app at end of turn', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('call-w', 'write_file', '{"app_id":"app_A","path":"a.tsx","content":"a"}'))
+      .mockResolvedValueOnce(toolCallPass('call-x', 'write_file', '{"app_id":"app_B","path":"b.tsx","content":"b"}'))
+      .mockResolvedValueOnce(textPass('done'));
+
+    const cache = new WorkingTreeCache();
+    const flushSpy = vi.fn().mockResolvedValue({ pushed: 1, deleted: 0 });
+    const repoSync = {
+      pullLatest: vi.fn().mockResolvedValue({ hydrated: true }),
+      flush: flushSpy,
+    };
+
+    await collect(
+      runAgentTurn(baseInput, {
+        cache,
+        repoSync: repoSync as any,
+        recordUsage: vi.fn().mockResolvedValue(undefined),
+        loadTemplate: vi.fn().mockResolvedValue([]),
+      }),
+    );
+
+    expect(flushSpy).toHaveBeenCalledTimes(2);
+    const appIds = flushSpy.mock.calls.map((c) => c[0].appId).sort();
+    expect(appIds).toEqual(['app_A', 'app_B']);
+  });
+
+  it('routes deploy_frontend to deployer and emits deployment_progress', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('call-d', 'deploy_frontend', '{"app_id":"app_1"}'))
+      .mockResolvedValueOnce(textPass('shipped'));
+
+    const cache = new WorkingTreeCache();
+    // Pre-seed the cache so ensureHydrated is a no-op and deployer has files.
+    cache.write('conv-1', 'app_1', 'index.html', '<html/>');
+
+    const deploySpy = vi.fn(async (_input: { convId: string; appId: string; jwt: string }) => {
+      // Trigger the emitter to prove routing.
+      return { ok: true as const, deployment_id: 'dep_123', url: 'https://x.butterbase.dev' };
+    });
+    const deployerFactory = (emit: (evt: LoopEvent) => void) => ({
+      deploy: (async (input: { convId: string; appId: string; jwt: string }) => {
+        emit({ type: 'deployment_progress', deployment_id: 'dep_123', status: 'queued' });
+        emit({ type: 'deployment_progress', deployment_id: 'dep_123', status: 'live', url: 'https://x.butterbase.dev' });
+        return deploySpy(input);
+      }) as any,
+    });
+
+    const events = await collect(
+      runAgentTurn(baseInput, {
+        cache,
+        repoSync: {
+          pullLatest: vi.fn().mockResolvedValue({ hydrated: true }),
+          flush: vi.fn().mockResolvedValue({ pushed: 0, deleted: 0 }),
+        } as any,
+        recordUsage: vi.fn().mockResolvedValue(undefined),
+        loadTemplate: vi.fn().mockResolvedValue([]),
+        deployerFactory: deployerFactory as any,
+      }),
+    );
+
+    const progressEvents = events.filter((e) => e.type === 'deployment_progress') as any[];
+    expect(progressEvents.length).toBe(2);
+    expect(progressEvents[0].status).toBe('queued');
+    expect(progressEvents[1].status).toBe('live');
+    expect(progressEvents[1].url).toBe('https://x.butterbase.dev');
+    // Deployer was invoked, MCP was NOT hit.
+    expect(deploySpy).toHaveBeenCalledWith(expect.objectContaining({ appId: 'app_1' }));
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('records usage with correct per-turn counters', async () => {
+    global.fetch = vi.fn()
+      // pass 1: write_file
+      .mockResolvedValueOnce(toolCallPass('call-w', 'write_file', '{"app_id":"app_1","path":"a.tsx","content":"a"}'))
+      // pass 2: deploy_frontend
+      .mockResolvedValueOnce(toolCallPass('call-d', 'deploy_frontend', '{"app_id":"app_1"}'))
+      // pass 3: text w/ usage
+      .mockResolvedValueOnce(textPass('done', { prompt_tokens: 42, completion_tokens: 7 }));
+
+    const cache = new WorkingTreeCache();
+    const recordUsageSpy = vi.fn().mockResolvedValue(undefined);
+
+    const deployerFactory = (_emit: (evt: LoopEvent) => void) => ({
+      deploy: (async () => ({ ok: true as const, deployment_id: 'd1', url: 'https://y' })) as any,
+    });
+
+    await collect(
+      runAgentTurn(baseInput, {
+        cache,
+        repoSync: {
+          pullLatest: vi.fn().mockResolvedValue({ hydrated: true }),
+          flush: vi.fn().mockResolvedValue({ pushed: 1, deleted: 0 }),
+        } as any,
+        recordUsage: recordUsageSpy,
+        loadTemplate: vi.fn().mockResolvedValue([]),
+        deployerFactory: deployerFactory as any,
+      }),
+    );
+
+    expect(recordUsageSpy).toHaveBeenCalledTimes(1);
+    const row = recordUsageSpy.mock.calls[0][1];
+    expect(row).toMatchObject({
+      userId: 'user-1',
+      conversationId: 'conv-1',
+      model: 'claude-3-5-sonnet',
+      promptTokens: 42,
+      completionTokens: 7,
+      toolCallsCount: 2,
+      fileWritesCount: 1,
+      deploymentsCount: 1,
+    });
   });
 });

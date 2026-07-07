@@ -4,22 +4,28 @@
  * runAgentTurn:  user turn → stream tokens → tool calls → tool results → repeat
  * streamChatCompletion: wraps the AI gateway's /v1/chat/completions SSE endpoint.
  *
- * Gateway notes (from gateway.ts investigation):
- *   - Endpoint: POST /v1/chat/completions  (platform-level, no per-app URL segment)
- *   - Auth: Bearer JWT in Authorization header
- *   - appId: null — gateway resolves organization from the userId in the JWT
- *   - Payload: OpenAI-compatible (messages, tools, tool_choice, stream:true)
- *   - Response: OpenAI SSE delta format; tool_calls index-based, args split across chunks
- *
- * Task-4 concern: the calling URL (AI_GATEWAY_URL env) must be set in the HTTP
- * route. In local dev, default is http://localhost:3000 (the control-api itself).
+ * Task 7 integration:
+ *   - File-op tools (write/read/list/delete_file) are dispatched in-process via
+ *     `fileOps.execute()` — they never hit MCP.
+ *   - The deploy_frontend tool is dispatched in-process via `deployer.deploy()`.
+ *   - A module-level `WorkingTreeCache` singleton is reused across requests.
+ *   - `ensureHydrated` pulls the app's current repo snapshot (via manage_repo)
+ *     and, on empty repos, scaffolds from the template.
+ *   - End-of-turn: flush all touched apps back to manage_repo, and record
+ *     per-turn usage counters (tokens + tool_calls + writes + deploys).
  */
 
 import pg from 'pg';
 import { appendMessage, listMessages, type Message } from './store.js';
-import { getToolCatalog, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { getSystemPrompt } from './prompt.js';
+import { WorkingTreeCache } from './working-tree.js';
+import { createFileOps, type FileOpName } from './file-ops.js';
+import { createRepoSync, type RepoSync } from './repo-sync.js';
+import { createDeployer } from './deploy.js';
+import { loadTemplate as loadTemplateDefault } from './template-loader.js';
+import { recordUsage as recordUsageDefault, type UsageRow } from './usage-store.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -31,7 +37,61 @@ export type LoopEvent =
   | { type: 'tool_result'; id: string; result?: unknown; error?: string }
   | { type: 'assistant_message'; content: string }
   | { type: 'done' }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'file_change'; app_id: string; path: string; kind: 'write' | 'delete'; content?: string; sha256?: string }
+  | { type: 'active_app_change'; app_id: string; app_name?: string }
+  | { type: 'deployment_progress'; deployment_id: string; status: 'queued' | 'building' | 'live' | 'failed'; url?: string; log_tail?: string; error?: string };
+
+// ---------------------------------------------------------------------------
+// Injectable deps (module-level singletons by default)
+// ---------------------------------------------------------------------------
+
+type Mcp = { call(name: string, args: unknown, jwt: string): Promise<any> };
+
+export type LoopDeps = {
+  cache: WorkingTreeCache;
+  mcp: Mcp;
+  repoSync: RepoSync;
+  recordUsage: (pool: pg.Pool, row: UsageRow) => Promise<void>;
+  loadTemplate: (input: { appId: string; apiUrl: string }) => Promise<Array<{ path: string; content: string }>>;
+  // Optional preconstructed per-turn factories (tests can inject fully-formed spies).
+  // If omitted, they are built per-turn from the primitives above.
+  fileOpsFactory?: (emit: (evt: LoopEvent) => void, ensureHydrated: (i: { convId: string; appId: string; jwt: string }) => Promise<void>) => ReturnType<typeof createFileOps>;
+  deployerFactory?: (emit: (evt: LoopEvent) => void) => ReturnType<typeof createDeployer>;
+};
+
+let _sharedCache: WorkingTreeCache | undefined;
+export function getSharedWorkingTreeCache(): WorkingTreeCache {
+  if (!_sharedCache) _sharedCache = new WorkingTreeCache();
+  return _sharedCache;
+}
+
+function defaultMcp(): Mcp {
+  return {
+    async call(name: string, args: unknown, jwt: string) {
+      const r = await callMcpTool(name, args, jwt);
+      if (!r.ok) throw new Error(r.error ?? 'mcp call failed');
+      return r.result;
+    },
+  };
+}
+
+let _defaultDeps: LoopDeps | undefined;
+function getDefaultDeps(): LoopDeps {
+  if (!_defaultDeps) {
+    const cache = getSharedWorkingTreeCache();
+    const mcp = defaultMcp();
+    const repoSync = createRepoSync({ cache, mcp });
+    _defaultDeps = {
+      cache,
+      mcp,
+      repoSync,
+      recordUsage: recordUsageDefault,
+      loadTemplate: loadTemplateDefault,
+    };
+  }
+  return _defaultDeps;
+}
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -39,7 +99,8 @@ export type LoopEvent =
 
 type StreamChunk =
   | { type: 'token'; text: string }
-  | { type: 'tool_call'; id: string; name: string; args: unknown };
+  | { type: 'tool_call'; id: string; name: string; args: unknown }
+  | { type: 'usage'; prompt_tokens: number; completion_tokens: number };
 
 interface GatewayMessage {
   role: string;
@@ -61,7 +122,6 @@ interface GatewayMessage {
  */
 function toGatewayMessages(messages: Message[]): GatewayMessage[] {
   return messages.map((msg): GatewayMessage => {
-    // Tool-result row — maps to OpenAI 'tool' role
     if (msg.role === 'tool') {
       return {
         role: 'tool',
@@ -69,7 +129,6 @@ function toGatewayMessages(messages: Message[]): GatewayMessage[] {
         content: JSON.stringify(msg.toolResult ?? {}),
       };
     }
-    // Assistant turn that issued a tool call
     if (msg.role === 'assistant' && msg.toolCallId) {
       return {
         role: 'assistant',
@@ -86,14 +145,13 @@ function toGatewayMessages(messages: Message[]): GatewayMessage[] {
         ],
       };
     }
-    // Plain user / assistant / system message
     return { role: msg.role, content: msg.content };
   });
 }
 
 /**
  * Stream chat completions from the AI gateway.
- * Yields token chunks and fully-assembled tool_call chunks.
+ * Yields token, tool_call, and (optionally) usage chunks.
  */
 export async function* streamChatCompletion(opts: {
   model: string;
@@ -122,6 +180,7 @@ export async function* streamChatCompletion(opts: {
       })),
       tool_choice: 'auto',
       stream: true,
+      stream_options: { include_usage: true },
     }),
   });
 
@@ -133,7 +192,6 @@ export async function* streamChatCompletion(opts: {
   const decoder = new TextDecoder();
   let buffer = '';
 
-  // Accumulate tool_calls[index] across chunks before yielding
   const toolCallAccum = new Map<number, { id: string; name: string; args: string }>();
   let sawToolCallsFinish = false;
 
@@ -143,7 +201,6 @@ export async function* streamChatCompletion(opts: {
 
     buffer += decoder.decode(value, { stream: true });
 
-    // SSE events are separated by double newlines
     const parts = buffer.split('\n\n');
     buffer = parts.pop() ?? '';
 
@@ -165,6 +222,7 @@ export async function* streamChatCompletion(opts: {
             };
             finish_reason?: string | null;
           }>;
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
         };
         try {
           chunk = JSON.parse(data) as typeof chunk;
@@ -172,17 +230,24 @@ export async function* streamChatCompletion(opts: {
           continue;
         }
 
+        // Usage frame — emitted as the final chunk when stream_options.include_usage is set.
+        if (chunk.usage) {
+          yield {
+            type: 'usage',
+            prompt_tokens: chunk.usage.prompt_tokens ?? 0,
+            completion_tokens: chunk.usage.completion_tokens ?? 0,
+          };
+        }
+
         const choice = chunk.choices?.[0];
         if (!choice) continue;
 
         const delta = choice.delta;
 
-        // Text token
         if (delta?.content) {
           yield { type: 'token', text: delta.content };
         }
 
-        // Tool call fragment — accumulate by index
         if (delta?.tool_calls) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index ?? 0;
@@ -196,7 +261,6 @@ export async function* streamChatCompletion(opts: {
           }
         }
 
-        // Emit completed tool calls when finish_reason signals done
         if (choice.finish_reason === 'tool_calls') {
           sawToolCallsFinish = true;
           for (const [, acc] of toolCallAccum) {
@@ -214,8 +278,6 @@ export async function* streamChatCompletion(opts: {
     }
   }
 
-  // Safety flush: emit any accumulated tool calls if [DONE] arrived without
-  // a tool_calls finish_reason (some gateway implementations behave this way)
   if (!sawToolCallsFinish && toolCallAccum.size > 0) {
     for (const [, acc] of toolCallAccum) {
       let parsedArgs: unknown;
@@ -235,14 +297,21 @@ export async function* streamChatCompletion(opts: {
 
 const TOOL_CALL_LIMIT = 8;
 
-export async function* runAgentTurn(input: {
-  conversationId: string;
-  userId: string;
-  jwt: string;
-  userMessage: string;
-  model: string;
-  pool: pg.Pool;
-}): AsyncGenerator<LoopEvent> {
+export async function* runAgentTurn(
+  input: {
+    conversationId: string;
+    userId: string;
+    jwt: string;
+    userMessage: string;
+    model: string;
+    pool: pg.Pool;
+  },
+  depsOverride?: Partial<LoopDeps>,
+): AsyncGenerator<LoopEvent> {
+  const base = getDefaultDeps();
+  const deps: LoopDeps = { ...base, ...(depsOverride ?? {}) };
+  const { cache, repoSync, recordUsage, loadTemplate } = deps;
+
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
     role: 'user',
@@ -255,19 +324,73 @@ export async function* runAgentTurn(input: {
 
   const tools = getToolCatalog();
 
-  // Load history after persisting the user message so it is included
+  // Per-turn state --------------------------------------------------------
+  const touchedApps = new Set<string>();
+  const baselineByApp = new Map<string, Map<string, string>>();
+  let toolCallsCount = 0;
+  let fileWritesCount = 0;
+  let deploymentsCount = 0;
+  let gatewayPromptTokens = 0;
+  let gatewayCompletionTokens = 0;
+
+  // SSE queue: file-ops / deployer emit callbacks push events that need to be
+  // interleaved with the loop's own yields. We drain the queue after each
+  // in-process tool invocation.
+  const pendingEvents: LoopEvent[] = [];
+  const emit = (evt: LoopEvent) => { pendingEvents.push(evt); };
+
+  const apiUrl = process.env.PUBLIC_API_URL ?? 'https://api.butterbase.dev';
+
+  // ensureHydrated captures the baseline the first time an app is touched.
+  const ensureHydrated = async ({ convId, appId, jwt }: { convId: string; appId: string; jwt: string }) => {
+    if (!cache.get(convId, appId)) {
+      const r = await repoSync.pullLatest({ convId, appId, jwt });
+      if (!r.hydrated) {
+        const files = await loadTemplate({ appId, apiUrl });
+        for (const f of files) cache.write(convId, appId, f.path, f.content);
+      }
+    }
+    if (!baselineByApp.has(appId)) {
+      baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
+    }
+  };
+
+  // Build per-turn fileOps + deployer bound to our SSE queue.
+  const fileOps = deps.fileOpsFactory
+    ? deps.fileOpsFactory(emit, ensureHydrated)
+    : createFileOps({
+        cache,
+        repoSync,
+        apiUrl,
+        onFileChange: (evt) => emit({ type: 'file_change', ...evt }),
+        onActiveAppChange: (evt) => emit({ type: 'active_app_change', app_id: evt.appId, app_name: evt.appName }),
+        ensureHydrated,
+      });
+
+  const deployer = deps.deployerFactory
+    ? deps.deployerFactory(emit)
+    : createDeployer({
+        cache,
+        mcp: deps.mcp,
+        onDeploymentProgress: (evt) => emit({ type: 'deployment_progress', ...evt }),
+      });
+
   const history = await listMessages(input.pool, input.conversationId);
   const messages: GatewayMessage[] = [
     { role: 'system', content: getSystemPrompt() },
     ...toGatewayMessages(history),
   ];
 
-  // 2. Agentic loop — cap at TOOL_CALL_LIMIT steps
-  for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
+  // Yield and drain any queued SSE events (file_change / active_app_change /
+  // deployment_progress) — flushed after every fileOps/deployer invocation.
+  function* drainPending(): Generator<LoopEvent> {
+    while (pendingEvents.length) yield pendingEvents.shift()!;
+  }
+
+  // 2. Agentic loop -------------------------------------------------------
+  let terminated = false;
+  outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
     let assistantText = '';
-    // Fix 1: collect ALL tool calls emitted in one gateway pass, not just the last.
-    // streamChatCompletion correctly yields every accumulated tool_call once per stream,
-    // so we must process N of them rather than overwriting with the last.
     const pendingToolCalls: Array<{ id: string; name: string; args: unknown }> = [];
 
     const stream = streamChatCompletion({
@@ -277,10 +400,6 @@ export async function* runAgentTurn(input: {
       jwt: input.jwt,
     });
 
-    // Fix 2: wrap the gateway stream in try/catch so HTTP errors (non-2xx thrown
-    // by streamChatCompletion) are surfaced as 'error' events instead of unhandled
-    // rejections. Startup errors (appendMessage/listMessages) above intentionally
-    // still propagate as thrown exceptions (Task-4 will get a 500).
     try {
       for await (const chunk of stream) {
         if (chunk.type === 'token') {
@@ -288,10 +407,12 @@ export async function* runAgentTurn(input: {
           yield { type: 'token', text: chunk.text };
         } else if (chunk.type === 'tool_call') {
           pendingToolCalls.push(chunk);
+        } else if (chunk.type === 'usage') {
+          gatewayPromptTokens += chunk.prompt_tokens;
+          gatewayCompletionTokens += chunk.completion_tokens;
         }
       }
     } catch (err: unknown) {
-      // Best-effort: persist any partial text the assistant streamed before the error.
       if (assistantText) {
         try {
           await appendMessage(input.pool, input.conversationId, {
@@ -303,12 +424,13 @@ export async function* runAgentTurn(input: {
             toolResult: null,
           });
         } catch {
-          // Swallow the persistence error so the original error message survives.
+          // Swallow persistence error so original error survives.
         }
       }
       const message = err instanceof Error ? err.message : String(err);
       yield { type: 'error', message };
-      return;
+      terminated = true;
+      break outer;
     }
 
     // No tool call — assistant is done
@@ -323,21 +445,15 @@ export async function* runAgentTurn(input: {
       });
       yield { type: 'assistant_message', content: assistantText };
       yield { type: 'done' };
-      return;
+      terminated = true;
+      break outer;
     }
 
-    // Fix 1 (multi-call persistence strategy):
-    // The store schema has one tool_call_id/tool_name/tool_args per row, so we
-    // write one assistant row per tool_call.  Content is placed on the first row
-    // and left as empty string on subsequent rows — this keeps the assistant text
-    // visible without duplicating it, and the gateway reconstruction in
-    // toGatewayMessages groups them back per-call anyway.
     const allowedToolNames = new Set(tools.map((t) => t.name));
     const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
     for (let i = 0; i < pendingToolCalls.length; i++) {
       const tc = pendingToolCalls[i];
 
-      // Persist assistant row (content only on first row for clarity)
       await appendMessage(input.pool, input.conversationId, {
         role: 'assistant',
         content: i === 0 ? assistantText : '',
@@ -349,14 +465,12 @@ export async function* runAgentTurn(input: {
 
       yield { type: 'tool_call', ...tc };
 
-      // Allowlist guard — reject tool names not in the catalog without hitting MCP.
+      // Allowlist guard
       if (!allowedToolNames.has(tc.name)) {
         const errorMsg = `Tool "${tc.name}" is not available in this agent's catalog.`;
         const resultPayload = { error: errorMsg };
         toolCallResults.push({ id: tc.id, ...resultPayload });
         yield { type: 'tool_result', id: tc.id, ...resultPayload };
-
-        // Persist the tool result row so history stays consistent
         await appendMessage(input.pool, input.conversationId, {
           role: 'tool',
           content: '',
@@ -368,13 +482,89 @@ export async function* runAgentTurn(input: {
         continue;
       }
 
-      // Execute the tool via MCP
+      // ---- Route: file-op tools (in-process) ----------------------------
+      if (isFileOpTool(tc.name)) {
+        const args = (tc.args ?? {}) as { app_id?: string };
+        const r = await fileOps.execute(tc.name as FileOpName, args, {
+          convId: input.conversationId,
+          jwt: input.jwt,
+        });
+        // Drain any file_change / active_app_change events emitted during exec.
+        for (const evt of drainPending()) yield evt;
+
+        toolCallsCount++;
+        if (args.app_id) touchedApps.add(args.app_id);
+        const payload: { result?: unknown; error?: string } = r.ok
+          ? { result: r.data }
+          : { error: r.error };
+        if (r.ok && tc.name === 'write_file') fileWritesCount++;
+        toolCallResults.push({ id: tc.id, ...payload });
+        yield { type: 'tool_result', id: tc.id, ...payload };
+        await appendMessage(input.pool, input.conversationId, {
+          role: 'tool',
+          content: '',
+          toolCallId: tc.id,
+          toolName: tc.name,
+          toolArgs: tc.args,
+          toolResult: r.ok ? r.data : { error: r.error },
+        });
+        continue;
+      }
+
+      // ---- Route: deploy tool (in-process) ------------------------------
+      if (isDeployTool(tc.name)) {
+        const args = (tc.args ?? {}) as { app_id?: string };
+        toolCallsCount++;
+        if (!args.app_id) {
+          const err = 'app_id is required';
+          toolCallResults.push({ id: tc.id, error: err });
+          yield { type: 'tool_result', id: tc.id, error: err };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: { error: err },
+          });
+          continue;
+        }
+        // Ensure the workspace is hydrated before bundling.
+        try {
+          await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
+        } catch {
+          // Fall through — deployer will report "no files" if truly empty.
+        }
+        touchedApps.add(args.app_id);
+        const r = await deployer.deploy({
+          convId: input.conversationId,
+          appId: args.app_id,
+          jwt: input.jwt,
+        });
+        for (const evt of drainPending()) yield evt;
+        const payload: { result?: unknown; error?: string } = r.ok
+          ? { result: { deployment_id: r.deployment_id, url: r.url } }
+          : { error: r.error };
+        if (r.ok) deploymentsCount++;
+        toolCallResults.push({ id: tc.id, ...payload });
+        yield { type: 'tool_result', id: tc.id, ...payload };
+        await appendMessage(input.pool, input.conversationId, {
+          role: 'tool',
+          content: '',
+          toolCallId: tc.id,
+          toolName: tc.name,
+          toolArgs: tc.args,
+          toolResult: payload.error ? { error: payload.error } : (payload.result ?? {}),
+        });
+        continue;
+      }
+
+      // ---- Default: MCP tool -------------------------------------------
+      toolCallsCount++;
       const call = await callMcpTool(tc.name, tc.args, input.jwt);
       const resultPayload = call.ok ? { result: call.result } : { error: call.error };
       toolCallResults.push({ id: tc.id, ...resultPayload });
       yield { type: 'tool_result', id: tc.id, ...resultPayload };
-
-      // Persist the tool result row
       await appendMessage(input.pool, input.conversationId, {
         role: 'tool',
         content: '',
@@ -385,9 +575,6 @@ export async function* runAgentTurn(input: {
       });
     }
 
-    // Fix 1 (OpenAI multi-tool-call ordering):
-    // OpenAI protocol requires ONE assistant message containing ALL tool_calls,
-    // followed by one 'tool' message per result in matching order.
     messages.push({
       role: 'assistant',
       content: assistantText || null,
@@ -412,5 +599,37 @@ export async function* runAgentTurn(input: {
   }
 
   // Reached the tool call cap
-  yield { type: 'error', message: 'Tool call limit reached (8).' };
+  if (!terminated) {
+    yield { type: 'error', message: 'Tool call limit reached (8).' };
+  }
+
+  // End-of-turn: flush touched apps + record usage ------------------------
+  for (const appId of touchedApps) {
+    const baseline = baselineByApp.get(appId) ?? new Map<string, string>();
+    try {
+      await repoSync.flush({
+        convId: input.conversationId,
+        appId,
+        jwt: input.jwt,
+        baseline,
+      });
+    } catch {
+      // Best-effort; loop should not hard-fail because of a flush error.
+    }
+  }
+
+  try {
+    await recordUsage(input.pool, {
+      userId: input.userId,
+      conversationId: input.conversationId,
+      model: input.model,
+      promptTokens: gatewayPromptTokens,
+      completionTokens: gatewayCompletionTokens,
+      toolCallsCount,
+      fileWritesCount,
+      deploymentsCount,
+    });
+  } catch {
+    // Telemetry is best-effort in v1.
+  }
 }
