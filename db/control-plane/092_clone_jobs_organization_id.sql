@@ -1,3 +1,4 @@
+-- @scope: platform
 -- template_clone_jobs.dest_organization_id
 --
 -- Records the org the destination clone should land in. Populated by
