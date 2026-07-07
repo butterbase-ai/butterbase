@@ -520,7 +520,21 @@ async function executeClone(
       } else {
         destAppId = generateAppId();
         const destName = job.dest_app_name ?? `Clone of ${job.source_app_id}`;
-        await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId);
+
+        // Resolve the destination org up-front. Passed into insertAppRow so
+        // the runtime apps.organization_id lines up with the control-plane
+        // org_app_index write below. Without this, insertAppRow would fall
+        // back to resolveOrganizationId(user) → the requester's personal
+        // org — mirroring the /init bug fixed in provisioner.ts — and the
+        // clone would silently vanish from the target org's dashboard.
+        //
+        // Prefer the job's dest_organization_id (set by the clone route from
+        // the same precedence /init uses). Fall back to the requester's
+        // personal org for legacy jobs written before migration 092.
+        const destOrgId = job.dest_organization_id
+          ?? await resolveOrganizationId(controlDb, job.requested_by_user_id);
+
+        await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId, destOrgId);
         await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
         // Reserve a subdomain for the dest. Mirrors routes/init.ts: derive
@@ -543,12 +557,6 @@ async function executeClone(
         // Cross-region index so authorizeRepoRead/Write and other lookups can
         // resolve the dest app's region. Init route does the same step after
         // its insertAppRow; the clone worker is the equivalent caller here.
-        //
-        // Prefer the job's dest_organization_id (set by the clone route from
-        // the same precedence /init uses). Fall back to the requester's
-        // personal org for legacy jobs written before migration 092.
-        const destOrgId = job.dest_organization_id
-          ?? await resolveOrganizationId(controlDb, job.requested_by_user_id);
         await addOrgAppIndex(controlDb, {
           organizationId: destOrgId,
           appId: destAppId,
