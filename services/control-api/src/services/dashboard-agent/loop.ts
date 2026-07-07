@@ -346,6 +346,11 @@ export async function* runAgentTurn(
     if (!cache.get(convId, appId)) {
       const r = await repoSync.pullLatest({ convId, appId, jwt });
       if (!r.hydrated) {
+        // Capture baseline BEFORE scaffold so every template file counts as
+        // "new" and is included in the end-of-turn push to manage_repo.
+        if (!baselineByApp.has(appId)) {
+          baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
+        }
         const files = await loadTemplate({ appId, apiUrl });
         for (const f of files) cache.write(convId, appId, f.path, f.content);
       }
