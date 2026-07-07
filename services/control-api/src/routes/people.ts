@@ -126,6 +126,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const providerCfg = config.people.providers[slot];
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtime, appId);
 
     const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
@@ -134,7 +135,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     // Balance gate — skip if this slot charges $0 per credit
     if (pricing.usdPerCredit > 0) {
-      const bal = await getCreditsBalance(app.controlDb, userId);
+      const bal = await getCreditsBalance(app.controlDb, organizationId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
         setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
@@ -148,8 +149,9 @@ export async function peopleRoutes(app: FastifyInstance) {
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (usdCost > 0) {
-        usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        usdCharged = await deductCreditsBalance(app.controlDb, organizationId, usdCost);
+        // Per-org billing: incrementUsage keys on the app's owning org
+        // (resolved outer scope), not the caller's personal org.
         await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
@@ -203,6 +205,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const providerCfg = config.people.providers[slot];
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtime, appId);
 
     const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
@@ -210,7 +213,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const pricing = getPeoplePricing(slot);
 
     if (pricing.usdPerCredit > 0) {
-      const bal = await getCreditsBalance(app.controlDb, userId);
+      const bal = await getCreditsBalance(app.controlDb, organizationId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
         setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
@@ -224,8 +227,9 @@ export async function peopleRoutes(app: FastifyInstance) {
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (usdCost > 0) {
-        usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        usdCharged = await deductCreditsBalance(app.controlDb, organizationId, usdCost);
+        // Per-org billing: incrementUsage keys on the app's owning org
+        // (resolved outer scope), not the caller's personal org.
         await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
@@ -288,6 +292,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     }
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtime, appId);
 
     const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
@@ -316,7 +321,7 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     // Balance gate — skip if this slot charges $0 per credit
     if (pricing.usdPerCredit > 0) {
-      const bal = await getCreditsBalance(app.controlDb, userId);
+      const bal = await getCreditsBalance(app.controlDb, organizationId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
         setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
@@ -339,8 +344,9 @@ export async function peopleRoutes(app: FastifyInstance) {
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (usdCost > 0) {
-        usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        usdCharged = await deductCreditsBalance(app.controlDb, organizationId, usdCost);
+        // Per-org billing: incrementUsage keys on the app's owning org
+        // (resolved outer scope), not the caller's personal org.
         await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
@@ -415,6 +421,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     }
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtime, appId);
 
     const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
@@ -422,7 +429,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const pricing = getPeoplePricing(slot);
 
     if (pricing.usdPerCredit > 0) {
-      const bal = await getCreditsBalance(app.controlDb, userId);
+      const bal = await getCreditsBalance(app.controlDb, organizationId);
       if (bal.totalUsd < config.people.minBalanceUsd) {
         setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCharged: 0 });
         return reply.code(402).send({ error: 'insufficient_credits' });
@@ -433,8 +440,8 @@ export async function peopleRoutes(app: FastifyInstance) {
     try {
       const nonce = crypto.randomBytes(32).toString('hex');
 
-      // Insert the pending row BEFORE calling the adapter.
-      const organizationId = await resolveOrgFromApp(runtime, appId);
+      // Insert the pending row BEFORE calling the adapter. organizationId is
+      // hoisted from the outer scope (app's owning org).
       const lookupRow = await runtime.query<{ id: string }>(
         `INSERT INTO people_email_lookups (app_id, organization_id, user_id, normalized_url, nonce, key_type, provider_slot, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending') RETURNING id`,
@@ -452,8 +459,9 @@ export async function peopleRoutes(app: FastifyInstance) {
       const usdCost = result.creditsConsumed * pricing.usdPerCredit;
       let usdCharged = 0;
       if (usdCost > 0) {
-        usdCharged = await deductCreditsBalance(app.controlDb, userId, usdCost);
-        const organizationId = await resolveOrganizationId(app.controlDb, userId);
+        usdCharged = await deductCreditsBalance(app.controlDb, organizationId, usdCost);
+        // Per-org billing: incrementUsage keys on the app's owning org
+        // (resolved outer scope), not the caller's personal org.
         await incrementUsage(organizationId, userId, 'people_credits', result.creditsConsumed, appId);
       }
 
@@ -506,6 +514,7 @@ export async function peopleRoutes(app: FastifyInstance) {
     const { appId, id } = request.params as { appId: string; id: string };
 
     const runtime = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtime, appId);
 
     const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);

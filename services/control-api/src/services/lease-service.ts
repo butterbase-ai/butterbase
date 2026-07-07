@@ -2,7 +2,12 @@ import type pg from 'pg';
 import { NotFoundError } from './api-errors.js';
 
 export interface GrantArgs {
+  /** User whose action is being billed (audit + credit_leases.user_id). */
   userId: string;
+  /** Organization whose credit pools are drawn — under per-org billing this
+   *  is the app's owning org (from resolveOrgFromApp) or the caller's
+   *  explicit billing org, never a personal-org default at this layer. */
+  organizationId: string;
   region: string;
   amountUsd: number;
   ttlSeconds: number;
@@ -21,21 +26,17 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
-    // Read the caller's personal-org billing row. The monthly pool now lives
-    // on organizations.monthly_allowance_usd (migration 093); before 093 it
-    // was on platform_users. This code path always keys on the personal org
-    // because grantLease is currently invoked without an explicit org (AI
-    // gateway, function invocation). Team-org AI billing is a follow-up:
-    // when we thread activeOrgId through, this SELECT should key on that org.
-    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string; personal_organization_id: string }>(
-      `SELECT o.monthly_allowance_usd, o.credits_usd, pu.personal_organization_id
-       FROM platform_users pu
-       JOIN organizations o ON o.id = pu.personal_organization_id
-       WHERE pu.id = $1 FOR UPDATE OF o`,
-      [args.userId]
+    // Per-org billing (Phase 3b). Caller passes args.organizationId — this
+    // is the app's owning org (AI gateway) or an explicit billing subject.
+    // No implicit personal-org fallback at this layer.
+    const organizationId = args.organizationId;
+    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string }>(
+      `SELECT monthly_allowance_usd, credits_usd
+       FROM organizations
+       WHERE id = $1 FOR UPDATE`,
+      [organizationId]
     );
-    if (u.rows.length === 0) throw new NotFoundError('user', args.userId);
-    const organizationId = u.rows[0].personal_organization_id;
+    if (u.rows.length === 0) throw new NotFoundError('organization', organizationId);
 
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
     const topup = parseFloat(u.rows[0].credits_usd);

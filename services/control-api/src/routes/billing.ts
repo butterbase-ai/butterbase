@@ -227,8 +227,10 @@ export async function billingRoutes(app: FastifyInstance) {
         };
       }
 
-      // Get credits balance — platform_users is controlDb; stays on controlDb
-      const credits = await getCreditsBalance(app.controlDb, userId);
+      // Per-org billing balance (migration 093 + Phase 3b). Keyed on the
+      // resolved billingOrgId, which honors ?org_id when the caller is a
+      // member and otherwise defaults to their personal org.
+      const credits = await getCreditsBalance(app.controlDb, billingOrgId);
       // getSpendingCapStatus reads platform_users+plans (controlDb) and ai_usage_logs (runtime);
       // FIXME: getSpendingCapStatus internally calls getAiCreditsUsed which hits runtimeDb tables
       // (ai_usage_logs, apps). The service function signature must be updated in a follow-on batch.

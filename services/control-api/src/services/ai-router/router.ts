@@ -44,7 +44,7 @@ export async function acquireWithAudit(
 ): Promise<ReturnType<typeof acquireForEstimatedCost>> {
   try {
     return await acquireForEstimatedCost(
-      ctx.platformPool, ctx.userId, ctx.region, reservedUsd, ttlSeconds,
+      ctx.platformPool, ctx.userId, ctx.organizationId, ctx.region, reservedUsd, ttlSeconds,
     );
   } catch (err) {
     if (err instanceof InsufficientCreditsError && ctx.appId) {

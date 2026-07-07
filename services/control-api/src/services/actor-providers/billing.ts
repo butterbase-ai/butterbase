@@ -7,6 +7,7 @@ export const ACTOR_LEASE_TTL_SECONDS = 600;
 
 export interface ReserveActorCreditsInput {
   userId: string;
+  organizationId: string;
   region: string;
   recordingUsdPerSecond: number;
   transcriptionUsdPerSecond: number;
@@ -27,6 +28,7 @@ export async function reserveActorCredits(
 
   const res = await grantLease(platformPool, {
     userId: input.userId,
+    organizationId: input.organizationId,
     region: input.region,
     amountUsd: requested,
     ttlSeconds: ACTOR_LEASE_TTL_SECONDS,
