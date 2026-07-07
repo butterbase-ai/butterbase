@@ -154,7 +154,15 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const authHeader = request.headers.authorization ?? '';
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
 
-    // Begin SSE response
+    // Begin SSE response. reply.hijack() bypasses Fastify's onSend, which is where
+    // @fastify/cors normally injects Access-Control-Allow-Origin. Reflect the caller
+    // origin explicitly so browsers accept the stream.
+    const requestOrigin = request.headers.origin;
+    if (requestOrigin) {
+      reply.raw.setHeader('access-control-allow-origin', requestOrigin);
+      reply.raw.setHeader('vary', 'origin');
+      reply.raw.setHeader('access-control-allow-credentials', 'true');
+    }
     reply.raw.setHeader('content-type', 'text/event-stream');
     reply.raw.setHeader('cache-control', 'no-cache');
     reply.raw.setHeader('connection', 'keep-alive');
