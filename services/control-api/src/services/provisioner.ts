@@ -64,6 +64,7 @@ export async function insertAppRow(
   name: string,
   ownerId: string,
   appId: string,
+  targetOrganizationId?: string,
 ): Promise<{ app: App; isExisting: boolean }> {
   // Write the apps row into the TARGET region's runtime DB (where the app
   // is homed), not the local machine's runtime DB. Previously this used
@@ -81,8 +82,14 @@ export async function insertAppRow(
     return { app: existing.rows[0], isExisting: true };
   }
 
-  // Validate owner exists and resolve their org (platform-tier, stays on controlDb)
-  const organizationId = await resolveOrganizationId(controlDb, ownerId);
+  // Prefer the caller-resolved target org (matches what the route wrote to
+  // org_app_index). Falling back to resolveOrganizationId(ownerId) here —
+  // the pre-orgs path — silently placed team-org apps in the owner's
+  // personal org on the runtime side while org_app_index correctly pointed
+  // at the team org. The mismatch made those apps invisible in the
+  // dashboard's org-scoped list (which filters by apps.organization_id).
+  const organizationId = targetOrganizationId
+    ?? await resolveOrganizationId(controlDb, ownerId);
 
   const dbName = appId;
   await runtimeDb.query(

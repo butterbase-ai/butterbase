@@ -253,7 +253,7 @@ export async function initRoutes(app: FastifyInstance) {
     const appId = generateAppId();
 
     const { app: appRow, isExisting } = await insertAppRow(
-      provisionRegion, app.controlDb, name, ownerId, appId
+      provisionRegion, app.controlDb, name, ownerId, appId, orgId
     );
 
     if (isExisting) {
