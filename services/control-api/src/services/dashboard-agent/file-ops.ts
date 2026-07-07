@@ -1,5 +1,5 @@
-import type { WorkingTreeCache } from './working-tree'
-import type { RepoSync } from './repo-sync'
+import type { WorkingTreeCache } from './working-tree.js'
+import type { RepoSync } from './repo-sync.js'
 
 export type FileOpName = 'write_file' | 'read_file' | 'list_files' | 'delete_file'
 export type FileChangeEvent = {

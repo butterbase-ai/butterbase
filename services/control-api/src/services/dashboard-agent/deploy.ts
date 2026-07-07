@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import { createHash } from 'node:crypto'
-import type { WorkingTreeCache } from './working-tree'
+import type { WorkingTreeCache } from './working-tree.js'
 
 export type DeploymentProgressEvent = {
   deployment_id: string
@@ -48,7 +48,7 @@ export function createDeployer(deps: DeployDeps) {
       const deployment_id: string = create.deployment_id
       const upload_url: string = create.upload_url
 
-      const put = await fetch(upload_url, { method: 'PUT', body: zipBuf, headers: { 'Content-Type': 'application/zip' } })
+      const put = await fetch(upload_url, { method: 'PUT', body: zipBuf as BodyInit, headers: { 'Content-Type': 'application/zip' } })
       if (!put.ok) return { ok: false as const, error: `upload failed: ${put.status}` }
 
       await deps.mcp.call('manage_frontend', {

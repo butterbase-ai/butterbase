@@ -1,4 +1,4 @@
-import type { WorkingFile, WorkingTree, WorkingTreeCache } from './working-tree'
+import type { WorkingFile, WorkingTree, WorkingTreeCache } from './working-tree.js'
 
 type Mcp = { call(name: string, args: unknown, jwt: string): Promise<any> }
 
