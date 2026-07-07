@@ -295,7 +295,10 @@ export async function* streamChatCompletion(opts: {
 // Main export: runAgentTurn
 // ---------------------------------------------------------------------------
 
-const TOOL_CALL_LIMIT = 8;
+// Builder-mode conversations routinely chain 20+ tool calls per turn:
+// init_app + schema + RLS + N file-writes + deploy_frontend. Env-overridable
+// so a runaway loop can still be capped without a code change.
+const TOOL_CALL_LIMIT = Number.parseInt(process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT ?? '30', 10);
 
 export async function* runAgentTurn(
   input: {
@@ -608,7 +611,7 @@ export async function* runAgentTurn(
 
     // Reached the tool call cap
     if (!terminated) {
-      yield { type: 'error', message: 'Tool call limit reached (8).' };
+      yield { type: 'error', message: `Tool call limit reached (${TOOL_CALL_LIMIT}).` };
     }
   } catch (err: unknown) {
     // Tool invocation threw an uncaught exception.
