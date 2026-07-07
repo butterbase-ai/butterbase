@@ -33,6 +33,9 @@ export async function callMcpTool(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
+        // MCP StreamableHTTP transport requires BOTH content types in Accept
+        // (rejects with 406 Not Acceptable otherwise).
+        accept: 'application/json, text/event-stream',
         authorization: `Bearer ${jwt}`,
       },
       body: JSON.stringify({
