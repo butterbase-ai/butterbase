@@ -378,4 +378,180 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
       30_000,
     );
   });
+
+  // ── Case D: rewind endpoint ────────────────────────────────────────────────
+
+  describe('Case D: rewind endpoint', () => {
+    const APP_ID = 'app_rewind_test';
+
+    /** Queue the three MCP calls a successful rewind makes, in order. */
+    function mockRewindMcpCalls(opts: {
+      snapshots: string[];
+      pullFiles: Array<{ path: string; sha256: string; download_url: string }>;
+      pullSnapshotId: string;
+      pushSnapshotId: string;
+    }) {
+      vi.mocked(callMcpTool)
+        // 1. list_snapshots
+        .mockResolvedValueOnce({
+          ok: true,
+          result: { snapshots: opts.snapshots.map((id) => ({ snapshot_id: id, created_at: new Date().toISOString() })) },
+        })
+        // 2. pull_snapshot
+        .mockResolvedValueOnce({
+          ok: true,
+          result: { snapshot_id: opts.pullSnapshotId, files: opts.pullFiles },
+        })
+        // 3. push
+        .mockResolvedValueOnce({
+          ok: true,
+          result: { snapshot_id: opts.pushSnapshotId, total_bytes: 1, file_count: opts.pullFiles.length },
+        });
+    }
+
+    it(
+      'requires ownership: user B rewinding user A conversation gets 404',
+      async () => {
+        const appA = await buildApp(USER_A, pool);
+        const appB = await buildApp(USER_B, pool);
+
+        try {
+          const convR = await appA.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-d-ownership', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const rewindR = await appB.inject({
+            method: 'POST',
+            url: `/conversations/${conversation.id}/rewind`,
+            payload: { app_id: APP_ID, snapshot_id: 'snap_1' },
+            headers: { authorization: 'Bearer test-jwt-b' },
+          });
+
+          expect(rewindR.statusCode).toBe(404);
+          expect(rewindR.json()).toMatchObject({ error: 'conversation not found' });
+          // No MCP calls should have been made — ownership check fires first.
+          expect(callMcpTool).not.toHaveBeenCalled();
+        } finally {
+          await appA.close();
+          await appB.close();
+        }
+      },
+      30_000,
+    );
+
+    it(
+      'rewinds to a valid snapshot: writes an assistant row and returns new_snapshot_id',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-d-happy', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const originalFetch = global.fetch;
+          global.fetch = vi.fn().mockResolvedValue(new Response('const x = 1;'));
+
+          mockRewindMcpCalls({
+            snapshots: ['snap_1', 'snap_2'],
+            pullFiles: [
+              { path: 'src/App.tsx', sha256: 'a'.repeat(64), download_url: 'https://s3/a' },
+            ],
+            pullSnapshotId: 'snap_1',
+            pushSnapshotId: 'snap_3',
+          });
+
+          try {
+            const rewindR = await app.inject({
+              method: 'POST',
+              url: `/conversations/${conversation.id}/rewind`,
+              payload: { app_id: APP_ID, snapshot_id: 'snap_1' },
+              headers: { authorization: 'Bearer test-jwt-a' },
+            });
+
+            expect(rewindR.statusCode).toBe(200);
+            expect(rewindR.json()).toMatchObject({ new_snapshot_id: 'snap_3', files_changed: 1 });
+
+            // callMcpTool called 3x: list_snapshots, pull_snapshot, push
+            expect(callMcpTool).toHaveBeenCalledTimes(3);
+            expect(vi.mocked(callMcpTool).mock.calls[0][0]).toBe('manage_repo');
+            expect((vi.mocked(callMcpTool).mock.calls[0][1] as any).action).toBe('list_snapshots');
+            expect((vi.mocked(callMcpTool).mock.calls[1][1] as any).action).toBe('pull_snapshot');
+            expect((vi.mocked(callMcpTool).mock.calls[2][1] as any).action).toBe('push');
+
+            // Assistant row persisted recording the rewind.
+            type MsgRow = { role: string; content: string; model_used: string | null };
+            const { rows } = await pool.query<MsgRow>(
+              `SELECT role, content, model_used
+               FROM dashboard_agent_messages
+               WHERE conversation_id = $1
+               ORDER BY created_at ASC`,
+              [conversation.id],
+            );
+            expect(rows).toHaveLength(1);
+            expect(rows[0].role).toBe('assistant');
+            expect(rows[0].content).toBe('Rewound to snapshot snap_1. Working tree restored.');
+            expect(rows[0].model_used).toBeNull();
+          } finally {
+            global.fetch = originalFetch;
+          }
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+
+    it(
+      'rejects rewind to a snapshot_id not in the app history with a 4xx and no DB write',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-d-invalid', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          // Only list_snapshots is mocked — snap_999 is not among the returned ids,
+          // so the route should reject before ever calling pull_snapshot/push.
+          vi.mocked(callMcpTool).mockResolvedValueOnce({
+            ok: true,
+            result: { snapshots: [{ snapshot_id: 'snap_1', created_at: new Date().toISOString() }] },
+          });
+
+          const rewindR = await app.inject({
+            method: 'POST',
+            url: `/conversations/${conversation.id}/rewind`,
+            payload: { app_id: APP_ID, snapshot_id: 'snap_999' },
+            headers: { authorization: 'Bearer test-jwt-a' },
+          });
+
+          expect(rewindR.statusCode).toBeGreaterThanOrEqual(400);
+          expect(rewindR.statusCode).toBeLessThan(500);
+          expect(callMcpTool).toHaveBeenCalledTimes(1); // only list_snapshots
+
+          const { rows } = await pool.query(
+            `SELECT id FROM dashboard_agent_messages WHERE conversation_id = $1`,
+            [conversation.id],
+          );
+          expect(rows).toHaveLength(0);
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+  });
 });

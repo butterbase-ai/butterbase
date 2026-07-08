@@ -7,6 +7,7 @@
  *   GET    /conversations/:id      – get conversation + messages
  *   DELETE /conversations/:id      – delete conversation (204)
  *   POST   /messages               – SSE agent turn (streams LoopEvent frames)
+ *   POST   /conversations/:id/rewind – restore working tree to a prior snapshot
  *
  * Feature flag: DASHBOARD_ASSISTANT_ENABLED must equal '1' or all routes
  * return 404.
@@ -27,9 +28,13 @@ import {
   deleteConversation,
   updateConversationModel,
   listMessages,
+  appendMessage,
 } from '../services/dashboard-agent/store.js';
-import { runAgentTurn } from '../services/dashboard-agent/loop.js';
+import { runAgentTurn, getSharedWorkingTreeCache } from '../services/dashboard-agent/loop.js';
+import { getRecentAppIds } from '../services/dashboard-agent/schema-context.js';
 import { listUsage } from '../services/dashboard-agent/usage-store.js';
+import { createRepoSync } from '../services/dashboard-agent/repo-sync.js';
+import { callMcpTool } from '../services/dashboard-agent/mcp-client.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -37,6 +42,31 @@ import { listUsage } from '../services/dashboard-agent/usage-store.js';
 
 function isEnabled(): boolean {
   return process.env.DASHBOARD_ASSISTANT_ENABLED === '1';
+}
+
+// ---------------------------------------------------------------------------
+// MCP wrapper + repoSync for the rewind route.
+//
+// Mirrors defaultMcp()/getDefaultDeps() in loop.ts (not exported from there),
+// but shares the SAME cache instance via getSharedWorkingTreeCache() so a
+// rewind's pullSnapshot()/pushCurrentTree() operate on the same in-memory
+// working tree that runAgentTurn reads/writes.
+//
+// Built lazily (not at module scope) so unit tests that vi.mock loop.js with
+// a partial mock (only runAgentTurn) don't blow up trying to resolve
+// getSharedWorkingTreeCache() at import time.
+// ---------------------------------------------------------------------------
+
+const rewindMcp = {
+  async call(name: string, args: unknown, jwt: string) {
+    const r = await callMcpTool(name, args, jwt);
+    if (!r.ok) throw new Error(r.error ?? 'mcp call failed');
+    return r.result;
+  },
+};
+
+function getRewindRepoSync() {
+  return createRepoSync({ cache: getSharedWorkingTreeCache(), mcp: rewindMcp });
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +82,11 @@ const postMessageBody = z.object({
   conversation_id: z.string().uuid(),
   message: z.string().min(1),
   model: z.string().min(1).default('claude-sonnet-4-5'),
+});
+
+const rewindBody = z.object({
+  app_id: z.string().min(1),
+  snapshot_id: z.string().min(1),
 });
 
 // ---------------------------------------------------------------------------
@@ -213,6 +248,101 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     } finally {
       reply.raw.end();
     }
+  });
+
+  // ── POST /conversations/:id/rewind ───────────────────────────────────────
+  //
+  // Restores the conversation's working-tree cache to an earlier snapshot's
+  // state, then pushes that state back out as a brand-new snapshot (history
+  // is append-only — we never delete or rewrite existing snapshots). Returns
+  // a plain JSON summary rather than SSE; the frontend refetches conversation
+  // state afterwards to pick up the new assistant message + latest files.
+  app.post('/conversations/:id/rewind', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+
+    const parsed = rewindBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { app_id: appId, snapshot_id: snapshotId } = parsed.data;
+
+    // 1. Ownership check.
+    const conversation = await getConversation(app.controlDb, id, userId);
+    if (!conversation) {
+      return reply.code(404).send({ error: 'conversation not found' });
+    }
+
+    // Extract JWT verbatim from Authorization header, same as /messages.
+    const authHeader = request.headers.authorization ?? '';
+    const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+
+    // 2. Loose guard: app_id must have shown up in this conversation's
+    // tool_args at least once. Best-effort — if the lookup itself throws we
+    // don't block the rewind on it (schema/store hiccups shouldn't brick the
+    // feature), but if it succeeds and the app_id truly never appeared, reject.
+    try {
+      const recentAppIds = await getRecentAppIds(app.controlDb, id);
+      if (recentAppIds.length > 0 && !recentAppIds.includes(appId)) {
+        return reply.code(400).send({ error: 'app_id not associated with this conversation' });
+      }
+    } catch {
+      // best-effort guard only
+    }
+
+    // 3. Validate snapshot_id is a real snapshot of this app before touching
+    // the cache — avoids clobbering the working tree on a typo'd snapshot_id.
+    try {
+      const list: any = await rewindMcp.call('manage_repo', { action: 'list_snapshots', app_id: appId }, jwt);
+      const snapshots: Array<{ snapshot_id?: string; snapshotId?: string }> = list?.snapshots ?? list ?? [];
+      const ids = snapshots.map((s) => s.snapshot_id ?? s.snapshotId).filter(Boolean);
+      if (ids.length > 0 && !ids.includes(snapshotId)) {
+        return reply.code(400).send({ error: 'snapshot_id not found for this app' });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return reply.code(500).send({ error: `failed to list snapshots: ${msg}` });
+    }
+
+    const repoSync = getRewindRepoSync();
+
+    // 4. Pull the target snapshot — overwrites the shared cache for (id, appId).
+    let filesChanged = 0;
+    try {
+      const pulled = await repoSync.pullSnapshot({ convId: id, appId, snapshotId, jwt });
+      if (!pulled.hydrated) {
+        return reply.code(400).send({ error: 'snapshot has no files or could not be hydrated' });
+      }
+      filesChanged = getSharedWorkingTreeCache().list(id, appId).length;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return reply.code(500).send({ error: `pull_snapshot failed: ${msg}` });
+    }
+
+    // 5. Push the (now-restored) cache back out as a new, append-only snapshot.
+    let newSnapshotId: string | null = null;
+    try {
+      const pushed = await repoSync.pushCurrentTree({ convId: id, appId, jwt });
+      newSnapshotId = pushed.snapshotId;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return reply.code(500).send({ error: `push failed: ${msg}` });
+    }
+
+    // 6. Record the rewind as an assistant message.
+    await appendMessage(app.controlDb, id, {
+      role: 'assistant',
+      content: `Rewound to snapshot ${snapshotId}. Working tree restored.`,
+      toolCallId: null,
+      toolName: null,
+      toolArgs: null,
+      toolResult: null,
+      modelUsed: null,
+    });
+
+    return reply.send({ new_snapshot_id: newSnapshotId, files_changed: filesChanged });
   });
 
   // ── GET /v1/dashboard-agent/usage ────────────────────────────────────────

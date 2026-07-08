@@ -10,7 +10,16 @@ export type RepoSync = {
     appId: string
     jwt: string
     baseline: Map<string, string>
-  }): Promise<{ pushed: number; deleted: number }>
+  }): Promise<{ pushed: number; deleted: number; newSnapshotId: string | null }>
+  /**
+   * Push the ENTIRE current cache contents for (convId, appId) as a brand new
+   * snapshot, unconditionally (no baseline/diff short-circuit — unlike flush,
+   * this always pushes even if nothing "changed" relative to some baseline).
+   * Used by the rewind endpoint: after pullSnapshot overwrites the cache with
+   * an older snapshot's contents, we push that state back out so it becomes
+   * the new latest (append-only history — we never mutate/delete snapshots).
+   */
+  pushCurrentTree(input: { convId: string; appId: string; jwt: string }): Promise<{ snapshotId: string | null; filesPushed: number }>
 }
 
 export function createRepoSync(deps: { cache: WorkingTreeCache; mcp: Mcp }): RepoSync {
@@ -50,11 +59,11 @@ export function createRepoSync(deps: { cache: WorkingTreeCache; mcp: Mcp }): Rep
       const { changed, deleted } = cache.diff(convId, appId, baseline)
       // Fast-path: no changes and no deletes → no push
       if (changed.length === 0 && deleted.length === 0) {
-        return { pushed: 0, deleted: 0 }
+        return { pushed: 0, deleted: 0, newSnapshotId: null }
       }
       const tree = cache.get(convId, appId)
       if (!tree || tree.size === 0) {
-        return { pushed: 0, deleted: deleted.length }
+        return { pushed: 0, deleted: deleted.length, newSnapshotId: null }
       }
       // manage_repo.push replaces the entire snapshot manifest — no inheritance
       // from prior snapshots. We must always send the full current tree so that
@@ -63,8 +72,20 @@ export function createRepoSync(deps: { cache: WorkingTreeCache; mcp: Mcp }): Rep
         path: f.path,
         content_base64: Buffer.from(f.content, 'utf8').toString('base64'),
       }))
-      await mcp.call('manage_repo', { action: 'push', app_id: appId, files }, jwt)
-      return { pushed: files.length, deleted: deleted.length }
+      const res = await mcp.call('manage_repo', { action: 'push', app_id: appId, files }, jwt)
+      return { pushed: files.length, deleted: deleted.length, newSnapshotId: res?.snapshot_id ?? null }
+    },
+
+    async pushCurrentTree({ convId, appId, jwt }) {
+      const tree = cache.get(convId, appId)
+      const files = tree
+        ? Array.from(tree.values()).map(f => ({
+            path: f.path,
+            content_base64: Buffer.from(f.content, 'utf8').toString('base64'),
+          }))
+        : []
+      const res = await mcp.call('manage_repo', { action: 'push', app_id: appId, files }, jwt)
+      return { snapshotId: res?.snapshot_id ?? null, filesPushed: files.length }
     },
   }
 }
