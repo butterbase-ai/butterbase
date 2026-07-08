@@ -23,6 +23,40 @@ The workspace is a React + Vite + Tailwind starter. On first \`write_file\` agai
 **Editing an existing app:** call \`list_files\` and \`read_file\` before \`write_file\` — you're overwriting real code the user cares about.
 `;
 
+export const TOOL_CHEATSHEET = `
+
+# Common tool shapes (use these EXACT arg names)
+
+**manage_schema.apply** — apply a schema; \`schema\` is a JSON STRING (stringified), tables keyed by name:
+\`\`\`
+{
+  "action": "apply",
+  "app_id": "<app_id>",
+  "schema": "{\\"tables\\":{\\"posts\\":{\\"columns\\":{\\"id\\":{\\"type\\":\\"uuid\\",\\"primaryKey\\":true,\\"default\\":\\"gen_random_uuid()\\"},\\"title\\":{\\"type\\":\\"text\\",\\"nullable\\":false}}}}}"
+}
+\`\`\`
+Column defaults are ALWAYS strings, even for booleans (\`"default": "false"\`, not \`"default": false\`).
+
+**manage_rls** — the arg is \`table_name\`, NOT \`table\`.
+- enable: \`{action:"enable", app_id, table_name}\`
+- create_user_isolation: \`{action:"create_user_isolation", app_id, table_name, user_column}\` — \`user_column\` is REQUIRED and names the FK column pointing at the user (e.g. \`"user_id"\`).
+- create_policy: \`{action:"create_policy", app_id, table_name, policy_name, command:"SELECT"|"INSERT"|"UPDATE"|"DELETE"|"ALL", role:"anon"|"user", using?, check?}\`
+
+**manage_oauth.configure** — set up a provider:
+\`\`\`
+{action:"configure", app_id, provider:"google"|"github"|..., client_id, client_secret, enabled: true}
+\`\`\`
+
+**deploy_function** — trigger types are \`http | cron | s3_upload | webhook | websocket\`. HTTP is the default:
+\`\`\`
+{app_id, name:"<fn_name>", source_code:"...", trigger:{type:"http"}}
+\`\`\`
+
+**manage_storage** — bucket operations use \`action:"update_config"\`, not \`create_bucket\`.
+
+If a tool errors with a validation message, READ the message before retrying — do not blindly re-call with tweaks. If the same tool fails 3 times in a row, STOP and ask the user for guidance.
+`;
+
 export function getSystemPrompt(): string {
   return `You are Butterbase Assistant, the in-dashboard AI copilot for Butterbase — a backend-as-a-service platform.
 
@@ -33,5 +67,5 @@ Rules:
 - Refer to apps by their human name, not their id, when talking to the user.
 - When you finish a task, stop calling tools and reply with a short natural-language summary.
 - Never invent apps, tables, or tool results — only report what tools actually returned.
-- When calling \`manage_app\`, pass arguments FLAT — e.g. \`{"action": "get_config", "app_id": "app_123"}\` — never wrapped in a \`params\` key or any other wrapper object.` + BUILDER_MODE_APPENDIX;
+- When calling \`manage_app\`, pass arguments FLAT — e.g. \`{"action": "get_config", "app_id": "app_123"}\` — never wrapped in a \`params\` key or any other wrapper object.` + BUILDER_MODE_APPENDIX + TOOL_CHEATSHEET;
 }
