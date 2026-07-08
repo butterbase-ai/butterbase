@@ -18,6 +18,7 @@ import type pg from 'pg';
 vi.mock('../store.js', () => ({
   appendMessage: vi.fn(),
   listMessages: vi.fn(),
+  getRecentToolArgs: vi.fn(),
 }));
 
 vi.mock('../mcp-client.js', () => ({
@@ -81,6 +82,7 @@ import { runAgentTurn, type LoopEvent } from '../loop.js';
 
 const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
 const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
+const mockGetRecentToolArgs = storeModule.getRecentToolArgs as MockedFunction<typeof storeModule.getRecentToolArgs>;
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
 
 /** Collect all LoopEvents emitted by the generator. */
@@ -155,6 +157,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockAppendMessage.mockResolvedValue(stubMessage);
   mockListMessages.mockResolvedValue([]);
+  mockGetRecentToolArgs.mockResolvedValue([]);
 });
 
 describe('runAgentTurn — no tool calls', () => {
@@ -820,6 +823,50 @@ describe('runAgentTurn — Task 7 file-op integration', () => {
       fileWritesCount: 1,
       deploymentsCount: 1,
     });
+  });
+
+  it('injects live schema for recently-touched apps into the system prompt (Task 4)', async () => {
+    // Recent tool_args show the conversation already touched app_1 via a prior tool call.
+    mockGetRecentToolArgs.mockResolvedValueOnce([
+      { action: 'get_config', app_id: 'app_1' },
+    ]);
+
+    global.fetch = vi.fn().mockResolvedValueOnce(textPass('done'));
+
+    const mcpSpy = {
+      call: vi.fn().mockResolvedValue({
+        schema: {
+          tables: {
+            todos: {
+              columns: {
+                id: { type: 'uuid', primaryKey: true },
+                title: { type: 'text', nullable: false },
+              },
+            },
+          },
+        },
+      }),
+    };
+
+    await collect(
+      runAgentTurn(baseInput, {
+        mcp: mcpSpy as any,
+        recordUsage: vi.fn().mockResolvedValue(undefined),
+        loadTemplate: vi.fn().mockResolvedValue([]),
+      }),
+    );
+
+    expect(mcpSpy.call).toHaveBeenCalledWith('manage_schema', { action: 'get', app_id: 'app_1' }, 'test-jwt');
+
+    // The system prompt sent to the gateway must contain the compact schema block.
+    const firstFetchCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(firstFetchCall[1].body as string) as {
+      messages: Array<{ role: string; content?: string }>;
+    };
+    const systemMsg = body.messages.find((m) => m.role === 'system');
+    expect(systemMsg).toBeDefined();
+    expect(systemMsg!.content).toContain('# Current app schemas');
+    expect(systemMsg!.content).toContain('app_1: todos(id uuid pk, title text NOT NULL)');
   });
 
   it('runs end-of-turn flush + recordUsage even when a tool invocation throws', async () => {

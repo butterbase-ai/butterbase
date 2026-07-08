@@ -216,6 +216,29 @@ export async function appendMessage(
 }
 
 /**
+ * Fetch the `tool_args` JSONB payload for the most recent N messages in a
+ * conversation (newest first). Used by schema-context.ts to figure out
+ * which app_ids the agent has recently touched, without pulling full
+ * message rows.
+ */
+export async function getRecentToolArgs(
+  pool: pg.Pool,
+  conversationId: string,
+  limit = 20
+): Promise<Array<unknown | null>> {
+  const result = await pool.query(
+    `SELECT tool_args
+       FROM dashboard_agent_messages
+      WHERE conversation_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2`,
+    [conversationId, limit]
+  );
+
+  return result.rows.map(row => row.tool_args ?? null);
+}
+
+/**
  * List all messages in a conversation, ordered by creation time
  */
 export async function listMessages(

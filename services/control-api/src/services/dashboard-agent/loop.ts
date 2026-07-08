@@ -20,6 +20,7 @@ import { appendMessage, listMessages, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { getSystemPrompt } from './prompt.js';
+import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
 import { createFileOps, type FileOpName } from './file-ops.js';
 import { createRepoSync, type RepoSync } from './repo-sync.js';
@@ -386,8 +387,25 @@ export async function* runAgentTurn(
       });
 
   const history = await listMessages(input.pool, input.conversationId);
+
+  // Live schema injection (Plan 3a Task 4): prepend a compact summary of the
+  // current schema for every app_id the agent has recently touched, so the
+  // model doesn't hallucinate column names from stale conversation history.
+  // Per-turn cache only — schemas can change between turns via manage_schema.apply.
+  const schemaCache = new Map<string, string>();
+  let schemaPromptBlock = '';
+  try {
+    const recentAppIds = await getRecentAppIds(input.pool, input.conversationId);
+    if (recentAppIds.length > 0) {
+      const schemasByAppId = await fetchAppSchemasCached(recentAppIds, input.jwt, deps.mcp, schemaCache);
+      schemaPromptBlock = buildSchemaPromptBlock(schemasByAppId);
+    }
+  } catch {
+    // Schema injection is best-effort — never block the turn on it.
+  }
+
   const messages: GatewayMessage[] = [
-    { role: 'system', content: getSystemPrompt() },
+    { role: 'system', content: schemaPromptBlock + getSystemPrompt() },
     ...toGatewayMessages(history),
   ];
 
