@@ -433,6 +433,7 @@ export async function* runAgentTurn(
               toolName: null,
               toolArgs: null,
               toolResult: null,
+              modelUsed: input.model,
             });
           } catch {
             // Swallow persistence error so original error survives.
@@ -453,6 +454,7 @@ export async function* runAgentTurn(
           toolName: null,
           toolArgs: null,
           toolResult: null,
+          modelUsed: input.model,
         });
         yield { type: 'assistant_message', content: assistantText };
         yield { type: 'done' };
@@ -472,6 +474,7 @@ export async function* runAgentTurn(
           toolName: tc.name,
           toolArgs: tc.args,
           toolResult: null,
+          modelUsed: input.model,
         });
 
         yield { type: 'tool_call', ...tc };

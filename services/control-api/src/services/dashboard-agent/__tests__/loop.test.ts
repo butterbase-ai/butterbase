@@ -130,6 +130,7 @@ const stubMessage = {
   toolName: null,
   toolArgs: null,
   toolResult: null,
+  modelUsed: null,
   createdAt: new Date(),
 };
 
@@ -190,7 +191,12 @@ describe('runAgentTurn — no tool calls', () => {
       2,
       stubPool,
       'conv-1',
-      expect.objectContaining({ role: 'assistant', content: 'Hello world', toolCallId: null }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Hello world',
+        toolCallId: null,
+        modelUsed: baseInput.model,
+      }),
     );
 
     // Exactly two appendMessage calls
@@ -260,7 +266,12 @@ describe('runAgentTurn — one tool call', () => {
       2,
       stubPool,
       'conv-1',
-      expect.objectContaining({ role: 'assistant', toolCallId: 'call-1', toolName: 'manage_app' }),
+      expect.objectContaining({
+        role: 'assistant',
+        toolCallId: 'call-1',
+        toolName: 'manage_app',
+        modelUsed: baseInput.model,
+      }),
     );
     expect(mockAppendMessage).toHaveBeenNthCalledWith(
       3,
@@ -272,7 +283,20 @@ describe('runAgentTurn — one tool call', () => {
       4,
       stubPool,
       'conv-1',
-      expect.objectContaining({ role: 'assistant', content: 'You have no apps.', toolCallId: null }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'You have no apps.',
+        toolCallId: null,
+        modelUsed: baseInput.model,
+      }),
+    );
+
+    // Tool-role rows must NOT carry modelUsed.
+    expect(mockAppendMessage).toHaveBeenNthCalledWith(
+      3,
+      stubPool,
+      'conv-1',
+      expect.not.objectContaining({ modelUsed: expect.anything() }),
     );
   });
 });

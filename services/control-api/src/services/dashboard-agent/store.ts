@@ -19,6 +19,7 @@ export type Message = {
   toolName: string | null;
   toolArgs: unknown | null;
   toolResult: unknown | null;
+  modelUsed: string | null;
   createdAt: Date;
 };
 
@@ -158,7 +159,7 @@ export async function deleteConversation(
 export async function appendMessage(
   pool: pg.Pool,
   conversationId: string,
-  msg: Omit<Message, 'id' | 'createdAt' | 'conversationId'>
+  msg: Omit<Message, 'id' | 'createdAt' | 'conversationId' | 'modelUsed'> & { modelUsed?: string | null }
 ): Promise<Message> {
   const client = await pool.connect();
   try {
@@ -167,9 +168,9 @@ export async function appendMessage(
     // Insert the message
     const msgResult = await client.query(
       `INSERT INTO dashboard_agent_messages
-       (conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, created_at`,
+       (conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, created_at`,
       [
         conversationId,
         msg.role,
@@ -178,6 +179,7 @@ export async function appendMessage(
         msg.toolName,
         msg.toolArgs ? JSON.stringify(msg.toolArgs) : null,
         msg.toolResult ? JSON.stringify(msg.toolResult) : null,
+        msg.modelUsed ?? null,
       ]
     );
 
@@ -202,6 +204,7 @@ export async function appendMessage(
       toolName: msgRow.tool_name,
       toolArgs: msgRow.tool_args ?? null,
       toolResult: msgRow.tool_result ?? null,
+      modelUsed: msgRow.model_used ?? null,
       createdAt: new Date(msgRow.created_at),
     };
   } catch (err) {
@@ -220,7 +223,7 @@ export async function listMessages(
   conversationId: string
 ): Promise<Message[]> {
   const result = await pool.query(
-    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, created_at
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, created_at
      FROM dashboard_agent_messages
      WHERE conversation_id = $1
      ORDER BY created_at ASC`,
@@ -236,6 +239,7 @@ export async function listMessages(
     toolName: row.tool_name,
     toolArgs: row.tool_args ?? null,
     toolResult: row.tool_result ?? null,
+    modelUsed: row.model_used ?? null,
     createdAt: new Date(row.created_at),
   }));
 }
