@@ -54,6 +54,45 @@ describe('repo-sync', () => {
     expect(cache.get(CONV, APP)).toBeUndefined()
   })
 
+  it('pullSnapshot hydrates the cache from a specific snapshot manifest + presigned GETs', async () => {
+    const cache = new WorkingTreeCache()
+    const mcp = mkMcp({
+      pull_snapshot: (args) => {
+        expect(args).toEqual({ action: 'pull_snapshot', app_id: APP, snapshot_id: 'snap_old' })
+        return {
+          snapshot_id: 'snap_old',
+          files: [
+            { path: 'src/App.tsx', sha256: 'a'.repeat(64), download_url: 'https://s3/a' },
+          ],
+        }
+      },
+    })
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (url: any) => {
+      const s = String(url)
+      if (s === 'https://s3/a') return new Response('OLD_APP_CONTENT') as any
+      throw new Error(`unexpected fetch ${s}`)
+    }) as any
+    try {
+      const sync = createRepoSync({ cache, mcp })
+      const r = await sync.pullSnapshot({ convId: CONV, appId: APP, snapshotId: 'snap_old', jwt: JWT })
+      expect(r.hydrated).toBe(true)
+      expect(mcp.call).toHaveBeenCalledWith('manage_repo', { action: 'pull_snapshot', app_id: APP, snapshot_id: 'snap_old' }, JWT)
+      expect(cache.read(CONV, APP, 'src/App.tsx')).toBe('OLD_APP_CONTENT')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('pullSnapshot returns hydrated=false on empty snapshot', async () => {
+    const cache = new WorkingTreeCache()
+    const mcp = mkMcp({ pull_snapshot: () => ({ snapshot_id: null, files: [] }) })
+    const sync = createRepoSync({ cache, mcp })
+    const r = await sync.pullSnapshot({ convId: CONV, appId: APP, snapshotId: 'snap_old', jwt: JWT })
+    expect(r.hydrated).toBe(false)
+    expect(cache.get(CONV, APP)).toBeUndefined()
+  })
+
   it('flush pushes the FULL current tree (manage_repo.push replaces manifest — no inheritance)', async () => {
     const cache = new WorkingTreeCache()
     cache.write(CONV, APP, 'a.ts', 'A')

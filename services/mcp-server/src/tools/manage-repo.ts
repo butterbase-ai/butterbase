@@ -15,6 +15,7 @@ export function registerManageRepo(server: McpServer) {
 Actions:
   - "push":             Push a small set of files (≤1 MB total over MCP — for larger repos shell out to \`butterbase repo push\`). Files are { path, content_base64 } pairs. Server computes sha and runs prepare → upload → commit.
   - "pull_latest":      Fetch the latest snapshot's manifest (does not write files locally). Returns { snapshot_id, files: [{ path, sha256, size, downloadUrl }] } — agents fetch each downloadUrl directly.
+  - "pull_snapshot":    Fetch a SPECIFIC snapshot's manifest by snapshot_id (does not write files locally). Returns the same shape as "pull_latest" but for that snapshot.
   - "status":           Returns { app_id, pinned_snapshot_id?, remote_latest_snapshot_id?, file_count }. No working-tree comparison (the server has no working tree).
   - "list_snapshots":   List snapshot history newest-first.
   - "wipe":             Delete every snapshot and blob, then null repo_latest_snapshot. Irreversible.
@@ -22,14 +23,16 @@ Actions:
 Parameters by action:
   push:           { action: "push", app_id, files: [{ path, content_base64 }], message? }
   pull_latest:    { action: "pull_latest", app_id }
+  pull_snapshot:  { action: "pull_snapshot", app_id, snapshot_id }
   status:         { action: "status", app_id }
   list_snapshots: { action: "list_snapshots", app_id }
   wipe:           { action: "wipe", app_id }
 
-Auth matrix: writes (push, wipe) require app owner. Reads (pull_latest, status, list_snapshots) work for owner or anonymously on a public app; private+non-owner gets 404.`,
+Auth matrix: writes (push, wipe) require app owner. Reads (pull_latest, pull_snapshot, status, list_snapshots) work for owner or anonymously on a public app; private+non-owner gets 404.`,
     {
-      action: z.enum(['push', 'pull_latest', 'status', 'list_snapshots', 'wipe']),
+      action: z.enum(['push', 'pull_latest', 'pull_snapshot', 'status', 'list_snapshots', 'wipe']),
       app_id: z.string().describe('App ID — required for every action.'),
+      snapshot_id: z.string().optional().describe('REQUIRED for "pull_snapshot". The specific snapshot_id to fetch (as returned by push/pull_latest/list_snapshots).'),
       files: z.array(z.object({
         path: z.string().describe('Relative path inside the repo (no .., no leading /).'),
         content_base64: z.string().describe('File bytes base64-encoded. Server decodes, hashes, and uploads.'),
@@ -67,6 +70,27 @@ Auth matrix: writes (push, wipe) require app owner. Reads (pull_latest, status, 
             downloadUrl: urlBySha.get(f.sha256) ?? null,
           }));
           return text({ snapshot_id: latest.snapshot_id, files });
+        }
+        case 'pull_snapshot': {
+          if (!args.snapshot_id) return errOut('snapshot_id required');
+          const snap = await apiGet<{ snapshot_id: string; manifest: Manifest }>(`/v1/${args.app_id}/repo/snapshots/${encodeURIComponent(args.snapshot_id)}`);
+          const shas = snap.manifest.files.map(f => f.sha256);
+          // De-dup shas — content-addressed storage means multiple paths can share the same sha.
+          const uniqueShas = Array.from(new Set(shas));
+          // Batch endpoint caps at 1000 shas per call; chunk if needed.
+          const urlBySha = new Map<string, string>();
+          for (let i = 0; i < uniqueShas.length; i += 1000) {
+            const chunk = uniqueShas.slice(i, i + 1000);
+            const res = await apiPost<{ blobs: { sha256: string; size: number; downloadUrl: string }[] }>(`/v1/${args.app_id}/repo/blobs/batch`, { shas: chunk });
+            for (const b of res.blobs) urlBySha.set(b.sha256, b.downloadUrl);
+          }
+          const files = snap.manifest.files.map(f => ({
+            path: f.path,
+            sha256: f.sha256,
+            size: f.size,
+            downloadUrl: urlBySha.get(f.sha256) ?? null,
+          }));
+          return text({ snapshot_id: snap.snapshot_id, files });
         }
         case 'list_snapshots': {
           const res = await apiGet(`/v1/${args.app_id}/repo/snapshots`);

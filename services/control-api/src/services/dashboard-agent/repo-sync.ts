@@ -4,6 +4,7 @@ type Mcp = { call(name: string, args: unknown, jwt: string): Promise<any> }
 
 export type RepoSync = {
   pullLatest(input: { convId: string; appId: string; jwt: string }): Promise<{ hydrated: boolean }>
+  pullSnapshot(input: { convId: string; appId: string; snapshotId: string; jwt: string }): Promise<{ hydrated: boolean }>
   flush(input: {
     convId: string
     appId: string
@@ -17,6 +18,21 @@ export function createRepoSync(deps: { cache: WorkingTreeCache; mcp: Mcp }): Rep
   return {
     async pullLatest({ convId, appId, jwt }) {
       const res = await mcp.call('manage_repo', { action: 'pull_latest', app_id: appId }, jwt)
+      const files: Array<{ path: string; sha256: string; download_url: string }> = res?.files ?? []
+      if (!res?.snapshot_id || files.length === 0) return { hydrated: false }
+      const tree: WorkingTree = new Map()
+      await Promise.all(files.map(async (f) => {
+        const resp = await fetch(f.download_url)
+        const content = await resp.text()
+        const wf: WorkingFile = { path: f.path, content, sha256: f.sha256 }
+        tree.set(f.path, wf)
+      }))
+      cache.set(convId, appId, tree)
+      return { hydrated: true }
+    },
+
+    async pullSnapshot({ convId, appId, snapshotId, jwt }) {
+      const res = await mcp.call('manage_repo', { action: 'pull_snapshot', app_id: appId, snapshot_id: snapshotId }, jwt)
       const files: Array<{ path: string; sha256: string; download_url: string }> = res?.files ?? []
       if (!res?.snapshot_id || files.length === 0) return { hydrated: false }
       const tree: WorkingTree = new Map()
