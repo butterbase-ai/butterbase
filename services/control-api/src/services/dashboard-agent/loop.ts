@@ -17,7 +17,7 @@
 
 import pg from 'pg';
 import { createHash } from 'crypto';
-import { appendMessage, listMessages, type Message } from './store.js';
+import { appendMessage, listMessages, upsertSnapshotLabel, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { getSystemPrompt } from './prompt.js';
@@ -28,6 +28,7 @@ import { createRepoSync, type RepoSync } from './repo-sync.js';
 import { createDeployer } from './deploy.js';
 import { loadTemplate as loadTemplateDefault } from './template-loader.js';
 import { recordUsage as recordUsageDefault, type UsageRow } from './usage-store.js';
+import { deriveSnapshotTitle, createGatewayChat, type SnapshotTitleGateway } from './snapshot-title.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -60,6 +61,11 @@ export type LoopDeps = {
   // If omitted, they are built per-turn from the primitives above.
   fileOpsFactory?: (emit: (evt: LoopEvent) => void, ensureHydrated: (i: { convId: string; appId: string; jwt: string }) => Promise<void>) => ReturnType<typeof createFileOps>;
   deployerFactory?: (emit: (evt: LoopEvent) => void) => ReturnType<typeof createDeployer>;
+  // Task 5 (Plan 3d): snapshot auto-naming. Tests can inject a stub gateway
+  // and/or a spy for the store write; production builds a real gateway chat
+  // client bound to the request's JWT and use the real store.upsertSnapshotLabel.
+  snapshotTitleGatewayFactory?: (jwt: string) => SnapshotTitleGateway;
+  upsertSnapshotLabel?: typeof upsertSnapshotLabel;
 };
 
 let _sharedCache: WorkingTreeCache | undefined;
@@ -90,6 +96,8 @@ function getDefaultDeps(): LoopDeps {
       repoSync,
       recordUsage: recordUsageDefault,
       loadTemplate: loadTemplateDefault,
+      snapshotTitleGatewayFactory: createGatewayChat,
+      upsertSnapshotLabel,
     };
   }
   return _defaultDeps;
@@ -351,6 +359,8 @@ export async function* runAgentTurn(
   const base = getDefaultDeps();
   const deps: LoopDeps = { ...base, ...(depsOverride ?? {}) };
   const { cache, repoSync, recordUsage, loadTemplate } = deps;
+  const snapshotTitleGatewayFactory = deps.snapshotTitleGatewayFactory ?? createGatewayChat;
+  const upsertSnapshotLabelFn = deps.upsertSnapshotLabel ?? upsertSnapshotLabel;
 
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
@@ -426,6 +436,11 @@ export async function* runAgentTurn(
 
   const history = await listMessages(input.pool, input.conversationId);
 
+  // Task 5 (Plan 3d): turn number for the `Turn <N>` snapshot-title fallback.
+  // history already includes the user message just persisted above, so
+  // roughly two history rows (user + assistant) per completed turn.
+  const turnNumber = Math.max(1, Math.ceil(history.length / 2));
+
   // Live schema injection (Plan 3a Task 4): prepend a compact summary of the
   // current schema for every app_id the agent has recently touched, so the
   // model doesn't hallucinate column names from stale conversation history.
@@ -455,6 +470,9 @@ export async function* runAgentTurn(
 
   // 2. Agentic loop -------------------------------------------------------
   let terminated = false;
+  // Task 5 (Plan 3d): last assistant text produced this turn, used as the
+  // "Assistant: <chunk>" half of the snapshot-title summarization prompt.
+  let lastAssistantText = '';
   try {
     outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
       let assistantText = '';
@@ -480,6 +498,7 @@ export async function* runAgentTurn(
           }
         }
       } catch (err: unknown) {
+        if (assistantText) lastAssistantText = assistantText;
         if (assistantText) {
           try {
             await appendMessage(input.pool, input.conversationId, {
@@ -503,6 +522,7 @@ export async function* runAgentTurn(
 
       // No tool call — assistant is done
       if (pendingToolCalls.length === 0) {
+        lastAssistantText = assistantText;
         await appendMessage(input.pool, input.conversationId, {
           role: 'assistant',
           content: assistantText,
@@ -551,6 +571,7 @@ export async function* runAgentTurn(
             const stuckMessage = `Agent stuck on ${tc.name} — same args tried 3 times. Ask the user how to proceed.`;
             yield { type: 'error', message: stuckMessage };
             const summary = `I got stuck repeating the same "${tc.name}" call with identical arguments and stopped after ${TOOL_RETRY_LIMIT} attempts. Let me know how you'd like to proceed.`;
+            lastAssistantText = summary;
             await appendMessage(input.pool, input.conversationId, {
               role: 'assistant',
               content: summary,
@@ -715,12 +736,36 @@ export async function* runAgentTurn(
     for (const appId of touchedApps) {
       const baseline = baselineByApp.get(appId) ?? new Map<string, string>();
       try {
-        await repoSync.flush({
+        const flushResult = await repoSync.flush({
           convId: input.conversationId,
           appId,
           jwt: input.jwt,
           baseline,
         });
+
+        // Task 5 (Plan 3d): auto-name the new snapshot. Entirely best-effort —
+        // must never block or fail the SSE stream, so every step is wrapped.
+        if (flushResult.newSnapshotId) {
+          try {
+            const gateway = snapshotTitleGatewayFactory(input.jwt);
+            const snapshotTitle = await deriveSnapshotTitle(
+              input.userMessage,
+              lastAssistantText,
+              gateway,
+              turnNumber,
+            );
+            await upsertSnapshotLabelFn(input.pool, {
+              conversationId: input.conversationId,
+              appId,
+              snapshotId: flushResult.newSnapshotId,
+              label: snapshotTitle,
+              autoGenerated: true,
+            });
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.warn(`[dashboard-agent] snapshot auto-naming failed for app ${appId}: ${message}`);
+          }
+        }
       } catch {
         // Best-effort; loop should not hard-fail because of a flush error.
       }
