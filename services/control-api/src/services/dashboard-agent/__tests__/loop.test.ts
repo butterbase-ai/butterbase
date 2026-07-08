@@ -306,7 +306,10 @@ describe('runAgentTurn — one tool call', () => {
 
 describe('runAgentTurn — tool cap', () => {
   it('emits at most 8 tool_call frames then an error frame', async () => {
-    // Gateway always returns a tool_call
+    // Gateway always returns a tool_call. Args vary per call (distinct `id` arg)
+    // so the Task 5 retry-budget guard never trips — this test exercises the
+    // tool-call cap in isolation.
+    let callIndex = 0;
     const toolCallPass = () =>
       gatewayResponse([
         {
@@ -320,7 +323,7 @@ describe('runAgentTurn — tool cap', () => {
         {
           choices: [
             {
-              delta: { tool_calls: [{ index: 0, function: { arguments: '{"action":"list"}' } }] },
+              delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ action: 'list', id: `iter-${callIndex++}` }) } }] },
               finish_reason: null,
             },
           ],
@@ -349,6 +352,76 @@ describe('runAgentTurn — tool cap', () => {
     // Fix 3: assert persistence count.
     // 1 user row + 8 × (1 assistant row + 1 tool row) = 17 total calls.
     expect(mockAppendMessage).toHaveBeenCalledTimes(17);
+  });
+});
+
+describe('runAgentTurn — tool retry budget (Task 5)', () => {
+  it('stops after 3 invocations when the same tool is called with identical args repeatedly, emits a stuck error frame, and persists an assistant summary', async () => {
+    // Gateway scripts the SAME tool call with the SAME args four times in a row.
+    const sameCallPass = () =>
+      gatewayResponse([
+        {
+          choices: [
+            {
+              delta: { tool_calls: [{ index: 0, id: 'call-retry', function: { name: 'manage_app', arguments: '' } }] },
+              finish_reason: null,
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: { tool_calls: [{ index: 0, function: { arguments: '{"action":"list","id":"app_1"}' } }] },
+              finish_reason: null,
+            },
+          ],
+        },
+        { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      ]);
+
+    // Fresh streams per fetch call (each pass would only be reached if the loop
+    // kept going — the retry guard should stop it before a 4th fetch happens).
+    global.fetch = vi.fn().mockImplementation(() => Promise.resolve(sameCallPass()));
+
+    mockCallMcpTool.mockResolvedValue({ ok: true, result: {} });
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    // Only 3 tool invocations should have happened (the 4th is caught by the guard
+    // before dispatch).
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(3);
+
+    const errorEvents = events.filter((e) => e.type === 'error') as Array<{ type: 'error'; message: string }>;
+    expect(errorEvents.length).toBe(1);
+    expect(errorEvents[0].message).toMatch(/stuck on manage_app/);
+    expect(errorEvents[0].message).toMatch(/same args tried 3 times/);
+
+    // done should NOT be emitted — the stuck error is terminal.
+    expect(events.find((e) => e.type === 'done')).toBeUndefined();
+
+    // An assistant summary message describing the stuck state must be persisted.
+    const assistantSummaryCalls = mockAppendMessage.mock.calls.filter(
+      ([, , msg]) =>
+        (msg as { role: string; toolCallId: unknown; modelUsed?: unknown }).role === 'assistant' &&
+        (msg as { toolCallId: unknown }).toolCallId === null,
+    );
+    // First is the initial "no tool call yet" style row never happens here since every
+    // pass has a tool call; the persisted stuck-summary row is the one we care about.
+    const stuckSummaryCall = mockAppendMessage.mock.calls.find(
+      ([, , msg]) =>
+        (msg as { role: string; content?: string }).role === 'assistant' &&
+        typeof (msg as { content?: string }).content === 'string' &&
+        (msg as { content?: string }).content!.includes('manage_app'),
+    );
+    expect(stuckSummaryCall).toBeDefined();
+    expect((stuckSummaryCall![2] as { modelUsed?: string }).modelUsed).toBe(baseInput.model);
+
+    // The stuck-state summary should also be emitted as an assistant_message event.
+    const assistantMessageEvent = events.find((e) => e.type === 'assistant_message') as
+      | { type: 'assistant_message'; content: string }
+      | undefined;
+    expect(assistantMessageEvent).toBeDefined();
+    expect(assistantMessageEvent!.content).toContain('manage_app');
   });
 });
 

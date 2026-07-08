@@ -16,6 +16,7 @@
  */
 
 import pg from 'pg';
+import { createHash } from 'crypto';
 import { appendMessage, listMessages, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
@@ -117,6 +118,32 @@ interface GatewayMessage {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Deeply sort object keys so that logically-equal argument objects (regardless
+ * of key insertion order) produce identical JSON — and therefore identical hashes.
+ */
+function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value !== null && typeof value === 'object') {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = sortKeysDeep((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Compute a stable sha256 hash of a tool call's args, independent of key order.
+ * Used by the per-turn retry budget (Task 5) to detect the agent repeatedly
+ * invoking the same tool with the same arguments.
+ */
+function hashToolArgs(args: unknown): string {
+  const canonical = JSON.stringify(sortKeysDeep(args ?? {}));
+  return createHash('sha256').update(canonical).digest('hex');
+}
 
 /**
  * Convert persisted store messages to the gateway's OpenAI-compatible format.
@@ -303,6 +330,13 @@ const TOOL_CALL_LIMIT = process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT
   ? Number.parseInt(process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT, 10)
   : Number.POSITIVE_INFINITY;
 
+// Per-turn retry budget: if the agent invokes the same tool with the exact
+// same (canonicalized) args this many times in a row, the loop assumes it's
+// stuck and stops rather than burning further tool calls. Env-overridable.
+const TOOL_RETRY_LIMIT = process.env.DASHBOARD_AGENT_TOOL_RETRY_LIMIT
+  ? Number.parseInt(process.env.DASHBOARD_AGENT_TOOL_RETRY_LIMIT, 10)
+  : 3;
+
 export async function* runAgentTurn(
   input: {
     conversationId: string;
@@ -338,6 +372,10 @@ export async function* runAgentTurn(
   let deploymentsCount = 0;
   let gatewayPromptTokens = 0;
   let gatewayCompletionTokens = 0;
+  // Task 5: per-turn tool-call retry tracking — keyed by tool name, tracks the
+  // hash of the last args seen for that tool and how many consecutive times
+  // in a row that same hash has been retried.
+  const retryState = new Map<string, { lastArgsHash: string; retries: number }>();
 
   // SSE queue: file-ops / deployer emit callbacks push events that need to be
   // interleaved with the loop's own yields. We drain the queue after each
@@ -496,6 +534,37 @@ export async function* runAgentTurn(
         });
 
         yield { type: 'tool_call', ...tc };
+
+        // Retry budget guard (Task 5): detect the agent calling the same tool
+        // with the same args over and over and give up rather than spin forever.
+        {
+          const argsHash = hashToolArgs(tc.args);
+          const prior = retryState.get(tc.name);
+          if (prior && prior.lastArgsHash === argsHash) {
+            prior.retries += 1;
+          } else {
+            retryState.set(tc.name, { lastArgsHash: argsHash, retries: 0 });
+          }
+          const state = retryState.get(tc.name)!;
+
+          if (state.retries >= TOOL_RETRY_LIMIT) {
+            const stuckMessage = `Agent stuck on ${tc.name} — same args tried 3 times. Ask the user how to proceed.`;
+            yield { type: 'error', message: stuckMessage };
+            const summary = `I got stuck repeating the same "${tc.name}" call with identical arguments and stopped after ${TOOL_RETRY_LIMIT} attempts. Let me know how you'd like to proceed.`;
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'assistant',
+              content: summary,
+              toolCallId: null,
+              toolName: null,
+              toolArgs: null,
+              toolResult: null,
+              modelUsed: input.model,
+            });
+            yield { type: 'assistant_message', content: summary };
+            terminated = true;
+            break outer;
+          }
+        }
 
         // Allowlist guard
         if (!allowedToolNames.has(tc.name)) {
