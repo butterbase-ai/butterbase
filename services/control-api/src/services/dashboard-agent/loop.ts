@@ -295,10 +295,12 @@ export async function* streamChatCompletion(opts: {
 // Main export: runAgentTurn
 // ---------------------------------------------------------------------------
 
-// Builder-mode conversations routinely chain 20+ tool calls per turn:
-// init_app + schema + RLS + N file-writes + deploy_frontend. Env-overridable
-// so a runaway loop can still be capped without a code change.
-const TOOL_CALL_LIMIT = Number.parseInt(process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT ?? '30', 10);
+// Unlimited by default — builder-mode chains 20+ tool calls per turn routinely
+// and the LLM's own context window is the real ceiling. Env-overridable so a
+// runaway can still be capped without a code change.
+const TOOL_CALL_LIMIT = process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT
+  ? Number.parseInt(process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT, 10)
+  : Number.POSITIVE_INFINITY;
 
 export async function* runAgentTurn(
   input: {
