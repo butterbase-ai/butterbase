@@ -20,7 +20,7 @@ export type FileOpDeps = {
   ensureHydrated(input: { convId: string; appId: string; jwt: string }): Promise<void>
 }
 
-const MANAGED_PATHS = new Set(['package.json', 'package-lock.json'])
+const ROOT_MANAGED_PATHS = new Set(['package.json', 'package-lock.json'])
 const MAX_BYTES = 512 * 1024
 const ALLOWLIST_MSG =
   'package.json is managed. Use one of the allowlisted libraries: react, react-dom, tailwindcss, lucide-react, clsx, tailwind-merge, class-variance-authority, @butterbase/sdk.'
@@ -28,6 +28,14 @@ const ALLOWLIST_MSG =
 function validatePath(path: string): string | null {
   if (!path || path.startsWith('/') || path.includes('..')) return `invalid path: ${path}`
   return null
+}
+
+function isFunctionPath(path: string): boolean {
+  return /^functions\/[^/]+\//.test(path)
+}
+
+function isRootManagedPath(path: string): boolean {
+  return ROOT_MANAGED_PATHS.has(path)
 }
 
 export function createFileOps(deps: FileOpDeps) {
@@ -52,7 +60,7 @@ export function createFileOps(deps: FileOpDeps) {
           const content: string = args.content ?? ''
           const pv = validatePath(path)
           if (pv) return { ok: false, error: pv }
-          if (MANAGED_PATHS.has(path)) return { ok: false, error: ALLOWLIST_MSG }
+          if (isRootManagedPath(path) && !isFunctionPath(path)) return { ok: false, error: ALLOWLIST_MSG }
           if (Buffer.byteLength(content, 'utf8') > MAX_BYTES) {
             return { ok: false, error: `file exceeds ${MAX_BYTES} bytes` }
           }
@@ -78,7 +86,7 @@ export function createFileOps(deps: FileOpDeps) {
           const path: string = args.path
           const pv = validatePath(path)
           if (pv) return { ok: false, error: pv }
-          if (MANAGED_PATHS.has(path)) return { ok: false, error: ALLOWLIST_MSG }
+          if (isRootManagedPath(path) && !isFunctionPath(path)) return { ok: false, error: ALLOWLIST_MSG }
           await beforeMutate(ctx.convId, appId, ctx.jwt)
           const removed = deps.cache.delete(ctx.convId, appId, path)
           if (!removed) return { ok: false, error: `not found: ${path}` }

@@ -99,4 +99,60 @@ describe('file-ops', () => {
     expect(cache.read(CTX.convId, 'a1', 'a.ts')).toBeUndefined()
     expect(events).toEqual([{ app_id: 'a1', path: 'a.ts', kind: 'delete' }])
   })
+
+  it('write_file allows functions/<name>/index.ts', async () => {
+    const { ops, cache } = setup()
+    const r = await ops.execute('write_file', { app_id: 'a1', path: 'functions/hello/index.ts', content: 'export default {}' }, CTX)
+    expect(r.ok).toBe(true)
+    expect(cache.read(CTX.convId, 'a1', 'functions/hello/index.ts')).toBe('export default {}')
+  })
+
+  it('write_file allows functions/<name>/package.json', async () => {
+    const { ops, cache } = setup()
+    const r = await ops.execute('write_file', { app_id: 'a1', path: 'functions/hello/package.json', content: '{"name":"hello"}' }, CTX)
+    expect(r.ok).toBe(true)
+    expect(cache.read(CTX.convId, 'a1', 'functions/hello/package.json')).toBe('{"name":"hello"}')
+  })
+
+  it('write_file allows functions/<name>/nested/dir/util.ts', async () => {
+    const { ops, cache } = setup()
+    const r = await ops.execute('write_file', { app_id: 'a1', path: 'functions/hello/nested/dir/util.ts', content: 'export const x = 1' }, CTX)
+    expect(r.ok).toBe(true)
+    expect(cache.read(CTX.convId, 'a1', 'functions/hello/nested/dir/util.ts')).toBe('export const x = 1')
+  })
+
+  it('write_file rejects functions/../malicious.ts (path traversal)', async () => {
+    const { ops } = setup()
+    const r = await ops.execute('write_file', { app_id: 'a1', path: 'functions/../malicious.ts', content: 'X' }, CTX)
+    expect(r.ok).toBe(false)
+  })
+
+  it('write_file still rejects root package.json', async () => {
+    const { ops } = setup()
+    const r = await ops.execute('write_file', { app_id: 'a1', path: 'package.json', content: '{}' }, CTX)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('package.json is managed')
+  })
+
+  it('write_file still rejects root package-lock.json', async () => {
+    const { ops } = setup()
+    const r = await ops.execute('write_file', { app_id: 'a1', path: 'package-lock.json', content: '{}' }, CTX)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('package.json is managed')
+  })
+
+  it('delete_file allows functions/<name>/file.ts', async () => {
+    const { ops, cache } = setup()
+    await ops.execute('write_file', { app_id: 'a1', path: 'functions/hello/file.ts', content: 'X' }, CTX)
+    const r = await ops.execute('delete_file', { app_id: 'a1', path: 'functions/hello/file.ts' }, CTX)
+    expect(r.ok).toBe(true)
+    expect(cache.read(CTX.convId, 'a1', 'functions/hello/file.ts')).toBeUndefined()
+  })
+
+  it('delete_file still rejects root package.json', async () => {
+    const { ops } = setup()
+    const r = await ops.execute('delete_file', { app_id: 'a1', path: 'package.json' }, CTX)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('package.json is managed')
+  })
 })
