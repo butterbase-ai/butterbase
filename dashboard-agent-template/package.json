@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@butterbase/sdk": "^2.8.1",
+    "@butterbase/sdk": "^2.8.2",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.400.0",
@@ -20,9 +20,13 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
+    "esbuild-wasm": "^0.21.5",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.4",
     "typescript": "^5.4.5",
     "vite": "^5.3.1"
+  },
+  "overrides": {
+    "rollup": "npm:@rollup/wasm-node@^4.20.0"
   }
 }
