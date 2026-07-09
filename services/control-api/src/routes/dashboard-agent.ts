@@ -58,6 +58,7 @@ import {
   type SnapshotLabel,
 } from '../services/dashboard-agent/store.js';
 import { runAgentTurn, getSharedWorkingTreeCache } from '../services/dashboard-agent/loop.js';
+import { publish as publishEvent, subscribe as subscribeToConversation } from '../services/dashboard-agent/event-bus.js';
 import { getRecentAppIds } from '../services/dashboard-agent/schema-context.js';
 import { listUsage, getConversationUsageTotal } from '../services/dashboard-agent/usage-store.js';
 import { createRepoSync } from '../services/dashboard-agent/repo-sync.js';
@@ -421,15 +422,62 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       });
 
       for await (const event of gen) {
-        if (clientDisconnected) break;
+        publishEvent(conversation_id, event);
+        if (clientDisconnected) continue;
         reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+      const errEvent = { type: 'error' as const, message: msg };
+      publishEvent(conversation_id, errEvent);
+      if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(errEvent)}\n\n`);
     } finally {
       reply.raw.end();
     }
+  });
+
+  // ── GET /conversations/:id/stream ────────────────────────────────────────
+  // Persistent SSE — subscribes to the in-process event bus so any running
+  // turn's events flow into this connection, even without holding the
+  // original POST /messages open. Heartbeat every 25s keeps proxies happy.
+  app.get('/conversations/:id/stream', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+    const conversation = await getConversation(app.controlDb, id, userId);
+    if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
+
+    // reply.hijack() bypasses Fastify's onSend (where @fastify/cors normally
+    // injects CORS headers), so reflect the caller Origin explicitly.
+    const requestOrigin = request.headers.origin;
+    if (requestOrigin) {
+      reply.raw.setHeader('access-control-allow-origin', requestOrigin);
+      reply.raw.setHeader('vary', 'origin');
+      reply.raw.setHeader('access-control-allow-credentials', 'true');
+    }
+    reply.raw.setHeader('content-type', 'text/event-stream');
+    reply.raw.setHeader('cache-control', 'no-cache');
+    reply.raw.setHeader('connection', 'keep-alive');
+    reply.raw.setHeader('x-accel-buffering', 'no');
+    reply.hijack();
+
+    let disconnected = false;
+    const unsubscribe = subscribeToConversation(id, (evt) => {
+      if (disconnected) return;
+      try { reply.raw.write(`data: ${JSON.stringify(evt)}\n\n`); } catch { /* noop */ }
+    });
+    const heartbeat = setInterval(() => {
+      if (disconnected) return;
+      try { reply.raw.write(`: ping\n\n`); } catch { /* noop */ }
+    }, 25_000);
+    try { reply.raw.write(`: subscribed\n\n`); } catch { /* noop */ }
+
+    request.raw.on('close', () => {
+      disconnected = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+      try { reply.raw.end(); } catch { /* noop */ }
+    });
   });
 
   // ── POST /messages/:id/rate — thumbs up/down + optional reason (Task 19) ─
@@ -550,12 +598,15 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       });
 
       for await (const event of gen) {
-        if (clientDisconnected) break;
+        publishEvent(id, event);
+        if (clientDisconnected) continue;
         reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+      const errEvent = { type: 'error' as const, message: msg };
+      publishEvent(id, errEvent);
+      if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(errEvent)}\n\n`);
     } finally {
       reply.raw.end();
     }
@@ -606,8 +657,15 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     // 3. Validate snapshot_id is a real snapshot of this app before touching
     // the cache — avoids clobbering the working tree on a typo'd snapshot_id.
     try {
-      const list: any = await rewindMcp.call('manage_repo', { action: 'list_snapshots', app_id: appId }, jwt);
-      const snapshots: Array<{ snapshot_id?: string; snapshotId?: string }> = list?.snapshots ?? list ?? [];
+      const raw: any = await rewindMcp.call('manage_repo', { action: 'list_snapshots', app_id: appId }, jwt);
+      let payload: any = raw;
+      if (raw && typeof raw === 'object' && Array.isArray(raw.content)) {
+        const textFrame = raw.content.find((c: any) => c?.type === 'text' && typeof c.text === 'string');
+        if (textFrame) { try { payload = JSON.parse(textFrame.text); } catch { payload = {}; } }
+      }
+      const snapshots: Array<{ snapshot_id?: string; snapshotId?: string }> = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.snapshots) ? payload.snapshots : [];
       const ids = snapshots.map((s) => s.snapshot_id ?? s.snapshotId).filter(Boolean);
       if (ids.length > 0 && !ids.includes(snapshotId)) {
         return reply.code(400).send({ error: 'snapshot_id not found for this app' });
@@ -656,6 +714,59 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     return reply.send({ new_snapshot_id: newSnapshotId, files_changed: filesChanged });
   });
 
+  // ── GET /conversations/:id/apps/:app_id/tree ─────────────────────────────
+  //
+  // Read-only helper: hydrates a browsable file list for an app whose repo
+  // exists server-side but which the current conversation has not touched
+  // (e.g. the pane's App Directory picked it). Peels the MCP envelope, fetches
+  // each blob's content, returns { files: [{ path, content, sha256 }] }.
+  // Ownership on the conversation is checked; app-level ACL is enforced by
+  // the underlying manage_repo tool.
+  app.get('/conversations/:id/apps/:app_id/tree', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+    const userId = requireUserId(request);
+    const { id, app_id: appId } = request.params as { id: string; app_id: string };
+
+    const conversation = await getConversation(app.controlDb, id, userId);
+    if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
+
+    const authHeader = request.headers.authorization ?? '';
+    const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+
+    let payload: any;
+    try {
+      const raw: any = await rewindMcp.call('manage_repo', { action: 'pull_latest', app_id: appId }, jwt);
+      payload = raw;
+      if (raw && typeof raw === 'object' && Array.isArray(raw.content)) {
+        const textFrame = raw.content.find((c: any) => c?.type === 'text' && typeof c.text === 'string');
+        if (textFrame) { try { payload = JSON.parse(textFrame.text); } catch { payload = {}; } }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // 404 vs 500: pull_latest returns "no snapshot yet" as a specific error;
+      // treat any failure here as empty rather than 500 so the client can render
+      // "No files" instead of surfacing an obscure MCP error.
+      request.log.warn({ err: msg, appId }, 'tree hydrate: pull_latest failed');
+      return reply.send({ files: [] });
+    }
+
+    const files: Array<{ path: string; sha256: string; downloadUrl?: string; download_url?: string }> = payload?.files ?? [];
+    if (files.length === 0) return reply.send({ files: [] });
+
+    const out = await Promise.all(files.map(async (f) => {
+      const url = f.downloadUrl ?? f.download_url;
+      if (!url) return null;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) return null;
+        const content = await resp.text();
+        return { path: f.path, sha256: f.sha256, content };
+      } catch { return null; }
+    }));
+
+    return reply.send({ files: out.filter((f): f is { path: string; sha256: string; content: string } => f !== null) });
+  });
+
   // ── GET /conversations/:id/snapshots ─────────────────────────────────────
   //
   // Lists snapshot history for an app associated with this conversation,
@@ -681,26 +792,32 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'app_id query param is required' });
     }
 
-    // 3. Loose guard: app_id must have shown up in this conversation's
-    // tool_args at least once (same best-effort pattern as rewind).
-    try {
-      const recentAppIds = await getRecentAppIds(app.controlDb, id);
-      if (recentAppIds.length > 0 && !recentAppIds.includes(appId)) {
-        return reply.code(404).send({ error: 'app_id not associated with this conversation' });
-      }
-    } catch {
-      // best-effort guard only
-    }
+    // 3. Read-only route: no per-conversation association guard. The
+    // underlying MCP tool (manage_repo.list_snapshots) enforces app ownership,
+    // and the pane's app-directory picker lets users browse any app in their
+    // active org — a stricter conversation-scoped guard here would 404 that UX.
 
     // Extract JWT verbatim from Authorization header, same as /messages and /rewind.
     const authHeader = request.headers.authorization ?? '';
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
 
-    // 4. Fetch raw snapshot list from manage_repo.
+    // 4. Fetch raw snapshot list from manage_repo. MCP tools return either the
+    // raw payload OR an envelope { content: [{ type: 'text', text: '<json>' }] };
+    // peel that here so mergeSnapshotsWithLabels always sees an array.
     let rawSnapshots: RawSnapshot[] = [];
     try {
-      const list: any = await rewindMcp.call('manage_repo', { action: 'list_snapshots', app_id: appId }, jwt);
-      rawSnapshots = list?.snapshots ?? list ?? [];
+      const raw: any = await rewindMcp.call('manage_repo', { action: 'list_snapshots', app_id: appId }, jwt);
+      let payload: any = raw;
+      if (raw && typeof raw === 'object' && Array.isArray(raw.content)) {
+        const textFrame = raw.content.find((c: any) => c?.type === 'text' && typeof c.text === 'string');
+        if (textFrame) {
+          try { payload = JSON.parse(textFrame.text); } catch { payload = {}; }
+        }
+      }
+      const listSnapshots = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.snapshots) ? payload.snapshots : [];
+      rawSnapshots = listSnapshots as RawSnapshot[];
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return reply.code(500).send({ error: `failed to list snapshots: ${msg}` });
@@ -885,12 +1002,15 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       });
 
       for await (const event of gen) {
-        if (clientDisconnected) break;
+        publishEvent(conversationId, event);
+        if (clientDisconnected) continue;
         reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+      const errEvent = { type: 'error' as const, message: msg };
+      publishEvent(conversationId, errEvent);
+      if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(errEvent)}\n\n`);
     } finally {
       reply.raw.end();
     }
