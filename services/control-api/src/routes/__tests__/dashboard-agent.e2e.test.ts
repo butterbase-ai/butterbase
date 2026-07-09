@@ -44,6 +44,8 @@ import pg from 'pg';
 import { dashboardAgentRoutes, mergeSnapshotsWithLabels } from '../dashboard-agent.js';
 import { callMcpTool } from '../../services/dashboard-agent/mcp-client.js';
 import type { SnapshotLabel } from '../../services/dashboard-agent/store.js';
+import { appendMessage } from '../../services/dashboard-agent/store.js';
+import { createApproval } from '../../services/dashboard-agent/approvals-store.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -818,6 +820,261 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
           );
           expect(row.rows).toHaveLength(1);
           expect(row.rows[0]).toMatchObject({ label: 'Checkpoint before rewrite', auto_generated: false });
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+  });
+
+  // ── Case G: approvals resolve endpoint ────────────────────────────────────
+
+  describe('Case G: approvals resolve endpoint', () => {
+    /**
+     * Seed a conversation with a paused assistant tool-call row (as the loop's
+     * Plan 3b Task 2 gate would leave it: tool_result=null, pending_approval_id
+     * set) plus its matching pending approval row. Mirrors what runAgentTurn
+     * does right before it yields `approval_required` and terminates.
+     */
+    async function seedPendingApproval(convId: string, toolArgs: unknown = { action: 'get_state' }) {
+      const toolCallId = `call_${randomUUID()}`;
+      const messageId = randomUUID();
+
+      const approval = await createApproval(pool, {
+        conversationId: convId,
+        turnMessageId: messageId,
+        toolName: 'manage_billing',
+        toolArgs,
+        sensitivity: 'destructive',
+      });
+
+      await appendMessage(
+        pool,
+        convId,
+        {
+          role: 'assistant',
+          content: '',
+          toolCallId,
+          toolName: 'manage_billing',
+          toolArgs,
+          toolResult: null,
+          modelUsed: 'gpt-4o',
+          pendingApprovalId: approval.id,
+        },
+        messageId,
+      );
+
+      return { approval, toolCallId, messageId };
+    }
+
+    /** Mock a single-pass resumed-turn gateway response: final tokens, no more tool calls. */
+    function mockResumedTurnGateway() {
+      global.fetch = vi.fn().mockResolvedValueOnce(
+        gatewayResponse([
+          { choices: [{ delta: { content: 'Done.' }, finish_reason: null }] },
+          { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        ]),
+      );
+    }
+
+    it(
+      'cross-tenant approve returns 404',
+      async () => {
+        const appA = await buildApp(USER_A, pool);
+        const appB = await buildApp(USER_B, pool);
+
+        try {
+          const convR = await appA.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-g-cross-tenant', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const { approval } = await seedPendingApproval(conversation.id);
+
+          const resolveR = await appB.inject({
+            method: 'POST',
+            url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+            headers: { authorization: 'Bearer test-jwt-b' },
+            payload: { status: 'approved' },
+          });
+
+          expect(resolveR.statusCode).toBe(404);
+          expect(resolveR.headers['content-type']).not.toContain('text/event-stream');
+          expect(callMcpTool).not.toHaveBeenCalled();
+        } finally {
+          await appA.close();
+          await appB.close();
+        }
+      },
+      30_000,
+    );
+
+    it(
+      'resolving an already-resolved approval returns 409',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-g-already-resolved', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const { approval } = await seedPendingApproval(conversation.id);
+
+          // Resolve it once (deny — cheapest path, no MCP call needed).
+          mockResumedTurnGateway();
+          const first = await app.inject({
+            method: 'POST',
+            url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+            headers: { authorization: 'Bearer test-jwt-a' },
+            payload: { status: 'denied' },
+          });
+          expect(first.statusCode).toBe(200);
+
+          // Second resolve attempt on the now-denied approval → 409.
+          const second = await app.inject({
+            method: 'POST',
+            url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+            headers: { authorization: 'Bearer test-jwt-a' },
+            payload: { status: 'approved' },
+          });
+          expect(second.statusCode).toBe(409);
+          expect(second.headers['content-type']).not.toContain('text/event-stream');
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+
+    it(
+      'approve happy path: executes the tool, persists the tool row, and streams the resumed turn',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-g-approve', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const toolArgs = { action: 'get_state' };
+          const { approval, toolCallId } = await seedPendingApproval(conversation.id, toolArgs);
+
+          // The resume helper executes the gated tool via callMcpTool.
+          vi.mocked(callMcpTool).mockResolvedValueOnce({ ok: true, result: { balance_cents: 4200 } });
+          mockResumedTurnGateway();
+
+          const resolveR = await app.inject({
+            method: 'POST',
+            url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+            headers: { authorization: 'Bearer test-jwt-a' },
+            payload: { status: 'approved', trust_scope: 'conversation' },
+          });
+
+          expect(resolveR.statusCode).toBe(200);
+          expect(resolveR.headers['content-type']).toContain('text/event-stream');
+
+          const frames = parseSseFrames(resolveR.body);
+          expect(frames.some((f: any) => f.type === 'assistant_message' || f.type === 'done')).toBe(true);
+
+          // callMcpTool called once (the actual gated execution) — the mocked
+          // resumed-turn gateway response has no further tool calls.
+          expect(callMcpTool).toHaveBeenCalledTimes(1);
+          expect(vi.mocked(callMcpTool).mock.calls[0][0]).toBe('manage_billing');
+
+          // Approval row updated.
+          const approvalRow = await pool.query(
+            `SELECT status, trust_scope FROM dashboard_agent_approvals WHERE id = $1`,
+            [approval.id],
+          );
+          expect(approvalRow.rows[0]).toMatchObject({ status: 'approved', trust_scope: 'conversation' });
+
+          // Tool-result row persisted with matching tool_call_id and a non-null result.
+          const toolRow = await pool.query(
+            `SELECT tool_call_id, tool_result, pending_approval_id
+             FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2`,
+            [conversation.id, toolCallId],
+          );
+          expect(toolRow.rows).toHaveLength(1);
+          expect(toolRow.rows[0].tool_result).toMatchObject({ balance_cents: 4200 });
+
+          // Paused assistant row's pending_approval_id cleared.
+          const assistantRow = await pool.query(
+            `SELECT pending_approval_id FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND tool_call_id = $2 AND role = 'assistant'`,
+            [conversation.id, toolCallId],
+          );
+          expect(assistantRow.rows[0].pending_approval_id).toBeNull();
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+
+    it(
+      'deny happy path: synthesizes a denial tool result including the reason, no MCP execution',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-g-deny', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const { approval, toolCallId } = await seedPendingApproval(conversation.id);
+
+          mockResumedTurnGateway();
+
+          const resolveR = await app.inject({
+            method: 'POST',
+            url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+            headers: { authorization: 'Bearer test-jwt-a' },
+            payload: { status: 'denied', reason: 'too risky right now' },
+          });
+
+          expect(resolveR.statusCode).toBe(200);
+          expect(resolveR.headers['content-type']).toContain('text/event-stream');
+
+          // Denial never calls the MCP client.
+          expect(callMcpTool).not.toHaveBeenCalled();
+
+          const approvalRow = await pool.query(
+            `SELECT status, deny_reason FROM dashboard_agent_approvals WHERE id = $1`,
+            [approval.id],
+          );
+          expect(approvalRow.rows[0]).toMatchObject({
+            status: 'denied',
+            deny_reason: 'too risky right now',
+          });
+
+          const toolRow = await pool.query(
+            `SELECT tool_result FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2`,
+            [conversation.id, toolCallId],
+          );
+          expect(toolRow.rows).toHaveLength(1);
+          const result = toolRow.rows[0].tool_result as { ok: boolean; error: string };
+          expect(result.ok).toBe(false);
+          expect(result.error).toContain('User denied.');
+          expect(result.error).toContain('too risky right now');
         } finally {
           await app.close();
         }

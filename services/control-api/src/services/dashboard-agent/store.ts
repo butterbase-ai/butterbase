@@ -324,6 +324,53 @@ export async function upsertSnapshotLabel(
 }
 
 /**
+ * Find the paused assistant tool-call row gated by a given approval
+ * (dashboard_agent_messages.pending_approval_id = approvalId). Used by the
+ * resume flow (Plan 3b Task 3) to recover the tool_call_id it must attach
+ * the follow-up tool-result row to.
+ */
+export async function getMessageByPendingApprovalId(
+  pool: pg.Pool,
+  approvalId: string
+): Promise<Message | null> {
+  const result = await pool.query(
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
+     FROM dashboard_agent_messages
+     WHERE pending_approval_id = $1`,
+    [approvalId]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    role: row.role,
+    content: row.content,
+    toolCallId: row.tool_call_id,
+    toolName: row.tool_name,
+    toolArgs: row.tool_args ?? null,
+    toolResult: row.tool_result ?? null,
+    modelUsed: row.model_used ?? null,
+    pendingApprovalId: row.pending_approval_id ?? null,
+    createdAt: new Date(row.created_at),
+  };
+}
+
+/**
+ * Clear pending_approval_id on a message row once its approval has been
+ * resolved and the follow-up tool-result row has been persisted.
+ */
+export async function clearPendingApproval(
+  pool: pg.Pool,
+  messageId: string
+): Promise<void> {
+  await pool.query(
+    `UPDATE dashboard_agent_messages SET pending_approval_id = NULL WHERE id = $1`,
+    [messageId]
+  );
+}
+
+/**
  * List all messages in a conversation, ordered by creation time
  */
 export async function listMessages(

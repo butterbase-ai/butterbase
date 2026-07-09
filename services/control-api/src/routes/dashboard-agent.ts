@@ -10,6 +10,11 @@
  *   POST   /conversations/:id/rewind – restore working tree to a prior snapshot
  *   GET    /conversations/:id/snapshots – list snapshot history + labels
  *   POST   /conversations/:id/snapshots/label – set a user label on a snapshot
+ *   POST   /v1/dashboard-agent/approvals/:id/resolve – approve/deny a gated
+ *          tool call and stream the resumed turn's SSE events. Combines the
+ *          approve/deny + resume-and-execute steps described in the Plan 3b
+ *          Task 3 brief into a single endpoint (documented choice — see brief
+ *          "For simplicity ... pick and document").
  *
  * Feature flag: DASHBOARD_ASSISTANT_ENABLED must equal '1' or all routes
  * return 404.
@@ -40,6 +45,7 @@ import { getRecentAppIds } from '../services/dashboard-agent/schema-context.js';
 import { listUsage } from '../services/dashboard-agent/usage-store.js';
 import { createRepoSync } from '../services/dashboard-agent/repo-sync.js';
 import { callMcpTool } from '../services/dashboard-agent/mcp-client.js';
+import { resolveApprovalAndPersistResult } from '../services/dashboard-agent/resume.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -150,6 +156,14 @@ const labelSnapshotBody = z.object({
   snapshot_id: z.string().min(1),
   label: z.string().min(1).max(200),
 });
+
+const resolveApprovalBody = z
+  .object({
+    status: z.enum(['approved', 'denied']),
+    trust_scope: z.enum(['conversation']).optional(),
+    reason: z.string().max(2000).optional(),
+  })
+  .strict();
 
 // ---------------------------------------------------------------------------
 // Route plugin
@@ -528,5 +542,91 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ rows });
+  });
+
+  // ── POST /v1/dashboard-agent/approvals/:id/resolve ───────────────────────
+  //
+  // Approve or deny a gated tool call (Plan 3b Task 2's approval_required
+  // pause), then stream the resumed turn's SSE events. See resume.ts for the
+  // execute-then-persist steps that make the resumed history valid before
+  // the agent loop is re-entered.
+  app.post('/v1/dashboard-agent/approvals/:id/resolve', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id: approvalId } = request.params as { id: string };
+
+    const parsed = resolveApprovalBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { status, trust_scope: trustScope, reason } = parsed.data;
+
+    // Extract JWT verbatim from Authorization header, same as /messages.
+    const authHeader = request.headers.authorization ?? '';
+    const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+
+    // Ownership + status checks, tool execution/denial-synthesis, and the
+    // follow-up tool-result row are all done BEFORE any SSE headers are
+    // sent — once hijacked we can't return a JSON 404/409/400.
+    const outcome = await resolveApprovalAndPersistResult(app.controlDb, {
+      approvalId,
+      userId,
+      jwt,
+      resolution:
+        status === 'approved' ? { status: 'approved', trustScope } : { status: 'denied', reason },
+    });
+
+    if (!outcome.ok) {
+      return reply.code(outcome.code).send({ error: outcome.error });
+    }
+
+    const conversationId = outcome.approval.conversationId;
+
+    // Begin SSE response — mirrors /messages.
+    const requestOrigin = request.headers.origin;
+    if (requestOrigin) {
+      reply.raw.setHeader('access-control-allow-origin', requestOrigin);
+      reply.raw.setHeader('vary', 'origin');
+      reply.raw.setHeader('access-control-allow-credentials', 'true');
+    }
+    reply.raw.setHeader('content-type', 'text/event-stream');
+    reply.raw.setHeader('cache-control', 'no-cache');
+    reply.raw.setHeader('connection', 'keep-alive');
+    reply.hijack();
+
+    let clientDisconnected = false;
+    request.raw.on('close', () => {
+      clientDisconnected = true;
+      app.log.debug({ conversationId }, 'dashboard-agent resume SSE client disconnected');
+    });
+
+    try {
+      const conversation = await getConversation(app.controlDb, conversationId, userId);
+      const model = conversation?.model ?? 'claude-sonnet-4-5';
+
+      // Empty userMessage: the resumed turn's history already contains the
+      // just-persisted tool-result row (via resolveApprovalAndPersistResult).
+      // The loop still appends a `role: 'user'` row per turn — an empty one
+      // here is a harmless no-op line in history, not a duplicate prompt.
+      const gen = runAgentTurn({
+        conversationId,
+        userId,
+        jwt,
+        userMessage: '',
+        model,
+        pool: app.controlDb,
+      });
+
+      for await (const event of gen) {
+        if (clientDisconnected) break;
+        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+    } finally {
+      reply.raw.end();
+    }
   });
 }
