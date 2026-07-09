@@ -14,6 +14,8 @@
  *          edit-and-resend a user message ({message_id, new_user_message?}).
  *          Deletes the target message + everything after it, then streams a
  *          fresh turn via SSE (same wire format as /messages).
+ *   POST   /messages/:id/rate      – set/clear a thumbs up/down + optional
+ *          reason on an assistant message ({rating: 1|-1|0, reason?}).
  *   POST   /conversations/:id/rewind – restore working tree to a prior snapshot
  *   GET    /conversations/:id/snapshots – list snapshot history + labels
  *   POST   /conversations/:id/snapshots/label – set a user label on a snapshot
@@ -51,6 +53,8 @@ import {
   getMessageById,
   deleteMessagesFromInclusive,
   getLastUserMessage,
+  getMessageWithOwner,
+  rateMessage,
   type SnapshotLabel,
 } from '../services/dashboard-agent/store.js';
 import { runAgentTurn, getSharedWorkingTreeCache } from '../services/dashboard-agent/loop.js';
@@ -204,6 +208,14 @@ const pinConversationBody = z.object({
 const regenerateBody = z.object({
   message_id: z.string().uuid(),
   new_user_message: z.string().min(1).optional(),
+});
+
+// rating: 1 (thumbs up) | -1 (thumbs down) | 0 (un-rate — clears both
+// rating + rating_reason). `reason` is only meaningful alongside rating: -1;
+// the store silently drops it otherwise (documented in rateMessage's jsdoc).
+const rateMessageBody = z.object({
+  rating: z.union([z.literal(1), z.literal(-1), z.literal(0)]),
+  reason: z.string().max(2000).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -418,6 +430,35 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     } finally {
       reply.raw.end();
     }
+  });
+
+  // ── POST /messages/:id/rate — thumbs up/down + optional reason (Task 19) ─
+  app.post('/messages/:id/rate', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+
+    const parsed = rateMessageBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+
+    // Ownership check via conversation_id → user_id join — 404 for both a
+    // nonexistent message and a message that belongs to another user's
+    // conversation (no distinction leaked to the caller).
+    const message = await getMessageWithOwner(app.controlDb, id, userId);
+    if (!message) {
+      return reply.code(404).send({ error: 'message not found' });
+    }
+    if (message.role !== 'assistant') {
+      return reply.code(400).send({ error: 'only assistant messages can be rated' });
+    }
+
+    await rateMessage(app.controlDb, id, parsed.data.rating, parsed.data.reason);
+
+    const updated = await getMessageWithOwner(app.controlDb, id, userId);
+    return reply.send({ message: updated });
   });
 
   // ── POST /conversations/:id/regenerate ───────────────────────────────────

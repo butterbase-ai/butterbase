@@ -22,6 +22,8 @@ export type Message = {
   toolResult: unknown | null;
   modelUsed: string | null;
   pendingApprovalId: string | null;
+  rating: 1 | -1 | 0 | null;
+  ratingReason: string | null;
   createdAt: Date;
 };
 
@@ -351,7 +353,7 @@ export async function deleteConversation(
 export async function appendMessage(
   pool: pg.Pool,
   conversationId: string,
-  msg: Omit<Message, 'id' | 'createdAt' | 'conversationId' | 'modelUsed' | 'pendingApprovalId'> & {
+  msg: Omit<Message, 'id' | 'createdAt' | 'conversationId' | 'modelUsed' | 'pendingApprovalId' | 'rating' | 'ratingReason'> & {
     modelUsed?: string | null;
     pendingApprovalId?: string | null;
   },
@@ -369,11 +371,11 @@ export async function appendMessage(
         ? `INSERT INTO dashboard_agent_messages
        (id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at`
+       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, rating, rating_reason, created_at`
         : `INSERT INTO dashboard_agent_messages
        (conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at`,
+       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, rating, rating_reason, created_at`,
       id
         ? [
             id,
@@ -423,6 +425,8 @@ export async function appendMessage(
       toolResult: msgRow.tool_result ?? null,
       modelUsed: msgRow.model_used ?? null,
       pendingApprovalId: msgRow.pending_approval_id ?? null,
+      rating: msgRow.rating ?? null,
+      ratingReason: msgRow.rating_reason ?? null,
       createdAt: new Date(msgRow.created_at),
     };
   } catch (err) {
@@ -525,7 +529,7 @@ export async function getMessageByPendingApprovalId(
   approvalId: string
 ): Promise<Message | null> {
   const result = await pool.query(
-    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, rating, rating_reason, created_at
      FROM dashboard_agent_messages
      WHERE pending_approval_id = $1`,
     [approvalId]
@@ -543,6 +547,8 @@ export async function getMessageByPendingApprovalId(
     toolResult: row.tool_result ?? null,
     modelUsed: row.model_used ?? null,
     pendingApprovalId: row.pending_approval_id ?? null,
+    rating: row.rating ?? null,
+    ratingReason: row.rating_reason ?? null,
     createdAt: new Date(row.created_at),
   };
 }
@@ -573,7 +579,7 @@ export async function getMessageById(
   messageId: string
 ): Promise<Message | null> {
   const result = await pool.query(
-    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, rating, rating_reason, created_at
        FROM dashboard_agent_messages
       WHERE id = $1 AND conversation_id = $2`,
     [messageId, conversationId]
@@ -591,8 +597,73 @@ export async function getMessageById(
     toolResult: row.tool_result ?? null,
     modelUsed: row.model_used ?? null,
     pendingApprovalId: row.pending_approval_id ?? null,
+    rating: row.rating ?? null,
+    ratingReason: row.rating_reason ?? null,
     createdAt: new Date(row.created_at),
   };
+}
+
+/**
+ * Fetch a single message by id, scoped to the owning USER (not just a
+ * specific conversation id the caller already trusts) — joins through
+ * dashboard_agent_conversations to check user_id. Used by the rate route
+ * (Plan 3e Task 19) so a cross-tenant rate attempt 404s without a separate
+ * conversation-ownership lookup.
+ */
+export async function getMessageWithOwner(
+  pool: pg.Pool,
+  messageId: string,
+  userId: string
+): Promise<Message | null> {
+  const result = await pool.query(
+    `SELECT m.id, m.conversation_id, m.role, m.content, m.tool_call_id, m.tool_name, m.tool_args, m.tool_result, m.model_used, m.pending_approval_id, m.rating, m.rating_reason, m.created_at
+       FROM dashboard_agent_messages m
+       JOIN dashboard_agent_conversations c ON c.id = m.conversation_id
+      WHERE m.id = $1 AND c.user_id = $2`,
+    [messageId, userId]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    role: row.role,
+    content: row.content,
+    toolCallId: row.tool_call_id,
+    toolName: row.tool_name,
+    toolArgs: row.tool_args ?? null,
+    toolResult: row.tool_result ?? null,
+    modelUsed: row.model_used ?? null,
+    pendingApprovalId: row.pending_approval_id ?? null,
+    rating: row.rating ?? null,
+    ratingReason: row.rating_reason ?? null,
+    createdAt: new Date(row.created_at),
+  };
+}
+
+/**
+ * Set or clear a message's rating (Plan 3e Task 19). `rating: 0` (or the
+ * caller omitting a reason) clears both `rating` and `rating_reason` — a
+ * thumbs-up (rating: 1) never carries a reason, so any reason argument is
+ * ignored unless rating === -1.
+ */
+export async function rateMessage(
+  pool: pg.Pool,
+  messageId: string,
+  rating: 1 | -1 | 0,
+  reason?: string
+): Promise<void> {
+  if (rating === 0) {
+    await pool.query(
+      `UPDATE dashboard_agent_messages SET rating = NULL, rating_reason = NULL WHERE id = $1`,
+      [messageId]
+    );
+    return;
+  }
+  await pool.query(
+    `UPDATE dashboard_agent_messages SET rating = $2, rating_reason = $3 WHERE id = $1`,
+    [messageId, rating, rating === -1 ? (reason ?? null) : null]
+  );
 }
 
 /**
@@ -666,7 +737,7 @@ export async function getLastUserMessage(
   conversationId: string
 ): Promise<Message | null> {
   const result = await pool.query(
-    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, rating, rating_reason, created_at
        FROM dashboard_agent_messages
       WHERE conversation_id = $1 AND role = 'user'
       ORDER BY created_at DESC
@@ -686,19 +757,23 @@ export async function getLastUserMessage(
     toolResult: row.tool_result ?? null,
     modelUsed: row.model_used ?? null,
     pendingApprovalId: row.pending_approval_id ?? null,
+    rating: row.rating ?? null,
+    ratingReason: row.rating_reason ?? null,
     createdAt: new Date(row.created_at),
   };
 }
 
 /**
- * List all messages in a conversation, ordered by creation time
+ * List all messages in a conversation, ordered by creation time. Includes
+ * `rating`/`rating_reason` (Plan 3e Task 19) so history rehydrate preserves
+ * any thumbs up/down the user left on prior assistant turns.
  */
 export async function listMessages(
   pool: pg.Pool,
   conversationId: string
 ): Promise<Message[]> {
   const result = await pool.query(
-    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, rating, rating_reason, created_at
      FROM dashboard_agent_messages
      WHERE conversation_id = $1
      ORDER BY created_at ASC`,
@@ -716,6 +791,8 @@ export async function listMessages(
     toolResult: row.tool_result ?? null,
     modelUsed: row.model_used ?? null,
     pendingApprovalId: row.pending_approval_id ?? null,
+    rating: row.rating ?? null,
+    ratingReason: row.rating_reason ?? null,
     createdAt: new Date(row.created_at),
   }));
 }

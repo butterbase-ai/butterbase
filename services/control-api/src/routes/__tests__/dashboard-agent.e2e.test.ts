@@ -1960,4 +1960,165 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
       }
     });
   });
+
+  // ── Case K: rate message (Plan 3e Task 19) ────────────────────────────────
+
+  describe('Case K: rate message', () => {
+    it('cross-tenant: user B rating user A message gets 404', async () => {
+      const appA = await buildApp(USER_A, pool);
+      const appB = await buildApp(USER_B, pool);
+
+      try {
+        const convR = await appA.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-k-rate-ownership', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const asstMsg = await appendMessage(pool, conversation.id, {
+          role: 'assistant',
+          content: 'hello there',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        const rateR = await appB.inject({
+          method: 'POST',
+          url: `/messages/${asstMsg.id}/rate`,
+          payload: { rating: 1 },
+        });
+
+        expect(rateR.statusCode).toBe(404);
+        expect(rateR.json()).toMatchObject({ error: 'message not found' });
+
+        const row = await pool.query(
+          `SELECT rating, rating_reason FROM dashboard_agent_messages WHERE id = $1`,
+          [asstMsg.id],
+        );
+        expect(row.rows[0].rating).toBeNull();
+        expect(row.rows[0].rating_reason).toBeNull();
+      } finally {
+        await appA.close();
+        await appB.close();
+      }
+    });
+
+    it('happy path: rating 1 sets rating and is reflected in listMessages', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-k-rate-happy', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const asstMsg = await appendMessage(pool, conversation.id, {
+          role: 'assistant',
+          content: 'hello there',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        const rateR = await app.inject({
+          method: 'POST',
+          url: `/messages/${asstMsg.id}/rate`,
+          payload: { rating: 1 },
+        });
+        expect(rateR.statusCode).toBe(200);
+        expect(rateR.json<{ message: { rating: number | null } }>().message.rating).toBe(1);
+
+        const getR = await app.inject({
+          method: 'GET',
+          url: `/conversations/${conversation.id}`,
+        });
+        const { messages } = getR.json<{ messages: Array<{ id: string; rating: number | null; ratingReason: string | null }> }>();
+        const found = messages.find((m) => m.id === asstMsg.id);
+        expect(found?.rating).toBe(1);
+        expect(found?.ratingReason).toBeNull();
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('toggle: rating -1 with a reason then rating 0 clears both fields', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-k-rate-toggle', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const asstMsg = await appendMessage(pool, conversation.id, {
+          role: 'assistant',
+          content: 'a wrong answer',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        // Non-assistant rows can't be rated.
+        const userMsg = await appendMessage(pool, conversation.id, {
+          role: 'user',
+          content: 'a question',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+        const userRateR = await app.inject({
+          method: 'POST',
+          url: `/messages/${userMsg.id}/rate`,
+          payload: { rating: 1 },
+        });
+        expect(userRateR.statusCode).toBe(400);
+
+        const downR = await app.inject({
+          method: 'POST',
+          url: `/messages/${asstMsg.id}/rate`,
+          payload: { rating: -1, reason: 'not accurate' },
+        });
+        expect(downR.statusCode).toBe(200);
+        const downJson = downR.json<{ message: { rating: number | null; ratingReason: string | null } }>();
+        expect(downJson.message.rating).toBe(-1);
+        expect(downJson.message.ratingReason).toBe('not accurate');
+
+        const rowAfterDown = await pool.query(
+          `SELECT rating, rating_reason FROM dashboard_agent_messages WHERE id = $1`,
+          [asstMsg.id],
+        );
+        expect(rowAfterDown.rows[0].rating).toBe(-1);
+        expect(rowAfterDown.rows[0].rating_reason).toBe('not accurate');
+
+        const clearR = await app.inject({
+          method: 'POST',
+          url: `/messages/${asstMsg.id}/rate`,
+          payload: { rating: 0 },
+        });
+        expect(clearR.statusCode).toBe(200);
+        const clearJson = clearR.json<{ message: { rating: number | null; ratingReason: string | null } }>();
+        expect(clearJson.message.rating).toBeNull();
+        expect(clearJson.message.ratingReason).toBeNull();
+
+        const rowAfterClear = await pool.query(
+          `SELECT rating, rating_reason FROM dashboard_agent_messages WHERE id = $1`,
+          [asstMsg.id],
+        );
+        expect(rowAfterClear.rows[0].rating).toBeNull();
+        expect(rowAfterClear.rows[0].rating_reason).toBeNull();
+      } finally {
+        await app.close();
+      }
+    });
+  });
 });
