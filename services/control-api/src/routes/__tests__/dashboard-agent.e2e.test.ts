@@ -1212,4 +1212,178 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
       30_000,
     );
   });
+
+  // ── Case H: full pause -> resume smoke (real /messages trigger) ──────────
+  //
+  // Cases A-G exercise the resolve endpoint against a hand-seeded pending
+  // approval. This case drives the WHOLE flow starting from a real user
+  // message so the sensitivity gate inside runAgentTurn is what creates the
+  // approval — closer to what actually happens in production.
+
+  describe('Case H: full pause -> resume smoke', () => {
+    it(
+      'manage_app.delete pauses for approval, then approving resumes and executes it',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-h-smoke', model: 'anthropic/claude-haiku-4.5' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+          const conversationId = conversation.id;
+
+          // ── Phase 1: initial turn — gateway scripts a manage_app.delete call ──
+          global.fetch = vi.fn().mockResolvedValueOnce(
+            gatewayResponse([
+              { choices: [{ delta: { content: 'Sure, deleting it.' }, finish_reason: null }] },
+              {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        { index: 0, id: 'call_del1', function: { name: 'manage_app', arguments: '' } },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              },
+              {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        { index: 0, function: { arguments: '{"action":"delete","app_id":"app_test"}' } },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              },
+              { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+            ]),
+          );
+
+          const msgR = await app.inject({
+            method: 'POST',
+            url: '/messages',
+            payload: {
+              conversation_id: conversationId,
+              message: 'delete app app_test',
+              model: 'anthropic/claude-haiku-4.5',
+            },
+            headers: { authorization: 'Bearer test-jwt-a' },
+          });
+
+          expect(msgR.statusCode).toBe(200);
+          expect(msgR.headers['content-type']).toContain('text/event-stream');
+
+          const initialFrames = parseSseFrames(msgR.body) as Array<{ type: string; [k: string]: unknown }>;
+
+          // MCP must not have been dispatched yet — the gate pauses before exec.
+          expect(callMcpTool).not.toHaveBeenCalled();
+
+          const approvalFrame = initialFrames.find((f) => f.type === 'approval_required');
+          expect(approvalFrame).toMatchObject({
+            type: 'approval_required',
+            tool_name: 'manage_app',
+            sensitivity: 'destructive',
+          });
+          expect(typeof approvalFrame?.approval_id).toBe('string');
+
+          // No tool_result and no done frame in this first stream — the turn
+          // terminated at the pause, not at a natural end.
+          expect(initialFrames.some((f) => f.type === 'tool_result')).toBe(false);
+          expect(initialFrames.some((f) => f.type === 'done')).toBe(false);
+          expect(initialFrames[initialFrames.length - 1]?.type).toBe('approval_required');
+
+          const approvalId = approvalFrame!.approval_id as string;
+
+          // Pending approval row exists.
+          const pendingRow = await pool.query(
+            `SELECT status, tool_name, sensitivity FROM dashboard_agent_approvals WHERE id = $1`,
+            [approvalId],
+          );
+          expect(pendingRow.rows).toHaveLength(1);
+          expect(pendingRow.rows[0]).toMatchObject({
+            status: 'pending',
+            tool_name: 'manage_app',
+            sensitivity: 'destructive',
+          });
+
+          // Assistant row persisted with pending_approval_id set.
+          const pausedMsgRow = await pool.query(
+            `SELECT role, tool_call_id, pending_approval_id FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND role = 'assistant' AND tool_call_id = 'call_del1'`,
+            [conversationId],
+          );
+          expect(pausedMsgRow.rows).toHaveLength(1);
+          expect(pausedMsgRow.rows[0].pending_approval_id).toBe(approvalId);
+
+          // ── Phase 2: approve — resume executes the delete, then wraps up ────
+          vi.mocked(callMcpTool).mockResolvedValueOnce({ ok: true, result: { deleted: true } });
+          global.fetch = vi.fn().mockResolvedValueOnce(
+            gatewayResponse([
+              { choices: [{ delta: { content: 'Done. Deleted.' }, finish_reason: null }] },
+              { choices: [{ delta: {}, finish_reason: 'stop' }] },
+            ]),
+          );
+
+          const resolveR = await app.inject({
+            method: 'POST',
+            url: `/v1/dashboard-agent/approvals/${approvalId}/resolve`,
+            headers: { authorization: 'Bearer test-jwt-a' },
+            payload: { status: 'approved' },
+          });
+
+          expect(resolveR.statusCode).toBe(200);
+          expect(resolveR.headers['content-type']).toContain('text/event-stream');
+
+          // The delete exec (via resolveApprovalAndPersistResult) happens
+          // BEFORE the resumed runAgentTurn starts, so it's always the first
+          // callMcpTool invocation. The resumed turn's own best-effort live
+          // schema injection (schema-context.ts) may also call manage_schema
+          // for app_test — that's incidental to this smoke test, not the
+          // thing under test, so we only assert on the delete call itself.
+          const deleteCall = vi
+            .mocked(callMcpTool)
+            .mock.calls.find(([name, args]) => name === 'manage_app' && (args as any)?.action === 'delete');
+          expect(deleteCall).toBeDefined();
+          expect(deleteCall?.[1]).toMatchObject({ action: 'delete', app_id: 'app_test' });
+
+          // Note: the executed tool's result is persisted directly to
+          // Postgres by resolveApprovalAndPersistResult (see resume.ts)
+          // BEFORE the resumed SSE stream even starts — it is not re-emitted
+          // as a `tool_result` frame. The resumed stream only carries the
+          // NEW gateway pass's events (tokens/assistant_message/done).
+          const resumeFrames = parseSseFrames(resolveR.body) as Array<{ type: string; [k: string]: unknown }>;
+          expect(resumeFrames.some((f) => f.type === 'tool_result')).toBe(false);
+          expect(resumeFrames.some((f) => f.type === 'done' || f.type === 'assistant_message')).toBe(true);
+
+          // Approval flipped to approved.
+          const resolvedRow = await pool.query(
+            `SELECT status FROM dashboard_agent_approvals WHERE id = $1`,
+            [approvalId],
+          );
+          expect(resolvedRow.rows[0].status).toBe('approved');
+
+          // Tool-role message row persisted for the delete result.
+          const toolMsgRow = await pool.query(
+            `SELECT role, tool_call_id, tool_result FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = 'call_del1'`,
+            [conversationId],
+          );
+          expect(toolMsgRow.rows).toHaveLength(1);
+          expect(toolMsgRow.rows[0].tool_result).toMatchObject({ deleted: true });
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+  });
 });
