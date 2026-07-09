@@ -56,7 +56,7 @@ describe('manage_repo tool', () => {
     });
 
     // First call must be the specific-snapshot GET, URL-encoded snapshot_id.
-    const [firstUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [firstUrl] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(firstUrl).toContain('/v1/app_test123/repo/snapshots/snap_old');
 
     const text = (out.content as Array<{ type: string; text?: string }>)
