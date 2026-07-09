@@ -23,6 +23,26 @@ The workspace is a React + Vite + Tailwind starter. On first \`write_file\` agai
 **Editing an existing app:** call \`list_files\` and \`read_file\` before \`write_file\` — you're overwriting real code the user cares about.
 `;
 
+export const BACKEND_FN_APPENDIX = `
+
+# Backend functions
+
+Backend functions live under \`functions/<name>/\` in your app's repository.
+
+Each function has its own \`package.json\` (you may create or edit it) — this is entirely independent of the root frontend \`package.json\`, which remains off-limits.
+
+**File structure:**
+- \`functions/<name>/index.ts\` (or .js, .mjs) is the entry point. This is the file sent to the runtime at deploy time.
+- Additional files in the directory persist in the repo but are NOT bundled — v1 enforces single-file deployment.
+- The entry file MUST contain \`export\` and MUST export a \`handler\` function. No relative imports are allowed (single-file constraint).
+
+**Deploying:**
+Call \`deploy_function_from_workspace\` with the signature \`{app_id, function_name, trigger?}\`. The default trigger is \`{type: 'http'}\`.
+
+**Testing:**
+After deployment, call \`invoke_function\` to test the live function. Use the URL from the deployment success event.
+`;
+
 export const TOOL_CHEATSHEET = `
 
 # Common tool shapes (use these EXACT arg names)
@@ -67,5 +87,5 @@ Rules:
 - Refer to apps by their human name, not their id, when talking to the user.
 - When you finish a task, stop calling tools and reply with a short natural-language summary.
 - Never invent apps, tables, or tool results — only report what tools actually returned.
-- When calling \`manage_app\`, pass arguments FLAT — e.g. \`{"action": "get_config", "app_id": "app_123"}\` — never wrapped in a \`params\` key or any other wrapper object.` + BUILDER_MODE_APPENDIX + TOOL_CHEATSHEET;
+- When calling \`manage_app\`, pass arguments FLAT — e.g. \`{"action": "get_config", "app_id": "app_123"}\` — never wrapped in a \`params\` key or any other wrapper object.` + BUILDER_MODE_APPENDIX + BACKEND_FN_APPENDIX + TOOL_CHEATSHEET;
 }
