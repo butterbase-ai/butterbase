@@ -750,4 +750,79 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
       30_000,
     );
   });
+
+  describe('Case F: label snapshot endpoint', () => {
+    const APP_ID = 'app_snapshot_label_test';
+
+    it(
+      'cross-tenant: user B labeling a snapshot on user A conversation gets 404',
+      async () => {
+        const appA = await buildApp(USER_A, pool);
+        const appB = await buildApp(USER_B, pool);
+
+        try {
+          const convR = await appA.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-f-ownership', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const labelR = await appB.inject({
+            method: 'POST',
+            url: `/conversations/${conversation.id}/snapshots/label`,
+            headers: { authorization: 'Bearer test-jwt-b' },
+            payload: { app_id: APP_ID, snapshot_id: 'snap_1', label: 'nope' },
+          });
+
+          expect(labelR.statusCode).toBe(404);
+          expect(labelR.json()).toMatchObject({ error: 'conversation not found' });
+          expect(callMcpTool).not.toHaveBeenCalled();
+        } finally {
+          await appA.close();
+          await appB.close();
+        }
+      },
+      30_000,
+    );
+
+    it(
+      'happy path: labels a snapshot and it is retrievable via the snapshot list',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-f-happy', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const labelR = await app.inject({
+            method: 'POST',
+            url: `/conversations/${conversation.id}/snapshots/label`,
+            headers: { authorization: 'Bearer test-jwt-a' },
+            payload: { app_id: APP_ID, snapshot_id: 'snap_1', label: 'Checkpoint before rewrite' },
+          });
+
+          expect(labelR.statusCode).toBe(200);
+          expect(labelR.json()).toMatchObject({ ok: true });
+
+          const row = await pool.query(
+            `SELECT label, auto_generated FROM dashboard_agent_snapshot_labels
+             WHERE conversation_id = $1 AND app_id = $2 AND snapshot_id = 'snap_1'`,
+            [conversation.id, APP_ID],
+          );
+          expect(row.rows).toHaveLength(1);
+          expect(row.rows[0]).toMatchObject({ label: 'Checkpoint before rewrite', auto_generated: false });
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+  });
 });
