@@ -21,9 +21,9 @@ Actions:
 Parameters by action:
   status:    { action: "status" }
   portal:    { action: "portal" }
-  topup:     { action: "topup", amount: <number in USD cents> }
+  topup:     { action: "topup", amount: <whole USD dollars, $5–$500> }
   cap_get:   { action: "cap_get" }
-  cap_raise: { action: "cap_raise", raise_by: <number in USD cents> }
+  cap_raise: { action: "cap_raise", raise_by: <whole USD dollars> }
   plans:     { action: "plans" }
   usage:     { action: "usage", start_date?: "YYYY-MM-DD", end_date?: "YYYY-MM-DD", meter?: "compute" | "storage" | ... }
 
@@ -31,23 +31,23 @@ Examples:
 
   Check current plan and balance:
     Input:  { action: "status" }
-    Output: { plan: "pro", balance_cents: 5000, spending_cap_cents: 20000, usage: { ... } }
+    Output: { plan: "launch", balance_usd: 50, spending_cap_usd: 200, usage: { ... } }
 
   Open billing portal:
     Input:  { action: "portal" }
     Output: { url: "https://billing.stripe.com/session/..." }
 
   Top up $25:
-    Input:  { action: "topup", amount: 2500 }
-    Output: { success: true, new_balance_cents: 7500 }
+    Input:  { action: "topup", amount: 25 }
+    Output: { success: true, new_balance_usd: 75 }
 
   Get current spending cap:
     Input:  { action: "cap_get" }
-    Output: { spending_cap_cents: 20000 }
+    Output: { spending_cap_usd: 200 }
 
   Raise spending cap by $50:
-    Input:  { action: "cap_raise", raise_by: 5000 }
-    Output: { spending_cap_cents: 25000 }
+    Input:  { action: "cap_raise", raise_by: 50 }
+    Output: { spending_cap_usd: 250 }
 
   List available plans:
     Input:  { action: "plans" }
@@ -60,7 +60,7 @@ Examples:
 Common errors:
   - AUTH_INSUFFICIENT_PERMISSIONS: Must be authenticated as the account owner
   - INSUFFICIENT_BALANCE: Account balance too low for top-up operation
-  - INVALID_AMOUNT: amount / raise_by must be a positive integer (cents)`,
+  - INVALID_AMOUNT: amount / raise_by must be a positive whole-dollar integer`,
     {
       action: z
         .enum(['status', 'portal', 'topup', 'cap_get', 'cap_raise', 'plans', 'usage'])
@@ -70,13 +70,13 @@ Common errors:
         .int()
         .positive()
         .optional()
-        .describe('Amount in USD cents (required for "topup")'),
+        .describe('Amount in whole USD dollars, $5–$500 (required for "topup")'),
       raise_by: z
         .number()
         .int()
         .positive()
         .optional()
-        .describe('Amount in USD cents to raise the spending cap by (required for "cap_raise")'),
+        .describe('Amount in whole USD dollars to raise the spending cap by (required for "cap_raise")'),
       start_date: z
         .string()
         .optional()
@@ -133,7 +133,7 @@ Common errors:
         case 'topup': {
           if (amount === undefined) {
             return {
-              content: [{ type: 'text' as const, text: 'Error: "amount" (in USD cents) is required for the "topup" action.' }],
+              content: [{ type: 'text' as const, text: 'Error: "amount" (in whole USD dollars, $5–$500) is required for the "topup" action.' }],
               isError: true,
             };
           }
@@ -163,7 +163,7 @@ Common errors:
         case 'cap_raise': {
           if (raise_by === undefined) {
             return {
-              content: [{ type: 'text' as const, text: 'Error: "raise_by" (in USD cents) is required for the "cap_raise" action.' }],
+              content: [{ type: 'text' as const, text: 'Error: "raise_by" (in whole USD dollars) is required for the "cap_raise" action.' }],
               isError: true,
             };
           }
