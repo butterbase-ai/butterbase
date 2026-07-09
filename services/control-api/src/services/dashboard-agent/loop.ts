@@ -17,7 +17,7 @@
 
 import pg from 'pg';
 import { createHash, randomUUID } from 'crypto';
-import { appendMessage, listMessages, upsertSnapshotLabel, type Message } from './store.js';
+import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust } from './approvals-store.js';
@@ -30,6 +30,7 @@ import { createDeployer } from './deploy.js';
 import { loadTemplate as loadTemplateDefault } from './template-loader.js';
 import { recordUsage as recordUsageDefault, type UsageRow } from './usage-store.js';
 import { deriveSnapshotTitle, createGatewayChat, type SnapshotTitleGateway } from './snapshot-title.js';
+import { generateConversationTitle } from './conversation-title.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -45,7 +46,8 @@ export type LoopEvent =
   | { type: 'file_change'; app_id: string; path: string; kind: 'write' | 'delete'; content?: string; sha256?: string }
   | { type: 'active_app_change'; app_id: string; app_name?: string }
   | { type: 'deployment_progress'; deployment_id: string; status: 'queued' | 'building' | 'live' | 'failed'; url?: string; log_tail?: string; error?: string }
-  | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' };
+  | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' }
+  | { type: 'title_updated'; title: string };
 
 // ---------------------------------------------------------------------------
 // Injectable deps (module-level singletons by default)
@@ -68,6 +70,10 @@ export type LoopDeps = {
   // client bound to the request's JWT and use the real store.upsertSnapshotLabel.
   snapshotTitleGatewayFactory?: (jwt: string) => SnapshotTitleGateway;
   upsertSnapshotLabel?: typeof upsertSnapshotLabel;
+  // Task 2 (Plan 3e): conversation auto-titling. Tests can inject spies for
+  // the store reads/writes; production uses the real store functions.
+  getConversation?: typeof getConversation;
+  updateConversationTitle?: typeof updateConversationTitle;
 };
 
 let _sharedCache: WorkingTreeCache | undefined;
@@ -100,6 +106,8 @@ function getDefaultDeps(): LoopDeps {
       loadTemplate: loadTemplateDefault,
       snapshotTitleGatewayFactory: createGatewayChat,
       upsertSnapshotLabel,
+      getConversation,
+      updateConversationTitle,
     };
   }
   return _defaultDeps;
@@ -363,6 +371,8 @@ export async function* runAgentTurn(
   const { cache, repoSync, recordUsage, loadTemplate } = deps;
   const snapshotTitleGatewayFactory = deps.snapshotTitleGatewayFactory ?? createGatewayChat;
   const upsertSnapshotLabelFn = deps.upsertSnapshotLabel ?? upsertSnapshotLabel;
+  const getConversationFn = deps.getConversation ?? getConversation;
+  const updateConversationTitleFn = deps.updateConversationTitle ?? updateConversationTitle;
 
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
@@ -831,6 +841,33 @@ export async function* runAgentTurn(
       });
     } catch {
       // Telemetry is best-effort in v1.
+    }
+
+    // Task 2 (Plan 3e): auto-title the conversation after its first assistant
+    // turn. Entirely best-effort — never blocks or fails the SSE stream, and
+    // never overwrites a title the user (or a prior turn) already set.
+    if (lastAssistantText) {
+      try {
+        const conversation = await getConversationFn(input.pool, input.conversationId, input.userId);
+        if (conversation && conversation.title === 'New conversation') {
+          const gateway = snapshotTitleGatewayFactory(input.jwt);
+          const title = await generateConversationTitle(input.userMessage, lastAssistantText, gateway);
+          if (title) {
+            const updated = await updateConversationTitleFn(
+              input.pool,
+              input.conversationId,
+              input.userId,
+              title,
+            );
+            if (updated) {
+              yield { type: 'title_updated', title: updated.title };
+            }
+          }
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[dashboard-agent] conversation auto-titling failed: ${message}`);
+      }
     }
   }
 }

@@ -140,6 +140,43 @@ export async function updateConversationModel(
 }
 
 /**
+ * Auto-title a conversation after its first assistant turn (Plan 3e Task 2).
+ *
+ * Guarded server-side (not just by the caller's pre-check) so a race between
+ * two turns can't clobber a user-supplied rename: only writes when the title
+ * is still the default AND no title has been auto-generated yet. Returns the
+ * updated row, or null if the guard didn't match (already titled/renamed) or
+ * the conversation doesn't exist / isn't owned by the caller.
+ */
+export async function updateConversationTitle(
+  pool: pg.Pool,
+  id: string,
+  userId: string,
+  title: string
+): Promise<Conversation | null> {
+  const result = await pool.query(
+    `UPDATE dashboard_agent_conversations
+        SET title = $3, title_generated_at = NOW(), updated_at = NOW()
+      WHERE id = $1 AND user_id = $2
+        AND title = 'New conversation'
+        AND title_generated_at IS NULL
+      RETURNING id, user_id, title, model, created_at, updated_at, last_message_at`,
+    [id, userId, title]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    userId: row.user_id,
+    title: row.title,
+    model: row.model,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
+  };
+}
+
+/**
  * Delete a conversation, scoped to a user (messages cascade delete)
  */
 export async function deleteConversation(

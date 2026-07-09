@@ -20,6 +20,8 @@ vi.mock('../store.js', () => ({
   listMessages: vi.fn(),
   getRecentToolArgs: vi.fn(),
   upsertSnapshotLabel: vi.fn(),
+  getConversation: vi.fn(),
+  updateConversationTitle: vi.fn(),
 }));
 
 vi.mock('../mcp-client.js', () => ({
@@ -99,6 +101,8 @@ const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof sto
 const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
 const mockGetRecentToolArgs = storeModule.getRecentToolArgs as MockedFunction<typeof storeModule.getRecentToolArgs>;
 const mockUpsertSnapshotLabel = storeModule.upsertSnapshotLabel as MockedFunction<typeof storeModule.upsertSnapshotLabel>;
+const mockGetConversation = storeModule.getConversation as MockedFunction<typeof storeModule.getConversation>;
+const mockUpdateConversationTitle = storeModule.updateConversationTitle as MockedFunction<typeof storeModule.updateConversationTitle>;
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
 const mockCreateApproval = approvalsStoreModule.createApproval as MockedFunction<typeof approvalsStoreModule.createApproval>;
 const mockCheckTrust = approvalsStoreModule.checkTrust as MockedFunction<typeof approvalsStoreModule.checkTrust>;
@@ -177,6 +181,10 @@ beforeEach(() => {
   mockListMessages.mockResolvedValue([]);
   mockGetRecentToolArgs.mockResolvedValue([]);
   mockUpsertSnapshotLabel.mockResolvedValue(undefined);
+  // Default: no conversation found → auto-titling is a no-op for tests that
+  // don't care about it. Tests exercising Task 2 override this.
+  mockGetConversation.mockResolvedValue(null);
+  mockUpdateConversationTitle.mockResolvedValue(null);
   // Default: no sensitivity gate involvement for existing tests that never
   // touch a confirm/destructive tool. Tests exercising the gate override this.
   mockCheckTrust.mockResolvedValue(true);
@@ -1146,6 +1154,102 @@ describe('runAgentTurn — snapshot auto-naming (Plan 3d Task 5)', () => {
     expect(consoleWarnSpy).toHaveBeenCalled();
 
     consoleWarnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 3e Task 2: conversation auto-titling
+// ---------------------------------------------------------------------------
+
+describe('runAgentTurn — conversation auto-titling (Plan 3e Task 2)', () => {
+  const stubConversation = {
+    id: 'conv-1',
+    userId: 'user-1',
+    title: 'New conversation',
+    model: 'claude-3-5-sonnet',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    lastMessageAt: null,
+  };
+
+  it('generates and persists a title on the first assistant turn, and emits title_updated', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      gatewayResponse([
+        { choices: [{ delta: { content: 'Sure, scaffolding a todo app now.' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]),
+    );
+
+    mockGetConversation.mockResolvedValueOnce(stubConversation);
+    const gatewayChatSpy = vi.fn().mockResolvedValue('Todo App Setup');
+    const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
+    mockUpdateConversationTitle.mockResolvedValueOnce({ ...stubConversation, title: 'Todo App Setup' });
+
+    const events = await collect(
+      runAgentTurn(
+        { ...baseInput, userMessage: 'Help me build a todo app' },
+        { snapshotTitleGatewayFactory },
+      ),
+    );
+
+    expect(mockGetConversation).toHaveBeenCalledWith(stubPool, 'conv-1', 'user-1');
+    expect(gatewayChatSpy).toHaveBeenCalledTimes(1);
+    const callArg = gatewayChatSpy.mock.calls[0][0] as { prompt: string };
+    expect(callArg.prompt).toContain('Help me build a todo app');
+    expect(callArg.prompt).toContain('Sure, scaffolding a todo app now.');
+
+    expect(mockUpdateConversationTitle).toHaveBeenCalledWith(
+      stubPool,
+      'conv-1',
+      'user-1',
+      'Todo App Setup',
+    );
+
+    const titleEvent = events.find((e) => e.type === 'title_updated');
+    expect(titleEvent).toEqual({ type: 'title_updated', title: 'Todo App Setup' });
+  });
+
+  it('does not touch the title when the conversation already has a non-default title', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      gatewayResponse([
+        { choices: [{ delta: { content: 'Done.' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]),
+    );
+
+    mockGetConversation.mockResolvedValueOnce({ ...stubConversation, title: 'Renamed by user' });
+    const gatewayChatSpy = vi.fn();
+    const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
+
+    const events = await collect(
+      runAgentTurn(baseInput, { snapshotTitleGatewayFactory }),
+    );
+
+    expect(gatewayChatSpy).not.toHaveBeenCalled();
+    expect(mockUpdateConversationTitle).not.toHaveBeenCalled();
+    expect(events.find((e) => e.type === 'title_updated')).toBeUndefined();
+  });
+
+  it('silently skips the title update when the gateway call times out / errors', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      gatewayResponse([
+        { choices: [{ delta: { content: 'Done.' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]),
+    );
+
+    mockGetConversation.mockResolvedValueOnce(stubConversation);
+    const gatewayChatSpy = vi.fn().mockRejectedValue(new Error('timeout'));
+    const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
+
+    const events = await collect(
+      runAgentTurn(baseInput, { snapshotTitleGatewayFactory }),
+    );
+
+    expect(mockUpdateConversationTitle).not.toHaveBeenCalled();
+    expect(events.find((e) => e.type === 'title_updated')).toBeUndefined();
+    // Turn still completes normally.
+    expect(events.find((e) => e.type === 'assistant_message')).toBeDefined();
   });
 });
 
