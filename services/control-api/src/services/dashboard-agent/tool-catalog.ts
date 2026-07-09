@@ -191,6 +191,35 @@ export function getToolCatalog(): ToolSpec[] {
         properties: { app_id: { type: 'string', description: 'The Butterbase app id to deploy.' } },
       },
     },
+    {
+      name: 'deploy_function_from_workspace',
+      description:
+        'Deploy a serverless function from the current workspace. Reads the SINGLE entry file ' +
+        'functions/<function_name>/index.ts (falling back to .js, .mjs) written via write_file, and ' +
+        'deploys it via deploy_function. Only that one entry file is sent — other files under the ' +
+        'function\'s directory persist in the workspace but are not bundled. Use this after writing a ' +
+        'function\'s index file with write_file, when the user asks to deploy/ship a function.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id', 'function_name'],
+        properties: {
+          app_id: { type: 'string', description: 'The Butterbase app id to deploy the function to.' },
+          function_name: { type: 'string', description: 'Function name; must match the functions/<name>/ directory written earlier.' },
+          trigger: {
+            type: 'object',
+            description: 'Optional single trigger. Defaults to {type: "http"}.',
+            properties: {
+              type: { type: 'string', enum: ['http', 'cron', 's3_upload', 'webhook', 'websocket'] },
+              config: {},
+            },
+          },
+          envVars: { type: 'object', description: 'Optional environment variables (encrypted at rest).', additionalProperties: { type: 'string' } },
+          timeoutMs: { type: 'number', description: 'Optional execution timeout in milliseconds (default 30000).' },
+          memoryLimitMb: { type: 'number', description: 'Optional memory limit in MB (default 128).' },
+        },
+      },
+    },
   ];
 }
 
@@ -208,6 +237,16 @@ export function isFileOpTool(name: string): name is 'write_file' | 'read_file' |
  */
 export function isDeployTool(name: string): name is 'deploy_frontend' {
   return name === 'deploy_frontend'
+}
+
+/**
+ * Returns true for the workspace-function-deploy tool name that is dispatched
+ * in-process by the loop (Plan 3c Task 3), not forwarded to mcp-client.
+ * (`deploy_function` itself — the raw MCP tool with an inline `code` arg —
+ * is unaffected and still routes through the default MCP path.)
+ */
+export function isDeployFunctionTool(name: string): name is 'deploy_function_from_workspace' {
+  return name === 'deploy_function_from_workspace'
 }
 
 /**

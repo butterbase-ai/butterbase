@@ -70,10 +70,16 @@ vi.mock('../tool-catalog.js', () => ({
       description: 'deploy',
       parameters: { type: 'object', additionalProperties: true, required: ['app_id'] },
     },
+    {
+      name: 'deploy_function_from_workspace',
+      description: 'deploy function',
+      parameters: { type: 'object', additionalProperties: true, required: ['app_id', 'function_name'] },
+    },
   ]),
   isFileOpTool: (name: string) =>
     name === 'write_file' || name === 'read_file' || name === 'list_files' || name === 'delete_file',
   isDeployTool: (name: string) => name === 'deploy_frontend',
+  isDeployFunctionTool: (name: string) => name === 'deploy_function_from_workspace',
   sensitivityFor: (name: string, args: any) => {
     const action = args && typeof args === 'object' ? (args as Record<string, unknown>).action : null;
     if (name === 'manage_app' && (action === 'delete' || action === 'pause')) return 'destructive';
@@ -713,6 +719,7 @@ describe('runAgentTurn — gateway HTTP error (Fix 2)', () => {
 import { WorkingTreeCache } from '../working-tree.js';
 import { createFileOps } from '../file-ops.js';
 import { createDeployer } from '../deploy.js';
+import { createFunctionDeployer } from '../deploy-function.js';
 
 /** Emit a single-tool-call gateway pass. */
 function toolCallPass(id: string, name: string, argsJson: string) {
@@ -883,6 +890,52 @@ describe('runAgentTurn — Task 7 file-op integration', () => {
     // Deployer was invoked, MCP was NOT hit.
     expect(deploySpy).toHaveBeenCalledWith(expect.objectContaining({ appId: 'app_1' }));
     expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('routes deploy_function_from_workspace to the function deployer and emits function_deployment_progress', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('call-f', 'deploy_function_from_workspace', '{"app_id":"app_1","function_name":"hello"}'))
+      .mockResolvedValueOnce(textPass('shipped'));
+
+    const cache = new WorkingTreeCache();
+    // Pre-seed the entry file so ensureHydrated is a no-op and the deployer has code.
+    cache.write('conv-1', 'app_1', 'functions/hello/index.ts', 'export function handler() {}');
+
+    const deploySpy = vi.fn(async (_input: any) => ({ ok: true as const, url: 'https://x.butterbase.dev/v1/app_1/fn/hello', deploymentId: 'fn_123' }));
+    const functionDeployerFactory = (emit: (evt: LoopEvent) => void) => ({
+      deploy: (async (input: any) => {
+        emit({ type: 'function_deployment_progress', function_name: 'hello', status: 'queued' });
+        emit({ type: 'function_deployment_progress', function_name: 'hello', status: 'uploading' });
+        emit({ type: 'function_deployment_progress', function_name: 'hello', status: 'live', url: 'https://x.butterbase.dev/v1/app_1/fn/hello' });
+        return deploySpy(input);
+      }) as any,
+    });
+
+    const events = await collect(
+      runAgentTurn(baseInput, {
+        cache,
+        repoSync: {
+          pullLatest: vi.fn().mockResolvedValue({ hydrated: true }),
+          flush: vi.fn().mockResolvedValue({ pushed: 0, deleted: 0 }),
+        } as any,
+        recordUsage: vi.fn().mockResolvedValue(undefined),
+        loadTemplate: vi.fn().mockResolvedValue([]),
+        functionDeployerFactory: functionDeployerFactory as any,
+      }),
+    );
+
+    const progressEvents = events.filter((e) => e.type === 'function_deployment_progress') as any[];
+    expect(progressEvents.map((e) => e.status)).toEqual(['queued', 'uploading', 'live']);
+    expect(progressEvents[2].url).toBe('https://x.butterbase.dev/v1/app_1/fn/hello');
+
+    expect(deploySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ appId: 'app_1', functionName: 'hello' }),
+    );
+    // Deployer was invoked, MCP was NOT hit directly by the loop.
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+
+    const toolResult = events.find((e) => e.type === 'tool_result' && (e as any).id === 'call-f') as any;
+    expect(toolResult.result).toMatchObject({ url: 'https://x.butterbase.dev/v1/app_1/fn/hello', deployment_id: 'fn_123' });
   });
 
   it('records usage with correct per-turn counters', async () => {

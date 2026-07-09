@@ -18,7 +18,7 @@
 import pg from 'pg';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust } from './approvals-store.js';
 import { getSystemPrompt } from './prompt.js';
@@ -27,6 +27,7 @@ import { WorkingTreeCache } from './working-tree.js';
 import { createFileOps, type FileOpName } from './file-ops.js';
 import { createRepoSync, type RepoSync } from './repo-sync.js';
 import { createDeployer } from './deploy.js';
+import { createFunctionDeployer } from './deploy-function.js';
 import { loadTemplate as loadTemplateDefault } from './template-loader.js';
 import { recordUsage as recordUsageDefault, type UsageRow } from './usage-store.js';
 import { deriveSnapshotTitle, createGatewayChat, type SnapshotTitleGateway } from './snapshot-title.js';
@@ -46,6 +47,7 @@ export type LoopEvent =
   | { type: 'file_change'; app_id: string; path: string; kind: 'write' | 'delete'; content?: string; sha256?: string }
   | { type: 'active_app_change'; app_id: string; app_name?: string }
   | { type: 'deployment_progress'; deployment_id: string; status: 'queued' | 'building' | 'live' | 'failed'; url?: string; log_tail?: string; error?: string }
+  | { type: 'function_deployment_progress'; function_name: string; status: 'queued' | 'uploading' | 'live' | 'failed'; url?: string; error?: string }
   | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' }
   | { type: 'title_updated'; title: string };
 
@@ -65,6 +67,7 @@ export type LoopDeps = {
   // If omitted, they are built per-turn from the primitives above.
   fileOpsFactory?: (emit: (evt: LoopEvent) => void, ensureHydrated: (i: { convId: string; appId: string; jwt: string }) => Promise<void>) => ReturnType<typeof createFileOps>;
   deployerFactory?: (emit: (evt: LoopEvent) => void) => ReturnType<typeof createDeployer>;
+  functionDeployerFactory?: (emit: (evt: LoopEvent) => void) => ReturnType<typeof createFunctionDeployer>;
   // Task 5 (Plan 3d): snapshot auto-naming. Tests can inject a stub gateway
   // and/or a spy for the store write; production builds a real gateway chat
   // client bound to the request's JWT and use the real store.upsertSnapshotLabel.
@@ -446,6 +449,25 @@ export async function* runAgentTurn(
         onDeploymentProgress: (evt) => emit({ type: 'deployment_progress', ...evt }),
       });
 
+  // createFunctionDeployer's Mcp contract never throws (returns {ok:false,error}
+  // instead) — deps.mcp (the loop's default) throws on failure, so adapt it here.
+  const functionDeployer = deps.functionDeployerFactory
+    ? deps.functionDeployerFactory(emit)
+    : createFunctionDeployer({
+        cache,
+        mcp: {
+          async call(name: string, args: unknown, jwt: string) {
+            try {
+              const result = await deps.mcp.call(name, args, jwt);
+              return { ok: true as const, result };
+            } catch (e) {
+              return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+            }
+          },
+        },
+        onFunctionDeployProgress: (evt) => emit({ type: 'function_deployment_progress', ...evt }),
+      });
+
   const history = await listMessages(input.pool, input.conversationId);
 
   // Task 5 (Plan 3d): turn number for the `Turn <N>` snapshot-title fallback.
@@ -727,6 +749,64 @@ export async function* runAgentTurn(
             ? { result: { deployment_id: r.deployment_id, url: r.url } }
             : { error: r.error };
           if (r.ok) deploymentsCount++;
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error ? { error: payload.error } : (payload.result ?? {}),
+          });
+          continue;
+        }
+
+        // ---- Route: deploy_function_from_workspace tool (in-process) -----
+        if (isDeployFunctionTool(tc.name)) {
+          const args = (tc.args ?? {}) as {
+            app_id?: string;
+            function_name?: string;
+            trigger?: { type: 'http' | 'cron' | 's3_upload' | 'webhook' | 'websocket'; config?: unknown };
+            envVars?: Record<string, string>;
+            timeoutMs?: number;
+            memoryLimitMb?: number;
+          };
+          toolCallsCount++;
+          if (!args.app_id || !args.function_name) {
+            const err = 'app_id and function_name are required';
+            toolCallResults.push({ id: tc.id, error: err });
+            yield { type: 'tool_result', id: tc.id, error: err };
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: { error: err },
+            });
+            continue;
+          }
+          try {
+            await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
+          } catch {
+            // Fall through — deployer will report "entry file not found" if truly empty.
+          }
+          touchedApps.add(args.app_id);
+          const r = await functionDeployer.deploy({
+            convId: input.conversationId,
+            appId: args.app_id,
+            jwt: input.jwt,
+            functionName: args.function_name,
+            trigger: args.trigger,
+            envVars: args.envVars,
+            timeoutMs: args.timeoutMs,
+            memoryLimitMb: args.memoryLimitMb,
+          });
+          for (const evt of drainPending()) yield evt;
+          const payload: { result?: unknown; error?: string } = r.ok
+            ? { result: { url: r.url, deployment_id: r.deploymentId } }
+            : { error: r.error };
           toolCallResults.push({ id: tc.id, ...payload });
           yield { type: 'tool_result', id: tc.id, ...payload };
           await appendMessage(input.pool, input.conversationId, {
