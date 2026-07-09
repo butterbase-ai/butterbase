@@ -26,6 +26,11 @@ vi.mock('../mcp-client.js', () => ({
   callMcpTool: vi.fn(),
 }));
 
+vi.mock('../approvals-store.js', () => ({
+  createApproval: vi.fn(),
+  checkTrust: vi.fn(),
+}));
+
 vi.mock('../tool-catalog.js', () => ({
   getToolCatalog: vi.fn().mockReturnValue([
     {
@@ -67,6 +72,14 @@ vi.mock('../tool-catalog.js', () => ({
   isFileOpTool: (name: string) =>
     name === 'write_file' || name === 'read_file' || name === 'list_files' || name === 'delete_file',
   isDeployTool: (name: string) => name === 'deploy_frontend',
+  sensitivityFor: (name: string, args: any) => {
+    const action = args && typeof args === 'object' ? (args as Record<string, unknown>).action : null;
+    if (name === 'manage_app' && (action === 'delete' || action === 'pause')) return 'destructive';
+    if (name === 'manage_repo' && action === 'wipe') return 'destructive';
+    if (name === 'manage_billing') return 'destructive';
+    if (name === 'manage_migrations' && (action === 'abort' || action === 'reverse')) return 'destructive';
+    return 'safe';
+  },
 }));
 
 // ---------------------------------------------------------------------------
@@ -75,6 +88,7 @@ vi.mock('../tool-catalog.js', () => ({
 
 import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
+import * as approvalsStoreModule from '../approvals-store.js';
 import { runAgentTurn, type LoopEvent } from '../loop.js';
 
 // ---------------------------------------------------------------------------
@@ -86,6 +100,8 @@ const mockListMessages = storeModule.listMessages as MockedFunction<typeof store
 const mockGetRecentToolArgs = storeModule.getRecentToolArgs as MockedFunction<typeof storeModule.getRecentToolArgs>;
 const mockUpsertSnapshotLabel = storeModule.upsertSnapshotLabel as MockedFunction<typeof storeModule.upsertSnapshotLabel>;
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
+const mockCreateApproval = approvalsStoreModule.createApproval as MockedFunction<typeof approvalsStoreModule.createApproval>;
+const mockCheckTrust = approvalsStoreModule.checkTrust as MockedFunction<typeof approvalsStoreModule.checkTrust>;
 
 /** Collect all LoopEvents emitted by the generator. */
 async function collect(gen: AsyncGenerator<LoopEvent>): Promise<LoopEvent[]> {
@@ -161,6 +177,9 @@ beforeEach(() => {
   mockListMessages.mockResolvedValue([]);
   mockGetRecentToolArgs.mockResolvedValue([]);
   mockUpsertSnapshotLabel.mockResolvedValue(undefined);
+  // Default: no sensitivity gate involvement for existing tests that never
+  // touch a confirm/destructive tool. Tests exercising the gate override this.
+  mockCheckTrust.mockResolvedValue(true);
 });
 
 describe('runAgentTurn — no tool calls', () => {
@@ -1127,5 +1146,119 @@ describe('runAgentTurn — snapshot auto-naming (Plan 3d Task 5)', () => {
     expect(consoleWarnSpy).toHaveBeenCalled();
 
     consoleWarnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 3b Task 2: sensitivity gate
+// ---------------------------------------------------------------------------
+
+/** Single-tool-call SSE pass for a given tool name + JSON-stringified args. */
+function toolCallPassFor(callId: string, name: string, argsJson: string) {
+  return gatewayResponse([
+    {
+      choices: [
+        { delta: { tool_calls: [{ index: 0, id: callId, function: { name, arguments: '' } }] }, finish_reason: null },
+      ],
+    },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: argsJson } }] }, finish_reason: null }] },
+    { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+  ]);
+}
+
+describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
+  it('gates an untrusted destructive call: creates an approval, emits approval_required, never dispatches MCP, and terminates the turn without done', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      toolCallPassFor('call-del', 'manage_app', '{"action":"delete","id":"app_1"}'),
+    );
+
+    mockCheckTrust.mockResolvedValueOnce(false);
+    mockCreateApproval.mockResolvedValueOnce({
+      id: 'approval-1',
+      conversationId: 'conv-1',
+      turnMessageId: 'msg-approval-1',
+      toolName: 'manage_app',
+      toolArgs: { action: 'delete', id: 'app_1' },
+      sensitivity: 'destructive',
+      status: 'pending',
+      trustScope: null,
+      denyReason: null,
+      createdAt: new Date().toISOString(),
+      resolvedAt: null,
+    });
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(mockCheckTrust).toHaveBeenCalledWith(stubPool, 'conv-1', 'manage_app');
+    expect(mockCreateApproval).toHaveBeenCalledWith(
+      stubPool,
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        toolName: 'manage_app',
+        toolArgs: { action: 'delete', id: 'app_1' },
+        sensitivity: 'destructive',
+      }),
+    );
+
+    expect(events).toEqual([
+      {
+        type: 'approval_required',
+        approval_id: 'approval-1',
+        tool_name: 'manage_app',
+        args: { action: 'delete', id: 'app_1' },
+        sensitivity: 'destructive',
+      },
+    ]);
+
+    // Never reaches MCP dispatch.
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    // Turn is paused, not completed.
+    expect(events.find((e) => e.type === 'done')).toBeUndefined();
+
+    // The paused assistant tool-call row is persisted with the pending approval id.
+    const pausedRow = mockAppendMessage.mock.calls.find(
+      ([, , msg]) => (msg as { toolName?: string }).toolName === 'manage_app',
+    );
+    expect(pausedRow).toBeDefined();
+    expect((pausedRow![2] as { pendingApprovalId?: string }).pendingApprovalId).toBe('approval-1');
+  });
+
+  it('leaves a safe tool call unaffected (no trust check, no approval, dispatches MCP normally)', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPassFor('call-list', 'manage_app', '{"action":"list"}'))
+      .mockResolvedValueOnce(gatewayResponse([
+        { choices: [{ delta: { content: 'You have no apps.' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]));
+
+    mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { apps: [] } });
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(mockCheckTrust).not.toHaveBeenCalled();
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'list' }, 'test-jwt');
+    expect(events.find((e) => e.type === 'approval_required')).toBeUndefined();
+    expect(events.find((e) => e.type === 'done')).toBeDefined();
+  });
+
+  it('bypasses the gate for a trusted destructive call (checkTrust true): dispatches MCP normally, no approval row', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPassFor('call-del2', 'manage_app', '{"action":"delete","id":"app_1"}'))
+      .mockResolvedValueOnce(gatewayResponse([
+        { choices: [{ delta: { content: 'Deleted.' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]));
+
+    mockCheckTrust.mockResolvedValueOnce(true);
+    mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { deleted: true } });
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(mockCheckTrust).toHaveBeenCalledWith(stubPool, 'conv-1', 'manage_app');
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'delete', id: 'app_1' }, 'test-jwt');
+    expect(events.find((e) => e.type === 'approval_required')).toBeUndefined();
+    expect(events.find((e) => e.type === 'done')).toBeDefined();
   });
 });

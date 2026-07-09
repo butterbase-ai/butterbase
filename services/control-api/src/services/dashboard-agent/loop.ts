@@ -16,10 +16,11 @@
  */
 
 import pg from 'pg';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
+import { createApproval, checkTrust } from './approvals-store.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -43,7 +44,8 @@ export type LoopEvent =
   | { type: 'error'; message: string }
   | { type: 'file_change'; app_id: string; path: string; kind: 'write' | 'delete'; content?: string; sha256?: string }
   | { type: 'active_app_change'; app_id: string; app_name?: string }
-  | { type: 'deployment_progress'; deployment_id: string; status: 'queued' | 'building' | 'live' | 'failed'; url?: string; log_tail?: string; error?: string };
+  | { type: 'deployment_progress'; deployment_id: string; status: 'queued' | 'building' | 'live' | 'failed'; url?: string; log_tail?: string; error?: string }
+  | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' };
 
 // ---------------------------------------------------------------------------
 // Injectable deps (module-level singletons by default)
@@ -542,6 +544,51 @@ export async function* runAgentTurn(
       const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
+
+        // Sensitivity gate (Plan 3b Task 2): destructive/confirm-tier calls
+        // pause the turn for explicit user approval, unless the conversation
+        // has already granted conversation-wide trust for this exact tool.
+        // Gated BEFORE the assistant tool-call row is persisted (below) and
+        // BEFORE the retry-budget counter is touched — an approval pause is
+        // not a tool "attempt".
+        const sensitivity = sensitivityFor(tc.name, tc.args);
+        if (sensitivity !== 'safe') {
+          const trusted = await checkTrust(input.pool, input.conversationId, tc.name);
+          if (!trusted) {
+            const messageId = randomUUID();
+            const approval = await createApproval(input.pool, {
+              conversationId: input.conversationId,
+              turnMessageId: messageId,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              sensitivity,
+            });
+            await appendMessage(
+              input.pool,
+              input.conversationId,
+              {
+                role: 'assistant',
+                content: i === 0 ? assistantText : '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: null,
+                modelUsed: input.model,
+                pendingApprovalId: approval.id,
+              },
+              messageId,
+            );
+            yield {
+              type: 'approval_required',
+              approval_id: approval.id,
+              tool_name: tc.name,
+              args: tc.args,
+              sensitivity,
+            };
+            terminated = true;
+            break outer;
+          }
+        }
 
         await appendMessage(input.pool, input.conversationId, {
           role: 'assistant',

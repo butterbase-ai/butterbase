@@ -20,6 +20,7 @@ export type Message = {
   toolArgs: unknown | null;
   toolResult: unknown | null;
   modelUsed: string | null;
+  pendingApprovalId: string | null;
   createdAt: Date;
 };
 
@@ -159,7 +160,13 @@ export async function deleteConversation(
 export async function appendMessage(
   pool: pg.Pool,
   conversationId: string,
-  msg: Omit<Message, 'id' | 'createdAt' | 'conversationId' | 'modelUsed'> & { modelUsed?: string | null }
+  msg: Omit<Message, 'id' | 'createdAt' | 'conversationId' | 'modelUsed' | 'pendingApprovalId'> & {
+    modelUsed?: string | null;
+    pendingApprovalId?: string | null;
+  },
+  /** Pre-generated id (Plan 3b Task 2): used when the loop needs to know the
+   *  row's id before insert, e.g. to reference it from an approval row. */
+  id?: string
 ): Promise<Message> {
   const client = await pool.connect();
   try {
@@ -167,20 +174,39 @@ export async function appendMessage(
 
     // Insert the message
     const msgResult = await client.query(
-      `INSERT INTO dashboard_agent_messages
-       (conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, created_at`,
-      [
-        conversationId,
-        msg.role,
-        msg.content,
-        msg.toolCallId,
-        msg.toolName,
-        msg.toolArgs ? JSON.stringify(msg.toolArgs) : null,
-        msg.toolResult ? JSON.stringify(msg.toolResult) : null,
-        msg.modelUsed ?? null,
-      ]
+      id
+        ? `INSERT INTO dashboard_agent_messages
+       (id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at`
+        : `INSERT INTO dashboard_agent_messages
+       (conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at`,
+      id
+        ? [
+            id,
+            conversationId,
+            msg.role,
+            msg.content,
+            msg.toolCallId,
+            msg.toolName,
+            msg.toolArgs ? JSON.stringify(msg.toolArgs) : null,
+            msg.toolResult ? JSON.stringify(msg.toolResult) : null,
+            msg.modelUsed ?? null,
+            msg.pendingApprovalId ?? null,
+          ]
+        : [
+            conversationId,
+            msg.role,
+            msg.content,
+            msg.toolCallId,
+            msg.toolName,
+            msg.toolArgs ? JSON.stringify(msg.toolArgs) : null,
+            msg.toolResult ? JSON.stringify(msg.toolResult) : null,
+            msg.modelUsed ?? null,
+            msg.pendingApprovalId ?? null,
+          ]
     );
 
     const msgRow = msgResult.rows[0];
@@ -205,6 +231,7 @@ export async function appendMessage(
       toolArgs: msgRow.tool_args ?? null,
       toolResult: msgRow.tool_result ?? null,
       modelUsed: msgRow.model_used ?? null,
+      pendingApprovalId: msgRow.pending_approval_id ?? null,
       createdAt: new Date(msgRow.created_at),
     };
   } catch (err) {
@@ -304,7 +331,7 @@ export async function listMessages(
   conversationId: string
 ): Promise<Message[]> {
   const result = await pool.query(
-    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, created_at
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
      FROM dashboard_agent_messages
      WHERE conversation_id = $1
      ORDER BY created_at ASC`,
@@ -321,6 +348,7 @@ export async function listMessages(
     toolArgs: row.tool_args ?? null,
     toolResult: row.tool_result ?? null,
     modelUsed: row.model_used ?? null,
+    pendingApprovalId: row.pending_approval_id ?? null,
     createdAt: new Date(row.created_at),
   }));
 }

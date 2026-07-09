@@ -26,3 +26,6 @@ CREATE TABLE IF NOT EXISTS dashboard_agent_approvals (
 );
 CREATE INDEX IF NOT EXISTS dashboard_agent_approvals_conv_status_idx
   ON dashboard_agent_approvals (conversation_id, status);
+
+ALTER TABLE dashboard_agent_messages
+  ADD COLUMN IF NOT EXISTS pending_approval_id UUID;

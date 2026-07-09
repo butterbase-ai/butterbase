@@ -13,6 +13,10 @@ export type ToolSpec = {
   name: string;
   description: string;
   parameters: object; // JSON schema
+  // Base sensitivity hint (Plan 3b). Optional; defaults to 'safe'. The real
+  // gate logic is `sensitivityFor(name, args)` below, since sensitivity for
+  // several tools depends on the action/args, not just the tool name.
+  sensitivity?: 'safe' | 'confirm' | 'destructive';
 };
 
 // Shared "flat, permissive" params shape: LLM passes `action` (when the tool
@@ -40,6 +44,7 @@ export function getToolCatalog(): ToolSpec[] {
       description:
         'Manage EXISTING app lifecycle. Actions: "list", "delete", "pause", "get_config", "set_visibility", "update_access_mode", "secure", "update_cors", "preview_clone_env_vars", "clone", "get_clone_job", "find_templates", "set_clone_webhook", "link_substrate", "unlink_substrate", "set_substrate_autopropagate", "move", "move_status", "teardown_source_replica", "get_env", "update_env". Call action="list" first in a new conversation.',
       parameters: flatActionParams(),
+      sensitivity: 'confirm',
     },
     {
       name: 'init_app',
@@ -78,7 +83,7 @@ export function getToolCatalog(): ToolSpec[] {
       parameters: flatActionParams(),
     },
     { name: 'manage_rls', description: 'Configure Row-Level Security policies. Actions include "enable", "create_user_isolation", "create_policy". Requires app_id.', parameters: flatActionParams() },
-    { name: 'manage_migrations', description: 'Manage schema migrations for an app: status, apply, abort, reverse, teardown source replicas.', parameters: flatActionParams() },
+    { name: 'manage_migrations', description: 'Manage schema migrations for an app: status, apply, abort, reverse, teardown source replicas.', parameters: flatActionParams(), sensitivity: 'confirm' },
 
     // ---- Auth ----
     { name: 'manage_auth_config', description: 'Configure end-user auth for an app: JWT lifetimes, OAuth providers, custom auth hooks. Requires app_id.', parameters: flatActionParams() },
@@ -112,8 +117,8 @@ export function getToolCatalog(): ToolSpec[] {
     // ---- Integrations / people / repo / billing / audits ----
     { name: 'manage_integrations', description: 'Manage third-party SaaS integrations (Composio-backed): email, SMS, calendar, CRM, docs, project management.', parameters: flatActionParams() },
     { name: 'manage_people', description: 'Manage the app\'s "people" (contacts) list with provider identifiers and slots.', parameters: flatActionParams() },
-    { name: 'manage_repo', description: 'Link and manage the app\'s source repository.', parameters: flatActionParams() },
-    { name: 'manage_billing', description: 'Read the org\'s billing state. Use sparingly; write operations are gated.', parameters: flatActionParams() },
+    { name: 'manage_repo', description: 'Link and manage the app\'s source repository.', parameters: flatActionParams(), sensitivity: 'confirm' },
+    { name: 'manage_billing', description: 'Read the org\'s billing state. Use sparingly; write operations are gated.', parameters: flatActionParams(), sensitivity: 'destructive' },
     { name: 'query_audit_logs', description: 'Query audit logs for an app or org. Read-only.', parameters: flatActionParams() },
 
     // ---- Docs / meta ----
@@ -203,4 +208,28 @@ export function isFileOpTool(name: string): name is 'write_file' | 'read_file' |
  */
 export function isDeployTool(name: string): name is 'deploy_frontend' {
   return name === 'deploy_frontend'
+}
+
+/**
+ * Compute the effective sensitivity of a tool call from its NAME + ARGS
+ * (Plan 3b Task 2). Several tools are only destructive for specific actions
+ * (e.g. manage_app.delete vs manage_app.list), so this is the real gate
+ * logic — the `sensitivity` field on each ToolSpec is just a coarse hint.
+ */
+export function sensitivityFor(name: string, args: any): 'safe' | 'confirm' | 'destructive' {
+  const a = (args ?? {}) as Record<string, unknown>;
+  const action = typeof a.action === 'string' ? a.action : null;
+  if (name === 'manage_app' && (action === 'delete' || action === 'pause')) return 'destructive';
+  if (name === 'manage_repo' && action === 'wipe') return 'destructive';
+  if (
+    name === 'manage_schema' &&
+    action === 'apply' &&
+    typeof a.schema === 'string' &&
+    /DROP\s+(TABLE|COLUMN)/i.test(a.schema)
+  ) {
+    return 'destructive';
+  }
+  if (name === 'manage_billing') return 'destructive';
+  if (name === 'manage_migrations' && (action === 'abort' || action === 'reverse')) return 'destructive';
+  return 'safe';
 }
