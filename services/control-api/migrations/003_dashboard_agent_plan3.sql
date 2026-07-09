@@ -29,3 +29,14 @@ CREATE INDEX IF NOT EXISTS dashboard_agent_approvals_conv_status_idx
 
 ALTER TABLE dashboard_agent_messages
   ADD COLUMN IF NOT EXISTS pending_approval_id UUID;
+
+ALTER TABLE dashboard_agent_conversations
+  ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS title_generated_at TIMESTAMPTZ;
+
+ALTER TABLE dashboard_agent_messages
+  ADD COLUMN IF NOT EXISTS rating SMALLINT,
+  ADD COLUMN IF NOT EXISTS rating_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS dashboard_agent_conversations_pinned_idx
+  ON dashboard_agent_conversations (user_id, pinned_at DESC NULLS LAST, last_message_at DESC NULLS LAST);
