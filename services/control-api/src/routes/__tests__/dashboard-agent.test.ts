@@ -28,6 +28,7 @@ vi.mock('../../services/dashboard-agent/loop.js', () => ({
 
 vi.mock('../../services/dashboard-agent/usage-store.js', () => ({
   getConversationUsageTotal: vi.fn(),
+  listUsage: vi.fn(),
 }));
 
 // ── Imports (after mocks) ────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ import {
   listMessages,
 } from '../../services/dashboard-agent/store.js';
 import { runAgentTurn } from '../../services/dashboard-agent/loop.js';
-import { getConversationUsageTotal } from '../../services/dashboard-agent/usage-store.js';
+import { getConversationUsageTotal, listUsage } from '../../services/dashboard-agent/usage-store.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -416,6 +417,65 @@ describe('dashboard-agent routes', () => {
       expect(body.prompt_tokens).toBe(0);
       expect(body.completion_tokens).toBe(0);
       expect(body.total_cost_usd).toBe(0);
+    });
+  });
+
+  // ── Case 12: GET /usage ──────────────────────────────────────────────────────
+  // (Plan 3 I-3: retrieve dashboard agent usage records)
+
+  describe('Case 12: GET /usage', () => {
+    beforeEach(async () => {
+      app = await buildTestApp();
+    });
+
+    it('returns 401 when unauthenticated', async () => {
+      app = await buildTestApp(null);
+      const r = await app.inject({
+        method: 'GET',
+        url: '/usage',
+      });
+
+      expect(r.statusCode).toBe(401);
+    });
+
+    it('returns 403 when requesting another user\'s usage', async () => {
+      app = await buildTestApp(USER_A);
+      const r = await app.inject({
+        method: 'GET',
+        url: '/usage?user_id=' + USER_B,
+      });
+
+      expect(r.statusCode).toBe(403);
+      expect(r.json()).toMatchObject({ error: 'forbidden' });
+    });
+
+    it('returns 200 with usage rows for authenticated user', async () => {
+      const usageRows = [
+        {
+          userId: USER_A,
+          conversationId: '11111111-1111-1111-1111-111111111111',
+          model: 'claude-sonnet-4-5',
+          promptTokens: 100,
+          completionTokens: 200,
+          toolCallsCount: 1,
+          fileWritesCount: 0,
+          deploymentsCount: 0,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ];
+      vi.mocked(listUsage).mockResolvedValueOnce(usageRows);
+
+      const r = await app.inject({
+        method: 'GET',
+        url: '/usage',
+      });
+
+      expect(r.statusCode).toBe(200);
+      const body = r.json();
+      expect(body.rows).toHaveLength(1);
+      expect(body.rows[0].userId).toBe(USER_A);
+      expect(body.rows[0].promptTokens).toBe(100);
+      expect(listUsage).toHaveBeenCalledWith(expect.anything(), { userId: USER_A });
     });
   });
 });

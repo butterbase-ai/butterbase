@@ -791,8 +791,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     });
   });
 
-  // ── GET /v1/dashboard-agent/usage ────────────────────────────────────────
-  app.get('/v1/dashboard-agent/usage', async (request, reply) => {
+  // ── GET /usage ────────────────────────────────────────
+  app.get('/usage', async (request, reply) => {
     if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
 
     const userId = requireUserId(request);
@@ -810,13 +810,13 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     return reply.send({ rows });
   });
 
-  // ── POST /v1/dashboard-agent/approvals/:id/resolve ───────────────────────
+  // ── POST /approvals/:id/resolve ───────────────────────
   //
   // Approve or deny a gated tool call (Plan 3b Task 2's approval_required
   // pause), then stream the resumed turn's SSE events. See resume.ts for the
   // execute-then-persist steps that make the resumed history valid before
   // the agent loop is re-entered.
-  app.post('/v1/dashboard-agent/approvals/:id/resolve', async (request, reply) => {
+  app.post('/approvals/:id/resolve', async (request, reply) => {
     if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
 
     const userId = requireUserId(request);
