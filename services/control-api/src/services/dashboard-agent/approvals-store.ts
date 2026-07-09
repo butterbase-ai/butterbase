@@ -122,6 +122,11 @@ export async function listPendingByConv(
 /**
  * Resolve an approval (approve, deny, or mark as expired). Updates status,
  * trust_scope, deny_reason, and resolved_at.
+ *
+ * The UPDATE is conditioned on `status = 'pending'` so that two concurrent
+ * resolve attempts can't both "win" (TOCTOU race) — only one call will
+ * affect a row and get a truthy return. Callers MUST check the return value
+ * rather than relying solely on a prior read-side status check.
  */
 export async function resolveApproval(
   pool: pg.Pool,
@@ -131,13 +136,15 @@ export async function resolveApproval(
     trustScope?: 'conversation';
     denyReason?: string;
   }
-): Promise<void> {
-  await pool.query(
+): Promise<boolean> {
+  const result = await pool.query(
     `UPDATE dashboard_agent_approvals
      SET status = $2, trust_scope = $3, deny_reason = $4, resolved_at = NOW()
-     WHERE id = $1`,
+     WHERE id = $1 AND status = 'pending'
+     RETURNING id`,
     [id, input.status, input.trustScope ?? null, input.denyReason ?? null]
   );
+  return (result.rowCount ?? 0) > 0;
 }
 
 /**

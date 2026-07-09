@@ -33,7 +33,7 @@ export type ResolutionInput =
 
 export type ResolveOutcome =
   | { ok: true; approval: Approval }
-  | { ok: false; code: 404 | 409 | 400; error: string };
+  | { ok: false; code: 404 | 409 | 400 | 502; error: string };
 
 /**
  * Ownership + status checks, execute-or-synthesize the tool result, and
@@ -58,7 +58,11 @@ export async function resolveApprovalAndPersistResult(
     return { ok: false, code: 404, error: 'approval not found' };
   }
 
-  // 2. Status check — only pending approvals can be resolved.
+  // 2. Status check — fast-path 404/409 without touching MCP or the DB
+  // write path. This is NOT the source of truth for concurrency safety —
+  // resolveApproval's conditional UPDATE (WHERE status = 'pending') is the
+  // real guard against a double-resolve race. Two concurrent requests can
+  // both pass this read, but only one will win the UPDATE below.
   if (approval.status !== 'pending') {
     return { ok: false, code: 409, error: `approval already ${approval.status}` };
   }
@@ -69,24 +73,44 @@ export async function resolveApprovalAndPersistResult(
     return { ok: false, code: 400, error: 'no paused tool call found for this approval' };
   }
 
-  // 4. Resolve the approval row + execute/synthesize the tool result.
+  // 4. Execute/synthesize the tool result, THEN resolve the approval row.
+  //
+  // Ordering matters for the approve path: we execute the gated MCP tool
+  // BEFORE flipping the approval to 'approved'. If MCP dispatch fails, the
+  // approval is left 'pending' (never resolved) so a retry can re-attempt
+  // the resolve — we haven't committed to a result we can't stand behind,
+  // and no orphaned `role: 'tool'` row gets written.
+  //
+  // The final `resolveApproval` call (conditioned on status='pending') is
+  // also what atomically defeats a concurrent double-resolve: whichever
+  // request's UPDATE actually affects a row is the one that proceeds to
+  // persist the tool-result row and continue the turn.
   let toolResult: unknown;
   if (resolution.status === 'approved') {
-    await resolveApproval(pool, approvalId, {
+    const call = await callMcpTool(approval.toolName, approval.toolArgs, jwt);
+    if (!call.ok) {
+      return { ok: false, code: 502, error: `Tool execution failed: ${call.error}` };
+    }
+    toolResult = call.result;
+
+    const resolved = await resolveApproval(pool, approvalId, {
       status: 'approved',
       trustScope: resolution.trustScope,
     });
-
-    const call = await callMcpTool(approval.toolName, approval.toolArgs, jwt);
-    toolResult = call.ok ? call.result : { error: call.error };
+    if (!resolved) {
+      return { ok: false, code: 409, error: `approval already resolved` };
+    }
   } else {
-    await resolveApproval(pool, approvalId, {
+    const message = `User denied.${resolution.reason ? ` Reason: ${resolution.reason}` : ''}`;
+    toolResult = { ok: false, error: message };
+
+    const resolved = await resolveApproval(pool, approvalId, {
       status: 'denied',
       denyReason: resolution.reason,
     });
-
-    const message = `User denied.${resolution.reason ? ` Reason: ${resolution.reason}` : ''}`;
-    toolResult = { ok: false, error: message };
+    if (!resolved) {
+      return { ok: false, code: 409, error: `approval already resolved` };
+    }
   }
 
   // 5. Persist the tool-result row that completes the assistant/tool pair.

@@ -1081,5 +1081,135 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
       },
       30_000,
     );
+
+    it(
+      'approve path MCP failure returns 502, persists no tool row, and leaves the approval pending',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-g-mcp-failure', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const { approval, toolCallId } = await seedPendingApproval(conversation.id);
+
+          // MCP dispatch fails outright (callMcpTool never throws — it
+          // resolves to {ok:false, error}).
+          vi.mocked(callMcpTool).mockResolvedValueOnce({ ok: false, error: 'mcp down' });
+
+          const resolveR = await app.inject({
+            method: 'POST',
+            url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+            headers: { authorization: 'Bearer test-jwt-a' },
+            payload: { status: 'approved' },
+          });
+
+          expect(resolveR.statusCode).toBe(502);
+          expect(resolveR.headers['content-type']).not.toContain('text/event-stream');
+          expect(resolveR.json()).toMatchObject({ error: expect.stringContaining('mcp down') });
+
+          expect(callMcpTool).toHaveBeenCalledTimes(1);
+
+          // Approval was never flipped to 'approved' — tool exec happens
+          // before resolveApproval, so a failed exec leaves it pending and
+          // retryable.
+          const approvalRow = await pool.query(
+            `SELECT status FROM dashboard_agent_approvals WHERE id = $1`,
+            [approval.id],
+          );
+          expect(approvalRow.rows[0].status).toBe('pending');
+
+          // No tool-result row was persisted.
+          const toolRow = await pool.query(
+            `SELECT id FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2`,
+            [conversation.id, toolCallId],
+          );
+          expect(toolRow.rows).toHaveLength(0);
+
+          // Paused assistant row's pending_approval_id is still set (never cleared).
+          const assistantRow = await pool.query(
+            `SELECT pending_approval_id FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND tool_call_id = $2 AND role = 'assistant'`,
+            [conversation.id, toolCallId],
+          );
+          expect(assistantRow.rows[0].pending_approval_id).toBe(approval.id);
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
+
+    it(
+      'concurrent double-resolve: exactly one request succeeds, the other gets 409, only one tool row exists',
+      async () => {
+        const app = await buildApp(USER_A, pool);
+
+        try {
+          const convR = await app.inject({
+            method: 'POST',
+            url: '/conversations',
+            payload: { title: 'e2e-case-g-concurrent', model: 'gpt-4o' },
+          });
+          expect(convR.statusCode).toBe(201);
+          const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+          const { approval, toolCallId } = await seedPendingApproval(conversation.id);
+
+          // Both concurrent resolves take the approve path — mock callMcpTool
+          // to succeed for whichever request actually reaches it (the loser
+          // of the resolveApproval race should never even call it if MCP
+          // exec happens first... but tool-exec-first means BOTH requests
+          // may call callMcpTool before the DB race is decided. Mock enough
+          // responses for both.)
+          vi.mocked(callMcpTool).mockResolvedValue({ ok: true, result: { balance_cents: 4200 } });
+          mockResumedTurnGateway();
+          mockResumedTurnGateway();
+
+          const [first, second] = await Promise.all([
+            app.inject({
+              method: 'POST',
+              url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+              headers: { authorization: 'Bearer test-jwt-a' },
+              payload: { status: 'approved' },
+            }),
+            app.inject({
+              method: 'POST',
+              url: `/v1/dashboard-agent/approvals/${approval.id}/resolve`,
+              headers: { authorization: 'Bearer test-jwt-a' },
+              payload: { status: 'approved' },
+            }),
+          ]);
+
+          const codes = [first.statusCode, second.statusCode].sort();
+          expect(codes).toEqual([200, 409]);
+
+          const approvalRow = await pool.query(
+            `SELECT status FROM dashboard_agent_approvals WHERE id = $1`,
+            [approval.id],
+          );
+          expect(approvalRow.rows[0].status).toBe('approved');
+
+          // Only one tool-result row exists despite both requests potentially
+          // calling callMcpTool — the conditional UPDATE ensures only the
+          // winner reaches the persist step.
+          const toolRows = await pool.query(
+            `SELECT id FROM dashboard_agent_messages
+             WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2`,
+            [conversation.id, toolCallId],
+          );
+          expect(toolRows.rows).toHaveLength(1);
+        } finally {
+          await app.close();
+        }
+      },
+      30_000,
+    );
   });
 });
