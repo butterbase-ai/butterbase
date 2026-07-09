@@ -53,3 +53,20 @@ export async function listUsage(
     createdAt: r.created_at,
   }))
 }
+
+export async function getConversationUsageTotal(
+  pool: pg.Pool,
+  conversationId: string,
+): Promise<{ promptTokens: number; completionTokens: number }> {
+  const { rows } = await pool.query(
+    `SELECT SUM(prompt_tokens)::int AS prompt_tokens, SUM(completion_tokens)::int AS completion_tokens
+     FROM dashboard_agent_usage
+     WHERE conversation_id = $1`,
+    [conversationId],
+  )
+  const row = rows[0]
+  return {
+    promptTokens: row.prompt_tokens ?? 0,
+    completionTokens: row.completion_tokens ?? 0,
+  }
+}

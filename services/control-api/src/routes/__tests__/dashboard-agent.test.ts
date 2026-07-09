@@ -26,6 +26,10 @@ vi.mock('../../services/dashboard-agent/loop.js', () => ({
   runAgentTurn: vi.fn(),
 }));
 
+vi.mock('../../services/dashboard-agent/usage-store.js', () => ({
+  getConversationUsageTotal: vi.fn(),
+}));
+
 // ── Imports (after mocks) ────────────────────────────────────────────────────
 
 import { dashboardAgentRoutes } from '../dashboard-agent.js';
@@ -37,6 +41,7 @@ import {
   listMessages,
 } from '../../services/dashboard-agent/store.js';
 import { runAgentTurn } from '../../services/dashboard-agent/loop.js';
+import { getConversationUsageTotal } from '../../services/dashboard-agent/usage-store.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -350,6 +355,67 @@ describe('dashboard-agent routes', () => {
 
       // runAgentTurn must NOT have been called
       expect(runAgentTurn).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Case 11: GET /conversations/:id/usage-total ──────────────────────────
+  // (Plan 3e Task 16: retrieve usage cost label data)
+
+  describe('Case 11: GET /conversations/:id/usage-total', () => {
+    beforeEach(async () => {
+      app = await buildTestApp();
+    });
+
+    it("cross-tenant 404 – user B cannot access user A's conversation", async () => {
+      app = await buildTestApp(USER_A);
+      vi.mocked(getConversation).mockResolvedValueOnce(null);
+
+      const r = await app.inject({
+        method: 'GET',
+        url: '/conversations/some-id/usage-total',
+      });
+
+      expect(r.statusCode).toBe(404);
+      expect(r.json()).toMatchObject({ error: 'conversation not found' });
+    });
+
+    it('happy path – returns summed tokens and calculated cost', async () => {
+      vi.mocked(getConversation).mockResolvedValueOnce(SAMPLE_CONVERSATION);
+      vi.mocked(getConversationUsageTotal).mockResolvedValueOnce({
+        promptTokens: 1000,
+        completionTokens: 2000,
+      });
+
+      const r = await app.inject({
+        method: 'GET',
+        url: '/conversations/11111111-1111-1111-1111-111111111111/usage-total',
+      });
+
+      expect(r.statusCode).toBe(200);
+      const body = r.json();
+      expect(body.prompt_tokens).toBe(1000);
+      expect(body.completion_tokens).toBe(2000);
+      expect(typeof body.total_cost_usd).toBe('number');
+      expect(body.total_cost_usd).toBeGreaterThan(0);
+    });
+
+    it('no usage – returns zeros', async () => {
+      vi.mocked(getConversation).mockResolvedValueOnce(SAMPLE_CONVERSATION);
+      vi.mocked(getConversationUsageTotal).mockResolvedValueOnce({
+        promptTokens: 0,
+        completionTokens: 0,
+      });
+
+      const r = await app.inject({
+        method: 'GET',
+        url: '/conversations/11111111-1111-1111-1111-111111111111/usage-total',
+      });
+
+      expect(r.statusCode).toBe(200);
+      const body = r.json();
+      expect(body.prompt_tokens).toBe(0);
+      expect(body.completion_tokens).toBe(0);
+      expect(body.total_cost_usd).toBe(0);
     });
   });
 });

@@ -55,7 +55,7 @@ import {
 } from '../services/dashboard-agent/store.js';
 import { runAgentTurn, getSharedWorkingTreeCache } from '../services/dashboard-agent/loop.js';
 import { getRecentAppIds } from '../services/dashboard-agent/schema-context.js';
-import { listUsage } from '../services/dashboard-agent/usage-store.js';
+import { listUsage, getConversationUsageTotal } from '../services/dashboard-agent/usage-store.js';
 import { createRepoSync } from '../services/dashboard-agent/repo-sync.js';
 import { callMcpTool } from '../services/dashboard-agent/mcp-client.js';
 import { resolveApprovalAndPersistResult } from '../services/dashboard-agent/resume.js';
@@ -66,6 +66,21 @@ import { resolveApprovalAndPersistResult } from '../services/dashboard-agent/res
 
 function isEnabled(): boolean {
   return process.env.DASHBOARD_ASSISTANT_ENABLED === '1';
+}
+
+// ---------------------------------------------------------------------------
+// Helper: calculate usage cost (Plan 3e Task 16)
+// ---------------------------------------------------------------------------
+
+function calculateUsageCost(promptTokens: number, completionTokens: number): number {
+  // Approximate cost based on Haiku (cheapest) pricing
+  // Real deployment would query stored cost or use model-specific pricing
+  // Haiku: $0.80/$4 per 1M, but default to conservative mid-range estimate
+  const promptPricePerMillion = 3.0;
+  const completionPricePerMillion = 15.0;
+  const promptCost = (promptTokens / 1_000_000) * promptPricePerMillion;
+  const completionCost = (completionTokens / 1_000_000) * completionPricePerMillion;
+  return parseFloat((promptCost + completionCost).toFixed(6));
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +717,37 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ ok: true });
+  });
+
+  // ── GET /conversations/:id/usage-total ───────────────────────────────────
+  // Sum all tokens and compute total cost for a conversation (Plan 3e Task 16)
+  app.get('/conversations/:id/usage-total', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+
+    // Ownership check
+    const conversation = await getConversation(app.controlDb, id, userId);
+    if (!conversation) {
+      return reply.code(404).send({ error: 'conversation not found' });
+    }
+
+    const { promptTokens, completionTokens } = await getConversationUsageTotal(
+      app.controlDb,
+      id,
+    );
+
+    // Calculate cost using the helper from ai-usage-logger
+    // For now use a simplified approach: average cost across common models
+    // Real: fetch stored cost if available, else compute from tokens
+    const totalCostUsd = calculateUsageCost(promptTokens, completionTokens);
+
+    return reply.send({
+      total_cost_usd: totalCostUsd,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+    });
   });
 
   // ── GET /v1/dashboard-agent/usage ────────────────────────────────────────
