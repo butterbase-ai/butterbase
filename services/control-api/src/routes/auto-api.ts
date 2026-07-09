@@ -28,6 +28,63 @@ import { getRedisClient } from '../services/redis.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Resolve the single-column primary key of a table for the /:id single-row
+ * routes. Returns { column, type } on success, or a Fastify-ready error
+ * response payload when the PK is composite, missing, or the /:id value fails
+ * the PK-specific validation.
+ *
+ * The three single-row routes historically hardcoded WHERE "id" = $1, which
+ * 500'd on any table whose PK column isn't literally named "id". Callers must
+ * now pass their table's true PK value in the URL segment.
+ */
+function resolveSingleRowPk(
+  tableDef: { columns: Record<string, { type: string; primaryKey?: boolean }> },
+  id: string,
+): { column: string } | { errorPayload: ReturnType<typeof createAgentError>; status: number } {
+  const pkCols = Object.entries(tableDef.columns).filter(([, c]) => c.primaryKey);
+  if (pkCols.length === 0) {
+    return {
+      status: 400,
+      errorPayload: createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Table has no primary key — single-row routes require one',
+        remediation: 'Use the collection route with a query filter (e.g. ?some_col=eq.value), or add a primaryKey to the table.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }),
+    };
+  }
+  if (pkCols.length > 1) {
+    return {
+      status: 400,
+      errorPayload: createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: `Table has a composite primary key (${pkCols.map(([n]) => n).join(', ')}) — single-row routes support single-column PKs only`,
+        remediation: 'Use the collection route with query filters matching every PK column (e.g. ?col_a=eq.x&col_b=eq.y).',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }),
+    };
+  }
+  const [column, colInfo] = pkCols[0];
+  const type = colInfo.type.toLowerCase();
+  // UUID PKs get strict format validation (backwards compatible). Other PK
+  // types (text/int/bigint/etc) fall through to Postgres, which returns
+  // 22P02 (invalid_text_representation) for a truly bad value — caught by
+  // detectInvalidInput() in the shared catch block.
+  if (type === 'uuid' && !UUID_RE.test(id)) {
+    return {
+      status: 400,
+      errorPayload: createAgentError({
+        code: VALIDATION_INVALID_TYPE,
+        message: `Invalid UUID format: "${id}"`,
+        remediation: `The "${column}" primary key is a uuid — pass a value like 550e8400-e29b-41d4-a716-446655440000.`,
+        documentation_url: getDocUrl(VALIDATION_INVALID_TYPE),
+      }),
+    };
+  }
+  return { column };
+}
+
 type WebhookInvocationStatus = 'completed' | 'rejected' | 'skipped_duplicate';
 
 async function recordWebhookInvocation(
@@ -831,15 +888,6 @@ export async function autoApiRoutes(app: FastifyInstance) {
   app.get('/v1/:app_id/:table/:id', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { app_id, table, id } = request.params as { app_id: string; table: string; id: string };
 
-    if (!UUID_RE.test(id)) {
-      return reply.code(400).send(createAgentError({
-        code: VALIDATION_INVALID_TYPE,
-        message: `Invalid UUID format: "${id}"`,
-        remediation: 'The id parameter must be a valid UUID (e.g. 550e8400-e29b-41d4-a716-446655440000).',
-        documentation_url: getDocUrl(VALIDATION_INVALID_TYPE),
-      }));
-    }
-
     try {
       const { pool, role, userId } = await resolveAppAndPool(
         app.controlDb,
@@ -857,8 +905,11 @@ export async function autoApiRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl(VALIDATION_TABLE_NOT_FOUND)
       }));
 
+      const pk = resolveSingleRowPk(tableDef, id);
+      if ('errorPayload' in pk) return reply.code(pk.status).send(pk.errorPayload);
+
       const result = await executeWithRole(pool, role, userId, async (client) => {
-        return client.query(`SELECT * FROM "${table}" WHERE "id" = $1`, [id]);
+        return client.query(`SELECT * FROM "${table}" WHERE "${pk.column}" = $1`, [id]);
       });
 
       if (result.rows.length === 0) return reply.code(404).send(createAgentError({
@@ -1055,15 +1106,6 @@ export async function autoApiRoutes(app: FastifyInstance) {
   app.patch('/v1/:app_id/:table/:id', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { app_id, table, id } = request.params as { app_id: string; table: string; id: string };
 
-    if (!UUID_RE.test(id)) {
-      return reply.code(400).send(createAgentError({
-        code: VALIDATION_INVALID_TYPE,
-        message: `Invalid UUID format: "${id}"`,
-        remediation: 'The id parameter must be a valid UUID (e.g., 550e8400-e29b-41d4-a716-446655440000).',
-        documentation_url: getDocUrl(VALIDATION_INVALID_TYPE),
-      }));
-    }
-
     try {
       const { pool, role, userId } = await resolveAppAndPool(
         app.controlDb,
@@ -1080,6 +1122,9 @@ export async function autoApiRoutes(app: FastifyInstance) {
         remediation: `Create the table first using apply_schema. Example: {"tables": {"${table}": {"columns": {...}}}}`,
         documentation_url: getDocUrl(VALIDATION_TABLE_NOT_FOUND)
       }));
+
+      const pk = resolveSingleRowPk(tableDef, id);
+      if ('errorPayload' in pk) return reply.code(pk.status).send(pk.errorPayload);
 
       const body = request.body as Record<string, unknown>;
       const validColumns = new Set(Object.keys(tableDef.columns));
@@ -1099,7 +1144,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
 
       const result = await executeWithRole(pool, role, userId, async (client) => {
         return client.query(
-          `UPDATE "${table}" SET ${setClauses} WHERE "id" = $${values.length} RETURNING *`,
+          `UPDATE "${table}" SET ${setClauses} WHERE "${pk.column}" = $${values.length} RETURNING *`,
           values
         );
       });
@@ -1183,15 +1228,6 @@ export async function autoApiRoutes(app: FastifyInstance) {
   app.delete('/v1/:app_id/:table/:id', { config: { requiresAppRegion: true, migrationGuard: true } }, async (request, reply) => {
     const { app_id, table, id } = request.params as { app_id: string; table: string; id: string };
 
-    if (!UUID_RE.test(id)) {
-      return reply.code(400).send(createAgentError({
-        code: VALIDATION_INVALID_TYPE,
-        message: `Invalid UUID format: "${id}"`,
-        remediation: 'The id parameter must be a valid UUID (e.g., 550e8400-e29b-41d4-a716-446655440000).',
-        documentation_url: getDocUrl(VALIDATION_INVALID_TYPE),
-      }));
-    }
-
     try {
       const { pool, role, userId } = await resolveAppAndPool(
         app.controlDb,
@@ -1209,8 +1245,11 @@ export async function autoApiRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl(VALIDATION_TABLE_NOT_FOUND)
       }));
 
+      const pk = resolveSingleRowPk(tableDef, id);
+      if ('errorPayload' in pk) return reply.code(pk.status).send(pk.errorPayload);
+
       const result = await executeWithRole(pool, role, userId, async (client) => {
-        return client.query(`DELETE FROM "${table}" WHERE "id" = $1`, [id]);
+        return client.query(`DELETE FROM "${table}" WHERE "${pk.column}" = $1`, [id]);
       });
 
       if (result.rowCount === 0) return reply.code(404).send(createAgentError({
