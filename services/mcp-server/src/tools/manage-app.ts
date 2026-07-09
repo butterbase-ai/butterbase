@@ -16,7 +16,7 @@ Actions:
   - "update_access_mode":      Toggle an app's access mode between "public" and "authenticated"
   - "secure":                  Lock down an app: sets access_mode to "authenticated" and optionally enables RLS user isolation
   - "update_cors":             Update CORS allowed origins to control which frontend domains can access your API
-  - "preview_clone_env_vars":  Preview which env vars a source app's functions need before cloning. Returns { functions: [{ fn_name, keys, conventions }] }. Call this before clone to decide what to supply via env_var_values or auto_mint_api_key.
+  - "preview_clone_env_vars":  Preview which env vars a source app's functions and Durable Objects need before cloning. Returns { functions: [{ fn_name, keys, conventions }], durable_objects: { env_keys, note? } }. Call this before clone to decide what to supply via env_var_values or auto_mint_api_key. DO env values are never carried across clones — re-set them via manage_durable_objects action=set_env after clone completes.
   - "clone":                   Create a clone of a public app. Returns { job_id, pending_env_vars }. The dest app is a fresh empty-DB app owned by the caller. Source must be public and have a repo snapshot. Supply env_var_values and/or auto_mint_api_key to pre-fill function env vars; pending_env_vars lists keys still needing values.
   - "get_clone_job":           Look up the status of a previously-started clone job. Returns { status, dest_app_id?, error_message? }.
   - "find_templates":          Search public templates by name, region, sort order, and pagination. Returns paginated list of public app templates.

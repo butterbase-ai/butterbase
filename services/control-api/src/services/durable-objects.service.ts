@@ -440,6 +440,101 @@ export async function listDoEnvVarKeys(db: Pool, appId: string): Promise<string[
   return r.rows.map((row) => row.key);
 }
 
+export interface CloneReplayResult {
+  cloned: string[];
+  do_env_keys: string[];
+}
+
+/**
+ * Clone every active DO class from `sourceAppId` (source runtime DB) to
+ * `destAppId` (dest runtime DB), then bundle-and-deploy the dest's DOs to
+ * its own CF Worker namespace. Called from executeClone before functions
+ * replay so that functions whose env vars reference `<appId>_do` URLs can
+ * be pointed at the dest namespace by the caller.
+ *
+ * Values of DO env vars are NOT copied — they're secrets held only in the
+ * source's encryption envelope. Their KEYS are returned so the clone caller
+ * can surface them alongside function env keys in the pending_env_vars flow.
+ *
+ * If the source has no active DOs, returns `{ cloned: [], do_env_keys: [] }`
+ * without deploying anything.
+ */
+export async function replayDurableObjectsForClone(
+  sourceDb: Pool,
+  destDb: Pool,
+  sourceAppId: string,
+  destAppId: string,
+  destUserId: string,
+): Promise<CloneReplayResult> {
+  const src = await sourceDb.query<{
+    name: string;
+    class_name: string;
+    code: string;
+    access_mode: AccessMode;
+  }>(
+    `SELECT name, class_name, code, access_mode
+       FROM app_durable_objects
+      WHERE app_id = $1 AND status IN ('PENDING', 'BUILDING', 'READY')
+      ORDER BY name`,
+    [sourceAppId],
+  );
+  const keysRes = await sourceDb.query<{ key: string }>(
+    `SELECT key FROM app_do_env_vars WHERE app_id = $1 ORDER BY key`,
+    [sourceAppId],
+  );
+  const doEnvKeys = keysRes.rows.map((r) => r.key);
+
+  if (src.rows.length === 0) {
+    return { cloned: [], do_env_keys: doEnvKeys };
+  }
+
+  // Insert every source class into the dest at status='BUILDING'. On conflict
+  // (a re-run of a partially-completed clone) refresh the code and drop to
+  // BUILDING so the deploy below repairs the state.
+  const insertedIds: string[] = [];
+  for (const row of src.rows) {
+    const codeSha = sha256(row.code);
+    const ins = await destDb.query<{ id: string }>(
+      `INSERT INTO app_durable_objects (app_id, name, class_name, code, code_sha, access_mode, status, deployed_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'BUILDING', $7)
+       ON CONFLICT (app_id, name) DO UPDATE
+         SET class_name = EXCLUDED.class_name,
+             code = EXCLUDED.code,
+             code_sha = EXCLUDED.code_sha,
+             access_mode = EXCLUDED.access_mode,
+             status = 'BUILDING',
+             error_message = NULL,
+             updated_at = now()
+       RETURNING id`,
+      [destAppId, row.name, row.class_name, row.code, codeSha, row.access_mode, destUserId],
+    );
+    insertedIds.push(ins.rows[0].id);
+  }
+
+  try {
+    await bundleAndDeploy(destDb, destAppId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    await destDb.query(
+      `UPDATE app_durable_objects
+          SET status = 'ERROR', error_message = $1, updated_at = now()
+        WHERE id = ANY($2::uuid[])`,
+      [msg, insertedIds],
+    );
+    throw err;
+  }
+
+  await destDb.query(
+    `UPDATE app_durable_objects
+        SET status = 'READY', error_message = NULL,
+            last_deployed_at = now(), updated_at = now()
+      WHERE id = ANY($1::uuid[])`,
+    [insertedIds],
+  );
+
+  return { cloned: src.rows.map((r) => r.name), do_env_keys: doEnvKeys };
+}
+
 // CF binding name pattern: identifier-like, uppercase by convention.
 const ENV_KEY_REGEX = /^[A-Z_][A-Z0-9_]*$/;
 

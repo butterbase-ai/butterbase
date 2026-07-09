@@ -7,6 +7,7 @@ export type CloneJobStatus =
   | 'processing'
   | 'replaying_schema'
   | 'replaying_rls'
+  | 'replaying_durable_objects'
   | 'replaying_functions'
   | 'replaying_config'
   | 'copying_repo'

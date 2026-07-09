@@ -22,6 +22,7 @@ import {
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayMeetingsWebhook, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
+import { replayDurableObjectsForClone } from './durable-objects.service.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
@@ -700,6 +701,44 @@ async function executeClone(
         await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
       }
       logger.info({ destAppId: resolvedDestAppId, ...seedResult }, '[clone] seed data complete');
+
+      // Replay Durable Object classes. Must run BEFORE replayFunctions so any
+      // function env var pointing at a `<appId>_do` URL can be re-supplied by
+      // the caller after they see the DO namespace exists on dest. Prior to
+      // this step, DOs silently failed to clone: manage_durable_objects list
+      // on the dest returned an empty array while functions still referenced
+      // the source DO URLs (bug 6a04a0d5). DO env var VALUES are secrets and
+      // never copied — only their KEYS surface, so the caller can re-set them
+      // via manage_durable_objects action=set_env after clone completes.
+      scope.setTag('step', 'replaying_durable_objects');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_durable_objects' });
+      try {
+        const doResult = await replayDurableObjectsForClone(
+          sourceRuntimePool,
+          destRuntimePool,
+          job.source_app_id,
+          resolvedDestAppId,
+          job.requested_by_user_id,
+        );
+        if (doResult.cloned.length > 0) {
+          logger.info(
+            { destAppId: resolvedDestAppId, cloned: doResult.cloned, doEnvKeys: doResult.do_env_keys },
+            '[clone] durable objects replayed',
+          );
+          if (doResult.do_env_keys.length > 0) {
+            await appendCloneJobWarnings(controlDb, jobId, [
+              `Durable Objects cloned: ${doResult.cloned.join(', ')}. The DO env keys (${doResult.do_env_keys.join(', ')}) are secrets and were not copied — set them via manage_durable_objects action=set_env after the clone completes.`,
+            ]);
+          }
+        } else {
+          logger.info({ destAppId: resolvedDestAppId }, '[clone] no active durable objects on source');
+        }
+      } catch (err) {
+        // DO replay failure is not silently ignored — surface it as a fatal
+        // clone-job failure so the caller notices instead of getting a
+        // "completed" clone whose DOs are half-deployed.
+        throw err;
+      }
 
       // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
       scope.setTag('step', 'replaying_functions');

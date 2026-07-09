@@ -6,6 +6,7 @@ import {
   listSourceEnvVarKeys, detectConventions,
   AUTO_MINT_CONVENTION_KEYS, STATIC_FILL_KEYS,
 } from '../services/clone-env-vars.js';
+import { listDoEnvVarKeys } from '../services/durable-objects.service.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { RESOURCE_NOT_FOUND, AUTH_INSUFFICIENT_PERMISSIONS } from '@butterbase/shared/error-types';
 
@@ -96,6 +97,17 @@ export function cloneRoutesPreflight(app: FastifyInstance) {
           return { status: 'user_required' };
         };
 
+        // Durable Object env vars are surfaced under a separate key so
+        // callers can see they must be re-set post-clone via
+        // manage_durable_objects action=set_env (the platform never copies
+        // DO env values across apps — they're app-scoped secrets).
+        let doEnvKeys: string[] = [];
+        try {
+          doEnvKeys = await listDoEnvVarKeys(runtimePool, source_app_id);
+        } catch (doErr) {
+          app.log.warn({ err: doErr, source_app_id }, 'clone-preflight: listDoEnvVarKeys failed; assuming none');
+        }
+
         return {
           functions: fns.map(f => ({
             fn_name: f.fn_name,
@@ -106,6 +118,12 @@ export function cloneRoutesPreflight(app: FastifyInstance) {
             // input entirely for `auto_filled` rows.
             key_meta: f.keys.map(k => ({ key: k, ...classify(k) })),
           })),
+          durable_objects: {
+            env_keys: doEnvKeys,
+            note: doEnvKeys.length > 0
+              ? 'DO env var values are not carried across clones. Re-set each key via manage_durable_objects action=set_env once the clone completes.'
+              : undefined,
+          },
         };
       } catch (err) {
         app.log.error({ err, source_app_id }, 'clone-preflight: listSourceEnvVarKeys threw');
