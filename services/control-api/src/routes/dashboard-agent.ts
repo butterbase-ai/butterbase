@@ -6,6 +6,9 @@
  *   GET    /conversations          – list caller's conversations
  *   GET    /conversations/:id      – get conversation + messages
  *   DELETE /conversations/:id      – delete conversation (204)
+ *   PATCH  /conversations/:id/rename    – rename conversation (user-chosen title)
+ *   POST   /conversations/:id/duplicate – copy conversation + all messages
+ *   POST   /conversations/:id/pin       – set/clear pinned_at
  *   POST   /messages               – SSE agent turn (streams LoopEvent frames)
  *   POST   /conversations/:id/rewind – restore working tree to a prior snapshot
  *   GET    /conversations/:id/snapshots – list snapshot history + labels
@@ -34,6 +37,9 @@ import {
   getConversation,
   deleteConversation,
   updateConversationModel,
+  renameConversation,
+  duplicateConversation,
+  pinConversation,
   listMessages,
   appendMessage,
   listSnapshotLabels,
@@ -165,6 +171,14 @@ const resolveApprovalBody = z
   })
   .strict();
 
+const renameConversationBody = z.object({
+  title: z.string().trim().min(1).max(200),
+});
+
+const pinConversationBody = z.object({
+  pinned: z.boolean(),
+});
+
 // ---------------------------------------------------------------------------
 // Route plugin
 // ---------------------------------------------------------------------------
@@ -255,6 +269,59 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const body = patchConversationBody.parse(request.body);
 
     const updated = await updateConversationModel(app.controlDb, id, userId, body.model);
+    if (!updated) return reply.code(404).send({ error: 'conversation not found' });
+    return reply.send({ conversation: updated });
+  });
+
+  // ── PATCH /conversations/:id/rename — user-chosen title ─────────────────
+  app.patch('/conversations/:id/rename', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+
+    const parsed = renameConversationBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+
+    const updated = await renameConversation(app.controlDb, id, userId, parsed.data.title);
+    if (!updated) return reply.code(404).send({ error: 'conversation not found' });
+    return reply.send({ conversation: updated });
+  });
+
+  // ── POST /conversations/:id/duplicate — copy conversation + messages ────
+  app.post('/conversations/:id/duplicate', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+
+    // Ownership check up front so a bad id 404s without touching the store's
+    // transaction (duplicateConversation throws for the same case, but this
+    // gives an early, cheap, consistent 404 path with the rest of the file).
+    const conversation = await getConversation(app.controlDb, id, userId);
+    if (!conversation) {
+      return reply.code(404).send({ error: 'conversation not found' });
+    }
+
+    const duplicate = await duplicateConversation(app.controlDb, id, userId);
+    return reply.code(201).send({ conversation: duplicate });
+  });
+
+  // ── POST /conversations/:id/pin — set/clear pinned_at ────────────────────
+  app.post('/conversations/:id/pin', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+
+    const parsed = pinConversationBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+
+    const updated = await pinConversation(app.controlDb, id, userId, parsed.data.pinned);
     if (!updated) return reply.code(404).send({ error: 'conversation not found' });
     return reply.send({ conversation: updated });
   });

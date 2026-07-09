@@ -1386,4 +1386,314 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
       30_000,
     );
   });
+
+  // ── Case I: rename / duplicate / pin (Plan 3e Task 5) ─────────────────────
+
+  describe('Case I: rename conversation', () => {
+    it('cross-tenant: user B renaming user A conversation gets 404', async () => {
+      const appA = await buildApp(USER_A, pool);
+      const appB = await buildApp(USER_B, pool);
+
+      try {
+        const convR = await appA.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-rename-ownership', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const renameR = await appB.inject({
+          method: 'PATCH',
+          url: `/conversations/${conversation.id}/rename`,
+          payload: { title: 'hijacked' },
+        });
+
+        expect(renameR.statusCode).toBe(404);
+        expect(renameR.json()).toMatchObject({ error: 'conversation not found' });
+      } finally {
+        await appA.close();
+        await appB.close();
+      }
+    });
+
+    it('happy path: renames the conversation title', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'original title', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const renameR = await app.inject({
+          method: 'PATCH',
+          url: `/conversations/${conversation.id}/rename`,
+          payload: { title: 'renamed title' },
+        });
+
+        expect(renameR.statusCode).toBe(200);
+        expect(renameR.json()).toMatchObject({ conversation: { title: 'renamed title' } });
+
+        const row = await pool.query(`SELECT title FROM dashboard_agent_conversations WHERE id = $1`, [
+          conversation.id,
+        ]);
+        expect(row.rows[0].title).toBe('renamed title');
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('rejects an empty title with 400', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-empty-title', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const renameR = await app.inject({
+          method: 'PATCH',
+          url: `/conversations/${conversation.id}/rename`,
+          payload: { title: '' },
+        });
+
+        expect(renameR.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('rejects a title over 200 chars with 400', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-long-title', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const renameR = await app.inject({
+          method: 'PATCH',
+          url: `/conversations/${conversation.id}/rename`,
+          payload: { title: 'x'.repeat(201) },
+        });
+
+        expect(renameR.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe('Case I: duplicate conversation', () => {
+    it('cross-tenant: user B duplicating user A conversation gets 404', async () => {
+      const appA = await buildApp(USER_A, pool);
+      const appB = await buildApp(USER_B, pool);
+
+      try {
+        const convR = await appA.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-dup-ownership', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const dupR = await appB.inject({
+          method: 'POST',
+          url: `/conversations/${conversation.id}/duplicate`,
+        });
+
+        expect(dupR.statusCode).toBe(404);
+        expect(dupR.json()).toMatchObject({ error: 'conversation not found' });
+      } finally {
+        await appA.close();
+        await appB.close();
+      }
+    });
+
+    it('happy path: copies the conversation + all messages into a new conversation', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-dup-happy', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        await appendMessage(pool, conversation.id, {
+          role: 'user',
+          content: 'hello',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+        await appendMessage(pool, conversation.id, {
+          role: 'assistant',
+          content: 'hi there',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        const dupR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversation.id}/duplicate`,
+        });
+
+        expect(dupR.statusCode).toBe(201);
+        const { conversation: dup } = dupR.json<{ conversation: { id: string; title: string } }>();
+        expect(dup.id).not.toBe(conversation.id);
+        expect(dup.title).toBe('e2e-case-i-dup-happy (copy)');
+
+        const dupMessages = await pool.query(
+          `SELECT role, content FROM dashboard_agent_messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
+          [dup.id],
+        );
+        expect(dupMessages.rows).toHaveLength(2);
+        expect(dupMessages.rows[0]).toMatchObject({ role: 'user', content: 'hello' });
+        expect(dupMessages.rows[1]).toMatchObject({ role: 'assistant', content: 'hi there' });
+
+        // Deleting the original does not affect the copy (cascade preserved).
+        const delR = await app.inject({ method: 'DELETE', url: `/conversations/${conversation.id}` });
+        expect(delR.statusCode).toBe(204);
+
+        const stillThere = await pool.query(`SELECT id FROM dashboard_agent_conversations WHERE id = $1`, [
+          dup.id,
+        ]);
+        expect(stillThere.rows).toHaveLength(1);
+
+        const dupMessagesAfter = await pool.query(
+          `SELECT id FROM dashboard_agent_messages WHERE conversation_id = $1`,
+          [dup.id],
+        );
+        expect(dupMessagesAfter.rows).toHaveLength(2);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe('Case I: pin conversation', () => {
+    it('cross-tenant: user B pinning user A conversation gets 404', async () => {
+      const appA = await buildApp(USER_A, pool);
+      const appB = await buildApp(USER_B, pool);
+
+      try {
+        const convR = await appA.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-pin-ownership', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const pinR = await appB.inject({
+          method: 'POST',
+          url: `/conversations/${conversation.id}/pin`,
+          payload: { pinned: true },
+        });
+
+        expect(pinR.statusCode).toBe(404);
+        expect(pinR.json()).toMatchObject({ error: 'conversation not found' });
+      } finally {
+        await appA.close();
+        await appB.close();
+      }
+    });
+
+    it('happy path: toggles pinned_at set then cleared', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-pin-toggle', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const pinR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversation.id}/pin`,
+          payload: { pinned: true },
+        });
+        expect(pinR.statusCode).toBe(200);
+        expect(pinR.json<{ conversation: { pinnedAt: string | null } }>().conversation.pinnedAt).not.toBeNull();
+
+        const pinnedRow = await pool.query(
+          `SELECT pinned_at FROM dashboard_agent_conversations WHERE id = $1`,
+          [conversation.id],
+        );
+        expect(pinnedRow.rows[0].pinned_at).not.toBeNull();
+
+        const unpinR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversation.id}/pin`,
+          payload: { pinned: false },
+        });
+        expect(unpinR.statusCode).toBe(200);
+        expect(unpinR.json<{ conversation: { pinnedAt: string | null } }>().conversation.pinnedAt).toBeNull();
+
+        const unpinnedRow = await pool.query(
+          `SELECT pinned_at FROM dashboard_agent_conversations WHERE id = $1`,
+          [conversation.id],
+        );
+        expect(unpinnedRow.rows[0].pinned_at).toBeNull();
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('listConversations returns pinned conversations first', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR1 = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-list-1', model: 'gpt-4o' },
+        });
+        const conv1 = convR1.json<{ conversation: { id: string } }>().conversation;
+
+        const convR2 = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-i-list-2', model: 'gpt-4o' },
+        });
+        const conv2 = convR2.json<{ conversation: { id: string } }>().conversation;
+
+        // Pin the SECOND (older-created) conversation — it should still sort
+        // first despite conv1 being newer, because pinned_at wins.
+        const pinR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conv2.id}/pin`,
+          payload: { pinned: true },
+        });
+        expect(pinR.statusCode).toBe(200);
+
+        const listR = await app.inject({ method: 'GET', url: '/conversations' });
+        expect(listR.statusCode).toBe(200);
+        const { conversations } = listR.json<{ conversations: Array<{ id: string }> }>();
+
+        const ids = conversations.map((c) => c.id);
+        const idx1 = ids.indexOf(conv1.id);
+        const idx2 = ids.indexOf(conv2.id);
+        expect(idx2).toBeGreaterThanOrEqual(0);
+        expect(idx1).toBeGreaterThanOrEqual(0);
+        expect(idx2).toBeLessThan(idx1);
+      } finally {
+        await app.close();
+      }
+    });
+  });
 });
