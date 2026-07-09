@@ -10,6 +10,10 @@
  *   POST   /conversations/:id/duplicate – copy conversation + all messages
  *   POST   /conversations/:id/pin       – set/clear pinned_at
  *   POST   /messages               – SSE agent turn (streams LoopEvent frames)
+ *   POST   /conversations/:id/regenerate – regenerate an assistant reply, or
+ *          edit-and-resend a user message ({message_id, new_user_message?}).
+ *          Deletes the target message + everything after it, then streams a
+ *          fresh turn via SSE (same wire format as /messages).
  *   POST   /conversations/:id/rewind – restore working tree to a prior snapshot
  *   GET    /conversations/:id/snapshots – list snapshot history + labels
  *   POST   /conversations/:id/snapshots/label – set a user label on a snapshot
@@ -44,6 +48,9 @@ import {
   appendMessage,
   listSnapshotLabels,
   upsertSnapshotLabel,
+  getMessageById,
+  deleteMessagesFromInclusive,
+  getLastUserMessage,
   type SnapshotLabel,
 } from '../services/dashboard-agent/store.js';
 import { runAgentTurn, getSharedWorkingTreeCache } from '../services/dashboard-agent/loop.js';
@@ -177,6 +184,11 @@ const renameConversationBody = z.object({
 
 const pinConversationBody = z.object({
   pinned: z.boolean(),
+});
+
+const regenerateBody = z.object({
+  message_id: z.string().uuid(),
+  new_user_message: z.string().min(1).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -378,6 +390,106 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         jwt,
         userMessage: message,
         model,
+        pool: app.controlDb,
+      });
+
+      for await (const event of gen) {
+        if (clientDisconnected) break;
+        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+    } finally {
+      reply.raw.end();
+    }
+  });
+
+  // ── POST /conversations/:id/regenerate ───────────────────────────────────
+  //
+  // Two-in-one endpoint (Plan 3e Task 6):
+  //   - Regenerate: {message_id} only. message_id MUST reference an
+  //     'assistant' row. Deletes that row + everything after it, then
+  //     replays the last remaining user message.
+  //   - Edit-and-resend: {message_id, new_user_message}. message_id MUST
+  //     reference a 'user' row. Deletes that row + everything after it, then
+  //     runs new_user_message as the next user turn.
+  // Streams the resulting turn via SSE, same wire format as /messages.
+  app.post('/conversations/:id/regenerate', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const { id } = request.params as { id: string };
+
+    const parsed = regenerateBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { message_id: messageId, new_user_message: newUserMessage } = parsed.data;
+
+    // Ownership check BEFORE sending SSE headers — once headers are sent we
+    // cannot return a JSON 404/400.
+    const conversation = await getConversation(app.controlDb, id, userId);
+    if (!conversation) {
+      return reply.code(404).send({ error: 'conversation not found' });
+    }
+
+    const target = await getMessageById(app.controlDb, id, messageId);
+    if (!target) {
+      return reply.code(404).send({ error: 'message not found' });
+    }
+
+    let userMessageToReplay: string;
+
+    if (newUserMessage != null) {
+      // Edit-and-resend: message_id must be a user row.
+      if (target.role !== 'user') {
+        return reply.code(400).send({ error: 'new_user_message requires message_id to reference a user message' });
+      }
+      await deleteMessagesFromInclusive(app.controlDb, id, messageId);
+      userMessageToReplay = newUserMessage;
+    } else {
+      // Regenerate: message_id must be an assistant row.
+      if (target.role !== 'assistant') {
+        return reply.code(400).send({ error: 'message_id must reference an assistant message to regenerate' });
+      }
+      await deleteMessagesFromInclusive(app.controlDb, id, messageId);
+      const lastUser = await getLastUserMessage(app.controlDb, id);
+      if (!lastUser) {
+        return reply.code(400).send({ error: 'no user message to regenerate from' });
+      }
+      userMessageToReplay = lastUser.content;
+    }
+
+    // Extract JWT verbatim from Authorization header, same as /messages.
+    const authHeader = request.headers.authorization ?? '';
+    const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+
+    // Begin SSE response — mirrors /messages.
+    const requestOrigin = request.headers.origin;
+    if (requestOrigin) {
+      reply.raw.setHeader('access-control-allow-origin', requestOrigin);
+      reply.raw.setHeader('vary', 'origin');
+      reply.raw.setHeader('access-control-allow-credentials', 'true');
+    }
+    reply.raw.setHeader('content-type', 'text/event-stream');
+    reply.raw.setHeader('cache-control', 'no-cache');
+    reply.raw.setHeader('connection', 'keep-alive');
+    reply.hijack();
+
+    let clientDisconnected = false;
+    request.raw.on('close', () => {
+      clientDisconnected = true;
+      app.log.debug({ conversationId: id }, 'dashboard-agent regenerate SSE client disconnected');
+    });
+
+    try {
+      const gen = runAgentTurn({
+        conversationId: id,
+        userId,
+        jwt,
+        userMessage: userMessageToReplay,
+        model: conversation.model,
         pool: app.controlDb,
       });
 

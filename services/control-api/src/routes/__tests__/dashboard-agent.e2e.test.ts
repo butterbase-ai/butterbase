@@ -1696,4 +1696,268 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
       }
     });
   });
+
+  // ── Case J: regenerate / edit-and-resend ──────────────────────────────────
+
+  describe('Case J: regenerate', () => {
+    it('cross-tenant: user B regenerating from user A conversation gets 404', async () => {
+      const appA = await buildApp(USER_A, pool);
+      const appB = await buildApp(USER_B, pool);
+
+      try {
+        const convR = await appA.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-j-regen-ownership', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+
+        const userMsg = await appendMessage(pool, conversation.id, {
+          role: 'user',
+          content: 'hi',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+        const asstMsg = await appendMessage(pool, conversation.id, {
+          role: 'assistant',
+          content: 'hello there',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        const regenR = await appB.inject({
+          method: 'POST',
+          url: `/conversations/${conversation.id}/regenerate`,
+          payload: { message_id: asstMsg.id },
+          headers: { authorization: 'Bearer test-jwt' },
+        });
+
+        expect(regenR.statusCode).toBe(404);
+        expect(regenR.json()).toMatchObject({ error: 'conversation not found' });
+
+        // Original messages survive untouched.
+        const rows = await pool.query(
+          `SELECT id FROM dashboard_agent_messages WHERE conversation_id = $1`,
+          [conversation.id],
+        );
+        expect(rows.rows.map((r) => r.id).sort()).toEqual([userMsg.id, asstMsg.id].sort());
+      } finally {
+        await appA.close();
+        await appB.close();
+      }
+    });
+
+    it('happy path: deletes the assistant message + everything after, streams a new turn', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-j-regen-happy', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+        const conversationId = conversation.id;
+
+        const userMsg = await appendMessage(pool, conversationId, {
+          role: 'user',
+          content: 'do i have apps',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+        const asstMsg = await appendMessage(pool, conversationId, {
+          role: 'assistant',
+          content: 'You have no apps.',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+        // A stray follow-up row after the assistant message (simulates a
+        // subsequent turn) — must also be deleted since it's >= the target.
+        const strayMsg = await appendMessage(pool, conversationId, {
+          role: 'user',
+          content: 'stray follow-up',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        global.fetch = vi.fn().mockResolvedValueOnce(
+          gatewayResponse([
+            { choices: [{ delta: { content: 'You still have ' }, finish_reason: null }] },
+            { choices: [{ delta: { content: 'no apps.' }, finish_reason: null }] },
+            { choices: [{ delta: {}, finish_reason: 'stop' }] },
+          ]),
+        );
+
+        const regenR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversationId}/regenerate`,
+          payload: { message_id: asstMsg.id },
+          headers: { authorization: 'Bearer test-jwt' },
+        });
+
+        expect(regenR.statusCode).toBe(200);
+        expect(regenR.headers['content-type']).toContain('text/event-stream');
+
+        const frames = parseSseFrames(regenR.body);
+        expect(frames.some((f) => (f as { type: string }).type === 'assistant_message')).toBe(true);
+        expect(frames[frames.length - 1]).toMatchObject({ type: 'done' });
+
+        // Original assistant message + stray follow-up are gone; the user
+        // message survives (it's before the deletion point) and is replayed.
+        const rows = await pool.query<{ id: string; role: string; content: string }>(
+          `SELECT id, role, content FROM dashboard_agent_messages
+           WHERE conversation_id = $1 ORDER BY created_at ASC`,
+          [conversationId],
+        );
+        const ids = rows.rows.map((r) => r.id);
+        expect(ids).toContain(userMsg.id);
+        expect(ids).not.toContain(asstMsg.id);
+        expect(ids).not.toContain(strayMsg.id);
+
+        // A brand-new assistant row with the regenerated content was appended.
+        const newAssistantRow = rows.rows.find(
+          (r) => r.role === 'assistant' && r.content === 'You still have no apps.',
+        );
+        expect(newAssistantRow).toBeTruthy();
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('edit-and-resend: deletes from the user message and streams a turn with the new content', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-j-edit-resend', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+        const conversationId = conversation.id;
+
+        const userMsg = await appendMessage(pool, conversationId, {
+          role: 'user',
+          content: 'original question',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+        await appendMessage(pool, conversationId, {
+          role: 'assistant',
+          content: 'original answer',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        global.fetch = vi.fn().mockResolvedValueOnce(
+          gatewayResponse([
+            { choices: [{ delta: { content: 'edited answer' }, finish_reason: null }] },
+            { choices: [{ delta: {}, finish_reason: 'stop' }] },
+          ]),
+        );
+
+        const regenR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversationId}/regenerate`,
+          payload: { message_id: userMsg.id, new_user_message: 'edited question' },
+          headers: { authorization: 'Bearer test-jwt' },
+        });
+
+        expect(regenR.statusCode).toBe(200);
+        const frames = parseSseFrames(regenR.body);
+        expect(frames[frames.length - 1]).toMatchObject({ type: 'done' });
+
+        const rows = await pool.query<{ role: string; content: string }>(
+          `SELECT role, content FROM dashboard_agent_messages
+           WHERE conversation_id = $1 ORDER BY created_at ASC`,
+          [conversationId],
+        );
+
+        // Original user + assistant rows are gone; replaced by the new turn.
+        expect(rows.rows.some((r) => r.content === 'original question')).toBe(false);
+        expect(rows.rows.some((r) => r.content === 'original answer')).toBe(false);
+        expect(rows.rows[0]).toMatchObject({ role: 'user', content: 'edited question' });
+        expect(rows.rows.some((r) => r.role === 'assistant' && r.content === 'edited answer')).toBe(true);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('rejects an ambiguous/invalid message_id with 400', async () => {
+      const app = await buildApp(USER_A, pool);
+
+      try {
+        const convR = await app.inject({
+          method: 'POST',
+          url: '/conversations',
+          payload: { title: 'e2e-case-j-invalid', model: 'gpt-4o' },
+        });
+        const { conversation } = convR.json<{ conversation: { id: string } }>();
+        const conversationId = conversation.id;
+
+        const userMsg = await appendMessage(pool, conversationId, {
+          role: 'user',
+          content: 'hi',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        // Regenerate (no new_user_message) but message_id points at a USER row — invalid.
+        const regenR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversationId}/regenerate`,
+          payload: { message_id: userMsg.id },
+          headers: { authorization: 'Bearer test-jwt' },
+        });
+        expect(regenR.statusCode).toBe(400);
+
+        const asstMsg = await appendMessage(pool, conversationId, {
+          role: 'assistant',
+          content: 'hello',
+          toolCallId: null,
+          toolName: null,
+          toolArgs: null,
+          toolResult: null,
+        });
+
+        // Edit-and-resend (new_user_message set) but message_id points at an
+        // ASSISTANT row — invalid.
+        const editR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversationId}/regenerate`,
+          payload: { message_id: asstMsg.id, new_user_message: 'new text' },
+          headers: { authorization: 'Bearer test-jwt' },
+        });
+        expect(editR.statusCode).toBe(400);
+
+        // A totally unknown message_id also 400s (not found under a 404 path
+        // here — validated the same way malformed input would be).
+        const missingR = await app.inject({
+          method: 'POST',
+          url: `/conversations/${conversationId}/regenerate`,
+          payload: { message_id: randomUUID() },
+          headers: { authorization: 'Bearer test-jwt' },
+        });
+        expect(missingR.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+  });
 });

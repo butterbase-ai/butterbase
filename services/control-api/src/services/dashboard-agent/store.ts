@@ -562,6 +562,135 @@ export async function clearPendingApproval(
 }
 
 /**
+ * Fetch a single message by id, scoped to a conversation (returns null if it
+ * doesn't exist or belongs to a different conversation). Used by the
+ * regenerate / edit-and-resend route to validate the target message's role
+ * before deleting from it.
+ */
+export async function getMessageById(
+  pool: pg.Pool,
+  conversationId: string,
+  messageId: string
+): Promise<Message | null> {
+  const result = await pool.query(
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
+       FROM dashboard_agent_messages
+      WHERE id = $1 AND conversation_id = $2`,
+    [messageId, conversationId]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    role: row.role,
+    content: row.content,
+    toolCallId: row.tool_call_id,
+    toolName: row.tool_name,
+    toolArgs: row.tool_args ?? null,
+    toolResult: row.tool_result ?? null,
+    modelUsed: row.model_used ?? null,
+    pendingApprovalId: row.pending_approval_id ?? null,
+    createdAt: new Date(row.created_at),
+  };
+}
+
+/**
+ * Delete a message and every message at or after it (by created_at, with id
+ * as a tiebreaker for same-millisecond inserts) within a conversation. Used
+ * by the regenerate / edit-and-resend flow (Plan 3e Task 6): the caller
+ * looks up the target row's created_at first, then this deletes it and
+ * everything after so the loop can re-run from a clean point.
+ *
+ * Runs in its own transaction (BEGIN/COMMIT) — the route only ever calls
+ * this once per request and doesn't need to compose it with other writes.
+ * Returns the number of rows deleted.
+ */
+export async function deleteMessagesFromInclusive(
+  pool: pg.Pool,
+  conversationId: string,
+  fromMessageId: string
+): Promise<number> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const anchor = await client.query(
+      `SELECT created_at FROM dashboard_agent_messages WHERE id = $1 AND conversation_id = $2`,
+      [fromMessageId, conversationId]
+    );
+    if (anchor.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return 0;
+    }
+    const fromCreatedAt = anchor.rows[0].created_at;
+
+    const result = await client.query(
+      `DELETE FROM dashboard_agent_messages
+        WHERE conversation_id = $1
+          AND (created_at > $2 OR (created_at = $2 AND id >= $3))`,
+      [conversationId, fromCreatedAt, fromMessageId]
+    );
+
+    // last_message_at may now point at a deleted row — recompute from what's left.
+    const remaining = await client.query(
+      `SELECT MAX(created_at) AS last_created_at FROM dashboard_agent_messages WHERE conversation_id = $1`,
+      [conversationId]
+    );
+    await client.query(
+      `UPDATE dashboard_agent_conversations SET last_message_at = $2, updated_at = NOW() WHERE id = $1`,
+      [conversationId, remaining.rows[0]?.last_created_at ?? null]
+    );
+
+    await client.query('COMMIT');
+    return result.rowCount ?? 0;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore — connection may already be rolled back
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Fetch the most recent 'user'-role message in a conversation, or null if
+ * none exists. Used by the regenerate flow to find the turn to replay after
+ * deleting an assistant message and everything after it.
+ */
+export async function getLastUserMessage(
+  pool: pg.Pool,
+  conversationId: string
+): Promise<Message | null> {
+  const result = await pool.query(
+    `SELECT id, conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result, model_used, pending_approval_id, created_at
+       FROM dashboard_agent_messages
+      WHERE conversation_id = $1 AND role = 'user'
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [conversationId]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    role: row.role,
+    content: row.content,
+    toolCallId: row.tool_call_id,
+    toolName: row.tool_name,
+    toolArgs: row.tool_args ?? null,
+    toolResult: row.tool_result ?? null,
+    modelUsed: row.model_used ?? null,
+    pendingApprovalId: row.pending_approval_id ?? null,
+    createdAt: new Date(row.created_at),
+  };
+}
+
+/**
  * List all messages in a conversation, ordered by creation time
  */
 export async function listMessages(
