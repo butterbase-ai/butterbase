@@ -162,6 +162,21 @@ export const config = {
     /** Postgres role that owns per-app DBs; created via Neon API if missing on the branch */
     databaseOwner: process.env.NEON_DATA_DATABASE_OWNER ?? 'butterbase',
     enabled: process.env.NEON_API_KEY !== undefined && process.env.NEON_API_KEY !== '',
+    orphanReconciler: {
+      // Off by default. Flip to true only after inspecting a dry-run cycle.
+      enabled: process.env.NEON_ORPHAN_RECONCILER_ENABLED === 'true',
+      // Log candidates but don't call deleteDatabase. Default true so a fresh
+      // NEON_ORPHAN_RECONCILER_ENABLED=true env can't nuke real data on first boot.
+      dryRun: process.env.NEON_ORPHAN_DRY_RUN !== 'false',
+      // Minimum age before a Neon DB is considered an orphan. Guards against
+      // the ~200ms window between createDatabase and app_db_connections insert.
+      graceHours: parseInt(process.env.NEON_ORPHAN_GRACE_HOURS ?? '24', 10),
+      // Cap per-run blast radius. Anything above still gets listed in the log
+      // for manual triage, but only the top-N (oldest first) get dropped.
+      maxDropsPerRun: parseInt(process.env.NEON_ORPHAN_MAX_DROPS_PER_RUN ?? '10', 10),
+      // Cadence between runs. Default 6h — orphans accrue slowly.
+      runIntervalHours: parseInt(process.env.NEON_ORPHAN_RUN_INTERVAL_HOURS ?? '6', 10),
+    },
   },
 
   realtime: {

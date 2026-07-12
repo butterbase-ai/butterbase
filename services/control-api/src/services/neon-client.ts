@@ -373,6 +373,24 @@ export async function deleteDatabase(
   });
 }
 
+export interface NeonDatabaseSummary {
+  name: string;
+  createdAt: string;
+}
+
+/**
+ * List every database on the project's default branch. Used by the orphan
+ * reconciler to enumerate the full Neon inventory and diff it against
+ * `runtimeDb.apps`. Returns bare `{ name, createdAt }` — callers should not
+ * depend on the raw Neon response shape.
+ */
+export async function listDatabases(projectId: string): Promise<NeonDatabaseSummary[]> {
+  const branchId = await getDefaultBranchId(projectId);
+  const res = await neonFetch(`/projects/${projectId}/branches/${branchId}/databases`);
+  const data = await res.json() as { databases: NeonDatabase[] };
+  return data.databases.map((db) => ({ name: db.name, createdAt: db.created_at }));
+}
+
 /**
  * After creating a DB on Neon (PG 15+), the `public` schema CREATE privilege
  * is revoked by default.  Connect as the project owner (`neondb_owner`) and
