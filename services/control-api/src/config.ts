@@ -60,6 +60,18 @@ export const config = {
     return {
       enabled: process.env.AI_ROUTER_V2_ENABLED === 'true',
       presenceModeEnabled: process.env.AI_ROUTER_PRESENCE_MODE === 'true',
+      // Ranker mode:
+      //   'waterfall' — deterministic secondary-first, primary-fallback (recommended)
+      //   'presence'  — legacy 50/50 randomization between secondary and primary
+      //   'price'     — cheapest catalog price first
+      // Waterfall wins over presenceModeEnabled when both are set.
+      mode: (process.env.AI_ROUTER_MODE === 'waterfall' ? 'waterfall'
+           : process.env.AI_ROUTER_MODE === 'price'     ? 'price'
+           : process.env.AI_ROUTER_PRESENCE_MODE === 'true' ? 'presence'
+           : 'price') as 'waterfall' | 'presence' | 'price',
+      // Slot-cooldown TTL: how long to skip a slot after a fallback-kind failure.
+      // Auto-expires — no manual intervention needed to unstick a recovered provider.
+      slotCooldownSeconds: parseInt(process.env.AI_ROUTER_SLOT_COOLDOWN_SEC ?? '300', 10),
       v2EndpointsEnabled: process.env.AI_GATEWAY_V2_ENDPOINTS_ENABLED === 'true',
       defaultRegion: process.env.AI_ROUTER_DEFAULT_REGION ?? 'us-east-1',
       markupPct,

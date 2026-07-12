@@ -92,6 +92,7 @@ export type AdapterErrorKind =
   | 'model_not_available'
   | 'auth'
   | 'bad_request'
+  | 'insufficient_credits'
   | 'unknown';
 
 export class AdapterError extends Error {
@@ -104,6 +105,54 @@ export class AdapterError extends Error {
     super(message);
     this.name = 'AdapterError';
   }
+}
+
+/**
+ * Upstream error `code` strings that indicate the *upstream account* is out of
+ * credits (not the caller). All of these must fall over to another provider.
+ *
+ * Sources:
+ *  - OpenAI:  `insufficient_quota`
+ *  - Anthropic: `credit_balance_too_low` (in the `error.type` field)
+ *  - new-api (imarouter et al.): `insufficient_user_quota`
+ *  - OpenRouter: some upstreams echo `insufficient_credits` or return 402
+ *
+ * These often arrive as HTTP 200 with an error envelope, or as 429 with a
+ * distinct code — status alone is not enough. Match on the payload's
+ * `error.code` OR `error.type` string.
+ */
+export const UPSTREAM_INSUFFICIENT_CREDIT_CODES: ReadonlySet<string> = new Set([
+  'insufficient_quota',
+  'insufficient_user_quota',
+  'insufficient_credits',
+  'credit_balance_too_low',
+  'billing_hard_limit_reached',
+  'account_deactivated',
+]);
+
+/**
+ * Best-effort inspection of an OpenAI-shaped error body for upstream-credit
+ * exhaustion. Returns true when we should treat the response as
+ * `insufficient_credits` regardless of HTTP status. Handles both:
+ *   { error: { code, type, message } }
+ * and bare-string bodies containing one of the known codes.
+ */
+export function isUpstreamCreditExhaustionBody(body: unknown): boolean {
+  if (!body) return false;
+  if (typeof body === 'string') {
+    for (const code of UPSTREAM_INSUFFICIENT_CREDIT_CODES) {
+      if (body.includes(code)) return true;
+    }
+    return false;
+  }
+  if (typeof body !== 'object') return false;
+  const err = (body as { error?: unknown }).error;
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: unknown }).code;
+  const type = (err as { type?: unknown }).type;
+  if (typeof code === 'string' && UPSTREAM_INSUFFICIENT_CREDIT_CODES.has(code)) return true;
+  if (typeof type === 'string' && UPSTREAM_INSUFFICIENT_CREDIT_CODES.has(type)) return true;
+  return false;
 }
 
 export interface AdapterCapabilities {

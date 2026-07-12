@@ -106,13 +106,27 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
   }
   if (err instanceof AdapterError) {
     // AdapterError.kind ('transport', 'rate_limit', etc.) is generic enough to
-    // share, but never include the adapter name (err.router) which would leak
-    // upstream provider identity.
-    return reply.code(err.statusCode).send(openaiError(
-      err.message,
-      'invalid_request_error',
-      err.kind,
-    ));
+    // share, but NEVER include the adapter name (err.router) or the raw
+    // upstream message (err.message) — those can carry upstream request ids,
+    // upstream account balances, or non-English error strings that leak our
+    // gateway topology. Map to a butterbase-shaped canned message per kind.
+    //
+    // If we reach this handler with kind='insufficient_credits' it means the
+    // fallback chain was already exhausted — every provider we tried was out
+    // of credits — so we surface a platform-level 503 to the caller, NOT a
+    // 402 (which would misleadingly suggest the caller's butterbase credits
+    // are the problem).
+    const KIND_MESSAGE: Record<string, { status: number; type: string; msg: string }> = {
+      auth:                  { status: 401, type: 'authentication_error', msg: 'Upstream authentication failed.' },
+      rate_limit:            { status: 429, type: 'api_error',           msg: 'Model is temporarily rate-limited. Please retry.' },
+      model_not_available:   { status: 404, type: 'invalid_request_error', msg: 'Model is not available.' },
+      transport:             { status: 502, type: 'api_error',           msg: 'Upstream transport error. Please retry.' },
+      insufficient_credits:  { status: 503, type: 'api_error',           msg: 'Model is temporarily unavailable. Please try again or use a different model.' },
+      bad_request:           { status: 400, type: 'invalid_request_error', msg: 'The upstream provider rejected the request.' },
+      unknown:               { status: 502, type: 'api_error',           msg: 'Upstream provider error. Please retry.' },
+    };
+    const spec = KIND_MESSAGE[err.kind] ?? KIND_MESSAGE.unknown;
+    return reply.code(spec.status).send(openaiError(spec.msg, spec.type, err.kind));
   }
   if (err instanceof z.ZodError) {
     return reply.code(400).send(openaiError(

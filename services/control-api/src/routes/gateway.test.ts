@@ -336,10 +336,13 @@ describe('Fix 2 — AdapterError non-fallback kinds map to invalid_request_error
     vi.clearAllMocks();
   });
 
-  it('10. AdapterError bad_request thrown from routeChatCompletion → 400 invalid_request_error / bad_request with message preserved', async () => {
+  it('10. AdapterError bad_request thrown from routeChatCompletion → 400 invalid_request_error / bad_request with canned message (upstream text scrubbed)', async () => {
     app = await buildTestApp({ userId: 'user-jwt-adapter', authMethod: 'jwt', scopes: [] });
+    // Raw upstream text — must NOT reach the client. gateway.ts replaces
+    // AdapterError.message with a per-kind canned message so upstream request
+    // ids, non-English strings, and account balances can never leak.
     mockRouteChatCompletion.mockRejectedValueOnce(
-      new AdapterError('openrouter', 400, 'bad_request', 'upstream rejected'),
+      new AdapterError('openrouter', 400, 'bad_request', 'raw upstream text with req_id abc123 and $-1.2 balance'),
     );
 
     const r = await app.inject({
@@ -352,7 +355,36 @@ describe('Fix 2 — AdapterError non-fallback kinds map to invalid_request_error
     const body = r.json();
     expect(body.error.type).toBe('invalid_request_error');
     expect(body.error.code).toBe('bad_request');
-    expect(body.error.message).toBe('upstream rejected');
+    // Canned message, not the raw upstream string.
+    expect(body.error.message).toBe('The upstream provider rejected the request.');
+    // Belt-and-braces: no upstream artifact should have leaked.
+    expect(JSON.stringify(body)).not.toMatch(/req_id|abc123|balance|\$-1/);
+  });
+
+  it('10b. AdapterError insufficient_credits (fallback exhausted) → 503 api_error / insufficient_credits, upstream text scrubbed', async () => {
+    // This shape lands when EVERY provider in the fallback chain was out of
+    // credits — the router already fell over as far as it could and re-threw
+    // the last AdapterError. Client MUST get a 503 (platform unavailability),
+    // NOT a 402 (which would misleadingly point at the caller's own credits).
+    app = await buildTestApp({ userId: 'user-jwt-icred', authMethod: 'jwt', scopes: [] });
+    mockRouteChatCompletion.mockRejectedValueOnce(
+      new AdapterError('openrouter', 402, 'insufficient_credits',
+        '用户额度不足, 剩余额度: $-1.056014 (request id: 20260711221607138104560JcaEJu5j)'),
+    );
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: CHAT_BODY,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(r.statusCode).toBe(503);
+    const body = r.json();
+    expect(body.error.type).toBe('api_error');
+    expect(body.error.code).toBe('insufficient_credits');
+    // Canned English message — no Chinese, no request id, no negative balance.
+    expect(body.error.message).toMatch(/temporarily unavailable/i);
+    expect(JSON.stringify(body)).not.toMatch(/用户额度不足|剩余额度|request id|20260711/);
   });
 });
 

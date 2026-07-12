@@ -1,7 +1,8 @@
 import type pg from 'pg';
 import type { Redis } from 'ioredis';
 import { readCatalogEntry, readEnabledRouters } from './catalog.js';
-import { rankRoutersForModel, rankRoutersPresenceMode, estimateWorstCaseUsd, pickStickyRouter } from './select.js';
+import { rankRoutersForModel, rankRoutersPresenceMode, rankRoutersWaterfall, estimateWorstCaseUsd, pickStickyRouter } from './select.js';
+import { markSlotDown, readDownSlots, COOLDOWN_TRIGGER_KINDS } from './slot-cooldown.js';
 import {
   createStickyBindingsFromRedis,
   hashCacheablePrefix,
@@ -23,7 +24,35 @@ import { sendBillingEmail } from '../auth/email-service.js';
 import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult } from './adapters/types.js';
 import type { RouterName } from './normalize.js';
 
-const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 'model_not_available', 'unknown']);
+// Error kinds that must trigger fallover to the next candidate provider.
+// `insufficient_credits` means the *upstream provider's* account is out — not
+// the caller's — so we should transparently try the next provider before ever
+// surfacing anything to the client. Adapters set this via HTTP 402 or via
+// body-level detection of new-api / OpenAI / Anthropic credit-exhaust codes.
+const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 'model_not_available', 'insufficient_credits', 'unknown']);
+
+/**
+ * Slot names we might see in the ranker output. Kept in one place so the
+ * slot-cooldown MGET stays O(known-slots) instead of scanning Redis keys.
+ * Extend when adding new named slots.
+ */
+const KNOWN_ROUTER_SLOTS = ['provider-primary', 'provider-secondary', 'provider-tertiary', 'openrouter'] as const;
+
+/**
+ * Pick the active ranker. Waterfall wins over presence-mode when both are
+ * on; price-mode is the legacy default.
+ *
+ * Reads BOTH `config.aiRouter.mode` (env-driven, frozen at module load) AND
+ * the mutable `config.aiRouter.presenceModeEnabled` flag. Tests mutate the
+ * latter at runtime, and older prod deploys may still be on the legacy
+ * `AI_ROUTER_PRESENCE_MODE` env var, so honoring both keeps everyone working.
+ */
+function pickRanker() {
+  const mode = config.aiRouter.mode;
+  if (mode === 'waterfall') return rankRoutersWaterfall;
+  if (mode === 'presence' || config.aiRouter.presenceModeEnabled) return rankRoutersPresenceMode;
+  return rankRoutersForModel;
+}
 
 /**
  * Non-fatal post-settle hook: reads the user's current credits balance
@@ -148,7 +177,11 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   }
   const enabledStatuses = await readEnabledRouters(ctx.redis);
   const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
-  const ranker = config.aiRouter.presenceModeEnabled ? rankRoutersPresenceMode : rankRoutersForModel;
+  // Skip any slot currently in cooldown from a recent fallback-kind failure.
+  // Fail-open on Redis errors so a cache blip can't wedge routing.
+  const downSlots = await readDownSlots(ctx.redis, KNOWN_ROUTER_SLOTS);
+  for (const s of downSlots) enabled.delete(s);
+  const ranker = pickRanker();
   const ranked = ranker(entry, enabled);
   if (ranked.length === 0) {
     throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
@@ -215,6 +248,14 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     } catch (err) {
       lastError = err;
       if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        // Cool the slot down for a TTL window so subsequent fresh requests
+        // don't keep re-attempting a known-degraded provider. Auth /
+        // bad_request are caller-scoped (see COOLDOWN_TRIGGER_KINDS) and
+        // must not cool the slot for other callers — filtered inside the
+        // helper by the trigger set.
+        if (COOLDOWN_TRIGGER_KINDS.has(err.kind)) {
+          void markSlotDown(ctx.redis, candidate.name, config.aiRouter.slotCooldownSeconds);
+        }
         // If the failing candidate was the sticky pin, drop the binding before
         // falling through so the next conversation turn re-picks fresh.
         if (candidate.name === pinned && bindingKey) {
@@ -403,7 +444,11 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
 
   const enabledStatuses = await readEnabledRouters(ctx.redis);
   const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
-  const ranker = config.aiRouter.presenceModeEnabled ? rankRoutersPresenceMode : rankRoutersForModel;
+  // Skip any slot currently in cooldown from a recent fallback-kind failure.
+  // Fail-open on Redis errors so a cache blip can't wedge routing.
+  const downSlots = await readDownSlots(ctx.redis, KNOWN_ROUTER_SLOTS);
+  for (const s of downSlots) enabled.delete(s);
+  const ranker = pickRanker();
   const ranked = ranker(entry, enabled);
   if (ranked.length === 0) throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
 
@@ -432,6 +477,9 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     } catch (err) {
       lastError = err;
       if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        if (COOLDOWN_TRIGGER_KINDS.has(err.kind)) {
+          void markSlotDown(ctx.redis, candidate.name, config.aiRouter.slotCooldownSeconds);
+        }
         fallbackChain.push(`${candidate.name}:${err.kind}`);
         continue;
       }
@@ -684,7 +732,11 @@ export async function routeVideoSubmit(
 
   const enabledStatuses = await readEnabledRouters(ctx.redis);
   const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
-  const ranker = config.aiRouter.presenceModeEnabled ? rankRoutersPresenceMode : rankRoutersForModel;
+  // Skip any slot currently in cooldown from a recent fallback-kind failure.
+  // Fail-open on Redis errors so a cache blip can't wedge routing.
+  const downSlots = await readDownSlots(ctx.redis, KNOWN_ROUTER_SLOTS);
+  for (const s of downSlots) enabled.delete(s);
+  const ranker = pickRanker();
   const ranked = ranker(entry, enabled);
   if (ranked.length === 0) {
     throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
@@ -711,6 +763,9 @@ export async function routeVideoSubmit(
     } catch (err) {
       lastError = err;
       if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        if (COOLDOWN_TRIGGER_KINDS.has(err.kind)) {
+          void markSlotDown(ctx.redis, candidate.name, config.aiRouter.slotCooldownSeconds);
+        }
         fallbackChain.push(`${candidate.name}:${err.kind}`);
         continue;
       }

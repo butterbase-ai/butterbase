@@ -173,3 +173,45 @@ export function rankRoutersPresenceMode(
   if (or) head.push(or);
   return promotePreferred(entry.canonicalId, head);
 }
+
+/**
+ * Waterfall ranker: try slots in a fixed slot-identity order, independent of
+ * which provider brand currently occupies each slot. Secondary first (highest
+ * margin), then primary (reliability anchor), then any other enabled candidate
+ * the catalog offers (e.g. the OSS `openrouter` adapter, provider-tertiary
+ * when populated, or a future named slot) in catalog order.
+ *
+ * When `AI_ROUTER_MODE=waterfall` is set the router uses this ranker instead
+ * of presence-mode. Combined with slot-cooldown (see slot-cooldown.ts), a slot
+ * that fails with a fallback-kind error is skipped for a TTL window so we
+ * don't keep re-attempting a known-degraded provider on every fresh request.
+ *
+ * Model-support filtering still happens upstream (via `entry.routers`), so
+ * this ranker never returns a slot that doesn't list the requested model.
+ */
+const WATERFALL_SLOT_ORDER: readonly string[] = [
+  'provider-secondary',
+  'provider-primary',
+];
+
+export function rankRoutersWaterfall(
+  entry: CatalogEntry,
+  enabled: Set<string>,
+): CatalogRouter[] {
+  const available = entry.routers.filter(r => enabled.has(r.name));
+  const bySlot = new Map(available.map(r => [r.name, r]));
+  const ordered: CatalogRouter[] = [];
+  for (const slot of WATERFALL_SLOT_ORDER) {
+    const r = bySlot.get(slot as CatalogRouter['name']);
+    if (r) ordered.push(r);
+  }
+  // Trailing tail: any enabled router not in the named slot order (OSS
+  // `openrouter`, future per-tenant slots) keeps catalog order at the end.
+  // Never inserted ahead of a named slot.
+  for (const r of available) {
+    if (!WATERFALL_SLOT_ORDER.includes(r.name) && !ordered.includes(r)) {
+      ordered.push(r);
+    }
+  }
+  return promotePreferred(entry.canonicalId, ordered);
+}

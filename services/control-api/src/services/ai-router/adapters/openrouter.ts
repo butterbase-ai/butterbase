@@ -1,5 +1,5 @@
 import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult } from './types.js';
-import { AdapterError } from './types.js';
+import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
 
 interface OpenRouterConfig {
@@ -29,11 +29,34 @@ export function pickProviderCost(usage: unknown): number | null {
 
 function classifyHttp(status: number): AdapterErrorKind {
   if (status === 401 || status === 403) return 'auth';
+  if (status === 402) return 'insufficient_credits';
   if (status === 404) return 'model_not_available';
   if (status === 429) return 'rate_limit';
   if (status >= 500) return 'transport';
   if (status >= 400) return 'bad_request';
   return 'unknown';
+}
+
+/**
+ * Some upstreams (new-api-based proxies like imarouter) return HTTP 200 with
+ * an OpenAI-shaped error envelope for "user quota insufficient". Others 429
+ * with a specific `code`. We must inspect the parsed body BEFORE treating the
+ * response as a valid completion.
+ *
+ * Also normalizes the message so we never leak an upstream request id,
+ * upstream balance, or a non-English message to the caller.
+ */
+function throwIfUpstreamCreditExhaustion(router: 'openrouter', status: number, body: unknown): void {
+  if (isUpstreamCreditExhaustionBody(body)) {
+    // Deliberately generic — the caller must NOT see upstream request ids or
+    // negative-balance figures. Fallback loop only reads err.kind anyway.
+    throw new AdapterError(
+      router,
+      status,
+      'insufficient_credits',
+      'upstream provider is out of credits',
+    );
+  }
 }
 
 export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
@@ -186,12 +209,20 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      // Some upstreams (new-api / imarouter) return non-2xx with an OpenAI-shaped
+      // credit-exhausted envelope. Try to parse and reclassify BEFORE surfacing.
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* body is not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
       throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
     }
     if (req.stream) {
       return { status: res.status, stream: res.body ?? undefined, usage: null, providerCostUsd: null };
     }
     const json = await res.json() as any;
+    // new-api-based upstreams (imarouter et al.) return HTTP 200 with an error
+    // envelope for `insufficient_user_quota` — inspect BEFORE treating as success.
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
     // OpenRouter's chat-completions API returns the billed cost in `usage.cost`.
     // Older docs/responses used `usage.total_cost`; accept either so we don't
     // silently fall back to a catalog-token estimate (which under-counts image
@@ -228,9 +259,13 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
       throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
     }
     const json = await res.json() as any;
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
     const cost = pickProviderCost(json.usage);
     return {
       status: res.status,
