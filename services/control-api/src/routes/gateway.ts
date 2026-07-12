@@ -19,9 +19,9 @@ import {
   chatCompletionRequestSchema as chatCompletionSchema,
   embeddingRequestSchema as embeddingSchema,
 } from '../services/ai-router/schemas.js';
-import { messagesRequestSchema } from '../services/ai-router/messages-schema.js';
+import { messagesRequestSchema, guardMessagesRoutingShape } from '../services/ai-router/messages-schema.js';
 import { routeMessages } from '../services/ai-router/messages.js';
-import { responsesRequestSchema } from '../services/ai-router/responses-schema.js';
+import { responsesRequestSchema, guardResponsesRoutingShape } from '../services/ai-router/responses-schema.js';
 import { routeResponses } from '../services/ai-router/responses.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
 
@@ -293,7 +293,34 @@ export async function gatewayRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: { message: 'Not found', type: 'invalid_request_error', code: 'not_found' } });
       }
       const user = resolveGatewayUser(request);
-      const body = messagesRequestSchema.parse(request.body);
+      // Passthrough posture: /v1/messages forwards the request body to the upstream
+      // Anthropic provider (or through the translation layer) without policing
+      // Anthropic's own request schema. We only validate the minimum shape our
+      // own routing/lease/token-estimator needs. Unknown/new Anthropic fields
+      // (adaptive thinking, document blocks, prompt-cache params, future
+      // additions) flow through untouched; Anthropic returns its own 400 with a
+      // real error message if the body is malformed. The strict reference schema
+      // is still evaluated for observability so we see drift in logs before it
+      // becomes a bug report.
+      const guardRes = guardMessagesRoutingShape(request.body);
+      if (!guardRes.ok) {
+        return reply.code(400).send({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: guardRes.message },
+        });
+      }
+      const body = guardRes.body;
+      const driftCheck = messagesRequestSchema.safeParse(request.body);
+      if (!driftCheck.success) {
+        request.log.warn({
+          event: 'ai_router.messages.schema_drift',
+          issues: driftCheck.error.issues.slice(0, 8).map(i => ({
+            path: i.path.join('.'),
+            code: i.code,
+            message: i.message,
+          })),
+        }, 'forwarding /v1/messages body that does not match reference schema');
+      }
       auditCtx = {
         endpoint: 'messages',
         model: body.model,
@@ -380,7 +407,29 @@ export async function gatewayRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: { message: 'Not found', type: 'invalid_request_error', code: 'not_found' } });
       }
       const user = resolveGatewayUser(request);
-      const body = responsesRequestSchema.parse(request.body);
+      // Passthrough posture (see /v1/messages above for full rationale). We
+      // guard only the fields the router itself consumes; OpenAI validates the
+      // Responses API surface. Reference schema is still evaluated for drift
+      // logging.
+      const guardRes = guardResponsesRoutingShape(request.body);
+      if (!guardRes.ok) {
+        return reply.code(400).send({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: guardRes.message },
+        });
+      }
+      const body = guardRes.body;
+      const driftCheck = responsesRequestSchema.safeParse(request.body);
+      if (!driftCheck.success) {
+        request.log.warn({
+          event: 'ai_router.responses.schema_drift',
+          issues: driftCheck.error.issues.slice(0, 8).map(i => ({
+            path: i.path.join('.'),
+            code: i.code,
+            message: i.message,
+          })),
+        }, 'forwarding /v1/responses body that does not match reference schema');
+      }
       auditCtx = {
         endpoint: 'responses', model: body.model,
         appId: request.auth.appId ?? '_platform',

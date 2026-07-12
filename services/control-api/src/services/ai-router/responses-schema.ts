@@ -47,3 +47,31 @@ export const responsesRequestSchema = z.object({
 }).passthrough();
 
 export type ResponsesRequest = z.infer<typeof responsesRequestSchema>;
+
+/**
+ * Structural guard for /v1/responses — mirrors guardMessagesRoutingShape. We
+ * only validate the fields the router itself consumes (model, input, stream,
+ * previous_response_id). Everything else is passthrough; OpenAI validates its
+ * own Responses API surface.
+ */
+export function guardResponsesRoutingShape(
+  raw: unknown,
+): { ok: true; body: ResponsesRequest } | { ok: false; message: string } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, message: 'Request body must be a JSON object' };
+  }
+  const b = raw as Record<string, unknown>;
+  if (typeof b.model !== 'string' || b.model.length === 0) {
+    return { ok: false, message: 'Field "model" must be a non-empty string' };
+  }
+  if (typeof b.input !== 'string' && !Array.isArray(b.input)) {
+    return { ok: false, message: 'Field "input" must be a string or an array' };
+  }
+  if (b.stream !== undefined && typeof b.stream !== 'boolean') {
+    return { ok: false, message: 'Field "stream" must be boolean when present' };
+  }
+  if (b.previous_response_id !== undefined && typeof b.previous_response_id !== 'string') {
+    return { ok: false, message: 'Field "previous_response_id" must be a string when present' };
+  }
+  return { ok: true, body: b as ResponsesRequest };
+}
