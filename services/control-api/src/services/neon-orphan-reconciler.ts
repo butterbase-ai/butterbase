@@ -96,9 +96,11 @@ export async function reconcileOrphansForRegion(
   const orphans: { name: string; appId: string; createdAt: string; ageMs: number }[] = [];
   let skippedYoung = 0;
   let skippedInflight = 0;
+  let unmatchedNeonCount = 0; // Neon dbs with no live app row (before grace/inflight filters)
   for (const db of neonDbs) {
     const appId = db.name.slice('db_'.length); // 'db_app_XXX' → 'app_XXX'
     if (liveDbNames.has(appId)) continue;
+    unmatchedNeonCount++;
     if (inflightAppIds.has(appId)) {
       skippedInflight++;
       continue;
@@ -110,6 +112,11 @@ export async function reconcileOrphansForRegion(
     }
     orphans.push({ name: db.name, appId, createdAt: db.createdAt, ageMs });
   }
+  // Live apps whose db_name doesn't exist in Neon — the inverse orphan class
+  // (broken app that will 3D000 on query). We only log the count; fixing them
+  // is out of scope for this reconciler.
+  const missingNeonForLive = liveDbNames.size
+    - neonDbs.filter((db) => liveDbNames.has(db.name.slice('db_'.length))).length;
 
   // Oldest first — pick from the most-clearly-orphaned end when the cap bites.
   orphans.sort((a, b) => a.ageMs - b.ageMs > 0 ? -1 : 1);
@@ -120,7 +127,7 @@ export async function reconcileOrphansForRegion(
     region,
     neonDbCount: neonDbs.length,
     liveAppCount: liveDbNames.size,
-    orphanCount: neonDbs.length - liveDbNames.size,
+    orphanCount: unmatchedNeonCount,
     eligibleCount,
     dropped: [],
     wouldDrop: [],
@@ -135,6 +142,10 @@ export async function reconcileOrphansForRegion(
       neonDbCount: result.neonDbCount,
       liveAppCount: result.liveAppCount,
       orphanCount: result.orphanCount,
+      // Inverse case — live app rows pointing at non-existent Neon dbs. Not
+      // acted on here (deleting an app row would be wrong; those apps are
+      // just broken), but surfaced so an operator can grep for it.
+      missingNeonForLive,
       eligibleCount,
       skippedYoung,
       skippedInflight,
