@@ -801,11 +801,22 @@ export class RealtimeManager {
         continue;
       }
 
-      // RLS check: can this role/user see the record?
-      if (pkCol && recordPk !== undefined) {
-        const canSee = await this.rlsCheck(pool, change.table_name, pkCol, String(recordPk), role, userId);
-        if (!canSee) continue;
+      // Fail-closed: we can only enforce RLS on delivery when a single-column
+      // PK is available to filter on inside rlsCheck's SELECT. Without one
+      // (no PK, composite PK, or a transient DB error resolving it) we can't
+      // ask Postgres "does this row satisfy the policy for THIS record?", so
+      // drop the change for non-service roles instead of broadcasting. Prior
+      // behavior fell through to sendChange, leaking the row to every anon
+      // subscriber on any RLS-protected PK-less table.
+      if (!pkCol || recordPk === undefined) {
+        this.log.warn(
+          { appId, table: change.table_name, role, hasPk: !!pkCol, hasRecord: !!record },
+          '[Realtime] dropping change: no usable single-column PK for RLS check',
+        );
+        continue;
       }
+      const canSee = await this.rlsCheck(pool, change.table_name, pkCol, String(recordPk), role, userId);
+      if (!canSee) continue;
 
       for (const c of clients) this.sendChange(c.socket, change);
     }
@@ -823,12 +834,19 @@ export class RealtimeManager {
         `SELECT a.attname
          FROM pg_index i
          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-         WHERE i.indrelid = $1::regclass AND i.indisprimary
-         LIMIT 1`,
+         WHERE i.indrelid = $1::regclass AND i.indisprimary`,
         [table]
       );
-      const col = result.rows.length > 0 ? result.rows[0].attname : null;
-      this.pkCache.set(table, { col, expires: Date.now() + 60000 }); // cache 60s
+      // Only single-column PKs are usable here — rlsCheck's WHERE filters on
+      // exactly one column. A composite PK with the pre-fix LIMIT 1 would
+      // filter on one of the columns and match rows that share that value
+      // (wrong row, wrong RLS answer). Treat composite and no-PK the same;
+      // callers fail closed for non-service roles.
+      const col = result.rows.length === 1 ? result.rows[0].attname : null;
+      // Only cache positive results. Caching null poisoned the cache for 60s
+      // on any transient DB blip and silently disabled RLS on the table for
+      // that window — every subsequent event during it would broadcast.
+      if (col !== null) this.pkCache.set(table, { col, expires: Date.now() + 60000 });
       return col;
     } catch {
       return null;
@@ -843,6 +861,10 @@ export class RealtimeManager {
     role: 'butterbase_anon' | 'butterbase_user' | 'butterbase_service',
     userId: string | null
   ): Promise<boolean> {
+    // Defense in depth — the delivery gate already refuses to call us without
+    // a pkColumn, but a future caller wiring us up wrong shouldn't be able to
+    // turn the WHERE clause into a table scan.
+    if (!pkColumn) return false;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
