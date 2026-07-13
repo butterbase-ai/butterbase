@@ -8,6 +8,22 @@
 
 ### Added
 
+- **Durable Objects**: DO Workers now receive the same env surface as functions:
+  - Platform `BUTTERBASE_*` values (APP_ID, API_URL, APP_NAME, REGION, ANON_KEY,
+    plus optional SUBDOMAIN / FRONTEND_URL / STRIPE_ACCOUNT_ID / AI_DEFAULT_MODEL)
+    injected at deploy time — no need to set these as env vars by hand.
+  - App-level env vars (`app_env_vars`) merged into the DO env with the same
+    precedence functions use (per-DO override > app-level, platform always wins).
+    Set once at app level (`manage_app action: "update_env"`) and every DO and
+    every function in the app inherits it.
+  - `BUTTERBASE_INTERNAL_FN_KEY` auto-injected so DO classes can call sibling
+    functions with a working bearer.
+  - `PATCH /v1/:appId/env` now redeploys the DO Worker when the app has active
+    DO classes so the change reaches running DOs immediately.
+- **Clone**: `app_env_vars` are copied from source to dest on `manage_app action: "clone"`.
+  Preflight response gains `app_env.keys[]` so cloners see the app-level keys
+  they'll inherit. Reserved `BUTTERBASE_*` prefix is now rejected on
+  `manage_durable_objects action: "set_env"` (was previously function-only).
 - **Functions**: App-level environment variables. Set a key once at the app level and every function inherits it via `ctx.env.<KEY>`; per-function values still override on collision, and platform `BUTTERBASE_*` values always win. Managed via `manage_app` MCP actions `get_env` / `update_env`, control-api `GET`/`PATCH /v1/:appId/env`, or the dashboard's App Settings → Environment variables card. Reserved-prefix (`BUTTERBASE_*`) keys are rejected at both app-level and per-function PATCH endpoints. Cache invalidation fans out to every function in the app in one request; values are AES-256-GCM encrypted at rest and never returned by any GET endpoint or logged in any audit event.
 - **CLI**: `bb keys generate --app <id>` flag (required when `--scope app`; auto-resolved from a `bb.config` in the current directory when absent).
 - **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
