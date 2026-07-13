@@ -157,6 +157,13 @@ describe('bundler butterbase.ctx helper', () => {
     expect(bundle).toMatch(/delete\s+\w+\.DO_INVOKER_URL/);
   });
 
+  it("scrubs BUTTERBASE_INTERNAL_FN_KEY from ctx.env (user code should use ctx.invoke)", () => {
+    const { bundle } = buildBundle([
+      { name: 'my-do', code: 'export class MyDo { async fetch(req) { return new Response("ok"); } }', access_mode: 'public' },
+    ]);
+    expect(bundle).toMatch(/delete\s+\w+\.BUTTERBASE_INTERNAL_FN_KEY/);
+  });
+
   it('emits an invokeDO that POSTs to DO_INVOKER_URL/invoke with the right headers', () => {
     const { bundle } = buildBundle([
       { name: 'my-do', code: 'export class MyDo { async fetch(req) { return new Response("ok"); } }', access_mode: 'public' },
