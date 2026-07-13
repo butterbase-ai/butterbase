@@ -23,6 +23,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayMeetingsWebhook, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
 import { replayDurableObjectsForClone } from './durable-objects.service.js';
+import { replayAppEnvVars } from './clone-app-env.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
@@ -702,6 +703,25 @@ async function executeClone(
       }
       logger.info({ destAppId: resolvedDestAppId, ...seedResult }, '[clone] seed data complete');
 
+      // Replay app-level env vars BEFORE DO + function replay so both
+      // downstream surfaces see the merged blob at first deploy/insert.
+      try {
+        const appEnvResult = await replayAppEnvVars(
+          sourceRuntimePool, destRuntimePool,
+          job.source_app_id, resolvedDestAppId, job.requested_by_user_id,
+        );
+        if (appEnvResult.copied) {
+          logger.info(
+            { destAppId: resolvedDestAppId, keyCount: appEnvResult.keyCount },
+            '[clone] copied app_env_vars from source',
+          );
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await appendCloneJobWarnings(controlDb, jobId, [`app_env_vars replay failed: ${msg}`]);
+        logger.warn({ err, destAppId: resolvedDestAppId }, '[clone] app_env_vars replay failed; continuing');
+      }
+
       // Replay Durable Object classes. Must run BEFORE replayFunctions so any
       // function env var pointing at a `<appId>_do` URL can be re-supplied by
       // the caller after they see the DO namespace exists on dest. Prior to
@@ -716,6 +736,7 @@ async function executeClone(
         const doResult = await replayDurableObjectsForClone(
           sourceRuntimePool,
           destRuntimePool,
+          controlDb,
           job.source_app_id,
           resolvedDestAppId,
           job.requested_by_user_id,

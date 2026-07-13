@@ -7,6 +7,8 @@ import {
   AUTO_MINT_CONVENTION_KEYS, STATIC_FILL_KEYS,
 } from '../services/clone-env-vars.js';
 import { listDoEnvVarKeys } from '../services/durable-objects.service.js';
+import { decrypt } from '../services/crypto.js';
+import type { Pool } from 'pg';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { RESOURCE_NOT_FOUND, AUTH_INSUFFICIENT_PERMISSIONS } from '@butterbase/shared/error-types';
 
@@ -24,6 +26,19 @@ import { RESOURCE_NOT_FOUND, AUTH_INSUFFICIENT_PERMISSIONS } from '@butterbase/s
  * matches clone.ts via createAgentError so callers can use a single error
  * handler across both.
  */
+async function loadAppEnvKeys(db: Pool, appId: string): Promise<string[]> {
+  const r = await db.query<{ encrypted_env_vars: string }>(
+    `SELECT encrypted_env_vars FROM app_env_vars WHERE app_id = $1`, [appId],
+  );
+  if (r.rows.length === 0) return [];
+  const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+  try {
+    return Object.keys(JSON.parse(decrypt(r.rows[0].encrypted_env_vars, encKey)));
+  } catch {
+    return [];
+  }
+}
+
 export function cloneRoutesPreflight(app: FastifyInstance) {
   app.get<{ Params: { source_app_id: string } }>(
     '/v1/templates/:source_app_id/clone-preflight',
@@ -108,6 +123,13 @@ export function cloneRoutesPreflight(app: FastifyInstance) {
           app.log.warn({ err: doErr, source_app_id }, 'clone-preflight: listDoEnvVarKeys failed; assuming none');
         }
 
+        let appEnvKeys: string[] = [];
+        try {
+          appEnvKeys = await loadAppEnvKeys(runtimePool, source_app_id);
+        } catch (aeErr) {
+          app.log.warn({ err: aeErr, source_app_id }, 'clone-preflight: loadAppEnvKeys failed; assuming none');
+        }
+
         return {
           functions: fns.map(f => ({
             fn_name: f.fn_name,
@@ -123,6 +145,10 @@ export function cloneRoutesPreflight(app: FastifyInstance) {
             note: doEnvKeys.length > 0
               ? 'DO env var values are not carried across clones. Re-set each key via manage_durable_objects action=set_env once the clone completes.'
               : undefined,
+          },
+          app_env: {
+            keys: appEnvKeys,
+            note: 'These app-level env vars are copied to the clone. Override any of them with PATCH /v1/:appId/env after clone.',
           },
         };
       } catch (err) {
