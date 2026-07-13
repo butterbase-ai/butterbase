@@ -138,3 +138,23 @@ describe('buildBundle', () => {
     ).toThrow(expect.objectContaining({ code: 'INVALID_ACCESS_MODE' }));
   });
 });
+
+describe('bundler generated fetch — dispatch branch', () => {
+  it('emits a fetch handler that routes internal.butterbase/_dispatch to the DO namespace', () => {
+    const { bundle } = buildBundle([
+      { name: 'support-ticket-do', code: 'export class SupportTicketDo { async fetch() { return new Response("ok"); } }', access_mode: 'public' },
+    ]);
+    expect(bundle).toContain("'internal.butterbase'");
+    expect(bundle).toContain('/_dispatch/');
+    expect(bundle).toContain('idFromName');
+  });
+
+  it('preserves the existing /_do/ public path exactly', () => {
+    const { bundle } = buildBundle([
+      { name: 'chat-room', code: 'export class ChatRoom { async fetch() { return new Response("ok"); } }', access_mode: 'authenticated' },
+    ]);
+    expect(bundle).toContain('_do');
+    expect(bundle).toContain('checkAuth');
+    expect(bundle).toContain('ROUTES');
+  });
+});

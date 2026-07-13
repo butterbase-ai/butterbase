@@ -277,6 +277,24 @@ async function checkAuth(req, mode, env) {
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+
+    // Internal dispatch path — only reachable via WfP dispatch-namespace
+    // call from do-invoker (fn→DO) or another _do Worker (DO→DO). CF's
+    // public edge does not route the 'internal.butterbase' hostname, so a
+    // browser cannot arrive here. No access_mode check — the caller
+    // proved intra-app origin by having the dispatch binding.
+    if (url.hostname === 'internal.butterbase' && url.pathname.startsWith('/_dispatch/')) {
+      const parts = url.pathname.split('/');
+      const className = decodeURIComponent(parts[2] || '');
+      const instanceKey = decodeURIComponent(parts[3] || '');
+      const route = ROUTES[className];
+      if (!route) return new Response('unknown class: ' + className, { status: 404 });
+      const ns = env[route.binding];
+      if (!ns) return new Response('binding missing: ' + route.binding, { status: 500 });
+      const id = ns.idFromName(instanceKey);
+      return ns.get(id).fetch(req);
+    }
+
     const m = url.pathname.match(/^\\/_do\\/([^/]+)\\/([^/]+)/);
     if (!m) return new Response('not found', { status: 404 });
     const [, name, instance] = m;
