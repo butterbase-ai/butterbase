@@ -8,7 +8,23 @@ export default {
     if (auth !== `Bearer ${env.DO_INVOKER_TOKEN}`) {
       return new Response('unauthorized', { status: 401 });
     }
-    return new Response('do-invoker: not yet implemented', { status: 501 });
+
+    const appId = req.headers.get('x-butterbase-app');
+    const className = req.headers.get('x-butterbase-class');
+    const instanceKey = req.headers.get('x-butterbase-instance');
+
+    if (!appId) return new Response('x-butterbase-app required', { status: 400 });
+    if (!className) return new Response('x-butterbase-class required', { status: 400 });
+    if (!instanceKey) return new Response('x-butterbase-instance required', { status: 400 });
+
+    // Build the internal-hostname request the target ${appId}_do fetch
+    // handler recognizes as a dispatch arrival. Method, headers, body all
+    // preserved so caller identity + loop-depth + content-type propagate.
+    const internalUrl = `https://internal.butterbase/_dispatch/${encodeURIComponent(className)}/${encodeURIComponent(instanceKey)}`;
+    const dispatchReq = new Request(internalUrl, req);
+
+    const stub = env.DO_DISPATCH.get(`${appId}_do`);
+    return stub.fetch(dispatchReq);
   },
 };
 
