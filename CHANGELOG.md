@@ -8,6 +8,27 @@
 
 ### Added
 
+- **Functions**: `ctx.invokeDO(className, instanceKey, body?, opts?)` for calling a
+  same-app Durable Object from a function. Uses a platform-managed bearer (never
+  exposed via `ctx.env`); intra-app callers reach the DO without going through
+  the public HTTP surface. Loop-depth guard (max 4) shared with `ctx.invoke`.
+- **Durable Objects**: user DO code can opt into a per-request `ctx` object with
+  `env`, `invoke`, `invokeDO`, `user`, `request`, `state` by calling
+  `butterbase.ctx(req, this.env, this.state)` at the top of `fetch`. The
+  `butterbase` helper is prepended to every DO bundle automatically. Old DO code
+  that doesn't call the helper works unchanged.
+- **Durable Objects**: DO code can call sibling DOs via `ctx.invokeDO(...)` and
+  sibling functions via `ctx.invoke(...)`. DO→DO uses a WfP dispatch-namespace
+  binding directly (no shim, topological auth boundary); DO→function goes through
+  the same `do-invoker` shim functions use.
+- **New Worker `do-invoker`**: platform-owned CF Worker at `services/do-invoker/`
+  that translates HTTPS calls from deno-runtime into WfP dispatch calls to user
+  DO Workers. Auth is a single platform bearer (`DO_INVOKER_TOKEN`) held only by
+  the control-plane processes that need to sign these calls. Rotate with
+  `scripts/rotate-do-invoker-token.sh` (see docs). Not on any public route.
+  Local dev entry in `docker-compose.local.yml` runs `wrangler dev --local` for
+  the shim; note that wrangler dev cannot simulate WfP dispatch namespaces, so
+  end-to-end fn↔DO in local dev requires a scratch CF account deploy.
 - **Durable Objects**: DO Workers now receive the same env surface as functions:
   - Platform `BUTTERBASE_*` values (APP_ID, API_URL, APP_NAME, REGION, ANON_KEY,
     plus optional SUBDOMAIN / FRONTEND_URL / STRIPE_ACCOUNT_ID / AI_DEFAULT_MODEL)
@@ -56,6 +77,12 @@ Migration is mechanical — the new actions take the same parameters as the stan
 
 ### Deprecated
 
+- **User `INTERNAL_TOKEN` pattern**: apps that plumb a shared secret between
+  functions and their DOs for auth (`Authorization: Bearer ${INTERNAL_TOKEN}`)
+  should migrate to `ctx.invokeDO(...)` and the injected
+  `x-butterbase-internal-caller` header. The old pattern continues to work but
+  the shared secret is no longer necessary — the platform now provides the
+  auth boundary.
 - **Templates / user code**: the bearer-equality auth pattern in function code is deprecated. Code that compared `req.headers.get('authorization') === \`Bearer ${ctx.env.BUTTERBASE_API_KEY}\`` to decide whether to trust an `as_user_id` body field worked only when every caller and callee shared one key — a coincidence the clone job no longer (and arguably never should have) guaranteed. Replace with `ctx.user.id` (impersonation is now a platform concern, gated per-function) or `ctx.invoke('fn-name', body)` for same-app calls (no bearer involved). The platform will keep accepting the old pattern for back-compat in this release; it will not be removed without a separate breaking-change notice.
 
 ### Operational

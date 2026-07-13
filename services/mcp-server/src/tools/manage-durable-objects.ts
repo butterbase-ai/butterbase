@@ -49,6 +49,12 @@ Env vars are key-value pairs injected into every DO class at runtime, scoped to 
 the app. They are separate from function env vars. After set_env / delete_env, redeploy DOs for the
 change to take effect.
 
+Server-to-server ctx: DO code can opt into a per-request context object by calling
+\`const ctx = butterbase.ctx(req, this.env, this.state)\` at the top of \`fetch(req)\`. From it, DO
+code can call a sibling function with \`ctx.invoke('fn-name', body)\` and call a sibling DO with
+\`ctx.invokeDO('class-name', 'instance-key', body)\` — no bearer plumbing, platform-managed auth.
+Old DO code that doesn't call \`butterbase.ctx(...)\` continues to work unchanged.
+
 Common errors:
   - RESOURCE_NOT_FOUND: app_id or DO class doesn't exist
   - AUTH_INSUFFICIENT_PERMISSIONS: must be app owner or collaborator
