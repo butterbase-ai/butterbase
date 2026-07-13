@@ -1,0 +1,15 @@
+name = "do-invoker"
+main = "src/worker.ts"
+compatibility_date = "2026-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Binding to the same WfP dispatch namespace user _do scripts live in.
+# Value MUST match config.cloudflare.dispatchNamespace (services/control-api/src/config.ts:259).
+# If the prod deployment overrides CLOUDFLARE_DISPATCH_NAMESPACE, ops must set
+# the same override on the do-invoker deploy — otherwise dispatch returns "script not found".
+[[dispatch_namespaces]]
+binding = "DO_DISPATCH"
+namespace = "bb-frontends"
+
+# The bearer secret is not in this file — set via `wrangler secret put DO_INVOKER_TOKEN`.
+# Documented in README.md.
