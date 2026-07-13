@@ -145,8 +145,8 @@ async function fetchAppRowForPlatformEnv(
   return r.rows[0];
 }
 
-async function resolvePlatformDoEnv(controlDb: Pool, appId: string): Promise<PlatformDoEnvFields> {
-  const app = await fetchAppRowForPlatformEnv(controlDb, appId);
+async function resolvePlatformDoEnv(runtimeDb: Pool, appId: string): Promise<PlatformDoEnvFields> {
+  const app = await fetchAppRowForPlatformEnv(runtimeDb, appId);
   const fields: PlatformDoEnvFields = {
     BUTTERBASE_APP_ID: appId,
     BUTTERBASE_API_URL: config.apiBaseUrl,
@@ -293,10 +293,10 @@ async function bundleAndDeploy(
   }
 
   const [platformEnv, appEnvVars, doEnvVars, internalFnKey] = await Promise.all([
-    resolvePlatformDoEnv(controlDb, appId),
+    resolvePlatformDoEnv(db, appId),  // apps table lives on runtime plane
     loadAppLevelEnvVars(db, appId),
     loadDoOnlyEnvVars(db, appId),
-    fetchInternalFnKeyForApp(controlDb, appId),
+    fetchInternalFnKeyForApp(controlDb, appId),  // app_kv_credentials lives on control plane
   ]);
 
   const { envVars, collisions } = buildDoEnvBundle({

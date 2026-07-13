@@ -45,14 +45,14 @@ describe('registerDurableObject', () => {
       { rows: [{ id: 'do_1' }] },
       { rows: [{ id: 'do_1', name: 'chat-room', class_name: 'ChatRoom', code: 'export class ChatRoom {}', access_mode: 'public' }] },
       { rows: [] }, // No prior deploy state.
+      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] }, // apps row (runtime)
       { rows: [] }, // No app_env_vars.
       { rows: [] }, // No DO env vars.
       { rows: [] },
       { rows: [] },
     );
     c.queryResults.push(
-      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] },
-      { rows: [] },
+      { rows: [] }, // kv_function_key
     );
 
     const result = await DurableObjectsService.registerDurableObject(m.db, c.db, 'app_xyz', 'user_1', {
@@ -91,13 +91,13 @@ describe('registerDurableObject', () => {
       { rows: [{ id: 'do_1' }] },
       { rows: [{ id: 'do_1', name: 'chat-room', class_name: 'ChatRoom', code: 'export class ChatRoom {}', access_mode: 'public' }] },
       { rows: [] },                // SELECT prev state
+      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] }, // apps row (runtime)
       { rows: [] },                // SELECT app_env_vars
       { rows: [] },                // SELECT do env vars
       { rows: [] },                // UPDATE ERROR
     );
     c.queryResults.push(
-      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] },
-      { rows: [] },
+      { rows: [] }, // kv_function_key
     );
 
     await expect(
@@ -153,14 +153,14 @@ describe('registerDurableObject', () => {
       { rows: [{ id: 'do_1' }] },
       { rows: [{ id: 'do_1', name: 'chat-room', class_name: 'ChatRoom', code: 'export class ChatRoom {}', access_mode: 'public' }] },
       { rows: [{ deployed_class_names: ['ChatRoom'] }] },
+      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] }, // apps row (runtime)
       { rows: [] }, // app_env_vars
       { rows: [] }, // do env vars
       { rows: [] },
       { rows: [] },
     );
     c.queryResults.push(
-      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] },
-      { rows: [] },
+      { rows: [] }, // kv_function_key
     );
 
     await DurableObjectsService.registerDurableObject(m.db, c.db, 'app_xyz', 'user_1', {
@@ -190,13 +190,13 @@ describe('deleteDurableObject', () => {
       { rows: [] }, // DELETE row
       { rows: [{ id: 'do_2', name: 'leaderboard', class_name: 'Leaderboard', code: 'export class Leaderboard {}', access_mode: 'authenticated' }] }, // remaining
       { rows: [{ deployed_class_names: ['ChatRoom', 'Leaderboard'] }] }, // prev state
+      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] }, // apps row (runtime)
       { rows: [] }, // app_env_vars
       { rows: [] }, // do env vars
       { rows: [] }, // UPSERT deploy_state
     );
     c.queryResults.push(
-      { rows: [{ name: 'app', region: 'us-east-1', anon_key: 'anon', subdomain: null, deployment_url: null, stripe_connect_account_id: null, ai_config: null }] },
-      { rows: [] },
+      { rows: [] }, // kv_function_key
     );
 
     await DurableObjectsService.deleteDurableObject(m.db, c.db, 'app_xyz', 'chat-room');
@@ -257,20 +257,28 @@ describe('bundleAndDeploy env composition', () => {
     const encKey = process.env.AUTH_ENCRYPTION_KEY!;
     const appId = 'app_env_composition';
 
-    // Runtime DB call order:
+    // Runtime DB call order (apps lives on runtime plane):
     //  1. INSERT INTO app_durable_objects ... RETURNING id
     //  2. SELECT active classes
     //  3. SELECT prev deploy state
-    //  4. SELECT encrypted_env_vars FROM app_env_vars
-    //  5. SELECT key, encrypted_value FROM app_do_env_vars
-    //  6. INSERT INTO app_do_deploy_state ... ON CONFLICT DO UPDATE
-    //  7. UPDATE app_durable_objects SET status='READY'
+    //  4. SELECT apps row (resolvePlatformDoEnv — runtime!)
+    //  5. SELECT encrypted_env_vars FROM app_env_vars
+    //  6. SELECT key, encrypted_value FROM app_do_env_vars
+    //  7. INSERT INTO app_do_deploy_state ... ON CONFLICT DO UPDATE
+    //  8. UPDATE app_durable_objects SET status='READY'
     runtimeMock.queryResults.push(
       { rows: [{ id: 'do_1' }] },
       { rows: [{ id: 'do_1', name: 'widget-ticket-do', class_name: 'WidgetTicketDo',
                  code: 'export class WidgetTicketDo { async fetch() { return new Response("ok"); } }',
                  access_mode: 'public' }] },
       { rows: [] },
+      {
+        rows: [{
+          name: 'my-app', region: 'us-east-1', anon_key: 'anon_xyz',
+          subdomain: 'my-app', deployment_url: null,
+          stripe_connect_account_id: null, ai_config: null,
+        }],
+      },
       { rows: [{ encrypted_env_vars: encrypt(JSON.stringify({
           STRIPE_SECRET: 'sk_app',
           BUTTERBASE_APP_ID: 'spoofed',
@@ -280,17 +288,9 @@ describe('bundleAndDeploy env composition', () => {
       { rows: [] },
     );
 
-    // Control DB order:
-    //  1. SELECT apps row (resolvePlatformDoEnv)
-    //  2. SELECT kv_function_key (fetchInternalFnKeyForApp)
+    // Control DB order (only app_kv_credentials):
+    //  1. SELECT kv_function_key (fetchInternalFnKeyForApp)
     controlMock.queryResults.push(
-      {
-        rows: [{
-          name: 'my-app', region: 'us-east-1', anon_key: 'anon_xyz',
-          subdomain: 'my-app', deployment_url: null,
-          stripe_connect_account_id: null, ai_config: null,
-        }],
-      },
       { rows: [{ kv_function_key: 'kv_internal_xyz' }] },
     );
 
