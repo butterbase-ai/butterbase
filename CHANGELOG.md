@@ -8,6 +8,22 @@
 
 ### Added
 
+- **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
+  `BUTTERBASE_INTERNAL_FN_KEY` (in addition to `DO_INVOKER_URL` /
+  `DO_INVOKER_TOKEN`). The platform still injects the key into DO env so
+  `ctx.invoke` can mint fn→fn bearer headers — user code should use
+  `ctx.invoke(...)` instead of reading the key directly. Old DO code that
+  ignored `ctx.env` is unaffected.
+- **Ops**: `scripts/backfill-do-invoker-env.ts` — iterate all apps with active
+  Durable Objects and call `redeployIfActive` on each so their DO Worker picks
+  up the `DO_DISPATCH` binding + `DO_INVOKER_*` env keys. Dry-run default;
+  `--fix` to apply; `--app` / `--region` to scope. Run once after the first
+  ctx.invokeDO deploy per environment.
+- **Ops**: `scripts/rotate-do-invoker-token.sh` — atomic rotation across the
+  `do-invoker` CF Worker (`wrangler secret put`) and both Fly apps
+  (`butterbase-platform`, `butterbase-runtime`). Verifies at the end by
+  probing `/invoke` with the new bearer (expects 400 missing routing headers,
+  NOT 401). Set `DRY_RUN=1` to walk through without touching anything.
 - **Functions**: `ctx.invokeDO(className, instanceKey, body?, opts?)` for calling a
   same-app Durable Object from a function. Uses a platform-managed bearer (never
   exposed via `ctx.env`); intra-app callers reach the DO without going through

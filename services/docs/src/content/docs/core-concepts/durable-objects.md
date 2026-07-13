@@ -227,6 +227,23 @@ DO code opts into ctx via a helper. The bundler prepends `butterbase` to every D
 
 Old DO code that doesn't call `butterbase.ctx(...)` continues to work unchanged.
 
+### What's NOT in `ctx.env`
+
+`ctx.env` deliberately hides platform-only keys that user code should never
+read directly:
+
+- `DO_INVOKER_URL` / `DO_INVOKER_TOKEN` — the shim's bearer. Use
+  `ctx.invokeDO(...)` instead of trying to reach it yourself.
+- `BUTTERBASE_INTERNAL_FN_KEY` — the fn-invocation bearer. Use `ctx.invoke(...)`
+  instead of minting your own Authorization header.
+
+Everything else (all `BUTTERBASE_*` platform values, your `app_env_vars`, your
+per-DO env vars) remains visible via `ctx.env` exactly as documented for
+functions. If you want the underlying `this.env` directly (e.g. to log the
+raw key set for a bug report), that's still available inside the class body
+untouched — the scrub only applies to the object returned by
+`butterbase.ctx(...)`.
+
 ### Who called me?
 
 Requests arriving via server-to-server routing carry:
