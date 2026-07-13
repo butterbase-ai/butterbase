@@ -254,6 +254,9 @@ const butterbase = {
     const env = { ...envIn };
     delete env.DO_INVOKER_URL;
     delete env.DO_INVOKER_TOKEN;
+    // Platform-injected key used by ctx.invoke below; user code should use
+    // ctx.invoke instead of reading it directly, so hide it from ctx.env.
+    delete env.BUTTERBASE_INTERNAL_FN_KEY;
 
     const caller = req.headers.get('x-butterbase-internal-caller');
     const loopDepthIn = Number(req.headers.get('x-butterbase-loop-depth') || '0') || 0;
