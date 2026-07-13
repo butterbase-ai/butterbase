@@ -227,6 +227,8 @@ services:
       - WORKER_TIMEOUT_MS=30000
       - MAX_CONCURRENT_WORKERS=100
       - REDIS_URL=redis://redis:6379
+      - DO_INVOKER_URL=http://do-invoker:8787
+      - DO_INVOKER_TOKEN=local-dev-do-invoker-token
     volumes:
       - ./services/deno-runtime:/app:ro
       - deno_cache:/deno-dir
@@ -251,6 +253,23 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+
+  # Local do-invoker shim so function↔DO round-trips work end-to-end.
+  # Note: wrangler dev's local mode does not simulate WfP dispatch namespaces,
+  # so the shim will 500 when attempting to dispatch. Full E2E requires
+  # deploying do-invoker + a DO to a scratch CF account.
+  do-invoker:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./services/do-invoker:/app:ro
+    ports:
+      - "8787:8787"
+    environment:
+      - DO_INVOKER_TOKEN=local-dev-do-invoker-token
+    command: sh -c "npm install --no-audit --no-fund && npx wrangler dev --local --ip 0.0.0.0 --port 8787"
+    networks:
+      - butterbase
 
 volumes:
   control-plane-data:
