@@ -299,11 +299,16 @@ async function bundleAndDeploy(
     fetchInternalFnKeyForApp(controlDb, appId),  // app_kv_credentials lives on control plane
   ]);
 
+  const invokerConfig = config.doInvoker
+    ? { url: config.doInvoker.url, token: config.doInvoker.token }
+    : null;
+
   const { envVars, collisions } = buildDoEnvBundle({
     platformEnv: platformEnv as unknown as Record<string, string>,
     appEnvVars,
     doEnvVars,
     internalFnKey,
+    invokerConfig,
     doBindingNames: built.bindingNames,
   });
 
@@ -325,6 +330,7 @@ async function bundleAndDeploy(
       migrations: { new_classes, deleted_classes },
       oldTag,
       envVars,
+      dispatchBindings: [{ binding: 'DO_DISPATCH', namespace: CloudflareWfp.NS }],
     });
   } catch (err) {
     throw wrapCfDeployError(err);

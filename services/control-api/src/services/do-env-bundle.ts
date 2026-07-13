@@ -3,6 +3,7 @@ export interface DoEnvBundleInput {
   appEnvVars: Record<string, string>;
   doEnvVars: Record<string, string>;
   internalFnKey: string | null;
+  invokerConfig: { url: string; token: string } | null;
   doBindingNames: string[];
 }
 
@@ -19,6 +20,14 @@ export function buildDoEnvBundle(input: DoEnvBundleInput): DoEnvBundleResult {
   };
   if (input.internalFnKey !== null) {
     envVars.BUTTERBASE_INTERNAL_FN_KEY = input.internalFnKey;
+  }
+  if (input.invokerConfig !== null) {
+    // Not prefixed with BUTTERBASE_ so the bundler's ctx-scrub pass can
+    // identify and delete these platform-only keys from user-visible ctx.env.
+    // The reserved-prefix guard on manage_durable_objects set_env still
+    // prevents users from setting keys of these names.
+    envVars.DO_INVOKER_URL = input.invokerConfig.url;
+    envVars.DO_INVOKER_TOKEN = input.invokerConfig.token;
   }
 
   const bindingSet = new Set(input.doBindingNames);

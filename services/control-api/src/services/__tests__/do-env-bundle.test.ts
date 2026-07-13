@@ -8,6 +8,7 @@ describe('buildDoEnvBundle', () => {
       appEnvVars: { STRIPE_SECRET: 'sk_app', SHARED: 'app' },
       doEnvVars:  { SHARED: 'do_override', LOCAL_TO_DO: 'yes' },
       internalFnKey: null,
+      invokerConfig: null,
       doBindingNames: [],
     });
     expect(envVars).toEqual({
@@ -24,9 +25,23 @@ describe('buildDoEnvBundle', () => {
       appEnvVars: {},
       doEnvVars: {},
       internalFnKey: 'kv_abc',
+      invokerConfig: null,
       doBindingNames: [],
     });
     expect(envVars.BUTTERBASE_INTERNAL_FN_KEY).toBe('kv_abc');
+  });
+
+  it('injects DO_INVOKER_URL/TOKEN as top-tier env when invokerConfig is provided', () => {
+    const { envVars } = buildDoEnvBundle({
+      platformEnv: {},
+      appEnvVars: { DO_INVOKER_TOKEN: 'user_forged' },
+      doEnvVars: {},
+      internalFnKey: null,
+      invokerConfig: { url: 'https://do-invoker.workers.dev', token: 'real_platform_token' },
+      doBindingNames: [],
+    });
+    expect(envVars.DO_INVOKER_URL).toBe('https://do-invoker.workers.dev');
+    expect(envVars.DO_INVOKER_TOKEN).toBe('real_platform_token');
   });
 
   it('omits BUTTERBASE_INTERNAL_FN_KEY when internalFnKey is null', () => {
@@ -35,6 +50,7 @@ describe('buildDoEnvBundle', () => {
       appEnvVars: {},
       doEnvVars: {},
       internalFnKey: null,
+      invokerConfig: null,
       doBindingNames: [],
     });
     expect('BUTTERBASE_INTERNAL_FN_KEY' in envVars).toBe(false);
@@ -46,6 +62,7 @@ describe('buildDoEnvBundle', () => {
       appEnvVars: { WIDGET_TICKET_DO: 'oops' },
       doEnvVars: {},
       internalFnKey: null,
+      invokerConfig: null,
       doBindingNames: ['WIDGET_TICKET_DO'],
     });
     expect(collisions).toEqual([{ key: 'WIDGET_TICKET_DO', reason: 'do_binding' }]);
@@ -58,6 +75,7 @@ describe('buildDoEnvBundle', () => {
       appEnvVars: { BUTTERBASE_APP_ID: 'spoofed_app' },
       doEnvVars:  { BUTTERBASE_APP_ID: 'spoofed_do' },
       internalFnKey: null,
+      invokerConfig: null,
       doBindingNames: [],
     });
     expect(envVars.BUTTERBASE_APP_ID).toBe('real');
