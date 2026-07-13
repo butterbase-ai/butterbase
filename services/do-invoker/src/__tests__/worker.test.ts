@@ -78,4 +78,54 @@ describe('do-invoker dispatch', () => {
     expect(capturedCalls[0].headers['x-butterbase-internal-caller']).toBe('fn:widget-ingest');
     expect(capturedCalls[0].headers['x-butterbase-loop-depth']).toBe('1');
   });
+
+  it('returns 404 when the target script does not exist in the dispatch namespace', async () => {
+    const stubEnv = {
+      DO_INVOKER_TOKEN: 'test-token',
+      DO_DISPATCH: {
+        get(_scriptName: string) {
+          throw new Error('script not found');
+        },
+      },
+    };
+    const req = new Request('https://do-invoker.test/invoke', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-token',
+        'x-butterbase-app': 'app_missing',
+        'x-butterbase-class': 'c',
+        'x-butterbase-instance': 'i',
+      },
+    });
+    const res = await worker.fetch(req, stubEnv as any);
+    expect(res.status).toBe(404);
+    expect(await res.text()).toMatch(/unknown app: app_missing/);
+  });
+
+  it('returns 502 when the target script throws at fetch time', async () => {
+    const stubEnv = {
+      DO_INVOKER_TOKEN: 'test-token',
+      DO_DISPATCH: {
+        get(_scriptName: string) {
+          return {
+            async fetch(): Promise<Response> {
+              throw new Error('script crashed');
+            },
+          };
+        },
+      },
+    };
+    const req = new Request('https://do-invoker.test/invoke', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-token',
+        'x-butterbase-app': 'app_crashy',
+        'x-butterbase-class': 'c',
+        'x-butterbase-instance': 'i',
+      },
+    });
+    const res = await worker.fetch(req, stubEnv as any);
+    expect(res.status).toBe(502);
+    expect(await res.text()).toMatch(/dispatch failed:.*script crashed/);
+  });
 });

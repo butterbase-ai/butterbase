@@ -23,8 +23,19 @@ export default {
     const internalUrl = `https://internal.butterbase/_dispatch/${encodeURIComponent(className)}/${encodeURIComponent(instanceKey)}`;
     const dispatchReq = new Request(internalUrl, req);
 
-    const stub = env.DO_DISPATCH.get(`${appId}_do`);
-    return stub.fetch(dispatchReq);
+    let stub;
+    try {
+      stub = env.DO_DISPATCH.get(`${appId}_do`);
+    } catch (err) {
+      // WfP dispatch throws when the script name isn't registered — surface
+      // as 404 instead of leaking a CF 1101 (uncaught Worker exception).
+      return new Response(`unknown app: ${appId}`, { status: 404 });
+    }
+    try {
+      return await stub.fetch(dispatchReq);
+    } catch (err) {
+      return new Response(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`, { status: 502 });
+    }
   },
 };
 
