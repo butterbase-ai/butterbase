@@ -716,6 +716,7 @@ async function executeClone(
         const doResult = await replayDurableObjectsForClone(
           sourceRuntimePool,
           destRuntimePool,
+          controlDb,
           job.source_app_id,
           resolvedDestAppId,
           job.requested_by_user_id,

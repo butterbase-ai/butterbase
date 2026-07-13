@@ -127,7 +127,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
-      const result = await Service.registerDurableObject((await runtimeDb(appId)), appId, userId, body);
+      const result = await Service.registerDurableObject((await runtimeDb(appId)), controlDb, appId, userId, body);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.create',
         action: 'create', resourceType: 'durable_object', resourceId: result.id,
@@ -186,7 +186,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     const userId = requireUserId(request);
     await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     try {
-      await Service.deleteDurableObject((await runtimeDb(appId)), appId, name);
+      await Service.deleteDurableObject((await runtimeDb(appId)), controlDb, appId, name);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.delete',
         action: 'delete', resourceType: 'durable_object', resourceId: name, success: true,
@@ -237,7 +237,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     const body = setEnvSchema.parse(request.body);
 
     try {
-      const result = await Service.setDoEnvVar((await runtimeDb(appId)), appId, key, body.value);
+      const result = await Service.setDoEnvVar((await runtimeDb(appId)), controlDb, appId, key, body.value);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.env.set',
         action: 'update', resourceType: 'durable_object', resourceId: key,
@@ -271,7 +271,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
-      const result = await Service.deleteDoEnvVar((await runtimeDb(appId)), appId, key);
+      const result = await Service.deleteDoEnvVar((await runtimeDb(appId)), controlDb, appId, key);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.env.delete',
         action: 'delete', resourceType: 'durable_object', resourceId: key,

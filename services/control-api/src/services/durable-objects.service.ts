@@ -22,6 +22,8 @@ import {
   type ClassDef,
 } from './do-bundler.js';
 import { validateEnvKeys } from '../lib/env-vars.js';
+import { buildDoEnvBundle } from './do-env-bundle.js';
+import { config } from '../config.js';
 
 export class DurableObjectError extends Error {
   constructor(message: string, public readonly code: string) {
@@ -86,7 +88,7 @@ async function loadPrevDeployState(db: Pool, appId: string): Promise<PrevDeployS
  * empty object if none exist. The same AUTH_ENCRYPTION_KEY envelope is used
  * for app_frontend_env_vars and app_do_env_vars; no per-table key separation.
  */
-async function loadDoEnvVars(db: Pool, appId: string): Promise<Record<string, string>> {
+async function loadDoOnlyEnvVars(db: Pool, appId: string): Promise<Record<string, string>> {
   const r = await db.query<{ key: string; encrypted_value: string }>(
     `SELECT key, encrypted_value FROM app_do_env_vars WHERE app_id = $1`,
     [appId],
@@ -97,6 +99,75 @@ async function loadDoEnvVars(db: Pool, appId: string): Promise<Record<string, st
     out[row.key] = decrypt(row.encrypted_value, encKey);
   }
   return out;
+}
+
+async function loadAppLevelEnvVars(db: Pool, appId: string): Promise<Record<string, string>> {
+  const r = await db.query<{ encrypted_env_vars: string }>(
+    `SELECT encrypted_env_vars FROM app_env_vars WHERE app_id = $1`,
+    [appId],
+  );
+  if (r.rows.length === 0) return {};
+  const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+  try {
+    return JSON.parse(decrypt(r.rows[0].encrypted_env_vars, encKey)) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+interface PlatformDoEnvFields {
+  BUTTERBASE_APP_ID: string;
+  BUTTERBASE_API_URL: string;
+  BUTTERBASE_APP_NAME: string;
+  BUTTERBASE_REGION: string;
+  BUTTERBASE_ANON_KEY: string;
+  BUTTERBASE_SUBDOMAIN?: string;
+  BUTTERBASE_FRONTEND_URL?: string;
+  BUTTERBASE_STRIPE_ACCOUNT_ID?: string;
+  BUTTERBASE_AI_DEFAULT_MODEL?: string;
+}
+
+async function fetchAppRowForPlatformEnv(
+  controlDb: Pool,
+  appId: string,
+): Promise<{
+  name: string; region: string; anon_key: string;
+  subdomain: string | null; deployment_url: string | null;
+  stripe_connect_account_id: string | null; ai_config: unknown;
+}> {
+  const r = await controlDb.query(
+    `SELECT name, region, anon_key, subdomain, deployment_url,
+            stripe_connect_account_id, ai_config
+       FROM apps WHERE id = $1`,
+    [appId],
+  );
+  if (r.rows.length === 0) throw new DurableObjectError(`App ${appId} not found`, 'APP_NOT_FOUND');
+  return r.rows[0];
+}
+
+async function resolvePlatformDoEnv(controlDb: Pool, appId: string): Promise<PlatformDoEnvFields> {
+  const app = await fetchAppRowForPlatformEnv(controlDb, appId);
+  const fields: PlatformDoEnvFields = {
+    BUTTERBASE_APP_ID: appId,
+    BUTTERBASE_API_URL: config.apiBaseUrl,
+    BUTTERBASE_APP_NAME: app.name,
+    BUTTERBASE_REGION: app.region,
+    BUTTERBASE_ANON_KEY: app.anon_key,
+  };
+  if (app.subdomain) fields.BUTTERBASE_SUBDOMAIN = app.subdomain;
+  if (app.deployment_url) fields.BUTTERBASE_FRONTEND_URL = app.deployment_url;
+  if (app.stripe_connect_account_id) fields.BUTTERBASE_STRIPE_ACCOUNT_ID = app.stripe_connect_account_id;
+  const aiDefault = (app.ai_config as { defaultModel?: string } | null)?.defaultModel;
+  if (typeof aiDefault === 'string') fields.BUTTERBASE_AI_DEFAULT_MODEL = aiDefault;
+  return fields;
+}
+
+async function fetchInternalFnKeyForApp(controlDb: Pool, appId: string): Promise<string | null> {
+  const r = await controlDb.query<{ kv_function_key: string }>(
+    `SELECT kv_function_key FROM app_kv_credentials WHERE app_id = $1 LIMIT 1`,
+    [appId],
+  );
+  return r.rows[0]?.kv_function_key ?? null;
 }
 
 async function persistDeployState(
@@ -169,6 +240,7 @@ function wrapCfDeployError(err: unknown): DurableObjectError {
  */
 async function bundleAndDeploy(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   preloadedActive?: ActiveClassRow[],
 ): Promise<void> {
@@ -220,19 +292,27 @@ async function bundleAndDeploy(
     }
   }
 
-  // Load app-level env vars and reject any key that collides with a DO
-  // namespace binding name — CF would reject the PUT for duplicate bindings,
-  // and silently shadowing the DO namespace inside the user's class would be
-  // worse than a clear error here.
-  const envVars = await loadDoEnvVars(db, appId);
-  const bindingNameSet = new Set(built.bindingNames);
-  for (const k of Object.keys(envVars)) {
-    if (bindingNameSet.has(k)) {
-      throw new DurableObjectError(
-        `DO env var key '${k}' collides with a DO namespace binding. Rename the env var or the conflicting class.`,
-        'ENV_BINDING_COLLISION',
-      );
-    }
+  const [platformEnv, appEnvVars, doEnvVars, internalFnKey] = await Promise.all([
+    resolvePlatformDoEnv(controlDb, appId),
+    loadAppLevelEnvVars(db, appId),
+    loadDoOnlyEnvVars(db, appId),
+    fetchInternalFnKeyForApp(controlDb, appId),
+  ]);
+
+  const { envVars, collisions } = buildDoEnvBundle({
+    platformEnv: platformEnv as unknown as Record<string, string>,
+    appEnvVars,
+    doEnvVars,
+    internalFnKey,
+    doBindingNames: built.bindingNames,
+  });
+
+  if (collisions.length > 0) {
+    const first = collisions[0];
+    throw new DurableObjectError(
+      `DO env var key '${first.key}' collides with a DO namespace binding. Rename the env var or the conflicting class.`,
+      'ENV_BINDING_COLLISION',
+    );
   }
 
   let result;
@@ -261,6 +341,7 @@ async function bundleAndDeploy(
  */
 export async function registerDurableObject(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   userId: string,
   input: RegisterInput,
@@ -307,7 +388,7 @@ export async function registerDurableObject(
   const id = upsert.rows[0].id as string;
 
   try {
-    await bundleAndDeploy(db, appId);
+    await bundleAndDeploy(db, controlDb, appId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     await db.query(
@@ -376,6 +457,7 @@ export async function getDurableObject(
  */
 export async function deleteDurableObject(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   name: string,
 ): Promise<void> {
@@ -412,7 +494,7 @@ export async function deleteDurableObject(
   // already-loaded active set so we don't re-query (and so it matches the
   // post-DELETE snapshot above). The diff is computed against the previous
   // deploy state (which still contains the deleted class).
-  await bundleAndDeploy(db, appId, remaining);
+  await bundleAndDeploy(db, controlDb, appId, remaining);
 }
 
 export interface DurableObjectUsage {
@@ -463,6 +545,7 @@ export interface CloneReplayResult {
 export async function replayDurableObjectsForClone(
   sourceDb: Pool,
   destDb: Pool,
+  controlDb: Pool,
   sourceAppId: string,
   destAppId: string,
   destUserId: string,
@@ -513,7 +596,7 @@ export async function replayDurableObjectsForClone(
   }
 
   try {
-    await bundleAndDeploy(destDb, destAppId);
+    await bundleAndDeploy(destDb, controlDb, destAppId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     await destDb.query(
@@ -550,6 +633,7 @@ export interface SetDoEnvResult {
  */
 export async function setDoEnvVar(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   key: string,
   value: string,
@@ -579,23 +663,36 @@ export async function setDoEnvVar(
     [appId, key, encrypted],
   );
 
-  return { redeployed: await maybeRedeploy(db, appId) };
+  return { redeployed: await maybeRedeploy(db, controlDb, appId) };
 }
 
 export async function deleteDoEnvVar(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   key: string,
 ): Promise<SetDoEnvResult> {
   await db.query(`DELETE FROM app_do_env_vars WHERE app_id = $1 AND key = $2`, [appId, key]);
-  return { redeployed: await maybeRedeploy(db, appId) };
+  return { redeployed: await maybeRedeploy(db, controlDb, appId) };
 }
 
-async function maybeRedeploy(db: Pool, appId: string): Promise<boolean> {
+async function maybeRedeploy(db: Pool, controlDb: Pool, appId: string): Promise<boolean> {
   const active = await loadActiveClasses(db, appId);
   if (active.length === 0) return false;
-  await bundleAndDeploy(db, appId, active);
+  await bundleAndDeploy(db, controlDb, appId, active);
   return true;
+}
+
+/**
+ * Redeploys the app's DO Worker if any classes are currently active. Returns
+ * true when a redeploy actually ran, false when the app has no DOs. Errors bubble.
+ */
+export async function redeployIfActive(
+  db: Pool,
+  controlDb: Pool,
+  appId: string,
+): Promise<boolean> {
+  return maybeRedeploy(db, controlDb, appId);
 }
 
 export async function getDurableObjectUsage(
