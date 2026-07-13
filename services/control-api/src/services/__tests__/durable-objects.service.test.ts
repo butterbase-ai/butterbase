@@ -2,6 +2,7 @@ process.env.AUTH_ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789a
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../cloudflare-wfp.js', () => ({
+  NS: 'bb-frontends',
   deployDoWorker: vi.fn().mockResolvedValue({ newTag: 'v-test' }),
   deleteDoWorker: vi.fn().mockResolvedValue(undefined),
   getDoWorkerMigrationTag: vi.fn().mockResolvedValue(null),
@@ -313,6 +314,54 @@ describe('bundleAndDeploy env composition', () => {
     expect(call.envVars.BUTTERBASE_SUBDOMAIN).toBe('my-app');
     expect(call.envVars.BUTTERBASE_INTERNAL_FN_KEY).toBe('kv_internal_xyz');
     expect(call.envVars.BUTTERBASE_API_URL).toMatch(/^https?:\/\//);
+  });
+
+  it('passes dispatchBindings + invoker env when config.doInvoker is set', async () => {
+    const { config } = await import('../../config.js');
+    const originalInvoker = (config as any).doInvoker;
+    (config as any).doInvoker = { url: 'https://do-invoker.workers.dev', token: 'plat_token' };
+    try {
+      const { encrypt } = await import('../crypto.js');
+      const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+      const appId = 'app_env_invoker';
+      const runtimeMock = makeMockDb();
+      const controlMock = makeMockDb();
+      runtimeMock.queryResults.push(
+        { rows: [{ id: 'do_1' }] },
+        { rows: [{ id: 'do_1', name: 'my-do', class_name: 'MyDo',
+                   code: 'export class MyDo { async fetch() { return new Response("ok"); } }',
+                   access_mode: 'public' }] },
+        { rows: [] },
+        {
+          rows: [{
+            name: 'my-app', region: 'us-east-1', anon_key: 'anon_xyz',
+            subdomain: 'my-app', deployment_url: null,
+            stripe_connect_account_id: null, ai_config: null,
+          }],
+        },
+        { rows: [{ encrypted_env_vars: encrypt(JSON.stringify({}), encKey) }] },
+        { rows: [] },
+        { rows: [] },
+        { rows: [] },
+      );
+      controlMock.queryResults.push({ rows: [{ kv_function_key: null }] });
+
+      await DurableObjectsService.registerDurableObject(
+        runtimeMock.db, controlMock.db, appId, 'user_1',
+        {
+          name: 'my-do',
+          code: 'export class MyDo { async fetch() { return new Response("ok"); } }',
+          access_mode: 'public',
+        },
+      );
+
+      const call = (CloudflareWfp.deployDoWorker as any).mock.calls[0][0];
+      expect(call.dispatchBindings).toEqual([{ binding: 'DO_DISPATCH', namespace: expect.any(String) }]);
+      expect(call.envVars.DO_INVOKER_URL).toBe('https://do-invoker.workers.dev');
+      expect(call.envVars.DO_INVOKER_TOKEN).toBe('plat_token');
+    } finally {
+      (config as any).doInvoker = originalInvoker;
+    }
   });
 });
 

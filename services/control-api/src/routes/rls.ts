@@ -540,10 +540,64 @@ export async function rlsRoutes(app: FastifyInstance) {
         success: true,
       });
 
+      // Post-create advisory: if the expression contains a subquery against a table that has
+      // RLS enabled but no permissive SELECT policy for the target role, the subquery will read
+      // zero rows and the outer policy will silently evaluate false. This is the #1 source of
+      // "my WITH CHECK looks trivially true but INSERT keeps failing" reports.
+      const warnings: string[] = [];
+      const targetRole = role ? ROLE_MAP[role] : null;
+      if (targetRole) {
+        const expressions = [using_expression, with_check_expression].filter(Boolean) as string[];
+        const referencedTables = new Set<string>();
+        for (const expr of expressions) {
+          // Best-effort match: `FROM <ident>` and `JOIN <ident>` where ident is quoted or bare.
+          const re = /\b(?:from|join)\s+(?:"([^"]+)"|([a-zA-Z_][a-zA-Z0-9_]*))/gi;
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(expr)) !== null) {
+            const name = m[1] || m[2];
+            if (name && name.toLowerCase() !== table_name.toLowerCase()) referencedTables.add(name);
+          }
+        }
+        if (referencedTables.size > 0) {
+          const advisoryClient = await pool.connect();
+          try {
+            const check = await advisoryClient.query(
+              `SELECT c.relname AS table_name,
+                      c.relrowsecurity AS rls_enabled,
+                      EXISTS (
+                        SELECT 1 FROM pg_policies p
+                        WHERE p.schemaname = 'public'
+                          AND p.tablename = c.relname
+                          AND (p.cmd = 'SELECT' OR p.cmd = 'ALL')
+                          AND ($2 = ANY(p.roles) OR 'public' = ANY(p.roles))
+                          AND (p.permissive = 'PERMISSIVE' OR p.permissive IS NULL)
+                      ) AS has_readable_policy
+               FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = 'public' AND c.relname = ANY($1::text[])`,
+              [Array.from(referencedTables), targetRole]
+            );
+            for (const row of check.rows) {
+              if (row.rls_enabled && !row.has_readable_policy) {
+                warnings.push(
+                  `Referenced table "${row.table_name}" has RLS enabled but no permissive SELECT policy for role "${role}". ` +
+                  `Subqueries against it will return zero rows for end-users, causing this policy to silently evaluate false ` +
+                  `(AUTH_RLS_POLICY_VIOLATION on writes, empty results on reads). ` +
+                  `Fix: create_policy on "${row.table_name}" with command: "SELECT", role: "${role}", using_expression: <predicate>.`
+                );
+              }
+            }
+          } finally {
+            advisoryClient.release();
+          }
+        }
+      }
+
       return reply.send({
         success: true,
         policy_name,
         table: table_name,
+        ...(warnings.length > 0 ? { warnings } : {}),
       });
     } catch (error) {
       if (isHttpError(error)) throw error;

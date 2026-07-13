@@ -280,6 +280,18 @@ export const config = {
      * Used by dashboard-api to dispatch invite emails via POST /internal/email/invite. */
     emailSecret: process.env.INTERNAL_EMAIL_SECRET ?? 'dev-internal-email-secret',
   },
+
+  /**
+   * Platform-owned do-invoker Worker used for fn→DO and DO→function calls.
+   * Both values are set in this process's env; the token is echoed into each
+   * user DO's env bundle (never surfaced via user-visible ctx.env).
+   */
+  doInvoker: process.env.DO_INVOKER_URL && process.env.DO_INVOKER_TOKEN
+    ? {
+        url: process.env.DO_INVOKER_URL,
+        token: process.env.DO_INVOKER_TOKEN,
+      }
+    : null,
 };
 
 /**

@@ -138,3 +138,61 @@ describe('buildBundle', () => {
     ).toThrow(expect.objectContaining({ code: 'INVALID_ACCESS_MODE' }));
   });
 });
+
+describe('bundler butterbase.ctx helper', () => {
+  it('prepends a `butterbase` helper with ctx() to every bundle', () => {
+    const { bundle } = buildBundle([
+      { name: 'my-do', code: 'export class MyDo { async fetch(req) { return new Response("ok"); } }', access_mode: 'public' },
+    ]);
+    expect(bundle).toContain('const butterbase');
+    expect(bundle).toMatch(/butterbase\s*=\s*{/);
+    expect(bundle).toMatch(/ctx\s*[:(]/);
+  });
+
+  it("scrubs DO_INVOKER_TOKEN and DO_INVOKER_URL from ctx.env", () => {
+    const { bundle } = buildBundle([
+      { name: 'my-do', code: 'export class MyDo { async fetch(req) { return new Response("ok"); } }', access_mode: 'public' },
+    ]);
+    expect(bundle).toMatch(/delete\s+\w+\.DO_INVOKER_TOKEN/);
+    expect(bundle).toMatch(/delete\s+\w+\.DO_INVOKER_URL/);
+  });
+
+  it('emits an invokeDO that POSTs to DO_INVOKER_URL/invoke with the right headers', () => {
+    const { bundle } = buildBundle([
+      { name: 'my-do', code: 'export class MyDo { async fetch(req) { return new Response("ok"); } }', access_mode: 'public' },
+    ]);
+    expect(bundle).toContain('/invoke');
+    expect(bundle).toContain('x-butterbase-app');
+    expect(bundle).toContain('x-butterbase-class');
+    expect(bundle).toContain('x-butterbase-instance');
+    expect(bundle).toContain('x-butterbase-internal-caller');
+    expect(bundle).toContain('x-butterbase-loop-depth');
+  });
+
+  it("does NOT modify user class source (opt-in helper — old DOs still work)", () => {
+    const userCode = 'export class MyDo { async fetch(req) { return new Response("ok"); } }';
+    const { bundle } = buildBundle([{ name: 'my-do', code: userCode, access_mode: 'public' }]);
+    expect(bundle).toContain('class MyDo');
+    expect(bundle).not.toMatch(/class __User_?MyDo/);
+  });
+});
+
+describe('bundler generated fetch — dispatch branch', () => {
+  it('emits a fetch handler that routes internal.butterbase/_dispatch to the DO namespace', () => {
+    const { bundle } = buildBundle([
+      { name: 'support-ticket-do', code: 'export class SupportTicketDo { async fetch() { return new Response("ok"); } }', access_mode: 'public' },
+    ]);
+    expect(bundle).toContain("'internal.butterbase'");
+    expect(bundle).toContain('/_dispatch/');
+    expect(bundle).toContain('idFromName');
+  });
+
+  it('preserves the existing /_do/ public path exactly', () => {
+    const { bundle } = buildBundle([
+      { name: 'chat-room', code: 'export class ChatRoom { async fetch() { return new Response("ok"); } }', access_mode: 'authenticated' },
+    ]);
+    expect(bundle).toContain('_do');
+    expect(bundle).toContain('checkAuth');
+    expect(bundle).toContain('ROUTES');
+  });
+});

@@ -7,7 +7,7 @@ import { WORKER_SOURCE as STATIC_FALLBACK_WORKER_JS } from '@butterbase/static-f
 import { config } from '../config.js';
 import { cfFetch, CF_BASE } from './cloudflare-client.js';
 
-const NS = config.cloudflare.dispatchNamespace;
+export const NS = config.cloudflare.dispatchNamespace;
 const KV_ID = config.cloudflare.subdomainKvId;
 
 /**
@@ -222,6 +222,9 @@ export interface DoDeployInput {
   // each DO class instance. Caller is responsible for ensuring keys do not
   // collide with `bindingNames` (the DO namespace bindings).
   envVars?: Record<string, string>;
+  // Extra dispatch_namespace bindings (e.g. `DO_DISPATCH` → `bb-frontends`) so
+  // this DO worker can invoke sibling `${appId}_do` scripts by name.
+  dispatchBindings?: { binding: string; namespace: string }[];
 }
 
 /**
@@ -229,7 +232,7 @@ export interface DoDeployInput {
  * caller must persist so the next deploy can supply it as `old_tag`.
  */
 export async function deployDoWorker(input: DoDeployInput): Promise<{ newTag: string }> {
-  const { scriptName, bundle, classNames, bindingNames, migrations, oldTag, envVars } = input;
+  const { scriptName, bundle, classNames, bindingNames, migrations, oldTag, envVars, dispatchBindings } = input;
 
   if (classNames.length !== bindingNames.length) {
     throw new Error('deployDoWorker: classNames and bindingNames length mismatch');
@@ -247,10 +250,16 @@ export async function deployDoWorker(input: DoDeployInput): Promise<{ newTag: st
     text,
   }));
 
+  const dispatchBindingEntries = (dispatchBindings ?? []).map((b) => ({
+    type: 'dispatch_namespace' as const,
+    name: b.binding,
+    namespace: b.namespace,
+  }));
+
   const newTag = `v-${Date.now()}`;
   const metadata = {
     main_module: 'worker.mjs',
-    bindings: [...doBindings, ...envBindings],
+    bindings: [...doBindings, ...envBindings, ...dispatchBindingEntries],
     migrations: {
       ...(oldTag ? { old_tag: oldTag } : {}),
       new_tag: newTag,
