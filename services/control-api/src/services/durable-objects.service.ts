@@ -21,6 +21,7 @@ import {
   type AccessMode,
   type ClassDef,
 } from './do-bundler.js';
+import { validateEnvKeys } from '../lib/env-vars.js';
 
 export class DurableObjectError extends Error {
   constructor(message: string, public readonly code: string) {
@@ -553,6 +554,13 @@ export async function setDoEnvVar(
   key: string,
   value: string,
 ): Promise<SetDoEnvResult> {
+  const reserved = validateEnvKeys([key]);
+  if (reserved) {
+    throw new DurableObjectError(
+      `Reserved key: "${reserved.key}" — keys starting with BUTTERBASE_ are reserved for platform use`,
+      'RESERVED_ENV_KEY',
+    );
+  }
   if (!ENV_KEY_REGEX.test(key)) {
     throw new DurableObjectError(
       `Invalid env var key '${key}'. Must match ${ENV_KEY_REGEX} (uppercase, digits, underscore).`,

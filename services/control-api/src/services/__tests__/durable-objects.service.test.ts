@@ -1,3 +1,4 @@
+process.env.AUTH_ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../cloudflare-wfp.js', () => ({
@@ -219,5 +220,31 @@ describe('deleteDurableObject', () => {
 
     expect(CloudflareWfp.deployDoWorker).not.toHaveBeenCalled();
     expect(CloudflareWfp.deleteDoWorker).not.toHaveBeenCalled();
+  });
+});
+
+describe('setDoEnvVar reserved prefix', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('rejects BUTTERBASE_* keys with RESERVED_ENV_KEY code', async () => {
+    const m = makeMockDb();
+    await expect(
+      DurableObjectsService.setDoEnvVar(m.db, 'app_xyz', 'BUTTERBASE_APP_ID', 'spoofed')
+    ).rejects.toMatchObject({
+      name: 'DurableObjectError',
+      code: 'RESERVED_ENV_KEY',
+    });
+    // Must reject BEFORE any write — no query issued.
+    expect(m.queries).toHaveLength(0);
+  });
+
+  it('accepts non-reserved keys and returns redeployed=false when no active classes', async () => {
+    const m = makeMockDb();
+    m.queryResults.push(
+      { rows: [] }, // INSERT INTO app_do_env_vars (upsert)
+      { rows: [] }, // SELECT active classes for maybeRedeploy → empty
+    );
+    const res = await DurableObjectsService.setDoEnvVar(m.db, 'app_xyz', 'STRIPE_SECRET', 'sk_test_x');
+    expect(res).toEqual({ redeployed: false });
   });
 });
