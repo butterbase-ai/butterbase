@@ -45,8 +45,20 @@ WORKDIR /app
 # Match the devDep version from the package's package.json. Hardcoded here
 # instead of read-from-package because we don't carry the workspace into
 # this stage. Bump in lockstep with packages/static-frontend-worker/package.json.
+#
+# --include=optional is REQUIRED: workerd ships its platform-specific binary
+# (@cloudflare/workerd-linux-{amd64,arm64}) as an optionalDependency, and
+# recent npm versions drop optional deps when --omit=dev is set alone, which
+# makes the container crash at runtime with "The package
+# @cloudflare/workerd-linux-arm64 could not be found."
+#
+# Do NOT pipe npm through `| tail -N` here without also setting pipefail —
+# an earlier version of this line piped through `| tail -5` and silently
+# swallowed npm's non-zero exit, producing an image missing the workerd
+# binary. node:22-slim's /bin/sh is dash and doesn't support pipefail, so
+# we just let npm output land in the build log in full.
 RUN npm init -y >/dev/null && \
-    npm install --omit=dev --no-package-lock miniflare@^4.20260426.0 2>&1 | tail -5
+    npm install --omit=dev --include=optional --no-package-lock miniflare@^4.20260426.0
 
 COPY --from=builder /app/submodules/butterbase-oss/packages/static-frontend-worker/dist ./dist/
 COPY --from=builder /app/submodules/butterbase-oss/packages/static-frontend-worker/scripts ./scripts/
