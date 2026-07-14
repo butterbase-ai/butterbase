@@ -142,8 +142,17 @@ export function cloneRoutesPreflight(app: FastifyInstance) {
           })),
           durable_objects: {
             env_keys: doEnvKeys,
-            note: doEnvKeys.length > 0
-              ? 'DO env var values are not carried across clones. Re-set each key via manage_durable_objects action=set_env once the clone completes.'
+            // Same per-key annotation shape as functions: convention keys are
+            // auto-minted with the shared clone bb_sk_*; anything else remains
+            // a secret the caller must re-set via manage_durable_objects
+            // action=set_env after clone.
+            key_meta: doEnvKeys.map((k) =>
+              AUTO_MINT_CONVENTION_KEYS.includes(k)
+                ? { key: k, status: 'auto_filled' as const, reason: 'Auto-minted bb_sk_* scoped to the new app (shared with functions).' }
+                : { key: k, status: 'user_required' as const },
+            ),
+            note: doEnvKeys.some((k) => !AUTO_MINT_CONVENTION_KEYS.includes(k))
+              ? 'Non-convention DO env values are not carried across clones. Re-set each user_required key via manage_durable_objects action=set_env once the clone completes.'
               : undefined,
           },
           app_env: {
