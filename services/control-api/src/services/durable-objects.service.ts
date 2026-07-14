@@ -23,6 +23,7 @@ import {
 } from './do-bundler.js';
 import { validateEnvKeys } from '../lib/env-vars.js';
 import { buildDoEnvBundle } from './do-env-bundle.js';
+import { AUTO_MINT_CONVENTION_KEYS } from './clone-env-vars.js';
 import { config } from '../config.js';
 
 export class DurableObjectError extends Error {
@@ -532,6 +533,20 @@ export async function listDoEnvVarKeys(db: Pool, appId: string): Promise<string[
 export interface CloneReplayResult {
   cloned: string[];
   do_env_keys: string[];
+  /** DO env keys that received a value from the shared clone-minted bb_sk_*.
+   *  Empty when no shared key was passed or no keys matched a convention. */
+  auto_minted_keys: string[];
+}
+
+export interface ReplayDurableObjectsCloneOpts {
+  /** Shared bb_sk_* minted once per clone by the orchestrator. When provided,
+   *  every DO env key that matches AUTO_MINT_CONVENTION_KEYS (or is listed
+   *  in explicitAutoMintKeys) is written to app_do_env_vars on the dest with
+   *  this value before bundleAndDeploy runs. */
+  sharedMintedKey?: string | null;
+  /** Extra DO env keys the caller explicitly asked to auto-fill with the
+   *  shared minted key, beyond convention-matched keys. */
+  explicitAutoMintKeys?: string[];
 }
 
 /**
@@ -541,12 +556,16 @@ export interface CloneReplayResult {
  * replay so that functions whose env vars reference `<appId>_do` URLs can
  * be pointed at the dest namespace by the caller.
  *
- * Values of DO env vars are NOT copied — they're secrets held only in the
- * source's encryption envelope. Their KEYS are returned so the clone caller
- * can surface them alongside function env keys in the pending_env_vars flow.
+ * Values of DO env vars are NOT copied wholesale — they're secrets held only
+ * in the source's encryption envelope. Their KEYS are returned so the clone
+ * caller can surface them alongside function env keys in the pending_env_vars
+ * flow. The one exception is convention keys (BUTTERBASE_API_KEY /
+ * BB_SUBSTRATE_KEY): when `opts.sharedMintedKey` is provided, those keys are
+ * filled with the shared minted bb_sk_* so DOs and functions on the cloned
+ * app share the same intra-app credential without a manual set_env step.
  *
- * If the source has no active DOs, returns `{ cloned: [], do_env_keys: [] }`
- * without deploying anything.
+ * If the source has no active DOs, returns `{ cloned: [], do_env_keys: [],
+ * auto_minted_keys: [] }` without deploying anything.
  */
 export async function replayDurableObjectsForClone(
   sourceDb: Pool,
@@ -555,6 +574,7 @@ export async function replayDurableObjectsForClone(
   sourceAppId: string,
   destAppId: string,
   destUserId: string,
+  opts?: ReplayDurableObjectsCloneOpts,
 ): Promise<CloneReplayResult> {
   const src = await sourceDb.query<{
     name: string;
@@ -575,7 +595,7 @@ export async function replayDurableObjectsForClone(
   const doEnvKeys = keysRes.rows.map((r) => r.key);
 
   if (src.rows.length === 0) {
-    return { cloned: [], do_env_keys: doEnvKeys };
+    return { cloned: [], do_env_keys: doEnvKeys, auto_minted_keys: [] };
   }
 
   // Insert every source class into the dest at status='BUILDING'. On conflict
@@ -601,6 +621,35 @@ export async function replayDurableObjectsForClone(
     insertedIds.push(ins.rows[0].id);
   }
 
+  // Auto-mint convention keys into app_do_env_vars BEFORE bundleAndDeploy so
+  // the deploy picks up the values on first roll. Bypasses setDoEnvVar's
+  // reserved-prefix guard (BUTTERBASE_API_KEY starts with BUTTERBASE_) via
+  // direct SQL — a platform-controlled write of a platform-recognized key,
+  // mirroring how clone-replay writes function encrypted_env_vars for the
+  // same convention. Explicit + convention targets are unioned so a caller
+  // can request a non-convention key too, at the cost of naming it up front.
+  const autoMintedKeys: string[] = [];
+  if (opts?.sharedMintedKey && doEnvKeys.length + (opts.explicitAutoMintKeys?.length ?? 0) > 0) {
+    const conventionTargets = doEnvKeys.filter((k) => AUTO_MINT_CONVENTION_KEYS.includes(k));
+    const explicitTargets = opts.explicitAutoMintKeys ?? [];
+    const mintTargets = Array.from(new Set([...conventionTargets, ...explicitTargets]));
+    if (mintTargets.length > 0) {
+      const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+      const encrypted = encrypt(opts.sharedMintedKey, encKey);
+      for (const key of mintTargets) {
+        await destDb.query(
+          `INSERT INTO app_do_env_vars (app_id, key, encrypted_value)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (app_id, key) DO UPDATE
+             SET encrypted_value = EXCLUDED.encrypted_value,
+                 updated_at = now()`,
+          [destAppId, key, encrypted],
+        );
+        autoMintedKeys.push(key);
+      }
+    }
+  }
+
   try {
     await bundleAndDeploy(destDb, controlDb, destAppId);
   } catch (err) {
@@ -622,7 +671,7 @@ export async function replayDurableObjectsForClone(
     [insertedIds],
   );
 
-  return { cloned: src.rows.map((r) => r.name), do_env_keys: doEnvKeys };
+  return { cloned: src.rows.map((r) => r.name), do_env_keys: doEnvKeys, auto_minted_keys: autoMintedKeys };
 }
 
 // CF binding name pattern: identifier-like, uppercase by convention.

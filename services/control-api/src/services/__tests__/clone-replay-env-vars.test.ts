@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { replayFunctions } from '../clone-replay.js';
 import { decrypt } from '../crypto.js';
-import { runtimeDb, controlDb } from '../../__tests__/test-helpers/control-db.js';
-import { randomUUID } from 'node:crypto';
+import { runtimeDb, controlDb, seedUser } from '../../__tests__/test-helpers/control-db.js';
 
 const RUN_DB_TESTS = process.env.RUN_DB_TESTS === '1';
 const describeDb = RUN_DB_TESTS ? describe : describe.skip;
@@ -11,11 +10,7 @@ const noopLogger = { info() {}, warn() {} };
 
 describeDb('replayFunctions with pending env vars', () => {
   it('writes provided values into the dest function encrypted_env_vars', async () => {
-    const ownerId = randomUUID();
-    await controlDb.query(
-      `INSERT INTO platform_users (id, email, email_verified) VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING`,
-      [ownerId, `replay-env-${ownerId}@x.com`],
-    );
+    const { id: ownerId } = await seedUser(`replay-env-${Date.now()}@x.com`);
     const srcId = `app_replay_src_${ownerId.slice(0, 8)}`;
     const destId = `app_replay_dst_${ownerId.slice(0, 8)}`;
     for (const id of [srcId, destId]) {
@@ -49,14 +44,11 @@ describeDb('replayFunctions with pending env vars', () => {
     await runtimeDb.query(`DELETE FROM app_functions WHERE app_id IN ($1, $2)`, [srcId, destId]);
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
     await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
+    await controlDb.query(`DELETE FROM organizations WHERE owner_id = $1`, [ownerId]);
   });
 
   it('reports unfilled keys when source has more keys than the user supplied', async () => {
-    const ownerId = randomUUID();
-    await controlDb.query(
-      `INSERT INTO platform_users (id, email, email_verified) VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING`,
-      [ownerId, `replay-env-unf-${ownerId}@x.com`],
-    );
+    const { id: ownerId } = await seedUser(`replay-env-unf-${Date.now()}@x.com`);
     const srcId = `app_replay_src_unf_${ownerId.slice(0, 8)}`;
     const destId = `app_replay_dst_unf_${ownerId.slice(0, 8)}`;
     for (const id of [srcId, destId]) {
@@ -86,6 +78,7 @@ describeDb('replayFunctions with pending env vars', () => {
     await runtimeDb.query(`DELETE FROM app_functions WHERE app_id IN ($1, $2)`, [srcId, destId]);
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
     await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
+    await controlDb.query(`DELETE FROM organizations WHERE owner_id = $1`, [ownerId]);
   });
 
   // Phase 4 contract: one shared bb_sk_* per clone, fanned out to every fn
@@ -94,11 +87,7 @@ describeDb('replayFunctions with pending env vars', () => {
   // callee compared the bearer to its own env. See
   // backfill-consolidate-clone-keys.ts for the matching cleanup script.
   it('mints exactly one shared bb_sk_* and assigns the same value to every fn', async () => {
-    const ownerId = randomUUID();
-    await controlDb.query(
-      `INSERT INTO platform_users (id, email, email_verified) VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING`,
-      [ownerId, `replay-shared-${ownerId}@x.com`],
-    );
+    const { id: ownerId } = await seedUser(`replay-shared-${Date.now()}@x.com`);
     const srcId = `app_replay_shared_src_${ownerId.slice(0, 8)}`;
     const destId = `app_replay_shared_dst_${ownerId.slice(0, 8)}`;
     for (const id of [srcId, destId]) {
@@ -153,5 +142,6 @@ describeDb('replayFunctions with pending env vars', () => {
     await runtimeDb.query(`DELETE FROM app_functions WHERE app_id IN ($1, $2)`, [srcId, destId]);
     await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
     await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
+    await controlDb.query(`DELETE FROM organizations WHERE owner_id = $1`, [ownerId]);
   });
 });

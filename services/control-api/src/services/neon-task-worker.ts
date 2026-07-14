@@ -22,7 +22,8 @@ import {
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayMeetingsWebhook, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
-import { replayDurableObjectsForClone } from './durable-objects.service.js';
+import { replayDurableObjectsForClone, listDoEnvVarKeys } from './durable-objects.service.js';
+import { AUTO_MINT_CONVENTION_KEYS, mintApiKeyForClone } from './clone-env-vars.js';
 import { replayAppEnvVars } from './clone-app-env.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
@@ -722,50 +723,9 @@ async function executeClone(
         logger.warn({ err, destAppId: resolvedDestAppId }, '[clone] app_env_vars replay failed; continuing');
       }
 
-      // Replay Durable Object classes. Must run BEFORE replayFunctions so any
-      // function env var pointing at a `<appId>_do` URL can be re-supplied by
-      // the caller after they see the DO namespace exists on dest. Prior to
-      // this step, DOs silently failed to clone: manage_durable_objects list
-      // on the dest returned an empty array while functions still referenced
-      // the source DO URLs (bug 6a04a0d5). DO env var VALUES are secrets and
-      // never copied — only their KEYS surface, so the caller can re-set them
-      // via manage_durable_objects action=set_env after clone completes.
-      scope.setTag('step', 'replaying_durable_objects');
-      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_durable_objects' });
-      try {
-        const doResult = await replayDurableObjectsForClone(
-          sourceRuntimePool,
-          destRuntimePool,
-          controlDb,
-          job.source_app_id,
-          resolvedDestAppId,
-          job.requested_by_user_id,
-        );
-        if (doResult.cloned.length > 0) {
-          logger.info(
-            { destAppId: resolvedDestAppId, cloned: doResult.cloned, doEnvKeys: doResult.do_env_keys },
-            '[clone] durable objects replayed',
-          );
-          if (doResult.do_env_keys.length > 0) {
-            await appendCloneJobWarnings(controlDb, jobId, [
-              `Durable Objects cloned: ${doResult.cloned.join(', ')}. The DO env keys (${doResult.do_env_keys.join(', ')}) are secrets and were not copied — set them via manage_durable_objects action=set_env after the clone completes.`,
-            ]);
-          }
-        } else {
-          logger.info({ destAppId: resolvedDestAppId }, '[clone] no active durable objects on source');
-        }
-      } catch (err) {
-        // DO replay failure is not silently ignored — surface it as a fatal
-        // clone-job failure so the caller notices instead of getting a
-        // "completed" clone whose DOs are half-deployed.
-        throw err;
-      }
-
-      // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
-      scope.setTag('step', 'replaying_functions');
-      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
-
       // Read the staged env vars + auto-mint requests off the clone job row.
+      // Hoisted above DO replay (previously read just before replayFunctions)
+      // so DO replay can also consume the shared bb_sk_ minted for this clone.
       const cjRow = await controlDb.query<{
         pending_env_vars: string | null;
         auto_mint_requests: { fn_name: string; key: string }[] | null;
@@ -788,14 +748,11 @@ async function executeClone(
       }
       const autoMintRequests = cjRow.rows[0]?.auto_mint_requests ?? undefined;
 
-      // Resolve dest owner id (needed for auto-mint — bb_sk_* is minted under the
-      // dest owner's user_id). One round-trip; cached for the rest of this step.
-      // The dest app was created by an earlier step in this same worker, so we
-      // must be able to read its owner back — an empty result here means the
-      // runtime DB is inconsistent with what we just wrote. Hard-fail rather
-      // than silently skip auto-mint (which downstream would already throw
-      // via the tightened precondition check in replayFunctions, but failing
-      // here gives a more precise error).
+      // Resolve dest owner id once — needed for any auto-mint decision that
+      // follows (bb_sk_ is minted under the dest owner's user_id). Hoisted
+      // above DO replay so the DO side can share the same minted key with the
+      // fn side (one shared credential per clone; intra-app bearer checks
+      // between DO and fn only match when both carry the same value).
       const ownerRow = await destRuntimePool.query<{ owner_id: string }>(
         `SELECT owner_id FROM apps WHERE id = $1`,
         [resolvedDestAppId],
@@ -806,6 +763,110 @@ async function executeClone(
           `[clone] dest app ${resolvedDestAppId} has no owner_id in runtime DB — clone flow inconsistent`,
         );
       }
+
+      // Mint the shared bb_sk_ once if EITHER side (DOs or functions) needs
+      // it. Detection scans:
+      //   - source DO env keys      (auto-mint if any match a convention key)
+      //   - source fn env keys      (same)
+      //   - caller's auto_mint_requests (per-fn explicit opt-in)
+      // If nothing needs it, we don't mint at all. The mint call itself is
+      // best-effort: transient failures surface as a warning and each side
+      // leaves the affected keys unfilled. Preconditions (controlDb pool +
+      // ownerId) are already satisfied here.
+      let sourceDoEnvKeys: string[] = [];
+      try {
+        sourceDoEnvKeys = await listDoEnvVarKeys(sourceRuntimePool, job.source_app_id);
+      } catch (dke) {
+        logger.warn(
+          { err: dke, sourceAppId: job.source_app_id },
+          '[clone] listDoEnvVarKeys failed on source; DO auto-mint disabled for this clone',
+        );
+      }
+      const doNeedsMint = sourceDoEnvKeys.some((k) => AUTO_MINT_CONVENTION_KEYS.includes(k));
+
+      // We can't cheaply pre-list source fn env keys here (that read happens
+      // inside replayFunctions). Mint eagerly only when the DO side needs it
+      // or the caller explicitly opted in; otherwise defer to replayFunctions'
+      // internal mint decision (unchanged path for the fn-only case).
+      let sharedMintedKey: string | null = null;
+      const explicitMintRequested = (autoMintRequests?.length ?? 0) > 0;
+      if (doNeedsMint || explicitMintRequested) {
+        try {
+          const minted = await mintApiKeyForClone(controlDb, {
+            ownerId: destAppOwnerId,
+            destAppId: resolvedDestAppId,
+          });
+          sharedMintedKey = minted.key;
+          logger.info(
+            { destAppId: resolvedDestAppId, keyId: minted.keyId, doNeedsMint, explicitMintRequested },
+            '[clone] shared API key minted for clone (shared across DO + fn replay)',
+          );
+        } catch (mintErr) {
+          const msg = `shared key mint failed: ${(mintErr as Error).message}`;
+          await appendCloneJobWarnings(controlDb, jobId, [msg]);
+          logger.warn(
+            { err: mintErr, destAppId: resolvedDestAppId },
+            '[clone] shared key mint failed; DO auto-mint targets will remain unfilled',
+          );
+        }
+      }
+
+      // Replay Durable Object classes. Must run BEFORE replayFunctions so any
+      // function env var pointing at a `<appId>_do` URL can be re-supplied by
+      // the caller after they see the DO namespace exists on dest. Prior to
+      // this step, DOs silently failed to clone: manage_durable_objects list
+      // on the dest returned an empty array while functions still referenced
+      // the source DO URLs (bug 6a04a0d5). DO env var VALUES are secrets and
+      // never copied — only their KEYS surface, so the caller can re-set them
+      // via manage_durable_objects action=set_env after clone completes. The
+      // one exception is convention keys (BUTTERBASE_API_KEY / BB_SUBSTRATE_KEY):
+      // when the shared bb_sk_ was minted above, those keys are auto-filled
+      // so DO and fn on the cloned app share the same intra-app credential.
+      scope.setTag('step', 'replaying_durable_objects');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_durable_objects' });
+      try {
+        const doResult = await replayDurableObjectsForClone(
+          sourceRuntimePool,
+          destRuntimePool,
+          controlDb,
+          job.source_app_id,
+          resolvedDestAppId,
+          job.requested_by_user_id,
+          { sharedMintedKey },
+        );
+        if (doResult.cloned.length > 0) {
+          logger.info(
+            {
+              destAppId: resolvedDestAppId,
+              cloned: doResult.cloned,
+              doEnvKeys: doResult.do_env_keys,
+              autoMintedKeys: doResult.auto_minted_keys,
+            },
+            '[clone] durable objects replayed',
+          );
+          const unfilled = doResult.do_env_keys.filter((k) => !doResult.auto_minted_keys.includes(k));
+          if (unfilled.length > 0) {
+            await appendCloneJobWarnings(controlDb, jobId, [
+              `Durable Objects cloned: ${doResult.cloned.join(', ')}. Unfilled DO env keys (${unfilled.join(', ')}) are secrets that were not copied — set them via manage_durable_objects action=set_env after the clone completes.`,
+            ]);
+          }
+        } else {
+          logger.info({ destAppId: resolvedDestAppId }, '[clone] no active durable objects on source');
+        }
+      } catch (err) {
+        // DO replay failure is not silently ignored — surface it as a fatal
+        // clone-job failure so the caller notices instead of getting a
+        // "completed" clone whose DOs are half-deployed.
+        throw err;
+      }
+
+      // Step 5 (Phase 5 A4): Replay app_functions from source runtime DB to dest runtime DB.
+      // pendingEnvVarValues, autoMintRequests, and destAppOwnerId are resolved
+      // above the DO replay step so the DO side can share the minted key with
+      // the fn side. `preMintedSharedKey` tells replayFunctions to reuse the
+      // orchestrator-level mint instead of minting a second key.
+      scope.setTag('step', 'replaying_functions');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
 
       const fnResult = await replayFunctions(
         sourceRuntimePool,
@@ -819,6 +880,7 @@ async function executeClone(
           autoMintRequests,
           controlPool: controlDb,
           destAppOwnerId,
+          preMintedSharedKey: sharedMintedKey,
         },
       );
       if (fnResult.warnings.length > 0) {
