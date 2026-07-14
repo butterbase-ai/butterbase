@@ -3,16 +3,31 @@ import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
 
 /**
- * OpenRouter routes image models through /chat/completions with multimodal
- * output. Their /v1/models `supported_parameters` for image models advertises
- * only `seed`, `response_format`, `temperature`, `top_p`. `aspect_ratio`,
- * `size`, `n`, `guidance_scale`, `mask`, `negative_prompt` are dropped silently
- * by OpenRouter — we reject them at the route layer to avoid the silent drop.
+ * OpenRouter has a dedicated OpenAI-Images-compatible endpoint at
+ * POST /api/v1/images/generations. Request shape: { model, prompt, n?, size?,
+ * seed? }. Response shape: { created, data: [{ b64_json, media_type }], usage:
+ * { cost, ... } } — `response_format` is ignored; base64 is always returned.
+ *
+ * The endpoint accepts `image`/`mask` inputs for edits, but our validator maps
+ * them into `input_images[]` / `mask` (URLs). We forward `input_images` as
+ * `image` (single) or the array (multi) iff the model advertises it, and
+ * `mask` as `mask`. Support here is conservative — probed live per model.
  */
-const OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL: ReadonlySet<string> = new Set(['seed', 'input_images']);
-const OPENROUTER_IMAGE_SUPPORTED_PROVIDER: ReadonlySet<string> = new Set(['response_format']);
+const OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL: ReadonlySet<string> = new Set([
+  'size',
+  'n',
+  'seed',
+  'input_images',
+]);
+const OPENROUTER_IMAGE_SUPPORTED_PROVIDER: ReadonlySet<string> = new Set([]);
 
-/** Canonical IDs OpenRouter serves as image models. Populated from /v1/models?output_modalities=image. */
+/**
+ * Canonical IDs OpenRouter serves as image models via /api/v1/images/generations.
+ * Each entry was probed live with a real POST — models that failed (e.g.
+ * `sourceful/riverflow-v2.5-pro`, which requires aspect_ratio and rejects the
+ * OpenAI-Images `size` param) are excluded here AND from
+ * CANONICAL_IMAGE_MODEL_ROUTES in select.ts.
+ */
 const OPENROUTER_IMAGE_MODELS: ReadonlySet<string> = new Set([
   'openai/gpt-image-2',
   'openai/gpt-image-1',
@@ -20,7 +35,6 @@ const OPENROUTER_IMAGE_MODELS: ReadonlySet<string> = new Set([
   'google/gemini-3.1-flash-lite-image',
   'google/gemini-3.1-flash-image',
   'google/gemini-3-pro-image',
-  'sourceful/riverflow-v2.5-pro',
 ]);
 
 interface OpenRouterConfig {
@@ -373,75 +387,84 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
   }
 
   /**
-   * OpenRouter serves image models through /chat/completions (multimodal
-   * output), not a dedicated image API. The result is available synchronously,
-   * so we return terminal state INLINE: `pollingUrl` is empty string and
-   * `status: 'completed'|'failed'` — routeImageSubmit recognizes this and
-   * settles the job row without ever polling.
+   * OpenRouter's images endpoint (POST /api/v1/images/generations) is
+   * OpenAI-Images-compatible: synchronous request/response, base64 bytes
+   * returned inline. We wrap the b64 in a data: URI and stash it as the
+   * "unsigned URL" — the /content route uses raw fetch() which Node 18+
+   * supports on data: URIs, so no adapter-side content plumbing is needed.
+   *
+   * Returned status is always terminal ('completed' | 'failed'); routeImageSubmit
+   * recognises this and settles the row inline without polling.
    */
   async function submitImage(req: ImageGenerationRequest, upstreamId: string): Promise<ImageSubmitResult> {
-    const content: unknown[] = [{ type: 'text', text: req.prompt }];
-    for (const url of req.input_images ?? []) {
-      content.push({ type: 'image_url', image_url: { url } });
-    }
-    const chatReq = {
-      model: upstreamId,
-      messages: [{ role: 'user', content }],
-      stream: false,
-      ...(req.seed != null ? { seed: req.seed } : {}),
-      ...(typeof req.provider?.response_format === 'string'
-        ? { response_format: req.provider.response_format }
-        : {}),
-    } as unknown as ChatCompletionRequest;
+    // input_images / mask are forwarded as OpenAI-Images-style `image` / `mask`
+    // fields (single image → string, multi → array). OpenRouter's docs show
+    // these accepted on models that advertise edit mode; models that don't
+    // silently ignore. Rejection of unsupported params happens at the route
+    // via getSupportedImageParams — we only include them here if the caller
+    // provided them.
+    const imageParam = req.input_images && req.input_images.length > 0
+      ? (req.input_images.length === 1 ? req.input_images[0] : req.input_images)
+      : undefined;
 
-    const result = await chatCompletion(chatReq, upstreamId);
-    if (result.status !== 200) {
-      return {
-        upstreamJobId: `or-sync-${crypto.randomUUID()}`,
-        pollingUrl: '',
-        status: 'failed',
-        error: `OpenRouter chat completion returned ${result.status}`,
-      };
-    }
-    const body = result.body as {
-      id?: string;
-      choices?: Array<{
-        message?: {
-          content?: unknown;
-          images?: Array<{ image_url?: { url: string }; type?: string }>;
-        };
-      }>;
+    const body = {
+      model: upstreamId,
+      prompt: req.prompt,
+      ...(req.n != null ? { n: req.n } : {}),
+      ...(req.size ? { size: req.size } : {}),
+      ...(req.seed != null ? { seed: req.seed } : {}),
+      ...(imageParam !== undefined ? { image: imageParam } : {}),
+      ...(req.mask ? { mask: req.mask } : {}),
     };
-    const msg = body?.choices?.[0]?.message;
-    const urls: string[] = [];
-    // Two known shapes: message.images[] or message.content[].image_url.url
-    if (Array.isArray(msg?.images)) {
-      for (const img of msg.images) {
-        if (typeof img.image_url?.url === 'string') urls.push(img.image_url.url);
-      }
+
+    const res = await fetcher(`${base}/images/generations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'HTTP-Referer': referer,
+        'X-Title': title,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
+      throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
     }
-    if (urls.length === 0 && Array.isArray(msg?.content)) {
-      for (const part of msg.content as Array<{ type?: string; image_url?: { url?: string } }>) {
-        if (part?.type === 'image_url' && typeof part.image_url?.url === 'string') {
-          urls.push(part.image_url.url);
-        }
-      }
-    }
-    if (urls.length === 0) {
+
+    const json = await res.json() as {
+      created?: number;
+      data?: Array<{ b64_json?: string; media_type?: string }>;
+      usage?: unknown;
+    };
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
+
+    const first = json.data?.[0];
+    if (!first || typeof first.b64_json !== 'string' || first.b64_json.length === 0) {
+      // Deliberate: return failed rather than throw so the job row settles cleanly
+      // (no lease refund; upstream cost was presumably $0 in this case).
       return {
-        upstreamJobId: body?.id ?? `or-sync-${crypto.randomUUID()}`,
+        upstreamJobId: `or-img-${crypto.randomUUID()}`,
         pollingUrl: '',
         status: 'failed',
-        error: 'OpenRouter returned no image content in assistant message',
+        error: 'OpenRouter images endpoint returned no b64_json in data[0]',
       };
     }
+
+    const contentType = first.media_type ?? 'image/png';
+    const dataUri = `data:${contentType};base64,${first.b64_json}`;
+
     return {
-      upstreamJobId: body?.id ?? `or-sync-${crypto.randomUUID()}`,
+      upstreamJobId: `or-img-${crypto.randomUUID()}`,
       pollingUrl: '',  // sync-inline; route settles without polling
       status: 'completed',
-      unsignedUrls: urls,
-      providerCostUsd: result.providerCostUsd ?? undefined,
-      contentType: 'image/png',  // OpenRouter data-URI outputs are PNG per catalog
+      unsignedUrls: [dataUri],
+      providerCostUsd: pickProviderCost(json.usage) ?? undefined,
+      contentType,
     };
   }
 

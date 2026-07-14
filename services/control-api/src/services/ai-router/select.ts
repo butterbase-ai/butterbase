@@ -66,7 +66,9 @@ export const CANONICAL_IMAGE_MODEL_ROUTES: Readonly<Record<string, RouterName>> 
   'google/gemini-3.1-flash-lite-image':    'openrouter',
   'google/gemini-3.1-flash-image':         'openrouter',
   'google/gemini-3-pro-image':             'openrouter',
-  'sourceful/riverflow-v2.5-pro':          'openrouter',
+  // sourceful/riverflow-v2.5-pro removed: requires `aspect_ratio` (not `size`)
+  // on /api/v1/images/generations and returns 422 for OpenAI-Images-shape requests.
+  // Re-enable once we add per-model param mapping (size → aspect_ratio) at the adapter.
   'bytedance/seedream-5-pro':              'provider-secondary',
   'bytedance/seedream-5-lite':             'provider-secondary',
   'bytedance/seedream-4-5':                'provider-secondary',

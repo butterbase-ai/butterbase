@@ -3,14 +3,14 @@ import { openrouterAdapter } from './openrouter.js';
 import type { ImageGenerationRequest } from './types.js';
 
 /**
- * Build a fetcher that always returns the given chat-completions response body
- * with HTTP 200. Records the request body it was called with so tests can
- * assert on the shape submitImage sent upstream.
+ * Build a fetcher that always returns the given /images/generations response
+ * body with HTTP 200. Records the request body so tests can assert on the
+ * OpenAI-Images-shape payload submitImage sent upstream.
  */
-function chatFetcher(responseBody: unknown) {
-  const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+function imagesFetcher(responseBody: unknown, status = 200) {
+  const fetcher = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => {
     return new Response(JSON.stringify(responseBody), {
-      status: 200,
+      status,
       headers: { 'content-type': 'application/json' },
     });
   });
@@ -19,139 +19,160 @@ function chatFetcher(responseBody: unknown) {
 
 function baseReq(overrides: Partial<ImageGenerationRequest> = {}): ImageGenerationRequest {
   return {
-    model: 'openai/gpt-image-2',
+    model: 'openai/gpt-image-1-mini',
     prompt: 'a red panda wearing a hat',
     ...overrides,
   };
 }
 
-describe('openrouter adapter — image methods', () => {
-  it('submitImage builds a chat-completions body with text + image_url parts when input_images is populated', async () => {
-    const fetcher = chatFetcher({
-      id: 'gen-1',
-      choices: [{ message: { role: 'assistant', images: [{ image_url: { url: 'https://example.com/out.png' } }] } }],
-      usage: {},
+const B64_PNG_STUB = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+describe('openrouter adapter — image methods (POST /api/v1/images/generations)', () => {
+  it('submitImage hits /images/generations with an OpenAI-Images-shape body', async () => {
+    const fetcher = imagesFetcher({
+      created: 1,
+      data: [{ b64_json: B64_PNG_STUB, media_type: 'image/png' }],
+      usage: { cost: 0.005 },
     });
     const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
 
     await adapter.submitImage!(
-      baseReq({ input_images: ['https://example.com/ref1.png', 'https://example.com/ref2.png'] }),
-      'openai/gpt-image-2',
+      baseReq({ size: '1024x1024', n: 1, seed: 42 }),
+      'openai/gpt-image-1-mini',
     );
 
     expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain('/images/generations');
+    const sentBody = JSON.parse((init as RequestInit).body as string);
+    expect(sentBody).toEqual({
+      model: 'openai/gpt-image-1-mini',
+      prompt: 'a red panda wearing a hat',
+      n: 1,
+      size: '1024x1024',
+      seed: 42,
+    });
+  });
+
+  it('forwards a single input_images entry as `image` string (edit mode)', async () => {
+    const fetcher = imagesFetcher({
+      created: 1,
+      data: [{ b64_json: B64_PNG_STUB, media_type: 'image/png' }],
+    });
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+
+    await adapter.submitImage!(baseReq({ input_images: ['https://example.com/ref.png'] }), 'openai/gpt-image-1-mini');
+
     const [, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     const sentBody = JSON.parse((init as RequestInit).body as string);
-    expect(sentBody.model).toBe('openai/gpt-image-2');
-    expect(sentBody.messages).toEqual([
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'a red panda wearing a hat' },
-          { type: 'image_url', image_url: { url: 'https://example.com/ref1.png' } },
-          { type: 'image_url', image_url: { url: 'https://example.com/ref2.png' } },
-        ],
-      },
-    ]);
+    expect(sentBody.image).toBe('https://example.com/ref.png');
   });
 
-  it('returns status=completed with unsignedUrls when message.images[] is present', async () => {
-    const fetcher = chatFetcher({
-      id: 'gen-2',
-      choices: [{
-        message: {
-          role: 'assistant',
-          images: [{ image_url: { url: 'https://example.com/a.png' } }, { image_url: { url: 'https://example.com/b.png' } }],
-        },
-      }],
-      usage: {},
+  it('forwards multiple input_images as `image` array', async () => {
+    const fetcher = imagesFetcher({
+      created: 1,
+      data: [{ b64_json: B64_PNG_STUB, media_type: 'image/png' }],
     });
     const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
 
-    const out = await adapter.submitImage!(baseReq(), 'openai/gpt-image-2');
+    await adapter.submitImage!(
+      baseReq({ input_images: ['https://example.com/a.png', 'https://example.com/b.png'] }),
+      'openai/gpt-image-1-mini',
+    );
+
+    const [, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const sentBody = JSON.parse((init as RequestInit).body as string);
+    expect(sentBody.image).toEqual(['https://example.com/a.png', 'https://example.com/b.png']);
+  });
+
+  it('omits size/n/seed when not provided (no silent defaults)', async () => {
+    const fetcher = imagesFetcher({
+      created: 1,
+      data: [{ b64_json: B64_PNG_STUB, media_type: 'image/png' }],
+    });
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+
+    await adapter.submitImage!(baseReq(), 'openai/gpt-image-1-mini');
+
+    const [, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const sentBody = JSON.parse((init as RequestInit).body as string);
+    expect('size' in sentBody).toBe(false);
+    expect('n' in sentBody).toBe(false);
+    expect('seed' in sentBody).toBe(false);
+  });
+
+  it('returns status=completed with a data: URI derived from b64_json + media_type', async () => {
+    const fetcher = imagesFetcher({
+      created: 1,
+      data: [{ b64_json: B64_PNG_STUB, media_type: 'image/jpeg' }],
+      usage: { cost: 0.0343 },
+    });
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+
+    const out = await adapter.submitImage!(baseReq(), 'openai/gpt-image-1-mini');
 
     expect(out.status).toBe('completed');
-    expect(out.unsignedUrls).toEqual(['https://example.com/a.png', 'https://example.com/b.png']);
     expect(out.pollingUrl).toBe('');
-    expect(out.upstreamJobId).toBe('gen-2');
+    expect(out.contentType).toBe('image/jpeg');
+    expect(out.unsignedUrls).toHaveLength(1);
+    expect(out.unsignedUrls![0]).toBe(`data:image/jpeg;base64,${B64_PNG_STUB}`);
+    expect(out.providerCostUsd).toBe(0.0343);
   });
 
-  it('handles the alternate message.content[].image_url.url shape', async () => {
-    const fetcher = chatFetcher({
-      id: 'gen-3',
-      choices: [{
-        message: {
-          role: 'assistant',
-          content: [
-            { type: 'text', text: 'here you go' },
-            { type: 'image_url', image_url: { url: 'https://example.com/c.png' } },
-          ],
-        },
-      }],
-      usage: {},
+  it('defaults contentType to image/png when media_type is missing', async () => {
+    const fetcher = imagesFetcher({
+      created: 1,
+      data: [{ b64_json: B64_PNG_STUB }],
     });
     const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
 
-    const out = await adapter.submitImage!(baseReq(), 'openai/gpt-image-2');
+    const out = await adapter.submitImage!(baseReq(), 'openai/gpt-image-1-mini');
 
-    expect(out.status).toBe('completed');
-    expect(out.unsignedUrls).toEqual(['https://example.com/c.png']);
+    expect(out.contentType).toBe('image/png');
+    expect(out.unsignedUrls![0].startsWith('data:image/png;base64,')).toBe(true);
   });
 
-  it('returns status=failed with an error when no image URLs are found', async () => {
-    const fetcher = chatFetcher({
-      id: 'gen-4',
-      choices: [{ message: { role: 'assistant', content: 'sorry, I cannot generate that' } }],
-      usage: {},
-    });
+  it('returns status=failed (no throw) when data[0].b64_json is missing', async () => {
+    const fetcher = imagesFetcher({ created: 1, data: [] });
     const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
 
-    const out = await adapter.submitImage!(baseReq(), 'openai/gpt-image-2');
+    const out = await adapter.submitImage!(baseReq(), 'openai/gpt-image-1-mini');
 
     expect(out.status).toBe('failed');
     expect(out.error).toBeTruthy();
     expect(out.unsignedUrls).toBeUndefined();
   });
 
-  it('includes seed in the request body when set, omits it otherwise', async () => {
-    const respBody = {
-      id: 'gen-5',
-      choices: [{ message: { role: 'assistant', images: [{ image_url: { url: 'https://example.com/d.png' } }] } }],
-      usage: {},
-    };
+  it('throws AdapterError on non-2xx HTTP', async () => {
+    const fetcher = imagesFetcher({ error: { message: 'Model temporarily unavailable' } }, 502);
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
 
-    const fetcherWithSeed = chatFetcher(respBody);
-    const adapterWithSeed = openrouterAdapter({ apiKey: 'k', fetch: fetcherWithSeed });
-    await adapterWithSeed.submitImage!(baseReq({ seed: 42 }), 'openai/gpt-image-2');
-    const [, initWithSeed] = (fetcherWithSeed as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
-    const bodyWithSeed = JSON.parse((initWithSeed as RequestInit).body as string);
-    expect(bodyWithSeed.seed).toBe(42);
-
-    const fetcherNoSeed = chatFetcher(respBody);
-    const adapterNoSeed = openrouterAdapter({ apiKey: 'k', fetch: fetcherNoSeed });
-    await adapterNoSeed.submitImage!(baseReq(), 'openai/gpt-image-2');
-    const [, initNoSeed] = (fetcherNoSeed as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
-    const bodyNoSeed = JSON.parse((initNoSeed as RequestInit).body as string);
-    expect('seed' in bodyNoSeed).toBe(false);
+    await expect(adapter.submitImage!(baseReq(), 'openai/gpt-image-1-mini')).rejects.toThrow();
   });
 
-  it('getSupportedImageParams returns a whitelist including seed but excluding aspect_ratio/size/n for a known image model', async () => {
-    const adapter = openrouterAdapter({ apiKey: 'k', fetch: chatFetcher({}) });
+  it('getSupportedImageParams whitelists size/n/seed/input_images for known image models', async () => {
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: imagesFetcher({}) });
 
-    const params = adapter.getSupportedImageParams!('openai/gpt-image-2');
+    const params = adapter.getSupportedImageParams!('openai/gpt-image-1-mini');
 
     expect(params).not.toBeNull();
+    expect(params!.topLevel.has('size')).toBe(true);
+    expect(params!.topLevel.has('n')).toBe(true);
     expect(params!.topLevel.has('seed')).toBe(true);
+    expect(params!.topLevel.has('input_images')).toBe(true);
+    // aspect_ratio is NOT supported (OpenAI-Images uses size)
     expect(params!.topLevel.has('aspect_ratio')).toBe(false);
-    expect(params!.topLevel.has('size')).toBe(false);
-    expect(params!.topLevel.has('n')).toBe(false);
   });
 
   it('getSupportedImageParams returns null for a non-image model', async () => {
-    const adapter = openrouterAdapter({ apiKey: 'k', fetch: chatFetcher({}) });
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: imagesFetcher({}) });
 
-    const params = adapter.getSupportedImageParams!('anthropic/claude-3-opus');
+    expect(adapter.getSupportedImageParams!('anthropic/claude-3-opus')).toBeNull();
+  });
 
-    expect(params).toBeNull();
+  it('getSupportedImageParams returns null for sourceful (removed due to aspect_ratio-only requirement)', async () => {
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: imagesFetcher({}) });
+
+    expect(adapter.getSupportedImageParams!('sourceful/riverflow-v2.5-pro')).toBeNull();
   });
 });
