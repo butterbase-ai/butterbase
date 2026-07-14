@@ -52,17 +52,21 @@ const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
  * submitImage AND returns non-null from getSupportedImageParams(canonicalId)"
  * when the map has no entry.
  *
- * ImaRouter (provider-secondary) is the sole image router — it covers all 13
- * models we advertise. OpenRouter's image sub-path (via /chat/completions) is
- * disabled until we wire OpenRouter's dedicated /images endpoint; its
- * sync-inline /chat/completions path doesn't actually serve the pure-image
- * models it claims to. See TODO(openrouter-images).
+ * ImaRouter (provider-secondary) covers the 13 async-generation models it owns;
+ * OpenRouter covers the sync-inline set from its /v1/models?output_modalities=image
+ * enumeration (see adapters/openrouter.ts:OPENROUTER_IMAGE_MODELS).
  */
 export const CANONICAL_IMAGE_MODEL_ROUTES: Readonly<Record<string, RouterName>> = {
   'openai/gpt-image-2':                    'provider-secondary',
+  'openai/gpt-image-1':                    'openrouter',
+  'openai/gpt-image-1-mini':               'openrouter',
   'google/gemini-3-pro-image-preview':     'provider-secondary',
   'google/gemini-3.1-flash-image-preview': 'provider-secondary',
   'google/gemini-2.5-flash-image':         'provider-secondary',
+  'google/gemini-3.1-flash-lite-image':    'openrouter',
+  'google/gemini-3.1-flash-image':         'openrouter',
+  'google/gemini-3-pro-image':             'openrouter',
+  'sourceful/riverflow-v2.5-pro':          'openrouter',
   'bytedance/seedream-5-pro':              'provider-secondary',
   'bytedance/seedream-5-lite':             'provider-secondary',
   'bytedance/seedream-4-5':                'provider-secondary',
