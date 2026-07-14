@@ -1,27 +1,6 @@
-import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
+import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult } from './types.js';
 import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
-
-/**
- * OpenRouter routes image models through /chat/completions with multimodal
- * output. Their /v1/models `supported_parameters` for image models advertises
- * only `seed`, `response_format`, `temperature`, `top_p`. `aspect_ratio`,
- * `size`, `n`, `guidance_scale`, `mask`, `negative_prompt` are dropped silently
- * by OpenRouter — we reject them at the route layer to avoid the silent drop.
- */
-const OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL: ReadonlySet<string> = new Set(['seed', 'input_images']);
-const OPENROUTER_IMAGE_SUPPORTED_PROVIDER: ReadonlySet<string> = new Set(['response_format']);
-
-/** Canonical IDs OpenRouter serves as image models. Populated from /v1/models?output_modalities=image. */
-const OPENROUTER_IMAGE_MODELS: ReadonlySet<string> = new Set([
-  'openai/gpt-image-2',
-  'openai/gpt-image-1',
-  'openai/gpt-image-1-mini',
-  'google/gemini-3.1-flash-lite-image',
-  'google/gemini-3.1-flash-image',
-  'google/gemini-3-pro-image',
-  'sourceful/riverflow-v2.5-pro',
-]);
 
 interface OpenRouterConfig {
   apiKey: string;
@@ -372,103 +351,6 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     return { stream: res.body, contentType: res.headers.get('content-type') ?? 'video/mp4' };
   }
 
-  /**
-   * OpenRouter serves image models through /chat/completions (multimodal
-   * output), not a dedicated image API. The result is available synchronously,
-   * so we return terminal state INLINE: `pollingUrl` is empty string and
-   * `status: 'completed'|'failed'` — routeImageSubmit recognizes this and
-   * settles the job row without ever polling.
-   */
-  async function submitImage(req: ImageGenerationRequest, upstreamId: string): Promise<ImageSubmitResult> {
-    const content: unknown[] = [{ type: 'text', text: req.prompt }];
-    for (const url of req.input_images ?? []) {
-      content.push({ type: 'image_url', image_url: { url } });
-    }
-    const chatReq = {
-      model: upstreamId,
-      messages: [{ role: 'user', content }],
-      stream: false,
-      ...(req.seed != null ? { seed: req.seed } : {}),
-      ...(typeof req.provider?.response_format === 'string'
-        ? { response_format: req.provider.response_format }
-        : {}),
-    } as unknown as ChatCompletionRequest;
-
-    const result = await chatCompletion(chatReq, upstreamId);
-    if (result.status !== 200) {
-      return {
-        upstreamJobId: `or-sync-${crypto.randomUUID()}`,
-        pollingUrl: '',
-        status: 'failed',
-        error: `OpenRouter chat completion returned ${result.status}`,
-      };
-    }
-    const body = result.body as {
-      id?: string;
-      choices?: Array<{
-        message?: {
-          content?: unknown;
-          images?: Array<{ image_url?: { url: string }; type?: string }>;
-        };
-      }>;
-    };
-    const msg = body?.choices?.[0]?.message;
-    const urls: string[] = [];
-    // Two known shapes: message.images[] or message.content[].image_url.url
-    if (Array.isArray(msg?.images)) {
-      for (const img of msg.images) {
-        if (typeof img.image_url?.url === 'string') urls.push(img.image_url.url);
-      }
-    }
-    if (urls.length === 0 && Array.isArray(msg?.content)) {
-      for (const part of msg.content as Array<{ type?: string; image_url?: { url?: string } }>) {
-        if (part?.type === 'image_url' && typeof part.image_url?.url === 'string') {
-          urls.push(part.image_url.url);
-        }
-      }
-    }
-    if (urls.length === 0) {
-      return {
-        upstreamJobId: body?.id ?? `or-sync-${crypto.randomUUID()}`,
-        pollingUrl: '',
-        status: 'failed',
-        error: 'OpenRouter returned no image content in assistant message',
-      };
-    }
-    return {
-      upstreamJobId: body?.id ?? `or-sync-${crypto.randomUUID()}`,
-      pollingUrl: '',  // sync-inline; route settles without polling
-      status: 'completed',
-      unsignedUrls: urls,
-      providerCostUsd: result.providerCostUsd ?? undefined,
-      contentType: 'image/png',  // OpenRouter data-URI outputs are PNG per catalog
-    };
-  }
-
-  async function pollImage(_pollingUrl: string): Promise<ImagePollResult> {
-    // OpenRouter image path is sync-inline; route stores terminal state on submit.
-    // If a client somehow triggers a poll, return non-terminal as a defensive no-op.
-    return { status: 'completed' };
-  }
-
-  async function fetchImageContent(
-    _upstreamJobId: string,
-    _index = 0,
-  ): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }> {
-    // Not used: the route serves content by streaming the stored unsigned URL directly.
-    // But we implement it defensively so the adapter contract is complete.
-    throw new AdapterError('openrouter', 501, 'unknown',
-      'openrouter fetchImageContent is not implemented; route streams from stored URL');
-  }
-
-  function getSupportedImageParams(canonicalId: string): ImageSupportedParams | null {
-    if (!OPENROUTER_IMAGE_MODELS.has(canonicalId)) return null;
-    return {
-      topLevel: OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL,
-      provider: OPENROUTER_IMAGE_SUPPORTED_PROVIDER,
-    };
-  }
-
   return {
     name: 'openrouter',
     capabilities: { supportsNativeMessages: () => false },
@@ -479,9 +361,5 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     submitVideo,
     pollVideo,
     fetchVideoContent,
-    submitImage,
-    pollImage,
-    fetchImageContent,
-    getSupportedImageParams,
   };
 }
