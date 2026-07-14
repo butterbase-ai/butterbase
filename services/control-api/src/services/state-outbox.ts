@@ -12,8 +12,17 @@ export interface WriteResult {
 }
 
 /**
- * Atomically updates the listed fields on the user's personal organization and
- * writes a paired row to user_state_outbox. Returns the assigned outbox version.
+ * Atomically updates the listed fields on the target organization and writes a
+ * paired row to user_state_outbox. Returns the assigned outbox version.
+ *
+ * Target org resolution:
+ *   - If `organizationId` is provided, that org is updated. Callers on the
+ *     billing path (checkout, subscription cancel) MUST pass it — a team-org
+ *     member checking out otherwise mis-routes the plan_id write to the
+ *     acting user's personal org (incident 2026-07-14).
+ *   - If omitted, falls back to `platform_users.personal_organization_id` for
+ *     `userId`. Kept for callers where user == org (soft-lock, spending cap
+ *     bumps on the personal org, etc.).
  *
  * Use this for EVERY mutation of organizations.{account_status, plan_id,
  * spending_cap_usd}. Do not write those columns directly with bare UPDATEs.
@@ -24,7 +33,8 @@ export interface WriteResult {
 export async function writeUserStateChange(
   platformPool: pg.Pool,
   userId: string,
-  change: UserStateChange
+  change: UserStateChange,
+  organizationId?: string
 ): Promise<WriteResult> {
   const keys = Object.keys(change) as OutboxField[];
   if (keys.length === 0) throw new Error('writeUserStateChange: no fields provided');
@@ -40,19 +50,24 @@ export async function writeUserStateChange(
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
-    const upd = await client.query(
-      `UPDATE organizations SET ${setClause} WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
-      [userId, ...values]
-    );
+    const upd = organizationId
+      ? await client.query(
+          `UPDATE organizations SET ${setClause} WHERE id = $1`,
+          [organizationId, ...values]
+        )
+      : await client.query(
+          `UPDATE organizations SET ${setClause} WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
+          [userId, ...values]
+        );
     if (upd.rowCount === 0) {
-      throw new NotFoundError('user', userId);
+      throw new NotFoundError(organizationId ? 'organization' : 'user', organizationId ?? userId);
     }
-    const organizationId = await resolveOrganizationId(platformPool, userId);
+    const outboxOrgId = organizationId ?? (await resolveOrganizationId(platformPool, userId));
     const ins = await client.query<{ version: string }>(
       `INSERT INTO user_state_outbox (user_id, organization_id, fields_changed)
        VALUES ($1, $2, $3::jsonb)
        RETURNING version`,
-      [userId, organizationId, JSON.stringify(change)]
+      [userId, outboxOrgId, JSON.stringify(change)]
     );
     await client.query('COMMIT');
     return { version: parseInt(ins.rows[0].version, 10) };

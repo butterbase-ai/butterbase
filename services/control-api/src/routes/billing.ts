@@ -312,6 +312,7 @@ export async function billingRoutes(app: FastifyInstance) {
         planId: body.planId,
         successUrl,
         cancelUrl,
+        organizationId: request.auth?.organizationId ?? null,
       });
 
       return { sessionId: session.sessionId, url: session.url };
