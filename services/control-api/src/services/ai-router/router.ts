@@ -21,7 +21,7 @@ import { logAuditEvent } from '../audit/audit-events-service.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 import { maybeSendCreditsEmail } from '../credits-email.js';
 import { sendBillingEmail } from '../auth/email-service.js';
-import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult } from './adapters/types.js';
+import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult, type ImageGenerationRequest, type ImageSubmitResult, type ImagePollResult } from './adapters/types.js';
 import type { RouterName } from './normalize.js';
 
 // Error kinds that must trigger fallover to the next candidate provider.
@@ -711,6 +711,95 @@ export function billedVideoCostUsd(
   return rate !== null ? clampVideoCost(rate, req, /*withBuffer*/ false) : null;
 }
 
+/**
+ * Pick the price-per-image for one router's rawPricing payload, given the
+ * request's `size`/`aspect_ratio`. Returns null when the router has no
+ * usable variant-shaped pricing — mirrors `ratePerSecondFromRouter` for video.
+ */
+function pricePerImageFromRouter(
+  rawPricing: unknown,
+  req: ImageGenerationRequest,
+): number | null {
+  const rp = rawPricing as
+    | { variants?: Array<{ spec: string; pricePerImage: number }> }
+    | null
+    | undefined;
+  const variants = (rp?.variants ?? []).filter(
+    v => Number.isFinite(v.pricePerImage) && v.pricePerImage > 0,
+  );
+  if (variants.length === 0) return null;
+  const requestedSize = req.size ?? req.aspect_ratio ?? '';
+  const matched = requestedSize
+    ? variants.find(v => v.spec === requestedSize)
+    : undefined;
+  const perImage = matched?.pricePerImage ?? Math.max(...variants.map(v => v.pricePerImage));
+  return perImage;
+}
+
+/**
+ * Scan rawPricing across routers for a per-image rate. `preferRouter` pins
+ * to that router's pricing (settle-time semantics — bill the actual upstream
+ * that served the request); omitted, returns the MAX across all routers
+ * (submit-time semantics — cover any router the fallback chain might land on).
+ */
+function resolveImageRateForRequest(
+  entry: import('./catalog.js').CatalogEntry,
+  req: ImageGenerationRequest,
+  preferRouter: RouterName | undefined,
+): number | null {
+  if (preferRouter) {
+    const r = entry.routers.find(x => x.name === preferRouter);
+    const rate = r ? pricePerImageFromRouter(r.rawPricing, req) : null;
+    if (rate !== null) return rate;
+    // Preferred router has no pricing — fall through to global scan.
+  }
+  let best: number | null = null;
+  for (const router of entry.routers) {
+    const rate = pricePerImageFromRouter(router.rawPricing, req);
+    if (rate !== null && (best === null || rate > best)) best = rate;
+  }
+  return best;
+}
+
+/**
+ * Lease-time cost estimate for an image request. Selects the highest-priced
+ * variant that could apply given `size`/`aspect_ratio` — so the lease is
+ * always a covering upper bound. Settle path uses the actual amount_usd from
+ * upstream (via ImageSubmitResult.providerCostUsd or pollImage's providerCostUsd),
+ * with `billedImageCostUsd` as the catalog fallback when upstream is silent.
+ *
+ * Returns 0 (not a nonzero default) when no router has parseable variant
+ * pricing — unlike video there is no cross-model default; callers that need
+ * a floor should clamp themselves.
+ */
+export function estimateImageCostUsd(
+  entry: import('./catalog.js').CatalogEntry,
+  req: ImageGenerationRequest,
+): number {
+  const perImage = resolveImageRateForRequest(entry, req, undefined);
+  if (perImage === null) return 0;
+  const n = req.n ?? 1;
+  return perImage * n;
+}
+
+/**
+ * Compute settled billing cost for a completed image job — used when the
+ * upstream's `providerCostUsd` is unavailable. Pins to the chosen router's
+ * pricing variants. Returns null when neither the chosen router nor any
+ * sibling has parseable pricing — the caller treats null as "unknown, use
+ * $0 as guard" (mirrors billedVideoCostUsd).
+ */
+export function billedImageCostUsd(
+  entry: import('./catalog.js').CatalogEntry,
+  req: ImageGenerationRequest,
+  chosenRouter: RouterName,
+): number | null {
+  const perImage = resolveImageRateForRequest(entry, req, chosenRouter);
+  if (perImage === null) return null;
+  const n = req.n ?? 1;
+  return perImage * n;
+}
+
 export interface RouteVideoSubmitResult {
   upstreamJobId: string;
   pollingUrl: string;
@@ -854,6 +943,179 @@ export async function settleVideoJob(
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
     modality: 'video',
+  }));
+  return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };
+}
+
+/**
+ * Images typically finish in seconds, but OpenRouter's synchronous path
+ * returns terminal state on submit — so the lease only needs to outlive a
+ * background poll cycle for the (rarer) async providers. 15 minutes matches
+ * the video lease TTL as a conservative shared default.
+ */
+const IMAGE_LEASE_TTL_SECONDS = 15 * 60;
+
+export interface RouteImageSubmitResult {
+  chosenRouter: RouterName;
+  upstreamJobId: string;
+  pollingUrl: string;
+  leaseId: string;
+  estimatedCostUsd: number;
+  terminalInline: null | {
+    status: 'completed' | 'failed';
+    unsignedUrls?: string[];
+    contentType?: string;
+    providerCostUsd?: number;
+    error?: string;
+  };
+}
+
+export async function routeImageSubmit(
+  ctx: RouteContext,
+  req: ImageGenerationRequest,
+): Promise<RouteImageSubmitResult> {
+  const canonicalId = req.model;
+  const entry = await readCatalogEntry(ctx.redis, canonicalId);
+  if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  if (!entry.routers.some(r => r.modality === 'image')) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is not an image model. Use /chat/completions instead.`);
+  }
+
+  const enabledStatuses = await readEnabledRouters(ctx.redis);
+  const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
+  // Skip any slot currently in cooldown from a recent fallback-kind failure.
+  // Fail-open on Redis errors so a cache blip can't wedge routing.
+  const downSlots = await readDownSlots(ctx.redis, KNOWN_ROUTER_SLOTS);
+  for (const s of downSlots) enabled.delete(s);
+  const ranker = pickRanker();
+  const ranked = ranker(entry, enabled);
+  if (ranked.length === 0) {
+    throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
+  }
+
+  const estimatedCostUsd = estimateImageCostUsd(entry, req);
+  const reservedUsd = estimatedCostUsd * (1 + ctx.markupPct / 100);
+  const lease = await acquireWithAudit(ctx, reservedUsd, IMAGE_LEASE_TTL_SECONDS);
+
+  const fallbackChain: string[] = [];
+  let submitted: { result: ImageSubmitResult; router: RouterName } | null = null;
+  let lastError: unknown = null;
+
+  for (const candidate of ranked) {
+    const adapter = ctx.adapters.get(candidate.name);
+    if (!adapter?.submitImage) {
+      fallbackChain.push(`${candidate.name}:no_image_adapter`);
+      continue;
+    }
+    try {
+      const result = await adapter.submitImage(req, candidate.upstreamId ?? adapter.toUpstreamId(canonicalId));
+      submitted = { result, router: candidate.name };
+      break;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        if (COOLDOWN_TRIGGER_KINDS.has(err.kind)) {
+          void markSlotDown(ctx.redis, candidate.name, config.aiRouter.slotCooldownSeconds);
+        }
+        fallbackChain.push(`${candidate.name}:${err.kind}`);
+        continue;
+      }
+      await settleAfterCall(ctx.platformPool, lease, 0);
+      throw err;
+    }
+  }
+
+  if (!submitted) {
+    await settleAfterCall(ctx.platformPool, lease, 0);
+    const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
+    (err as any).cause = lastError;
+    throw err;
+  }
+
+  // Sync-inline path (OpenRouter): upstream returned terminal state on submit.
+  // Route caller settles the row inline and skips polling.
+  const isTerminal = submitted.result.status === 'completed' || submitted.result.status === 'failed';
+
+  return {
+    chosenRouter: submitted.router,
+    upstreamJobId: submitted.result.upstreamJobId,
+    pollingUrl: submitted.result.pollingUrl,
+    leaseId: lease.leaseId,
+    estimatedCostUsd,
+    terminalInline: isTerminal ? {
+      status: submitted.result.status as 'completed' | 'failed',
+      unsignedUrls: submitted.result.unsignedUrls,
+      contentType: submitted.result.contentType,
+      providerCostUsd: submitted.result.providerCostUsd,
+      error: submitted.result.error,
+    } : null,
+  };
+}
+
+export async function routeImagePoll(
+  ctx: RouteContext,
+  chosenRouter: RouterName,
+  pollingUrl: string,
+): Promise<ImagePollResult> {
+  const adapter = ctx.adapters.get(chosenRouter);
+  if (!adapter?.pollImage) {
+    throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Provider for this job is no longer available.');
+  }
+  return adapter.pollImage(pollingUrl);
+}
+
+/**
+ * Called by the route handler when a job first observes a terminal status.
+ * Settles the lease against actual provider cost and writes the usage row.
+ *
+ * NOT idempotent — call exactly once per terminal poll (or once inline for
+ * the sync-submit OpenRouter path). The caller is responsible for gating
+ * this on the atomic terminal-state transition in image-jobs.ts.
+ */
+export async function settleImageJob(
+  ctx: RouteContext,
+  args: {
+    leaseId: string;
+    chosenRouter: RouterName;
+    canonicalModel: string;
+    providerCostUsd: number;
+    fallbackChain?: string[];
+  },
+): Promise<{ chargedCreditsUsd: number; providerCostUsd: number }> {
+  const chargedCredits = applyMarkup(args.providerCostUsd, ctx.markupPct);
+  // settleAfterCall only reads handle.leaseId; the other LeaseHandle fields are
+  // not consulted, so a synthetic handle is safe here.
+  await settleAfterCall(
+    ctx.platformPool,
+    { leaseId: args.leaseId, amountGrantedUsd: 0, expiresAt: new Date() },
+    chargedCredits,
+  );
+  maybeTriggerAutoRefill(
+    { pool: ctx.platformPool, redis: ctx.redis },
+    ctx.organizationId,
+  ).catch((err) => console.error('[router] auto-refill check failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
+    (err) => console.error('[router] credits-email failed:', err),
+  );
+  writeAiUsageRow(ctx.runtimePool, {
+    appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
+    promptTokens: 0, completionTokens: 0, totalTokens: 0,
+    providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
+    markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    keyType: 'platform', chargedToUser: true,
+  }).catch(err => console.error('[router] usage-log write failed:', err));
+  console.log(JSON.stringify({
+    level: 'info',
+    type: 'ai_router.call',
+    app_id: ctx.appId,
+    user_id: ctx.userId,
+    canonical_model: args.canonicalModel,
+    chosen_router: args.chosenRouter,
+    fallback_chain: args.fallbackChain ?? [],
+    provider_cost_usd: args.providerCostUsd,
+    charged_credits_usd: chargedCredits,
+    markup_pct: ctx.markupPct,
+    modality: 'image',
   }));
   return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };
 }
