@@ -45,6 +45,40 @@ const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
 };
 
 /**
+ * Image routing: canonical → router that owns the model. Consulted by
+ * `routeImageSubmit` (router.ts) before it walks the ranker chain — the mapped
+ * router is preferred when it advertises `submitImage` and `getSupportedImageParams`
+ * returns non-null. Falls through to "first enabled adapter that implements
+ * submitImage AND returns non-null from getSupportedImageParams(canonicalId)"
+ * when the map has no entry.
+ *
+ * ImaRouter (provider-secondary) covers the 13 async-generation models it owns;
+ * OpenRouter covers the sync-inline set from its /v1/models?output_modalities=image
+ * enumeration (see adapters/openrouter.ts:OPENROUTER_IMAGE_MODELS).
+ */
+export const CANONICAL_IMAGE_MODEL_ROUTES: Readonly<Record<string, RouterName>> = {
+  'openai/gpt-image-2':                    'provider-secondary',
+  'openai/gpt-image-1':                    'openrouter',
+  'openai/gpt-image-1-mini':               'openrouter',
+  'google/gemini-3-pro-image-preview':     'provider-secondary',
+  'google/gemini-3.1-flash-image-preview': 'provider-secondary',
+  'google/gemini-2.5-flash-image':         'provider-secondary',
+  'google/gemini-3.1-flash-lite-image':    'openrouter',
+  'google/gemini-3.1-flash-image':         'openrouter',
+  'google/gemini-3-pro-image':             'openrouter',
+  'sourceful/riverflow-v2.5-pro':          'openrouter',
+  'bytedance/seedream-5-pro':              'provider-secondary',
+  'bytedance/seedream-5-lite':             'provider-secondary',
+  'bytedance/seedream-4-5':                'provider-secondary',
+  'alibaba/wan-2.7-image':                 'provider-secondary',
+  'alibaba/wan-2.7-image-pro':             'provider-secondary',
+  'alibaba/wan-2.6-t2i':                   'provider-secondary',
+  'alibaba/wan-2.6-image':                 'provider-secondary',
+  'prunaai/p-image':                       'provider-secondary',
+  'prunaai/p-image-edit':                  'provider-secondary',
+};
+
+/**
  * Move the model's preferred router (if any) to the head of `chain`, leaving
  * the relative order of the rest unchanged. No-op when there's no override,
  * the override isn't in the chain, or it's already at the head.
