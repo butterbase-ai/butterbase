@@ -57,6 +57,47 @@ export interface VideoPollResult {
   error?: string;
 }
 
+export interface ImageGenerationRequest {
+  model: string;                       // canonical id; adapter translates
+  prompt: string;
+  size?: string;                       // "1024x1024" | "1K" | "2K" | "4K" | "1280*1280" | ...
+  aspect_ratio?: string;               // "1:1", "16:9", ...
+  n?: number;                          // multi-image (GPT Image 2 only among wired models)
+  seed?: number;
+  negative_prompt?: string;
+  input_images?: string[];             // URLs; single/multi reference or edit source
+  mask?: string;                       // URL; GPT Image 2 edit mode
+  provider?: Record<string, unknown>;  // per-model escape hatch (whitelisted by adapter)
+}
+
+export interface ImageSubmitResult {
+  upstreamJobId: string;
+  pollingUrl: string;                  // opaque to the route; adapter-owned
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'expired';
+  // Populated when the upstream is synchronous (OpenRouter path). When present,
+  // the caller (routeImageSubmit) marks the row terminal inline and skips the
+  // background poll cycle.
+  unsignedUrls?: string[];
+  providerCostUsd?: number;
+  contentType?: string;                // 'image/png' | 'image/jpeg' | 'image/webp'
+  error?: string;                      // when status is a terminal failure
+}
+
+export interface ImagePollResult {
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'expired';
+  unsignedUrls?: string[];
+  providerCostUsd?: number;
+  contentType?: string;
+  error?: string;
+}
+
+export interface ImageSupportedParams {
+  /** Top-level ImageGenerationRequest keys the model accepts. */
+  topLevel: ReadonlySet<string>;
+  /** Whitelisted keys inside the `provider: {...}` bag. */
+  provider: ReadonlySet<string>;
+}
+
 export interface AdapterUsage {
   promptTokens: number;
   completionTokens: number;
@@ -174,6 +215,17 @@ export interface RouterAdapter {
   pollVideo?(pollingUrl: string): Promise<VideoPollResult>;
   /** Fetch the raw MP4 bytes for a completed job. Pass through to caller as a stream. */
   fetchVideoContent?(upstreamJobId: string, index?: number): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
+  submitImage?(req: ImageGenerationRequest, upstreamId: string): Promise<ImageSubmitResult>;
+  pollImage?(pollingUrl: string): Promise<ImagePollResult>;
+  /** Fetch the raw image bytes for a completed job. Streams through the adapter's fetch. */
+  fetchImageContent?(upstreamJobId: string, index?: number): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
+  /**
+   * Per-model supported-param whitelist for validation. Returns `null` when the
+   * adapter doesn't own the given canonical (route falls through to another
+   * adapter). Returns the whitelist to enforce a 400 UNSUPPORTED_PARAM before
+   * the request reaches upstream.
+   */
+  getSupportedImageParams?(canonicalId: string): ImageSupportedParams | null;
   /**
    * Native Anthropic Messages API passthrough. When implemented, `routeMessages`
    * skips the chat-completions translation layer and forwards the request body
