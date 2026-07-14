@@ -90,6 +90,9 @@ function baseAdapter(overrides: Partial<RouterAdapter> = {}): RouterAdapter {
     toUpstreamId: (id: string) => id,
     listModels: vi.fn(async () => []),
     chatCompletion: vi.fn(async () => ({ status: 200, body: {}, usage: null, providerCostUsd: null })),
+    // Adapters used in image-routing tests are assumed to own the canonical
+    // unless a test explicitly overrides this to simulate a non-owning adapter.
+    getSupportedImageParams: vi.fn(() => ({ sizes: ['1024x1024', '1792x1024'] } as any)),
     ...overrides,
   };
 }
@@ -180,6 +183,70 @@ describe('routeImageSubmit', () => {
 
     expect(result.terminalInline).toBeNull();
     expect(result.pollingUrl).toBe('https://imarouter.example.com/jobs/job-2');
+  });
+
+  it('skips an adapter whose getSupportedImageParams returns null for the canonical, even though submitImage is defined', async () => {
+    const submitImageA = vi.fn(async () => ({
+      upstreamJobId: 'job-a',
+      pollingUrl: 'https://a.example.com/jobs/job-a',
+      status: 'pending' as const,
+    }));
+    const submitImageB = vi.fn(async () => ({
+      upstreamJobId: 'job-b',
+      pollingUrl: 'https://b.example.com/jobs/job-b',
+      status: 'pending' as const,
+    }));
+
+    const catalogEntry: CatalogEntry = {
+      canonicalId: 'stability/sd3.5',
+      displayName: 'Stable Diffusion 3.5',
+      updatedAt: new Date().toISOString(),
+      routers: [
+        {
+          name: 'adapter-a' as any,
+          upstreamId: 'stability/sd3.5',
+          promptPricePerMtok: 0,
+          completionPricePerMtok: 0,
+          contextLength: 0,
+          modality: 'image',
+          rawPricing: { variants: VARIANTS },
+        },
+        {
+          name: 'adapter-b' as any,
+          upstreamId: 'stability/sd3.5',
+          promptPricePerMtok: 0,
+          completionPricePerMtok: 0,
+          contextLength: 0,
+          modality: 'image',
+          rawPricing: { variants: VARIANTS },
+        },
+      ],
+    };
+    const redis = makeImageRedis(catalogEntry, [
+      { name: 'adapter-a', enabled: true },
+      { name: 'adapter-b', enabled: true },
+    ]);
+    const adapters = new Map<string, RouterAdapter>([
+      ['adapter-a', baseAdapter({
+        name: 'adapter-a' as any,
+        submitImage: submitImageA,
+        // Adapter A has submitImage wired up, but does not actually own this
+        // canonical — getSupportedImageParams returns null for it.
+        getSupportedImageParams: vi.fn(() => null),
+      })],
+      ['adapter-b', baseAdapter({
+        name: 'adapter-b' as any,
+        submitImage: submitImageB,
+        getSupportedImageParams: vi.fn(() => ({ sizes: ['1024x1024', '1792x1024'] } as any)),
+      })],
+    ]);
+    const ctx = makeCtx({ redis, adapters });
+
+    const result = await routeImageSubmit(ctx as any, { model: 'stability/sd3.5', prompt: 'a fox' });
+
+    expect(submitImageA).not.toHaveBeenCalled();
+    expect(submitImageB).toHaveBeenCalled();
+    expect(result.chosenRouter).toBe('adapter-b');
   });
 });
 

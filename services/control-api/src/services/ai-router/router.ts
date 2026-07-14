@@ -1003,7 +1003,7 @@ export async function routeImageSubmit(
 
   for (const candidate of ranked) {
     const adapter = ctx.adapters.get(candidate.name);
-    if (!adapter?.submitImage) {
+    if (!adapter?.submitImage || adapter.getSupportedImageParams?.(canonicalId) == null) {
       fallbackChain.push(`${candidate.name}:no_image_adapter`);
       continue;
     }
