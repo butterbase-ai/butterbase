@@ -18,6 +18,7 @@ import { readCatalogEntry } from '../services/ai-router/catalog.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
+import { CANONICAL_IMAGE_MODEL_ROUTES } from '../services/ai-router/select.js';
 import {
   insertImageJob, getImageJob, markImageJobInProgress, markImageJobTerminal,
   type ImageJobRow,
@@ -395,9 +396,17 @@ export function validateImageParams(
   adapters: Map<RouterName, RouterAdapter>,
 ): Record<string, unknown> | null {
   let paramSpec: import('../services/ai-router/adapters/types.js').ImageSupportedParams | null = null;
-  for (const adapter of adapters.values()) {
-    const s = adapter.getSupportedImageParams?.(body.model);
-    if (s) { paramSpec = s; break; }
+  const preferredRouter = CANONICAL_IMAGE_MODEL_ROUTES[body.model];
+  if (preferredRouter) {
+    const preferredAdapter = adapters.get(preferredRouter);
+    const s = preferredAdapter?.getSupportedImageParams?.(body.model);
+    if (s) paramSpec = s;
+  }
+  if (!paramSpec) {
+    for (const adapter of adapters.values()) {
+      const s = adapter.getSupportedImageParams?.(body.model);
+      if (s) { paramSpec = s; break; }
+    }
   }
   if (!paramSpec) return null;
 

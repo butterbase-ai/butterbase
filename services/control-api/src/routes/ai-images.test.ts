@@ -393,4 +393,30 @@ describe('validateImageParams (brief case 5: UNSUPPORTED_PARAM)', () => {
     });
     expect(validateImageParams(body, multi)).toBeNull();
   });
+
+  it('consults CANONICAL_IMAGE_MODEL_ROUTES first: openai/gpt-image-2 + size passes even though the first-inserted adapter (openrouter) excludes size (C-1 regression)', () => {
+    // openrouter is inserted first (as buildImageAdapters does) and its whitelist
+    // for gpt-image-2 deliberately excludes 'size' to mirror OPENROUTER_IMAGE_MODELS'
+    // real restrictions. provider-secondary is the canonical owner per
+    // CANONICAL_IMAGE_MODEL_ROUTES and does support 'size'. Without the routing-map
+    // lookup, plain Map iteration order would pick openrouter first and 400.
+    const openrouterGptImage2Spec: ImageSupportedParams = {
+      topLevel: new Set(['n', 'input_images', 'mask']), // no 'size'
+      provider: new Set([]),
+    };
+    const providerSecondaryGptImage2Spec: ImageSupportedParams = {
+      topLevel: new Set(['size', 'n', 'input_images', 'mask']),
+      provider: new Set(['quality', 'background', 'output_format']),
+    };
+    const multi = new Map<RouterName, RouterAdapter>([
+      ['openrouter', makeAdapter('openrouter', { 'openai/gpt-image-2': openrouterGptImage2Spec })],
+      ['provider-secondary', makeAdapter('provider-secondary', { 'openai/gpt-image-2': providerSecondaryGptImage2Spec })],
+    ]);
+    const body = imageSubmitSchema.parse({
+      model: 'openai/gpt-image-2',
+      prompt: 'a cat',
+      size: '1024x1024',
+    });
+    expect(validateImageParams(body, multi)).toBeNull();
+  });
 });
