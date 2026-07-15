@@ -390,6 +390,211 @@ Each job is persisted. You can poll from any client / process — there's no in-
 
 If you stop polling before the job completes, the credit reservation is automatically released after a few minutes and any upstream charge that occurred is on us. Just don't expect to retrieve the video later — re-submit.
 
+## Image generation
+
+Image generation follows the same async submit → poll → download shape as video. Most models complete in 5–30 seconds. Unlike `/chat/completions`, the image endpoint accepts image-native parameters (`size`, `aspect_ratio`, `seed`, `n`, reference images, masks) which the chat surface can't express.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /v1/\{app_id}/images/completions | Submit a generation job |
+| GET | /v1/\{app_id}/images/completions/\{job_id} | Poll job status |
+| GET | /v1/\{app_id}/images/completions/\{job_id}/content?index=N | Stream the rendered PNG/JPEG |
+
+### Choosing a model
+
+Image models appear in `GET /v1/{app_id}/ai/models` alongside chat and video. Available at launch:
+
+| Family | Model IDs |
+|--------|-----------|
+| OpenAI | `openai/gpt-image-2`, `openai/gpt-image-1`, `openai/gpt-image-1-mini` |
+| Google (Nano Banana) | `google/gemini-3-pro-image-preview`, `google/gemini-3.1-flash-image-preview`, `google/gemini-2.5-flash-image` |
+| ByteDance Seedream | `bytedance/seedream-5-pro`, `bytedance/seedream-5-lite`, `bytedance/seedream-4-5` |
+| Alibaba Wan | `alibaba/wan-2.7-image-pro`, `alibaba/wan-2.7-image`, `alibaba/wan-2.6-t2i`, `alibaba/wan-2.6-image` |
+| PrunaAI | `prunaai/p-image`, `prunaai/p-image-edit` |
+
+Each model exposes a **different subset** of parameters. Submitting an unsupported param returns `400 UNSUPPORTED_PARAM` with the full whitelist of what that model does accept — no silent drops.
+
+### 1. Submit a job
+
+**curl:**
+
+```bash
+curl -X POST "https://api.butterbase.ai/v1/$APP_ID/images/completions" \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-image-2",
+    "prompt": "A serene mountain lake at sunset, photorealistic",
+    "size": "1024x1024",
+    "n": 1
+  }'
+```
+
+**TypeScript (fetch):**
+
+```typescript
+const res = await fetch(`${BUTTERBASE_API_URL}/v1/${APP_ID}/images/completions`, {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    model: 'google/gemini-3-pro-image-preview',
+    prompt: 'A serene mountain lake at sunset, photorealistic',
+    aspect_ratio: '16:9',
+  }),
+});
+const job = await res.json();
+// { job_id, status: 'pending', polling_url }
+```
+
+**Python (requests):**
+
+```python
+import os, requests
+res = requests.post(
+    f"{os.environ['BUTTERBASE_API_URL']}/v1/{APP_ID}/images/completions",
+    headers={"Authorization": f"Bearer {os.environ['BUTTERBASE_API_KEY']}"},
+    json={
+        "model": "alibaba/wan-2.7-image-pro",
+        "prompt": "A cat wearing a spacesuit",
+        "size": "2K",
+        "seed": 42,
+    },
+)
+job = res.json()
+# {"job_id": "...", "status": "pending", "polling_url": "..."}
+```
+
+**Response (202 Accepted):**
+
+```json
+{
+  "job_id": "0776b4a1-aef9-4fbc-8ac6-18255aa18614",
+  "status": "pending",
+  "polling_url": "https://api.butterbase.ai/v1/{app_id}/images/completions/0776b4a1-aef9-4fbc-8ac6-18255aa18614"
+}
+```
+
+**Request fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `model` | yes | Image model ID (see table above). |
+| `prompt` | yes | Text description of the image to generate. |
+| `size` | no | e.g. `1024x1024`, `1536x1024`, or symbolic like `1K` / `2K` / `4K`. Model-specific. |
+| `aspect_ratio` | no | e.g. `16:9`, `1:1`. Gemini and Pruna families only. |
+| `n` | no | Number of images to generate. GPT Image 2 / 1 / 1-mini only. |
+| `seed` | no | Integer for deterministic generation. Wan, Pruna, GPT Image 2, and a few OpenRouter models. |
+| `input_images` | no | Array of HTTPS image URLs for image-to-image or reference guidance (up to 14 refs on most models). |
+| `mask` | no | HTTPS URL of an alpha mask for edit mode. GPT Image 2 only. |
+| `negative_prompt` | no | Text description of what to avoid. Wan 2.6 only. |
+| `provider` | no | Object of model-specific params (e.g. Wan's `bbox_list` / `color_palette`, GPT's `quality` / `background`, Seedream's `optimize_prompt_options`). Validated against the model's provider-param whitelist. |
+
+**Image URL aliases:** For convenience, top-level keys `image`, `image_url`, `image_uri`, `reference_image`, `input_image`, and `starting_image` are folded into `input_images[]` before validation. Only `mask` remains a distinct top-level field.
+
+### 2. Poll for status
+
+Poll the URL from `polling_url` every 2–5 seconds until `status` is terminal (`completed`, `failed`, `cancelled`, or `expired`).
+
+**curl:**
+
+```bash
+curl "https://api.butterbase.ai/v1/$APP_ID/images/completions/$JOB_ID" \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY"
+```
+
+**TypeScript:**
+
+```typescript
+async function poll(jobUrl: string, apiKey: string) {
+  while (true) {
+    const res = await fetch(jobUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const job = await res.json();
+    if (['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) return job;
+    await new Promise(r => setTimeout(r, 2_000));
+  }
+}
+```
+
+**Python:**
+
+```python
+import time, requests
+def poll(job_url, api_key):
+    while True:
+        job = requests.get(job_url, headers={"Authorization": f"Bearer {api_key}"}).json()
+        if job["status"] in {"completed", "failed", "cancelled", "expired"}:
+            return job
+        time.sleep(2)
+```
+
+**Response (when `completed`):**
+
+```json
+{
+  "job_id": "0776b4a1-aef9-4fbc-8ac6-18255aa18614",
+  "status": "completed",
+  "model": "openai/gpt-image-2",
+  "polling_url": "https://api.butterbase.ai/v1/{app_id}/images/completions/0776b4a1-...",
+  "content_urls": [
+    "https://api.butterbase.ai/v1/{app_id}/images/completions/0776b4a1-.../content?index=0"
+  ],
+  "error": null,
+  "created_at": "2026-07-15T02:57:44.271Z",
+  "charged_credits_usd": 0.010168,
+  "settled_at": "2026-07-15T02:58:04.512Z"
+}
+```
+
+- `content_urls` is an array — with `n > 1` on GPT Image, one entry per generated image.
+- `charged_credits_usd` is populated once the job settles (first terminal poll). It's `null` while pending or in progress.
+- For `status: "failed"`, `error` carries the upstream message.
+
+### 3. Download the image
+
+The URLs in `content_urls` are absolute and require the same `Bearer` API key. They stream PNG or JPEG bytes (see the `Content-Type` header — varies per model / request).
+
+**curl:**
+
+```bash
+curl -L "$CONTENT_URL" \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY" \
+  --output image.png
+```
+
+**TypeScript:**
+
+```typescript
+const img = await fetch(job.content_urls[0], { headers: { Authorization: `Bearer ${apiKey}` } });
+const buf = Buffer.from(await img.arrayBuffer());
+// Content-Type header tells you the format: image/png, image/jpeg, image/webp
+```
+
+### Errors
+
+Same taxonomy as video generation, plus one image-specific code:
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `UNSUPPORTED_PARAM` | Request included a param the target model doesn't accept. Response body lists `supported_top_level` and `supported_provider` for that model. |
+| 400 | `WRONG_MODALITY` | Model isn't an image model (probably a chat or video model). |
+| 402 | `INSUFFICIENT_CREDITS` | App is out of credits. |
+| 404 | `JOB_NOT_FOUND` | jobId doesn't exist or belongs to another end-user. |
+| 409 | `JOB_NOT_COMPLETED` | Requested `/content` on a job that hasn't reached terminal status. |
+| 502 | `MODEL_UNAVAILABLE` | Upstream temporarily unavailable. Retry. |
+
+### Notes on URL expiration
+
+Content URLs are backed by the upstream provider's storage, which typically expires **~30 days** after generation. If you need long-term storage, download the image and mirror it to your own bucket (Butterbase Storage works well) before the window closes.
+
+### Concurrency
+
+There is no per-app or per-key concurrency cap on the Butterbase side — fire off as many parallel POSTs as your credit balance covers, and poll each returned `job_id` independently. Upstream rate limits from the underlying model provider are the only ceiling; if you hit one, you'll get a `429` with the specific upstream error surfaced.
+
 ## Configuration
 
 ```json

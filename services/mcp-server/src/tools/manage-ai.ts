@@ -29,6 +29,18 @@ Actions:
                        When status is "completed", content_urls contains absolute URLs (same origin
                        as the polling_url) that the caller can fetch() directly using the same
                        Authorization header. Use this to drive your own polling loop.
+  - submit_image      { app_id, model, prompt, size?, aspect_ratio?, n?, seed?, input_images?, mask?, negative_prompt?, provider? }
+                       Submits an async image-generation job. Returns { job_id, status, polling_url }.
+                       Model IDs: openai/gpt-image-2, google/gemini-3-pro-image-preview, bytedance/seedream-5-pro,
+                       alibaba/wan-2.7-image-pro, prunaai/p-image-edit — see list_models for the full catalog.
+                       Different models accept different params; a param outside the model's whitelist returns
+                       400 UNSUPPORTED_PARAM listing what the model does accept. Use "provider" for model-specific
+                       extras (e.g. { bbox_list, color_palette } for Wan; { quality, background, mask } for GPT Image).
+  - poll_image        { app_id, job_id }
+                       Returns current { status, model, content_urls?, error?, created_at, charged_credits_usd }.
+                       When status is "completed", content_urls contains absolute URLs (image/png or image/jpeg)
+                       fetchable with the same Authorization header. Content URLs expire ~30 days after generation —
+                       mirror to your own storage if you need long-term retention.
   - start_meeting     { app_id, meeting_url, transcript?, recording?, metadata?, bot_name?, automatic_leave? }
                        Spawn a meeting bot that joins a Zoom/Meet/Teams/Webex call.
                        recording: "mp4" (default), "audio_only", or false. transcript defaults to true.
@@ -69,6 +81,7 @@ drive the SDK from inside a function or DO.`,
       action: z.enum([
         'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
         'submit_video', 'poll_video',
+        'submit_image', 'poll_image',
         'start_meeting', 'get_meeting', 'list_meetings', 'stop_meeting', 'estimate_meeting',
         'configure_meetings_webhook', 'usage_meetings',
       ]).describe('The action to perform'),
@@ -95,15 +108,22 @@ drive the SDK from inside a function or DO.`,
       // get_usage
       startDate: z.string().optional(),
       endDate: z.string().optional(),
-      // submit_video
-      prompt: z.string().optional().describe('Required for submit_video'),
+      // submit_video / submit_image (shared: prompt, aspect_ratio, seed)
+      prompt: z.string().optional().describe('Required for submit_video / submit_image'),
       duration: z.number().int().positive().optional(),
       resolution: z.string().optional(),
       aspect_ratio: z.string().optional(),
       generate_audio: z.boolean().optional(),
       seed: z.number().int().optional(),
-      // poll_video
-      job_id: z.string().optional().describe('Required for poll_video'),
+      // submit_image
+      size: z.string().optional().describe('For submit_image: e.g. "1024x1024", "1K", "2K", "4K" (model-specific)'),
+      n: z.number().int().positive().max(10).optional().describe('For submit_image: number of images (GPT Image only)'),
+      input_images: z.array(z.string().url()).max(14).optional().describe('For submit_image / submit_video: HTTPS URLs for reference / image-to-image / edit source'),
+      mask: z.string().url().optional().describe('For submit_image: HTTPS URL of alpha mask (GPT Image 2 edit mode)'),
+      negative_prompt: z.string().optional().describe('For submit_image: text of what to avoid (Wan 2.6 only)'),
+      provider: z.record(z.unknown()).optional().describe('For submit_image: model-specific passthrough params (e.g. bbox_list, quality, optimize_prompt_options)'),
+      // poll_video / poll_image
+      job_id: z.string().optional().describe('Required for poll_video / poll_image'),
       // configure_meetings_webhook
       forward_url: z.string().optional().describe('Required for configure_meetings_webhook'),
       rotate_secret: z.boolean().optional().describe('For configure_meetings_webhook — generate a new signing secret'),
@@ -213,6 +233,32 @@ drive the SDK from inside a function or DO.`,
               return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "poll_video".' }], isError: true as const };
             }
             result = await apiGet(`/v1/${app_id}/videos/completions/${encodeURIComponent(args.job_id)}`);
+            break;
+          }
+          case 'submit_image': {
+            if (!args.prompt) {
+              return { content: [{ type: 'text' as const, text: 'Error: "prompt" is required for "submit_image".' }], isError: true as const };
+            }
+            if (!args.model) {
+              return { content: [{ type: 'text' as const, text: 'Error: "model" is required for "submit_image".' }], isError: true as const };
+            }
+            const body: Record<string, unknown> = { model: args.model, prompt: args.prompt };
+            if (args.size !== undefined) body.size = args.size;
+            if (args.aspect_ratio !== undefined) body.aspect_ratio = args.aspect_ratio;
+            if (args.n !== undefined) body.n = args.n;
+            if (args.seed !== undefined) body.seed = args.seed;
+            if (args.input_images !== undefined) body.input_images = args.input_images;
+            if (args.mask !== undefined) body.mask = args.mask;
+            if (args.negative_prompt !== undefined) body.negative_prompt = args.negative_prompt;
+            if (args.provider !== undefined) body.provider = args.provider;
+            result = await apiPost(`/v1/${app_id}/images/completions`, body);
+            break;
+          }
+          case 'poll_image': {
+            if (!args.job_id) {
+              return { content: [{ type: 'text' as const, text: 'Error: "job_id" is required for "poll_image".' }], isError: true as const };
+            }
+            result = await apiGet(`/v1/${app_id}/images/completions/${encodeURIComponent(args.job_id)}`);
             break;
           }
           case 'start_meeting': {
