@@ -10,7 +10,7 @@ This guide covers running the OSS stack on your machine with `docker-compose.loc
 | Node.js | 22+ |
 | npm | 10+ (comes with Node) |
 
-Optional for E2E / move-app tests: `libpq` (`pg_dump`, `psql`) — see [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md).
+Optional for E2E / move-app tests: `libpq` (`pg_dump`, `psql`).
 
 ## 1. Get the code
 
@@ -254,7 +254,7 @@ Multi-region integration tests:
 npm run e2e:all    # bootstrap compose + migrate + vitest
 ```
 
-See [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md).
+See the E2E config in `vitest.e2e.config.ts`.
 
 ## 10. Troubleshooting
 
@@ -339,6 +339,6 @@ In OSS mode, control-api logs: `No cloud overlays found, running in OSS mode (No
 - Explore [`Examples/`](./Examples) and deploy with [`packages/cli`](./packages/cli/README.md).
 - Use the SDK: [`packages/sdk`](./packages/sdk/README.md).
 - Read MCP tool docs via the butterbase MCP server or `services/mcp-server/src/docs/user-documentation.ts`.
-- Production deploy patterns: [`docs/runbooks`](./docs/runbooks), [`SECURITY.md`](./SECURITY.md).
+- Production deploy patterns: [`SECURITY.md`](./SECURITY.md).
 
 For issues, open a [bug report](https://github.com/butterbase-ai/butterbase/issues/new?template=bug.yml) with `docker compose ps` and relevant logs.
