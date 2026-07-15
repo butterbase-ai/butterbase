@@ -536,6 +536,9 @@ export interface CloneReplayResult {
   /** DO env keys that received a value from the shared clone-minted bb_sk_*.
    *  Empty when no shared key was passed or no keys matched a convention. */
   auto_minted_keys: string[];
+  /** DO env keys that received a value from CLONE_APP_ENV_OVERRIDES. Empty
+   *  when no override matched a source-declared DO env key. */
+  override_filled_keys: string[];
 }
 
 export interface ReplayDurableObjectsCloneOpts {
@@ -547,6 +550,11 @@ export interface ReplayDurableObjectsCloneOpts {
   /** Extra DO env keys the caller explicitly asked to auto-fill with the
    *  shared minted key, beyond convention-matched keys. */
   explicitAutoMintKeys?: string[];
+  /** Resolved per-clone overrides from CLONE_APP_ENV_OVERRIDES. Values land
+   *  in app_do_env_vars for any key present in the source's DO env keys.
+   *  Skipped when the same key is already convention-auto-minted (precedence:
+   *  user > convention > override). */
+  appOverrides?: Record<string, string>;
 }
 
 /**
@@ -563,9 +571,11 @@ export interface ReplayDurableObjectsCloneOpts {
  * BB_SUBSTRATE_KEY): when `opts.sharedMintedKey` is provided, those keys are
  * filled with the shared minted bb_sk_* so DOs and functions on the cloned
  * app share the same intra-app credential without a manual set_env step.
+ * `opts.appOverrides` (resolved from CLONE_APP_ENV_OVERRIDES) then fills any
+ * remaining source-declared DO env key not already covered by convention.
  *
  * If the source has no active DOs, returns `{ cloned: [], do_env_keys: [],
- * auto_minted_keys: [] }` without deploying anything.
+ * auto_minted_keys: [], override_filled_keys: [] }` without deploying anything.
  */
 export async function replayDurableObjectsForClone(
   sourceDb: Pool,
@@ -595,7 +605,7 @@ export async function replayDurableObjectsForClone(
   const doEnvKeys = keysRes.rows.map((r) => r.key);
 
   if (src.rows.length === 0) {
-    return { cloned: [], do_env_keys: doEnvKeys, auto_minted_keys: [] };
+    return { cloned: [], do_env_keys: doEnvKeys, auto_minted_keys: [], override_filled_keys: [] };
   }
 
   // Insert every source class into the dest at status='BUILDING'. On conflict
@@ -650,6 +660,33 @@ export async function replayDurableObjectsForClone(
     }
   }
 
+  const overrideFilledKeys: string[] = [];
+  if (opts?.appOverrides && Object.keys(opts.appOverrides).length > 0) {
+    const encKey = process.env.AUTH_ENCRYPTION_KEY;
+    if (!encKey) {
+      // Same soft-fail shape as the convention path: log and continue so
+      // the rest of the clone finishes; the unfilled key surfaces to the
+      // dashboard banner via the standard do_env_keys path.
+      // (encKey missing is a boot-config problem that will affect many other
+      // paths too — no need to double-report here.)
+    } else {
+      for (const [key, value] of Object.entries(opts.appOverrides)) {
+        if (!doEnvKeys.includes(key)) continue;
+        if (autoMintedKeys.includes(key)) continue; // convention wins
+        const encrypted = encrypt(value, encKey);
+        await destDb.query(
+          `INSERT INTO app_do_env_vars (app_id, key, encrypted_value)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (app_id, key) DO UPDATE
+             SET encrypted_value = EXCLUDED.encrypted_value,
+                 updated_at = now()`,
+          [destAppId, key, encrypted],
+        );
+        overrideFilledKeys.push(key);
+      }
+    }
+  }
+
   try {
     await bundleAndDeploy(destDb, controlDb, destAppId);
   } catch (err) {
@@ -671,7 +708,12 @@ export async function replayDurableObjectsForClone(
     [insertedIds],
   );
 
-  return { cloned: src.rows.map((r) => r.name), do_env_keys: doEnvKeys, auto_minted_keys: autoMintedKeys };
+  return {
+    cloned: src.rows.map((r) => r.name),
+    do_env_keys: doEnvKeys,
+    auto_minted_keys: autoMintedKeys,
+    override_filled_keys: overrideFilledKeys,
+  };
 }
 
 // CF binding name pattern: identifier-like, uppercase by convention.
