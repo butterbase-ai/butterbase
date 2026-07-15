@@ -28,6 +28,7 @@ import { replayAppEnvVars } from './clone-app-env.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
+import { getCloneAppOverrides, resolveOverridesForClone } from './clone-app-overrides.js';
 
 interface NeonTask {
   id: number;
@@ -61,6 +62,10 @@ export function startNeonTaskWorker(
   dataPlaneDb: pg.Pool,
   logger: Logger,
 ): NodeJS.Timeout {
+  // Force eager parse so a malformed CLONE_APP_ENV_OVERRIDES blob fails the
+  // worker at startup, not mid-clone.
+  getCloneAppOverrides();
+
   let running = false;
 
   const interval = setInterval(async () => {
@@ -764,6 +769,17 @@ async function executeClone(
         );
       }
 
+      // Resolve CLONE_APP_ENV_OVERRIDES once per clone. mint_hex specs produce
+      // a single value here that is threaded into BOTH replayDurableObjectsForClone
+      // and replayFunctions so DO signer + function verifiers share it.
+      const appOverrides = resolveOverridesForClone(getCloneAppOverrides(), job.source_app_id);
+      if (Object.keys(appOverrides).length > 0) {
+        logger.info(
+          { destAppId: resolvedDestAppId, sourceAppId: job.source_app_id, overrideKeys: Object.keys(appOverrides) },
+          '[clone] CLONE_APP_ENV_OVERRIDES matched source app',
+        );
+      }
+
       // Mint the shared bb_sk_ once if EITHER side (DOs or functions) needs
       // it. Detection scans:
       //   - source DO env keys      (auto-mint if any match a convention key)
@@ -832,7 +848,7 @@ async function executeClone(
           job.source_app_id,
           resolvedDestAppId,
           job.requested_by_user_id,
-          { sharedMintedKey },
+          { sharedMintedKey, appOverrides },
         );
         if (doResult.cloned.length > 0) {
           logger.info(
@@ -844,7 +860,10 @@ async function executeClone(
             },
             '[clone] durable objects replayed',
           );
-          const unfilled = doResult.do_env_keys.filter((k) => !doResult.auto_minted_keys.includes(k));
+          const overrideFilled = doResult.override_filled_keys;
+          const unfilled = doResult.do_env_keys.filter(
+            (k) => !doResult.auto_minted_keys.includes(k) && !overrideFilled.includes(k),
+          );
           if (unfilled.length > 0) {
             await appendCloneJobWarnings(controlDb, jobId, [
               `Durable Objects cloned: ${doResult.cloned.join(', ')}. Unfilled DO env keys (${unfilled.join(', ')}) are secrets that were not copied — set them via manage_durable_objects action=set_env after the clone completes.`,
@@ -881,6 +900,7 @@ async function executeClone(
           controlPool: controlDb,
           destAppOwnerId,
           preMintedSharedKey: sharedMintedKey,
+          appOverrides,
         },
       );
       if (fnResult.warnings.length > 0) {

@@ -36,6 +36,11 @@ export interface ReplayFunctionsEnvVarOpts {
    *  instead of minting a second one. Preserves "at most one shared key per
    *  clone." */
   preMintedSharedKey?: string | null;
+  /** Resolved per-clone overrides from CLONE_APP_ENV_OVERRIDES. For every
+   *  function whose source `encrypted_env_vars` declares one of these keys,
+   *  the value is layered into `merged` AFTER user-supplied pendingEnvVarValues
+   *  and CONVENTIONS auto-mint (both win), BEFORE static fills. */
+  appOverrides?: Record<string, string>;
 }
 
 /**
@@ -343,9 +348,11 @@ export async function replayRls(
  *                              `opts.pendingEnvVarValues` supplies user-provided
  *                              values; `opts.autoMintRequests` triggers bb_sk_*
  *                              key generation per function/key pair.
- * @returns `{ count, warnings, unfilledEnvVars }` — rows successfully inserted,
- *          warning strings, and a map of function name → source env var keys that
- *          were not covered by either provided values or auto-mint.
+ * @returns `{ count, warnings, unfilledEnvVars, overrideFilledFunctions }` — rows
+ *          successfully inserted, warning strings, a map of function name → source
+ *          env var keys that were not covered by either provided values or
+ *          auto-mint, and a map of function name → keys that were filled from
+ *          `opts.appOverrides` (non-empty entries only).
  */
 export async function replayFunctions(
   sourceRuntimePool: pg.Pool,
@@ -355,7 +362,12 @@ export async function replayFunctions(
   requestedByUserId: string,
   logger: ReplayLogger,
   opts?: ReplayFunctionsEnvVarOpts,
-): Promise<{ count: number; warnings: string[]; unfilledEnvVars: Record<string, string[]> }> {
+): Promise<{
+  count: number;
+  warnings: string[];
+  unfilledEnvVars: Record<string, string[]>;
+  overrideFilledFunctions: Record<string, string[]>;
+}> {
   const src = await sourceRuntimePool.query<{
     id: string;
     name: string;
@@ -379,6 +391,7 @@ export async function replayFunctions(
   const warnings: string[] = [];
   let inserted = 0;
   const unfilledEnvVars: Record<string, string[]> = {};
+  const overrideFilledFunctions: Record<string, string[]> = {};
 
   // Pre-compute "what env vars does each source function need" — we use this
   // to subtract filled (provided + auto-minted) keys and surface the rest.
@@ -526,11 +539,22 @@ export async function replayFunctions(
           }
         }
 
+        const srcKeysForFn = sourceKeysMap.get(f.name);
+
+        // appOverrides layer (below user-supplied + convention mint, above static fills).
+        if (opts?.appOverrides && srcKeysForFn) {
+          for (const [k, v] of Object.entries(opts.appOverrides)) {
+            if (!srcKeysForFn.has(k)) continue;
+            if (k in merged) continue; // user or convention already covered it
+            merged[k] = v;
+            (overrideFilledFunctions[f.name] ??= []).push(k);
+          }
+        }
+
         // Static fills: deterministic values the platform already knows. Only
         // applied when the source function actually used the key and the
         // caller didn't supply one explicitly.
         const staticFills = resolveStaticFills({ destAppId, apiBaseUrl: config.apiBaseUrl });
-        const srcKeysForFn = sourceKeysMap.get(f.name);
         if (srcKeysForFn) {
           for (const [k, v] of Object.entries(staticFills)) {
             if (srcKeysForFn.has(k) && !(k in merged)) merged[k] = v;
@@ -581,7 +605,7 @@ export async function replayFunctions(
     }
   }
 
-  return { count: inserted, warnings, unfilledEnvVars };
+  return { count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions };
 }
 
 // ---------------------------------------------------------------------------

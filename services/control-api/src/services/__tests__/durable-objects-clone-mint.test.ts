@@ -20,6 +20,11 @@ import { runtimeDb, controlDb, seedUser } from '../../__tests__/test-helpers/con
 const RUN_DB_TESTS = process.env.RUN_DB_TESTS === '1';
 const describeDb = RUN_DB_TESTS ? describe : describe.skip;
 
+// Single-region test topology: source and dest apps share one physical pool.
+// Named separately to match call-site semantics in the brief's test cases.
+const sourceRuntimePool = runtimeDb;
+const destRuntimePool = runtimeDb;
+
 // A minimally-valid DO class source — buildBundle re-extracts class_name via
 // regex from `export class Name extends DurableObject`, so this string is not
 // arbitrary. Matches the shape used by durable-objects.service.test.ts fixtures.
@@ -58,6 +63,35 @@ async function cleanup(ownerId: string, srcId: string, destId: string) {
   await runtimeDb.query(`DELETE FROM apps WHERE id IN ($1, $2)`, [srcId, destId]);
   await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
   await controlDb.query(`DELETE FROM organizations WHERE owner_id = $1`, [ownerId]);
+}
+
+/**
+ * Shared fixture for appOverrides tests: seeds an owner + source/dest app
+ * pair and a single source DO ('chat'/ChatRoom) declaring the given DO env
+ * keys (each with a placeholder value that the override path is expected to
+ * replace on the dest). Both source and dest apps live in `runtimeDb`
+ * (single-region test topology), mirroring every other fixture in this file.
+ * Caller is responsible for calling `cleanup(destApp.owner_id, sourceApp.id,
+ * destApp.id)` afterwards.
+ */
+async function setupCloneFixture(opts: { sourceDoEnvKeys: string[] }) {
+  const { id: ownerId } = await seedUser(`do-mint-override-${Date.now()}-${Math.random().toString(36).slice(2)}@x.com`);
+  const srcId = `app_do_ovr_src_${ownerId.slice(0, 8)}`;
+  const destId = `app_do_ovr_dst_${ownerId.slice(0, 8)}`;
+  for (const id of [srcId, destId]) {
+    await runtimeDb.query(
+      `INSERT INTO apps (id, name, owner_id, db_name) VALUES ($1, $1, $2, $1)`,
+      [id, ownerId],
+    );
+  }
+  const envKeys = Object.fromEntries(opts.sourceDoEnvKeys.map((k) => [k, `placeholder-${k}`]));
+  await seedSourceDo(srcId, 'chat', 'ChatRoom', envKeys);
+
+  return {
+    sourceApp: { id: srcId, owner_id: ownerId },
+    destApp: { id: destId, owner_id: ownerId },
+    doName: 'chat',
+  };
 }
 
 describeDb('replayDurableObjectsForClone auto-mint into app_do_env_vars', () => {
@@ -197,7 +231,7 @@ describeDb('replayDurableObjectsForClone auto-mint into app_do_env_vars', () => 
       { sharedMintedKey: 'bb_sk_ignored' },
     );
 
-    expect(result).toEqual({ cloned: [], do_env_keys: [], auto_minted_keys: [] });
+    expect(result).toEqual({ cloned: [], do_env_keys: [], auto_minted_keys: [], override_filled_keys: [] });
 
     const destRows = await runtimeDb.query<{ key: string }>(
       `SELECT key FROM app_do_env_vars WHERE app_id = $1`,
@@ -242,5 +276,82 @@ describeDb('replayDurableObjectsForClone auto-mint into app_do_env_vars', () => 
       .toBe('bb_sk_second_mint');
 
     await cleanup(ownerId, srcId, destId);
+  });
+
+  it('layers appOverrides into declared DO env keys and writes the encrypted value', async () => {
+    const { sourceApp, destApp } = await setupCloneFixture({
+      // Fixture helper (already in this file) inserts a DO row on the source
+      // + an app_do_env_vars row for 'CUSTOM_SECRET' whose value is a
+      // placeholder that we expect the override to REPLACE on the dest.
+      sourceDoEnvKeys: ['CUSTOM_SECRET'],
+    });
+
+    const result = await replayDurableObjectsForClone(
+      sourceRuntimePool,
+      destRuntimePool,
+      controlDb,
+      sourceApp.id,
+      destApp.id,
+      destApp.owner_id,
+      { appOverrides: { CUSTOM_SECRET: 'deadbeef'.repeat(8) } },
+    );
+
+    expect(result.override_filled_keys).toContain('CUSTOM_SECRET');
+    const row = await destRuntimePool.query<{ encrypted_value: string }>(
+      `SELECT encrypted_value FROM app_do_env_vars WHERE app_id = $1 AND key = $2`,
+      [destApp.id, 'CUSTOM_SECRET'],
+    );
+    const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+    expect(decrypt(row.rows[0].encrypted_value, encKey)).toEqual('deadbeef'.repeat(8));
+
+    await cleanup(destApp.owner_id, sourceApp.id, destApp.id);
+  });
+
+  it('skips appOverride keys that the source DO does not declare', async () => {
+    const { sourceApp, destApp } = await setupCloneFixture({ sourceDoEnvKeys: ['ONLY_THIS'] });
+    const result = await replayDurableObjectsForClone(
+      sourceRuntimePool,
+      destRuntimePool,
+      controlDb,
+      sourceApp.id,
+      destApp.id,
+      destApp.owner_id,
+      { appOverrides: { NOT_DECLARED: 'x'.repeat(64) } },
+    );
+    expect(result.override_filled_keys).toEqual([]);
+    const row = await destRuntimePool.query(
+      `SELECT 1 FROM app_do_env_vars WHERE app_id = $1 AND key = 'NOT_DECLARED'`,
+      [destApp.id],
+    );
+    expect(row.rowCount).toBe(0);
+
+    await cleanup(destApp.owner_id, sourceApp.id, destApp.id);
+  });
+
+  it('convention auto-mint wins over appOverrides for the same key', async () => {
+    const { sourceApp, destApp } = await setupCloneFixture({
+      sourceDoEnvKeys: ['BUTTERBASE_API_KEY'],
+    });
+    const result = await replayDurableObjectsForClone(
+      sourceRuntimePool,
+      destRuntimePool,
+      controlDb,
+      sourceApp.id,
+      destApp.id,
+      destApp.owner_id,
+      {
+        sharedMintedKey: 'bb_sk_from_mint',
+        appOverrides: { BUTTERBASE_API_KEY: 'bb_sk_from_override' },
+      },
+    );
+    expect(result.auto_minted_keys).toContain('BUTTERBASE_API_KEY');
+    expect(result.override_filled_keys).not.toContain('BUTTERBASE_API_KEY');
+    const row = await destRuntimePool.query<{ encrypted_value: string }>(
+      `SELECT encrypted_value FROM app_do_env_vars WHERE app_id = $1 AND key = 'BUTTERBASE_API_KEY'`,
+      [destApp.id],
+    );
+    expect(decrypt(row.rows[0].encrypted_value, process.env.AUTH_ENCRYPTION_KEY!)).toEqual('bb_sk_from_mint');
+
+    await cleanup(destApp.owner_id, sourceApp.id, destApp.id);
   });
 });
