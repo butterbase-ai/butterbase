@@ -62,6 +62,10 @@ export function startNeonTaskWorker(
   dataPlaneDb: pg.Pool,
   logger: Logger,
 ): NodeJS.Timeout {
+  // Force eager parse so a malformed CLONE_APP_ENV_OVERRIDES blob fails the
+  // worker at startup, not mid-clone.
+  getCloneAppOverrides();
+
   let running = false;
 
   const interval = setInterval(async () => {

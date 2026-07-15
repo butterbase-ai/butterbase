@@ -662,28 +662,20 @@ export async function replayDurableObjectsForClone(
 
   const overrideFilledKeys: string[] = [];
   if (opts?.appOverrides && Object.keys(opts.appOverrides).length > 0) {
-    const encKey = process.env.AUTH_ENCRYPTION_KEY;
-    if (!encKey) {
-      // Same soft-fail shape as the convention path: log and continue so
-      // the rest of the clone finishes; the unfilled key surfaces to the
-      // dashboard banner via the standard do_env_keys path.
-      // (encKey missing is a boot-config problem that will affect many other
-      // paths too — no need to double-report here.)
-    } else {
-      for (const [key, value] of Object.entries(opts.appOverrides)) {
-        if (!doEnvKeys.includes(key)) continue;
-        if (autoMintedKeys.includes(key)) continue; // convention wins
-        const encrypted = encrypt(value, encKey);
-        await destDb.query(
-          `INSERT INTO app_do_env_vars (app_id, key, encrypted_value)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (app_id, key) DO UPDATE
-             SET encrypted_value = EXCLUDED.encrypted_value,
-                 updated_at = now()`,
-          [destAppId, key, encrypted],
-        );
-        overrideFilledKeys.push(key);
-      }
+    const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+    for (const [key, value] of Object.entries(opts.appOverrides)) {
+      if (!doEnvKeys.includes(key)) continue;
+      if (autoMintedKeys.includes(key)) continue; // convention wins
+      const encrypted = encrypt(value, encKey);
+      await destDb.query(
+        `INSERT INTO app_do_env_vars (app_id, key, encrypted_value)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (app_id, key) DO UPDATE
+           SET encrypted_value = EXCLUDED.encrypted_value,
+               updated_at = now()`,
+        [destAppId, key, encrypted],
+      );
+      overrideFilledKeys.push(key);
     }
   }
 
