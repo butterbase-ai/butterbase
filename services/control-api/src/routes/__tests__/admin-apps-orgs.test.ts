@@ -1,0 +1,310 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import Fastify from 'fastify';
+import fp from 'fastify-plugin';
+
+// Mock admin-auth so requireAdmin is controllable (same pattern as
+// src/routes/admin/__tests__/activity.test.ts).
+vi.mock('../admin-auth.js', () => ({
+  requireAdmin: vi.fn(),
+}));
+
+// Mock region-resolver so tests don't need real runtime pools.
+vi.mock('../../services/region-resolver.js', () => ({
+  fanOutQuery: vi.fn(),
+  fanOutRuntimeRegions: vi.fn(),
+  getRuntimeDbForApp: vi.fn(),
+}));
+
+import { requireAdmin } from '../admin-auth.js';
+import { fanOutRuntimeRegions, getRuntimeDbForApp } from '../../services/region-resolver.js';
+import { adminRoutes } from '../admin.js';
+
+const mockRequireAdmin = vi.mocked(requireAdmin);
+const mockFanOutRuntimeRegions = vi.mocked(fanOutRuntimeRegions);
+const mockGetRuntimeDbForApp = vi.mocked(getRuntimeDbForApp);
+
+function makeControlDbMock(handlers: (sql: string, params: unknown[]) => { rows: any[] } | null) {
+  return {
+    query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
+      const r = handlers(sql, params);
+      return r ?? { rows: [] };
+    }),
+  };
+}
+
+async function makeApp(controlDb: any) {
+  const app = Fastify({ logger: false });
+  await app.register(
+    fp(
+      async (i: any) => {
+        i.decorate('controlDb', controlDb);
+      },
+      { name: 'shim' }
+    )
+  );
+  await app.register(adminRoutes);
+  return app;
+}
+
+/**
+ * Drives the callback passed to `fanOutRuntimeRegions(async pool => {...})`
+ * against a fake pool, recording every query issued so tests can assert on
+ * the SQL/params, and returns the merged single-region shape the real
+ * helper would produce.
+ */
+function makeFanOutRuntimeRegionsMock(
+  dataRows: any[],
+  total: number,
+  capturedQueries: { sql: string; params: unknown[] }[] = []
+) {
+  return vi.fn().mockImplementation(async (cb: any) => {
+    const poolStub = {
+      query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
+        capturedQueries.push({ sql, params });
+        if (sql.includes('count(*)::int AS total')) {
+          return { rows: [{ total }] };
+        }
+        return { rows: dataRows };
+      }),
+    };
+    const result = await cb(poolStub);
+    return [{ region: 'us-east-1', result }];
+  });
+}
+
+const teamApp = {
+  id: 'app-team-1',
+  name: 'Team App',
+  region: 'us-east-1',
+  db_provisioned: true,
+  deployment_url: 'https://team.example.com',
+  last_deployed_at: '2026-01-04T00:00:00Z',
+  created_at: '2026-01-01T00:00:00Z',
+  owner_id: 'owner-1',
+  function_count: 0,
+};
+
+const personalApp = {
+  id: 'app-personal-1',
+  name: 'Personal App',
+  region: 'us-east-1',
+  db_provisioned: true,
+  deployment_url: 'https://personal.example.com',
+  last_deployed_at: '2026-01-04T00:00:00Z',
+  created_at: '2026-01-02T00:00:00Z',
+  owner_id: 'owner-1',
+  function_count: 0,
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockRequireAdmin.mockResolvedValue('admin-uid');
+});
+
+describe('GET /admin/apps org enrichment', () => {
+  it('list rows carry organization_id/name/personal', async () => {
+    mockFanOutRuntimeRegions.mockImplementation(
+      makeFanOutRuntimeRegionsMock([teamApp, personalApp], 2)
+    );
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('FROM org_app_index oai') && sql.includes('JOIN organizations o')) {
+        return {
+          rows: [
+            { app_id: 'app-team-1', organization_id: 'org-team', organization_name: 'Acme', organization_personal: false },
+            { app_id: 'app-personal-1', organization_id: 'org-personal', organization_name: 'Personal', organization_personal: true },
+          ],
+        };
+      }
+      if (sql.includes('FROM platform_users WHERE id = ANY')) {
+        return { rows: [{ id: 'owner-1', email: 'owner@example.com' }] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    const r = await app.inject({ method: 'GET', url: '/admin/apps', headers: { authorization: 'Bearer ok' } });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    const team = body.data.find((row: any) => row.id === 'app-team-1');
+    const personal = body.data.find((row: any) => row.id === 'app-personal-1');
+    expect(team.organization_id).toBe('org-team');
+    expect(team.organization_name).toBe('Acme');
+    expect(team.organization_personal).toBe(false);
+    expect(personal.organization_id).toBe('org-personal');
+    expect(personal.organization_personal).toBe(true);
+    expect(body.total).toBe(2);
+  });
+
+  it('organization_id filter pre-resolves app ids in controlDb and constrains the runtime fanout', async () => {
+    const capturedQueries: { sql: string; params: unknown[] }[] = [];
+    mockFanOutRuntimeRegions.mockImplementation(makeFanOutRuntimeRegionsMock([teamApp], 1, capturedQueries));
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('FROM org_app_index WHERE organization_id = $1')) {
+        expect(params).toEqual(['org-team']);
+        return { rows: [{ app_id: 'app-team-1' }] };
+      }
+      if (sql.includes('FROM org_app_index oai') && sql.includes('JOIN organizations o')) {
+        return {
+          rows: [
+            { app_id: 'app-team-1', organization_id: 'org-team', organization_name: 'Acme', organization_personal: false },
+          ],
+        };
+      }
+      if (sql.includes('FROM platform_users WHERE id = ANY')) {
+        return { rows: [{ id: 'owner-1', email: 'owner@example.com' }] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'GET',
+      url: '/admin/apps?organization_id=org-team',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].organization_id).toBe('org-team');
+
+    // The runtime fanout's data query must have been constrained with
+    // `a.id = ANY($n::uuid[])` bound to the controlDb-resolved app id list.
+    const dataQuery = capturedQueries.find((q) => q.sql.includes('LEFT JOIN LATERAL'));
+    expect(dataQuery).toBeDefined();
+    expect(dataQuery!.sql).toContain('a.id = ANY(');
+    expect(dataQuery!.params[0]).toEqual(['app-team-1']);
+  });
+
+  it('unknown organization_id returns empty result without calling the runtime fanout', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('FROM org_app_index WHERE organization_id = $1')) {
+        return { rows: [] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'GET',
+      url: '/admin/apps?organization_id=org-unknown',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ data: [], total: 0 });
+    expect(mockFanOutRuntimeRegions).not.toHaveBeenCalled();
+  });
+
+  it('personal_only=yes filters to organization_personal === true', async () => {
+    mockFanOutRuntimeRegions.mockImplementation(
+      makeFanOutRuntimeRegionsMock([teamApp, personalApp], 2)
+    );
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('FROM org_app_index oai') && sql.includes('JOIN organizations o')) {
+        return {
+          rows: [
+            { app_id: 'app-team-1', organization_id: 'org-team', organization_name: 'Acme', organization_personal: false },
+            { app_id: 'app-personal-1', organization_id: 'org-personal', organization_name: 'Personal', organization_personal: true },
+          ],
+        };
+      }
+      if (sql.includes('FROM platform_users WHERE id = ANY')) {
+        return { rows: [{ id: 'owner-1', email: 'owner@example.com' }] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'GET',
+      url: '/admin/apps?personal_only=yes',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].id).toBe('app-personal-1');
+    expect(body.data.every((row: any) => row.organization_personal === true)).toBe(true);
+    expect(body.total).toBe(1);
+  });
+
+  it('personal_only=no filters to organization_personal === false', async () => {
+    mockFanOutRuntimeRegions.mockImplementation(
+      makeFanOutRuntimeRegionsMock([teamApp, personalApp], 2)
+    );
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('FROM org_app_index oai') && sql.includes('JOIN organizations o')) {
+        return {
+          rows: [
+            { app_id: 'app-team-1', organization_id: 'org-team', organization_name: 'Acme', organization_personal: false },
+            { app_id: 'app-personal-1', organization_id: 'org-personal', organization_name: 'Personal', organization_personal: true },
+          ],
+        };
+      }
+      if (sql.includes('FROM platform_users WHERE id = ANY')) {
+        return { rows: [{ id: 'owner-1', email: 'owner@example.com' }] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'GET',
+      url: '/admin/apps?personal_only=no',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].id).toBe('app-team-1');
+    expect(body.data.every((row: any) => row.organization_personal === false)).toBe(true);
+    expect(body.total).toBe(1);
+  });
+});
+
+describe('GET /admin/apps/:id org enrichment', () => {
+  it('the returned app object has organization_id/name/personal', async () => {
+    const runtimePoolStub = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM apps a')) {
+          return { rows: [teamApp] };
+        }
+        if (sql.includes('FROM app_functions f')) {
+          return { rows: [] };
+        }
+        if (sql.includes('FROM function_invocations fi')) {
+          return { rows: [] };
+        }
+        if (sql.includes('FROM ai_usage_logs')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+    mockGetRuntimeDbForApp.mockResolvedValue(runtimePoolStub as any);
+
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('FROM audit_events')) {
+        return { rows: [] };
+      }
+      if (sql.includes('FROM platform_users WHERE id = $1')) {
+        return { rows: [{ id: 'owner-1', email: 'owner@example.com' }] };
+      }
+      if (sql.includes('FROM org_app_index oai') && sql.includes('WHERE oai.app_id = $1')) {
+        expect(params).toEqual(['app-team-1']);
+        return {
+          rows: [
+            { organization_id: 'org-team', organization_name: 'Acme', organization_personal: false },
+          ],
+        };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'GET',
+      url: '/admin/apps/app-team-1',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.app.organization_id).toBe('org-team');
+    expect(body.app.organization_name).toBe('Acme');
+    expect(body.app.organization_personal).toBe(false);
+  });
+});
