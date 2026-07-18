@@ -8,12 +8,18 @@ import { requireAdmin } from '../../lib/admin-guard.js';
 import { fanOutQuery } from '../../services/region-resolver.js';
 
 // Stripe client lives in the cloud overlay; OSS builds reach an explicit
-// failure. Matches the pattern in routes/admin.ts. Kept here rather than at
-// module scope so a bad build in overlays only fails routes that need Stripe
-// (this handler), not the whole plugin.
+// failure. Kept here rather than at module scope so a bad build in overlays
+// only fails routes that need Stripe (this handler), not the whole plugin.
+//
+// Compiled path is services/control-api/dist/routes/admin/organizations.js
+// (one directory deeper than routes/admin.js, so one extra `..`), and the
+// production layout after the platform Dockerfile is /app/cloud/overlays/...
+// (not /app/cloud-overlays/... — that hyphenated shape is a stale string in
+// routes/admin.ts's copy of this helper; keep it consistent here with what
+// the platform image actually ships).
 async function getStripeClient(): Promise<any> {
   // @ts-expect-error — overlay path resolved at runtime
-  const mod = await import('../../../../cloud-overlays/dist/cloud-overlays/billing/stripe/stripe-service.js');
+  const mod = await import('../../../../../../cloud/overlays/dist/cloud/overlays/billing/stripe/stripe-service.js');
   return mod.getStripeClient();
 }
 
