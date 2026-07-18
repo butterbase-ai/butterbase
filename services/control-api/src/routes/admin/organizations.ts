@@ -250,7 +250,7 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
           `SELECT id, name, region, owner_id, db_provisioned, deployment_url,
                   last_deployed_at, created_at
              FROM apps
-            WHERE id = ANY($1::uuid[])`,
+            WHERE id = ANY($1::text[])`,
           [indexRows.map((r) => r.app_id)]
         );
 

@@ -377,7 +377,7 @@ export async function adminRoutes(app: FastifyInstance) {
       if (orgFilterAppIds.length === 0) {
         return { data: [], total: 0 };
       }
-      conditions.push(`a.id = ANY($${idx++}::uuid[])`);
+      conditions.push(`a.id = ANY($${idx++}::text[])`);
       params.push(orgFilterAppIds);
     }
 
@@ -465,7 +465,7 @@ export async function adminRoutes(app: FastifyInstance) {
         `SELECT oai.app_id, oai.organization_id, o.name AS organization_name, o.personal AS organization_personal
            FROM org_app_index oai
            JOIN organizations o ON o.id = oai.organization_id
-          WHERE oai.app_id = ANY($1::uuid[])`,
+          WHERE oai.app_id = ANY($1::text[])`,
         [allAppIds]
       );
       const byApp = new Map<string, any>(orgRes.rows.map((r: any) => [r.app_id, r]));
