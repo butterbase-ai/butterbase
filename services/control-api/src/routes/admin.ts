@@ -1669,9 +1669,14 @@ export async function adminRoutes(app: FastifyInstance) {
         [id]
       ),
       app.controlDb.query(
-        `SELECT pu.id AS user_id, pu.email, s.created_at AS subscribed_at
+        `SELECT s.organization_id,
+                o.name AS organization_name,
+                o.personal,
+                pu.email AS owner_email,
+                s.created_at AS subscribed_at
          FROM subscriptions s
-         JOIN platform_users pu ON s.user_id = pu.id
+         JOIN organizations o ON o.id = s.organization_id
+         JOIN platform_users pu ON pu.id = o.owner_id
          WHERE s.plan_id = $1 AND s.status = 'active'
          ORDER BY s.created_at DESC`,
         [id]
