@@ -600,9 +600,10 @@ describe('PATCH /admin/organizations/:id/plan', () => {
     expect(subscriptionUpdates).toHaveLength(0);
 
     expect(billingEventInserts).toHaveLength(1);
-    expect(billingEventInserts[0][0]).toBe('org-1');
-    const payload = JSON.parse(billingEventInserts[0][1] as string);
-    expect(payload).toEqual({ plan_id: 'enterprise-acme', stripe_price_id: 'price_123' });
+    expect(billingEventInserts[0][0]).toBe('admin-uid');
+    expect(billingEventInserts[0][1]).toBe('org-1');
+    const metadata = JSON.parse(billingEventInserts[0][2] as string);
+    expect(metadata).toEqual({ plan_id: 'enterprise-acme', stripe_price_id: 'price_123' });
   });
 
   it('200 assigns plan and updates the existing subscription row (no INSERT)', async () => {
