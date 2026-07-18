@@ -5,6 +5,7 @@
 // comes from org_app_index, which lives in controlDb as of migration 090).
 import type { FastifyPluginAsync } from 'fastify';
 import { requireAdmin } from '../../lib/admin-guard.js';
+import { fanOutQuery } from '../../services/region-resolver.js';
 
 function parseIntParam(value: string | undefined, fallback: number, max?: number): number {
   const raw = parseInt(value ?? '', 10);
@@ -38,6 +39,52 @@ export interface AdminOrganizationRow {
   member_count: number;
   app_count: number;
   created_at: string;
+}
+
+export interface AdminOrganizationDetail {
+  org: AdminOrganizationRow & {
+    auto_refill_enabled: boolean;
+    auto_refill_amount_usd: number | null;
+    billing_period_start: string | null;
+  };
+  members: Array<{
+    user_id: string;
+    email: string;
+    display_name: string | null;
+    role: 'owner' | 'member';
+    invited_by: string | null;
+    joined_at: string;
+  }>;
+  apps: Array<{
+    id: string;
+    name: string;
+    region: string;
+    owner_id: string;
+    db_provisioned: boolean;
+    deployment_url: string | null;
+    last_deployed_at: string | null;
+    created_at: string;
+  }>;
+  subscription: {
+    plan_id: string;
+    plan_name: string;
+    status: string;
+    price_monthly_cents: number;
+    started_at: string;
+  } | null;
+  recentBillingEvents: Array<{
+    id: string;
+    event_type: string;
+    created_at: string;
+  }>;
+  creditsLedger: {
+    credits_usd: number;
+    monthly_allowance_usd: number;
+    auto_refill_enabled: boolean;
+    auto_refill_amount_usd: number | null;
+    auto_refill_last_attempt_at: string | null;
+    auto_refill_last_failure_reason: string | null;
+  };
 }
 
 const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
@@ -114,6 +161,97 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     }));
 
     return { data: merged.slice(offset, offset + limit), total: merged.length };
+  });
+
+  fastify.get('/admin/organizations/:id', { config: { public: true } }, async (req, reply) => {
+    const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+    if (!user) return;
+
+    const ctrl = (fastify as any).controlDb;
+    const { id } = req.params as { id: string };
+
+    const orgRes = await ctrl.query(
+      `SELECT o.id, o.name, o.personal, o.owner_id, pu.email AS owner_email,
+              o.plan_id, o.account_status, o.stripe_customer_id,
+              o.credits_usd::float8 AS credits_usd,
+              coalesce(o.monthly_allowance_usd, 0)::float8 AS monthly_allowance_usd,
+              o.auto_refill_enabled,
+              o.auto_refill_amount_usd::float8 AS auto_refill_amount_usd,
+              o.auto_refill_last_attempt_at, o.auto_refill_last_failure_reason,
+              o.billing_period_start, o.created_at,
+              (SELECT count(*)::int FROM organization_members m WHERE m.organization_id = o.id) AS member_count
+         FROM organizations o
+         JOIN platform_users pu ON pu.id = o.owner_id
+        WHERE o.id = $1`,
+      [id]
+    );
+    if (orgRes.rows.length === 0) {
+      reply.code(404).send({ error: 'organization_not_found' });
+      return;
+    }
+    const org = orgRes.rows[0];
+
+    const [membersRes, appIndexRes, subRes, eventsRes] = await Promise.all([
+      ctrl.query(
+        `SELECT m.user_id, pu.email, pu.display_name, m.role, m.invited_by, m.joined_at
+           FROM organization_members m
+           JOIN platform_users pu ON pu.id = m.user_id
+          WHERE m.organization_id = $1
+          ORDER BY m.role = 'owner' DESC, m.joined_at ASC`,
+        [id]
+      ),
+      ctrl.query(
+        `SELECT app_id, region FROM org_app_index WHERE organization_id = $1 ORDER BY created_at DESC`,
+        [id]
+      ),
+      ctrl.query(
+        `SELECT s.plan_id, p.name AS plan_name, s.status,
+                coalesce(p.price_monthly_cents, 0) AS price_monthly_cents,
+                s.created_at AS started_at
+           FROM subscriptions s
+           LEFT JOIN plans p ON p.id = s.plan_id
+          WHERE s.organization_id = $1
+          ORDER BY s.created_at DESC
+          LIMIT 1`,
+        [id]
+      ),
+      ctrl.query(
+        `SELECT id, event_type, created_at
+           FROM billing_events
+          WHERE organization_id = $1
+          ORDER BY created_at DESC
+          LIMIT 25`,
+        [id]
+      ),
+    ]);
+
+    const indexRows: Array<{ app_id: string; region: string }> = appIndexRes.rows;
+    const apps = indexRows.length === 0
+      ? []
+      : await fanOutQuery<any>(
+          `SELECT id, name, region, owner_id, db_provisioned, deployment_url,
+                  last_deployed_at, created_at
+             FROM apps
+            WHERE id = ANY($1::uuid[])`,
+          [indexRows.map((r) => r.app_id)]
+        );
+
+    const detail: AdminOrganizationDetail = {
+      org: { ...org, member_count: membersRes.rowCount, app_count: apps.length },
+      members: membersRes.rows,
+      apps,
+      subscription: subRes.rows[0] ?? null,
+      recentBillingEvents: eventsRes.rows,
+      creditsLedger: {
+        credits_usd: org.credits_usd,
+        monthly_allowance_usd: org.monthly_allowance_usd,
+        auto_refill_enabled: org.auto_refill_enabled,
+        auto_refill_amount_usd: org.auto_refill_amount_usd,
+        auto_refill_last_attempt_at: org.auto_refill_last_attempt_at,
+        auto_refill_last_failure_reason: org.auto_refill_last_failure_reason,
+      },
+    };
+    return detail;
   });
 };
 

@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 import organizationsRoutes from './organizations.js';
+import { fanOutQuery } from '../../services/region-resolver.js';
+
+vi.mock('../../services/region-resolver.js', () => ({
+  fanOutQuery: vi.fn(),
+  fanOutRuntimeRegions: vi.fn(),
+  getRuntimeDbForApp: vi.fn(),
+}));
 
 function makeControlDbMock(handlers: (sql: string, params: unknown[]) => { rows: any[] } | null) {
   return { query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
@@ -98,5 +105,121 @@ describe('GET /admin/organizations', () => {
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body.data.every((row: any) => row.personal === false)).toBe(true);
+  });
+});
+
+describe('GET /admin/organizations/:id', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const orgRow = {
+    id: 'org-1', name: 'Acme', personal: false, owner_id: 'u1', owner_email: 'a@a.com',
+    plan_id: 'pro', account_status: 'active', stripe_customer_id: null,
+    credits_usd: 10, monthly_allowance_usd: 5, created_at: '2026-01-01T00:00:00Z',
+    auto_refill_enabled: true, auto_refill_amount_usd: 20,
+    auto_refill_last_attempt_at: '2026-01-05T00:00:00Z', auto_refill_last_failure_reason: null,
+    billing_period_start: '2026-01-01',
+  };
+
+  // The mock returns rows verbatim (it doesn't execute the SQL's ORDER BY),
+  // so the fixture is pre-sorted owner-first to match what the real query
+  // would return via `ORDER BY m.role = 'owner' DESC, m.joined_at ASC`.
+  const membersRows = [
+    { user_id: 'u1', email: 'a@a.com', display_name: 'Owner', role: 'owner', invited_by: null, joined_at: '2026-01-01T00:00:00Z' },
+    { user_id: 'u2', email: 'member@a.com', display_name: 'Member', role: 'member', invited_by: 'u1', joined_at: '2026-01-02T00:00:00Z' },
+  ];
+
+  const appIndexRows = [{ app_id: 'app-1', region: 'us-east-1' }];
+
+  const subRow = {
+    plan_id: 'pro', plan_name: 'Pro', status: 'active', price_monthly_cents: 2900, started_at: '2026-01-01T00:00:00Z',
+  };
+
+  const eventRows = [
+    { id: 'ev-1', event_type: 'charge', created_at: '2026-01-03T00:00:00Z' },
+    { id: 'ev-2', event_type: 'refund', created_at: '2026-01-02T00:00:00Z' },
+  ];
+
+  function makeDetailControlDbMock(opts: {
+    org?: any[]; members?: any[]; appIndex?: any[]; sub?: any[]; events?: any[];
+  }) {
+    return makeControlDbMock((sql) => {
+      if (sql.includes('FROM organizations o') && sql.includes('WHERE o.id')) {
+        return { rows: opts.org ?? [] };
+      }
+      if (sql.includes('FROM organization_members')) {
+        return { rows: opts.members ?? [] };
+      }
+      if (sql.includes('FROM org_app_index')) {
+        return { rows: opts.appIndex ?? [] };
+      }
+      if (sql.includes('FROM subscriptions')) {
+        return { rows: opts.sub ?? [] };
+      }
+      if (sql.includes('FROM billing_events')) {
+        return { rows: opts.events ?? [] };
+      }
+      return null;
+    });
+  }
+
+  it('404s on unknown org id', async () => {
+    const controlDb = makeDetailControlDbMock({ org: [] });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({ method: 'GET', url: '/admin/organizations/does-not-exist', headers: { authorization: 'Bearer ok' } });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'organization_not_found' });
+  });
+
+  it('returns the full composite detail shape', async () => {
+    const controlDb = makeDetailControlDbMock({
+      org: [orgRow], members: membersRows, appIndex: appIndexRows, sub: [subRow], events: eventRows,
+    });
+    vi.mocked(fanOutQuery).mockResolvedValue([
+      { id: 'app-1', name: 'My App', region: 'us-east-1', owner_id: 'u1', db_provisioned: true, deployment_url: 'https://app.example.com', last_deployed_at: '2026-01-04T00:00:00Z', created_at: '2026-01-01T00:00:00Z' },
+    ]);
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({ method: 'GET', url: '/admin/organizations/org-1', headers: { authorization: 'Bearer ok' } });
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body);
+
+    expect(body.org.id).toBe('org-1');
+    expect(body.org.auto_refill_enabled).toBe(true);
+    expect(body.org.billing_period_start).toBe('2026-01-01');
+
+    expect(body.members).toHaveLength(2);
+    expect(body.members[0].role).toBe('owner');
+    expect(body.members[0].email).toBe('a@a.com');
+
+    expect(body.apps).toHaveLength(1);
+    expect(body.apps[0].id).toBe('app-1');
+    expect(vi.mocked(fanOutQuery)).toHaveBeenCalledWith(expect.any(String), [['app-1']]);
+
+    expect(body.subscription).toEqual({
+      plan_id: 'pro', plan_name: 'Pro', status: 'active', price_monthly_cents: 2900, started_at: '2026-01-01T00:00:00Z',
+    });
+
+    expect(body.recentBillingEvents).toHaveLength(2);
+
+    expect(body.creditsLedger).toEqual({
+      credits_usd: 10,
+      monthly_allowance_usd: 5,
+      auto_refill_enabled: true,
+      auto_refill_amount_usd: 20,
+      auto_refill_last_attempt_at: '2026-01-05T00:00:00Z',
+      auto_refill_last_failure_reason: null,
+    });
+  });
+
+  it('returns empty apps without calling fanOutQuery when org has no apps', async () => {
+    const controlDb = makeDetailControlDbMock({
+      org: [orgRow], members: membersRows, appIndex: [], sub: [], events: [],
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({ method: 'GET', url: '/admin/organizations/org-1', headers: { authorization: 'Bearer ok' } });
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body);
+    expect(body.apps).toEqual([]);
+    expect(body.subscription).toBeNull();
+    expect(vi.mocked(fanOutQuery)).not.toHaveBeenCalled();
   });
 });
