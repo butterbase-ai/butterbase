@@ -1271,11 +1271,16 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // Verify destination org exists
     const dstResult = await app.controlDb.query(
-      `SELECT id FROM organizations WHERE id = $1`,
+      `SELECT id, personal FROM organizations WHERE id = $1`,
       [destination_organization_id]
     );
     if (dstResult.rows.length === 0) {
       return reply.code(404).send({ error: 'destination_not_found' });
+    }
+
+    // Reject transfers to personal orgs
+    if (dstResult.rows[0].personal) {
+      return reply.code(400).send({ error: 'destination_is_personal' });
     }
 
     // Update the org_app_index

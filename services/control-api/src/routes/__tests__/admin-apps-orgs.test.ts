@@ -421,6 +421,29 @@ describe('POST /admin/apps/:id/transfer', () => {
     expect(body.error).toBe('destination_not_found');
   });
 
+  it('400 when destination is a personal org', async () => {
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('SELECT organization_id FROM org_app_index WHERE app_id = $1')) {
+        return { rows: [{ organization_id: 'org-team' }] };
+      }
+      if (sql.includes('FROM organizations WHERE id = $1')) {
+        return { rows: [{ id: 'org-personal', personal: true }] };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/apps/app-team-1/transfer',
+      headers: { authorization: 'Bearer ok' },
+      payload: { destination_organization_id: 'org-personal' },
+    });
+    expect(r.statusCode).toBe(400);
+    const body = r.json();
+    expect(body.error).toBe('destination_is_personal');
+  });
+
   it('400 when destination_organization_id is missing', async () => {
     const controlDb = makeControlDbMock(() => null);
 
