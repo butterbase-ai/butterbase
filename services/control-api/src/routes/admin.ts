@@ -1763,6 +1763,39 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  // ───── PATCH /admin/billing/users/:id/plan ─────
+  // Deprecated shim: plan assignment now writes to organizations, keyed on
+  // organization id (see PATCH /admin/organizations/:id/plan in
+  // routes/admin/organizations.ts). This user-keyed route resolves the
+  // user's personal org and forwards the request internally so existing
+  // callers don't break.
+  app.patch('/admin/billing/users/:id/plan', { config: { public: true } }, async (request, reply) => {
+    if (!(await checkAdmin(request, reply))) return;
+
+    const { id } = request.params as { id: string };
+
+    const userRes = await app.controlDb.query(
+      `SELECT personal_organization_id FROM platform_users WHERE id = $1`,
+      [id]
+    );
+    const orgId = userRes.rows[0]?.personal_organization_id;
+    if (!orgId) {
+      return reply.code(404).send({ error: 'personal_org_not_found' });
+    }
+
+    const forward = await app.inject({
+      method: 'PATCH',
+      url: `/admin/organizations/${orgId}/plan`,
+      headers: request.headers,
+      payload: request.body as any,
+    });
+    reply.code(forward.statusCode);
+    for (const [key, value] of Object.entries(forward.headers)) {
+      if (value) reply.header(key, value);
+    }
+    return reply.send(forward.rawPayload);
+  });
+
   // ───── GET /admin/billing/users/:id/credits ─────
   // Returns split credit pools + auto-refill state for the admin UI.
   app.get('/admin/billing/users/:id/credits', { config: { public: true } }, async (request, reply) => {

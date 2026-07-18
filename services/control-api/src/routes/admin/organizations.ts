@@ -364,6 +364,68 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     );
     reply.code(204).send();
   });
+
+  fastify.patch('/admin/organizations/:id/plan', { config: { public: true } }, async (req, reply) => {
+    const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+    if (!user) return;
+
+    const ctrl = (fastify as any).controlDb;
+    const { id } = req.params as { id: string };
+    const { plan_id, stripe_price_id } = (req.body ?? {}) as { plan_id?: string; stripe_price_id?: string };
+
+    if (!plan_id) {
+      reply.code(400).send({ error: 'plan_id_required' });
+      return;
+    }
+
+    const planRes = await ctrl.query(`SELECT id FROM plans WHERE id = $1`, [plan_id]);
+    if (planRes.rows.length === 0) {
+      reply.code(404).send({ error: 'plan_not_found' });
+      return;
+    }
+
+    const updRes = await ctrl.query(
+      `UPDATE organizations SET plan_id = $1, updated_at = now() WHERE id = $2
+       RETURNING id, plan_id, account_status`,
+      [plan_id, id]
+    );
+    if (updRes.rows.length === 0) {
+      reply.code(404).send({ error: 'organization_not_found' });
+      return;
+    }
+
+    // Upsert subscription row keyed on organization_id. subscriptions.organization_id
+    // has no UNIQUE constraint (migration 075 only added the column), so ON CONFLICT
+    // isn't available here — do a manual SELECT then UPDATE-or-INSERT.
+    const existingSub = await ctrl.query(
+      `SELECT id FROM subscriptions WHERE organization_id = $1 LIMIT 1`,
+      [id]
+    );
+    if (existingSub.rows.length === 0) {
+      await ctrl.query(
+        `INSERT INTO subscriptions (organization_id, plan_id, status, stripe_price_id, created_at)
+         VALUES ($1, $2, 'active', $3, now())`,
+        [id, plan_id, stripe_price_id ?? null]
+      );
+    } else {
+      await ctrl.query(
+        `UPDATE subscriptions
+            SET plan_id = $1,
+                stripe_price_id = coalesce($2, stripe_price_id),
+                status = 'active'
+          WHERE organization_id = $3`,
+        [plan_id, stripe_price_id ?? null, id]
+      );
+    }
+
+    await ctrl.query(
+      `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
+       VALUES ($1, 'plan_assigned_admin', $2::jsonb, now())`,
+      [id, JSON.stringify({ plan_id, stripe_price_id: stripe_price_id ?? null })]
+    );
+
+    reply.send({ organization: updRes.rows[0] });
+  });
 };
 
 export default organizationsRoutes;

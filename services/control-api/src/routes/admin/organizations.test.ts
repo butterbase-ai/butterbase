@@ -442,3 +442,149 @@ describe('DELETE /admin/organizations/:id/members/:user_id', () => {
     expect(JSON.parse(r.body)).toEqual({ error: 'member_not_found' });
   });
 });
+
+describe('PATCH /admin/organizations/:id/plan', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('200 assigns plan, inserts a new subscription (none existed), and emits a billing_event', async () => {
+    const subscriptionSelects: unknown[][] = [];
+    const subscriptionInserts: unknown[][] = [];
+    const subscriptionUpdates: unknown[][] = [];
+    const billingEventInserts: unknown[][] = [];
+
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('SELECT id FROM plans WHERE id = $1')) {
+        return { rows: [{ id: 'enterprise-acme' }] };
+      }
+      if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) {
+        return { rows: [{ id: 'org-1', plan_id: 'enterprise-acme', account_status: 'active' }] };
+      }
+      if (sql.includes('SELECT') && sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
+        subscriptionSelects.push(params);
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO subscriptions')) {
+        subscriptionInserts.push(params);
+        return { rows: [{ id: 'sub-1' }] };
+      }
+      if (sql.includes('UPDATE subscriptions')) {
+        subscriptionUpdates.push(params);
+        return { rows: [{ id: 'sub-1' }] };
+      }
+      if (sql.includes('INSERT INTO billing_events')) {
+        billingEventInserts.push(params);
+        return { rows: [{ id: 'evt-1' }] };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'enterprise-acme', stripe_price_id: 'price_123' },
+    });
+
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body);
+    expect(body).toEqual({ organization: { id: 'org-1', plan_id: 'enterprise-acme', account_status: 'active' } });
+
+    expect(subscriptionSelects).toHaveLength(1);
+    expect(subscriptionInserts).toHaveLength(1);
+    expect(subscriptionInserts[0]).toEqual(['org-1', 'enterprise-acme', 'price_123']);
+    expect(subscriptionUpdates).toHaveLength(0);
+
+    expect(billingEventInserts).toHaveLength(1);
+    expect(billingEventInserts[0][0]).toBe('org-1');
+    const payload = JSON.parse(billingEventInserts[0][1] as string);
+    expect(payload).toEqual({ plan_id: 'enterprise-acme', stripe_price_id: 'price_123' });
+  });
+
+  it('200 assigns plan and updates the existing subscription row (no INSERT)', async () => {
+    const subscriptionInserts: unknown[][] = [];
+    const subscriptionUpdates: unknown[][] = [];
+
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('SELECT id FROM plans WHERE id = $1')) {
+        return { rows: [{ id: 'pro' }] };
+      }
+      if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) {
+        return { rows: [{ id: 'org-1', plan_id: 'pro', account_status: 'active' }] };
+      }
+      if (sql.includes('SELECT') && sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
+        return { rows: [{ id: 'sub-existing' }] };
+      }
+      if (sql.includes('INSERT INTO subscriptions')) {
+        subscriptionInserts.push(params);
+        return { rows: [{ id: 'sub-1' }] };
+      }
+      if (sql.includes('UPDATE subscriptions')) {
+        subscriptionUpdates.push(params);
+        return { rows: [{ id: 'sub-existing' }] };
+      }
+      if (sql.includes('INSERT INTO billing_events')) {
+        return { rows: [{ id: 'evt-1' }] };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'pro' },
+    });
+
+    expect(r.statusCode).toBe(200);
+    expect(subscriptionInserts).toHaveLength(0);
+    expect(subscriptionUpdates).toHaveLength(1);
+  });
+
+  it('400s with plan_id_required when body is empty', async () => {
+    const controlDb = makeControlDbMock(() => null);
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: {},
+    });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toEqual({ error: 'plan_id_required' });
+  });
+
+  it('404s with plan_not_found when the plan lookup is empty', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT id FROM plans WHERE id = $1')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'nonexistent' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'plan_not_found' });
+  });
+
+  it('404s with organization_not_found when the organizations UPDATE affects 0 rows', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT id FROM plans WHERE id = $1')) return { rows: [{ id: 'pro' }] };
+      if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-missing/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'pro' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'organization_not_found' });
+  });
+});

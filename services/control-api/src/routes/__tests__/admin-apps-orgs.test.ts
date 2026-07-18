@@ -18,6 +18,7 @@ vi.mock('../../services/region-resolver.js', () => ({
 import { requireAdmin } from '../admin-auth.js';
 import { fanOutRuntimeRegions, getRuntimeDbForApp } from '../../services/region-resolver.js';
 import { adminRoutes } from '../admin.js';
+import organizationsRoutes from '../admin/organizations.js';
 
 const mockRequireAdmin = vi.mocked(requireAdmin);
 const mockFanOutRuntimeRegions = vi.mocked(fanOutRuntimeRegions);
@@ -43,6 +44,37 @@ async function makeApp(controlDb: any) {
     )
   );
   await app.register(adminRoutes);
+  return app;
+}
+
+// Registers both adminRoutes (the shim under test) and organizationsRoutes
+// (the real forward target) on one Fastify instance so app.inject inside the
+// shim can actually reach PATCH /admin/organizations/:id/plan — mirroring
+// how both plugins share one root app in production (src/index.ts).
+// organizationsRoutes uses lib/admin-guard.js's requireAdmin, which is NOT
+// mocked here (only ../admin-auth.js is), so controlDb must additionally
+// answer the `FROM platform_users WHERE cognito_sub = $1` admin-check query
+// and authProvider must be decorated.
+async function makeAppWithOrgForwarding(controlDb: any, isAdmin = true) {
+  const app = Fastify({ logger: false });
+  await app.register(
+    fp(
+      async (i: any) => {
+        const original = controlDb.query;
+        controlDb.query = vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
+          if (sql.includes('FROM platform_users') && sql.includes('cognito_sub')) {
+            return { rows: [{ id: 'admin-uid', email: 'admin@example.com', display_name: null, is_admin: isAdmin }] };
+          }
+          return original(sql, params);
+        });
+        i.decorate('controlDb', controlDb);
+        i.decorate('authProvider', { async verifyJwt() { return { sub: 'sub-1' }; } });
+      },
+      { name: 'shim' }
+    )
+  );
+  await app.register(adminRoutes);
+  await app.register(organizationsRoutes);
   return app;
 }
 
@@ -457,5 +489,91 @@ describe('POST /admin/apps/:id/transfer', () => {
     expect(r.statusCode).toBe(400);
     const body = r.json();
     expect(body.error).toBe('destination_organization_id_required');
+  });
+});
+
+describe('PATCH /admin/billing/users/:id/plan (shim → organizations)', () => {
+  it('200 resolves the personal org and forwards; the org handler response is returned intact', async () => {
+    const orgPlanUpdateCalls: unknown[][] = [];
+
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('SELECT personal_organization_id FROM platform_users WHERE id = $1')) {
+        expect(params).toEqual(['user-1']);
+        return { rows: [{ personal_organization_id: 'org-personal-1' }] };
+      }
+      if (sql.includes('SELECT id FROM plans WHERE id = $1')) {
+        return { rows: [{ id: 'pro' }] };
+      }
+      if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) {
+        orgPlanUpdateCalls.push(params);
+        return { rows: [{ id: 'org-personal-1', plan_id: 'pro', account_status: 'active' }] };
+      }
+      if (sql.includes('SELECT') && sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO subscriptions')) {
+        return { rows: [{ id: 'sub-1' }] };
+      }
+      if (sql.includes('INSERT INTO billing_events')) {
+        return { rows: [{ id: 'evt-1' }] };
+      }
+      return null;
+    });
+
+    const app = await makeAppWithOrgForwarding(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/billing/users/user-1/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'pro' },
+    });
+
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body).toEqual({ organization: { id: 'org-personal-1', plan_id: 'pro', account_status: 'active' } });
+
+    // The forwarded call actually hit the org-keyed UPDATE with the resolved org id.
+    expect(orgPlanUpdateCalls).toHaveLength(1);
+    expect(orgPlanUpdateCalls[0]).toEqual(['pro', 'org-personal-1']);
+  });
+
+  it('404s with personal_org_not_found when the platform_users row has no personal org', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT personal_organization_id FROM platform_users WHERE id = $1')) {
+        return { rows: [{ personal_organization_id: null }] };
+      }
+      return null;
+    });
+
+    const app = await makeAppWithOrgForwarding(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/billing/users/user-2/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'pro' },
+    });
+
+    expect(r.statusCode).toBe(404);
+    expect(r.json()).toEqual({ error: 'personal_org_not_found' });
+  });
+
+  it('404s with personal_org_not_found when the platform_users row does not exist', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT personal_organization_id FROM platform_users WHERE id = $1')) {
+        return { rows: [] };
+      }
+      return null;
+    });
+
+    const app = await makeAppWithOrgForwarding(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/billing/users/user-missing/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'pro' },
+    });
+
+    expect(r.statusCode).toBe(404);
+    expect(r.json()).toEqual({ error: 'personal_org_not_found' });
   });
 });
