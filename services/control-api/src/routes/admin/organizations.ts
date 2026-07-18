@@ -100,6 +100,15 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     const limit = parseIntParam(q.limit, 50, 200);
     const offset = parseIntParam(q.offset, 0);
 
+    const MAX_LIST_OFFSET = 1000;
+    if (offset >= MAX_LIST_OFFSET) {
+      reply.code(400).send({
+        error: 'offset_too_large',
+        message: `Pagination offset must be < ${MAX_LIST_OFFSET}. Use search/filter params to narrow.`,
+      });
+      return;
+    }
+
     const conds: string[] = [];
     const params: unknown[] = [];
     let idx = 1;
@@ -370,8 +379,12 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
 
       await client.query('COMMIT');
       reply.send({ member: finalRes.rows[0] });
-    } catch (err) {
-      await client.query('ROLLBACK');
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err?.code === '40P01') {
+        reply.code(409).send({ error: 'concurrent_modification', message: 'Another admin is modifying this organization. Please retry.' });
+        return;
+      }
       throw err;
     } finally {
       client.release();
@@ -422,8 +435,12 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       );
       await client.query('COMMIT');
       reply.code(204).send();
-    } catch (err) {
-      await client.query('ROLLBACK');
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err?.code === '40P01') {
+        reply.code(409).send({ error: 'concurrent_modification', message: 'Another admin is modifying this organization. Please retry.' });
+        return;
+      }
       throw err;
     } finally {
       client.release();

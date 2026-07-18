@@ -133,6 +133,22 @@ describe('GET /admin/organizations', () => {
     const body = JSON.parse(r.body);
     expect(body.data.every((row: any) => row.personal === false)).toBe(true);
   });
+
+  it('400s with offset_too_large when offset >= 1000', async () => {
+    const controlDb = makeControlDbMock(() => null);
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'GET',
+      url: '/admin/organizations?offset=1001',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(400);
+    const body = JSON.parse(r.body);
+    expect(body).toEqual({
+      error: 'offset_too_large',
+      message: 'Pagination offset must be < 1000. Use search/filter params to narrow.',
+    });
+  });
 });
 
 describe('GET /admin/organizations/:id', () => {
