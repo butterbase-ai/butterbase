@@ -399,14 +399,16 @@ describe('POST /admin/apps/:id/transfer', () => {
     const inEvent = insertCalls.find((c) => c.sql.includes('app_transferred_in'));
     const outEvent = insertCalls.find((c) => c.sql.includes('app_transferred_out'));
     expect(inEvent).toBeDefined();
-    expect(inEvent.params[0]).toBe('org-dest');
-    expect(inEvent.params[1]).toContain('app-team-1');
-    expect(inEvent.params[1]).toContain('org-team');
+    expect(inEvent.params[0]).toBe('admin-uid');
+    expect(inEvent.params[1]).toBe('org-dest');
+    expect(inEvent.params[2]).toContain('app-team-1');
+    expect(inEvent.params[2]).toContain('org-team');
 
     expect(outEvent).toBeDefined();
-    expect(outEvent.params[0]).toBe('org-team');
-    expect(outEvent.params[1]).toContain('app-team-1');
-    expect(outEvent.params[1]).toContain('org-dest');
+    expect(outEvent.params[0]).toBe('admin-uid');
+    expect(outEvent.params[1]).toBe('org-team');
+    expect(outEvent.params[2]).toContain('app-team-1');
+    expect(outEvent.params[2]).toContain('org-dest');
   });
 
   it('409 when app already in destination org', async () => {

@@ -507,9 +507,9 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       await client.query(
-        `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
-         VALUES ($1, 'plan_assigned_admin', $2::jsonb, now())`,
-        [id, JSON.stringify({ plan_id, stripe_price_id: stripe_price_id ?? null })]
+        `INSERT INTO billing_events (user_id, organization_id, event_type, metadata, created_at)
+         VALUES ($1, $2, 'plan_assigned_admin', $3::jsonb, now())`,
+        [user.id, id, JSON.stringify({ plan_id, stripe_price_id: stripe_price_id ?? null })]
       );
 
       await client.query('COMMIT');

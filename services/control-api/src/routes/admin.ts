@@ -1254,7 +1254,8 @@ export async function adminRoutes(app: FastifyInstance) {
   // Body: { destination_organization_id: string }
   // Returns: { app_id, from_organization_id, to_organization_id }
   app.post('/admin/apps/:id/transfer', { config: { public: true } }, async (request, reply) => {
-    if (!(await checkAdmin(request, reply))) return;
+    const adminUserId = await requireAdmin(app, request, reply);
+    if (!adminUserId) return;
 
     const { id } = request.params as { id: string };
     const { destination_organization_id } = request.body as { destination_organization_id?: string };
@@ -1303,14 +1304,14 @@ export async function adminRoutes(app: FastifyInstance) {
         [destination_organization_id, id]
       );
       await client.query(
-        `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
-         VALUES ($1, 'app_transferred_in', $2::jsonb, now())`,
-        [destination_organization_id, JSON.stringify({ app_id: id, from: fromOrgId })]
+        `INSERT INTO billing_events (user_id, organization_id, event_type, metadata, created_at)
+         VALUES ($1, $2, 'app_transferred_in', $3::jsonb, now())`,
+        [adminUserId, destination_organization_id, JSON.stringify({ app_id: id, from: fromOrgId })]
       );
       await client.query(
-        `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
-         VALUES ($1, 'app_transferred_out', $2::jsonb, now())`,
-        [fromOrgId, JSON.stringify({ app_id: id, to: destination_organization_id })]
+        `INSERT INTO billing_events (user_id, organization_id, event_type, metadata, created_at)
+         VALUES ($1, $2, 'app_transferred_out', $3::jsonb, now())`,
+        [adminUserId, fromOrgId, JSON.stringify({ app_id: id, to: destination_organization_id })]
       );
       await client.query('COMMIT');
     } catch (err) {
