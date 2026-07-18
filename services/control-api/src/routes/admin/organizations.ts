@@ -7,6 +7,16 @@ import type { FastifyPluginAsync } from 'fastify';
 import { requireAdmin } from '../../lib/admin-guard.js';
 import { fanOutQuery } from '../../services/region-resolver.js';
 
+// Stripe client lives in the cloud overlay; OSS builds reach an explicit
+// failure. Matches the pattern in routes/admin.ts. Kept here rather than at
+// module scope so a bad build in overlays only fails routes that need Stripe
+// (this handler), not the whole plugin.
+async function getStripeClient(): Promise<any> {
+  // @ts-expect-error — overlay path resolved at runtime
+  const mod = await import('../../../../cloud-overlays/dist/cloud-overlays/billing/stripe/stripe-service.js');
+  return mod.getStripeClient();
+}
+
 function parseIntParam(value: string | undefined, fallback: number, max?: number): number {
   const raw = parseInt(value ?? '', 10);
   const n = (isNaN(raw) || raw <= 0) ? fallback : raw;
@@ -447,6 +457,27 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // PATCH /admin/organizations/:id/plan
+  //
+  // Assigns a plan to an org and — when the org has a live Stripe subscription
+  // AND the caller supplied a stripe_price_id — actually pushes the price
+  // change to Stripe. Mirrors the per-user assignEnterprisePriceToUser flow
+  // (cloud-overlays/billing/enterprise/assign-to-user.ts) but keyed on
+  // organization_id, so team-org enterprise pricing has a real code path.
+  //
+  // Sequence:
+  //   1. Validate inputs, load org + existing subscription + plan.
+  //   2. If Stripe is in play (live sub + new price_id): retrieve, sanity-
+  //      check, update the subscription item price with proration_behavior
+  //      'none' — cycle dates unchanged, no mid-cycle proration. Void any
+  //      open invoices on the sub to stop Stripe smart-retry from clobbering
+  //      the assignment via a payment_failed webhook.
+  //   3. DB transaction: update org.plan_id, upsert the subscriptions row
+  //      (persisting stripe_price_id when set), audit to billing_events.
+  //
+  // On Stripe-then-DB failure the caller can safely retry: currentPriceId
+  // will match the input on retry → noop branch; already-voided invoices are
+  // filtered out of the list; the DB writes are idempotent by shape.
   fastify.patch('/admin/organizations/:id/plan', { config: { public: true } }, async (req, reply) => {
     const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
     if (!user) return;
@@ -466,68 +497,232 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       return;
     }
 
+    const orgRes = await ctrl.query(
+      `SELECT id, owner_id, plan_id, stripe_customer_id, account_status
+         FROM organizations WHERE id = $1`,
+      [id]
+    );
+    if (orgRes.rows.length === 0) {
+      reply.code(404).send({ error: 'organization_not_found' });
+      return;
+    }
+    const org = orgRes.rows[0] as {
+      id: string; owner_id: string; plan_id: string | null;
+      stripe_customer_id: string | null; account_status: string;
+    };
+
+    // Existing live subscription for this org (any non-canceled state — we
+    // rescue past_due/unpaid users too, matching the per-user flow's intent).
+    const subRes = await ctrl.query(
+      `SELECT id, user_id, stripe_subscription_id, plan_id, stripe_price_id, status
+         FROM subscriptions
+        WHERE organization_id = $1
+          AND status IN ('active', 'trialing', 'past_due', 'unpaid', 'incomplete')
+        ORDER BY updated_at DESC`,
+      [id]
+    );
+    if (subRes.rows.length > 1) {
+      reply.code(409).send({
+        error: 'multiple_active_subs',
+        subscription_ids: subRes.rows.map((r: any) => r.stripe_subscription_id),
+      });
+      return;
+    }
+    const existingSub = subRes.rows[0] as {
+      id: string; user_id: string; stripe_subscription_id: string | null;
+      plan_id: string; stripe_price_id: string | null; status: string;
+    } | undefined;
+
+    // Decide whether we're driving Stripe or DB-only. Stripe needs the
+    // org's customer id, a live subscription with a stripe_subscription_id,
+    // and a stripe_price_id from the caller. Without any one of those, we
+    // fall back to a DB-only assignment (still useful — e.g. sliding a
+    // Stripe-less org onto 'playground', or shipping the plan change ahead
+    // of Stripe setup).
+    const stripeInPlay = Boolean(
+      stripe_price_id && existingSub?.stripe_subscription_id && org.stripe_customer_id
+    );
+
+    let stripeContext: {
+      currentPriceId: string;
+      subscriptionItemId: string;
+      newUnitAmountCents: number;
+      voidedInvoices: Array<{ id: string; amount_due_cents: number; status_before: string }>;
+      idempotentNoop: boolean;
+    } | null = null;
+
+    if (stripeInPlay) {
+      const stripe = await getStripeClient();
+      const stripeSub = await stripe.subscriptions.retrieve(existingSub!.stripe_subscription_id!);
+      const subCustomerId = typeof stripeSub.customer === 'string'
+        ? stripeSub.customer
+        : stripeSub.customer.id;
+      if (subCustomerId !== org.stripe_customer_id) {
+        reply.code(409).send({ error: 'stripe_customer_mismatch' });
+        return;
+      }
+      if (stripeSub.items.data.length !== 1) {
+        reply.code(409).send({
+          error: 'multiple_subscription_items',
+          count: stripeSub.items.data.length,
+        });
+        return;
+      }
+      const item = stripeSub.items.data[0];
+      const currentPriceId: string = item.price.id;
+
+      const targetPrice = await stripe.prices.retrieve(stripe_price_id!, { expand: ['product'] });
+      if (!targetPrice.active) {
+        reply.code(400).send({ error: 'price_inactive' });
+        return;
+      }
+      if (!targetPrice.recurring) {
+        reply.code(400).send({ error: 'price_not_recurring' });
+        return;
+      }
+      // Sanity: the price's product should be tagged for the target plan.
+      // We skip the check when the price's product has no butterbase_plan_id
+      // (older prices predate the tagging) to stay backward-compatible.
+      const productPlanTag = (targetPrice.product as any)?.metadata?.butterbase_plan_id;
+      if (productPlanTag && productPlanTag !== plan_id) {
+        reply.code(400).send({
+          error: 'price_plan_mismatch',
+          expected_plan_id: plan_id,
+          price_plan_id: productPlanTag,
+        });
+        return;
+      }
+
+      const idempotentNoop = currentPriceId === stripe_price_id && org.plan_id === plan_id;
+
+      const voidedInvoices: Array<{ id: string; amount_due_cents: number; status_before: string }> = [];
+      if (!idempotentNoop && currentPriceId !== stripe_price_id) {
+        // Cycle dates untouched; no mid-cycle proration. Next invoice at the
+        // normal boundary uses the new price for the whole period.
+        await stripe.subscriptionItems.update(item.id, {
+          price: stripe_price_id,
+          proration_behavior: 'none',
+        });
+
+        // Void open invoices to stop Stripe's ~3-week smart-retry from
+        // clobbering the assignment via payment_failed webhooks. This is a
+        // deliberate write-off — for the rescue/enterprise case it's what
+        // the operator wants.
+        const openInvoices = await stripe.invoices.list({
+          customer: org.stripe_customer_id!,
+          status: 'open',
+          subscription: stripeSub.id,
+          limit: 100,
+        });
+        for (const inv of openInvoices.data) {
+          if (!inv.id) continue;
+          try {
+            await stripe.invoices.voidInvoice(inv.id);
+            voidedInvoices.push({
+              id: inv.id,
+              amount_due_cents: inv.amount_due ?? 0,
+              status_before: inv.status ?? 'unknown',
+            });
+          } catch (err) {
+            // Invoice may have paid or transitioned; log and continue rather
+            // than aborting the whole assignment for a stale-state void.
+            req.log?.warn?.(
+              { err, invoice_id: inv.id, subscription_id: stripeSub.id },
+              'org-plan-assign: failed to void invoice'
+            );
+          }
+        }
+      }
+
+      stripeContext = {
+        currentPriceId,
+        subscriptionItemId: item.id,
+        newUnitAmountCents: targetPrice.unit_amount ?? 0,
+        voidedInvoices,
+        idempotentNoop,
+      };
+    }
+
+    // DB writes. One transaction so the org, subscription and audit rows
+    // either all land or none. user_state_outbox is written inside the same
+    // transaction so plan_id propagation stays paired with the plan change.
     const client = await ctrl.connect();
     try {
       await client.query('BEGIN');
 
-      const updRes = await client.query(
+      // Serialize concurrent admin plan changes for the same org.
+      if (existingSub) {
+        await client.query(`SELECT id FROM subscriptions WHERE id = $1 FOR UPDATE`, [existingSub.id]);
+      }
+
+      const updOrg = await client.query(
         `UPDATE organizations SET plan_id = $1, updated_at = now() WHERE id = $2
          RETURNING id, plan_id, account_status`,
         [plan_id, id]
       );
-      if (updRes.rows.length === 0) {
+      // rowCount 0 shouldn't happen — we just SELECTed the org outside the
+      // tx, and org rows aren't hard-deleted. But guard anyway.
+      if (updOrg.rows.length === 0) {
         await client.query('ROLLBACK');
         reply.code(404).send({ error: 'organization_not_found' });
         return;
       }
 
-      // Upsert subscription row keyed on organization_id. subscriptions.organization_id
-      // has no UNIQUE constraint (migration 075 only added the column), so ON CONFLICT
-      // isn't available here — do a manual SELECT then UPDATE-or-INSERT. FOR UPDATE
-      // serializes concurrent admins racing a plan change for the same org.
-      //
-      // subscriptions has no stripe_price_id column — the picked enterprise price is
-      // captured in the billing_events audit metadata below. subscriptions.user_id is
-      // NOT NULL; for a fresh INSERT we anchor it to the org owner.
-      const existingSub = await client.query(
-        `SELECT id FROM subscriptions WHERE organization_id = $1 LIMIT 1 FOR UPDATE`,
-        [id]
+      // Paired user_state_outbox row so the plan_id change propagates to
+      // downstream consumers (app-plan-resolver, etc.), same as the
+      // per-user flow. anchored to the org owner as user_id.
+      await client.query(
+        `INSERT INTO user_state_outbox (user_id, organization_id, fields_changed)
+         VALUES ($1, $2, $3::jsonb)`,
+        [org.owner_id, id, JSON.stringify({ plan_id })]
       );
-      if (existingSub.rows.length === 0) {
-        const ownerRes = await client.query(
-          `SELECT owner_id FROM organizations WHERE id = $1`,
-          [id]
-        );
-        const ownerId = ownerRes.rows[0]?.owner_id;
-        if (!ownerId) {
-          await client.query('ROLLBACK');
-          reply.code(500).send({ error: 'organization_owner_not_found' });
-          return;
-        }
+
+      if (!existingSub) {
         await client.query(
-          `INSERT INTO subscriptions (user_id, organization_id, plan_id, status, created_at)
-           VALUES ($1, $2, $3, 'active', now())`,
-          [ownerId, id, plan_id]
+          `INSERT INTO subscriptions (user_id, organization_id, plan_id, status, stripe_price_id, created_at)
+           VALUES ($1, $2, $3, 'active', $4, now())`,
+          [org.owner_id, id, plan_id, stripe_price_id ?? null]
         );
       } else {
+        // Clear grace_period_ends_at so the nightly enforceExpiredGracePeriods
+        // cron doesn't clobber this assignment — same reason the per-user
+        // flow clears it.
         await client.query(
           `UPDATE subscriptions
               SET plan_id = $1,
+                  stripe_price_id = coalesce($2, stripe_price_id),
                   status = 'active',
+                  grace_period_ends_at = NULL,
                   updated_at = now()
-            WHERE organization_id = $2`,
-          [plan_id, id]
+            WHERE id = $3`,
+          [plan_id, stripe_price_id ?? null, existingSub.id]
         );
       }
 
       await client.query(
         `INSERT INTO billing_events (user_id, organization_id, event_type, metadata, created_at)
          VALUES ($1, $2, 'plan_assigned_admin', $3::jsonb, now())`,
-        [user.id, id, JSON.stringify({ plan_id, stripe_price_id: stripe_price_id ?? null })]
+        [
+          user.id,
+          id,
+          JSON.stringify({
+            from_plan: org.plan_id,
+            to_plan: plan_id,
+            stripe_price_id: stripe_price_id ?? null,
+            stripe_subscription_id: existingSub?.stripe_subscription_id ?? null,
+            stripe_in_play: stripeInPlay,
+            stripe_noop: stripeContext?.idempotentNoop ?? false,
+            old_stripe_price_id: stripeContext?.currentPriceId ?? null,
+            new_unit_amount_cents: stripeContext?.newUnitAmountCents ?? null,
+            voided_invoices: stripeContext?.voidedInvoices ?? [],
+            actor_admin_id: user.id,
+            actor_admin_email: user.email,
+          }),
+        ]
       );
 
       await client.query('COMMIT');
-      reply.send({ organization: updRes.rows[0] });
+      reply.send({ organization: updOrg.rows[0] });
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;

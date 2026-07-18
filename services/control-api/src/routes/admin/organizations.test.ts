@@ -550,25 +550,37 @@ describe('DELETE /admin/organizations/:id/members/:user_id', () => {
 describe('PATCH /admin/organizations/:id/plan', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('200 assigns plan, inserts a new subscription (none existed), and emits a billing_event', async () => {
-    const subscriptionSelects: unknown[][] = [];
+  // DB-only fixtures (no Stripe): org without stripe_customer_id, or no
+  // stripe_price_id in the request. Unit tests can't drive the real Stripe
+  // path — getStripeClient dynamically imports a cloud-overlays module that
+  // isn't present in the OSS test env — so we cover only the DB behavior
+  // and rely on integration for the full parity flow.
+
+  it('200 with no existing sub: DB-only INSERT + user_state_outbox + billing_event', async () => {
     const subscriptionInserts: unknown[][] = [];
     const subscriptionUpdates: unknown[][] = [];
+    const outboxInserts: unknown[][] = [];
     const billingEventInserts: unknown[][] = [];
 
     const controlDb = makeControlDbMock((sql, params) => {
       if (sql.includes('SELECT id FROM plans WHERE id = $1')) {
         return { rows: [{ id: 'enterprise-acme' }] };
       }
+      if (sql.includes('SELECT id, owner_id, plan_id, stripe_customer_id, account_status')) {
+        return { rows: [{
+          id: 'org-1', owner_id: 'owner-uid', plan_id: 'launch',
+          stripe_customer_id: null, account_status: 'active',
+        }] };
+      }
+      if (sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
+        return { rows: [] };
+      }
       if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) {
         return { rows: [{ id: 'org-1', plan_id: 'enterprise-acme', account_status: 'active' }] };
       }
-      if (sql.includes('SELECT') && sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
-        subscriptionSelects.push(params);
-        return { rows: [] };
-      }
-      if (sql.includes('SELECT owner_id FROM organizations')) {
-        return { rows: [{ owner_id: 'owner-uid' }] };
+      if (sql.includes('INSERT INTO user_state_outbox')) {
+        outboxInserts.push(params);
+        return { rows: [{ version: 1 }] };
       }
       if (sql.includes('INSERT INTO subscriptions')) {
         subscriptionInserts.push(params);
@@ -597,19 +609,27 @@ describe('PATCH /admin/organizations/:id/plan', () => {
     const body = JSON.parse(r.body);
     expect(body).toEqual({ organization: { id: 'org-1', plan_id: 'enterprise-acme', account_status: 'active' } });
 
-    expect(subscriptionSelects).toHaveLength(1);
     expect(subscriptionInserts).toHaveLength(1);
-    expect(subscriptionInserts[0]).toEqual(['owner-uid', 'org-1', 'enterprise-acme']);
+    expect(subscriptionInserts[0]).toEqual(['owner-uid', 'org-1', 'enterprise-acme', 'price_123']);
     expect(subscriptionUpdates).toHaveLength(0);
+
+    expect(outboxInserts).toHaveLength(1);
+    expect(outboxInserts[0][0]).toBe('owner-uid');
+    expect(outboxInserts[0][1]).toBe('org-1');
+    expect(JSON.parse(outboxInserts[0][2] as string)).toEqual({ plan_id: 'enterprise-acme' });
 
     expect(billingEventInserts).toHaveLength(1);
     expect(billingEventInserts[0][0]).toBe('admin-uid');
     expect(billingEventInserts[0][1]).toBe('org-1');
     const metadata = JSON.parse(billingEventInserts[0][2] as string);
-    expect(metadata).toEqual({ plan_id: 'enterprise-acme', stripe_price_id: 'price_123' });
+    expect(metadata.from_plan).toBe('launch');
+    expect(metadata.to_plan).toBe('enterprise-acme');
+    expect(metadata.stripe_price_id).toBe('price_123');
+    expect(metadata.stripe_in_play).toBe(false);
+    expect(metadata.actor_admin_id).toBe('admin-uid');
   });
 
-  it('200 assigns plan and updates the existing subscription row (no INSERT)', async () => {
+  it('200 with existing sub (no stripe_subscription_id): DB-only UPDATE + persists stripe_price_id', async () => {
     const subscriptionInserts: unknown[][] = [];
     const subscriptionUpdates: unknown[][] = [];
 
@@ -617,12 +637,23 @@ describe('PATCH /admin/organizations/:id/plan', () => {
       if (sql.includes('SELECT id FROM plans WHERE id = $1')) {
         return { rows: [{ id: 'pro' }] };
       }
+      if (sql.includes('SELECT id, owner_id, plan_id, stripe_customer_id, account_status')) {
+        return { rows: [{
+          id: 'org-1', owner_id: 'owner-uid', plan_id: 'launch',
+          stripe_customer_id: null, account_status: 'active',
+        }] };
+      }
+      if (sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
+        return { rows: [{
+          id: 'sub-existing', user_id: 'owner-uid',
+          stripe_subscription_id: null, plan_id: 'launch',
+          stripe_price_id: null, status: 'active',
+        }] };
+      }
       if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) {
         return { rows: [{ id: 'org-1', plan_id: 'pro', account_status: 'active' }] };
       }
-      if (sql.includes('SELECT') && sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
-        return { rows: [{ id: 'sub-existing' }] };
-      }
+      if (sql.includes('INSERT INTO user_state_outbox')) return { rows: [{ version: 1 }] };
       if (sql.includes('INSERT INTO subscriptions')) {
         subscriptionInserts.push(params);
         return { rows: [{ id: 'sub-1' }] };
@@ -631,9 +662,7 @@ describe('PATCH /admin/organizations/:id/plan', () => {
         subscriptionUpdates.push(params);
         return { rows: [{ id: 'sub-existing' }] };
       }
-      if (sql.includes('INSERT INTO billing_events')) {
-        return { rows: [{ id: 'evt-1' }] };
-      }
+      if (sql.includes('INSERT INTO billing_events')) return { rows: [{ id: 'evt-1' }] };
       return null;
     });
 
@@ -642,12 +671,44 @@ describe('PATCH /admin/organizations/:id/plan', () => {
       method: 'PATCH',
       url: '/admin/organizations/org-1/plan',
       headers: { authorization: 'Bearer ok' },
-      payload: { plan_id: 'pro' },
+      payload: { plan_id: 'pro', stripe_price_id: 'price_pro' },
     });
 
     expect(r.statusCode).toBe(200);
     expect(subscriptionInserts).toHaveLength(0);
     expect(subscriptionUpdates).toHaveLength(1);
+    // params: [plan_id, stripe_price_id, sub_id]
+    expect(subscriptionUpdates[0]).toEqual(['pro', 'price_pro', 'sub-existing']);
+  });
+
+  it('409 multiple_active_subs when the org has more than one live subscription', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT id FROM plans WHERE id = $1')) return { rows: [{ id: 'pro' }] };
+      if (sql.includes('SELECT id, owner_id, plan_id, stripe_customer_id, account_status')) {
+        return { rows: [{
+          id: 'org-1', owner_id: 'owner-uid', plan_id: 'launch',
+          stripe_customer_id: 'cus_1', account_status: 'active',
+        }] };
+      }
+      if (sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) {
+        return { rows: [
+          { id: 'sub-a', user_id: 'owner-uid', stripe_subscription_id: 'sub_a', plan_id: 'launch', stripe_price_id: null, status: 'active' },
+          { id: 'sub-b', user_id: 'owner-uid', stripe_subscription_id: 'sub_b', plan_id: 'launch', stripe_price_id: null, status: 'active' },
+        ] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'pro' },
+    });
+    expect(r.statusCode).toBe(409);
+    const body = JSON.parse(r.body);
+    expect(body.error).toBe('multiple_active_subs');
+    expect(body.subscription_ids).toEqual(['sub_a', 'sub_b']);
   });
 
   it('400s with plan_id_required when body is empty', async () => {
@@ -679,10 +740,10 @@ describe('PATCH /admin/organizations/:id/plan', () => {
     expect(JSON.parse(r.body)).toEqual({ error: 'plan_not_found' });
   });
 
-  it('404s with organization_not_found when the organizations UPDATE affects 0 rows', async () => {
+  it('404s with organization_not_found when the org lookup is empty', async () => {
     const controlDb = makeControlDbMock((sql) => {
       if (sql.includes('SELECT id FROM plans WHERE id = $1')) return { rows: [{ id: 'pro' }] };
-      if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) return { rows: [] };
+      if (sql.includes('SELECT id, owner_id, plan_id, stripe_customer_id, account_status')) return { rows: [] };
       return null;
     });
     const app = await makeApp(controlDb, true);
