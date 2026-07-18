@@ -485,24 +485,38 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       // has no UNIQUE constraint (migration 075 only added the column), so ON CONFLICT
       // isn't available here — do a manual SELECT then UPDATE-or-INSERT. FOR UPDATE
       // serializes concurrent admins racing a plan change for the same org.
+      //
+      // subscriptions has no stripe_price_id column — the picked enterprise price is
+      // captured in the billing_events audit metadata below. subscriptions.user_id is
+      // NOT NULL; for a fresh INSERT we anchor it to the org owner.
       const existingSub = await client.query(
         `SELECT id FROM subscriptions WHERE organization_id = $1 LIMIT 1 FOR UPDATE`,
         [id]
       );
       if (existingSub.rows.length === 0) {
+        const ownerRes = await client.query(
+          `SELECT owner_id FROM organizations WHERE id = $1`,
+          [id]
+        );
+        const ownerId = ownerRes.rows[0]?.owner_id;
+        if (!ownerId) {
+          await client.query('ROLLBACK');
+          reply.code(500).send({ error: 'organization_owner_not_found' });
+          return;
+        }
         await client.query(
-          `INSERT INTO subscriptions (organization_id, plan_id, status, stripe_price_id, created_at)
-           VALUES ($1, $2, 'active', $3, now())`,
-          [id, plan_id, stripe_price_id ?? null]
+          `INSERT INTO subscriptions (user_id, organization_id, plan_id, status, created_at)
+           VALUES ($1, $2, $3, 'active', now())`,
+          [ownerId, id, plan_id]
         );
       } else {
         await client.query(
           `UPDATE subscriptions
               SET plan_id = $1,
-                  stripe_price_id = coalesce($2, stripe_price_id),
-                  status = 'active'
-            WHERE organization_id = $3`,
-          [plan_id, stripe_price_id ?? null, id]
+                  status = 'active',
+                  updated_at = now()
+            WHERE organization_id = $2`,
+          [plan_id, id]
         );
       }
 

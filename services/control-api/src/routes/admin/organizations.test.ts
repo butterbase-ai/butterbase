@@ -567,6 +567,9 @@ describe('PATCH /admin/organizations/:id/plan', () => {
         subscriptionSelects.push(params);
         return { rows: [] };
       }
+      if (sql.includes('SELECT owner_id FROM organizations')) {
+        return { rows: [{ owner_id: 'owner-uid' }] };
+      }
       if (sql.includes('INSERT INTO subscriptions')) {
         subscriptionInserts.push(params);
         return { rows: [{ id: 'sub-1' }] };
@@ -596,7 +599,7 @@ describe('PATCH /admin/organizations/:id/plan', () => {
 
     expect(subscriptionSelects).toHaveLength(1);
     expect(subscriptionInserts).toHaveLength(1);
-    expect(subscriptionInserts[0]).toEqual(['org-1', 'enterprise-acme', 'price_123']);
+    expect(subscriptionInserts[0]).toEqual(['owner-uid', 'org-1', 'enterprise-acme']);
     expect(subscriptionUpdates).toHaveLength(0);
 
     expect(billingEventInserts).toHaveLength(1);
