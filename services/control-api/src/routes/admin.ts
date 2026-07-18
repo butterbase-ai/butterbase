@@ -989,7 +989,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const { id } = request.params as { id: string };
 
-    const [userResult, suggestionsResult] = await Promise.all([
+    const [userResult, suggestionsResult, orgsRes] = await Promise.all([
       app.controlDb.query(
         `SELECT pu.id, pu.email, pu.display_name, pu.created_at,
                 pu.signup_source, pu.signup_referrer,
@@ -1005,6 +1005,14 @@ export async function adminRoutes(app: FastifyInstance) {
          WHERE user_id = $1
          ORDER BY created_at DESC
          LIMIT 10`,
+        [id]
+      ),
+      app.controlDb.query(
+        `SELECT o.id, o.name, o.personal, m.role, o.plan_id, m.joined_at
+         FROM organization_members m
+         JOIN organizations o ON o.id = m.organization_id
+         WHERE m.user_id = $1
+         ORDER BY o.personal DESC, m.joined_at ASC`,
         [id]
       ),
     ]);
@@ -1106,6 +1114,7 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       recentAuditEvents: auditResult.rows,
       recentSuggestions: suggestionsResult.rows,
+      organizations: orgsRes.rows,
     };
   });
 
