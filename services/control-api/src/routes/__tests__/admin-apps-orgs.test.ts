@@ -25,12 +25,15 @@ const mockFanOutRuntimeRegions = vi.mocked(fanOutRuntimeRegions);
 const mockGetRuntimeDbForApp = vi.mocked(getRuntimeDbForApp);
 
 function makeControlDbMock(handlers: (sql: string, params: unknown[]) => { rows: any[] } | null) {
-  return {
-    query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
-      const r = handlers(sql, params);
-      return r ?? { rows: [] };
-    }),
-  };
+  const query = vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
+    const r = handlers(sql, params);
+    return r ?? { rows: [] };
+  });
+  // Some routes (e.g. POST /admin/apps/:id/transfer) wrap writes in a
+  // transaction via `controlDb.connect()`. Route the client's queries
+  // through the same handler so tests can assert on SQL/params either way.
+  const client = { query, release: vi.fn() };
+  return { query, connect: vi.fn().mockResolvedValue(client) };
 }
 
 async function makeApp(controlDb: any) {
@@ -342,11 +345,16 @@ describe('GET /admin/apps/:id org enrichment', () => {
 });
 
 describe('POST /admin/apps/:id/transfer', () => {
-  it('200 transfers app between orgs and emits audit event', async () => {
+  it('200 transfers app between orgs and emits audit events for both sides in a transaction', async () => {
     const updateCalls: any[] = [];
     const insertCalls: any[] = [];
+    const txnCalls: string[] = [];
 
     const controlDb = makeControlDbMock((sql, params) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        txnCalls.push(sql);
+        return { rows: [] };
+      }
       if (sql.includes('UPDATE org_app_index SET organization_id')) {
         updateCalls.push({ sql, params });
         return { rows: [{ command: 'UPDATE', rowCount: 1 }] };
@@ -379,15 +387,26 @@ describe('POST /admin/apps/:id/transfer', () => {
     expect(body.from_organization_id).toBe('org-team');
     expect(body.to_organization_id).toBe('org-dest');
 
+    // Verify the move + both audit inserts ran inside a transaction.
+    expect(txnCalls).toEqual(['BEGIN', 'COMMIT']);
+
     // Verify UPDATE was called with correct params
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0].params).toEqual(['org-dest', 'app-team-1']);
 
-    // Verify INSERT billing_events was called
-    expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0].params[0]).toBe('org-dest');
-    expect(insertCalls[0].params[1]).toContain('app-team-1');
-    expect(insertCalls[0].params[1]).toContain('org-team');
+    // Verify both audit events were emitted: destination (in) and source (out).
+    expect(insertCalls).toHaveLength(2);
+    const inEvent = insertCalls.find((c) => c.sql.includes('app_transferred_in'));
+    const outEvent = insertCalls.find((c) => c.sql.includes('app_transferred_out'));
+    expect(inEvent).toBeDefined();
+    expect(inEvent.params[0]).toBe('org-dest');
+    expect(inEvent.params[1]).toContain('app-team-1');
+    expect(inEvent.params[1]).toContain('org-team');
+
+    expect(outEvent).toBeDefined();
+    expect(outEvent.params[0]).toBe('org-team');
+    expect(outEvent.params[1]).toContain('app-team-1');
+    expect(outEvent.params[1]).toContain('org-dest');
   });
 
   it('409 when app already in destination org', async () => {

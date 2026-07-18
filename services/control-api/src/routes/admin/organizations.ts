@@ -123,6 +123,15 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       plan_id: 'o.plan_id',
     }, 'ORDER BY o.created_at DESC');
 
+    // Cap the fetch instead of pulling every matching org row — the admin
+    // dashboard only ever renders one page at a time. `total` below reflects
+    // the number of rows actually fetched, so for result sets larger than
+    // 1000 it will under-report the true total; that's an accepted tradeoff
+    // for the admin surface (see whole-branch review, Important finding 7).
+    const fetchCap = Math.min(limit + offset, 1000);
+    const fetchLimitIdx = idx++;
+    params.push(fetchCap);
+
     const controlRows = await ctrl.query(
       `SELECT o.id, o.name, o.personal, o.owner_id, pu.email AS owner_email,
               o.plan_id, o.account_status, o.stripe_customer_id,
@@ -133,7 +142,8 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
        FROM organizations o
        JOIN platform_users pu ON pu.id = o.owner_id
        ${where}
-       ${orderBy}`,
+       ${orderBy}
+       LIMIT $${fetchLimitIdx}`,
       params
     );
 
@@ -178,8 +188,7 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
               o.auto_refill_enabled,
               o.auto_refill_amount_usd::float8 AS auto_refill_amount_usd,
               o.auto_refill_last_attempt_at, o.auto_refill_last_failure_reason,
-              o.billing_period_start, o.created_at,
-              (SELECT count(*)::int FROM organization_members m WHERE m.organization_id = o.id) AS member_count
+              o.billing_period_start, o.created_at
          FROM organizations o
          JOIN platform_users pu ON pu.id = o.owner_id
         WHERE o.id = $1`,
@@ -237,7 +246,7 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
         );
 
     const detail: AdminOrganizationDetail = {
-      org: { ...org, member_count: membersRes.rowCount, app_count: apps.length },
+      org: { ...org, member_count: membersRes.rows.length, app_count: apps.length },
       members: membersRes.rows,
       apps,
       subscription: subRes.rows[0] ?? null,
@@ -260,7 +269,12 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const ctrl = (fastify as any).controlDb;
     const { id } = req.params as { id: string };
-    const { user_id, role } = req.body as { user_id: string; role: 'owner' | 'member' };
+    const { user_id, role } = (req.body ?? {}) as { user_id?: string; role?: 'owner' | 'member' };
+
+    if (!user_id) {
+      reply.code(400).send({ error: 'user_id_required' });
+      return;
+    }
 
     if (role !== 'owner' && role !== 'member') {
       reply.code(400).send({ error: 'invalid_role' });
@@ -280,10 +294,16 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const inserted = await ctrl.query(
-      `INSERT INTO organization_members (organization_id, user_id, role, invited_by)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role
-       RETURNING organization_id, user_id, role, invited_by, joined_at`,
+      `WITH upserted AS (
+         INSERT INTO organization_members (organization_id, user_id, role, invited_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role
+         RETURNING organization_id, user_id, role, invited_by, joined_at
+       )
+       SELECT u.organization_id, u.user_id, u.role, u.invited_by, u.joined_at,
+              pu.email, pu.display_name
+         FROM upserted u
+         JOIN platform_users pu ON pu.id = u.user_id`,
       [id, user_id, role, user.id]
     );
     reply.code(201).send({ member: inserted.rows[0] });
@@ -295,40 +315,67 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const ctrl = (fastify as any).controlDb;
     const { id, user_id } = req.params as { id: string; user_id: string };
-    const { role } = req.body as { role: 'owner' | 'member' };
+    const { role } = (req.body ?? {}) as { role?: 'owner' | 'member' };
 
     if (role !== 'owner' && role !== 'member') {
       reply.code(400).send({ error: 'invalid_role' });
       return;
     }
 
-    const updRes = await ctrl.query(
-      `UPDATE organization_members SET role = $1
-        WHERE organization_id = $2 AND user_id = $3
-        RETURNING organization_id, user_id, role, invited_by, joined_at`,
-      [role, id, user_id]
-    );
-    if (updRes.rows.length === 0) {
-      reply.code(404).send({ error: 'member_not_found' });
+    const orgRes = await ctrl.query(`SELECT 1 FROM organizations WHERE id = $1`, [id]);
+    if (orgRes.rows.length === 0) {
+      reply.code(404).send({ error: 'organization_not_found' });
       return;
     }
 
-    if (role === 'member') {
-      const ownersRes = await ctrl.query(
-        `SELECT count(*)::int AS c FROM organization_members WHERE organization_id = $1 AND role = 'owner'`,
-        [id]
+    const client = await ctrl.connect();
+    try {
+      await client.query('BEGIN');
+
+      const updRes = await client.query(
+        `UPDATE organization_members SET role = $1
+          WHERE organization_id = $2 AND user_id = $3
+          RETURNING organization_id, user_id, role, invited_by, joined_at`,
+        [role, id, user_id]
       );
-      if (ownersRes.rows[0].c === 0) {
-        await ctrl.query(
-          `UPDATE organization_members SET role = 'owner' WHERE organization_id = $1 AND user_id = $2`,
-          [id, user_id]
-        );
-        reply.code(400).send({ error: 'last_owner' });
+      if (updRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        reply.code(404).send({ error: 'member_not_found' });
         return;
       }
-    }
 
-    reply.send({ member: updRes.rows[0] });
+      if (role === 'member') {
+        // FOR UPDATE serializes concurrent admins racing the same org's
+        // owner count, closing the demote-then-delete last-owner race.
+        const ownersRes = await client.query(
+          `SELECT count(*)::int AS c FROM organization_members
+            WHERE organization_id = $1 AND role = 'owner' FOR UPDATE`,
+          [id]
+        );
+        if (ownersRes.rows[0].c === 0) {
+          await client.query('ROLLBACK');
+          reply.code(400).send({ error: 'last_owner' });
+          return;
+        }
+      }
+
+      const finalRes = await client.query(
+        `SELECT m.organization_id, m.user_id, m.role, m.invited_by, m.joined_at,
+                pu.email, pu.display_name
+           FROM organization_members m
+           JOIN platform_users pu ON pu.id = m.user_id
+          WHERE m.organization_id = $1 AND m.user_id = $2`,
+        [id, user_id]
+      );
+
+      await client.query('COMMIT');
+      reply.send({ member: finalRes.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   });
 
   fastify.delete('/admin/organizations/:id/members/:user_id', { config: { public: true } }, async (req, reply) => {
@@ -338,31 +385,49 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     const ctrl = (fastify as any).controlDb;
     const { id, user_id } = req.params as { id: string; user_id: string };
 
-    const targetRes = await ctrl.query(
-      `SELECT role FROM organization_members WHERE organization_id = $1 AND user_id = $2`,
-      [id, user_id]
-    );
-    if (targetRes.rows.length === 0) {
-      reply.code(404).send({ error: 'member_not_found' });
-      return;
-    }
+    const client = await ctrl.connect();
+    try {
+      await client.query('BEGIN');
 
-    if (targetRes.rows[0].role === 'owner') {
-      const ownersRes = await ctrl.query(
-        `SELECT count(*)::int AS c FROM organization_members WHERE organization_id = $1 AND role = 'owner'`,
-        [id]
+      // FOR UPDATE holds the row lock across the owner-count check and the
+      // delete, closing the race where two concurrent deletes both see >1
+      // owner and both proceed, leaving the org with zero owners.
+      const targetRes = await client.query(
+        `SELECT role FROM organization_members
+          WHERE organization_id = $1 AND user_id = $2 FOR UPDATE`,
+        [id, user_id]
       );
-      if (ownersRes.rows[0].c <= 1) {
-        reply.code(400).send({ error: 'last_owner' });
+      if (targetRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        reply.code(404).send({ error: 'member_not_found' });
         return;
       }
-    }
 
-    await ctrl.query(
-      `DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2`,
-      [id, user_id]
-    );
-    reply.code(204).send();
+      if (targetRes.rows[0].role === 'owner') {
+        const ownersRes = await client.query(
+          `SELECT count(*)::int AS c FROM organization_members
+            WHERE organization_id = $1 AND role = 'owner' FOR UPDATE`,
+          [id]
+        );
+        if (ownersRes.rows[0].c <= 1) {
+          await client.query('ROLLBACK');
+          reply.code(400).send({ error: 'last_owner' });
+          return;
+        }
+      }
+
+      await client.query(
+        `DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2`,
+        [id, user_id]
+      );
+      await client.query('COMMIT');
+      reply.code(204).send();
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   });
 
   fastify.patch('/admin/organizations/:id/plan', { config: { public: true } }, async (req, reply) => {
@@ -384,47 +449,60 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       return;
     }
 
-    const updRes = await ctrl.query(
-      `UPDATE organizations SET plan_id = $1, updated_at = now() WHERE id = $2
-       RETURNING id, plan_id, account_status`,
-      [plan_id, id]
-    );
-    if (updRes.rows.length === 0) {
-      reply.code(404).send({ error: 'organization_not_found' });
-      return;
-    }
+    const client = await ctrl.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Upsert subscription row keyed on organization_id. subscriptions.organization_id
-    // has no UNIQUE constraint (migration 075 only added the column), so ON CONFLICT
-    // isn't available here — do a manual SELECT then UPDATE-or-INSERT.
-    const existingSub = await ctrl.query(
-      `SELECT id FROM subscriptions WHERE organization_id = $1 LIMIT 1`,
-      [id]
-    );
-    if (existingSub.rows.length === 0) {
-      await ctrl.query(
-        `INSERT INTO subscriptions (organization_id, plan_id, status, stripe_price_id, created_at)
-         VALUES ($1, $2, 'active', $3, now())`,
-        [id, plan_id, stripe_price_id ?? null]
+      const updRes = await client.query(
+        `UPDATE organizations SET plan_id = $1, updated_at = now() WHERE id = $2
+         RETURNING id, plan_id, account_status`,
+        [plan_id, id]
       );
-    } else {
-      await ctrl.query(
-        `UPDATE subscriptions
-            SET plan_id = $1,
-                stripe_price_id = coalesce($2, stripe_price_id),
-                status = 'active'
-          WHERE organization_id = $3`,
-        [plan_id, stripe_price_id ?? null, id]
+      if (updRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        reply.code(404).send({ error: 'organization_not_found' });
+        return;
+      }
+
+      // Upsert subscription row keyed on organization_id. subscriptions.organization_id
+      // has no UNIQUE constraint (migration 075 only added the column), so ON CONFLICT
+      // isn't available here — do a manual SELECT then UPDATE-or-INSERT. FOR UPDATE
+      // serializes concurrent admins racing a plan change for the same org.
+      const existingSub = await client.query(
+        `SELECT id FROM subscriptions WHERE organization_id = $1 LIMIT 1 FOR UPDATE`,
+        [id]
       );
+      if (existingSub.rows.length === 0) {
+        await client.query(
+          `INSERT INTO subscriptions (organization_id, plan_id, status, stripe_price_id, created_at)
+           VALUES ($1, $2, 'active', $3, now())`,
+          [id, plan_id, stripe_price_id ?? null]
+        );
+      } else {
+        await client.query(
+          `UPDATE subscriptions
+              SET plan_id = $1,
+                  stripe_price_id = coalesce($2, stripe_price_id),
+                  status = 'active'
+            WHERE organization_id = $3`,
+          [plan_id, stripe_price_id ?? null, id]
+        );
+      }
+
+      await client.query(
+        `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
+         VALUES ($1, 'plan_assigned_admin', $2::jsonb, now())`,
+        [id, JSON.stringify({ plan_id, stripe_price_id: stripe_price_id ?? null })]
+      );
+
+      await client.query('COMMIT');
+      reply.send({ organization: updRes.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-
-    await ctrl.query(
-      `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
-       VALUES ($1, 'plan_assigned_admin', $2::jsonb, now())`,
-      [id, JSON.stringify({ plan_id, stripe_price_id: stripe_price_id ?? null })]
-    );
-
-    reply.send({ organization: updRes.rows[0] });
   });
 };
 

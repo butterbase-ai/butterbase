@@ -1292,18 +1292,33 @@ export async function adminRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'destination_is_personal' });
     }
 
-    // Update the org_app_index
-    await app.controlDb.query(
-      `UPDATE org_app_index SET organization_id = $1 WHERE app_id = $2`,
-      [destination_organization_id, id]
-    );
-
-    // Emit an audit event in billing_events
-    await app.controlDb.query(
-      `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
-       VALUES ($1, 'app_transferred', $2::jsonb, now())`,
-      [destination_organization_id, JSON.stringify({ app_id: id, from: fromOrgId })]
-    );
+    // Move the app and emit audit events on both sides of the transfer in a
+    // single transaction, so a crash mid-write can't leave the app moved
+    // without an audit trail (or vice versa).
+    const client = await app.controlDb.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE org_app_index SET organization_id = $1 WHERE app_id = $2`,
+        [destination_organization_id, id]
+      );
+      await client.query(
+        `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
+         VALUES ($1, 'app_transferred_in', $2::jsonb, now())`,
+        [destination_organization_id, JSON.stringify({ app_id: id, from: fromOrgId })]
+      );
+      await client.query(
+        `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
+         VALUES ($1, 'app_transferred_out', $2::jsonb, now())`,
+        [fromOrgId, JSON.stringify({ app_id: id, to: destination_organization_id })]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
 
     return reply.send({
       app_id: id,

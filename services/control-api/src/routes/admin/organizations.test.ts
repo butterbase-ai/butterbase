@@ -10,10 +10,16 @@ vi.mock('../../services/region-resolver.js', () => ({
 }));
 
 function makeControlDbMock(handlers: (sql: string, params: unknown[]) => { rows: any[] } | null) {
-  return { query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
+  const query = vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
     const r = handlers(sql, params);
     return r ?? { rows: [] };
-  }) };
+  });
+  // Routes that need a transaction call `controlDb.connect()` and drive
+  // BEGIN/COMMIT/ROLLBACK through the returned client. Route the client's
+  // queries through the same handler so tests can assert on the same SQL
+  // fragments regardless of whether the route uses `.query` or `.connect()`.
+  const client = { query, release: vi.fn() };
+  return { query, connect: vi.fn().mockResolvedValue(client) };
 }
 
 async function makeApp(controlDb: any, isAdmin = true) {
@@ -79,6 +85,27 @@ describe('GET /admin/organizations', () => {
     expect(acme.plan_id).toBe('pro');
     const personal = body.data.find((row: any) => row.name === 'Personal');
     expect(personal.app_count).toBe(0);
+  });
+
+  it('applies a SQL-side LIMIT capped at limit+offset (bounded fetch)', async () => {
+    let capturedParams: unknown[] = [];
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('FROM organizations o')) {
+        capturedParams = params;
+        expect(sql).toMatch(/LIMIT \$\d+/);
+        return { rows: [] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'GET',
+      url: '/admin/organizations?limit=10&offset=5',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(200);
+    // fetchCap = Math.min(limit + offset, 1000) = min(15, 1000) = 15
+    expect(capturedParams[capturedParams.length - 1]).toBe(15);
   });
 
   it('filters by personal=no', async () => {
@@ -185,6 +212,9 @@ describe('GET /admin/organizations/:id', () => {
     expect(body.org.id).toBe('org-1');
     expect(body.org.auto_refill_enabled).toBe(true);
     expect(body.org.billing_period_start).toBe('2026-01-01');
+    // member_count is derived from the members query result, not a second
+    // correlated subquery on the org row (whole-branch review, Important 8).
+    expect(body.org.member_count).toBe(2);
 
     expect(body.members).toHaveLength(2);
     expect(body.members[0].role).toBe('owner');
@@ -227,7 +257,7 @@ describe('GET /admin/organizations/:id', () => {
 describe('POST /admin/organizations/:id/members', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('inserts a member and returns 201', async () => {
+  it('inserts a member and returns 201 with email + display_name', async () => {
     const controlDb = makeControlDbMock((sql) => {
       if (sql.includes('SELECT 1 FROM organizations')) return { rows: [{ '?column?': 1 }] };
       if (sql.includes('SELECT 1 FROM platform_users')) return { rows: [{ '?column?': 1 }] };
@@ -236,6 +266,7 @@ describe('POST /admin/organizations/:id/members', () => {
           rows: [{
             organization_id: 'org-1', user_id: 'user-2', role: 'member',
             invited_by: 'admin-uid', joined_at: '2026-01-01T00:00:00Z',
+            email: 'user2@example.com', display_name: 'User Two',
           }],
         };
       }
@@ -253,6 +284,7 @@ describe('POST /admin/organizations/:id/members', () => {
     expect(body.member).toEqual({
       organization_id: 'org-1', user_id: 'user-2', role: 'member',
       invited_by: 'admin-uid', joined_at: '2026-01-01T00:00:00Z',
+      email: 'user2@example.com', display_name: 'User Two',
     });
   });
 
@@ -267,6 +299,19 @@ describe('POST /admin/organizations/:id/members', () => {
     });
     expect(r.statusCode).toBe(400);
     expect(JSON.parse(r.body)).toEqual({ error: 'invalid_role' });
+  });
+
+  it('400s when user_id is missing', async () => {
+    const controlDb = makeControlDbMock(() => null);
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/organizations/org-1/members',
+      headers: { authorization: 'Bearer ok' },
+      payload: { role: 'member' },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toEqual({ error: 'user_id_required' });
   });
 
   it('404s when organization does not exist', async () => {
@@ -306,8 +351,9 @@ describe('POST /admin/organizations/:id/members', () => {
 describe('PATCH /admin/organizations/:id/members/:user_id', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('changes a member role and returns 200', async () => {
+  it('changes a member role and returns 200 with email + display_name', async () => {
     const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT 1 FROM organizations')) return { rows: [{ '?column?': 1 }] };
       if (sql.includes('UPDATE organization_members') && sql.includes('RETURNING')) {
         return {
           rows: [{
@@ -317,6 +363,15 @@ describe('PATCH /admin/organizations/:id/members/:user_id', () => {
         };
       }
       if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 2 }] };
+      if (sql.includes('FROM organization_members m') && sql.includes('JOIN platform_users')) {
+        return {
+          rows: [{
+            organization_id: 'org-1', user_id: 'user-2', role: 'owner',
+            invited_by: null, joined_at: '2026-01-01T00:00:00Z',
+            email: 'user2@example.com', display_name: 'User Two',
+          }],
+        };
+      }
       return null;
     });
     const app = await makeApp(controlDb, true);
@@ -329,6 +384,8 @@ describe('PATCH /admin/organizations/:id/members/:user_id', () => {
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body);
     expect(body.member.role).toBe('owner');
+    expect(body.member.email).toBe('user2@example.com');
+    expect(body.member.display_name).toBe('User Two');
   });
 
   it('400s on invalid role', async () => {
@@ -344,8 +401,25 @@ describe('PATCH /admin/organizations/:id/members/:user_id', () => {
     expect(JSON.parse(r.body)).toEqual({ error: 'invalid_role' });
   });
 
+  it('404s when organization does not exist', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT 1 FROM organizations')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/missing-org/members/user-2',
+      headers: { authorization: 'Bearer ok' },
+      payload: { role: 'member' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'organization_not_found' });
+  });
+
   it('404s when member does not exist', async () => {
     const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT 1 FROM organizations')) return { rows: [{ '?column?': 1 }] };
       if (sql.includes('UPDATE organization_members') && sql.includes('RETURNING')) return { rows: [] };
       return null;
     });
@@ -360,9 +434,11 @@ describe('PATCH /admin/organizations/:id/members/:user_id', () => {
     expect(JSON.parse(r.body)).toEqual({ error: 'member_not_found' });
   });
 
-  it('400s with last_owner and rolls back when demoting the sole owner', async () => {
-    const rollbackCalls: unknown[][] = [];
-    const controlDb = makeControlDbMock((sql, params) => {
+  it('400s with last_owner and rolls back the whole transaction when demoting the sole owner', async () => {
+    const queryCalls: string[] = [];
+    const controlDb = makeControlDbMock((sql) => {
+      queryCalls.push(sql);
+      if (sql.includes('SELECT 1 FROM organizations')) return { rows: [{ '?column?': 1 }] };
       if (sql.includes('UPDATE organization_members') && sql.includes('RETURNING')) {
         return {
           rows: [{
@@ -371,10 +447,9 @@ describe('PATCH /admin/organizations/:id/members/:user_id', () => {
           }],
         };
       }
-      if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 0 }] };
-      if (sql.includes("SET role = 'owner'")) {
-        rollbackCalls.push(params);
-        return { rows: [] };
+      if (sql.includes('count(*)::int AS c')) {
+        expect(sql).toContain('FOR UPDATE');
+        return { rows: [{ c: 0 }] };
       }
       return null;
     });
@@ -387,8 +462,11 @@ describe('PATCH /admin/organizations/:id/members/:user_id', () => {
     });
     expect(r.statusCode).toBe(400);
     expect(JSON.parse(r.body)).toEqual({ error: 'last_owner' });
-    expect(rollbackCalls).toHaveLength(1);
-    expect(rollbackCalls[0]).toEqual(['org-1', 'owner-1']);
+    // The demote UPDATE happened inside a transaction that then rolled back
+    // — no manual "SET role = 'owner'" revert query is issued anymore.
+    expect(queryCalls).toContain('BEGIN');
+    expect(queryCalls).toContain('ROLLBACK');
+    expect(queryCalls.some((s) => s.includes("SET role = 'owner'"))).toBe(false);
   });
 });
 
@@ -396,8 +474,13 @@ describe('DELETE /admin/organizations/:id/members/:user_id', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('removes a non-owner member and returns 204', async () => {
+    const queryCalls: string[] = [];
     const controlDb = makeControlDbMock((sql) => {
-      if (sql.includes('SELECT role FROM organization_members')) return { rows: [{ role: 'member' }] };
+      queryCalls.push(sql);
+      if (sql.includes('SELECT role FROM organization_members')) {
+        expect(sql).toContain('FOR UPDATE');
+        return { rows: [{ role: 'member' }] };
+      }
       if (sql.includes('DELETE FROM organization_members')) return { rows: [] };
       return null;
     });
@@ -409,12 +492,17 @@ describe('DELETE /admin/organizations/:id/members/:user_id', () => {
     });
     expect(r.statusCode).toBe(204);
     expect(r.body).toBe('');
+    expect(queryCalls).toContain('BEGIN');
+    expect(queryCalls).toContain('COMMIT');
   });
 
   it('400s with last_owner when the sole owner is targeted', async () => {
     const controlDb = makeControlDbMock((sql) => {
       if (sql.includes('SELECT role FROM organization_members')) return { rows: [{ role: 'owner' }] };
-      if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 1 }] };
+      if (sql.includes('count(*)::int AS c')) {
+        expect(sql).toContain('FOR UPDATE');
+        return { rows: [{ c: 1 }] };
+      }
       return null;
     });
     const app = await makeApp(controlDb, true);
