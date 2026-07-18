@@ -308,3 +308,131 @@ describe('GET /admin/apps/:id org enrichment', () => {
     expect(body.app.organization_personal).toBe(false);
   });
 });
+
+describe('POST /admin/apps/:id/transfer', () => {
+  it('200 transfers app between orgs and emits audit event', async () => {
+    const updateCalls: any[] = [];
+    const insertCalls: any[] = [];
+
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('UPDATE org_app_index SET organization_id')) {
+        updateCalls.push({ sql, params });
+        return { rows: [{ command: 'UPDATE', rowCount: 1 }] };
+      }
+      if (sql.includes('INSERT INTO billing_events')) {
+        insertCalls.push({ sql, params });
+        return { rows: [{ command: 'INSERT' }] };
+      }
+      if (sql.includes('SELECT organization_id FROM org_app_index WHERE app_id = $1')) {
+        expect(params).toEqual(['app-team-1']);
+        return { rows: [{ organization_id: 'org-team' }] };
+      }
+      if (sql.includes('FROM organizations WHERE id = $1')) {
+        expect(params[0]).toEqual('org-dest');
+        return { rows: [{ id: 'org-dest', personal: false }] };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/apps/app-team-1/transfer',
+      headers: { authorization: 'Bearer ok' },
+      payload: { destination_organization_id: 'org-dest' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.app_id).toBe('app-team-1');
+    expect(body.from_organization_id).toBe('org-team');
+    expect(body.to_organization_id).toBe('org-dest');
+
+    // Verify UPDATE was called with correct params
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].params).toEqual(['org-dest', 'app-team-1']);
+
+    // Verify INSERT billing_events was called
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0].params[0]).toBe('org-dest');
+    expect(insertCalls[0].params[1]).toContain('app-team-1');
+    expect(insertCalls[0].params[1]).toContain('org-team');
+  });
+
+  it('409 when app already in destination org', async () => {
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('SELECT organization_id FROM org_app_index WHERE app_id = $1')) {
+        return { rows: [{ organization_id: 'org-dest' }] };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/apps/app-team-1/transfer',
+      headers: { authorization: 'Bearer ok' },
+      payload: { destination_organization_id: 'org-dest' },
+    });
+    expect(r.statusCode).toBe(409);
+    const body = r.json();
+    expect(body.error).toBe('already_in_destination');
+  });
+
+  it('404 when app does not exist in org_app_index', async () => {
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('SELECT organization_id FROM org_app_index WHERE app_id = $1')) {
+        return { rows: [] };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/apps/app-unknown/transfer',
+      headers: { authorization: 'Bearer ok' },
+      payload: { destination_organization_id: 'org-dest' },
+    });
+    expect(r.statusCode).toBe(404);
+    const body = r.json();
+    expect(body.error).toBe('app_not_found');
+  });
+
+  it('404 when destination org does not exist', async () => {
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('SELECT organization_id FROM org_app_index WHERE app_id = $1')) {
+        return { rows: [{ organization_id: 'org-team' }] };
+      }
+      if (sql.includes('FROM organizations WHERE id = $1')) {
+        return { rows: [] };
+      }
+      return null;
+    });
+
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/apps/app-team-1/transfer',
+      headers: { authorization: 'Bearer ok' },
+      payload: { destination_organization_id: 'org-unknown' },
+    });
+    expect(r.statusCode).toBe(404);
+    const body = r.json();
+    expect(body.error).toBe('destination_not_found');
+  });
+
+  it('400 when destination_organization_id is missing', async () => {
+    const controlDb = makeControlDbMock(() => null);
+
+    const app = await makeApp(controlDb);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/apps/app-team-1/transfer',
+      headers: { authorization: 'Bearer ok' },
+      payload: {},
+    });
+    expect(r.statusCode).toBe(400);
+    const body = r.json();
+    expect(body.error).toBe('destination_organization_id_required');
+  });
+});

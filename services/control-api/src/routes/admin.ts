@@ -1241,6 +1241,63 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  // ───── POST /admin/apps/:id/transfer ─────
+  // Body: { destination_organization_id: string }
+  // Returns: { app_id, from_organization_id, to_organization_id }
+  app.post('/admin/apps/:id/transfer', { config: { public: true } }, async (request, reply) => {
+    if (!(await checkAdmin(request, reply))) return;
+
+    const { id } = request.params as { id: string };
+    const { destination_organization_id } = request.body as { destination_organization_id?: string };
+
+    if (!destination_organization_id) {
+      return reply.code(400).send({ error: 'destination_organization_id_required' });
+    }
+
+    // Look up the current organization for this app
+    const currentResult = await app.controlDb.query(
+      `SELECT organization_id FROM org_app_index WHERE app_id = $1`,
+      [id]
+    );
+    if (currentResult.rows.length === 0) {
+      return reply.code(404).send({ error: 'app_not_found' });
+    }
+    const fromOrgId = currentResult.rows[0].organization_id;
+
+    // Check if already in destination
+    if (fromOrgId === destination_organization_id) {
+      return reply.code(409).send({ error: 'already_in_destination' });
+    }
+
+    // Verify destination org exists
+    const dstResult = await app.controlDb.query(
+      `SELECT id FROM organizations WHERE id = $1`,
+      [destination_organization_id]
+    );
+    if (dstResult.rows.length === 0) {
+      return reply.code(404).send({ error: 'destination_not_found' });
+    }
+
+    // Update the org_app_index
+    await app.controlDb.query(
+      `UPDATE org_app_index SET organization_id = $1 WHERE app_id = $2`,
+      [destination_organization_id, id]
+    );
+
+    // Emit an audit event in billing_events
+    await app.controlDb.query(
+      `INSERT INTO billing_events (organization_id, event_type, payload, created_at)
+       VALUES ($1, 'app_transferred', $2::jsonb, now())`,
+      [destination_organization_id, JSON.stringify({ app_id: id, from: fromOrgId })]
+    );
+
+    return reply.send({
+      app_id: id,
+      from_organization_id: fromOrgId,
+      to_organization_id: destination_organization_id,
+    });
+  });
+
   // ───── GET /admin/functions/:id ─────
   // Returns: function detail with invocations and error summary
   app.get('/admin/functions/:id', { config: { public: true } }, async (request, reply) => {
