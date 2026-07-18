@@ -11,15 +11,18 @@ import { fanOutQuery } from '../../services/region-resolver.js';
 // failure. Kept here rather than at module scope so a bad build in overlays
 // only fails routes that need Stripe (this handler), not the whole plugin.
 //
-// Compiled path is services/control-api/dist/routes/admin/organizations.js
-// (one directory deeper than routes/admin.js, so one extra `..`), and the
-// production layout after the platform Dockerfile is /app/cloud/overlays/...
-// (not /app/cloud-overlays/... — that hyphenated shape is a stale string in
-// routes/admin.ts's copy of this helper; keep it consistent here with what
-// the platform image actually ships).
+// Compiled path in the platform image is
+//   /app/submodules/butterbase-oss/services/control-api/dist/routes/admin/organizations.js
+// Overlay path is
+//   /app/cloud/overlays/dist/cloud/overlays/billing/stripe/stripe-service.js
+// so we walk up seven directories (admin → routes → dist → control-api →
+// services → butterbase-oss → submodules → /app) then descend into cloud/…
+// routes/admin.ts's copy of this helper still has a stale
+// `cloud-overlays/dist/cloud-overlays/` shape — left for follow-up; it isn't
+// hit on common paths.
 async function getStripeClient(): Promise<any> {
   // @ts-expect-error — overlay path resolved at runtime
-  const mod = await import('../../../../../../cloud/overlays/dist/cloud/overlays/billing/stripe/stripe-service.js');
+  const mod = await import('../../../../../../../cloud/overlays/dist/cloud/overlays/billing/stripe/stripe-service.js');
   return mod.getStripeClient();
 }
 
