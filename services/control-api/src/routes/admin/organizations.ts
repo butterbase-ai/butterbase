@@ -253,6 +253,117 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     };
     return detail;
   });
+
+  fastify.post('/admin/organizations/:id/members', { config: { public: true } }, async (req, reply) => {
+    const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+    if (!user) return;
+
+    const ctrl = (fastify as any).controlDb;
+    const { id } = req.params as { id: string };
+    const { user_id, role } = req.body as { user_id: string; role: 'owner' | 'member' };
+
+    if (role !== 'owner' && role !== 'member') {
+      reply.code(400).send({ error: 'invalid_role' });
+      return;
+    }
+
+    const orgRes = await ctrl.query(`SELECT 1 FROM organizations WHERE id = $1`, [id]);
+    if (orgRes.rows.length === 0) {
+      reply.code(404).send({ error: 'organization_not_found' });
+      return;
+    }
+
+    const userRes = await ctrl.query(`SELECT 1 FROM platform_users WHERE id = $1`, [user_id]);
+    if (userRes.rows.length === 0) {
+      reply.code(404).send({ error: 'user_not_found' });
+      return;
+    }
+
+    const inserted = await ctrl.query(
+      `INSERT INTO organization_members (organization_id, user_id, role, invited_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role
+       RETURNING organization_id, user_id, role, invited_by, joined_at`,
+      [id, user_id, role, user.id]
+    );
+    reply.code(201).send({ member: inserted.rows[0] });
+  });
+
+  fastify.patch('/admin/organizations/:id/members/:user_id', { config: { public: true } }, async (req, reply) => {
+    const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+    if (!user) return;
+
+    const ctrl = (fastify as any).controlDb;
+    const { id, user_id } = req.params as { id: string; user_id: string };
+    const { role } = req.body as { role: 'owner' | 'member' };
+
+    if (role !== 'owner' && role !== 'member') {
+      reply.code(400).send({ error: 'invalid_role' });
+      return;
+    }
+
+    const updRes = await ctrl.query(
+      `UPDATE organization_members SET role = $1
+        WHERE organization_id = $2 AND user_id = $3
+        RETURNING organization_id, user_id, role, invited_by, joined_at`,
+      [role, id, user_id]
+    );
+    if (updRes.rows.length === 0) {
+      reply.code(404).send({ error: 'member_not_found' });
+      return;
+    }
+
+    if (role === 'member') {
+      const ownersRes = await ctrl.query(
+        `SELECT count(*)::int AS c FROM organization_members WHERE organization_id = $1 AND role = 'owner'`,
+        [id]
+      );
+      if (ownersRes.rows[0].c === 0) {
+        await ctrl.query(
+          `UPDATE organization_members SET role = 'owner' WHERE organization_id = $1 AND user_id = $2`,
+          [id, user_id]
+        );
+        reply.code(400).send({ error: 'last_owner' });
+        return;
+      }
+    }
+
+    reply.send({ member: updRes.rows[0] });
+  });
+
+  fastify.delete('/admin/organizations/:id/members/:user_id', { config: { public: true } }, async (req, reply) => {
+    const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+    if (!user) return;
+
+    const ctrl = (fastify as any).controlDb;
+    const { id, user_id } = req.params as { id: string; user_id: string };
+
+    const targetRes = await ctrl.query(
+      `SELECT role FROM organization_members WHERE organization_id = $1 AND user_id = $2`,
+      [id, user_id]
+    );
+    if (targetRes.rows.length === 0) {
+      reply.code(404).send({ error: 'member_not_found' });
+      return;
+    }
+
+    if (targetRes.rows[0].role === 'owner') {
+      const ownersRes = await ctrl.query(
+        `SELECT count(*)::int AS c FROM organization_members WHERE organization_id = $1 AND role = 'owner'`,
+        [id]
+      );
+      if (ownersRes.rows[0].c <= 1) {
+        reply.code(400).send({ error: 'last_owner' });
+        return;
+      }
+    }
+
+    await ctrl.query(
+      `DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2`,
+      [id, user_id]
+    );
+    reply.code(204).send();
+  });
 };
 
 export default organizationsRoutes;

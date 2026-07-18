@@ -223,3 +223,222 @@ describe('GET /admin/organizations/:id', () => {
     expect(vi.mocked(fanOutQuery)).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /admin/organizations/:id/members', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('inserts a member and returns 201', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT 1 FROM organizations')) return { rows: [{ '?column?': 1 }] };
+      if (sql.includes('SELECT 1 FROM platform_users')) return { rows: [{ '?column?': 1 }] };
+      if (sql.includes('INSERT INTO organization_members')) {
+        return {
+          rows: [{
+            organization_id: 'org-1', user_id: 'user-2', role: 'member',
+            invited_by: 'admin-uid', joined_at: '2026-01-01T00:00:00Z',
+          }],
+        };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/organizations/org-1/members',
+      headers: { authorization: 'Bearer ok' },
+      payload: { user_id: 'user-2', role: 'member' },
+    });
+    expect(r.statusCode).toBe(201);
+    const body = JSON.parse(r.body);
+    expect(body.member).toEqual({
+      organization_id: 'org-1', user_id: 'user-2', role: 'member',
+      invited_by: 'admin-uid', joined_at: '2026-01-01T00:00:00Z',
+    });
+  });
+
+  it('400s on invalid role', async () => {
+    const controlDb = makeControlDbMock(() => null);
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/organizations/org-1/members',
+      headers: { authorization: 'Bearer ok' },
+      payload: { user_id: 'user-2', role: 'admin' },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toEqual({ error: 'invalid_role' });
+  });
+
+  it('404s when organization does not exist', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT 1 FROM organizations')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/organizations/missing-org/members',
+      headers: { authorization: 'Bearer ok' },
+      payload: { user_id: 'user-2', role: 'member' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'organization_not_found' });
+  });
+
+  it('404s when the target user does not exist', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT 1 FROM organizations')) return { rows: [{ '?column?': 1 }] };
+      if (sql.includes('SELECT 1 FROM platform_users')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/admin/organizations/org-1/members',
+      headers: { authorization: 'Bearer ok' },
+      payload: { user_id: 'missing-user', role: 'member' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'user_not_found' });
+  });
+});
+
+describe('PATCH /admin/organizations/:id/members/:user_id', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('changes a member role and returns 200', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('UPDATE organization_members') && sql.includes('RETURNING')) {
+        return {
+          rows: [{
+            organization_id: 'org-1', user_id: 'user-2', role: 'owner',
+            invited_by: null, joined_at: '2026-01-01T00:00:00Z',
+          }],
+        };
+      }
+      if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 2 }] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/members/user-2',
+      headers: { authorization: 'Bearer ok' },
+      payload: { role: 'owner' },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body);
+    expect(body.member.role).toBe('owner');
+  });
+
+  it('400s on invalid role', async () => {
+    const controlDb = makeControlDbMock(() => null);
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/members/user-2',
+      headers: { authorization: 'Bearer ok' },
+      payload: { role: 'admin' },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toEqual({ error: 'invalid_role' });
+  });
+
+  it('404s when member does not exist', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('UPDATE organization_members') && sql.includes('RETURNING')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/members/missing-user',
+      headers: { authorization: 'Bearer ok' },
+      payload: { role: 'member' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'member_not_found' });
+  });
+
+  it('400s with last_owner and rolls back when demoting the sole owner', async () => {
+    const rollbackCalls: unknown[][] = [];
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (sql.includes('UPDATE organization_members') && sql.includes('RETURNING')) {
+        return {
+          rows: [{
+            organization_id: 'org-1', user_id: 'owner-1', role: 'member',
+            invited_by: null, joined_at: '2026-01-01T00:00:00Z',
+          }],
+        };
+      }
+      if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 0 }] };
+      if (sql.includes("SET role = 'owner'")) {
+        rollbackCalls.push(params);
+        return { rows: [] };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/members/owner-1',
+      headers: { authorization: 'Bearer ok' },
+      payload: { role: 'member' },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toEqual({ error: 'last_owner' });
+    expect(rollbackCalls).toHaveLength(1);
+    expect(rollbackCalls[0]).toEqual(['org-1', 'owner-1']);
+  });
+});
+
+describe('DELETE /admin/organizations/:id/members/:user_id', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('removes a non-owner member and returns 204', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT role FROM organization_members')) return { rows: [{ role: 'member' }] };
+      if (sql.includes('DELETE FROM organization_members')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'DELETE',
+      url: '/admin/organizations/org-1/members/user-2',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(204);
+    expect(r.body).toBe('');
+  });
+
+  it('400s with last_owner when the sole owner is targeted', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT role FROM organization_members')) return { rows: [{ role: 'owner' }] };
+      if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 1 }] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'DELETE',
+      url: '/admin/organizations/org-1/members/owner-1',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toEqual({ error: 'last_owner' });
+  });
+
+  it('404s when member does not exist', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT role FROM organization_members')) return { rows: [] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'DELETE',
+      url: '/admin/organizations/org-1/members/missing-user',
+      headers: { authorization: 'Bearer ok' },
+    });
+    expect(r.statusCode).toBe(404);
+    expect(JSON.parse(r.body)).toEqual({ error: 'member_not_found' });
+  });
+});
