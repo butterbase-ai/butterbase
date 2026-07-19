@@ -31,8 +31,12 @@ async function handleMcp(
       process.env.BUTTERBASE_E2E === '1' && typeof rawTestUid === 'string' && rawTestUid.length > 0
         ? rawTestUid
         : undefined;
+    // Forward x-organization-id so JWT MCP callers can pick which of their
+    // orgs tool calls resolve against. bb_sk_* keys ignore this downstream.
+    const rawOrgId = request.headers['x-organization-id'];
+    const organizationId = typeof rawOrgId === 'string' && rawOrgId.length > 0 ? rawOrgId : undefined;
 
-    await runWithRequestAuth({ authorizationHeader, testUserId }, async () => {
+    await runWithRequestAuth({ authorizationHeader, testUserId, organizationId }, async () => {
       await transport.handleRequest(request.raw, reply.raw, request.body);
     });
   } catch (error) {

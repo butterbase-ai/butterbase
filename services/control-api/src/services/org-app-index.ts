@@ -57,3 +57,25 @@ export async function listUserApps(controlPool: pg.Pool, organizationId: string)
   return r.rows;
 }
 
+/**
+ * List every app in every org the user is a member of. Used by JWT sessions
+ * that haven't picked an explicit active org — otherwise a user in multiple
+ * orgs sees only their personal-org apps and can't even discover the ids of
+ * team-org apps to switch context to. bb_sk_* API keys never call this — they
+ * carry an explicit organization_id and stay strictly scoped via listUserApps.
+ */
+export async function listAppsForUserAcrossOrgs(
+  controlPool: pg.Pool,
+  userId: string,
+): Promise<OrgAppIndexRow[]> {
+  const r = await controlPool.query<OrgAppIndexRow>(
+    `SELECT i.app_id, i.organization_id, i.region, i.subdomain, i.app_name, i.created_at, i.updated_at
+     FROM org_app_index i
+     JOIN organization_members m ON m.organization_id = i.organization_id
+     WHERE m.user_id = $1
+     ORDER BY i.created_at DESC`,
+    [userId],
+  );
+  return r.rows;
+}
+
