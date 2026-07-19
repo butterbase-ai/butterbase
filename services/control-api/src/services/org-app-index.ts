@@ -58,11 +58,11 @@ export async function listUserApps(controlPool: pg.Pool, organizationId: string)
 }
 
 /**
- * List every app in every org the user is a member of. Used by JWT sessions
- * that haven't picked an explicit active org — otherwise a user in multiple
- * orgs sees only their personal-org apps and can't even discover the ids of
- * team-org apps to switch context to. bb_sk_* API keys never call this — they
- * carry an explicit organization_id and stay strictly scoped via listUserApps.
+ * List every app in every org the user is a member of. Every caller of
+ * GET /apps uses this — bb_sk_* API keys, JWT sessions with or without
+ * x-organization-id, all fan out over the user's org memberships. Discovery
+ * is uniform with the app-scoped auth model in AppResolver.resolveApp, which
+ * grants access to any member of the app's org regardless of activeOrg.
  */
 export async function listAppsForUserAcrossOrgs(
   controlPool: pg.Pool,

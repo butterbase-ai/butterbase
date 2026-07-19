@@ -7,7 +7,7 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
-import { addOrgAppIndex, removeOrgAppIndex, listUserApps, listAppsForUserAcrossOrgs } from '../services/org-app-index.js';
+import { addOrgAppIndex, removeOrgAppIndex, listAppsForUserAcrossOrgs } from '../services/org-app-index.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { checkProjectQuota } from '../services/project-quota.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
@@ -45,18 +45,16 @@ const initSchema = {
 export async function initRoutes(app: FastifyInstance) {
   app.get('/apps', async (request) => {
     const ownerId = requireUserId(request);
-    // Scope to the caller's active org (Plan 07 org-scoped auth):
-    //   - bb_sk_* API keys carry their own organization_id → strict single-org listing.
-    //   - JWT callers that sent x-organization-id (populated on request.auth) → same.
-    //   - JWT callers WITHOUT an explicit active org → fan out over every org the
-    //     user is a member of, so a team-org member can discover shared apps
-    //     without a chicken-and-egg dance around x-organization-id.
-    // The strict per-key scoping model is preserved: bb_sk_* keys never see
-    // cross-org apps, only unscoped JWT sessions do.
-    const activeOrgId = request.auth?.organizationId ?? null;
-    const indexRows = activeOrgId
-      ? await listUserApps(app.controlDb, activeOrgId)
-      : await listAppsForUserAcrossOrgs(app.controlDb, ownerId);
+    // List always fans out over EVERY org the user is a member of, regardless
+    // of the credential's active-org signal (bb_sk_* key's own org, or the
+    // JWT session's x-organization-id). Two reasons:
+    //   1. AppResolver.resolveApp lets any member reach any app in that org
+    //      anyway, so pretending the app doesn't exist here creates a
+    //      chicken-and-egg where the caller has to already know the app_id to
+    //      hit get_config to learn it exists.
+    //   2. Every list row carries organization_id so callers can group/filter
+    //      client-side; strict scoping at list time only obscured that.
+    const indexRows = await listAppsForUserAcrossOrgs(app.controlDb, ownerId);
     if (indexRows.length === 0) return { apps: [] };
 
     // Fetch runtime rows for the exact app-ids resolved above — do NOT re-filter
