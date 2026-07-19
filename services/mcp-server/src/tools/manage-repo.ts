@@ -73,15 +73,29 @@ Auth matrix: writes (push, wipe) require app owner. Reads (pull_latest, status, 
           return text(res);
         }
         case 'status': {
-          // No "working tree" on the server; return what we can.
-          let remoteLatest: string | null = null;
-          let fileCount = 0;
-          try {
-            const latest = await apiGet<{ snapshot_id: string; manifest: Manifest }>(`/v1/${args.app_id}/repo/snapshots/latest`);
-            remoteLatest = latest.snapshot_id;
-            fileCount = latest.manifest.files.length;
-          } catch { /* no snapshots yet */ }
-          return text({ app_id: args.app_id, remote_latest_snapshot_id: remoteLatest, file_count: fileCount });
+          // No "working tree" on the server; return what we can. Use the list
+          // endpoint (200 + empty array when no snapshots) rather than
+          // /latest (404 when no snapshots) so we can distinguish
+          //   "app has no snapshots yet"  (empty list, safe to report)
+          //   from
+          //   "you cannot see this app"   (401/403/404 from auth) — must surface
+          // The previous try/catch on /latest swallowed the auth 404 and
+          // returned {remote_latest_snapshot_id: null, file_count: 0}, making
+          // access-denied indistinguishable from an empty repo.
+          const list = await apiGet<{ snapshots: { snapshot_id: string; created_at: string }[] }>(
+            `/v1/${args.app_id}/repo/snapshots`
+          );
+          if (list.snapshots.length === 0) {
+            return text({ app_id: args.app_id, remote_latest_snapshot_id: null, file_count: 0 });
+          }
+          const latest = await apiGet<{ snapshot_id: string; manifest: Manifest }>(
+            `/v1/${args.app_id}/repo/snapshots/latest`
+          );
+          return text({
+            app_id: args.app_id,
+            remote_latest_snapshot_id: latest.snapshot_id,
+            file_count: latest.manifest.files.length,
+          });
         }
         case 'wipe': {
           const res = await apiDelete(`/v1/${args.app_id}/repo`);

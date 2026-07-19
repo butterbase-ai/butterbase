@@ -7,7 +7,7 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
-import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
+import { addOrgAppIndex, removeOrgAppIndex, listUserApps, listAppsForUserAcrossOrgs } from '../services/org-app-index.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { checkProjectQuota } from '../services/project-quota.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
@@ -46,22 +46,26 @@ export async function initRoutes(app: FastifyInstance) {
   app.get('/apps', async (request) => {
     const ownerId = requireUserId(request);
     // Scope to the caller's active org (Plan 07 org-scoped auth):
-    //   - bb_sk_* API keys carry their own organization_id → that's the scope.
-    //   - JWT callers may set x-organization-id (populated on request.auth) to
-    //     pick an org they belong to; otherwise fall back to the personal org.
-    // Cross-org apps are only visible with a key/session scoped to that org —
-    // this preserves the per-key strict scoping model.
-    const activeOrgId = request.auth?.organizationId
-      ?? await resolveOrganizationId(app.controlDb, ownerId);
-    const indexRows = await listUserApps(app.controlDb, activeOrgId);
+    //   - bb_sk_* API keys carry their own organization_id → strict single-org listing.
+    //   - JWT callers that sent x-organization-id (populated on request.auth) → same.
+    //   - JWT callers WITHOUT an explicit active org → fan out over every org the
+    //     user is a member of, so a team-org member can discover shared apps
+    //     without a chicken-and-egg dance around x-organization-id.
+    // The strict per-key scoping model is preserved: bb_sk_* keys never see
+    // cross-org apps, only unscoped JWT sessions do.
+    const activeOrgId = request.auth?.organizationId ?? null;
+    const indexRows = activeOrgId
+      ? await listUserApps(app.controlDb, activeOrgId)
+      : await listAppsForUserAcrossOrgs(app.controlDb, ownerId);
     if (indexRows.length === 0) return { apps: [] };
 
-
-    // Fetch runtime rows for the exact app-ids resolved by the org-scoped
-    // org_app_index — do NOT re-filter by owner_id, since org-shared apps
-    // are owned by the org's owner, not the caller. Group by region.
+    // Fetch runtime rows for the exact app-ids resolved above — do NOT re-filter
+    // by owner_id, since org-shared apps are owned by the org's owner, not the
+    // caller. Group by region.
+    const orgByAppId = new Map<string, string>();
     const idsByRegion = new Map<string, string[]>();
     for (const r of indexRows) {
+      orgByAppId.set(r.app_id, r.organization_id);
       const list = idsByRegion.get(r.region) ?? [];
       list.push(r.app_id);
       idsByRegion.set(r.region, list);
@@ -72,7 +76,13 @@ export async function initRoutes(app: FastifyInstance) {
         'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_organization_id, substrate_autopropagate, created_at FROM apps WHERE id = ANY($1::text[]) ORDER BY created_at DESC',
         [appIds]
       );
-      allRows.push(...rows);
+      for (const row of rows) {
+        // Surface the owning org so callers can group/filter without a second
+        // round-trip. Runtime apps.organization_id may lag behind the control
+        // index during backfill; org_app_index is the authoritative pointer.
+        row.organization_id = orgByAppId.get(row.id) ?? row.organization_id ?? null;
+        allRows.push(row);
+      }
     }
     allRows.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
     return { apps: allRows };
