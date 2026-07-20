@@ -80,7 +80,7 @@ Common errors:
       source_app_id: z.string().optional().describe('Required for "clone" and "preview_clone_env_vars". The id of the public app to clone.'),
       name: z.string().optional().describe('Optional for "clone". A name for the new app; defaults to `Clone of <source_app_id>`.'),
       region: z.string().optional().describe('Optional for "clone". The region for the new app; defaults to the source app\'s region.'),
-      organization_id: z.string().min(1).optional().describe('Optional for "clone". Organization to create the destination app under. Requires membership. Defaults to the caller\'s personal org.'),
+      organization_id: z.string().min(1).optional().describe('Optional for "clone" and "link_substrate". For "clone", the org to create the destination app under (requires membership; defaults to caller\'s personal org). For "link_substrate", the org whose substrate the app should be linked to (requires caller membership; server 403s otherwise; defaults to caller\'s active/personal org).'),
       env_var_values: z.record(z.string(), z.record(z.string(), z.string())).optional()
         .describe('Optional for "clone". Per-function env var values: { fn_name: { KEY: "value" } }. Use preview_clone_env_vars to see what keys the source needs.'),
       auto_mint_api_key: z.array(z.object({
@@ -253,7 +253,10 @@ Common errors:
         case 'link_substrate': {
           const err = need(args.app_id, '"app_id" is required for this action.');
           if (err) return err;
-          const result = await apiPost(`/v1/me/apps/${args.app_id}/substrate-link`, {});
+          const body = args.organization_id
+            ? { organization_id: args.organization_id }
+            : {};
+          const result = await apiPost(`/v1/me/apps/${args.app_id}/substrate-link`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'unlink_substrate': {
