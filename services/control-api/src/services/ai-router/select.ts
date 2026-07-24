@@ -78,6 +78,10 @@ export const CANONICAL_IMAGE_MODEL_ROUTES: Readonly<Record<string, RouterName>> 
   'alibaba/wan-2.6-image':                 'provider-secondary',
   'prunaai/p-image':                       'provider-secondary',
   'prunaai/p-image-edit':                  'provider-secondary',
+  'black-forest-labs/flux.2-pro':          'openrouter',
+  'black-forest-labs/flux.2-max':          'openrouter',
+  'black-forest-labs/flux.2-flex':         'openrouter',
+  'black-forest-labs/flux.2-klein-4b':     'openrouter',
 };
 
 /**
