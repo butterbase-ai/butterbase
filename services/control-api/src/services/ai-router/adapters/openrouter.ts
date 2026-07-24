@@ -35,6 +35,10 @@ const OPENROUTER_IMAGE_MODELS: ReadonlySet<string> = new Set([
   'google/gemini-3.1-flash-lite-image',
   'google/gemini-3.1-flash-image',
   'google/gemini-3-pro-image',
+  'black-forest-labs/flux.2-pro',
+  'black-forest-labs/flux.2-max',
+  'black-forest-labs/flux.2-flex',
+  'black-forest-labs/flux.2-klein-4b',
 ]);
 
 interface OpenRouterConfig {
