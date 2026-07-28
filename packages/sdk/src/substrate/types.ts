@@ -10,8 +10,6 @@ export interface SubstrateStreamOptions {
   token?: string;
   /** Pre-minted single-use wst_ ticket (browser/app on-ramp). */
   ticket?: string;
-  /** Scope to a specific org (defaults server-side to the caller's org). */
-  orgId?: string;
   onChange: (evt: SubstrateChangeEvent) => void;
   onStatus?: (status: 'connecting' | 'open' | 'closed') => void;
 }

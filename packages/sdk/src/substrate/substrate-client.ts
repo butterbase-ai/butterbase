@@ -8,13 +8,12 @@ import type {
 /** Pure: build the substrate stream WS URL from an API origin + auth opts. */
 export function buildSubstrateStreamUrl(
   apiUrl: string,
-  opts: { token?: string; ticket?: string; orgId?: string },
+  opts: { token?: string; ticket?: string },
 ): string {
   const wsBase = apiUrl.replace(/^http/, 'ws');
   const params = new URLSearchParams();
   if (opts.ticket) params.set('ticket', opts.ticket);
   else if (opts.token) params.set('token', opts.token);
-  if (opts.orgId) params.set('org_id', opts.orgId);
   const qs = params.toString();
   return `${wsBase}/v1/me/substrate/stream${qs ? `?${qs}` : ''}`;
 }
@@ -43,7 +42,6 @@ export class SubstrateStreamClient {
       const url = buildSubstrateStreamUrl(apiUrl, {
         token: opts.token,
         ticket: opts.ticket,
-        orgId: opts.orgId,
       });
       ws = new WebSocket(url);
       ws.onopen = () => { backoffMs = 1000; opts.onStatus?.('open'); };

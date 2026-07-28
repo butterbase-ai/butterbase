@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildSubstrateStreamUrl } from './substrate-client.js';
+import { buildSubstrateStreamUrl, SubstrateStreamClient } from './substrate-client.js';
 import type { SubstrateChangeEvent } from './types.js';
 
 describe('buildSubstrateStreamUrl', () => {
@@ -8,9 +8,9 @@ describe('buildSubstrateStreamUrl', () => {
     expect(url).toBe('wss://api.butterbase.ai/v1/me/substrate/stream?ticket=wst_abc');
   });
 
-  it('passes token and org_id when provided', () => {
-    const url = buildSubstrateStreamUrl('https://api.butterbase.ai', { token: 'bb_sk_x', orgId: 'org1' });
-    expect(url).toBe('wss://api.butterbase.ai/v1/me/substrate/stream?token=bb_sk_x&org_id=org1');
+  it('passes token when provided', () => {
+    const url = buildSubstrateStreamUrl('https://api.butterbase.ai', { token: 'bb_sk_x' });
+    expect(url).toBe('wss://api.butterbase.ai/v1/me/substrate/stream?token=bb_sk_x');
   });
 
   it('downgrades http origins to ws (local dev)', () => {
@@ -18,8 +18,6 @@ describe('buildSubstrateStreamUrl', () => {
     expect(url).toBe('ws://localhost:4000/v1/me/substrate/stream?ticket=wst_1');
   });
 });
-
-import { SubstrateStreamClient } from './substrate-client.js';
 
 class FakeWS {
   static last: FakeWS;
