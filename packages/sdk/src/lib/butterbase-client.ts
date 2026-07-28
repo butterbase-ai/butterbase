@@ -10,6 +10,7 @@ import { AiClient } from '../ai/ai-client.js';
 import { BillingClient } from '../billing/billing-client.js';
 import { AdminClient } from '../admin/admin-client.js';
 import { RealtimeClient } from '../realtime/realtime-client.js';
+import { SubstrateStreamClient } from '../substrate/substrate-client.js';
 import { RagClient } from '../rag/rag-client.js';
 import { IntegrationsClient } from '../integrations/integrations-client.js';
 import { PartnersClient } from '../partners/partners-client.js';
@@ -30,6 +31,7 @@ export class ButterbaseClient {
   public readonly billing: BillingClient;
   public readonly admin: AdminClient;
   public readonly realtime: RealtimeClient;
+  public readonly substrate: SubstrateStreamClient;
   public readonly rag: RagClient;
   public readonly integrations: IntegrationsClient;
   public readonly partners: PartnersClient;
@@ -55,6 +57,7 @@ export class ButterbaseClient {
     this.billing = new BillingClient(this);
     this.admin = new AdminClient(this);
     this.realtime = new RealtimeClient(this);
+    this.substrate = new SubstrateStreamClient(this);
     this.rag = new RagClient(this);
     this.integrations = new IntegrationsClient(this);
     this.partners = new PartnersClient(this);
