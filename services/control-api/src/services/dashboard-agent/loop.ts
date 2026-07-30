@@ -903,8 +903,12 @@ export async function* runAgentTurn(
             console.warn(`[dashboard-agent] snapshot auto-naming failed for app ${appId}: ${message}`);
           }
         }
-      } catch {
-        // Best-effort; loop should not hard-fail because of a flush error.
+      } catch (err: unknown) {
+        // Best-effort; loop should not hard-fail because of a flush error —
+        // but DO log it so silent persistence failures don't leave the user
+        // wondering why files vanish on refresh.
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[dashboard-agent] end-of-turn flush failed for app ${appId}: ${message}`);
       }
     }
 
