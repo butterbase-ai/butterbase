@@ -712,6 +712,27 @@ describe('runAgentTurn — gateway HTTP error (Fix 2)', () => {
   });
 });
 
+describe('runAgentTurn — insufficient credits (gateway 402)', () => {
+  it('emits an error event carrying code and balance', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 402,
+      json: async () => ({
+        error: { code: 'insufficient_credits', type: 'billing_error', available_usd: 0.5, required_usd: 2 },
+      }),
+    } as unknown as Response);
+
+    const events = await collect(runAgentTurn(baseInput));
+    const err = events.find((e) => e.type === 'error');
+    expect(err).toMatchObject({
+      type: 'error',
+      code: 'insufficient_credits',
+      availableUsd: 0.5,
+      requiredUsd: 2,
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Task 7: builder-mode integration tests
 // ---------------------------------------------------------------------------

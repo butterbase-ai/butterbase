@@ -43,13 +43,26 @@ export type LoopEvent =
   | { type: 'tool_result'; id: string; result?: unknown; error?: string }
   | { type: 'assistant_message'; content: string }
   | { type: 'done' }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; code?: string; availableUsd?: number; requiredUsd?: number }
   | { type: 'file_change'; app_id: string; path: string; kind: 'write' | 'delete'; content?: string; sha256?: string }
   | { type: 'active_app_change'; app_id: string; app_name?: string }
   | { type: 'deployment_progress'; deployment_id: string; status: 'queued' | 'building' | 'live' | 'failed'; url?: string; log_tail?: string; error?: string }
   | { type: 'function_deployment_progress'; function_name: string; status: 'queued' | 'uploading' | 'live' | 'failed'; url?: string; error?: string }
   | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' }
   | { type: 'title_updated'; title: string };
+
+/** Thrown by streamChatCompletion when the gateway returns a 402 credits error. */
+export class InsufficientCreditsStreamError extends Error {
+  readonly code = 'insufficient_credits' as const;
+  readonly availableUsd?: number;
+  readonly requiredUsd?: number;
+  constructor(opts: { availableUsd?: number; requiredUsd?: number }) {
+    super('insufficient_credits');
+    this.name = 'InsufficientCreditsStreamError';
+    this.availableUsd = opts.availableUsd;
+    this.requiredUsd = opts.requiredUsd;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Injectable deps (module-level singletons by default)
@@ -234,6 +247,18 @@ export async function* streamChatCompletion(opts: {
   });
 
   if (!res.ok) {
+    if (res.status === 402) {
+      const body = (await res.json().catch(() => null)) as
+        | { error?: { code?: string; type?: string; available_usd?: number; required_usd?: number } }
+        | null;
+      const e = body?.error;
+      if (e && (e.code === 'insufficient_credits' || e.type === 'billing_error')) {
+        throw new InsufficientCreditsStreamError({
+          availableUsd: e.available_usd,
+          requiredUsd: e.required_usd,
+        });
+      }
+    }
     throw new Error(`gateway ${res.status}`);
   }
 
@@ -549,7 +574,17 @@ export async function* runAgentTurn(
           }
         }
         const message = err instanceof Error ? err.message : String(err);
-        yield { type: 'error', message };
+        if (err instanceof InsufficientCreditsStreamError) {
+          yield {
+            type: 'error',
+            message,
+            code: err.code,
+            availableUsd: err.availableUsd,
+            requiredUsd: err.requiredUsd,
+          };
+        } else {
+          yield { type: 'error', message };
+        }
         terminated = true;
         break outer;
       }
