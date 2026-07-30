@@ -1,4 +1,8 @@
-import { randomUUID } from 'node:crypto';
+// Use Web Crypto (globalThis.crypto) instead of importing from 'node:crypto'
+// so this module bundles cleanly in browsers, Sandpack, and Workers alongside
+// Node ≥19 (which exposes the same global). `randomUUID` is required to be
+// available on globalThis.crypto by the Web Crypto spec.
+const randomUUID = (): string => globalThis.crypto.randomUUID();
 
 export type QuotaKind = 'ai_credits' | 'function_invocations' | 'storage_gb_hours' | 'bandwidth_gb';
 
