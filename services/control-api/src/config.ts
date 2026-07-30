@@ -60,6 +60,18 @@ export const config = {
     return {
       enabled: process.env.AI_ROUTER_V2_ENABLED === 'true',
       presenceModeEnabled: process.env.AI_ROUTER_PRESENCE_MODE === 'true',
+      // Ranker mode:
+      //   'waterfall' — deterministic secondary-first, primary-fallback (recommended)
+      //   'presence'  — legacy 50/50 randomization between secondary and primary
+      //   'price'     — cheapest catalog price first
+      // Waterfall wins over presenceModeEnabled when both are set.
+      mode: (process.env.AI_ROUTER_MODE === 'waterfall' ? 'waterfall'
+           : process.env.AI_ROUTER_MODE === 'price'     ? 'price'
+           : process.env.AI_ROUTER_PRESENCE_MODE === 'true' ? 'presence'
+           : 'price') as 'waterfall' | 'presence' | 'price',
+      // Slot-cooldown TTL: how long to skip a slot after a fallback-kind failure.
+      // Auto-expires — no manual intervention needed to unstick a recovered provider.
+      slotCooldownSeconds: parseInt(process.env.AI_ROUTER_SLOT_COOLDOWN_SEC ?? '300', 10),
       v2EndpointsEnabled: process.env.AI_GATEWAY_V2_ENDPOINTS_ENABLED === 'true',
       defaultRegion: process.env.AI_ROUTER_DEFAULT_REGION ?? 'us-east-1',
       markupPct,
@@ -162,6 +174,21 @@ export const config = {
     /** Postgres role that owns per-app DBs; created via Neon API if missing on the branch */
     databaseOwner: process.env.NEON_DATA_DATABASE_OWNER ?? 'butterbase',
     enabled: process.env.NEON_API_KEY !== undefined && process.env.NEON_API_KEY !== '',
+    orphanReconciler: {
+      // Off by default. Flip to true only after inspecting a dry-run cycle.
+      enabled: process.env.NEON_ORPHAN_RECONCILER_ENABLED === 'true',
+      // Log candidates but don't call deleteDatabase. Default true so a fresh
+      // NEON_ORPHAN_RECONCILER_ENABLED=true env can't nuke real data on first boot.
+      dryRun: process.env.NEON_ORPHAN_DRY_RUN !== 'false',
+      // Minimum age before a Neon DB is considered an orphan. Guards against
+      // the ~200ms window between createDatabase and app_db_connections insert.
+      graceHours: parseInt(process.env.NEON_ORPHAN_GRACE_HOURS ?? '24', 10),
+      // Cap per-run blast radius. Anything above still gets listed in the log
+      // for manual triage, but only the top-N (oldest first) get dropped.
+      maxDropsPerRun: parseInt(process.env.NEON_ORPHAN_MAX_DROPS_PER_RUN ?? '10', 10),
+      // Cadence between runs. Default 6h — orphans accrue slowly.
+      runIntervalHours: parseInt(process.env.NEON_ORPHAN_RUN_INTERVAL_HOURS ?? '6', 10),
+    },
   },
 
   realtime: {
@@ -253,6 +280,18 @@ export const config = {
      * Used by dashboard-api to dispatch invite emails via POST /internal/email/invite. */
     emailSecret: process.env.INTERNAL_EMAIL_SECRET ?? 'dev-internal-email-secret',
   },
+
+  /**
+   * Platform-owned do-invoker Worker used for fn→DO and DO→function calls.
+   * Both values are set in this process's env; the token is echoed into each
+   * user DO's env bundle (never surfaced via user-visible ctx.env).
+   */
+  doInvoker: process.env.DO_INVOKER_URL && process.env.DO_INVOKER_TOKEN
+    ? {
+        url: process.env.DO_INVOKER_URL,
+        token: process.env.DO_INVOKER_TOKEN,
+      }
+    : null,
 };
 
 /**

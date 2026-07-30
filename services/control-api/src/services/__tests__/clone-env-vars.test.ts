@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { listSourceEnvVarKeys, detectConventions, mintApiKeyForClone, resolveStaticFills, AUTO_MINT_CONVENTION_KEYS, STATIC_FILL_KEYS } from '../clone-env-vars.js';
 import { encrypt } from '../crypto.js';
-import { runtimeDb, controlDb } from '../../__tests__/test-helpers/control-db.js';
-import { randomUUID } from 'node:crypto';
+import { runtimeDb, controlDb, seedUser } from '../../__tests__/test-helpers/control-db.js';
 
 const RUN_DB_TESTS = process.env.RUN_DB_TESTS === '1';
 const describeDb = RUN_DB_TESTS ? describe : describe.skip;
@@ -90,13 +89,10 @@ describe('resolveStaticFills', () => {
 
 describeDb('mintApiKeyForClone', () => {
   it('mints a bb_sk_* key scoped to the dest app and owner', async () => {
-    const ownerId = randomUUID();
-    // platform_users has a FK target — seed an owner row first
-    await controlDb.query(
-      `INSERT INTO platform_users (id, email, email_verified) VALUES ($1, $2, true)
-       ON CONFLICT (id) DO NOTHING`,
-      [ownerId, `auto-mint-test-${ownerId}@x.com`],
-    );
+    // Seed a platform_users row (with the required personal_organization_id
+    // populated) via the shared helper — a plain INSERT would violate the
+    // NOT NULL FK constraint on platform_users.personal_organization_id.
+    const { id: ownerId } = await seedUser(`auto-mint-test-${Date.now()}@x.com`);
 
     const destAppId = `app_dest_mint_test_${ownerId.slice(0, 8)}`;
     const { key, keyId } = await mintApiKeyForClone(controlDb, {
@@ -117,6 +113,9 @@ describeDb('mintApiKeyForClone', () => {
     expect(row.rows[0].name).toBe(`Auto-mint for clone (${destAppId})`);
 
     await controlDb.query(`DELETE FROM api_keys WHERE id = $1`, [keyId]);
+    // platform_users first (FK: user.personal_organization_id → orgs.id),
+    // organizations second — reverse of seedUser's insert order.
     await controlDb.query(`DELETE FROM platform_users WHERE id = $1`, [ownerId]);
+    await controlDb.query(`DELETE FROM organizations WHERE owner_id = $1`, [ownerId]);
   });
 });

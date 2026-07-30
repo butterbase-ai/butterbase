@@ -3,6 +3,7 @@ import { grantLease, settleLease } from '../../services/lease-service.js';
 
 interface GrantBody {
   userId?: string;
+  organizationId?: string;
   region?: string;
   amountUsd?: number;
 }
@@ -13,12 +14,12 @@ interface SettleBody {
 
 const internalLeaseRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: GrantBody }>('/v1/internal/lease/grant', async (request, reply) => {
-    const { userId, region, amountUsd } = request.body ?? {};
-    if (!userId || !region || typeof amountUsd !== 'number') {
-      return reply.code(400).send({ error: 'userId, region, amountUsd are required' });
+    const { userId, organizationId, region, amountUsd } = request.body ?? {};
+    if (!userId || !organizationId || !region || typeof amountUsd !== 'number') {
+      return reply.code(400).send({ error: 'userId, organizationId, region, amountUsd are required' });
     }
     const ttl = parseInt(process.env.BUTTERBASE_LEASE_TTL_SECONDS ?? '300', 10);
-    const result = await grantLease(fastify.controlDb, { userId, region, amountUsd, ttlSeconds: ttl });
+    const result = await grantLease(fastify.controlDb, { userId, organizationId, region, amountUsd, ttlSeconds: ttl });
     return {
       leaseId: result.leaseId,
       amountGranted: result.amountGranted,

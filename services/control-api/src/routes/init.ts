@@ -7,8 +7,9 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
-import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
-import { resolveOrganizationId } from '../services/org-resolver.js';
+import { addOrgAppIndex, removeOrgAppIndex, listAppsForUserAcrossOrgs } from '../services/org-app-index.js';
+import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
+import { checkProjectQuota } from '../services/project-quota.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const initSchema = {
@@ -32,6 +33,10 @@ const initSchema = {
         type: 'string',
         minLength: 1,
       },
+      organization_id: {
+        type: 'string',
+        minLength: 1,
+      },
     },
     additionalProperties: false,
   },
@@ -40,23 +45,25 @@ const initSchema = {
 export async function initRoutes(app: FastifyInstance) {
   app.get('/apps', async (request) => {
     const ownerId = requireUserId(request);
-    // Scope to the caller's active org (Plan 07 org-scoped auth):
-    //   - bb_sk_* API keys carry their own organization_id → that's the scope.
-    //   - JWT callers may set x-organization-id (populated on request.auth) to
-    //     pick an org they belong to; otherwise fall back to the personal org.
-    // Cross-org apps are only visible with a key/session scoped to that org —
-    // this preserves the per-key strict scoping model.
-    const activeOrgId = request.auth?.organizationId
-      ?? await resolveOrganizationId(app.controlDb, ownerId);
-    const indexRows = await listUserApps(app.controlDb, activeOrgId);
+    // List always fans out over EVERY org the user is a member of, regardless
+    // of the credential's active-org signal (bb_sk_* key's own org, or the
+    // JWT session's x-organization-id). Two reasons:
+    //   1. AppResolver.resolveApp lets any member reach any app in that org
+    //      anyway, so pretending the app doesn't exist here creates a
+    //      chicken-and-egg where the caller has to already know the app_id to
+    //      hit get_config to learn it exists.
+    //   2. Every list row carries organization_id so callers can group/filter
+    //      client-side; strict scoping at list time only obscured that.
+    const indexRows = await listAppsForUserAcrossOrgs(app.controlDb, ownerId);
     if (indexRows.length === 0) return { apps: [] };
 
-
-    // Fetch runtime rows for the exact app-ids resolved by the org-scoped
-    // org_app_index — do NOT re-filter by owner_id, since org-shared apps
-    // are owned by the org's owner, not the caller. Group by region.
+    // Fetch runtime rows for the exact app-ids resolved above — do NOT re-filter
+    // by owner_id, since org-shared apps are owned by the org's owner, not the
+    // caller. Group by region.
+    const orgByAppId = new Map<string, string>();
     const idsByRegion = new Map<string, string[]>();
     for (const r of indexRows) {
+      orgByAppId.set(r.app_id, r.organization_id);
       const list = idsByRegion.get(r.region) ?? [];
       list.push(r.app_id);
       idsByRegion.set(r.region, list);
@@ -67,7 +74,13 @@ export async function initRoutes(app: FastifyInstance) {
         'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_organization_id, substrate_autopropagate, created_at FROM apps WHERE id = ANY($1::text[]) ORDER BY created_at DESC',
         [appIds]
       );
-      allRows.push(...rows);
+      for (const row of rows) {
+        // Surface the owning org so callers can group/filter without a second
+        // round-trip. Runtime apps.organization_id may lag behind the control
+        // index during backfill; org_app_index is the authoritative pointer.
+        row.organization_id = orgByAppId.get(row.id) ?? row.organization_id ?? null;
+        allRows.push(row);
+      }
     }
     allRows.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
     return { apps: allRows };
@@ -135,18 +148,45 @@ export async function initRoutes(app: FastifyInstance) {
     // app provisioned in us-west-2 even when they didn't pick a region.
     // The default needs to be deterministic across machines.
     const allowedRegions = (process.env.BUTTERBASE_REGIONS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    // Regions that accept NEW app provisioning. Defaults to allowedRegions
+    // (BUTTERBASE_REGIONS gates both serving and provisioning). Setting
+    // BUTTERBASE_PROVISION_ALLOWED_REGIONS to a subset (e.g. "us-west-2")
+    // lets operators temporarily close a region to new writes without
+    // breaking traffic to apps already homed there — needed when one
+    // region has hit an infra ceiling (Neon's 500 databases-per-branch).
+    const provisionAllowed = (
+      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
+        ?? process.env.BUTTERBASE_REGIONS
+        ?? ''
+    ).split(',').map((s) => s.trim()).filter(Boolean);
     const bodyRegion = (request.body as { region?: string } | undefined)?.region;
-    const provisionRegion =
+    const requestedRegion =
       bodyRegion ??
       process.env.BUTTERBASE_DEFAULT_REGION ??
+      provisionAllowed[0] ??
       allowedRegions[0] ??
       'local';
 
-    if (!allowedRegions.includes(provisionRegion)) {
+    if (!allowedRegions.includes(requestedRegion)) {
       return reply.code(400).send({
-        error: `Region "${provisionRegion}" is not in BUTTERBASE_REGIONS`,
+        error: `Region "${requestedRegion}" is not in BUTTERBASE_REGIONS`,
         allowed: allowedRegions,
       });
+    }
+    // If the caller asked for a region that's temporarily closed to new
+    // apps, silently redirect to the first open region rather than 400ing.
+    // Dashboard/CLI flows often pin a region from the template's source and
+    // failing them mid-hackathon is worse UX than a transparent move. The
+    // response body doesn't currently expose region, so callers see nothing
+    // surprising; we log the override so operators can audit it.
+    let provisionRegion = requestedRegion;
+    if (provisionAllowed.length > 0 && !provisionAllowed.includes(requestedRegion)) {
+      const fallback = provisionAllowed[0];
+      request.log.warn(
+        { requestedRegion, provisionRegion: fallback, allowed: provisionAllowed },
+        '[init] redirecting new app to open region',
+      );
+      provisionRegion = fallback;
     }
     try {
       getDataProjectIdForRegion(provisionRegion);
@@ -161,36 +201,27 @@ export async function initRoutes(app: FastifyInstance) {
     // the control DB is the cross-region map.
     const region = provisionRegion;
 
-    // Enforce project limit for the user's plan.
-    // Cross-tier: platform_users + plans live on controlDb; apps count comes
-    // from org_app_index (cross-region — counts a user's apps in all regions,
-    // not just this region's runtime DB).
-    const planCheck = await app.controlDb.query(
-      `SELECT p.max_projects
-       FROM platform_users pu
-       JOIN organizations o ON o.id = pu.personal_organization_id
-       JOIN plans p ON p.id = o.plan_id
-       WHERE pu.id = $1`,
-      [ownerId]
-    );
-    const appsCountResult = await app.controlDb.query(
-      `SELECT COUNT(oai.app_id)::int AS current_projects
-       FROM org_app_index oai
-       JOIN organization_members om ON om.organization_id = oai.organization_id
-       WHERE om.user_id = $1`,
-      [ownerId]
-    );
-    const limitCheck = {
-      rows: planCheck.rows.length > 0
-        ? [{ max_projects: planCheck.rows[0].max_projects, current_projects: appsCountResult.rows[0]?.current_projects ?? 0 }]
-        : [],
-    };
+    // Resolve target org up-front so both quota + placement key on the same
+    // subject. Precedence:
+    //   1. Explicit body.organization_id — gated by membership check.
+    //   2. Auth-bound org (bb_sk_* key's org, or JWT x-organization-id).
+    //   3. Caller's personal org.
+    const bodyOrgId = (request.body as { organization_id?: string }).organization_id;
+    let orgId: string;
+    if (bodyOrgId) {
+      await assertOrgMember(app.controlDb, ownerId, bodyOrgId);
+      orgId = bodyOrgId;
+    } else {
+      orgId = request.auth?.organizationId
+        ?? await resolveOrganizationId(app.controlDb, ownerId);
+    }
 
-    if (limitCheck.rows.length > 0) {
-      const { max_projects, current_projects } = limitCheck.rows[0];
-      if (max_projects !== -1 && current_projects >= max_projects) {
-        return reply.code(403).send(quotaErrors.projectLimitReached(current_projects, max_projects));
-      }
+    // Enforce project limit against the TARGET org's plan (not the caller's
+    // personal org). A user on playground personal can still create apps
+    // in a team org up to that org's cap.
+    const quota = await checkProjectQuota(app.controlDb, orgId);
+    if (!quota.ok) {
+      return reply.code(403).send(quotaErrors.projectLimitReached(quota.current, quota.limit));
     }
 
     // Default subdomain to name with underscores replaced by hyphens
@@ -230,7 +261,7 @@ export async function initRoutes(app: FastifyInstance) {
     const appId = generateAppId();
 
     const { app: appRow, isExisting } = await insertAppRow(
-      provisionRegion, app.controlDb, name, ownerId, appId
+      provisionRegion, app.controlDb, name, ownerId, appId, orgId
     );
 
     if (isExisting) {
@@ -253,7 +284,10 @@ export async function initRoutes(app: FastifyInstance) {
       [subdomain, appId]
     );
 
-    const orgId = await resolveOrganizationId(app.controlDb, ownerId);
+    // orgId was resolved above (pre-quota-check); reuse it for placement.
+    // NOTE: for now we only check membership, not per-key scope — a bb_sk_*
+    // key can create an app in any org its owning user belongs to. Tighten
+    // later if we want strict per-key org locking.
     await addOrgAppIndex(app.controlDb, {
       organizationId: orgId,
       appId,

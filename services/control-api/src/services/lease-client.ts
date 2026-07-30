@@ -1,5 +1,6 @@
 export interface LeaseGrantRequest {
   userId: string;
+  organizationId: string;
   amountUsd: number;
   platformControlApiUrl: string;
   fetch?: typeof fetch;
@@ -25,7 +26,7 @@ export async function requestLeaseFromPlatform(req: LeaseGrantRequest): Promise<
       'content-type': 'application/json',
       'x-butterbase-internal-secret': secret,
     },
-    body: JSON.stringify({ userId: req.userId, region, amountUsd: req.amountUsd }),
+    body: JSON.stringify({ userId: req.userId, organizationId: req.organizationId, region, amountUsd: req.amountUsd }),
   });
   if (!res.ok) {
     const text = await res.text();

@@ -9,6 +9,7 @@ import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { requireUserId } from '../utils/require-auth.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { validateEnvKeys } from '../lib/env-vars.js';
+import { redeployIfActive } from '../services/durable-objects.service.js';
 
 export async function registerAppEnvRoutes(fastify: FastifyInstance) {
   const { controlDb } = fastify;
@@ -143,6 +144,16 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
       }
     }
 
+    let doRedeployed = false;
+    try {
+      doRedeployed = await redeployIfActive(db, controlDb, appId);
+    } catch (err) {
+      request.log.warn(
+        { app_id: appId, err: err instanceof Error ? err.message : String(err) },
+        '[app-env] DO redeploy failed after env update; deployed DOs still see stale values',
+      );
+    }
+
     logFromRequest(request, {
       appId,
       category: 'admin',
@@ -161,6 +172,7 @@ export async function registerAppEnvRoutes(fastify: FastifyInstance) {
         functions: invalidatedFns,
         ...(failedFns.length > 0 ? { failed: failedFns } : {}),
         count: invalidatedFns.length,
+        durable_objects_redeployed: doRedeployed,
       },
     });
   });

@@ -364,6 +364,35 @@ describe('deployDoWorker', () => {
     const workerPart = captured.get('worker.mjs') as Blob;
     expect(await workerPart.text()).toBe('export const x = 1;');
   });
+
+  it('includes each dispatch namespace as a bindings entry in the CF PUT metadata', async () => {
+    fetchMock.mockResolvedValueOnce(okText({ id: 'script-id' }));
+
+    await deployDoWorker({
+      scriptName: 'app_xyz_do',
+      bundle: '/* stub bundle */',
+      classNames: ['MyDo'],
+      bindingNames: ['MY_DO'],
+      migrations: { new_classes: ['MyDo'], deleted_classes: [] },
+      oldTag: null,
+      envVars: {},
+      dispatchBindings: [{ binding: 'DO_DISPATCH', namespace: 'bb-frontends' }],
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    const captured = init.body as FormData;
+    const metadataPart = captured.get('metadata') as Blob;
+    const metadataJson = JSON.parse(await metadataPart.text());
+
+    const dispatchBinding = metadataJson.bindings.find(
+      (b: any) => b.type === 'dispatch_namespace',
+    );
+    expect(dispatchBinding).toMatchObject({
+      type: 'dispatch_namespace',
+      name: 'DO_DISPATCH',
+      namespace: 'bb-frontends',
+    });
+  });
 });
 
 describe('deleteDoWorker', () => {

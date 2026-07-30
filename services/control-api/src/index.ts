@@ -70,6 +70,7 @@ import { aiConfigRoutes } from './routes/ai-config.js';
 import { peopleRoutes } from './routes/people.js';
 import { peopleWebhookRoutes } from './routes/people-webhook.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
+import { aiImageRoutes } from './routes/ai-images.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
@@ -103,6 +104,7 @@ import { getRedisClient, shutdownRedis } from './services/redis.js';
 import { enforceExpiredGracePeriods } from './services/billing-service.js';
 import { autoRestoreSoftLockedUsers } from './services/billing-service.js';
 import { startNeonTaskWorker } from './services/neon-task-worker.js';
+import { reconcileOrphans } from './services/neon-orphan-reconciler.js';
 import { startFailureNotifier } from './services/failure-notifier.js';
 import { startDigestNotifier } from './services/digest-notifier.js';
 import { startRagWorker } from './services/rag-worker.js';
@@ -131,6 +133,7 @@ import quotaStateRoutes from './routes/admin/quota-state.js';
 import regionStateRoutes from './routes/admin/region-state.js';
 import activeMigrationsRoutes from './routes/admin/active-migrations.js';
 import kvAdminStatsRoutes from './routes/admin/kv-admin-stats.js';
+import organizationsRoutes from './routes/admin/organizations.js';
 import wapaMetricsRoutes from './routes/admin/wapa-metrics.js';
 import adminActivityRoutes from './routes/admin/activity.js';
 import signupAttributionRoutes from './routes/admin/signup-attribution.js';
@@ -565,6 +568,7 @@ app.register(quotaStateRoutes);
 app.register(regionStateRoutes);
 app.register(activeMigrationsRoutes);
 app.register(kvAdminStatsRoutes);
+app.register(organizationsRoutes);
 app.register(wapaMetricsRoutes);
 app.register(adminActivityRoutes);
 app.register(signupAttributionRoutes);
@@ -629,6 +633,7 @@ app.register(aiConfigRoutes);
 app.register(peopleRoutes);
 app.register(peopleWebhookRoutes);
 app.register(aiVideoRoutes);
+app.register(aiImageRoutes);
 app.register(gatewayRoutes);
 app.register(aiMeetingsRoutes);
 app.register(autoRefillRoutes);
@@ -805,6 +810,45 @@ Promise.resolve(app.ready())
     const kvReconcileInterval = startKvReconcileWorker(app.controlDb);
     (app as any).kvReconcileInterval = kvReconcileInterval;
     app.log.info('KV reconcile worker started (24h interval)');
+
+    // Start Neon orphan-database reconciler. Off unless
+    // NEON_ORPHAN_RECONCILER_ENABLED=true. Even when enabled, defaults to
+    // dry-run until NEON_ORPHAN_DRY_RUN=false — first-boot safety.
+    if (config.neon.enabled && config.neon.orphanReconciler.enabled) {
+      const rc = config.neon.orphanReconciler;
+      const runOrphanReconciler = async () => {
+        const redis = getRedisClient();
+        // Longer TTL than the interval so a slow scan can't be double-fired.
+        const lockTtlSeconds = Math.max(60, rc.runIntervalHours * 3600);
+        const acquired = await redis.set('lock:orphan-reconciler', '1', 'EX', lockTtlSeconds, 'NX');
+        if (acquired !== 'OK') {
+          app.log.info('Orphan reconciler skipped (another instance holds the lock)');
+          return;
+        }
+        try {
+          await reconcileOrphans(app.controlDb, config.runtimeDb, app.log, {
+            graceHours: rc.graceHours,
+            maxDropsPerRun: rc.maxDropsPerRun,
+            dryRun: rc.dryRun,
+          });
+        } catch (err) {
+          app.log.error({ err }, 'Orphan reconciler cycle failed');
+        } finally {
+          await redis.del('lock:orphan-reconciler').catch(() => {});
+        }
+      };
+      // Fire once at boot + 30s so we don't stack on startup, then every N hours.
+      setTimeout(runOrphanReconciler, 30_000);
+      const orphanReconcilerInterval = setInterval(
+        runOrphanReconciler,
+        rc.runIntervalHours * 60 * 60 * 1000,
+      );
+      (app as any).orphanReconcilerInterval = orphanReconcilerInterval;
+      app.log.info(
+        { intervalHours: rc.runIntervalHours, dryRun: rc.dryRun, graceHours: rc.graceHours, maxDropsPerRun: rc.maxDropsPerRun },
+        'Neon orphan reconciler started',
+      );
+    }
 
     // Schedule nightly soft-lock auto-restore check (runs at 2 AM)
     const scheduleNightlyRestore = () => {
@@ -1023,6 +1067,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).failureNotifierInterval) clearInterval((app as any).failureNotifierInterval);
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
+      if ((app as any).orphanReconcilerInterval) clearInterval((app as any).orphanReconcilerInterval);
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});

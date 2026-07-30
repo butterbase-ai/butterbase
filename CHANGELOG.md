@@ -8,6 +8,59 @@
 
 ### Added
 
+- **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
+  `BUTTERBASE_INTERNAL_FN_KEY` (in addition to `DO_INVOKER_URL` /
+  `DO_INVOKER_TOKEN`). The platform still injects the key into DO env so
+  `ctx.invoke` can mint fn→fn bearer headers — user code should use
+  `ctx.invoke(...)` instead of reading the key directly. Old DO code that
+  ignored `ctx.env` is unaffected.
+- **Ops**: `scripts/backfill-do-invoker-env.ts` — iterate all apps with active
+  Durable Objects and call `redeployIfActive` on each so their DO Worker picks
+  up the `DO_DISPATCH` binding + `DO_INVOKER_*` env keys. Dry-run default;
+  `--fix` to apply; `--app` / `--region` to scope. Run once after the first
+  ctx.invokeDO deploy per environment.
+- **Ops**: `scripts/rotate-do-invoker-token.sh` — atomic rotation across the
+  `do-invoker` CF Worker (`wrangler secret put`) and both Fly apps
+  (`butterbase-platform`, `butterbase-runtime`). Verifies at the end by
+  probing `/invoke` with the new bearer (expects 400 missing routing headers,
+  NOT 401). Set `DRY_RUN=1` to walk through without touching anything.
+- **Functions**: `ctx.invokeDO(className, instanceKey, body?, opts?)` for calling a
+  same-app Durable Object from a function. Uses a platform-managed bearer (never
+  exposed via `ctx.env`); intra-app callers reach the DO without going through
+  the public HTTP surface. Loop-depth guard (max 4) shared with `ctx.invoke`.
+- **Durable Objects**: user DO code can opt into a per-request `ctx` object with
+  `env`, `invoke`, `invokeDO`, `user`, `request`, `state` by calling
+  `butterbase.ctx(req, this.env, this.state)` at the top of `fetch`. The
+  `butterbase` helper is prepended to every DO bundle automatically. Old DO code
+  that doesn't call the helper works unchanged.
+- **Durable Objects**: DO code can call sibling DOs via `ctx.invokeDO(...)` and
+  sibling functions via `ctx.invoke(...)`. DO→DO uses a WfP dispatch-namespace
+  binding directly (no shim, topological auth boundary); DO→function goes through
+  the same `do-invoker` shim functions use.
+- **New Worker `do-invoker`**: platform-owned CF Worker at `services/do-invoker/`
+  that translates HTTPS calls from deno-runtime into WfP dispatch calls to user
+  DO Workers. Auth is a single platform bearer (`DO_INVOKER_TOKEN`) held only by
+  the control-plane processes that need to sign these calls. Rotate with
+  `scripts/rotate-do-invoker-token.sh` (see docs). Not on any public route.
+  Local dev entry in `docker-compose.local.yml` runs `wrangler dev --local` for
+  the shim; note that wrangler dev cannot simulate WfP dispatch namespaces, so
+  end-to-end fn↔DO in local dev requires a scratch CF account deploy.
+- **Durable Objects**: DO Workers now receive the same env surface as functions:
+  - Platform `BUTTERBASE_*` values (APP_ID, API_URL, APP_NAME, REGION, ANON_KEY,
+    plus optional SUBDOMAIN / FRONTEND_URL / STRIPE_ACCOUNT_ID / AI_DEFAULT_MODEL)
+    injected at deploy time — no need to set these as env vars by hand.
+  - App-level env vars (`app_env_vars`) merged into the DO env with the same
+    precedence functions use (per-DO override > app-level, platform always wins).
+    Set once at app level (`manage_app action: "update_env"`) and every DO and
+    every function in the app inherits it.
+  - `BUTTERBASE_INTERNAL_FN_KEY` auto-injected so DO classes can call sibling
+    functions with a working bearer.
+  - `PATCH /v1/:appId/env` now redeploys the DO Worker when the app has active
+    DO classes so the change reaches running DOs immediately.
+- **Clone**: `app_env_vars` are copied from source to dest on `manage_app action: "clone"`.
+  Preflight response gains `app_env.keys[]` so cloners see the app-level keys
+  they'll inherit. Reserved `BUTTERBASE_*` prefix is now rejected on
+  `manage_durable_objects action: "set_env"` (was previously function-only).
 - **Functions**: App-level environment variables. Set a key once at the app level and every function inherits it via `ctx.env.<KEY>`; per-function values still override on collision, and platform `BUTTERBASE_*` values always win. Managed via `manage_app` MCP actions `get_env` / `update_env`, control-api `GET`/`PATCH /v1/:appId/env`, or the dashboard's App Settings → Environment variables card. Reserved-prefix (`BUTTERBASE_*`) keys are rejected at both app-level and per-function PATCH endpoints. Cache invalidation fans out to every function in the app in one request; values are AES-256-GCM encrypted at rest and never returned by any GET endpoint or logged in any audit event.
 - **CLI**: `bb keys generate --app <id>` flag (required when `--scope app`; auto-resolved from a `bb.config` in the current directory when absent).
 - **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
@@ -40,6 +93,12 @@ Migration is mechanical — the new actions take the same parameters as the stan
 
 ### Deprecated
 
+- **User `INTERNAL_TOKEN` pattern**: apps that plumb a shared secret between
+  functions and their DOs for auth (`Authorization: Bearer ${INTERNAL_TOKEN}`)
+  should migrate to `ctx.invokeDO(...)` and the injected
+  `x-butterbase-internal-caller` header. The old pattern continues to work but
+  the shared secret is no longer necessary — the platform now provides the
+  auth boundary.
 - **Templates / user code**: the bearer-equality auth pattern in function code is deprecated. Code that compared `req.headers.get('authorization') === \`Bearer ${ctx.env.BUTTERBASE_API_KEY}\`` to decide whether to trust an `as_user_id` body field worked only when every caller and callee shared one key — a coincidence the clone job no longer (and arguably never should have) guaranteed. Replace with `ctx.user.id` (impersonation is now a platform concern, gated per-function) or `ctx.invoke('fn-name', body)` for same-app calls (no bearer involved). The platform will keep accepting the old pattern for back-compat in this release; it will not be removed without a separate breaking-change notice.
 
 ### Operational

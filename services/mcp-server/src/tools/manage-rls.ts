@@ -36,11 +36,23 @@ create_policy guidance:
     without it, clients must include the column in POST bodies or insert is rejected with AUTH_RLS_POLICY_VIOLATION.
   - For UUID columns, cast: current_user_id()::uuid
 
-Cross-table subqueries pitfall:
-  EXISTS(SELECT 1 FROM other_table WHERE ...) inside a policy runs under the SAME user's RLS context.
-  If other_table has user_isolation, the subquery only sees the current user's rows, even for "public" rows.
-  Fix: add a permissive SELECT policy on the referenced table for the rows the subquery needs, OR use
-  "create_user_isolation" with public_read_column to set this up in one call.
+Cross-table subqueries pitfall (ANY policy, USING or WITH CHECK):
+  EXISTS/IN/scalar subqueries inside a policy expression read the referenced table THROUGH that table's own RLS,
+  under the SAME calling role. Symptom: policy evaluates false and the write fails AUTH_RLS_POLICY_VIOLATION
+  (or SELECT returns empty), even for expressions that look trivially true.
+  Three flavors:
+    1. Referenced table has RLS enabled but NO permissive SELECT policy for role "user"
+       → subquery sees 0 rows → EXISTS false. Even a hardcoded EXISTS(SELECT 1 FROM t WHERE id='<real id>') fails.
+    2. Referenced table has user_isolation → subquery only sees the CURRENT user's rows, never other users' rows
+       (blocks the "user B interacts with user A's public row" pattern).
+    3. Referenced table's user_isolation gates by column X, but the subquery keys by column Y
+       (e.g. users isolated on "id = current_user_id()" but subquery joins on "auth_user_id = current_user_id()",
+        or vice versa). The row exists but isn't visible via the subquery's join column.
+  Fix — pick one:
+    - Add a permissive SELECT policy for role "user" on the referenced table for the rows the subquery needs
+      (create_policy with command: "SELECT", role: "user", using_expression: <predicate>).
+    - Or use create_user_isolation with public_read_column to expose specific rows to everyone.
+    - Or align the subquery join column with the referenced table's isolation column.
 
 create_user_isolation does:
   1. Enables RLS on the table

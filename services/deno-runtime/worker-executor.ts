@@ -1,6 +1,11 @@
 // Isolated function executor using Web Workers
 import type { FunctionMetadata } from "./function-loader.ts";
 
+// Platform-owned do-invoker Worker: inlined into generated ctx source so
+// user code cannot read them via Deno.env or ctx.env.
+const DO_INVOKER_URL = Deno.env.get("DO_INVOKER_URL") ?? "";
+const DO_INVOKER_TOKEN = Deno.env.get("DO_INVOKER_TOKEN") ?? "";
+
 export interface LogEntry {
   level: 'log' | 'info' | 'warn' | 'error' | 'debug';
   message: string;
@@ -341,7 +346,7 @@ function reconstructPublicUrl(appId: string, functionName: string, internalUrl: 
   return `${apiBaseUrl}/v1/${appId}/fn/${functionName}${search}${hash}`;
 }
 
-function buildWorkerCode(
+export function buildWorkerCode(
   metadata: FunctionMetadata,
   context: {
     dbUrl: string;
@@ -660,6 +665,41 @@ function buildWorkerCode(
           : (typeof body === "string" ? body : JSON.stringify(body));
         return fetch(url, { method, headers: merged, body: bodyInit });
       },
+      /**
+       * Phase 3+: ctx.invokeDO('class-name', 'instance-key', body) — same-app
+       * function-to-DO call. Uses the platform-owned do-invoker bearer (never
+       * exposed via ctx.env). Loop-depth shared with ctx.invoke.
+       */
+      invokeDO: async (className, instanceKey, body, opts) => {
+        const MAX_DEPTH = 4;
+        const incomingDepth = parseInt(${JSON.stringify(context.requestHeaders["x-butterbase-loop-depth"] || "0")}, 10) || 0;
+        const nextDepth = incomingDepth + 1;
+        if (nextDepth > MAX_DEPTH) {
+          throw new Error("ctx.invokeDO loop limit exceeded (depth " + nextDepth + " > " + MAX_DEPTH + ")");
+        }
+        const invokerUrl = ${JSON.stringify(DO_INVOKER_URL)};
+        const invokerToken = ${JSON.stringify(DO_INVOKER_TOKEN)};
+        if (!invokerUrl || !invokerToken) {
+          throw new Error("ctx.invokeDO not configured on this runtime");
+        }
+        const userHeaders = (opts && typeof opts.headers === "object" && opts.headers) || {};
+        const platformHeaders = {
+          "content-type": "application/json",
+          "authorization": "Bearer " + invokerToken,
+          "x-butterbase-app": ${JSON.stringify(metadata.app_id)},
+          "x-butterbase-class": className,
+          "x-butterbase-instance": instanceKey,
+          "x-butterbase-internal-caller": "fn:" + ${JSON.stringify(metadata.function_name)},
+          "x-butterbase-caller-user": ${JSON.stringify(context.userId || "")},
+          "x-butterbase-loop-depth": String(nextDepth),
+        };
+        const merged = { ...userHeaders, ...platformHeaders };
+        const method = (opts && typeof opts.method === "string") ? opts.method : "POST";
+        const bodyInit = body === undefined || method === "GET" || method === "HEAD"
+          ? undefined
+          : (typeof body === "string" ? body : JSON.stringify(body));
+        return fetch(invokerUrl + "/invoke", { method, headers: merged, body: bodyInit });
+      },
       idempotency: db ? {
         // Atomically claim a key. Returns true if newly claimed (caller should
         // proceed), false if the key was already processed (caller should treat
@@ -909,6 +949,14 @@ function buildWorkerCode(
         });
         if (res.status === 404) return null;
         if (!res.ok) throw new Error('substrate.getEntity failed: ' + res.status);
+        return await res.json();
+      },
+      async wsTicket() {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/ws-ticket', {
+          method: 'POST',
+          headers: { 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+        });
+        if (!res.ok) throw new Error('substrate.wsTicket failed: ' + res.status + ' ' + await res.text());
         return await res.json();
       },
       async findEntities(filter) {

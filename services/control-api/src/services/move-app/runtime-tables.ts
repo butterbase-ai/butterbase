@@ -22,6 +22,8 @@ export const MOVE_APP_RUNTIME_TABLES = [
 
   // Functions
   'app_functions',
+  // Also copied by clone via services/clone-app-env.ts:replayAppEnvVars.
+  // Keep the two paths in sync if the app_env_vars schema changes.
   'app_env_vars',
   'function_triggers',
   'function_invocations',
@@ -52,6 +54,7 @@ export const MOVE_APP_RUNTIME_TABLES = [
   'app_user_activity_daily',
   'ai_usage_logs',
   'ai_video_jobs',
+  'ai_image_jobs',
   'actor_usage_logs',
   'mcp_tool_call_log',
   'people_usage_logs',

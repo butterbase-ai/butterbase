@@ -45,6 +45,46 @@ const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
 };
 
 /**
+ * Image routing: canonical → router that owns the model. Consulted by
+ * `routeImageSubmit` (router.ts) before it walks the ranker chain — the mapped
+ * router is preferred when it advertises `submitImage` and `getSupportedImageParams`
+ * returns non-null. Falls through to "first enabled adapter that implements
+ * submitImage AND returns non-null from getSupportedImageParams(canonicalId)"
+ * when the map has no entry.
+ *
+ * ImaRouter (provider-secondary) covers the 13 async-generation models it owns;
+ * OpenRouter covers the sync-inline set from its /v1/models?output_modalities=image
+ * enumeration (see adapters/openrouter.ts:OPENROUTER_IMAGE_MODELS).
+ */
+export const CANONICAL_IMAGE_MODEL_ROUTES: Readonly<Record<string, RouterName>> = {
+  'openai/gpt-image-2':                    'provider-secondary',
+  'openai/gpt-image-1':                    'openrouter',
+  'openai/gpt-image-1-mini':               'openrouter',
+  'google/gemini-3-pro-image-preview':     'provider-secondary',
+  'google/gemini-3.1-flash-image-preview': 'provider-secondary',
+  'google/gemini-2.5-flash-image':         'provider-secondary',
+  'google/gemini-3.1-flash-lite-image':    'openrouter',
+  'google/gemini-3.1-flash-image':         'openrouter',
+  'google/gemini-3-pro-image':             'openrouter',
+  // sourceful/riverflow-v2.5-pro removed: requires `aspect_ratio` (not `size`)
+  // on /api/v1/images/generations and returns 422 for OpenAI-Images-shape requests.
+  // Re-enable once we add per-model param mapping (size → aspect_ratio) at the adapter.
+  'bytedance/seedream-5-pro':              'provider-secondary',
+  'bytedance/seedream-5-lite':             'provider-secondary',
+  'bytedance/seedream-4-5':                'provider-secondary',
+  'alibaba/wan-2.7-image':                 'provider-secondary',
+  'alibaba/wan-2.7-image-pro':             'provider-secondary',
+  'alibaba/wan-2.6-t2i':                   'provider-secondary',
+  'alibaba/wan-2.6-image':                 'provider-secondary',
+  'prunaai/p-image':                       'provider-secondary',
+  'prunaai/p-image-edit':                  'provider-secondary',
+  'black-forest-labs/flux.2-pro':          'openrouter',
+  'black-forest-labs/flux.2-max':          'openrouter',
+  'black-forest-labs/flux.2-flex':         'openrouter',
+  'black-forest-labs/flux.2-klein-4b':     'openrouter',
+};
+
+/**
  * Move the model's preferred router (if any) to the head of `chain`, leaving
  * the relative order of the rest unchanged. No-op when there's no override,
  * the override isn't in the chain, or it's already at the head.
@@ -172,4 +212,46 @@ export function rankRoutersPresenceMode(
   if (tr) head.push(tr);
   if (or) head.push(or);
   return promotePreferred(entry.canonicalId, head);
+}
+
+/**
+ * Waterfall ranker: try slots in a fixed slot-identity order, independent of
+ * which provider brand currently occupies each slot. Secondary first (highest
+ * margin), then primary (reliability anchor), then any other enabled candidate
+ * the catalog offers (e.g. the OSS `openrouter` adapter, provider-tertiary
+ * when populated, or a future named slot) in catalog order.
+ *
+ * When `AI_ROUTER_MODE=waterfall` is set the router uses this ranker instead
+ * of presence-mode. Combined with slot-cooldown (see slot-cooldown.ts), a slot
+ * that fails with a fallback-kind error is skipped for a TTL window so we
+ * don't keep re-attempting a known-degraded provider on every fresh request.
+ *
+ * Model-support filtering still happens upstream (via `entry.routers`), so
+ * this ranker never returns a slot that doesn't list the requested model.
+ */
+const WATERFALL_SLOT_ORDER: readonly string[] = [
+  'provider-secondary',
+  'provider-primary',
+];
+
+export function rankRoutersWaterfall(
+  entry: CatalogEntry,
+  enabled: Set<string>,
+): CatalogRouter[] {
+  const available = entry.routers.filter(r => enabled.has(r.name));
+  const bySlot = new Map(available.map(r => [r.name, r]));
+  const ordered: CatalogRouter[] = [];
+  for (const slot of WATERFALL_SLOT_ORDER) {
+    const r = bySlot.get(slot as CatalogRouter['name']);
+    if (r) ordered.push(r);
+  }
+  // Trailing tail: any enabled router not in the named slot order (OSS
+  // `openrouter`, future per-tenant slots) keeps catalog order at the end.
+  // Never inserted ahead of a named slot.
+  for (const r of available) {
+    if (!WATERFALL_SLOT_ORDER.includes(r.name) && !ordered.includes(r)) {
+      ordered.push(r);
+    }
+  }
+  return promotePreferred(entry.canonicalId, ordered);
 }

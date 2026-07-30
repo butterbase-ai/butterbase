@@ -41,6 +41,7 @@ function mapDoErrorStatus(code: string): number {
     case 'INVALID_NAME':
     case 'INVALID_SOURCE':
     case 'INVALID_ENV_KEY':
+    case 'RESERVED_ENV_KEY':
     case 'ENV_BINDING_COLLISION':
     case 'EMPTY_BUNDLE':
       return 400;
@@ -78,6 +79,8 @@ function mapDoErrorRemediation(code: string): string {
       return 'Cloudflare rejected the DO migration shape. Check that you are not renaming an existing class without an explicit rename migration.';
     case 'INVALID_ENV_KEY':
       return 'Use uppercase identifiers for DO env keys (e.g. APP_ID, API_BASE_URL).';
+    case 'RESERVED_ENV_KEY':
+      return 'Rename the key. BUTTERBASE_* is reserved for platform-injected values.';
     case 'ENV_BINDING_COLLISION':
       return 'Pick an env var name that does not match a DO class binding name (UPPER_SNAKE form of the class URL name).';
     case 'CF_DEPLOY_FAILED':
@@ -124,7 +127,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
-      const result = await Service.registerDurableObject((await runtimeDb(appId)), appId, userId, body);
+      const result = await Service.registerDurableObject((await runtimeDb(appId)), controlDb, appId, userId, body);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.create',
         action: 'create', resourceType: 'durable_object', resourceId: result.id,
@@ -183,7 +186,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     const userId = requireUserId(request);
     await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
     try {
-      await Service.deleteDurableObject((await runtimeDb(appId)), appId, name);
+      await Service.deleteDurableObject((await runtimeDb(appId)), controlDb, appId, name);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.delete',
         action: 'delete', resourceType: 'durable_object', resourceId: name, success: true,
@@ -234,7 +237,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     const body = setEnvSchema.parse(request.body);
 
     try {
-      const result = await Service.setDoEnvVar((await runtimeDb(appId)), appId, key, body.value);
+      const result = await Service.setDoEnvVar((await runtimeDb(appId)), controlDb, appId, key, body.value);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.env.set',
         action: 'update', resourceType: 'durable_object', resourceId: key,
@@ -268,7 +271,7 @@ export async function registerDurableObjectRoutes(fastify: FastifyInstance) {
     await AppResolver.resolveApp(controlDb, appId, userId, request.auth?.organizationId ?? null);
 
     try {
-      const result = await Service.deleteDoEnvVar((await runtimeDb(appId)), appId, key);
+      const result = await Service.deleteDoEnvVar((await runtimeDb(appId)), controlDb, appId, key);
       logFromRequest(request, {
         appId, category: 'admin', eventType: 'durable_object.env.delete',
         action: 'delete', resourceType: 'durable_object', resourceId: key,

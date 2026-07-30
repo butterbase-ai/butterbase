@@ -27,7 +27,7 @@ import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catal
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 
-export async function readAutoRefillState(controlPool: pg.Pool, userId: string): Promise<{
+export async function readAutoRefillState(controlPool: pg.Pool, organizationId: string): Promise<{
   enabled: boolean;
   amountUsd: number | null;
   monthlyAllowanceUsd: number;
@@ -39,13 +39,12 @@ export async function readAutoRefillState(controlPool: pg.Pool, userId: string):
     monthly_allowance_usd: string;
     credits_usd: string;
   }>(
-    // Post-Plan-07: auto_refill_* + credits_usd live on organizations,
-    // monthly_allowance_usd stays on platform_users.
-    `SELECT o.auto_refill_enabled, o.auto_refill_amount_usd, pu.monthly_allowance_usd, o.credits_usd
-     FROM platform_users pu
-     JOIN organizations o ON o.id = pu.personal_organization_id
-     WHERE pu.id = $1`,
-    [userId]
+    // Per-org (migration 093 + 3b). Caller MUST resolve org upstream —
+    // billing state has no per-user meaning any longer.
+    `SELECT auto_refill_enabled, auto_refill_amount_usd, monthly_allowance_usd, credits_usd
+     FROM organizations
+     WHERE id = $1`,
+    [organizationId]
   );
   if (r.rows.length === 0) {
     return { enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0 };
@@ -244,13 +243,18 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     if (!authz.ok) return reply.code(authz.status).send(authz.body);
     const ownerId = authz.ownerId;
 
+    // Resolve the app's owning org up-front so both the success path and the
+    // InsufficientCreditsError catch share the same billing subject. Per-org
+    // billing (Phase 3b): every downstream lease/read is org-scoped.
+    const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
     try {
       const body = chatCompletionSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {
         const region = await resolveAppHomeRegion(app.controlDb, appId);
-        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
 
         const modelResolved = body.model
           || (await getAppDefaultModel(runtimePool, appId))
@@ -273,7 +277,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
-        const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
         const result = await routeChatCompletion(
           {
             platformPool: app.controlDb,
@@ -330,7 +334,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       // OpenRouterError all satisfy isHttpError and would otherwise escape to
       // the global handler which masks them as a generic 500.
       if (error instanceof InsufficientCreditsError) {
-        const ar = await readAutoRefillState(app.controlDb, ownerId).catch(() => ({
+        const ar = await readAutoRefillState(app.controlDb, organizationId).catch(() => ({
           enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
         }));
         return reply.code(402).send({
@@ -375,13 +379,17 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     if (!authz.ok) return reply.code(authz.status).send(authz.body);
     const ownerId = authz.ownerId;
 
+    // Per-org billing: resolve the app's owning org before dispatch so the
+    // InsufficientCreditsError catch below reports THAT org's state.
+    const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
     try {
       const body = embeddingSchema.parse(request.body);
 
       // ---- v2 path: multi-router gateway ----
       if (config.aiRouter.enabled) {
         const region = await resolveAppHomeRegion(app.controlDb, appId);
-        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
 
         const modelResolved = body.model
           || (await getAppDefaultModel(runtimePool, appId))
@@ -395,7 +403,6 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
-        const organizationId2 = await resolveOrgFromApp(runtimePool, appId);
         const result = await routeEmbedding(
           {
             platformPool: app.controlDb,
@@ -403,7 +410,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct: config.aiRouter.markupPct,
-            appId, organizationId: organizationId2, userId: ownerId, region,
+            appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
         );
@@ -423,7 +430,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       return reply.code(response.status).send(data);
     } catch (error) {
       if (error instanceof InsufficientCreditsError) {
-        const ar = await readAutoRefillState(app.controlDb, ownerId).catch(() => ({
+        const ar = await readAutoRefillState(app.controlDb, organizationId).catch(() => ({
           enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
         }));
         return reply.code(402).send({

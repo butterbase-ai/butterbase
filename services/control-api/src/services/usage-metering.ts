@@ -613,18 +613,20 @@ export interface CreditsBalance {
 }
 
 /**
- * Get the user's current credits balance across both pools:
+ * Get an organization's credits balance across both pools:
  * the monthly plan allowance and the prepaid top-up balance.
+ *
+ * Billing is per-org (migration 093). Callers MUST resolve the target org
+ * upstream — from request.auth.organizationId, an explicit param, or (for
+ * UX defaults on dashboard reads) resolveOrganizationId(userId). The data
+ * layer never falls back to personal on its own.
  */
-export async function getCreditsBalance(db: DbClient, userId: string): Promise<CreditsBalance> {
-  // Post-Plan-07: monthly_allowance_usd stays on platform_users (per-user budget),
-  // credits_usd moved to organizations (org-scoped credit balance).
+export async function getCreditsBalance(db: DbClient, organizationId: string): Promise<CreditsBalance> {
   const result = await db.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-    `SELECT pu.monthly_allowance_usd, o.credits_usd
-     FROM platform_users pu
-     JOIN organizations o ON o.id = pu.personal_organization_id
-     WHERE pu.id = $1`,
-    [userId]
+    `SELECT monthly_allowance_usd, credits_usd
+     FROM organizations
+     WHERE id = $1`,
+    [organizationId]
   );
   if (result.rows.length === 0) {
     return { monthlyAllowanceUsd: 0, topupUsd: 0, totalUsd: 0 };
@@ -640,17 +642,16 @@ export async function getCreditsBalance(db: DbClient, userId: string): Promise<C
  */
 export async function deductCreditsBalance(
   db: DbClient,
-  userId: string,
+  organizationId: string,
   amountUsd: number
 ): Promise<number> {
-  // credits_usd lives on organizations post-Plan-07; deduct from the caller's
-  // personal org's balance.
+  // Per-org (Phase 3b). Caller passes the org whose credit pool to draw from.
   const result = await db.query(
     `UPDATE organizations
      SET credits_usd = GREATEST(0, credits_usd - $1)
-     WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)
+     WHERE id = $2
      RETURNING credits_usd`,
-    [amountUsd, userId]
+    [amountUsd, organizationId]
   );
   if (result.rows.length === 0) return 0;
 

@@ -2,7 +2,12 @@ import type pg from 'pg';
 import { NotFoundError } from './api-errors.js';
 
 export interface GrantArgs {
+  /** User whose action is being billed (audit + credit_leases.user_id). */
   userId: string;
+  /** Organization whose credit pools are drawn — under per-org billing this
+   *  is the app's owning org (from resolveOrgFromApp) or the caller's
+   *  explicit billing org, never a personal-org default at this layer. */
+  organizationId: string;
   region: string;
   amountUsd: number;
   ttlSeconds: number;
@@ -21,15 +26,17 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
-    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string; personal_organization_id: string }>(
-      `SELECT pu.monthly_allowance_usd, o.credits_usd, pu.personal_organization_id
-       FROM platform_users pu
-       JOIN organizations o ON o.id = pu.personal_organization_id
-       WHERE pu.id = $1 FOR UPDATE OF pu, o`,
-      [args.userId]
+    // Per-org billing (Phase 3b). Caller passes args.organizationId — this
+    // is the app's owning org (AI gateway) or an explicit billing subject.
+    // No implicit personal-org fallback at this layer.
+    const organizationId = args.organizationId;
+    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string }>(
+      `SELECT monthly_allowance_usd, credits_usd
+       FROM organizations
+       WHERE id = $1 FOR UPDATE`,
+      [organizationId]
     );
-    if (u.rows.length === 0) throw new NotFoundError('user', args.userId);
-    const organizationId = u.rows[0].personal_organization_id;
+    if (u.rows.length === 0) throw new NotFoundError('organization', organizationId);
 
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
     const topup = parseFloat(u.rows[0].credits_usd);
@@ -59,8 +66,8 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
 
     if (monthlyDraw > 0) {
       await client.query(
-        `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd - $1 WHERE id = $2`,
-        [monthlyDraw, args.userId]
+        `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd - $1 WHERE id = $2`,
+        [monthlyDraw, organizationId]
       );
     }
     if (topupDraw > 0) {
@@ -141,8 +148,8 @@ export async function settleLease(
     if (refund > 0) {
       if (sourcePool === 'monthly') {
         await client.query(
-          `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-          [refund, r.rows[0].user_id]
+          `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
+          [refund, r.rows[0].organization_id]
         );
       } else if (sourcePool === 'topup') {
         await client.query(
@@ -155,8 +162,8 @@ export async function settleLease(
         const topupRefund = +(refund - monthlyRefund).toFixed(4); // preserve total via remainder
         if (monthlyRefund > 0) {
           await client.query(
-            `UPDATE platform_users SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-            [monthlyRefund, r.rows[0].user_id]
+            `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
+            [monthlyRefund, r.rows[0].organization_id]
           );
         }
         if (topupRefund > 0) {

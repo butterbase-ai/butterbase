@@ -45,6 +45,14 @@ export { AdminPlatformBillingClient } from './admin/platform-billing-client.js';
 // Realtime client
 export { RealtimeClient } from './realtime/realtime-client.js';
 
+// Substrate stream client
+export type {
+  SubstrateChangeEvent,
+  SubstrateStreamOptions,
+  SubstrateStreamSubscription,
+} from './substrate/types.js';
+export { buildSubstrateStreamUrl } from './substrate/substrate-client.js';
+
 // Error types
 export {
   ButterbaseError,

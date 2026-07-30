@@ -188,6 +188,20 @@ const { data, error } = await butterbase.functions.invoke('my-function', {
 });
 ```
 
+> **Inside a function's handler** (server-side, not this client SDK), your
+> `ctx` gives you the same primitives for calling siblings without plumbing
+> a bearer:
+>
+> ```typescript
+> export async function handler(req, ctx) {
+>   const r1 = await ctx.invoke('sibling-fn', { hello: 'world' });
+>   const r2 = await ctx.invokeDO('room', 'room-42', { cmd: 'join' });
+>   return new Response('ok');
+> }
+> ```
+>
+> See the platform docs: [Functions → Server-to-server](https://docs.butterbase.ai/core-concepts/functions#server-to-server-function-calls) and [Durable Objects → Server-to-server](https://docs.butterbase.ai/core-concepts/durable-objects#server-to-server-calls-into-durable-objects).
+
 ## Query Builder
 
 ### Operators

@@ -31,6 +31,16 @@ export interface ReplayFunctionsEnvVarOpts {
   controlPool?: pg.Pool;
   /** Dest app owner id — required for auto-mint (key is minted under this user). */
   destAppOwnerId?: string;
+  /** When the orchestrator already minted a shared bb_sk_* (e.g. because the
+   *  DO replay side needed it), pass it here so replayFunctions reuses it
+   *  instead of minting a second one. Preserves "at most one shared key per
+   *  clone." */
+  preMintedSharedKey?: string | null;
+  /** Resolved per-clone overrides from CLONE_APP_ENV_OVERRIDES. For every
+   *  function whose source `encrypted_env_vars` declares one of these keys,
+   *  the value is layered into `merged` AFTER user-supplied pendingEnvVarValues
+   *  and CONVENTIONS auto-mint (both win), BEFORE static fills. */
+  appOverrides?: Record<string, string>;
 }
 
 /**
@@ -338,9 +348,11 @@ export async function replayRls(
  *                              `opts.pendingEnvVarValues` supplies user-provided
  *                              values; `opts.autoMintRequests` triggers bb_sk_*
  *                              key generation per function/key pair.
- * @returns `{ count, warnings, unfilledEnvVars }` — rows successfully inserted,
- *          warning strings, and a map of function name → source env var keys that
- *          were not covered by either provided values or auto-mint.
+ * @returns `{ count, warnings, unfilledEnvVars, overrideFilledFunctions }` — rows
+ *          successfully inserted, warning strings, a map of function name → source
+ *          env var keys that were not covered by either provided values or
+ *          auto-mint, and a map of function name → keys that were filled from
+ *          `opts.appOverrides` (non-empty entries only).
  */
 export async function replayFunctions(
   sourceRuntimePool: pg.Pool,
@@ -350,7 +362,12 @@ export async function replayFunctions(
   requestedByUserId: string,
   logger: ReplayLogger,
   opts?: ReplayFunctionsEnvVarOpts,
-): Promise<{ count: number; warnings: string[]; unfilledEnvVars: Record<string, string[]> }> {
+): Promise<{
+  count: number;
+  warnings: string[];
+  unfilledEnvVars: Record<string, string[]>;
+  overrideFilledFunctions: Record<string, string[]>;
+}> {
   const src = await sourceRuntimePool.query<{
     id: string;
     name: string;
@@ -374,6 +391,7 @@ export async function replayFunctions(
   const warnings: string[] = [];
   let inserted = 0;
   const unfilledEnvVars: Record<string, string[]> = {};
+  const overrideFilledFunctions: Record<string, string[]> = {};
 
   // Pre-compute "what env vars does each source function need" — we use this
   // to subtract filled (provided + auto-minted) keys and surface the rest.
@@ -406,28 +424,36 @@ export async function replayFunctions(
       [...keys].some(k => AUTO_MINT_CONVENTION_KEYS.includes(k)),
     );
   if (anyFnNeedsMint) {
-    // Preconditions that make the mint IMPOSSIBLE rather than just failed:
-    // hard-fail so the caller sees the problem instead of silently continuing
-    // with an app whose intra-fn calls will 401. The mint call itself can
-    // still fail transiently (network, Neon hiccup) — that stays a warning
-    // so the rest of the clone (schema, RLS, storage, etc.) still lands.
-    if (!opts?.controlPool || !opts?.destAppOwnerId) {
-      throw new Error(
-        `auto-mint precondition missing (controlPool=${!!opts?.controlPool}, destAppOwnerId=${!!opts?.destAppOwnerId}). ` +
-          `Cloned functions require BUTTERBASE_API_KEY / BB_SUBSTRATE_KEY; refusing to complete clone with 401 baked in.`,
-      );
-    }
-    try {
-      const minted = await mintApiKeyForClone(opts.controlPool, {
-        ownerId: opts.destAppOwnerId,
-        destAppId,
-      });
-      sharedMintedKey = minted.key;
-      logger.info({ destAppId, keyId: minted.keyId }, '[clone] shared API key minted for clone');
-    } catch (mintErr) {
-      sharedMintError = `shared key mint failed: ${(mintErr as Error).message}`;
-      warnings.push(sharedMintError);
-      logger.warn({ err: mintErr, destAppId }, '[clone] shared key mint failed; per-function keys will remain unfilled');
+    if (opts?.preMintedSharedKey) {
+      // Orchestrator already minted (typically because the DO replay needed a
+      // shared key). Reuse verbatim — same key must land in DO env and fn env
+      // for intra-app bearer checks to match.
+      sharedMintedKey = opts.preMintedSharedKey;
+      logger.info({ destAppId }, '[clone] reusing pre-minted shared API key');
+    } else {
+      // Preconditions that make the mint IMPOSSIBLE rather than just failed:
+      // hard-fail so the caller sees the problem instead of silently continuing
+      // with an app whose intra-fn calls will 401. The mint call itself can
+      // still fail transiently (network, Neon hiccup) — that stays a warning
+      // so the rest of the clone (schema, RLS, storage, etc.) still lands.
+      if (!opts?.controlPool || !opts?.destAppOwnerId) {
+        throw new Error(
+          `auto-mint precondition missing (controlPool=${!!opts?.controlPool}, destAppOwnerId=${!!opts?.destAppOwnerId}). ` +
+            `Cloned functions require BUTTERBASE_API_KEY / BB_SUBSTRATE_KEY; refusing to complete clone with 401 baked in.`,
+        );
+      }
+      try {
+        const minted = await mintApiKeyForClone(opts.controlPool, {
+          ownerId: opts.destAppOwnerId,
+          destAppId,
+        });
+        sharedMintedKey = minted.key;
+        logger.info({ destAppId, keyId: minted.keyId }, '[clone] shared API key minted for clone');
+      } catch (mintErr) {
+        sharedMintError = `shared key mint failed: ${(mintErr as Error).message}`;
+        warnings.push(sharedMintError);
+        logger.warn({ err: mintErr, destAppId }, '[clone] shared key mint failed; per-function keys will remain unfilled');
+      }
     }
   }
 
@@ -513,11 +539,22 @@ export async function replayFunctions(
           }
         }
 
+        const srcKeysForFn = sourceKeysMap.get(f.name);
+
+        // appOverrides layer (below user-supplied + convention mint, above static fills).
+        if (opts?.appOverrides && srcKeysForFn) {
+          for (const [k, v] of Object.entries(opts.appOverrides)) {
+            if (!srcKeysForFn.has(k)) continue;
+            if (k in merged) continue; // user or convention already covered it
+            merged[k] = v;
+            (overrideFilledFunctions[f.name] ??= []).push(k);
+          }
+        }
+
         // Static fills: deterministic values the platform already knows. Only
         // applied when the source function actually used the key and the
         // caller didn't supply one explicitly.
         const staticFills = resolveStaticFills({ destAppId, apiBaseUrl: config.apiBaseUrl });
-        const srcKeysForFn = sourceKeysMap.get(f.name);
         if (srcKeysForFn) {
           for (const [k, v] of Object.entries(staticFills)) {
             if (srcKeysForFn.has(k) && !(k in merged)) merged[k] = v;
@@ -568,7 +605,7 @@ export async function replayFunctions(
     }
   }
 
-  return { count: inserted, warnings, unfilledEnvVars };
+  return { count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions };
 }
 
 // ---------------------------------------------------------------------------

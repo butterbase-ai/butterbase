@@ -83,6 +83,15 @@ Example:
     });
   }
 
+Server-to-server calls from inside a function:
+  - ctx.invoke('fn-name', body?, opts?) — call a sibling function in the same app.
+    Platform-managed bearer, no env plumbing. ctx.user.id propagates automatically;
+    the callee sees ctx.caller.type === 'loopback'. Loop-depth capped at 4.
+  - ctx.invokeDO('class-name', 'instance-key', body?, opts?) — call a sibling
+    Durable Object in the same app. Routed through a platform shim; no public
+    URL or bearer to plumb. Depth shared with ctx.invoke.
+  See docs → Functions → Server-to-server, and Durable Objects → Server-to-server.
+
 Row-Level Security in Functions:
   Functions respect RLS policies based on how they're invoked:
 

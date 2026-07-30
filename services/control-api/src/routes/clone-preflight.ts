@@ -6,6 +6,9 @@ import {
   listSourceEnvVarKeys, detectConventions,
   AUTO_MINT_CONVENTION_KEYS, STATIC_FILL_KEYS,
 } from '../services/clone-env-vars.js';
+import { listDoEnvVarKeys } from '../services/durable-objects.service.js';
+import { decrypt } from '../services/crypto.js';
+import type { Pool } from 'pg';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { RESOURCE_NOT_FOUND, AUTH_INSUFFICIENT_PERMISSIONS } from '@butterbase/shared/error-types';
 
@@ -23,6 +26,19 @@ import { RESOURCE_NOT_FOUND, AUTH_INSUFFICIENT_PERMISSIONS } from '@butterbase/s
  * matches clone.ts via createAgentError so callers can use a single error
  * handler across both.
  */
+async function loadAppEnvKeys(db: Pool, appId: string): Promise<string[]> {
+  const r = await db.query<{ encrypted_env_vars: string }>(
+    `SELECT encrypted_env_vars FROM app_env_vars WHERE app_id = $1`, [appId],
+  );
+  if (r.rows.length === 0) return [];
+  const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+  try {
+    return Object.keys(JSON.parse(decrypt(r.rows[0].encrypted_env_vars, encKey)));
+  } catch {
+    return [];
+  }
+}
+
 export function cloneRoutesPreflight(app: FastifyInstance) {
   app.get<{ Params: { source_app_id: string } }>(
     '/v1/templates/:source_app_id/clone-preflight',
@@ -96,6 +112,24 @@ export function cloneRoutesPreflight(app: FastifyInstance) {
           return { status: 'user_required' };
         };
 
+        // Durable Object env vars are surfaced under a separate key so
+        // callers can see they must be re-set post-clone via
+        // manage_durable_objects action=set_env (the platform never copies
+        // DO env values across apps — they're app-scoped secrets).
+        let doEnvKeys: string[] = [];
+        try {
+          doEnvKeys = await listDoEnvVarKeys(runtimePool, source_app_id);
+        } catch (doErr) {
+          app.log.warn({ err: doErr, source_app_id }, 'clone-preflight: listDoEnvVarKeys failed; assuming none');
+        }
+
+        let appEnvKeys: string[] = [];
+        try {
+          appEnvKeys = await loadAppEnvKeys(runtimePool, source_app_id);
+        } catch (aeErr) {
+          app.log.warn({ err: aeErr, source_app_id }, 'clone-preflight: loadAppEnvKeys failed; assuming none');
+        }
+
         return {
           functions: fns.map(f => ({
             fn_name: f.fn_name,
@@ -106,6 +140,25 @@ export function cloneRoutesPreflight(app: FastifyInstance) {
             // input entirely for `auto_filled` rows.
             key_meta: f.keys.map(k => ({ key: k, ...classify(k) })),
           })),
+          durable_objects: {
+            env_keys: doEnvKeys,
+            // Same per-key annotation shape as functions: convention keys are
+            // auto-minted with the shared clone bb_sk_*; anything else remains
+            // a secret the caller must re-set via manage_durable_objects
+            // action=set_env after clone.
+            key_meta: doEnvKeys.map((k) =>
+              AUTO_MINT_CONVENTION_KEYS.includes(k)
+                ? { key: k, status: 'auto_filled' as const, reason: 'Auto-minted bb_sk_* scoped to the new app (shared with functions).' }
+                : { key: k, status: 'user_required' as const },
+            ),
+            note: doEnvKeys.some((k) => !AUTO_MINT_CONVENTION_KEYS.includes(k))
+              ? 'Non-convention DO env values are not carried across clones. Re-set each user_required key via manage_durable_objects action=set_env once the clone completes.'
+              : undefined,
+          },
+          app_env: {
+            keys: appEnvKeys,
+            note: 'These app-level env vars are copied to the clone. Override any of them with PATCH /v1/:appId/env after clone.',
+          },
         };
       } catch (err) {
         app.log.error({ err, source_app_id }, 'clone-preflight: listSourceEnvVarKeys threw');

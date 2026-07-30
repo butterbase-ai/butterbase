@@ -182,6 +182,80 @@ export class ChatRoom {
 - **Delete the app:** all DO classes and instances are torn down with the app.
 - **Class renaming** is not yet supported — register the new name, copy data over, delete the old.
 
+## Server-to-server calls into Durable Objects
+
+Server code (functions and other DOs in the same app) can invoke a DO
+directly through platform-managed routing — no bearer to plumb, no public
+URL to construct.
+
+### From a function
+
+    // Inside a function
+    export default async (req, ctx) => {
+      const res = await ctx.invokeDO('support-ticket-do', 'ticket-42', {
+        cmd: 'handleFollowup',
+        note: 'customer replied',
+      });
+      return new Response(await res.text());
+    };
+
+`ctx.invokeDO(className, instanceKey, body?, opts?)`:
+- `className` — the DO class's registered name (e.g. `'support-ticket-do'`)
+- `instanceKey` — the instance identifier (same string used with `idFromName`)
+- `body` — request body, JSON-stringified for you
+- Returns a standard `Response`
+
+### From another DO
+
+DO code opts into ctx via a helper. The bundler prepends `butterbase` to every DO bundle; user code calls `butterbase.ctx(req, env, state)` at the top of `fetch`:
+
+    export class SupportTicketDo {
+      constructor(state, env) { this.state = state; this.env = env; }
+
+      async fetch(req) {
+        const ctx = butterbase.ctx(req, this.env, this.state);
+
+        // Call another DO in the same app
+        const audit = await ctx.invokeDO('audit-log-do', 'app_events', { evt: 'closed' });
+        // Call a function in the same app
+        const notif = await ctx.invoke('send-slack', { text: 'ticket closed' });
+        // App-level env (platform BUTTERBASE_* + app_env_vars — scrubbed of platform-only keys)
+        const stripeKey = ctx.env.STRIPE_SECRET;
+        return new Response('ok');
+      }
+    }
+
+Old DO code that doesn't call `butterbase.ctx(...)` continues to work unchanged.
+
+### What's NOT in `ctx.env`
+
+`ctx.env` deliberately hides platform-only keys that user code should never
+read directly:
+
+- `DO_INVOKER_URL` / `DO_INVOKER_TOKEN` — the shim's bearer. Use
+  `ctx.invokeDO(...)` instead of trying to reach it yourself.
+- `BUTTERBASE_INTERNAL_FN_KEY` — the fn-invocation bearer. Use `ctx.invoke(...)`
+  instead of minting your own Authorization header.
+
+Everything else (all `BUTTERBASE_*` platform values, your `app_env_vars`, your
+per-DO env vars) remains visible via `ctx.env` exactly as documented for
+functions. If you want the underlying `this.env` directly (e.g. to log the
+raw key set for a bug report), that's still available inside the class body
+untouched — the scrub only applies to the object returned by
+`butterbase.ctx(...)`.
+
+### Who called me?
+
+Requests arriving via server-to-server routing carry:
+- `ctx.request.caller` — `'fn:widget-ingest'` or `'do:support-ticket-do:ticket-42'`
+- `ctx.user?.id` — the impersonated user id, if the call chain carried one
+- `ctx.request.loopDepth` — how many hops deep this call chain is (max 4)
+
+The public HTTP path is unchanged — browsers and external services still
+hit `{subdomain}.butterbase.dev/_do/…` and are subject to your DO's
+`access_mode` and visitor-token checks. `ctx.request.caller` is `null` on
+that path.
+
 ## Usage and billing
 
 Cloudflare reports per-script metrics (request count, CPU duration). A 15-minute cron pulls these into Butterbase's usage meters:

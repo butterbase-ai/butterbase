@@ -21,6 +21,10 @@ import {
   type AccessMode,
   type ClassDef,
 } from './do-bundler.js';
+import { validateEnvKeys } from '../lib/env-vars.js';
+import { buildDoEnvBundle } from './do-env-bundle.js';
+import { AUTO_MINT_CONVENTION_KEYS } from './clone-env-vars.js';
+import { config } from '../config.js';
 
 export class DurableObjectError extends Error {
   constructor(message: string, public readonly code: string) {
@@ -85,7 +89,7 @@ async function loadPrevDeployState(db: Pool, appId: string): Promise<PrevDeployS
  * empty object if none exist. The same AUTH_ENCRYPTION_KEY envelope is used
  * for app_frontend_env_vars and app_do_env_vars; no per-table key separation.
  */
-async function loadDoEnvVars(db: Pool, appId: string): Promise<Record<string, string>> {
+async function loadDoOnlyEnvVars(db: Pool, appId: string): Promise<Record<string, string>> {
   const r = await db.query<{ key: string; encrypted_value: string }>(
     `SELECT key, encrypted_value FROM app_do_env_vars WHERE app_id = $1`,
     [appId],
@@ -96,6 +100,75 @@ async function loadDoEnvVars(db: Pool, appId: string): Promise<Record<string, st
     out[row.key] = decrypt(row.encrypted_value, encKey);
   }
   return out;
+}
+
+async function loadAppLevelEnvVars(db: Pool, appId: string): Promise<Record<string, string>> {
+  const r = await db.query<{ encrypted_env_vars: string }>(
+    `SELECT encrypted_env_vars FROM app_env_vars WHERE app_id = $1`,
+    [appId],
+  );
+  if (r.rows.length === 0) return {};
+  const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+  try {
+    return JSON.parse(decrypt(r.rows[0].encrypted_env_vars, encKey)) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+interface PlatformDoEnvFields {
+  BUTTERBASE_APP_ID: string;
+  BUTTERBASE_API_URL: string;
+  BUTTERBASE_APP_NAME: string;
+  BUTTERBASE_REGION: string;
+  BUTTERBASE_ANON_KEY: string;
+  BUTTERBASE_SUBDOMAIN?: string;
+  BUTTERBASE_FRONTEND_URL?: string;
+  BUTTERBASE_STRIPE_ACCOUNT_ID?: string;
+  BUTTERBASE_AI_DEFAULT_MODEL?: string;
+}
+
+async function fetchAppRowForPlatformEnv(
+  controlDb: Pool,
+  appId: string,
+): Promise<{
+  name: string; region: string; anon_key: string;
+  subdomain: string | null; deployment_url: string | null;
+  stripe_connect_account_id: string | null; ai_config: unknown;
+}> {
+  const r = await controlDb.query(
+    `SELECT name, region, anon_key, subdomain, deployment_url,
+            stripe_connect_account_id, ai_config
+       FROM apps WHERE id = $1`,
+    [appId],
+  );
+  if (r.rows.length === 0) throw new DurableObjectError(`App ${appId} not found`, 'APP_NOT_FOUND');
+  return r.rows[0];
+}
+
+async function resolvePlatformDoEnv(runtimeDb: Pool, appId: string): Promise<PlatformDoEnvFields> {
+  const app = await fetchAppRowForPlatformEnv(runtimeDb, appId);
+  const fields: PlatformDoEnvFields = {
+    BUTTERBASE_APP_ID: appId,
+    BUTTERBASE_API_URL: config.apiBaseUrl,
+    BUTTERBASE_APP_NAME: app.name,
+    BUTTERBASE_REGION: app.region,
+    BUTTERBASE_ANON_KEY: app.anon_key,
+  };
+  if (app.subdomain) fields.BUTTERBASE_SUBDOMAIN = app.subdomain;
+  if (app.deployment_url) fields.BUTTERBASE_FRONTEND_URL = app.deployment_url;
+  if (app.stripe_connect_account_id) fields.BUTTERBASE_STRIPE_ACCOUNT_ID = app.stripe_connect_account_id;
+  const aiDefault = (app.ai_config as { defaultModel?: string } | null)?.defaultModel;
+  if (typeof aiDefault === 'string') fields.BUTTERBASE_AI_DEFAULT_MODEL = aiDefault;
+  return fields;
+}
+
+async function fetchInternalFnKeyForApp(controlDb: Pool, appId: string): Promise<string | null> {
+  const r = await controlDb.query<{ kv_function_key: string }>(
+    `SELECT kv_function_key FROM app_kv_credentials WHERE app_id = $1 LIMIT 1`,
+    [appId],
+  );
+  return r.rows[0]?.kv_function_key ?? null;
 }
 
 async function persistDeployState(
@@ -168,6 +241,7 @@ function wrapCfDeployError(err: unknown): DurableObjectError {
  */
 async function bundleAndDeploy(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   preloadedActive?: ActiveClassRow[],
 ): Promise<void> {
@@ -219,19 +293,32 @@ async function bundleAndDeploy(
     }
   }
 
-  // Load app-level env vars and reject any key that collides with a DO
-  // namespace binding name — CF would reject the PUT for duplicate bindings,
-  // and silently shadowing the DO namespace inside the user's class would be
-  // worse than a clear error here.
-  const envVars = await loadDoEnvVars(db, appId);
-  const bindingNameSet = new Set(built.bindingNames);
-  for (const k of Object.keys(envVars)) {
-    if (bindingNameSet.has(k)) {
-      throw new DurableObjectError(
-        `DO env var key '${k}' collides with a DO namespace binding. Rename the env var or the conflicting class.`,
-        'ENV_BINDING_COLLISION',
-      );
-    }
+  const [platformEnv, appEnvVars, doEnvVars, internalFnKey] = await Promise.all([
+    resolvePlatformDoEnv(db, appId),  // apps table lives on runtime plane
+    loadAppLevelEnvVars(db, appId),
+    loadDoOnlyEnvVars(db, appId),
+    fetchInternalFnKeyForApp(controlDb, appId),  // app_kv_credentials lives on control plane
+  ]);
+
+  const invokerConfig = config.doInvoker
+    ? { url: config.doInvoker.url, token: config.doInvoker.token }
+    : null;
+
+  const { envVars, collisions } = buildDoEnvBundle({
+    platformEnv: platformEnv as unknown as Record<string, string>,
+    appEnvVars,
+    doEnvVars,
+    internalFnKey,
+    invokerConfig,
+    doBindingNames: built.bindingNames,
+  });
+
+  if (collisions.length > 0) {
+    const first = collisions[0];
+    throw new DurableObjectError(
+      `DO env var key '${first.key}' collides with a DO namespace binding. Rename the env var or the conflicting class.`,
+      'ENV_BINDING_COLLISION',
+    );
   }
 
   let result;
@@ -244,6 +331,7 @@ async function bundleAndDeploy(
       migrations: { new_classes, deleted_classes },
       oldTag,
       envVars,
+      dispatchBindings: [{ binding: 'DO_DISPATCH', namespace: CloudflareWfp.NS }],
     });
   } catch (err) {
     throw wrapCfDeployError(err);
@@ -260,6 +348,7 @@ async function bundleAndDeploy(
  */
 export async function registerDurableObject(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   userId: string,
   input: RegisterInput,
@@ -306,7 +395,7 @@ export async function registerDurableObject(
   const id = upsert.rows[0].id as string;
 
   try {
-    await bundleAndDeploy(db, appId);
+    await bundleAndDeploy(db, controlDb, appId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     await db.query(
@@ -375,6 +464,7 @@ export async function getDurableObject(
  */
 export async function deleteDurableObject(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   name: string,
 ): Promise<void> {
@@ -411,7 +501,7 @@ export async function deleteDurableObject(
   // already-loaded active set so we don't re-query (and so it matches the
   // post-DELETE snapshot above). The diff is computed against the previous
   // deploy state (which still contains the deleted class).
-  await bundleAndDeploy(db, appId, remaining);
+  await bundleAndDeploy(db, controlDb, appId, remaining);
 }
 
 export interface DurableObjectUsage {
@@ -440,6 +530,184 @@ export async function listDoEnvVarKeys(db: Pool, appId: string): Promise<string[
   return r.rows.map((row) => row.key);
 }
 
+export interface CloneReplayResult {
+  cloned: string[];
+  do_env_keys: string[];
+  /** DO env keys that received a value from the shared clone-minted bb_sk_*.
+   *  Empty when no shared key was passed or no keys matched a convention. */
+  auto_minted_keys: string[];
+  /** DO env keys that received a value from CLONE_APP_ENV_OVERRIDES. Empty
+   *  when no override matched a source-declared DO env key. */
+  override_filled_keys: string[];
+}
+
+export interface ReplayDurableObjectsCloneOpts {
+  /** Shared bb_sk_* minted once per clone by the orchestrator. When provided,
+   *  every DO env key that matches AUTO_MINT_CONVENTION_KEYS (or is listed
+   *  in explicitAutoMintKeys) is written to app_do_env_vars on the dest with
+   *  this value before bundleAndDeploy runs. */
+  sharedMintedKey?: string | null;
+  /** Extra DO env keys the caller explicitly asked to auto-fill with the
+   *  shared minted key, beyond convention-matched keys. */
+  explicitAutoMintKeys?: string[];
+  /** Resolved per-clone overrides from CLONE_APP_ENV_OVERRIDES. Values land
+   *  in app_do_env_vars for any key present in the source's DO env keys.
+   *  Skipped when the same key is already convention-auto-minted (precedence:
+   *  user > convention > override). */
+  appOverrides?: Record<string, string>;
+}
+
+/**
+ * Clone every active DO class from `sourceAppId` (source runtime DB) to
+ * `destAppId` (dest runtime DB), then bundle-and-deploy the dest's DOs to
+ * its own CF Worker namespace. Called from executeClone before functions
+ * replay so that functions whose env vars reference `<appId>_do` URLs can
+ * be pointed at the dest namespace by the caller.
+ *
+ * Values of DO env vars are NOT copied wholesale — they're secrets held only
+ * in the source's encryption envelope. Their KEYS are returned so the clone
+ * caller can surface them alongside function env keys in the pending_env_vars
+ * flow. The one exception is convention keys (BUTTERBASE_API_KEY /
+ * BB_SUBSTRATE_KEY): when `opts.sharedMintedKey` is provided, those keys are
+ * filled with the shared minted bb_sk_* so DOs and functions on the cloned
+ * app share the same intra-app credential without a manual set_env step.
+ * `opts.appOverrides` (resolved from CLONE_APP_ENV_OVERRIDES) then fills any
+ * remaining source-declared DO env key not already covered by convention.
+ *
+ * If the source has no active DOs, returns `{ cloned: [], do_env_keys: [],
+ * auto_minted_keys: [], override_filled_keys: [] }` without deploying anything.
+ */
+export async function replayDurableObjectsForClone(
+  sourceDb: Pool,
+  destDb: Pool,
+  controlDb: Pool,
+  sourceAppId: string,
+  destAppId: string,
+  destUserId: string,
+  opts?: ReplayDurableObjectsCloneOpts,
+): Promise<CloneReplayResult> {
+  const src = await sourceDb.query<{
+    name: string;
+    class_name: string;
+    code: string;
+    access_mode: AccessMode;
+  }>(
+    `SELECT name, class_name, code, access_mode
+       FROM app_durable_objects
+      WHERE app_id = $1 AND status IN ('PENDING', 'BUILDING', 'READY')
+      ORDER BY name`,
+    [sourceAppId],
+  );
+  const keysRes = await sourceDb.query<{ key: string }>(
+    `SELECT key FROM app_do_env_vars WHERE app_id = $1 ORDER BY key`,
+    [sourceAppId],
+  );
+  const doEnvKeys = keysRes.rows.map((r) => r.key);
+
+  if (src.rows.length === 0) {
+    return { cloned: [], do_env_keys: doEnvKeys, auto_minted_keys: [], override_filled_keys: [] };
+  }
+
+  // Insert every source class into the dest at status='BUILDING'. On conflict
+  // (a re-run of a partially-completed clone) refresh the code and drop to
+  // BUILDING so the deploy below repairs the state.
+  const insertedIds: string[] = [];
+  for (const row of src.rows) {
+    const codeSha = sha256(row.code);
+    const ins = await destDb.query<{ id: string }>(
+      `INSERT INTO app_durable_objects (app_id, name, class_name, code, code_sha, access_mode, status, deployed_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'BUILDING', $7)
+       ON CONFLICT (app_id, name) DO UPDATE
+         SET class_name = EXCLUDED.class_name,
+             code = EXCLUDED.code,
+             code_sha = EXCLUDED.code_sha,
+             access_mode = EXCLUDED.access_mode,
+             status = 'BUILDING',
+             error_message = NULL,
+             updated_at = now()
+       RETURNING id`,
+      [destAppId, row.name, row.class_name, row.code, codeSha, row.access_mode, destUserId],
+    );
+    insertedIds.push(ins.rows[0].id);
+  }
+
+  // Auto-mint convention keys into app_do_env_vars BEFORE bundleAndDeploy so
+  // the deploy picks up the values on first roll. Bypasses setDoEnvVar's
+  // reserved-prefix guard (BUTTERBASE_API_KEY starts with BUTTERBASE_) via
+  // direct SQL — a platform-controlled write of a platform-recognized key,
+  // mirroring how clone-replay writes function encrypted_env_vars for the
+  // same convention. Explicit + convention targets are unioned so a caller
+  // can request a non-convention key too, at the cost of naming it up front.
+  const autoMintedKeys: string[] = [];
+  if (opts?.sharedMintedKey && doEnvKeys.length + (opts.explicitAutoMintKeys?.length ?? 0) > 0) {
+    const conventionTargets = doEnvKeys.filter((k) => AUTO_MINT_CONVENTION_KEYS.includes(k));
+    const explicitTargets = opts.explicitAutoMintKeys ?? [];
+    const mintTargets = Array.from(new Set([...conventionTargets, ...explicitTargets]));
+    if (mintTargets.length > 0) {
+      const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+      const encrypted = encrypt(opts.sharedMintedKey, encKey);
+      for (const key of mintTargets) {
+        await destDb.query(
+          `INSERT INTO app_do_env_vars (app_id, key, encrypted_value)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (app_id, key) DO UPDATE
+             SET encrypted_value = EXCLUDED.encrypted_value,
+                 updated_at = now()`,
+          [destAppId, key, encrypted],
+        );
+        autoMintedKeys.push(key);
+      }
+    }
+  }
+
+  const overrideFilledKeys: string[] = [];
+  if (opts?.appOverrides && Object.keys(opts.appOverrides).length > 0) {
+    const encKey = process.env.AUTH_ENCRYPTION_KEY!;
+    for (const [key, value] of Object.entries(opts.appOverrides)) {
+      if (!doEnvKeys.includes(key)) continue;
+      if (autoMintedKeys.includes(key)) continue; // convention wins
+      const encrypted = encrypt(value, encKey);
+      await destDb.query(
+        `INSERT INTO app_do_env_vars (app_id, key, encrypted_value)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (app_id, key) DO UPDATE
+           SET encrypted_value = EXCLUDED.encrypted_value,
+               updated_at = now()`,
+        [destAppId, key, encrypted],
+      );
+      overrideFilledKeys.push(key);
+    }
+  }
+
+  try {
+    await bundleAndDeploy(destDb, controlDb, destAppId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    await destDb.query(
+      `UPDATE app_durable_objects
+          SET status = 'ERROR', error_message = $1, updated_at = now()
+        WHERE id = ANY($2::uuid[])`,
+      [msg, insertedIds],
+    );
+    throw err;
+  }
+
+  await destDb.query(
+    `UPDATE app_durable_objects
+        SET status = 'READY', error_message = NULL,
+            last_deployed_at = now(), updated_at = now()
+      WHERE id = ANY($1::uuid[])`,
+    [insertedIds],
+  );
+
+  return {
+    cloned: src.rows.map((r) => r.name),
+    do_env_keys: doEnvKeys,
+    auto_minted_keys: autoMintedKeys,
+    override_filled_keys: overrideFilledKeys,
+  };
+}
+
 // CF binding name pattern: identifier-like, uppercase by convention.
 const ENV_KEY_REGEX = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -454,10 +722,18 @@ export interface SetDoEnvResult {
  */
 export async function setDoEnvVar(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   key: string,
   value: string,
 ): Promise<SetDoEnvResult> {
+  const reserved = validateEnvKeys([key]);
+  if (reserved) {
+    throw new DurableObjectError(
+      `Reserved key: "${reserved.key}" — keys starting with BUTTERBASE_ are reserved for platform use`,
+      'RESERVED_ENV_KEY',
+    );
+  }
   if (!ENV_KEY_REGEX.test(key)) {
     throw new DurableObjectError(
       `Invalid env var key '${key}'. Must match ${ENV_KEY_REGEX} (uppercase, digits, underscore).`,
@@ -476,23 +752,36 @@ export async function setDoEnvVar(
     [appId, key, encrypted],
   );
 
-  return { redeployed: await maybeRedeploy(db, appId) };
+  return { redeployed: await maybeRedeploy(db, controlDb, appId) };
 }
 
 export async function deleteDoEnvVar(
   db: Pool,
+  controlDb: Pool,
   appId: string,
   key: string,
 ): Promise<SetDoEnvResult> {
   await db.query(`DELETE FROM app_do_env_vars WHERE app_id = $1 AND key = $2`, [appId, key]);
-  return { redeployed: await maybeRedeploy(db, appId) };
+  return { redeployed: await maybeRedeploy(db, controlDb, appId) };
 }
 
-async function maybeRedeploy(db: Pool, appId: string): Promise<boolean> {
+async function maybeRedeploy(db: Pool, controlDb: Pool, appId: string): Promise<boolean> {
   const active = await loadActiveClasses(db, appId);
   if (active.length === 0) return false;
-  await bundleAndDeploy(db, appId, active);
+  await bundleAndDeploy(db, controlDb, appId, active);
   return true;
+}
+
+/**
+ * Redeploys the app's DO Worker if any classes are currently active. Returns
+ * true when a redeploy actually ran, false when the app has no DOs. Errors bubble.
+ */
+export async function redeployIfActive(
+  db: Pool,
+  controlDb: Pool,
+  appId: string,
+): Promise<boolean> {
+  return maybeRedeploy(db, controlDb, appId);
 }
 
 export async function getDurableObjectUsage(

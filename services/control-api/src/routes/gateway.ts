@@ -19,9 +19,9 @@ import {
   chatCompletionRequestSchema as chatCompletionSchema,
   embeddingRequestSchema as embeddingSchema,
 } from '../services/ai-router/schemas.js';
-import { messagesRequestSchema } from '../services/ai-router/messages-schema.js';
+import { messagesRequestSchema, guardMessagesRoutingShape } from '../services/ai-router/messages-schema.js';
 import { routeMessages } from '../services/ai-router/messages.js';
-import { responsesRequestSchema } from '../services/ai-router/responses-schema.js';
+import { responsesRequestSchema, guardResponsesRoutingShape } from '../services/ai-router/responses-schema.js';
 import { routeResponses } from '../services/ai-router/responses.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
 
@@ -106,13 +106,27 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
   }
   if (err instanceof AdapterError) {
     // AdapterError.kind ('transport', 'rate_limit', etc.) is generic enough to
-    // share, but never include the adapter name (err.router) which would leak
-    // upstream provider identity.
-    return reply.code(err.statusCode).send(openaiError(
-      err.message,
-      'invalid_request_error',
-      err.kind,
-    ));
+    // share, but NEVER include the adapter name (err.router) or the raw
+    // upstream message (err.message) — those can carry upstream request ids,
+    // upstream account balances, or non-English error strings that leak our
+    // gateway topology. Map to a butterbase-shaped canned message per kind.
+    //
+    // If we reach this handler with kind='insufficient_credits' it means the
+    // fallback chain was already exhausted — every provider we tried was out
+    // of credits — so we surface a platform-level 503 to the caller, NOT a
+    // 402 (which would misleadingly suggest the caller's butterbase credits
+    // are the problem).
+    const KIND_MESSAGE: Record<string, { status: number; type: string; msg: string }> = {
+      auth:                  { status: 401, type: 'authentication_error', msg: 'Upstream authentication failed.' },
+      rate_limit:            { status: 429, type: 'api_error',           msg: 'Model is temporarily rate-limited. Please retry.' },
+      model_not_available:   { status: 404, type: 'invalid_request_error', msg: 'Model is not available.' },
+      transport:             { status: 502, type: 'api_error',           msg: 'Upstream transport error. Please retry.' },
+      insufficient_credits:  { status: 503, type: 'api_error',           msg: 'Model is temporarily unavailable. Please try again or use a different model.' },
+      bad_request:           { status: 400, type: 'invalid_request_error', msg: 'The upstream provider rejected the request.' },
+      unknown:               { status: 502, type: 'api_error',           msg: 'Upstream provider error. Please retry.' },
+    };
+    const spec = KIND_MESSAGE[err.kind] ?? KIND_MESSAGE.unknown;
+    return reply.code(spec.status).send(openaiError(spec.msg, spec.type, err.kind));
   }
   if (err instanceof z.ZodError) {
     return reply.code(400).send(openaiError(
@@ -293,7 +307,34 @@ export async function gatewayRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: { message: 'Not found', type: 'invalid_request_error', code: 'not_found' } });
       }
       const user = resolveGatewayUser(request);
-      const body = messagesRequestSchema.parse(request.body);
+      // Passthrough posture: /v1/messages forwards the request body to the upstream
+      // Anthropic provider (or through the translation layer) without policing
+      // Anthropic's own request schema. We only validate the minimum shape our
+      // own routing/lease/token-estimator needs. Unknown/new Anthropic fields
+      // (adaptive thinking, document blocks, prompt-cache params, future
+      // additions) flow through untouched; Anthropic returns its own 400 with a
+      // real error message if the body is malformed. The strict reference schema
+      // is still evaluated for observability so we see drift in logs before it
+      // becomes a bug report.
+      const guardRes = guardMessagesRoutingShape(request.body);
+      if (!guardRes.ok) {
+        return reply.code(400).send({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: guardRes.message },
+        });
+      }
+      const body = guardRes.body;
+      const driftCheck = messagesRequestSchema.safeParse(request.body);
+      if (!driftCheck.success) {
+        request.log.warn({
+          event: 'ai_router.messages.schema_drift',
+          issues: driftCheck.error.issues.slice(0, 8).map(i => ({
+            path: i.path.join('.'),
+            code: i.code,
+            message: i.message,
+          })),
+        }, 'forwarding /v1/messages body that does not match reference schema');
+      }
       auditCtx = {
         endpoint: 'messages',
         model: body.model,
@@ -380,7 +421,29 @@ export async function gatewayRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: { message: 'Not found', type: 'invalid_request_error', code: 'not_found' } });
       }
       const user = resolveGatewayUser(request);
-      const body = responsesRequestSchema.parse(request.body);
+      // Passthrough posture (see /v1/messages above for full rationale). We
+      // guard only the fields the router itself consumes; OpenAI validates the
+      // Responses API surface. Reference schema is still evaluated for drift
+      // logging.
+      const guardRes = guardResponsesRoutingShape(request.body);
+      if (!guardRes.ok) {
+        return reply.code(400).send({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: guardRes.message },
+        });
+      }
+      const body = guardRes.body;
+      const driftCheck = responsesRequestSchema.safeParse(request.body);
+      if (!driftCheck.success) {
+        request.log.warn({
+          event: 'ai_router.responses.schema_drift',
+          issues: driftCheck.error.issues.slice(0, 8).map(i => ({
+            path: i.path.join('.'),
+            code: i.code,
+            message: i.message,
+          })),
+        }, 'forwarding /v1/responses body that does not match reference schema');
+      }
       auditCtx = {
         endpoint: 'responses', model: body.model,
         appId: request.auth.appId ?? '_platform',

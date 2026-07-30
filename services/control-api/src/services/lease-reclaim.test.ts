@@ -82,11 +82,11 @@ describe('reclaimExpiredLeases', () => {
 });
 
 describe('reclaimExpiredLeases — split pools', () => {
-  // Post-Plan-07: monthly_allowance_usd stays on platform_users; credits_usd
-  // moved to organizations. Each test seeds via TWO UPDATEs and reads via JOIN.
+  // Post-migration 093: both monthly_allowance_usd and credits_usd live on
+  // organizations. Seed / read via the personal-org join.
   const readPools = async (userId: string) => {
     const u = await pool.query(
-      `SELECT pu.monthly_allowance_usd, o.credits_usd
+      `SELECT o.monthly_allowance_usd, o.credits_usd
        FROM platform_users pu
        JOIN organizations o ON o.id = pu.personal_organization_id
        WHERE pu.id = $1`,
@@ -95,11 +95,10 @@ describe('reclaimExpiredLeases — split pools', () => {
     return u.rows[0];
   };
   const seedPools = async (userId: string, monthly: number, credits: number) => {
-    await pool.query(`UPDATE platform_users SET monthly_allowance_usd = $1 WHERE id = $2`, [monthly, userId]);
     await pool.query(
-      `UPDATE organizations SET credits_usd = $1
-       WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $2)`,
-      [credits, userId],
+      `UPDATE organizations SET monthly_allowance_usd = $1, credits_usd = $2
+       WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $3)`,
+      [monthly, credits, userId],
     );
   };
 

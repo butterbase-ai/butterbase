@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { AppResolver } from '../services/app-resolver.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
 import { createAgentError, ErrorResponses } from '../services/error-handler.js';
-import { logAuditEvent } from '../services/audit/audit-events-service.js';
+import { logAuditEventFromControlDb } from '../services/audit/audit-events-service.js';
 import { config } from '../config.js';
 import {
   configureIntegration,
@@ -170,7 +170,7 @@ export async function integrationRoutes(app: FastifyInstance) {
           body.oauth_credentials,
         );
 
-        await logAuditEvent(app.controlDb, {
+        await logAuditEventFromControlDb(app.controlDb, {
           appId: resolved.id,
           category: 'admin',
           eventType: 'integration.configure',
@@ -249,7 +249,7 @@ export async function integrationRoutes(app: FastifyInstance) {
           app.controlDb, resolved.id, toolkit, body,
         );
 
-        await logAuditEvent(app.controlDb, {
+        await logAuditEventFromControlDb(app.controlDb, {
           appId: resolved.id,
           category: 'admin',
           eventType: 'integration.rotate_credentials',
@@ -309,7 +309,7 @@ export async function integrationRoutes(app: FastifyInstance) {
       const resolved = await AppResolver.resolveApp(app.controlDb, appId, auth.userId, auth.organizationId ?? null);
       await disableIntegration(app.controlDb, resolved.id, toolkit);
 
-      await logAuditEvent(app.controlDb, {
+      await logAuditEventFromControlDb(app.controlDb, {
         appId: resolved.id,
         category: 'admin',
         eventType: 'integration.disable',
@@ -393,7 +393,7 @@ export async function integrationRoutes(app: FastifyInstance) {
           app.controlDb, appId, userId, body.toolkit, body.redirectUrl,
         );
 
-        await logAuditEvent(app.controlDb, {
+        await logAuditEventFromControlDb(app.controlDb, {
           appId,
           category: 'admin',
           eventType: 'integration.connect',
@@ -465,7 +465,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         connectedAccountId,
       );
 
-      await logAuditEvent(app.controlDb, {
+      await logAuditEventFromControlDb(app.controlDb, {
         appId,
         category: 'admin',
         eventType: 'integration.callback',
@@ -526,7 +526,7 @@ export async function integrationRoutes(app: FastifyInstance) {
 
       await disconnectAccount(app.controlDb, appId, userId, id);
 
-      await logAuditEvent(app.controlDb, {
+      await logAuditEventFromControlDb(app.controlDb, {
         appId,
         category: 'admin',
         eventType: 'integration.disconnect',
@@ -600,7 +600,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      await logAuditEvent(app.controlDb, {
+      await logAuditEventFromControlDb(app.controlDb, {
         appId,
         category: 'admin',
         eventType: 'integration.execute',

@@ -58,6 +58,15 @@ vi.mock('../services/clone-env-vars.js', () => ({
   STATIC_FILL_KEYS: ['BUTTERBASE_API_URL', 'BUTTERBASE_APP_ID'],
 }));
 
+// Mock durable-objects.service to avoid its transitive cloudflare-wfp import,
+// which reads config.cloudflare.accountId at module load and would crash the
+// test env. Only listDoEnvVarKeys is used from this module by the preflight
+// route.
+const listDoEnvVarKeysMock = vi.fn<[], Promise<string[]>>(async () => []);
+vi.mock('../services/durable-objects.service.js', () => ({
+  listDoEnvVarKeys: (...args: unknown[]) => listDoEnvVarKeysMock(...(args as [])),
+}));
+
 // ---------------------------------------------------------------------------
 // Build a minimal Fastify app that registers only what we need
 // ---------------------------------------------------------------------------

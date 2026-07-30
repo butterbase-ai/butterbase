@@ -140,9 +140,11 @@ beforeEach(async () => {
   // Reset keys counter
   const kvR = wrap(redis);
   await resetKeysCounter(kvR, appId);
-  // Restore credits balance to a positive value (in case a test zeroed it)
+  // Restore credits balance to a positive value (in case a test zeroed it).
+  // Both pools live on organizations post-093.
   await pool.query(
-    `UPDATE platform_users SET monthly_allowance_usd = 10, credits_usd = 0 WHERE id = $1`,
+    `UPDATE organizations SET monthly_allowance_usd = 10, credits_usd = 0
+     WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
     [fixture.userId],
   );
 });
@@ -197,7 +199,8 @@ describeDb('kv-quota plugin', () => {
     const app = await buildTestApp(pool);
     try {
       await pool.query(
-        `UPDATE platform_users SET monthly_allowance_usd = 0, credits_usd = 0 WHERE id = $1`,
+        `UPDATE organizations SET monthly_allowance_usd = 0, credits_usd = 0
+         WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
         [fixture.userId],
       );
 

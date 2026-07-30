@@ -30,15 +30,21 @@ export async function maybeSendCreditsEmail(args: MaybeSendArgs): Promise<void> 
   const { db, userId, postBalance, sendBillingEmail } = args;
   const dashboardUrl = args.dashboardUrl ?? process.env.DASHBOARD_URL ?? '';
 
+  // auto_refill_* / credits_usd / monthly_allowance_usd moved to `organizations`
+  // in the per-org billing split (migration 093). Join through the user's
+  // personal_organization_id — same pattern router.ts uses when computing
+  // postBalance. credits_*_emailed_at (dedup markers) stayed on platform_users.
   const result = await db.query<UserState>(
-    `SELECT email,
-            auto_refill_enabled,
-            auto_refill_last_failure_reason,
-            credits_low_emailed_at,
-            credits_exhausted_emailed_at,
-            monthly_allowance_usd::text,
-            credits_usd::text
-     FROM platform_users WHERE id = $1`,
+    `SELECT pu.email,
+            o.auto_refill_enabled,
+            o.auto_refill_last_failure_reason,
+            pu.credits_low_emailed_at,
+            pu.credits_exhausted_emailed_at,
+            o.monthly_allowance_usd::text AS monthly_allowance_usd,
+            o.credits_usd::text            AS credits_usd
+       FROM platform_users pu
+       JOIN organizations o ON o.id = pu.personal_organization_id
+      WHERE pu.id = $1`,
     [userId],
   );
 

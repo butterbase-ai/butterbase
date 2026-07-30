@@ -182,6 +182,26 @@ const { data, error } = await butterbase.functions.invoke('my-function', {
 });
 ```
 
+## Substrate stream
+
+Subscribe to live [substrate](/core-concepts/substrate/) changes over a WebSocket. `bb.substrate.stream` opens the connection, reconnects with backoff, and delivers one callback per change. Frames are envelope-only (`{ org, op, tbl, id }`) — re-fetch the affected row by `id`.
+
+```typescript
+const sub = butterbase.substrate.stream({
+  token: process.env.BUTTERBASE_SUBSTRATE_KEY, // bb_sub_… or bb_sk_…
+  onChange: (evt) => {
+    // evt: { org, op: 'insert' | 'update' | 'delete', tbl, id }
+    if (evt.tbl === 'entities') refetchEntity(evt.id);
+  },
+  onStatus: (s) => console.log(s), // 'connecting' | 'open' | 'closed'
+});
+
+// stop listening
+sub.unsubscribe();
+```
+
+Provide **either** `token` (a substrate-scoped key, for server/script clients) **or** `ticket` (a one-shot `wst_…` minted for a browser — see [Stream live updates to a UI](/core-concepts/substrate/#8-stream-live-updates-to-a-ui)). The stream is org-scoped to the credential.
+
 ## Integrations
 
 Connect end-user accounts (Gmail, Slack, GitHub, etc.) and execute tools on their behalf. See the [integrations concept page](/core-concepts/integrations) for the platform model.

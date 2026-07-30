@@ -1,6 +1,45 @@
-import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult } from './types.js';
-import { AdapterError } from './types.js';
+import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
+import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
+
+/**
+ * OpenRouter has a dedicated OpenAI-Images-compatible endpoint at
+ * POST /api/v1/images/generations. Request shape: { model, prompt, n?, size?,
+ * seed? }. Response shape: { created, data: [{ b64_json, media_type }], usage:
+ * { cost, ... } } — `response_format` is ignored; base64 is always returned.
+ *
+ * The endpoint accepts `image`/`mask` inputs for edits, but our validator maps
+ * them into `input_images[]` / `mask` (URLs). We forward `input_images` as
+ * `image` (single) or the array (multi) iff the model advertises it, and
+ * `mask` as `mask`. Support here is conservative — probed live per model.
+ */
+const OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL: ReadonlySet<string> = new Set([
+  'size',
+  'n',
+  'seed',
+  'input_images',
+]);
+const OPENROUTER_IMAGE_SUPPORTED_PROVIDER: ReadonlySet<string> = new Set([]);
+
+/**
+ * Canonical IDs OpenRouter serves as image models via /api/v1/images/generations.
+ * Each entry was probed live with a real POST — models that failed (e.g.
+ * `sourceful/riverflow-v2.5-pro`, which requires aspect_ratio and rejects the
+ * OpenAI-Images `size` param) are excluded here AND from
+ * CANONICAL_IMAGE_MODEL_ROUTES in select.ts.
+ */
+const OPENROUTER_IMAGE_MODELS: ReadonlySet<string> = new Set([
+  'openai/gpt-image-2',
+  'openai/gpt-image-1',
+  'openai/gpt-image-1-mini',
+  'google/gemini-3.1-flash-lite-image',
+  'google/gemini-3.1-flash-image',
+  'google/gemini-3-pro-image',
+  'black-forest-labs/flux.2-pro',
+  'black-forest-labs/flux.2-max',
+  'black-forest-labs/flux.2-flex',
+  'black-forest-labs/flux.2-klein-4b',
+]);
 
 interface OpenRouterConfig {
   apiKey: string;
@@ -29,11 +68,34 @@ export function pickProviderCost(usage: unknown): number | null {
 
 function classifyHttp(status: number): AdapterErrorKind {
   if (status === 401 || status === 403) return 'auth';
+  if (status === 402) return 'insufficient_credits';
   if (status === 404) return 'model_not_available';
   if (status === 429) return 'rate_limit';
   if (status >= 500) return 'transport';
   if (status >= 400) return 'bad_request';
   return 'unknown';
+}
+
+/**
+ * Some upstreams (new-api-based proxies like imarouter) return HTTP 200 with
+ * an OpenAI-shaped error envelope for "user quota insufficient". Others 429
+ * with a specific `code`. We must inspect the parsed body BEFORE treating the
+ * response as a valid completion.
+ *
+ * Also normalizes the message so we never leak an upstream request id,
+ * upstream balance, or a non-English message to the caller.
+ */
+function throwIfUpstreamCreditExhaustion(router: 'openrouter', status: number, body: unknown): void {
+  if (isUpstreamCreditExhaustionBody(body)) {
+    // Deliberately generic — the caller must NOT see upstream request ids or
+    // negative-balance figures. Fallback loop only reads err.kind anyway.
+    throw new AdapterError(
+      router,
+      status,
+      'insufficient_credits',
+      'upstream provider is out of credits',
+    );
+  }
 }
 
 export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
@@ -186,12 +248,20 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      // Some upstreams (new-api / imarouter) return non-2xx with an OpenAI-shaped
+      // credit-exhausted envelope. Try to parse and reclassify BEFORE surfacing.
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* body is not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
       throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
     }
     if (req.stream) {
       return { status: res.status, stream: res.body ?? undefined, usage: null, providerCostUsd: null };
     }
     const json = await res.json() as any;
+    // new-api-based upstreams (imarouter et al.) return HTTP 200 with an error
+    // envelope for `insufficient_user_quota` — inspect BEFORE treating as success.
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
     // OpenRouter's chat-completions API returns the billed cost in `usage.cost`.
     // Older docs/responses used `usage.total_cost`; accept either so we don't
     // silently fall back to a catalog-token estimate (which under-counts image
@@ -228,9 +298,13 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
       throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
     }
     const json = await res.json() as any;
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
     const cost = pickProviderCost(json.usage);
     return {
       status: res.status,
@@ -316,6 +390,112 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     return { stream: res.body, contentType: res.headers.get('content-type') ?? 'video/mp4' };
   }
 
+  /**
+   * OpenRouter's images endpoint (POST /api/v1/images/generations) is
+   * OpenAI-Images-compatible: synchronous request/response, base64 bytes
+   * returned inline. We wrap the b64 in a data: URI and stash it as the
+   * "unsigned URL" — the /content route uses raw fetch() which Node 18+
+   * supports on data: URIs, so no adapter-side content plumbing is needed.
+   *
+   * Returned status is always terminal ('completed' | 'failed'); routeImageSubmit
+   * recognises this and settles the row inline without polling.
+   */
+  async function submitImage(req: ImageGenerationRequest, upstreamId: string): Promise<ImageSubmitResult> {
+    // input_images / mask are forwarded as OpenAI-Images-style `image` / `mask`
+    // fields (single image → string, multi → array). OpenRouter's docs show
+    // these accepted on models that advertise edit mode; models that don't
+    // silently ignore. Rejection of unsupported params happens at the route
+    // via getSupportedImageParams — we only include them here if the caller
+    // provided them.
+    const imageParam = req.input_images && req.input_images.length > 0
+      ? (req.input_images.length === 1 ? req.input_images[0] : req.input_images)
+      : undefined;
+
+    const body = {
+      model: upstreamId,
+      prompt: req.prompt,
+      ...(req.n != null ? { n: req.n } : {}),
+      ...(req.size ? { size: req.size } : {}),
+      ...(req.seed != null ? { seed: req.seed } : {}),
+      ...(imageParam !== undefined ? { image: imageParam } : {}),
+      ...(req.mask ? { mask: req.mask } : {}),
+    };
+
+    const res = await fetcher(`${base}/images/generations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'HTTP-Referer': referer,
+        'X-Title': title,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
+      throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
+    }
+
+    const json = await res.json() as {
+      created?: number;
+      data?: Array<{ b64_json?: string; media_type?: string }>;
+      usage?: unknown;
+    };
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
+
+    const first = json.data?.[0];
+    if (!first || typeof first.b64_json !== 'string' || first.b64_json.length === 0) {
+      // Deliberate: return failed rather than throw so the job row settles cleanly
+      // (no lease refund; upstream cost was presumably $0 in this case).
+      return {
+        upstreamJobId: `or-img-${crypto.randomUUID()}`,
+        pollingUrl: '',
+        status: 'failed',
+        error: 'OpenRouter images endpoint returned no b64_json in data[0]',
+      };
+    }
+
+    const contentType = first.media_type ?? 'image/png';
+    const dataUri = `data:${contentType};base64,${first.b64_json}`;
+
+    return {
+      upstreamJobId: `or-img-${crypto.randomUUID()}`,
+      pollingUrl: '',  // sync-inline; route settles without polling
+      status: 'completed',
+      unsignedUrls: [dataUri],
+      providerCostUsd: pickProviderCost(json.usage) ?? undefined,
+      contentType,
+    };
+  }
+
+  async function pollImage(_pollingUrl: string): Promise<ImagePollResult> {
+    // OpenRouter image path is sync-inline; route stores terminal state on submit.
+    // If a client somehow triggers a poll, return non-terminal as a defensive no-op.
+    return { status: 'completed' };
+  }
+
+  async function fetchImageContent(
+    _upstreamJobId: string,
+    _index = 0,
+  ): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }> {
+    // Not used: the route serves content by streaming the stored unsigned URL directly.
+    // But we implement it defensively so the adapter contract is complete.
+    throw new AdapterError('openrouter', 501, 'unknown',
+      'openrouter fetchImageContent is not implemented; route streams from stored URL');
+  }
+
+  function getSupportedImageParams(canonicalId: string): ImageSupportedParams | null {
+    if (!OPENROUTER_IMAGE_MODELS.has(canonicalId)) return null;
+    return {
+      topLevel: OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL,
+      provider: OPENROUTER_IMAGE_SUPPORTED_PROVIDER,
+    };
+  }
+
   return {
     name: 'openrouter',
     capabilities: { supportsNativeMessages: () => false },
@@ -326,5 +506,9 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     submitVideo,
     pollVideo,
     fetchVideoContent,
+    submitImage,
+    pollImage,
+    fetchImageContent,
+    getSupportedImageParams,
   };
 }

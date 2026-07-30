@@ -16,8 +16,8 @@ Actions:
   - "update_access_mode":      Toggle an app's access mode between "public" and "authenticated"
   - "secure":                  Lock down an app: sets access_mode to "authenticated" and optionally enables RLS user isolation
   - "update_cors":             Update CORS allowed origins to control which frontend domains can access your API
-  - "preview_clone_env_vars":  Preview which env vars a source app's functions need before cloning. Returns { functions: [{ fn_name, keys, conventions }] }. Call this before clone to decide what to supply via env_var_values or auto_mint_api_key.
-  - "clone":                   Create a clone of a public app. Returns { job_id, pending_env_vars }. The dest app is a fresh empty-DB app owned by the caller. Source must be public and have a repo snapshot. Supply env_var_values and/or auto_mint_api_key to pre-fill function env vars; pending_env_vars lists keys still needing values.
+  - "preview_clone_env_vars":  Preview which env vars a source app's functions and Durable Objects need before cloning. Returns { functions: [{ fn_name, keys, conventions }], durable_objects: { env_keys, note? }, app_env: { keys, note } }. Call this before clone to decide what to supply via env_var_values or auto_mint_api_key. DO env values are never carried across clones — re-set them via manage_durable_objects action=set_env after clone completes. app_env.keys are the app-level env var names that WILL be copied to the clone (inherited config, not per-function overrides).
+  - "clone":                   Create a clone of a public app. Returns { job_id, pending_env_vars }. The dest app is a fresh empty-DB app owned by the caller. Source must be public and have a repo snapshot. Supply env_var_values and/or auto_mint_api_key to pre-fill function env vars; pending_env_vars lists keys still needing values. app_env_vars are copied to the clone (values included). Override any of them with manage_app action: "update_env" after the clone completes.
   - "get_clone_job":           Look up the status of a previously-started clone job. Returns { status, dest_app_id?, error_message? }.
   - "find_templates":          Search public templates by name, region, sort order, and pagination. Returns paginated list of public app templates.
   - "set_clone_webhook":       Set or clear a webhook that fires when someone clones this app. Pass webhook_url + webhook_secret to configure, or clear_webhook: true to remove.
@@ -80,6 +80,7 @@ Common errors:
       source_app_id: z.string().optional().describe('Required for "clone" and "preview_clone_env_vars". The id of the public app to clone.'),
       name: z.string().optional().describe('Optional for "clone". A name for the new app; defaults to `Clone of <source_app_id>`.'),
       region: z.string().optional().describe('Optional for "clone". The region for the new app; defaults to the source app\'s region.'),
+      organization_id: z.string().min(1).optional().describe('Optional for "clone" and "link_substrate". For "clone", the org to create the destination app under (requires membership; defaults to caller\'s personal org). For "link_substrate", the org whose substrate the app should be linked to (requires caller membership; server 403s otherwise; defaults to caller\'s active/personal org).'),
       env_var_values: z.record(z.string(), z.record(z.string(), z.string())).optional()
         .describe('Optional for "clone". Per-function env var values: { fn_name: { KEY: "value" } }. Use preview_clone_env_vars to see what keys the source needs.'),
       auto_mint_api_key: z.array(z.object({
@@ -187,11 +188,13 @@ Common errors:
           const body: {
             name?: string;
             region?: string;
+            organization_id?: string;
             env_var_values?: Record<string, Record<string, string>>;
             auto_mint_api_key?: { fn_name: string; key: string }[];
           } = {};
           if (args.name) body.name = args.name;
           if (args.region) body.region = args.region;
+          if (args.organization_id) body.organization_id = args.organization_id;
           if (args.env_var_values) body.env_var_values = args.env_var_values;
           if (args.auto_mint_api_key) body.auto_mint_api_key = args.auto_mint_api_key;
 
@@ -250,7 +253,10 @@ Common errors:
         case 'link_substrate': {
           const err = need(args.app_id, '"app_id" is required for this action.');
           if (err) return err;
-          const result = await apiPost(`/v1/me/apps/${args.app_id}/substrate-link`, {});
+          const body = args.organization_id
+            ? { organization_id: args.organization_id }
+            : {};
+          const result = await apiPost(`/v1/me/apps/${args.app_id}/substrate-link`, body);
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'unlink_substrate': {

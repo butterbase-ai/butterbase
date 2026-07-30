@@ -7,6 +7,7 @@ export type CloneJobStatus =
   | 'processing'
   | 'replaying_schema'
   | 'replaying_rls'
+  | 'replaying_durable_objects'
   | 'replaying_functions'
   | 'replaying_config'
   | 'copying_repo'
@@ -35,6 +36,7 @@ export interface CloneJob {
   dest_app_id: string | null;
   dest_region: string;
   requested_by_user_id: string;
+  dest_organization_id: string | null;
   dest_app_name: string | null;
   status: CloneJobStatus;
   retry_count: number;
@@ -61,6 +63,7 @@ export async function createCloneJob(
     sourceRegion: string;
     destRegion: string;
     requestedByUserId: string;
+    destOrganizationId: string;
     destAppName?: string;
     pendingEnvVarValues?: Record<string, Record<string, string>>;
     autoMintRequests?: { fn_name: string; key: string }[];
@@ -83,8 +86,9 @@ export async function createCloneJob(
   const res = await controlDb.query<CloneJob>(
     `INSERT INTO template_clone_jobs
        (id, source_app_id, source_snapshot_id, source_region, dest_region,
-        requested_by_user_id, dest_app_name, pending_env_vars, auto_mint_requests)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        requested_by_user_id, dest_organization_id, dest_app_name,
+        pending_env_vars, auto_mint_requests)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       id,
@@ -93,6 +97,7 @@ export async function createCloneJob(
       args.sourceRegion,
       args.destRegion,
       args.requestedByUserId,
+      args.destOrganizationId,
       args.destAppName ?? null,
       pendingEnvVars,
       autoMintRequests,

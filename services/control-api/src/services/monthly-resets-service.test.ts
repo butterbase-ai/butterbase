@@ -22,10 +22,18 @@ describeDb('resetMonthlyAllowance', () => {
   });
 
   beforeEach(async () => {
+    // Fixture: insert a user + personal org, seed the org with $3.50 allowance
+    // (migration 093 moved the monthly pool from platform_users to organizations).
+    const orgResult = await pool.query(
+      `INSERT INTO organizations (name, personal, plan_id, credits_usd, monthly_allowance_usd, stripe_customer_id)
+       VALUES ($1, true, $2, 0, 3.50, $3) RETURNING id`,
+      [`reset-org-${Date.now()}-${Math.random()}`, planId, `cus_reset_${Date.now()}_${Math.random()}`]
+    );
+    const orgId = orgResult.rows[0].id;
     const u = await pool.query(
-      `INSERT INTO platform_users (email, account_status, plan_id, credits_usd, monthly_allowance_usd, stripe_customer_id)
-       VALUES ($1, 'active', $2, 0, 3.50, $3) RETURNING id`,
-      [`monthly-reset-${Date.now()}-${Math.random()}@x.com`, planId, `cus_reset_${Date.now()}_${Math.random()}`]
+      `INSERT INTO platform_users (email, account_status, plan_id, personal_organization_id)
+       VALUES ($1, 'active', $2, $3) RETURNING id`,
+      [`monthly-reset-${Date.now()}-${Math.random()}@x.com`, planId, orgId]
     );
     userId = u.rows[0].id;
   });
@@ -34,7 +42,12 @@ describeDb('resetMonthlyAllowance', () => {
     const r = await resetMonthlyAllowance(pool, { userId, planId, stripeEventId: `evt_${Date.now()}_a` });
     expect(r.newAmount).toBeCloseTo(10, 2);
     expect(r.previousUnspent).toBeCloseTo(3.50, 2);
-    const u = await pool.query(`SELECT monthly_allowance_usd FROM platform_users WHERE id = $1`, [userId]);
+    const u = await pool.query(
+      `SELECT o.monthly_allowance_usd FROM organizations o
+       JOIN platform_users pu ON pu.personal_organization_id = o.id
+       WHERE pu.id = $1`,
+      [userId]
+    );
     expect(parseFloat(u.rows[0].monthly_allowance_usd)).toBeCloseTo(10, 2);
 
     const audit = await pool.query(
@@ -52,12 +65,21 @@ describeDb('resetMonthlyAllowance', () => {
     expect(r1.newAmount).toBeCloseTo(10, 2);
 
     // simulate spending after the reset
-    await pool.query(`UPDATE platform_users SET monthly_allowance_usd = 4 WHERE id = $1`, [userId]);
+    await pool.query(
+      `UPDATE organizations SET monthly_allowance_usd = 4
+       WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $1)`,
+      [userId]
+    );
 
     const r2 = await resetMonthlyAllowance(pool, { userId, planId, stripeEventId: eventId });
     expect(r2.skippedDuplicate).toBe(true);
     expect(r2.newAmount).toBeCloseTo(4, 2); // unchanged
-    const u = await pool.query(`SELECT monthly_allowance_usd FROM platform_users WHERE id = $1`, [userId]);
+    const u = await pool.query(
+      `SELECT o.monthly_allowance_usd FROM organizations o
+       JOIN platform_users pu ON pu.personal_organization_id = o.id
+       WHERE pu.id = $1`,
+      [userId]
+    );
     expect(parseFloat(u.rows[0].monthly_allowance_usd)).toBeCloseTo(4, 2);
   });
 
@@ -67,7 +89,12 @@ describeDb('resetMonthlyAllowance', () => {
     expect(r.newAmount).toBe(0);
     expect(r.previousUnspent).toBeCloseTo(3.50, 2);
     // The SET still applied: monthly_allowance is now 0 (3.50 was lost — use-it-or-lose-it)
-    const u = await pool.query(`SELECT monthly_allowance_usd FROM platform_users WHERE id = $1`, [userId]);
+    const u = await pool.query(
+      `SELECT o.monthly_allowance_usd FROM organizations o
+       JOIN platform_users pu ON pu.personal_organization_id = o.id
+       WHERE pu.id = $1`,
+      [userId]
+    );
     expect(parseFloat(u.rows[0].monthly_allowance_usd)).toBeCloseTo(0, 2);
     // restore
     await pool.query(`UPDATE plans SET monthly_credit_grant_usd = 10 WHERE id = $1`, [planId]);

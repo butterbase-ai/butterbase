@@ -209,6 +209,12 @@ A common pattern is a cron-triggered function that fans out to sibling
 functions on the same app — e.g. `auto-sync-google` calls `ingest-gmail` and
 `ingest-calendar`. The platform gives you three tools for this:
 
+### Calling a Durable Object from a function
+
+Use `ctx.invokeDO(className, instanceKey, body?, opts?)`. See
+[Durable Objects → Server-to-server calls](../durable-objects#server-to-server-calls-into-durable-objects).
+
+
 ### `ctx.invoke('fn-name', body)` — the easy path
 
 Use this for any same-app function call. No bearer ceremony, no env-var keys.

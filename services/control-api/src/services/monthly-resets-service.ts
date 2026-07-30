@@ -6,6 +6,15 @@ export interface ResetArgs {
   userId: string;
   planId: string;
   stripeEventId: string;
+  /**
+   * Org whose monthly_allowance_usd should be SET. Optional for backwards
+   * compatibility — omit to reset the caller's personal org (legacy behavior
+   * before the per-org allowance split). New callers (stripe-service on
+   * invoice.paid / subscription.updated) MUST pass the subscription's
+   * organization_id so team-org subs reset the team-org pool, not the
+   * personal-org pool.
+   */
+  organizationId?: string;
 }
 
 export interface ResetResult {
@@ -40,16 +49,20 @@ export async function resetMonthlyAllowanceWithClient(
   }
   const grantAmount = parseFloat(plan.rows[0].monthly_credit_grant_usd);
 
-  const userRow = await client.query<{ monthly_allowance_usd: string }>(
-    `SELECT monthly_allowance_usd FROM platform_users WHERE id = $1 FOR UPDATE`,
-    [args.userId]
-  );
-  if (userRow.rows.length === 0) {
-    throw new NotFoundError('user', args.userId);
-  }
-  const previousUnspent = parseFloat(userRow.rows[0].monthly_allowance_usd);
+  // Resolve target org — subscription org if the caller passed it, else the
+  // user's personal org (legacy path).
+  const organizationId = args.organizationId
+    ?? await resolveOrganizationId(pool, args.userId);
 
-  const organizationId = await resolveOrganizationId(pool, args.userId);
+  const orgRow = await client.query<{ monthly_allowance_usd: string }>(
+    `SELECT monthly_allowance_usd FROM organizations WHERE id = $1 FOR UPDATE`,
+    [organizationId]
+  );
+  if (orgRow.rows.length === 0) {
+    throw new NotFoundError('organization', organizationId);
+  }
+  const previousUnspent = parseFloat(orgRow.rows[0].monthly_allowance_usd);
+
   const insRes = await client.query(
     `INSERT INTO monthly_credit_resets (user_id, organization_id, plan_id, amount_usd, previous_unspent_usd, stripe_event_id)
      VALUES ($1, $2, $3, $4, $5, $6)
@@ -62,10 +75,12 @@ export async function resetMonthlyAllowanceWithClient(
     return { newAmount: previousUnspent, previousUnspent, skippedDuplicate: true };
   }
 
-  // SET — not add. Use-it-or-lose-it.
+  // SET — not add. Use-it-or-lose-it. Per-org column is now authoritative;
+  // platform_users.monthly_allowance_usd will be dropped after all readers
+  // are cut over (see migration 093 header).
   await client.query(
-    `UPDATE platform_users SET monthly_allowance_usd = $1 WHERE id = $2`,
-    [grantAmount, args.userId]
+    `UPDATE organizations SET monthly_allowance_usd = $1 WHERE id = $2`,
+    [grantAmount, organizationId]
   );
 
   // Balance was just bumped — clear the credits-email dedup state so the next

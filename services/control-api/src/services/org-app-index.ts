@@ -57,3 +57,25 @@ export async function listUserApps(controlPool: pg.Pool, organizationId: string)
   return r.rows;
 }
 
+/**
+ * List every app in every org the user is a member of. Every caller of
+ * GET /apps uses this — bb_sk_* API keys, JWT sessions with or without
+ * x-organization-id, all fan out over the user's org memberships. Discovery
+ * is uniform with the app-scoped auth model in AppResolver.resolveApp, which
+ * grants access to any member of the app's org regardless of activeOrg.
+ */
+export async function listAppsForUserAcrossOrgs(
+  controlPool: pg.Pool,
+  userId: string,
+): Promise<OrgAppIndexRow[]> {
+  const r = await controlPool.query<OrgAppIndexRow>(
+    `SELECT i.app_id, i.organization_id, i.region, i.subdomain, i.app_name, i.created_at, i.updated_at
+     FROM org_app_index i
+     JOIN organization_members m ON m.organization_id = i.organization_id
+     WHERE m.user_id = $1
+     ORDER BY i.created_at DESC`,
+    [userId],
+  );
+  return r.rows;
+}
+

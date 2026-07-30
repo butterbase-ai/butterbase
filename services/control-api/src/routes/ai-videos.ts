@@ -126,11 +126,12 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const ownerId = authz.ownerId;
     const endUserSub = authz.caller.kind === 'end_user' ? authz.caller.sub : null;
 
+    const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
     try {
       const body = videoSubmitSchema.parse(request.body);
       const region = await resolveAppHomeRegion(app.controlDb, appId);
-      const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
-      const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
       const submit = await routeVideoSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
@@ -173,7 +174,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const publicPollingUrl = `${publicProto(request)}://${publicHost(request)}/v1/${appId}/videos/completions/${jobId}`;
       return reply.code(202).send({ job_id: jobId, status: 'pending', polling_url: publicPollingUrl });
     } catch (error) {
-      return handleVideoError(app, reply, ownerId, error);
+      return handleVideoError(app, reply, organizationId, error);
     }
   });
 
@@ -186,8 +187,10 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     if (!authz.ok) return reply.code(authz.status).send(authz.body);
     const ownerId = authz.ownerId;
 
+    const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
     try {
-      const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
       // End-users can only see jobs they submitted themselves. 404 (not 403)
@@ -203,7 +206,6 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       }
 
       const region = await resolveAppHomeRegion(app.controlDb, appId);
-      const organizationId = await resolveOrgFromApp(runtimePool, appId);
       const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
@@ -221,7 +223,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         polling_url: `${absoluteBase}/v1/${appId}/videos/completions/${jobId}`,
       });
     } catch (error) {
-      return handleVideoError(app, reply, ownerId, error);
+      return handleVideoError(app, reply, organizationId, error);
     }
   });
 
@@ -241,8 +243,10 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       });
     }
 
+    const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
     try {
-      const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
       if (authz.caller.kind === 'end_user' && job.end_user_sub !== authz.caller.sub) {
@@ -262,7 +266,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         .header('Content-Type', contentType)
         .send(Readable.fromWeb(stream as any));
     } catch (error) {
-      return handleVideoError(app, reply, ownerId, error);
+      return handleVideoError(app, reply, organizationId, error);
     }
   });
 }
@@ -343,9 +347,9 @@ export function buildPublicJobResponse(absoluteBase: string, appId: string, job:
   };
 }
 
-export async function handleVideoError(app: FastifyInstance, reply: any, userId: string, error: unknown) {
+export async function handleVideoError(app: FastifyInstance, reply: any, organizationId: string, error: unknown) {
   if (error instanceof InsufficientCreditsError) {
-    const ar = await readAutoRefillState(app.controlDb, userId).catch(() => ({
+    const ar = await readAutoRefillState(app.controlDb, organizationId).catch(() => ({
       enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
     }));
     return reply.code(402).send({

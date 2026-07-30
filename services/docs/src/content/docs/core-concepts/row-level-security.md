@@ -142,11 +142,48 @@ Only `create_user_isolation_policy` and `create_policy` with the `user_column` p
 
 ## Common pitfall: Cross-table subqueries
 
-When a RESTRICTIVE policy contains a subquery that reads another table, that subquery runs under the same user's RLS context. If the other table has user isolation, the subquery can only see the current user's rows.
+When **any** policy expression (USING or WITH CHECK, permissive or restrictive) contains a subquery like `EXISTS (SELECT 1 FROM other_table WHERE …)` or `column IN (SELECT … FROM other_table)`, that subquery reads `other_table` **through `other_table`'s own RLS**, under the same calling role. If the subquery can't see the row it's looking for, the outer expression evaluates false and the operation fails with `AUTH_RLS_POLICY_VIOLATION` on writes (or returns empty on reads) — even for expressions that look trivially true.
 
-**Example:** User B tries to comment on User A's public post. The policy on comments checks `EXISTS(SELECT 1 FROM posts WHERE id = post_id AND is_public = true)`. But posts has user isolation, so User B can't see User A's posts — the insert is blocked.
+There are three ways this bites you:
 
-**Solution:** Add a permissive SELECT policy on the referenced table for all authenticated users. Or use `create_user_isolation_policy` with `public_read_column: "is_public"`.
+### 1. Referenced table has RLS enabled but no permissive `user` policy
+
+Once a table has RLS enabled, the `butterbase_user` role sees zero rows unless a policy explicitly permits it. A subquery like `EXISTS (SELECT 1 FROM institutions WHERE id = '<real uuid>')` then returns false even though the row obviously exists.
+
+Fix — expose the rows the subquery needs to see:
+
+```
+create_policy({
+  table_name: "institutions",
+  policy_name: "institutions_user_read",
+  command: "SELECT",
+  role: "user",
+  using_expression: "true"   // or a narrower predicate
+})
+```
+
+### 2. Referenced table has user_isolation — cross-user reads blocked
+
+User B tries to comment on User A's public post. The policy on `comments` checks `EXISTS (SELECT 1 FROM posts WHERE id = post_id AND is_public = true)`. But `posts` has user_isolation, so User B can only see their own posts and the insert is blocked.
+
+Fix — use `create_user_isolation_policy` with `public_read_column: "is_public"` on the referenced table, or add a permissive SELECT policy scoped to the public rows.
+
+### 3. Subquery joins on a column different from the isolation column
+
+Your `users` table is isolated by `id = current_user_id()::uuid`, but the session's `sub` is actually a separate `auth_user_id` value (common with OAuth callbacks that generate their own session id). A policy on `checkpoints` that reads `EXISTS (SELECT 1 FROM users WHERE u.id = checkpoints.student_id AND u.auth_user_id = current_user_id()::uuid)` fails: the subquery is filtered to just the row where `id = current_user_id()`, and that row's `auth_user_id` never matches, so nothing comes back.
+
+Fix — align the referenced table's user_isolation column with the column your session id actually maps to. If your session `sub` is the OAuth `auth_user_id`, run:
+
+```
+create_user_isolation_policy({
+  table_name: "users",
+  user_column: "auth_user_id"   // not "id"
+})
+```
+
+### Quick diagnosis
+
+If a policy fires `AUTH_RLS_POLICY_VIOLATION` on an INSERT that looks like it should pass, run the subquery portion by hand as the same user (`select_rows` with `as_role: "user", as_user: <uuid>`) against the referenced table. If it returns no rows, that's your policy failing — not a WITH CHECK bug.
 
 ## REST API
 

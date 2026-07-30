@@ -28,6 +28,7 @@ export class InsufficientCreditsError extends Error {
 export async function acquireForEstimatedCost(
   platformPool: pg.Pool,
   userId: string,
+  organizationId: string,
   region: string,
   estimatedUsd: number,
   ttlSeconds: number
@@ -40,6 +41,7 @@ export async function acquireForEstimatedCost(
   const requested = estimatedUsd < MIN_LEASE_USD ? MIN_LEASE_USD : estimatedUsd;
   const res = await grantLease(platformPool, {
     userId,
+    organizationId,
     region,
     amountUsd: requested,
     ttlSeconds,

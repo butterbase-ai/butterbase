@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { NotFoundError } from './api-errors.js';
+import { NotFoundError, AuthorizationError } from './api-errors.js';
 
 /**
  * Resolve the caller's personal organization id for org-scoped inserts.
@@ -26,4 +26,26 @@ export async function resolveOrganizationId(pool: Pool, userId: string): Promise
     throw new Error(`resolveOrganizationId: user ${userId} has no personal_organization_id`);
   }
   return orgId;
+}
+
+/**
+ * Assert that `userId` is a member of `orgId`. Throws AuthorizationError (403)
+ * otherwise. Use when a caller supplies an explicit target org (e.g. body
+ * `organization_id` on `/init`) and we need to gate the write on membership.
+ *
+ * NOTE: this only checks membership, not per-key scope. A bb_sk_* key bound
+ * to org X can currently create resources in any org its owning user belongs
+ * to. Tighten later if strict per-key scoping is required.
+ */
+export async function assertOrgMember(pool: Pool, userId: string, orgId: string): Promise<void> {
+  const result = await pool.query(
+    'SELECT 1 FROM organization_members WHERE organization_id = $1 AND user_id = $2 LIMIT 1',
+    [orgId, userId],
+  );
+  if (result.rowCount === 0) {
+    throw new AuthorizationError(
+      `user is not a member of organization ${orgId}`,
+      'AUTH_ORG_FORBIDDEN',
+    );
+  }
 }
