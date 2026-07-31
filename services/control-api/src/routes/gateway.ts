@@ -12,6 +12,7 @@ import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../serv
 import { rankRoutersForModel } from '../services/ai-router/select.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
+import { minimaxAdapter } from '../services/ai-router/adapters/minimax.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
@@ -40,13 +41,17 @@ async function resolveGatewayOrg(controlDb: pg.Pool, userId: string): Promise<st
 export async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
   if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
+  if (config.aiRouter.minimaxApiKey) m.set('minimax', minimaxAdapter({
+    apiKey: config.aiRouter.minimaxApiKey,
+    region: config.aiRouter.minimaxRegion,
+  }));
   try {
     // @ts-expect-error — overlay path resolved at runtime
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
     if (config.aiRouter.providerPrimaryApiKey) m.set('provider-primary', overlay.providerPrimaryAdapter({ apiKey: config.aiRouter.providerPrimaryApiKey, baseUrl: config.aiRouter.providerPrimaryBaseUrl }));
     if (config.aiRouter.providerSecondaryApiKey) m.set('provider-secondary', overlay.providerSecondaryAdapter({ apiKey: config.aiRouter.providerSecondaryApiKey, baseUrl: config.aiRouter.providerSecondaryBaseUrl, catalogUrl: config.aiRouter.providerSecondaryCatalogUrl }));
     if (config.aiRouter.providerTertiaryApiKey) m.set('provider-tertiary', overlay.providerTertiaryAdapter({ apiKey: config.aiRouter.providerTertiaryApiKey, baseUrl: config.aiRouter.providerTertiaryBaseUrl }));
-  } catch { /* OSS mode: only openrouter is available */ }
+  } catch { /* OSS mode: direct adapters remain available */ }
   return m;
 }
 

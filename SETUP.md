@@ -327,6 +327,7 @@ CONTROL_DB_URL=postgresql://... npx tsx scripts/backfill-migrations.ts app_abc12
 | Feature | Env vars (see `.env.example`) |
 |---------|-------------------------------|
 | AI via OpenRouter | `OPENROUTER_API_KEY`, `AI_MARKUP_PERCENT` |
+| AI via MiniMax | `MINIMAX_API_KEY`, `MINIMAX_REGION`, `AI_MARKUP_PERCENT` |
 | Real AWS / R2 storage | `AWS_*`, `S3_*`, drop LocalStack endpoints |
 | Email (SES) | `SES_*`, `SES_FROM_EMAIL` |
 | Stripe billing | `STRIPE_*` (noop billing locally in OSS mode) |

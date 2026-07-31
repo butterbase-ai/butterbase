@@ -3,8 +3,56 @@ import { Redis } from 'ioredis';
 import {
   readCatalogEntry, listCatalogModels, writeCatalog, readEnabledRouters,
   tryAcquireRefreshLock, releaseRefreshLock, recordUnknownId,
+  refreshCatalog,
   type CatalogEntry,
 } from './catalog.js';
+import { minimaxAdapter } from './adapters/minimax.js';
+
+describe('catalog refresh metadata', () => {
+  it('preserves MiniMax cache pricing, input modalities, and thinking modes', async () => {
+    const values = new Map<string, string>();
+    const redis = {
+      get: async (key: string) => values.get(key) ?? null,
+      multi: () => {
+        const operations: Array<() => void> = [];
+        const pipeline = {
+          del: (key: string) => {
+            operations.push(() => { values.delete(key); });
+            return pipeline;
+          },
+          set: (key: string, value: string) => {
+            operations.push(() => { values.set(key, value); });
+            return pipeline;
+          },
+          exec: async () => {
+            for (const operation of operations) operation();
+            return [];
+          },
+        };
+        return pipeline;
+      },
+    } as unknown as Redis;
+
+    const result = await refreshCatalog(redis, [minimaxAdapter({ apiKey: 'test-key' })]);
+    expect(result.modelCount).toBe(2);
+
+    const m3 = JSON.parse(values.get('ai_catalog:model:minimax/MiniMax-M3')!);
+    expect(m3.routers[0]).toMatchObject({
+      cacheReadPricePerMtok: 0.12,
+      cacheWritePricePerMtok: null,
+      inputModalities: ['text', 'image', 'video'],
+      thinking: ['adaptive', 'disabled'],
+    });
+
+    const m27 = JSON.parse(values.get('ai_catalog:model:minimax/MiniMax-M2.7')!);
+    expect(m27.routers[0]).toMatchObject({
+      cacheReadPricePerMtok: 0.06,
+      cacheWritePricePerMtok: 0.375,
+      inputModalities: ['text'],
+      thinking: ['always_on'],
+    });
+  });
+});
 
 const RUN_REDIS_TESTS = process.env.RUN_REDIS_TESTS === '1' || process.env.RUN_DB_TESTS === '1';
 const describeRedis = RUN_REDIS_TESTS ? describe : describe.skip;

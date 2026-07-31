@@ -625,6 +625,8 @@ vi.mock('../config.js', async (orig) => {
       ...actual.config,
       aiRouter: {
         ...actual.config.aiRouter,
+        minimaxApiKey: 'key-minimax',
+        minimaxRegion: 'cn_zh',
         providerPrimaryApiKey: 'key-primary',
         providerPrimaryBaseUrl: 'https://primary.example.com',
         providerSecondaryApiKey: 'key-secondary',
@@ -638,6 +640,11 @@ vi.mock('../config.js', async (orig) => {
 });
 
 describe('Fix 6 — buildAdapters passes baseUrl and catalogUrl to adapter constructors', () => {
+  it('registers the MiniMax adapter in the OSS gateway', async () => {
+    const adapters = await buildAdapters();
+    expect(adapters.get('minimax')?.name).toBe('minimax');
+  });
+
   it('13. provider-primary adapter receives baseUrl', async () => {
     primaryAdapterArgs.length = 0;
     await buildAdapters();

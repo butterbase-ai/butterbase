@@ -45,6 +45,11 @@ describe('canonicalizeUpstreamId', () => {
     expect(canonicalizeUpstreamId('provider-primary', 'seed-2-0-pro-260328')).toBe('bytedance-seed/seed-2-0-pro-260328');
   });
 
+  it('canonicalizes MiniMax adapter model ids without changing their case', () => {
+    expect(canonicalizeUpstreamId('minimax', 'MiniMax-M3')).toBe('minimax/MiniMax-M3');
+    expect(canonicalizeUpstreamId('minimax', 'MiniMax-M2.7')).toBe('minimax/MiniMax-M2.7');
+  });
+
   it('passes through slash-prefixed vendor ids (lowercases the vendor)', () => {
     // AI Provider Primary publishes PixVerse and similar with explicit vendor prefix.
     expect(canonicalizeUpstreamId('provider-primary', 'PixVerse/v6')).toBe('pixverse/v6');
@@ -64,10 +69,11 @@ describe('canonicalizeUpstreamId', () => {
 });
 
 describe('RouterName type', () => {
-  it('accepts the three known routers', () => {
+  it('accepts the known routers', () => {
     const a: RouterName = 'openrouter';
     const b: RouterName = 'provider-primary';
     const c: RouterName = 'provider-secondary';
-    expect([a, b, c]).toHaveLength(3);
+    const d: RouterName = 'minimax';
+    expect([a, b, c, d]).toHaveLength(4);
   });
 });

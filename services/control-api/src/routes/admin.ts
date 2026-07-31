@@ -2143,6 +2143,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const { getRedisClient } = await import('../services/redis.js');
       const { config } = await import('../config.js');
       const { openrouterAdapter } = await import('../services/ai-router/adapters/openrouter.js');
+      const { minimaxAdapter } = await import('../services/ai-router/adapters/minimax.js');
       // Provider-primary / provider-secondary adapters live in the cloud overlay;
       // OSS builds boot without them.
       let providerPrimaryAdapter: any = null;
@@ -2159,6 +2160,12 @@ export async function adminRoutes(app: FastifyInstance) {
       const adapters = [];
       if (config.aiRouter.openrouterApiKey) {
         adapters.push(openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
+      }
+      if (config.aiRouter.minimaxApiKey) {
+        adapters.push(minimaxAdapter({
+          apiKey: config.aiRouter.minimaxApiKey,
+          region: config.aiRouter.minimaxRegion,
+        }));
       }
       if (providerPrimaryAdapter && config.aiRouter.providerPrimaryApiKey) {
         adapters.push(providerPrimaryAdapter({
@@ -2208,6 +2215,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { config } = await import('../config.js');
     const adapters = [
       { name: 'openrouter', configured: !!config.aiRouter.openrouterApiKey },
+      { name: 'minimax', configured: !!config.aiRouter.minimaxApiKey },
       { name: 'provider-primary', configured: !!config.aiRouter.providerPrimaryApiKey },
       { name: 'provider-secondary', configured: !!config.aiRouter.providerSecondaryApiKey },
       { name: 'provider-tertiary', configured: !!config.aiRouter.providerTertiaryApiKey },

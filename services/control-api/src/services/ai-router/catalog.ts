@@ -146,7 +146,11 @@ export async function refreshCatalog(
           upstreamId: m.upstreamId,
           promptPricePerMtok: m.promptPricePerMtok,
           completionPricePerMtok: m.completionPricePerMtok,
+          cacheReadPricePerMtok: m.cacheReadPricePerMtok,
+          cacheWritePricePerMtok: m.cacheWritePricePerMtok,
           contextLength: m.contextLength,
+          inputModalities: m.inputModalities,
+          thinking: m.thinking,
           modality: m.modality,
           rawPricing: m.rawPricing,
         });
