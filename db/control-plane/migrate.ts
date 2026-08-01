@@ -48,6 +48,56 @@ export function parseScopeHeader(sql: string): MigrationScope {
   return scope;
 }
 
+export type MigrationPhase = 'pre-deploy' | 'post-deploy';
+const VALID_PHASES: ReadonlySet<MigrationPhase> = new Set(['pre-deploy', 'post-deploy']);
+
+export class MigrationPhaseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MigrationPhaseError';
+  }
+}
+
+const PHASE_REGEX = /^\s*--\s*@phase\s*:\s*([a-z-]+)\s*$/;
+
+/**
+ * Parses the optional `-- @phase: <pre-deploy|post-deploy>` header from a
+ * migration's leading comment block. Unlike `-- @scope:`, this header is NOT
+ * required to be the first non-blank line — that line is reserved for
+ * `@scope`. Instead this scans forward through the contiguous run of
+ * comment/blank lines at the top of the file (the "header comment block")
+ * looking for an `@phase` line, and stops as soon as it hits the first line
+ * that is neither blank nor a `--` comment (i.e. real SQL).
+ *
+ * A file with no `@phase` header defaults to 'pre-deploy' — that is the
+ * common case, and only migrations gated behind the post-deploy boundary
+ * need to opt in.
+ */
+export function parsePhaseHeader(sql: string): MigrationPhase {
+  const lines = sql.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '') {
+      continue;
+    }
+    if (!trimmed.startsWith('--')) {
+      // End of the header comment block.
+      break;
+    }
+    const match = PHASE_REGEX.exec(line);
+    if (match) {
+      const phase = match[1] as MigrationPhase;
+      if (!VALID_PHASES.has(phase)) {
+        throw new MigrationPhaseError(
+          `Invalid phase "${phase}". Allowed: pre-deploy, post-deploy`
+        );
+      }
+      return phase;
+    }
+  }
+  return 'pre-deploy';
+}
+
 async function ensureMigrationsTable(client: pg.PoolClient): Promise<void> {
   await client.query(`
     CREATE TABLE IF NOT EXISTS _migrations (
@@ -107,6 +157,89 @@ export async function applyByScope(
   }
 }
 
+/** The env var that must be set (to '1') to allow post-deploy migrations to run. */
+export const ALLOW_POST_DEPLOY_ENV_VAR = 'ALLOW_POST_DEPLOY_MIGRATIONS';
+
+export interface MigrationPlanEntry {
+  file: string;
+  sql: string;
+  scope: MigrationScope;
+  phase: MigrationPhase;
+}
+
+export interface MigrationPlan {
+  toApply: MigrationPlanEntry[];
+  skipped: MigrationPlanEntry[];
+}
+
+/**
+ * Pure planning step, no DB/filesystem access: given the (filename, sql)
+ * pairs for every migration file, decides which ones to apply and which to
+ * skip because they are marked `-- @phase: post-deploy` and the opt-in env
+ * var was not set. Kept separate from `migrate()` so this decision — the
+ * whole point of the phase boundary — is unit-testable without a database.
+ */
+export function planMigrations(
+  files: Array<{ file: string; sql: string }>,
+  allowPostDeploy: boolean
+): MigrationPlan {
+  const toApply: MigrationPlanEntry[] = [];
+  const skipped: MigrationPlanEntry[] = [];
+
+  for (const { file, sql } of files) {
+    let scope: MigrationScope;
+    try {
+      scope = parseScopeHeader(sql);
+    } catch (err) {
+      throw new Error(`In ${file}: ${(err as Error).message}`);
+    }
+    let phase: MigrationPhase;
+    try {
+      phase = parsePhaseHeader(sql);
+    } catch (err) {
+      throw new Error(`In ${file}: ${(err as Error).message}`);
+    }
+
+    const entry: MigrationPlanEntry = { file, sql, scope, phase };
+    if (phase === 'post-deploy' && !allowPostDeploy) {
+      skipped.push(entry);
+    } else {
+      toApply.push(entry);
+    }
+  }
+
+  return { toApply, skipped };
+}
+
+/**
+ * Loudly reports any post-deploy migrations that were skipped, and how to
+ * apply them, so an operator is never left wondering why a migration didn't
+ * run. No-op when nothing was skipped.
+ */
+export function logSkippedPostDeploy(skipped: MigrationPlanEntry[]): void {
+  if (skipped.length === 0) {
+    return;
+  }
+  const bar = '='.repeat(78);
+  console.warn(bar);
+  console.warn(
+    `SKIPPED ${skipped.length} post-deploy migration(s) — ${ALLOW_POST_DEPLOY_ENV_VAR} is not set:`
+  );
+  for (const entry of skipped) {
+    console.warn(`  - ${entry.file}`);
+  }
+  console.warn('');
+  console.warn(
+    'These are gated behind the post-deploy phase boundary and will NOT run until the'
+  );
+  console.warn(
+    'new (COALESCE-reading) code is confirmed fully live and serving traffic — not merely deployed.'
+  );
+  console.warn('Once that is confirmed, apply them with:');
+  console.warn(`  ${ALLOW_POST_DEPLOY_ENV_VAR}=1 npm run migrate:control`);
+  console.warn(bar);
+}
+
 async function migrate(): Promise<void> {
   const url =
     process.env.NEON_PLATFORM_PRIMARY_URL ??
@@ -125,15 +258,18 @@ async function migrate(): Promise<void> {
       .filter((f) => f.endsWith('.sql'))
       .sort();
 
-    for (const file of files) {
-      const sql = fs.readFileSync(path.join(__dirname, file), 'utf-8');
-      let scope: MigrationScope;
-      try {
-        scope = parseScopeHeader(sql);
-      } catch (err) {
-        throw new Error(`In ${file}: ${(err as Error).message}`);
-      }
-      await applyByScope(scope, file, sql, client);
+    const fileContents = files.map((file) => ({
+      file,
+      sql: fs.readFileSync(path.join(__dirname, file), 'utf-8'),
+    }));
+
+    const allowPostDeploy = process.env[ALLOW_POST_DEPLOY_ENV_VAR] === '1';
+    const { toApply, skipped } = planMigrations(fileContents, allowPostDeploy);
+
+    logSkippedPostDeploy(skipped);
+
+    for (const entry of toApply) {
+      await applyByScope(entry.scope, entry.file, entry.sql, client);
     }
 
     console.log('Migrations complete.');

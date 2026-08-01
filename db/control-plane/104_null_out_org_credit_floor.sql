@@ -1,4 +1,5 @@
 -- @scope: platform
+-- @phase: post-deploy
 -- 104: POST-DEPLOY (2 of 2). Null out the existing explicit-0 rows so they
 -- inherit from plans.credit_floor_usd.
 --

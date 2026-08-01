@@ -1,4 +1,5 @@
 -- @scope: platform
+-- @phase: post-deploy
 -- 103: POST-DEPLOY (1 of 2). Drop organizations.credit_floor_usd's DEFAULT so
 -- newly-created orgs inherit their plan's floor instead of being pinned to 0.
 --
