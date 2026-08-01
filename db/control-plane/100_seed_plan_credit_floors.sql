@@ -1,3 +1,4 @@
+-- @scope: platform
 -- 100: Seed per-tier credit floor defaults on plans.
 --
 -- Split from 098 on purpose: 098 owns the *schema* change (adding the column,
@@ -13,7 +14,7 @@
 -- Idempotent: plain UPDATEs, safe to re-run.
 --
 -- PRE-deploy, safe: old code never reads plans, so these values are inert
--- until the new code (and migration 101) are live.
+-- until the new code (and the post-deploy migrations 103/104) are live.
 --
 -- playground stays at 0 explicitly (rather than relying on the column
 -- DEFAULT) so the full tier table is visible in one place and a future change

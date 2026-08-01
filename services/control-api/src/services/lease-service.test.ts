@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { grantLease, settleLease } from './lease-service.js';
 import { config } from '../config.js';
 
 const describeDb = process.env.RUN_DB_TESTS ? describe : describe.skip;
+const __dirnameLease = path.dirname(fileURLToPath(import.meta.url));
 
 let pool: pg.Pool;
 let orgId: string;
@@ -551,112 +555,124 @@ describeDb('grantLease — plan floor inheritance', () => {
 });
 
 // ---------------------------------------------------------------------
-// Migration-phasing regression guard (Task 14). 098 was split into a
-// pre-deploy half (098 + 100, keeps organizations.credit_floor_usd's
-// DEFAULT 0 and leaves existing rows at an explicit 0) and a post-deploy
-// half (101, drops the default and nulls out the explicit zeros) precisely
-// so that the OLD build — which reads credit_floor_usd directly via
-// `parseFloat(row.credit_floor_usd)`, not COALESCE — never observes a NULL
-// there. A NULL read by the old code becomes NaN, and `balance < NaN` is
-// always false, silently admitting every request regardless of balance.
+// Migration-phasing regression guard.
 //
-// These two tests exercise the NEW code (which does COALESCE correctly)
-// against each phase's org-row shape and assert both refuse at a negative
-// balance — i.e. an explicit 0 (the 098-post/101-pre state) and a NULL on a
-// zero-floor plan (the 101-post state) must behave identically. They are a
-// regression guard for the phasing itself, not for COALESCE semantics
-// (already covered above): if a future edit ever reintroduces a null-out
-// into 098, or drops organizations.credit_floor_usd's DEFAULT there, this
-// suite doesn't run against the old build to catch the NaN bypass directly —
-// but any change that made the *new* code disagree between these two
-// equivalent states would show up here.
+// The original 098 dropped organizations.credit_floor_usd's DEFAULT and
+// nulled out every row in the same migration that the deploy-order rule
+// requires to run BEFORE the code deploy. The old build reads that column as
+// `parseFloat(row.credit_floor_usd)`, not through COALESCE — NULL becomes
+// NaN, `balance < NaN` is always false, and every AI request is admitted
+// regardless of balance. So the destructive half was moved into post-deploy
+// migrations (103 DROP DEFAULT, 104 null-out), and 102 repairs environments
+// that already ran the unsplit 098.
+//
+// The tests below assert the PHASING, not COALESCE semantics (covered above).
+// Earlier attempts asserted new-code behaviour against hand-UPDATEd rows;
+// those passed even with the phasing fully reverted, because the code under
+// test never reads the migration files or the column's default. These read
+// the migration text and the live schema instead, so reverting the split —
+// putting a null-out or a DROP DEFAULT back into a pre-deploy file — fails
+// them.
 // ---------------------------------------------------------------------
-describeDb('grantLease — migration phasing (098/100 vs 101 org-row shapes)', () => {
-  let pool3: pg.Pool;
+
+const MIGRATIONS_DIR = path.resolve(__dirnameLease, '../../../../db/control-plane');
+const PRE_DEPLOY_MIGRATIONS = [
+  '098_credit_floor_and_abandoned_leases.sql',
+  '099_validate_credit_leases_status_check.sql',
+  '100_seed_plan_credit_floors.sql',
+  '101_null_out_org_credit_floor_default.sql',
+  '102_repair_org_credit_floor_default.sql',
+];
+const POST_DEPLOY_MIGRATIONS = [
+  '103_drop_org_credit_floor_default.sql',
+  '104_null_out_org_credit_floor.sql',
+];
+
+/** Migration text with comment lines stripped, so prose can mention what the SQL must not do. */
+function migrationStatements(file: string): string {
+  return fs
+    .readFileSync(path.join(MIGRATIONS_DIR, file), 'utf-8')
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('--'))
+    .join('\n');
+}
+
+describe('credit_floor_usd migration phasing — migration text', () => {
+  it('no pre-deploy migration nulls out organizations.credit_floor_usd or drops its DEFAULT', () => {
+    for (const file of PRE_DEPLOY_MIGRATIONS) {
+      const sql = migrationStatements(file);
+      // A NULL in this column is what the old code turns into NaN. Neither
+      // route to one — UPDATE ... = NULL, or DROP DEFAULT letting an INSERT
+      // produce one — may appear before the code deploy.
+      expect(sql, `${file} must not null out credit_floor_usd`).not.toMatch(
+        /credit_floor_usd\s*=\s*NULL/i,
+      );
+      expect(sql, `${file} must not drop the credit_floor_usd DEFAULT`).not.toMatch(
+        /credit_floor_usd\s+DROP\s+DEFAULT/i,
+      );
+    }
+  });
+
+  it('the pre-deploy set leaves the column with DEFAULT 0', () => {
+    const combined = PRE_DEPLOY_MIGRATIONS.map(migrationStatements).join('\n');
+    expect(combined).toMatch(/credit_floor_usd\s+SET\s+DEFAULT\s+0/i);
+    expect(combined).toMatch(/credit_floor_usd\s+IS\s+NULL/i);
+  });
+
+  it('the post-deploy work is split across two files, one lock-heavy statement each', () => {
+    const dropDefault = migrationStatements(POST_DEPLOY_MIGRATIONS[0]);
+    const nullOut = migrationStatements(POST_DEPLOY_MIGRATIONS[1]);
+    expect(dropDefault).toMatch(/credit_floor_usd\s+DROP\s+DEFAULT/i);
+    expect(dropDefault).not.toMatch(/credit_floor_usd\s*=\s*NULL/i);
+    expect(nullOut).toMatch(/credit_floor_usd\s*=\s*NULL/i);
+    // ACCESS EXCLUSIVE (blocks reads) must not be held across the whole-table
+    // scan: the runner wraps each FILE in one transaction.
+    expect(nullOut).not.toMatch(/DROP\s+DEFAULT/i);
+  });
+});
+
+describeDb('credit_floor_usd migration phasing — live schema', () => {
+  let poolSchema: pg.Pool;
 
   beforeAll(async () => {
-    pool3 = new pg.Pool({ connectionString: config.controlDb.url });
+    poolSchema = new pg.Pool({ connectionString: config.controlDb.url });
   });
 
   afterAll(async () => {
-    await pool3.end();
+    await poolSchema.end();
   });
 
-  async function createOrg(planId: string | null): Promise<{ orgId: string; userId: string }> {
-    const suffix = crypto.randomUUID();
-    const client = await pool3.connect();
-    try {
-      await client.query('BEGIN');
-      const tmpId = crypto.randomUUID();
-      const orgResult = await client.query<{ id: string }>(
-        `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, monthly_allowance_usd, auto_refill_enabled, account_status)
-         VALUES ($1, 'phasing-test-org', true, $2, 0, 0, false, 'active')
-         RETURNING id`,
-        [tmpId, planId],
-      );
-      const orgId = orgResult.rows[0].id;
-      const userResult = await client.query<{ id: string }>(
-        `INSERT INTO platform_users (id, email, personal_organization_id)
-         VALUES ($1, $2, $3)
-         RETURNING id`,
-        [tmpId, `phasing-test-${suffix}@example.com`, orgId],
-      );
-      const userId = userResult.rows[0].id;
-      await client.query('COMMIT');
-      return { orgId, userId };
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-  }
+  it('the column shape matches the migration phase this DB is actually in', async () => {
+    const applied = await poolSchema.query<{ filename: string }>(
+      `SELECT filename FROM _migrations WHERE filename = ANY($1)`,
+      [POST_DEPLOY_MIGRATIONS],
+    );
+    const postDeployApplied = applied.rows.length > 0;
 
-  async function cleanupOrg(orgId: string, userId: string) {
-    await pool3.query(`DELETE FROM credit_leases WHERE organization_id = $1`, [orgId]);
-    await pool3.query(`DELETE FROM platform_users WHERE id = $1`, [userId]);
-    await pool3.query(`DELETE FROM organizations WHERE id = $1`, [orgId]);
-  }
+    const col = await poolSchema.query<{ column_default: string | null; is_nullable: string }>(
+      `SELECT column_default, is_nullable
+         FROM information_schema.columns
+        WHERE table_name = 'organizations' AND column_name = 'credit_floor_usd'`,
+    );
+    expect(col.rows).toHaveLength(1);
+    // Nullable in every phase — 098 makes it so, and the new code's COALESCE
+    // depends on it. A NOT NULL here means 098 was reverted.
+    expect(col.rows[0].is_nullable).toEqual('YES');
 
-  it('098-post/101-pre state: an explicit credit_floor_usd = 0 refuses at any negative balance', async () => {
-    // This is the state every existing org is left in by the phased 098:
-    // the column is nullable, but nothing has nulled it out yet, so it still
-    // reads as an explicit 0 — exactly what old code expects.
-    const { orgId, userId } = await createOrg('launch'); // plan floor -10, irrelevant: override wins
-    try {
-      await pool3.query(
-        `UPDATE organizations SET credits_usd = -0.01, monthly_allowance_usd = 0, credit_floor_usd = 0 WHERE id = $1`,
-        [orgId],
-      );
-      const res = await grantLease(pool3, {
-        userId, organizationId: orgId, region: 'us-east-1',
-        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
-      });
-      expect(res.leaseId).toBeNull();
-      expect(res.floorUsd).toBeCloseTo(0, 4);
-    } finally {
-      await cleanupOrg(orgId, userId);
-    }
-  });
+    const nulls = await poolSchema.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM organizations WHERE credit_floor_usd IS NULL`,
+    );
 
-  it('101-post state: NULL credit_floor_usd on a zero-floor plan refuses at any negative balance', async () => {
-    // This is the end state 101 produces: the explicit 0 is nulled out, so
-    // the floor is inherited from the plan (playground = 0). Must match the
-    // pre-101 behaviour above exactly.
-    const { orgId, userId } = await createOrg('playground');
-    try {
-      await pool3.query(
-        `UPDATE organizations SET credits_usd = -0.01, monthly_allowance_usd = 0, credit_floor_usd = NULL WHERE id = $1`,
-        [orgId],
+    if (!postDeployApplied) {
+      // Pre-deploy phase: old code may still be live, so it must never be able
+      // to observe a NULL — neither on an existing row nor on a fresh INSERT.
+      expect(col.rows[0].column_default, 'pre-deploy: DEFAULT 0 must still be attached').toEqual(
+        '0',
       );
-      const res = await grantLease(pool3, {
-        userId, organizationId: orgId, region: 'us-east-1',
-        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
-      });
-      expect(res.leaseId).toBeNull();
-      expect(res.floorUsd).toBeCloseTo(0, 4);
-    } finally {
-      await cleanupOrg(orgId, userId);
+      expect(nulls.rows[0].n, 'pre-deploy: no org may have a NULL credit_floor_usd').toEqual('0');
+    } else {
+      // Post-deploy phase: the default is gone and NULL means "inherit plan".
+      expect(col.rows[0].column_default).toBeNull();
     }
   });
 });

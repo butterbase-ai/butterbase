@@ -1,0 +1,72 @@
+-- @scope: platform
+-- 104: POST-DEPLOY (2 of 2). Null out the existing explicit-0 rows so they
+-- inherit from plans.credit_floor_usd.
+--
+-- ============================================================================
+-- DO NOT APPLY UNTIL THE NEW CODE IS LIVE — the deploy that ships lease-service
+-- reading the floor as
+-- COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0).
+-- "Live" means actually serving traffic with no old revision still handling
+-- requests, not merely deployed.
+-- ============================================================================
+--
+-- ORDERING: 098 → 099 → 100 → 101 (no-op) → 102 → DEPLOY code → 103 → **104**.
+--
+-- Before the new code exists, the OLD build reads the column directly as
+-- `parseFloat(row.credit_floor_usd)`. A NULL there becomes NaN, and
+-- `balance < NaN` is always false — every AI request is silently admitted
+-- regardless of balance. A total credit-control bypass with no error and no
+-- log signal. Running this file early, even by one deploy cycle, reproduces
+-- that bug for every org whose credit_floor_usd is 0, i.e. all of them until
+-- an operator sets a real override.
+--
+-- ============================================================================
+-- ROLLBACK PROCEDURE — READ BEFORE ROLLING THE CODE BACK
+-- ============================================================================
+-- Once this migration has run, rolling the image back to a build that reads
+-- credit_floor_usd WITHOUT COALESCE re-opens the bypass on EVERY org: all the
+-- rows this file nulled out read as NaN to the old code, so no request is ever
+-- refused for being below its floor. Nothing errors; the only symptom is
+-- unbounded negative balances discovered later in billing.
+--
+-- If you roll the code back, run this FIRST (it is migration 102 verbatim; it
+-- is idempotent and safe to run even if you are unsure whether 103/104 ran):
+--
+--   ALTER TABLE organizations ALTER COLUMN credit_floor_usd SET DEFAULT 0;
+--   UPDATE organizations SET credit_floor_usd = 0 WHERE credit_floor_usd IS NULL;
+--
+-- Order matters within the rollback too: SET DEFAULT first, so orgs created
+-- between the two statements are not born NULL.
+--
+-- Caveat to state plainly: this repair cannot distinguish an org that was
+-- inheriting its plan floor from one an operator deliberately set to NULL, so
+-- every org is pinned to a floor of 0 (no extended credit) until 103/104 are
+-- re-applied after the code rolls forward again. That is the conservative
+-- direction — orgs are refused slightly earlier than intended, rather than
+-- never refused at all. Re-apply 103 and 104 (both idempotent) once the
+-- COALESCE-reading code is live again.
+--
+-- IF YOU SKIP THE REPAIR: every AI request from every org is admitted
+-- regardless of balance, silently, for as long as the old code is live.
+-- ============================================================================
+--
+-- Split from 103 on purpose: the runner wraps each FILE in one BEGIN/COMMIT,
+-- and this UPDATE is an unindexed whole-table scan. Sharing a transaction with
+-- 103's ALTER would hold ACCESS EXCLUSIVE — which blocks READS — for the whole
+-- scan, stalling every grantLease platform-wide. Alone, this statement takes
+-- only ROW EXCLUSIVE and does not block readers.
+--
+-- Idempotent: re-running it matches only rows still at exactly 0.
+--
+-- What the `WHERE credit_floor_usd = 0` scoping does and does not do. It does
+-- NOT protect an org an operator deliberately pinned to 0: `0 = 0`, so such a
+-- row is nulled out like any other, both on the first run and on any re-run.
+-- What it actually buys is (a) rows already NULL — from an earlier run, or
+-- from the original unsplit 098 — are skipped, so a re-run touches 0 rows
+-- instead of rewriting the whole table, and (b) NON-ZERO per-org overrides are
+-- never clobbered. A deliberate floor of 0 is indistinguishable from the
+-- pre-migration default and cannot be preserved by SQL here; if an org must be
+-- pinned to 0, set it after this migration has run and know that re-running
+-- this file will clear it back to "inherit from plan".
+
+UPDATE organizations SET credit_floor_usd = NULL WHERE credit_floor_usd = 0;

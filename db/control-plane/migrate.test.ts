@@ -68,6 +68,30 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+describe('every control-plane migration declares a scope', () => {
+  // Guard for a defect that already shipped once: migrations 098-101 were
+  // committed without the `-- @scope:` header. migrate.ts THROWS on a missing
+  // header instead of skipping the file, and the throw is outside the loop's
+  // try, so a single header-less file aborts the entire run — every migration
+  // after it silently never applies. A fresh dev/self-host DB got none of them.
+  //
+  // This test globs the directory rather than listing filenames so a new
+  // migration cannot be added without a header.
+  const files = fs
+    .readdirSync(__dirname)
+    .filter((f) => f.endsWith('.sql') && !f.endsWith('.oss-only'))
+    .sort();
+
+  it('finds migration files to check', () => {
+    expect(files.length).toBeGreaterThan(0);
+  });
+
+  it.each(files)('%s has a valid @scope header on its first non-blank line', (file) => {
+    const sql = fs.readFileSync(path.join(__dirname, file), 'utf-8');
+    expect(() => parseScopeHeader(sql)).not.toThrow();
+  });
+});
+
 describe('migrations', () => {
   it('088_app_meetings_webhooks has correct column schema', async () => {
     const dbUrl = process.env.TEST_DATABASE_URL;

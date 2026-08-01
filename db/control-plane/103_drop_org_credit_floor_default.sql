@@ -1,0 +1,36 @@
+-- @scope: platform
+-- 103: POST-DEPLOY (1 of 2). Drop organizations.credit_floor_usd's DEFAULT so
+-- newly-created orgs inherit their plan's floor instead of being pinned to 0.
+--
+-- ============================================================================
+-- DO NOT APPLY UNTIL THE NEW CODE IS LIVE — the deploy that ships lease-service
+-- reading the floor as
+-- COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0).
+-- "Live" means actually serving traffic with no old revision still handling
+-- requests, not merely deployed.
+-- ============================================================================
+--
+-- ORDERING: 098 → 099 → 100 → 101 (no-op) → 102 → DEPLOY code → **103** → 104.
+--
+-- Applying this before the new code is live means every org INSERTed from that
+-- moment gets a NULL credit_floor_usd. The old build reads the column as
+-- `parseFloat(row.credit_floor_usd)`, not through COALESCE; NULL becomes NaN,
+-- and `balance < NaN` is always false — that org's credit floor is silently
+-- disabled, with no error and no log signal. Same bug as the 104 null-out,
+-- just via INSERT instead of UPDATE.
+--
+-- Split from 104 on purpose. The runner wraps each FILE in one BEGIN/COMMIT,
+-- so keeping the DROP DEFAULT and 104's whole-table UPDATE together would hold
+-- this statement's ACCESS EXCLUSIVE lock — which blocks READS, not just writes
+-- — for the entire duration of the unindexed scan, stalling every grantLease
+-- platform-wide. Alone in its own transaction, this is a catalog-only ALTER
+-- with no scan or rewrite: the ACCESS EXCLUSIVE window is sub-millisecond.
+-- (Same reasoning as 098's NOT VALID / 099 VALIDATE split.)
+--
+-- ROLLBACK: see 104's header. Rolling the code back after 103/104 without
+-- first running the repair re-opens the bypass.
+--
+-- Idempotent: DROP DEFAULT on a column with no default is a no-op.
+
+ALTER TABLE organizations
+  ALTER COLUMN credit_floor_usd DROP DEFAULT;

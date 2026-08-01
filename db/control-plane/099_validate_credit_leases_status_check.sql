@@ -1,3 +1,4 @@
+-- @scope: platform
 -- 099: Validate the credit_leases status CHECK added NOT VALID in 098.
 --
 -- Must be a separate FILE, not just a separate statement: the migration runner
