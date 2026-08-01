@@ -1,21 +1,29 @@
 import type pg from 'pg';
+import { MIN_LEASE_USD } from './ai-router/billing-gate.js';
 
 export interface ReclaimResult {
+  /** Leases that were actually refunded and marked 'reclaimed'. */
   reclaimed: number;
+  /** Nominal leases marked 'abandoned' — no refund, still settleable later. */
+  abandoned: number;
   totalCreditedUsd: number;
 }
 
-export interface ReclaimOptions {
-  /** Reserve-small mode: expired leases are nominal, so there is nothing worth
-   *  refunding, and the job may still settle later and must still bill. Mark
-   *  'abandoned' and leave the balance untouched. */
-  reserveSmall?: boolean;
-}
-
+/**
+ * Sweep expired leases. The decision is made PER LEASE, never on a global
+ * flag: a lease of MIN_LEASE_USD or less is a nominal reserve-small hold with
+ * nothing worth refunding, and its job may still complete and must still bill
+ * — so it is marked 'abandoned' and the balance is untouched. Anything larger
+ * is a real pre-debited reservation and is refunded and marked 'reclaimed'.
+ *
+ * Deciding per-lease is what makes AI_RESERVE_SMALL_ENABLED safe to flip in
+ * either direction while leases are in flight. Branching on the flag instead
+ * would confiscate real legacy reservations on flip-on, and would refund-then-
+ * silently-drop the charge on nominal leases on flip-off.
+ */
 export async function reclaimExpiredLeases(
   platformPool: pg.Pool,
   graceSeconds: number,
-  opts: ReclaimOptions = {}
 ): Promise<ReclaimResult> {
   const client = await platformPool.connect();
   try {
@@ -38,17 +46,23 @@ export async function reclaimExpiredLeases(
       [String(graceSeconds)]
     );
     let total = 0;
+    let reclaimedCount = 0;
+    let abandonedCount = 0;
     for (const row of rows) {
       const amt = parseFloat(row.amount_usd);
       const sourcePool = row.source_pool;
       const topupPortion = row.topup_amount_usd ? parseFloat(row.topup_amount_usd) : 0;
       const monthlyPortion = amt - topupPortion;
 
-      if (opts.reserveSmall) {
+      // Nominal hold: nothing meaningful to refund, and the job may still
+      // settle. Abandon it so settleLease can still bill it and so the
+      // aged-unsettled alert can see it.
+      if (amt <= MIN_LEASE_USD) {
         await client.query(
           `UPDATE credit_leases SET status = 'abandoned', reclaimed_at = now() WHERE lease_id = $1`,
           [row.lease_id]
         );
+        abandonedCount++;
         continue;
       }
 
@@ -84,9 +98,10 @@ export async function reclaimExpiredLeases(
         `UPDATE credit_leases SET status = 'reclaimed', reclaimed_at = now() WHERE lease_id = $1`,
         [row.lease_id]
       );
+      reclaimedCount++;
     }
     await client.query('COMMIT');
-    return { reclaimed: rows.length, totalCreditedUsd: total };
+    return { reclaimed: reclaimedCount, abandoned: abandonedCount, totalCreditedUsd: total };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;

@@ -181,7 +181,7 @@ describeDb('reclaimExpiredLeases — split pools', () => {
   });
 });
 
-describeDb('reclaimExpiredLeases — reserve-small mode', () => {
+describeDb('reclaimExpiredLeases — nominal vs real leases', () => {
   let pool: pg.Pool;
   let testUserId: string;
   let testOrgId: string;
@@ -224,7 +224,36 @@ describeDb('reclaimExpiredLeases — reserve-small mode', () => {
     await pool.end();
   });
 
-  it('marks expired leases abandoned without refunding', async () => {
+  beforeEach(async () => {
+    await pool.query('DELETE FROM credit_leases WHERE organization_id = $1', [testOrgId]);
+    await pool.query(
+      `UPDATE organizations SET monthly_allowance_usd = 0, credits_usd = 10, credit_floor_usd = -25 WHERE id = $1`,
+      [testOrgId],
+    );
+  });
+
+  const expire = async (leaseId: string | null) => {
+    await pool.query(
+      `UPDATE credit_leases SET expires_at = now() - interval '1 hour' WHERE lease_id = $1`,
+      [leaseId],
+    );
+  };
+  const statusOf = async (leaseId: string | null) => {
+    const st = await pool.query<{ status: string }>(
+      `SELECT status FROM credit_leases WHERE lease_id = $1`, [leaseId],
+    );
+    return st.rows[0].status;
+  };
+  const credits = async () => {
+    const u = await pool.query<{ c: string }>(
+      `SELECT credits_usd AS c FROM organizations WHERE id = $1`, [testOrgId],
+    );
+    return parseFloat(u.rows[0].c);
+  };
+
+  // The decision is per lease, not per flag — this is what makes the flag safe
+  // to flip in either direction while leases are in flight.
+  it('marks a nominal (MIN_LEASE_USD) expired lease abandoned without refunding', async () => {
     const g = await grantLease(pool, {
       userId: testUserId,
       organizationId: testOrgId,
@@ -233,27 +262,42 @@ describeDb('reclaimExpiredLeases — reserve-small mode', () => {
       ttlSeconds: 1,
       allowFloor: true,
     });
-    await pool.query(
-      `UPDATE credit_leases SET expires_at = now() - interval '1 hour' WHERE lease_id = $1`,
-      [g.leaseId],
-    );
+    await expire(g.leaseId);
 
-    const before = await pool.query<{ c: string }>(
-      `SELECT credits_usd AS c FROM organizations WHERE id = $1`,
-      [testOrgId],
-    );
-    await reclaimExpiredLeases(pool, 0, { reserveSmall: true });
-    const after = await pool.query<{ c: string }>(
-      `SELECT credits_usd AS c FROM organizations WHERE id = $1`,
-      [testOrgId],
-    );
+    const before = await credits();
+    const r = await reclaimExpiredLeases(pool, 0);
+    expect(await credits()).toBeCloseTo(before, 4); // no refund
+    expect(await statusOf(g.leaseId)).toBe('abandoned');
+    expect(r.abandoned).toBe(1);
+    expect(r.reclaimed).toBe(0);
+    expect(r.totalCreditedUsd).toBeCloseTo(0, 4);
+  });
 
-    expect(parseFloat(after.rows[0].c)).toBeCloseTo(parseFloat(before.rows[0].c), 4); // no refund
+  it('refunds a real reservation and abandons a nominal one in the same sweep', async () => {
+    // A legacy-style real reservation, e.g. a video job that pre-debited $3.60.
+    const real = await grantLease(pool, {
+      userId: testUserId, organizationId: testOrgId, region: 'us-east-1',
+      amountUsd: 3.6, ttlSeconds: 1,
+    });
+    // And a reserve-small nominal hold.
+    const nominal = await grantLease(pool, {
+      userId: testUserId, organizationId: testOrgId, region: 'us-east-1',
+      amountUsd: 0.0001, ttlSeconds: 1, allowFloor: true,
+    });
+    await expire(real.leaseId);
+    await expire(nominal.leaseId);
 
-    const st = await pool.query<{ status: string }>(
-      `SELECT status FROM credit_leases WHERE lease_id = $1`,
-      [g.leaseId],
-    );
-    expect(st.rows[0].status).toBe('abandoned');
+    // After both grants: 10 - 3.6 - 0.0001 = 6.3999.
+    expect(await credits()).toBeCloseTo(6.3999, 4);
+
+    const r = await reclaimExpiredLeases(pool, 0);
+
+    // Only the real reservation is refunded — the nominal one is not.
+    expect(await credits()).toBeCloseTo(9.9999, 4);
+    expect(await statusOf(real.leaseId)).toBe('reclaimed');
+    expect(await statusOf(nominal.leaseId)).toBe('abandoned');
+    expect(r.reclaimed).toBe(1);
+    expect(r.abandoned).toBe(1);
+    expect(r.totalCreditedUsd).toBeCloseTo(3.6, 4);
   });
 });
