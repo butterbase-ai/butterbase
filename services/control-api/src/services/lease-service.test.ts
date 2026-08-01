@@ -101,6 +101,33 @@ describeDb('grantLease — floor semantics', () => {
     expect(res.floorUsd).toBeCloseTo(-25, 4);
   });
 
+  // Boundary: balance EXACTLY equal to the floor. The admission test is
+  // `totalAvailable < floor`, so equality is ADMITTED. This is deliberate:
+  // the floor is the last usable point, not a line you must stay above.
+  // Rejecting at equality would buy nothing — a balance one hundredth of a
+  // cent above the floor admits the same job with the same overshoot — while
+  // making `credit_floor_usd = 0` silently mean "needs a strictly positive
+  // balance". Overshoot is bounded at one job either way, and every
+  // subsequent call is refused because the balance is then below the floor.
+  it('admits a request when the balance is EXACTLY at the floor', async () => {
+    await setBalance(0, -25, -25);
+    const res = await grantLease(pool, {
+      userId, organizationId: orgId, region: 'us-east-1',
+      amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+    });
+    expect(res.leaseId).not.toBeNull();
+    expect(res.balanceUsd).toBeCloseTo(-25, 4);
+    expect(res.floorUsd).toBeCloseTo(-25, 4);
+    // The grant pushes the balance below the floor...
+    expect((await balances()).topup).toBeCloseTo(-25.0001, 4);
+    // ...so the very next request is refused. One job of overshoot, no more.
+    const next = await grantLease(pool, {
+      userId, organizationId: orgId, region: 'us-east-1',
+      amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+    });
+    expect(next.leaseId).toBeNull();
+  });
+
   it('drains monthly before topup and never drives monthly negative', async () => {
     await setBalance(1, 5, -25);
     await grantLease(pool, {
