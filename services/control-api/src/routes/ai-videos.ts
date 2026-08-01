@@ -87,6 +87,34 @@ const IMAGE_ALIAS_KEYS = [
   'starting_image',
 ] as const;
 
+/**
+ * Mirror canonical `input_images` URL strings onto `frame_images`, the object
+ * shape some upstreams require for image-to-video:
+ *   `{ type: 'image_url', image_url: { url }, frame_type }`
+ *
+ * Why this lives in normalization and not in an adapter: adapters forward the
+ * body verbatim, so an upstream that only understands `frame_images` silently
+ * ignored `input_images` and returned a text-to-video result — no error, full
+ * charge, wrong video. Deriving the mirror here means the canonical shape keeps
+ * working for every router while adapters stay pure passthrough.
+ *
+ * `input_images` is deliberately left in place: routers that consume the
+ * canonical form still read it, and routers that don't ignore unknown keys.
+ *
+ * Positional mapping only — first URL is the opening frame, second is the
+ * closing frame. Three or more frames have no unambiguous positional reading,
+ * so no mirror is derived; such callers must send `frame_images` (or
+ * `input_references`) explicitly.
+ */
+function deriveFrameImages(urls: string[]): Array<Record<string, unknown>> | null {
+  if (urls.length === 0 || urls.length > 2) return null;
+  return urls.map((url, i) => ({
+    type: 'image_url',
+    image_url: { url },
+    frame_type: i === 0 ? 'first_frame' : 'last_frame',
+  }));
+}
+
 export const videoSubmitSchema = z.preprocess((raw) => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
   const src = raw as Record<string, unknown>;
@@ -96,11 +124,19 @@ export const videoSubmitSchema = z.preprocess((raw) => {
     if (typeof v === 'string' && v.length > 0) aliased.push(v);
     else if (Array.isArray(v)) for (const item of v) if (typeof item === 'string' && item.length > 0) aliased.push(item);
   }
-  if (aliased.length === 0) return raw;
   const next = { ...src };
-  for (const key of IMAGE_ALIAS_KEYS) delete next[key];
-  const existing = Array.isArray(next.input_images) ? (next.input_images as unknown[]).filter((x): x is string => typeof x === 'string') : [];
-  next.input_images = [...existing, ...aliased];
+  if (aliased.length > 0) {
+    for (const key of IMAGE_ALIAS_KEYS) delete next[key];
+    const existing = Array.isArray(next.input_images) ? (next.input_images as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+    next.input_images = [...existing, ...aliased];
+  }
+
+  // An explicit frame_images from the caller always wins — never overwrite it.
+  if (next.frame_images === undefined && Array.isArray(next.input_images)) {
+    const urls = (next.input_images as unknown[]).filter((x): x is string => typeof x === 'string');
+    const derived = deriveFrameImages(urls);
+    if (derived) next.frame_images = derived;
+  }
   return next;
 }, z.object({
   model: z.string(),
@@ -111,7 +147,13 @@ export const videoSubmitSchema = z.preprocess((raw) => {
   generate_audio: z.boolean().optional(),
   seed: z.number().int().optional(),
   input_images: z.array(z.string().url()).optional(),
-  input_references: z.array(z.string().url()).optional(),
+  // Seed imagery may be supplied either as flat URL strings (canonical shape,
+  // translated by adapters that need it) or in the upstream's own object shape
+  // — `{ type: 'image_url', image_url: { url }, frame_type? }`. Object entries
+  // are forwarded verbatim without inspection, so callers targeting a specific
+  // upstream can use its native vocabulary.
+  input_references: z.array(z.union([z.string().url(), z.record(z.unknown())])).optional(),
+  frame_images: z.array(z.record(z.unknown())).optional(),
   provider: z.record(z.unknown()).optional(),
 }).strict());
 

@@ -21,9 +21,14 @@ Actions:
                        Set defaultModel, allowedModels, maxTokensPerRequest (1–100000), or rotate BYOK.
   - get_usage         { app_id, startDate?, endDate? }
                        Aggregate token counts and costs over a window.
-  - submit_video      { app_id, model, prompt, duration?, resolution?, aspect_ratio?, generate_audio?, seed? }
+  - submit_video      { app_id, model, prompt, duration?, resolution?, aspect_ratio?, generate_audio?, seed?, input_images?, input_references?, frame_images?, provider? }
                        Submits an async video-generation job. Returns { job_id, status, polling_url }.
                        Poll the returned URL until status is "completed".
+                       For image-to-video, supply seed imagery in the shape the target model's
+                       upstream expects — frame_images / input_references objects are forwarded
+                       verbatim; input_images accepts plain HTTPS URL strings. Seed params are
+                       passed through without inspection, so consult list_models for the model's
+                       accepted vocabulary rather than assuming a single canonical form.
   - poll_video        { app_id, job_id }
                        Returns current { status, model, content_urls?, error?, created_at }.
                        When status is "completed", content_urls contains absolute URLs (same origin
@@ -119,6 +124,8 @@ drive the SDK from inside a function or DO.`,
       size: z.string().optional().describe('For submit_image: e.g. "1024x1024", "1K", "2K", "4K" (model-specific)'),
       n: z.number().int().positive().max(10).optional().describe('For submit_image: number of images (GPT Image only)'),
       input_images: z.array(z.string().url()).max(14).optional().describe('For submit_image / submit_video: HTTPS URLs for reference / image-to-image / edit source'),
+      input_references: z.array(z.union([z.string().url(), z.record(z.unknown())])).max(14).optional().describe('For submit_video: style/content reference images (reference-to-video). HTTPS URL strings, or the upstream\'s native object form, forwarded as-is'),
+      frame_images: z.array(z.record(z.unknown())).max(14).optional().describe('For submit_video: seed frames in the upstream\'s native object form, forwarded as-is — e.g. { type: "image_url", image_url: { url }, frame_type: "first_frame" | "last_frame" }'),
       mask: z.string().url().optional().describe('For submit_image: HTTPS URL of alpha mask (GPT Image 2 edit mode)'),
       negative_prompt: z.string().optional().describe('For submit_image: text of what to avoid (Wan 2.6 only)'),
       provider: z.record(z.unknown()).optional().describe('For submit_image: model-specific passthrough params (e.g. bbox_list, quality, optimize_prompt_options)'),
@@ -217,15 +224,17 @@ drive the SDK from inside a function or DO.`,
             if (!args.model) {
               return { content: [{ type: 'text' as const, text: 'Error: "model" is required for "submit_video".' }], isError: true as const };
             }
-            result = await apiPost(`/v1/${app_id}/videos/completions`, {
-              model: args.model,
-              prompt: args.prompt,
-              duration: args.duration,
-              resolution: args.resolution,
-              aspect_ratio: args.aspect_ratio,
-              generate_audio: args.generate_audio,
-              seed: args.seed,
-            });
+            const videoBody: Record<string, unknown> = { model: args.model, prompt: args.prompt };
+            if (args.duration !== undefined) videoBody.duration = args.duration;
+            if (args.resolution !== undefined) videoBody.resolution = args.resolution;
+            if (args.aspect_ratio !== undefined) videoBody.aspect_ratio = args.aspect_ratio;
+            if (args.generate_audio !== undefined) videoBody.generate_audio = args.generate_audio;
+            if (args.seed !== undefined) videoBody.seed = args.seed;
+            if (args.input_images !== undefined) videoBody.input_images = args.input_images;
+            if (args.input_references !== undefined) videoBody.input_references = args.input_references;
+            if (args.frame_images !== undefined) videoBody.frame_images = args.frame_images;
+            if (args.provider !== undefined) videoBody.provider = args.provider;
+            result = await apiPost(`/v1/${app_id}/videos/completions`, videoBody);
             break;
           }
           case 'poll_video': {

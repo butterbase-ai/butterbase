@@ -318,6 +318,13 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     };
   }
 
+  /**
+   * Seed imagery is forwarded verbatim in whatever shape the caller supplied —
+   * this upstream names the fields `frame_images` (temporal positioning via
+   * `frame_type`) and `input_references` (style guidance, no positioning), and
+   * the route accepts those names directly rather than translating them here.
+   * The adapter deliberately does not inspect or reshape request parameters.
+   */
   async function submitVideo(
     req: VideoGenerationRequest,
     upstreamId: string,

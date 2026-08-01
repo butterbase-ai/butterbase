@@ -40,7 +40,14 @@ export interface VideoGenerationRequest {
   generate_audio?: boolean;
   seed?: number;
   input_images?: string[];
-  input_references?: string[];
+  /**
+   * Either flat URL strings (canonical) or upstream-native objects, which are
+   * forwarded verbatim. Adapters that translate should handle only the string
+   * form and pass objects through untouched.
+   */
+  input_references?: Array<string | Record<string, unknown>>;
+  /** Upstream-native seed-frame objects, forwarded verbatim without inspection. */
+  frame_images?: Array<Record<string, unknown>>;
   provider?: Record<string, unknown>;
 }
 

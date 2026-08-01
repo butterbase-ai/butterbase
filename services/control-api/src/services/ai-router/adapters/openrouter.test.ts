@@ -260,6 +260,69 @@ describe('openrouterAdapter — video', () => {
     });
   });
 
+  /**
+   * Captures the body of a single submitVideo call.
+   */
+  async function captureVideoBody(req: any) {
+    let captured: any = null;
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit | undefined) => {
+      captured = JSON.parse((init?.body as string) ?? '{}');
+      return new Response(JSON.stringify({
+        id: 'job-abc',
+        polling_url: 'https://openrouter.ai/api/v1/videos/job-abc',
+        status: 'pending',
+      }), { status: 202, headers: { 'Content-Type': 'application/json' } });
+    });
+    const adapter = openrouterAdapter({ apiKey: 'sk-test', fetch: fetchMock as any });
+    await adapter.submitVideo!(req, req.model);
+    return captured;
+  }
+
+  // Seed imagery must reach the upstream byte-for-byte as the caller sent it:
+  // the adapter does not inspect, reshape, or re-key request parameters.
+  it('submitVideo forwards frame_images verbatim', async () => {
+    const frames = [
+      { type: 'image_url', image_url: { url: 'https://example.com/a.jpg' }, frame_type: 'first_frame' },
+      { type: 'image_url', image_url: { url: 'https://example.com/b.jpg' }, frame_type: 'last_frame' },
+    ];
+    const body = await captureVideoBody({
+      model: 'bytedance/seedance-1-5-pro',
+      prompt: 'morph',
+      frame_images: frames,
+    });
+    expect(body.frame_images).toEqual(frames);
+  });
+
+  it('submitVideo forwards input_references verbatim in object form', async () => {
+    const refs = [{ type: 'image_url', image_url: { url: 'https://example.com/ref.jpg' } }];
+    const body = await captureVideoBody({
+      model: 'bytedance/seedance-1-5-pro',
+      prompt: 'reference guided',
+      input_references: refs,
+    });
+    expect(body.input_references).toEqual(refs);
+  });
+
+  it('submitVideo forwards unknown passthrough keys untouched', async () => {
+    const body = await captureVideoBody({
+      model: 'bytedance/seedance-1-5-pro',
+      prompt: 'x',
+      duration: 8,
+      some_future_param: { nested: true },
+    });
+    expect(body.duration).toBe(8);
+    expect(body.some_future_param).toEqual({ nested: true });
+  });
+
+  it('submitVideo sends no image fields for text-to-video', async () => {
+    const body = await captureVideoBody({
+      model: 'bytedance/seedance-1-5-pro',
+      prompt: 'just text',
+    });
+    expect(body.frame_images).toBeUndefined();
+    expect(body.input_references).toBeUndefined();
+  });
+
   it('pollVideo GETs the polling url and returns terminal state with cost', async () => {
     const fetchMock = vi.fn(async (url: string, init: RequestInit | undefined) => {
       expect(url).toBe('https://openrouter.ai/api/v1/videos/job-abc');
