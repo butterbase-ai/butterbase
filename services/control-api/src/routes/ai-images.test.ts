@@ -146,7 +146,7 @@ describe('handleImageError', () => {
     const app = makeApp({ rows: [dbRow] });
     const reply = makeReply();
 
-    const error = new InsufficientCreditsError(0.05, 0.01);
+    const error = new InsufficientCreditsError({ balanceUsd: 0.01, floorUsd: 0.05 });
     await handleImageError(app, reply, 'org-1', error);
 
     expect(reply._sent.code).toBe(402);

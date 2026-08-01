@@ -154,7 +154,7 @@ describe('POST /v1/chat/completions', () => {
 
   it('5. InsufficientCreditsError → 402 billing_error / insufficient_credits with required_usd and available_usd', async () => {
     app = await buildTestApp({ userId: 'user-jwt-credits', authMethod: 'jwt', scopes: [] });
-    mockRouteChatCompletion.mockRejectedValueOnce(new (InsufficientCreditsError as any)(0.05, 0.01));
+    mockRouteChatCompletion.mockRejectedValueOnce(new (InsufficientCreditsError as any)({ balanceUsd: 0.01, floorUsd: 0.05 }));
 
     const r = await app.inject({
       method: 'POST',

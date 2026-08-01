@@ -340,8 +340,8 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         return reply.code(402).send({
           error: 'insufficient_credits',
           code: 'INSUFFICIENT_CREDITS',
-          required_usd: error.requiredUsd,
-          available_usd: error.availableUsd,
+          required_usd: error.floorUsd,
+          available_usd: error.balanceUsd,
           monthly_allowance_usd: ar.monthlyAllowanceUsd,
           credits_usd: ar.topupUsd,
           auto_refill_enabled: ar.enabled,
@@ -435,7 +435,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         }));
         return reply.code(402).send({
           error: 'insufficient_credits', code: 'INSUFFICIENT_CREDITS',
-          required_usd: error.requiredUsd, available_usd: error.availableUsd,
+          required_usd: error.floorUsd, available_usd: error.balanceUsd,
           monthly_allowance_usd: ar.monthlyAllowanceUsd,
           credits_usd: ar.topupUsd,
           auto_refill_enabled: ar.enabled,
