@@ -1087,7 +1087,7 @@ describe('billedVideoCostUsd', () => {
     expect(cost).toBeCloseTo(0.7875, 6);
   });
 
-  it('falls back to sibling router pricing when chosen router has none', async () => {
+  it('does NOT fall back to sibling router pricing when chosen router has none (returns null)', async () => {
     const { billedVideoCostUsd } = await import('./router.js');
     const e = {
       ...entry,
@@ -1099,8 +1099,8 @@ describe('billedVideoCostUsd', () => {
       ],
     };
     const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 4, resolution: '480p' }, 'provider-tertiary' as any);
-    // 0.09 * 4 = 0.36
-    expect(cost).toBeCloseTo(0.36, 6);
+    // Must NOT bill at provider-secondary's 0.09 rate — that router never served the request.
+    expect(cost).toBeNull();
   });
 
   it('returns null when no router has parseable pricing', async () => {
@@ -1115,7 +1115,7 @@ describe('billedVideoCostUsd', () => {
     expect(cost).toBeNull();
   });
 
-  it('floor of $0.05 is applied even at settle time', async () => {
+  it('the $0.05 reservation floor is NOT applied at settle time', async () => {
     const { billedVideoCostUsd } = await import('./router.js');
     const e = {
       ...entry,
@@ -1125,7 +1125,42 @@ describe('billedVideoCostUsd', () => {
       ],
     };
     const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 1, resolution: '480p' }, 'provider-tertiary' as any);
-    expect(cost).toBe(0.05);
+    // 0.001 * 1 = 0.001, not floored to 0.05
+    expect(cost).toBeCloseTo(0.001, 6);
+  });
+});
+
+describe('billedVideoCostUsd — settle-time correctness', () => {
+  const entry = (routers: any[]) => ({ canonicalId: 'x/y', displayName: 'X', updatedAt: '', routers }) as any;
+  const perSecond = (name: string, rate: number) => ({
+    name, upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+    contextLength: 0, modality: 'video',
+    rawPricing: { unit: 'second', variants: [{ spec: '1080p', pricePerSecond: rate }] },
+  });
+
+  it('bills above the old $9 ceiling', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = entry([perSecond('openrouter', 1.0)]);
+    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 60, resolution: '1080p' }, 'openrouter' as any);
+    expect(cost).toBeCloseTo(60, 4);   // not clamped to 9
+  });
+
+  it('bills below the old $0.05 floor', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = entry([perSecond('openrouter', 0.001)]);
+    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 4, resolution: '1080p' }, 'openrouter' as any);
+    expect(cost).toBeCloseTo(0.004, 4); // not floored to 0.05
+  });
+
+  it('returns null rather than billing a sibling router\'s rate', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = entry([
+      { name: 'openrouter', upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+        contextLength: 0, modality: 'video', rawPricing: { pricing_skus: { video_tokens: '0.0000024' } } },
+      perSecond('provider-secondary', 5.0),
+    ]);
+    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 10, resolution: '1080p' }, 'openrouter' as any);
+    expect(cost).toBeNull();
   });
 });
 

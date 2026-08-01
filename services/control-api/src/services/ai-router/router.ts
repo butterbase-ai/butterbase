@@ -656,6 +656,16 @@ function clampVideoCost(ratePerSecond: number, req: VideoGenerationRequest, with
 }
 
 /**
+ * Settle-time cost: rate x seconds, unclamped. The [$0.05, $9] bounds exist to
+ * stop a bad SKU producing an absurd RESERVATION; applied to a CHARGE they
+ * under-bill expensive jobs and over-bill cheap ones.
+ */
+function billedVideoCost(ratePerSecond: number, req: VideoGenerationRequest): number {
+  const seconds = req.duration ?? 10;
+  return Math.max(0, +(ratePerSecond * seconds).toFixed(6));
+}
+
+/**
  * Pick the rate-per-second to use, scanning all routers' rawPricing.
  * Returns null when no router has a parseable pricing shape.
  *
@@ -702,23 +712,49 @@ export function estimateVideoCostUsd(
 }
 
 /**
+ * Settle-time rate for exactly the router that served the request. Unlike
+ * resolveRateForRequest, this never substitutes another router's pricing —
+ * billing a customer at a provider that did not serve them is indefensible.
+ */
+function rateForServingRouter(
+  entry: import('./catalog.js').CatalogEntry,
+  req: VideoGenerationRequest,
+  router: RouterName,
+): number | null {
+  const r = entry.routers.find(x => x.name === router);
+  return r ? ratePerSecondFromRouter(r.rawPricing, req) : null;
+}
+
+/**
  * Compute settled billing cost for a completed video job — used at poll
- * time when the upstream's `providerCostUsd` is unavailable. Pins to the
- * chosen router's pricing variants (so a 480p text-to-video request bills
- * at the 480p text rate, not the worst-case 1080p rate) and does NOT apply
- * the lease buffer (this is the exact bill, not a reservation estimate).
+ * time when the upstream's `providerCostUsd` is unavailable. Pins strictly
+ * to the chosen router's pricing variants (so a 480p text-to-video request
+ * bills at the 480p text rate, not the worst-case 1080p rate) and does NOT
+ * apply the lease buffer or the [$0.05, $9] reservation clamp (this is the
+ * exact bill, not a reservation estimate).
  *
- * Returns null when neither the chosen router nor any sibling has parseable
- * pricing — the caller can decide whether to charge $0 (safer for goodwill)
- * or fall back to VIDEO_DEFAULT_ESTIMATE_USD (safer for revenue).
+ * Returns null when the chosen router has no parseable pricing. Unlike
+ * estimateVideoCostUsd, this never falls through to a sibling router's
+ * rate — billing at a provider that did not serve the request is wrong
+ * regardless of direction.
  */
 export function billedVideoCostUsd(
   entry: import('./catalog.js').CatalogEntry,
   req: VideoGenerationRequest,
   chosenRouter: RouterName,
 ): number | null {
-  const rate = resolveRateForRequest(entry, req, chosenRouter);
-  return rate !== null ? clampVideoCost(rate, req, /*withBuffer*/ false) : null;
+  const rate = rateForServingRouter(entry, req, chosenRouter);
+  if (rate === null) {
+    // Caller (routes/ai-videos.ts) only reaches here when the upstream did
+    // not report providerCostUsd, so a null result here means the job is
+    // about to be settled for $0 with no cost signal at all. That's a
+    // silent revenue loss unless someone is watching for it.
+    console.warn('[billing] uncosted_job', JSON.stringify({
+      event: 'billing.uncosted_job', model: req.model, router: chosenRouter,
+    }));
+    return null;
+  }
+  return billedVideoCost(rate, req);
 }
 
 /**
