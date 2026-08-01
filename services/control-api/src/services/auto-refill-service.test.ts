@@ -76,7 +76,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '0',
-        credits_usd: '1', auto_refill_enabled: false,
+        credits_usd: '0', auto_refill_enabled: false,
         auto_refill_amount_usd: '20',
       }) },
     });
@@ -89,7 +89,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '0',
-        credits_usd: '1', auto_refill_enabled: true,
+        credits_usd: '0', auto_refill_enabled: true,
         auto_refill_amount_usd: null,
       }) },
     });
@@ -102,7 +102,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '0',
-        credits_usd: '1', auto_refill_enabled: true,
+        credits_usd: '0', auto_refill_enabled: true,
         auto_refill_amount_usd: '20',
       }) },
       redis: { set: vi.fn(async () => null), del: vi.fn() },
@@ -117,7 +117,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '0',
-        credits_usd: '2', auto_refill_enabled: true,
+        credits_usd: '0', auto_refill_enabled: true,
         auto_refill_amount_usd: '20',
       }) },
       stripeCharge: vi.fn(async () => ({ status: 'succeeded', paymentIntentId: 'pi_123' })),
@@ -137,7 +137,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '0',
-        credits_usd: '2', auto_refill_enabled: true,
+        credits_usd: '0', auto_refill_enabled: true,
         auto_refill_amount_usd: '20',
       }, ['owner1@example.com', 'owner2@example.com']) },
       stripeCharge: vi.fn(async () => ({ status: 'failed', paymentIntentId: '', failureReason: 'card_declined' })),
@@ -164,7 +164,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '0',
-        credits_usd: '2', auto_refill_enabled: true,
+        credits_usd: '0', auto_refill_enabled: true,
         auto_refill_amount_usd: '20',
       }) },
       stripeCharge: vi.fn(async () => { throw new Error('network'); }),
@@ -175,7 +175,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     expect(deps.redis.del).toHaveBeenCalled();
   });
 
-  it('no-op when monthly_allowance > 0 (even if topup < 5)', async () => {
+  it('no-op when monthly_allowance > 0 and combined balance is still positive', async () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '3',
@@ -190,7 +190,7 @@ describe('maybeTriggerAutoRefill — gating', () => {
     expect(deps.stripeCharge).not.toHaveBeenCalled();
   });
 
-  it('triggers when monthly == 0 AND topup < 5', async () => {
+  it('does NOT trigger merely because monthly == 0 and topup is below the old $5 threshold (combined still positive)', async () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
         monthly_allowance_usd: '0',
@@ -198,7 +198,41 @@ describe('maybeTriggerAutoRefill — gating', () => {
         auto_refill_enabled: true,
         auto_refill_amount_usd: '20',
       }) },
+    });
+    const r = await maybeTriggerAutoRefill(deps as any, ORG);
+    expect(r.attempted).toBe(false);
+    expect(r.reason).toBe('not_low');
+    expect(deps.stripeCharge).not.toHaveBeenCalled();
+  });
+
+  it('triggers exactly when combined balance crosses zero (monthly + topup <= 0)', async () => {
+    const deps = makeDeps({
+      pool: { query: makePoolQuery({
+        monthly_allowance_usd: '0',
+        credits_usd: '0',
+        auto_refill_enabled: true,
+        auto_refill_amount_usd: '20',
+      }) },
       stripeCharge: vi.fn(async () => ({ status: 'succeeded', paymentIntentId: 'pi_x' })),
+      grantAutoRefill: vi.fn(async () => ({ granted: 20 })),
+    });
+    const r = await maybeTriggerAutoRefill(deps as any, ORG);
+    expect(r.attempted).toBe(true);
+    expect(r.status).toBe('succeeded');
+  });
+
+  it('triggers before the negative floor is exhausted even when monthly_allowance is still positive', async () => {
+    // Regression for the bug this task fixes: a positive monthly_allowance
+    // used to block refill entirely, letting credits_usd burn all the way
+    // down through the negative credit_floor_usd band before topping up.
+    const deps = makeDeps({
+      pool: { query: makePoolQuery({
+        monthly_allowance_usd: '10',
+        credits_usd: '-15',
+        auto_refill_enabled: true,
+        auto_refill_amount_usd: '20',
+      }) },
+      stripeCharge: vi.fn(async () => ({ status: 'succeeded', paymentIntentId: 'pi_y' })),
       grantAutoRefill: vi.fn(async () => ({ granted: 20 })),
     });
     const r = await maybeTriggerAutoRefill(deps as any, ORG);

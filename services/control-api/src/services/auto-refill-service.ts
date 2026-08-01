@@ -82,7 +82,9 @@ export async function maybeTriggerAutoRefill(deps: Deps, organizationId: string)
   const topup = parseFloat(u.credits_usd);
   const amount = u.auto_refill_amount_usd ? parseFloat(u.auto_refill_amount_usd) : 0;
 
-  if (monthly > 0 || topup >= 5) return { attempted: false, reason: 'not_low' };
+  // Fire on crossing zero, not on reaching the floor — otherwise the org burns
+  // the entire negative band (down to credit_floor_usd) before topping up.
+  if (monthly + topup > 0) return { attempted: false, reason: 'not_low' };
   if (!u.auto_refill_enabled || amount <= 0) return { attempted: false, reason: 'disabled' };
 
   const lockKey = LOCK_KEY_PREFIX + organizationId;
