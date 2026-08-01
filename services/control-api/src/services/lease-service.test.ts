@@ -120,4 +120,113 @@ describeDb('grantLease — floor semantics', () => {
     });
     expect(res.amountGranted).toBeCloseTo(0.5, 4);
   });
+
+  it('rejects non-positive amountUsd', async () => {
+    await expect(
+      grantLease(pool, { userId, organizationId: orgId, region: 'us-east-1', amountUsd: 0, ttlSeconds: 60 })
+    ).rejects.toThrow();
+  });
+
+  // Back-ported from the pre-existing (dead, pre-multi-org) suite this file
+  // replaced. These assert the classification/refund-routing behavior that
+  // this diff's rounding change (`topupDraw = +(...).toFixed(4)`) touches,
+  // and that Task 4's settleLease rewrite will need as a regression guard.
+  // Written against CURRENT settleLease semantics (clamping) — not Task 4's
+  // future behavior.
+  describe('grantLease — source pool attribution', () => {
+    it('draws from monthly when monthly covers the full amount', async () => {
+      await setBalance(10, 5, -25);
+      const r = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'test', amountUsd: 4, ttlSeconds: 60,
+      });
+      expect(r.amountGranted).toBeCloseTo(4, 4);
+      const b = await balances();
+      expect(b.monthly).toBeCloseTo(6, 4);
+      expect(b.topup).toBeCloseTo(5, 4);
+      const l = await pool.query(
+        `SELECT source_pool, topup_amount_usd FROM credit_leases WHERE lease_id = $1`,
+        [r.leaseId],
+      );
+      expect(l.rows[0].source_pool).toBe('monthly');
+      expect(l.rows[0].topup_amount_usd).toBeNull();
+    });
+
+    it('draws from topup when monthly is empty', async () => {
+      await setBalance(0, 5, -25);
+      const r = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'test', amountUsd: 2, ttlSeconds: 60,
+      });
+      expect(r.amountGranted).toBeCloseTo(2, 4);
+      const b = await balances();
+      expect(b.topup).toBeCloseTo(3, 4);
+      const l = await pool.query(
+        `SELECT source_pool FROM credit_leases WHERE lease_id = $1`,
+        [r.leaseId],
+      );
+      expect(l.rows[0].source_pool).toBe('topup');
+    });
+
+    it('splits when monthly is insufficient but combined covers', async () => {
+      await setBalance(1, 5, -25);
+      const r = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'test', amountUsd: 3, ttlSeconds: 60,
+      });
+      expect(r.amountGranted).toBeCloseTo(3, 4);
+      const b = await balances();
+      expect(b.monthly).toBeCloseTo(0, 4);
+      expect(b.topup).toBeCloseTo(3, 4); // 5 - 2
+      const l = await pool.query(
+        `SELECT source_pool, amount_usd, topup_amount_usd FROM credit_leases WHERE lease_id = $1`,
+        [r.leaseId],
+      );
+      expect(l.rows[0].source_pool).toBe('split');
+      expect(parseFloat(l.rows[0].amount_usd)).toBeCloseTo(3, 4);
+      expect(parseFloat(l.rows[0].topup_amount_usd)).toBeCloseTo(2, 4);
+    });
+  });
+
+  describe('settleLease — refund routing', () => {
+    it('refunds a monthly-only lease back to monthly_allowance_usd', async () => {
+      await setBalance(10, 0, -25);
+      const grant = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'test', amountUsd: 4, ttlSeconds: 60,
+      });
+      if (!grant.leaseId) throw new Error('grant failed');
+      const r = await settleLease(pool, { leaseId: grant.leaseId, actualUsd: 1 });
+      expect(r.refundedUsd).toBeCloseTo(3, 4);
+      const b = await balances();
+      expect(b.monthly).toBeCloseTo(9, 4);
+      expect(b.topup).toBeCloseTo(0, 4);
+    });
+
+    it('refunds a topup-only lease back to credits_usd', async () => {
+      await setBalance(0, 10, -25);
+      const grant = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'test', amountUsd: 4, ttlSeconds: 60,
+      });
+      if (!grant.leaseId) throw new Error('grant failed');
+      const r = await settleLease(pool, { leaseId: grant.leaseId, actualUsd: 1 });
+      expect(r.refundedUsd).toBeCloseTo(3, 4);
+      const b = await balances();
+      expect(b.monthly).toBeCloseTo(0, 4);
+      expect(b.topup).toBeCloseTo(9, 4);
+    });
+
+    it('split-pool refund pro-rates back to both pools', async () => {
+      // grant: monthly=1, topup=10, amount=3 -> monthlyDraw=1, topupDraw=2.
+      // After grant: monthly=0, topup=8. settle actual=0.6 -> refund=2.4.
+      // monthlyPortion=1, topupPortion=2 of granted=3.
+      // monthlyRefund = 2.4 * 1 / 3 = 0.8; topupRefund = 2.4 - 0.8 = 1.6.
+      await setBalance(1, 10, -25);
+      const grant = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'test', amountUsd: 3, ttlSeconds: 60,
+      });
+      if (!grant.leaseId) throw new Error('grant failed');
+      const r = await settleLease(pool, { leaseId: grant.leaseId, actualUsd: 0.6 });
+      expect(r.refundedUsd).toBeCloseTo(2.4, 4);
+      const b = await balances();
+      expect(b.monthly).toBeCloseTo(0.8, 3);
+      expect(b.topup).toBeCloseTo(9.6, 3); // 8 + 1.6
+    });
+  });
 });
