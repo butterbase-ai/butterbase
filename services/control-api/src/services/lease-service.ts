@@ -38,14 +38,27 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     // is the app's owning org (AI gateway) or an explicit billing subject.
     // No implicit personal-org fallback at this layer.
     const organizationId = args.organizationId;
+    // Floor resolution: COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0)
+    // — a per-org override beats the plan's tier default, which beats 0 when
+    // there is no plan at all (plan_id NULL or dangling).
+    //
+    // `FOR UPDATE OF o` on purpose: this SELECT joins plans, and a bare
+    // `FOR UPDATE` on a join takes row locks on BOTH tables. Locking a shared
+    // plan row on every AI request would serialise unrelated traffic across
+    // every org on that tier and risks deadlock. Scoping the lock to `o`
+    // leaves plans unlocked; organizations is the only row this function
+    // mutates.
     const u = await client.query<{
       monthly_allowance_usd: string;
       credits_usd: string;
       credit_floor_usd: string;
     }>(
-      `SELECT monthly_allowance_usd, credits_usd, credit_floor_usd
-       FROM organizations
-       WHERE id = $1 FOR UPDATE`,
+      `SELECT o.monthly_allowance_usd,
+              o.credits_usd,
+              COALESCE(o.credit_floor_usd, p.credit_floor_usd, 0) AS credit_floor_usd
+       FROM organizations o
+       LEFT JOIN plans p ON p.id = o.plan_id
+       WHERE o.id = $1 FOR UPDATE OF o`,
       [organizationId]
     );
     if (u.rows.length === 0) throw new NotFoundError('organization', organizationId);

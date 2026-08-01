@@ -9,18 +9,47 @@
 -- back this migration while the code is live is not.)
 --
 -- credit_floor_usd: how far below zero an org's combined balance may go before
--- new AI calls are refused. 0 preserves today's behaviour (no credit extended),
--- so this migration is behaviour-neutral until per-tier defaults are set.
+-- new AI calls are refused. Resolution is COALESCE(organizations.credit_floor_usd,
+-- plans.credit_floor_usd, 0) — the org column is a per-org OVERRIDE, NULL means
+-- "inherit the plan's tier default". plans.credit_floor_usd carries the tier
+-- default and is NOT NULL (every plan has one; 0 is the safe/no-credit value).
 --
 -- 'abandoned': a lease whose TTL elapsed without settling. Distinct from
 -- 'reclaimed' because it is NOT refunded — a nominal reservation has nothing
 -- worth refunding, and the job may still settle later and must still bill.
 
-ALTER TABLE organizations
+ALTER TABLE plans
   ADD COLUMN IF NOT EXISTS credit_floor_usd NUMERIC(10,4) NOT NULL DEFAULT 0;
 
+COMMENT ON COLUMN plans.credit_floor_usd IS
+  'Tier default for how far below zero an org on this plan may go before new AI calls are refused. Zero or negative. Overridden per-org by organizations.credit_floor_usd when that column is non-NULL.';
+
+-- organizations.credit_floor_usd is NULLABLE on purpose: NULL means "inherit
+-- from plans.credit_floor_usd", a non-NULL value is a per-org override. It must
+-- NOT carry a DEFAULT — a default of 0 would re-pin every newly created org to
+-- 0 as an explicit override, defeating plan inheritance the moment the row is
+-- inserted.
+ALTER TABLE organizations
+  ADD COLUMN IF NOT EXISTS credit_floor_usd NUMERIC(10,4);
+
+ALTER TABLE organizations
+  ALTER COLUMN credit_floor_usd DROP DEFAULT;
+
+ALTER TABLE organizations
+  ALTER COLUMN credit_floor_usd DROP NOT NULL;
+
+-- All 171 existing orgs were backfilled to credit_floor_usd = 0 by the
+-- NOT NULL DEFAULT 0 this migration originally added. Left as-is, relaxing the
+-- NOT NULL turns those zeros into explicit per-org overrides that beat the
+-- plan default — every tier would silently stay pinned at 0, the exact bug
+-- this change exists to fix. Null them out so they inherit from the plan
+-- instead. Scoped to = 0 (not a blanket NULL-everything) so a real future
+-- override of 0 — an org deliberately pinned to "no credit" despite its plan
+-- — survives a re-run of this migration.
+UPDATE organizations SET credit_floor_usd = NULL WHERE credit_floor_usd = 0;
+
 COMMENT ON COLUMN organizations.credit_floor_usd IS
-  'Minimum combined (monthly_allowance_usd + credits_usd) balance before new AI calls are refused. Zero or negative. Negative values extend credit.';
+  'Per-org override of the combined-balance floor before new AI calls are refused. NULL inherits plans.credit_floor_usd. Zero or negative when set. Negative values extend credit.';
 
 -- Added NOT VALID on purpose. A plain ADD CONSTRAINT ... CHECK takes
 -- ACCESS EXCLUSIVE on credit_leases and full-scans it to validate, blocking

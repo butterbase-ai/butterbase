@@ -404,3 +404,148 @@ describeDb('grantLease — floor semantics', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------
+// Plan-floor inheritance (Task 13). organizations.credit_floor_usd is
+// nullable: NULL means "inherit plans.credit_floor_usd", a non-NULL value is
+// a per-org override. Resolution is
+//   COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0).
+//
+// These tests create their own orgs (varying plan_id and the floor override)
+// rather than reusing the fixture above, which is pinned to plan_id
+// 'playground'. Each follows the same owner_id / personal_organization_id
+// circular-FK pattern as the outer beforeAll: pre-generate a UUID and insert
+// both rows inside one BEGIN/COMMIT.
+// ---------------------------------------------------------------------
+describeDb('grantLease — plan floor inheritance', () => {
+  let pool2: pg.Pool;
+
+  beforeAll(async () => {
+    pool2 = new pg.Pool({ connectionString: config.controlDb.url });
+  });
+
+  afterAll(async () => {
+    await pool2.end();
+  });
+
+  async function createOrg(planId: string | null): Promise<{ orgId: string; userId: string }> {
+    const suffix = crypto.randomUUID();
+    const client = await pool2.connect();
+    try {
+      await client.query('BEGIN');
+      const tmpId = crypto.randomUUID();
+      const orgResult = await client.query<{ id: string }>(
+        `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, monthly_allowance_usd, auto_refill_enabled, account_status)
+         VALUES ($1, 'plan-floor-test-org', true, $2, 0, 0, false, 'active')
+         RETURNING id`,
+        [tmpId, planId],
+      );
+      const orgId = orgResult.rows[0].id;
+      const userResult = await client.query<{ id: string }>(
+        `INSERT INTO platform_users (id, email, personal_organization_id)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [tmpId, `plan-floor-test-${suffix}@example.com`, orgId],
+      );
+      const userId = userResult.rows[0].id;
+      await client.query('COMMIT');
+      return { orgId, userId };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function cleanupOrg(orgId: string, userId: string) {
+    await pool2.query(`DELETE FROM credit_leases WHERE organization_id = $1`, [orgId]);
+    await pool2.query(`DELETE FROM platform_users WHERE id = $1`, [userId]);
+    await pool2.query(`DELETE FROM organizations WHERE id = $1`, [orgId]);
+  }
+
+  it('inherits the plan floor when the org override is NULL: admits above it, refuses below it', async () => {
+    // 'launch' plan is seeded to credit_floor_usd = -10.
+    const { orgId: launchOrgId, userId: launchUserId } = await createOrg('launch');
+    try {
+      await pool2.query(
+        `UPDATE organizations SET credits_usd = -5, monthly_allowance_usd = 0, credit_floor_usd = NULL WHERE id = $1`,
+        [launchOrgId],
+      );
+      const admitted = await grantLease(pool2, {
+        userId: launchUserId, organizationId: launchOrgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      expect(admitted.leaseId).not.toBeNull();
+      expect(admitted.floorUsd).toBeCloseTo(-10, 4);
+
+      await pool2.query(
+        `UPDATE organizations SET credits_usd = -15, monthly_allowance_usd = 0, credit_floor_usd = NULL WHERE id = $1`,
+        [launchOrgId],
+      );
+      const refused = await grantLease(pool2, {
+        userId: launchUserId, organizationId: launchOrgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      expect(refused.leaseId).toBeNull();
+      expect(refused.floorUsd).toBeCloseTo(-10, 4);
+    } finally {
+      await cleanupOrg(launchOrgId, launchUserId);
+    }
+  });
+
+  it('a per-org override beats the plan default', async () => {
+    // Same 'launch' plan (floor -10), but this org overrides to -50.
+    const { orgId, userId } = await createOrg('launch');
+    try {
+      await pool2.query(
+        `UPDATE organizations SET credits_usd = -30, monthly_allowance_usd = 0, credit_floor_usd = -50 WHERE id = $1`,
+        [orgId],
+      );
+      const res = await grantLease(pool2, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      expect(res.leaseId).not.toBeNull();
+      expect(res.floorUsd).toBeCloseTo(-50, 4);
+    } finally {
+      await cleanupOrg(orgId, userId);
+    }
+  });
+
+  it('the playground plan floor (0) extends no credit: refused at any negative balance', async () => {
+    const { orgId, userId } = await createOrg('playground');
+    try {
+      await pool2.query(
+        `UPDATE organizations SET credits_usd = -0.01, monthly_allowance_usd = 0, credit_floor_usd = NULL WHERE id = $1`,
+        [orgId],
+      );
+      const res = await grantLease(pool2, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      expect(res.leaseId).toBeNull();
+      expect(res.floorUsd).toBeCloseTo(0, 4);
+    } finally {
+      await cleanupOrg(orgId, userId);
+    }
+  });
+
+  it('a NULL or dangling plan_id resolves the floor to 0, not NULL, and does not crash', async () => {
+    const { orgId, userId } = await createOrg(null);
+    try {
+      await pool2.query(
+        `UPDATE organizations SET credits_usd = 5, monthly_allowance_usd = 0, credit_floor_usd = NULL WHERE id = $1`,
+        [orgId],
+      );
+      const res = await grantLease(pool2, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 1, ttlSeconds: 60, allowFloor: true,
+      });
+      expect(res.leaseId).not.toBeNull();
+      expect(res.floorUsd).toBeCloseTo(0, 4);
+    } finally {
+      await cleanupOrg(orgId, userId);
+    }
+  });
+});
