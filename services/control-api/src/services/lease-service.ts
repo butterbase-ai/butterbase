@@ -130,6 +130,16 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
 export interface SettleArgs {
   leaseId: string;
   actualUsd: number;
+  /** Reserve-small mode: the reservation was nominal, so the true cost is
+   *  charged here and may exceed it — the delta is debited (monthly first,
+   *  then credits_usd, which may go negative). Also makes 'abandoned' a
+   *  settleable status, since an expired nominal lease was never refunded.
+   *
+   *  When false (the default, and the state of the world with
+   *  AI_RESERVE_SMALL_ENABLED unset) this function behaves exactly as it did
+   *  before reserve-small: the charge is clamped to the granted amount, only
+   *  'active' leases settle, and no path can debit beyond the reservation. */
+  allowOverdraft?: boolean;
 }
 
 export interface SettleResult {
@@ -163,18 +173,29 @@ export async function settleLease(
       await client.query('ROLLBACK');
       throw new NotFoundError('lease', args.leaseId);
     }
-    // 'settled' is terminal. 'abandoned' is NOT: a job whose lease expired can
-    // still complete, and it must still bill — otherwise expiry is a free-usage
-    // hole. Legacy 'reclaimed'/'expired'/'returned' were already refunded by the
-    // old reclaim path, so re-charging them would double-bill; leave terminal.
+    // Legacy (allowOverdraft off): only 'active' settles — anything else was
+    // already settled or already refunded by the reclaim path.
+    //
+    // Reserve-small (allowOverdraft on): 'abandoned' is ALSO settleable. A job
+    // whose nominal lease expired can still complete, and it must still bill —
+    // otherwise expiry is a free-usage hole. 'abandoned' is never refunded, so
+    // billing it cannot double-charge. 'settled' is terminal either way, and
+    // legacy 'reclaimed'/'expired'/'returned' were refunded by the old reclaim
+    // path, so re-charging them would double-bill; they stay terminal.
     const status = r.rows[0].status;
-    if (status !== 'active' && status !== 'abandoned') {
+    const settleable = status === 'active'
+      || (args.allowOverdraft === true && status === 'abandoned');
+    if (!settleable) {
       await client.query('COMMIT');
       return { refundedUsd: 0, chargedUsd: 0, additionalDebitUsd: 0 };
     }
 
     const granted = parseFloat(r.rows[0].amount_usd);
-    const actual = Math.max(0, args.actualUsd);
+    // Legacy clamps the charge to the reservation (never bills beyond what was
+    // pre-debited). Reserve-small bills the true cost and trues up the delta.
+    const actual = args.allowOverdraft
+      ? Math.max(0, args.actualUsd)
+      : Math.min(Math.max(0, args.actualUsd), granted);
     const delta = +(actual - granted).toFixed(4);
     const orgIdRow = r.rows[0].organization_id;
     const sourcePool = r.rows[0].source_pool;
@@ -191,7 +212,10 @@ export async function settleLease(
     let refund = 0;
     let additionalDebit = 0;
 
-    if (delta > 0) {
+    // `delta > 0` is unreachable when allowOverdraft is false (actual is clamped
+    // to granted above); the explicit conjunct is defence in depth so no future
+    // edit can leak an overdraft debit onto the legacy path.
+    if (delta > 0 && args.allowOverdraft === true) {
       // True-up. Drain monthly to zero first, then let credits_usd go negative.
       additionalDebit = delta;
       const cur = await client.query<{ monthly_allowance_usd: string }>(

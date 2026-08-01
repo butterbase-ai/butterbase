@@ -553,14 +553,23 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
 const VIDEO_DEFAULT_ESTIMATE_USD = 3.0;
 
 /**
- * Video jobs may take several minutes. We hold the lease for 15 minutes;
- * if the customer never polls back, the lease auto-expires per
- * credit_leases.expires_at — credits are returned to the user.
+ * Legacy: video jobs may take several minutes. We hold the lease for 15
+ * minutes; if the customer never polls back, the lease auto-expires per
+ * credit_leases.expires_at — credits are returned to the user. TTL is a
+ * money control here (it decides when a real reservation is refunded), so it
+ * must not move on the flag-off path.
+ *
+ * Reserve-small: the reservation is nominal, so the TTL no longer protects
+ * credits — it is row hygiene only. 2h matches the video sweeper's lookback
+ * so a normal job never transits 'abandoned'.
  */
-// With nominal reservations the TTL no longer protects credits — it is row
-// hygiene only. 2h matches the video sweeper's lookback so a normal job never
-// transits 'abandoned'.
-const VIDEO_LEASE_TTL_SECONDS = 2 * 60 * 60;
+const VIDEO_LEASE_TTL_LEGACY_SECONDS = 15 * 60;
+const VIDEO_LEASE_TTL_RESERVE_SMALL_SECONDS = 2 * 60 * 60;
+function videoLeaseTtlSeconds(): number {
+  return config.aiRouter.reserveSmallEnabled
+    ? VIDEO_LEASE_TTL_RESERVE_SMALL_SECONDS
+    : VIDEO_LEASE_TTL_LEGACY_SECONDS;
+}
 
 /**
  * Estimate the worst-case credit-cost (in USD, pre-markup) of a video job from
@@ -669,11 +678,18 @@ function billedVideoCost(ratePerSecond: number, req: VideoGenerationRequest): nu
  * Pick the rate-per-second to use, scanning all routers' rawPricing.
  * Returns null when no router has a parseable pricing shape.
  *
- * When `preferRouter` is provided, that router's pricing is used directly
- * (settle-time semantics — bill against the actual upstream that served
- * the request). When omitted, the function returns the MAX rate across
- * all routers (submit-time semantics — size the lease for any router the
- * fallback chain might land on).
+ * When `preferRouter` is provided, that router's pricing is tried first and
+ * the scan is used as a FALLBACK when it has none — i.e. the result may be a
+ * sibling router's rate. That is acceptable for sizing a reservation (which is
+ * refunded) but NOT for producing a bill: billing a customer at a provider
+ * that did not serve them is indefensible. The settle path only uses this
+ * shape on the legacy (reserve-small off) branch, where it is preserved
+ * verbatim for byte-compatibility; the reserve-small branch uses
+ * `rateForServingRouter`, which never substitutes.
+ *
+ * When `preferRouter` is omitted, returns the MAX rate across all routers
+ * (submit-time semantics — size the lease for any router the fallback chain
+ * might land on).
  */
 function resolveRateForRequest(
   entry: import('./catalog.js').CatalogEntry,
@@ -727,22 +743,35 @@ function rateForServingRouter(
 
 /**
  * Compute settled billing cost for a completed video job — used at poll
- * time when the upstream's `providerCostUsd` is unavailable. Pins strictly
- * to the chosen router's pricing variants (so a 480p text-to-video request
- * bills at the 480p text rate, not the worst-case 1080p rate) and does NOT
- * apply the lease buffer or the [$0.05, $9] reservation clamp (this is the
- * exact bill, not a reservation estimate).
+ * time when the upstream's `providerCostUsd` is unavailable.
  *
- * Returns null when the chosen router has no parseable pricing. Unlike
- * estimateVideoCostUsd, this never falls through to a sibling router's
- * rate — billing at a provider that did not serve the request is wrong
- * regardless of direction.
+ * `allowOverdraft` selects the pricing regime and defaults to the
+ * reserve-small flag, so with AI_RESERVE_SMALL_ENABLED unset this function is
+ * byte-equivalent to its pre-branch form. Tests pass it explicitly.
+ *
+ *   false (legacy): rate resolved with sibling fallback, cost clamped to
+ *     [$0.05, $9] and un-buffered. Exactly the pre-reserve-small behaviour —
+ *     it must stay, because a legacy job reserved a clamped amount and the
+ *     legacy settle path cannot debit beyond that reservation anyway.
+ *
+ *   true (reserve-small): pinned strictly to the router that served the
+ *     request (never a sibling's rate) and unclamped — the clamp exists to
+ *     stop a bad SKU producing an absurd RESERVATION; applied to a CHARGE it
+ *     under-bills expensive jobs and over-bills cheap ones.
+ *
+ * Returns null when no rate is resolvable; the caller treats null as "no cost
+ * signal" and settles $0.
  */
 export function billedVideoCostUsd(
   entry: import('./catalog.js').CatalogEntry,
   req: VideoGenerationRequest,
   chosenRouter: RouterName,
+  allowOverdraft: boolean = config.aiRouter.reserveSmallEnabled,
 ): number | null {
+  if (!allowOverdraft) {
+    const legacyRate = resolveRateForRequest(entry, req, chosenRouter);
+    return legacyRate !== null ? clampVideoCost(legacyRate, req, /*withBuffer*/ false) : null;
+  }
   const rate = rateForServingRouter(entry, req, chosenRouter);
   if (rate === null) {
     // Caller (routes/ai-videos.ts) only reaches here when the upstream did
@@ -783,10 +812,16 @@ function pricePerImageFromRouter(
 }
 
 /**
- * Scan rawPricing across routers for a per-image rate. `preferRouter` pins
- * to that router's pricing (settle-time semantics — bill the actual upstream
- * that served the request); omitted, returns the MAX across all routers
- * (submit-time semantics — cover any router the fallback chain might land on).
+ * Scan rawPricing across routers for a per-image rate. `preferRouter` tries
+ * that router's pricing FIRST but falls back to the cross-router scan when it
+ * has none — so the result may be a sibling's rate. Fine for sizing a
+ * reservation; wrong for producing a bill. Only the legacy (reserve-small off)
+ * settle branch uses this shape, and only to stay byte-compatible with
+ * pre-branch behaviour; the reserve-small branch uses
+ * `rateForServingImageRouter`, which never substitutes.
+ *
+ * Omitted, returns the MAX across all routers (submit-time semantics — cover
+ * any router the fallback chain might land on).
  */
 function resolveImageRateForRequest(
   entry: import('./catalog.js').CatalogEntry,
@@ -845,21 +880,33 @@ export function estimateImageCostUsd(
 
 /**
  * Compute settled billing cost for a completed image job — used when the
- * upstream's `providerCostUsd` is unavailable. Pins strictly to the chosen
- * router's pricing variants (this is the exact bill, not a reservation
- * estimate — there is no lease buffer or clamp to strip, unlike video).
+ * upstream's `providerCostUsd` is unavailable.
  *
- * Returns null when the chosen router has no parseable pricing. Unlike
- * estimateImageCostUsd, this never falls through to a sibling router's
- * rate — billing at a provider that did not serve the request is wrong
- * regardless of direction. The caller (routes/ai-images.ts) treats null as
- * "unknown, use $0 as guard" (mirrors billedVideoCostUsd).
+ * `allowOverdraft` selects the pricing regime and defaults to the
+ * reserve-small flag, so with AI_RESERVE_SMALL_ENABLED unset this function is
+ * byte-equivalent to its pre-branch form. Tests pass it explicitly.
+ *
+ *   false (legacy): rate resolved with sibling fallback (may bill at a router
+ *     that did not serve the request). Preserved verbatim — under the legacy
+ *     settle path the charge is clamped to the reservation regardless.
+ *
+ *   true (reserve-small): pinned strictly to the router that served the
+ *     request; a sibling's rate is never substituted.
+ *
+ * Returns null when no rate is resolvable; the caller (routes/ai-images.ts)
+ * treats null as "unknown, use $0 as guard" (mirrors billedVideoCostUsd).
  */
 export function billedImageCostUsd(
   entry: import('./catalog.js').CatalogEntry,
   req: ImageGenerationRequest,
   chosenRouter: RouterName,
+  allowOverdraft: boolean = config.aiRouter.reserveSmallEnabled,
 ): number | null {
+  if (!allowOverdraft) {
+    const legacyPerImage = resolveImageRateForRequest(entry, req, chosenRouter);
+    if (legacyPerImage === null) return null;
+    return legacyPerImage * (req.n ?? 1);
+  }
   const perImage = rateForServingImageRouter(entry, req, chosenRouter);
   if (perImage === null) {
     // Caller (routes/ai-images.ts) only reaches here when the upstream did
@@ -908,7 +955,7 @@ export async function routeVideoSubmit(
 
   const estimatedUsd = estimateVideoCostUsd(entry, req);
   const reservedUsd = estimatedUsd * (1 + ctx.markupPct / 100);
-  const lease = await acquireWithAudit(ctx, reservedUsd, VIDEO_LEASE_TTL_SECONDS);
+  const lease = await acquireWithAudit(ctx, reservedUsd, videoLeaseTtlSeconds());
 
   const fallbackChain: string[] = [];
   let submitted: { result: VideoSubmitResult; router: RouterName } | null = null;
@@ -1025,11 +1072,19 @@ export async function settleVideoJob(
 /**
  * Images typically finish in seconds, but OpenRouter's synchronous path
  * returns terminal state on submit — so the lease only needs to outlive a
- * background poll cycle for the (rarer) async providers. With nominal
- * reservations the TTL no longer protects credits — it is row hygiene only.
- * 2h matches the video lease TTL as a conservative shared default.
+ * background poll cycle for the (rarer) async providers.
+ *
+ * Legacy: 15 minutes, matching the video lease TTL — a money control, since it
+ * decides when a real reservation is refunded. Reserve-small: the reservation
+ * is nominal so the TTL is row hygiene only; 2h matches video.
  */
-const IMAGE_LEASE_TTL_SECONDS = 2 * 60 * 60;
+const IMAGE_LEASE_TTL_LEGACY_SECONDS = 15 * 60;
+const IMAGE_LEASE_TTL_RESERVE_SMALL_SECONDS = 2 * 60 * 60;
+function imageLeaseTtlSeconds(): number {
+  return config.aiRouter.reserveSmallEnabled
+    ? IMAGE_LEASE_TTL_RESERVE_SMALL_SECONDS
+    : IMAGE_LEASE_TTL_LEGACY_SECONDS;
+}
 
 export interface RouteImageSubmitResult {
   chosenRouter: RouterName;
@@ -1071,7 +1126,7 @@ export async function routeImageSubmit(
 
   const estimatedCostUsd = estimateImageCostUsd(entry, req);
   const reservedUsd = estimatedCostUsd * (1 + ctx.markupPct / 100);
-  const lease = await acquireWithAudit(ctx, reservedUsd, IMAGE_LEASE_TTL_SECONDS);
+  const lease = await acquireWithAudit(ctx, reservedUsd, imageLeaseTtlSeconds());
 
   const fallbackChain: string[] = [];
   let submitted: { result: ImageSubmitResult; router: RouterName } | null = null;

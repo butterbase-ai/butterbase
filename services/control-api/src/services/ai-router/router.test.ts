@@ -1075,14 +1075,14 @@ describe('billedVideoCostUsd', () => {
 
   it('pins to the chosen router (provider-tertiary), does NOT apply the lease buffer', async () => {
     const { billedVideoCostUsd } = await import('./router.js');
-    const cost = billedVideoCostUsd(entry as any, { model: 'x', prompt: 'p', duration: 4, resolution: '480p' }, 'provider-tertiary' as any);
+    const cost = billedVideoCostUsd(entry as any, { model: 'x', prompt: 'p', duration: 4, resolution: '480p' }, 'provider-tertiary' as any, /*allowOverdraft*/ true);
     // 0.071039 * 4 = 0.284156 (no 1.2× buffer, clamped above floor 0.05)
     expect(cost).toBeCloseTo(0.284156, 6);
   });
 
   it('uses higher tier when resolution = 720p (text mode)', async () => {
     const { billedVideoCostUsd } = await import('./router.js');
-    const cost = billedVideoCostUsd(entry as any, { model: 'x', prompt: 'p', duration: 5, resolution: '720p' }, 'provider-tertiary' as any);
+    const cost = billedVideoCostUsd(entry as any, { model: 'x', prompt: 'p', duration: 5, resolution: '720p' }, 'provider-tertiary' as any, /*allowOverdraft*/ true);
     // 0.157500 * 5 = 0.7875
     expect(cost).toBeCloseTo(0.7875, 6);
   });
@@ -1098,7 +1098,7 @@ describe('billedVideoCostUsd', () => {
           rawPricing: { unit: 'second', variants: [{ spec: '480p', pricePerSecond: 0.09 }] } },
       ],
     };
-    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 4, resolution: '480p' }, 'provider-tertiary' as any);
+    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 4, resolution: '480p' }, 'provider-tertiary' as any, /*allowOverdraft*/ true);
     // Must NOT bill at provider-secondary's 0.09 rate — that router never served the request.
     expect(cost).toBeNull();
   });
@@ -1111,7 +1111,7 @@ describe('billedVideoCostUsd', () => {
         { name: 'provider-tertiary' as any, upstreamId: 'x', promptPricePerMtok: 0, completionPricePerMtok: 0, contextLength: 0, modality: 'video' as const },
       ],
     };
-    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p' }, 'provider-tertiary' as any);
+    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p' }, 'provider-tertiary' as any, /*allowOverdraft*/ true);
     expect(cost).toBeNull();
   });
 
@@ -1124,9 +1124,93 @@ describe('billedVideoCostUsd', () => {
           rawPricing: { unit: 'second', variants: [{ spec: '480p', pricePerSecond: 0.001 }] } },
       ],
     };
-    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 1, resolution: '480p' }, 'provider-tertiary' as any);
+    const cost = billedVideoCostUsd(e as any, { model: 'x', prompt: 'p', duration: 1, resolution: '480p' }, 'provider-tertiary' as any, /*allowOverdraft*/ true);
     // 0.001 * 1 = 0.001, not floored to 0.05
     expect(cost).toBeCloseTo(0.001, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flag-OFF (legacy) settle pricing. AI_RESERVE_SMALL_ENABLED is unset in the
+// test env, so these call the exported functions WITHOUT the allowOverdraft
+// argument — i.e. exactly what production does today. They lock in that the
+// pre-reserve-small behaviour (sibling-router fallback + the [$0.05, $9]
+// clamp) survives untouched until the flag is turned on.
+// ---------------------------------------------------------------------------
+describe('billedVideoCostUsd — legacy behaviour with the flag off', () => {
+  const entry = (routers: any[]) => ({ canonicalId: 'x/y', displayName: 'X', updatedAt: '', routers }) as any;
+  const perSecond = (name: string, rate: number) => ({
+    name, upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+    contextLength: 0, modality: 'video',
+    rawPricing: { unit: 'second', variants: [{ spec: '1080p', pricePerSecond: rate }] },
+  });
+
+  it('still clamps to the $9 ceiling', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = entry([perSecond('openrouter', 1.0)]);
+    // 1.0 x 60s = $60 unclamped; legacy bills $9.
+    expect(billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 60, resolution: '1080p' }, 'openrouter' as any))
+      .toBeCloseTo(9, 4);
+  });
+
+  it('still floors at $0.05', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = entry([perSecond('openrouter', 0.001)]);
+    // 0.001 x 4s = $0.004 unclamped; legacy bills $0.05.
+    expect(billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 4, resolution: '1080p' }, 'openrouter' as any))
+      .toBeCloseTo(0.05, 4);
+  });
+
+  it('still falls back to a sibling router\'s rate', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = entry([
+      { name: 'openrouter', upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+        contextLength: 0, modality: 'video', rawPricing: { pricing_skus: { video_tokens: '0.0000024' } } },
+      perSecond('provider-secondary', 0.2),
+    ]);
+    // Serving router has no parseable pricing; legacy substitutes the sibling's
+    // 0.2/s => 0.2 x 10s = $2. (Reserve-small returns null instead.)
+    expect(billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 10, resolution: '1080p' }, 'openrouter' as any))
+      .toBeCloseTo(2, 4);
+  });
+
+  it('never applies the 1.2x lease buffer', async () => {
+    const { billedVideoCostUsd } = await import('./router.js');
+    const e = entry([perSecond('openrouter', 0.1)]);
+    // 0.1 x 10s = $1 exactly — a buffered value would be $1.20.
+    expect(billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 10, resolution: '1080p' }, 'openrouter' as any))
+      .toBeCloseTo(1, 4);
+  });
+});
+
+describe('billedImageCostUsd — legacy behaviour with the flag off', () => {
+  const entry = (routers: any[]) => ({ canonicalId: 'x/y', displayName: 'X', updatedAt: '', routers }) as any;
+  const perImage = (name: string, variants: Array<{ spec: string; pricePerImage: number }>) => ({
+    name, upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+    contextLength: 0, modality: 'image',
+    rawPricing: { variants },
+  });
+
+  it('still falls back to a sibling router\'s rate', async () => {
+    const { billedImageCostUsd } = await import('./router.js');
+    const e = entry([
+      { name: 'openrouter', upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+        contextLength: 0, modality: 'image', rawPricing: { pricing_skus: { image_tokens: '0.0000024' } } },
+      perImage('provider-secondary', [{ spec: '1024x1024', pricePerImage: 5.0 }]),
+    ]);
+    // Reserve-small returns null here; legacy bills the sibling's $5.
+    expect(billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024' }, 'openrouter' as any))
+      .toBeCloseTo(5, 4);
+  });
+
+  it('bills the serving router\'s rate x n when it has pricing', async () => {
+    const { billedImageCostUsd } = await import('./router.js');
+    const e = entry([
+      perImage('provider-tertiary', [{ spec: '1024x1024', pricePerImage: 0.04 }]),
+      perImage('provider-secondary', [{ spec: '1024x1024', pricePerImage: 0.09 }]),
+    ]);
+    expect(billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024', n: 2 }, 'provider-tertiary' as any))
+      .toBeCloseTo(0.08, 6);
   });
 });
 
@@ -1141,14 +1225,14 @@ describe('billedVideoCostUsd — settle-time correctness', () => {
   it('bills above the old $9 ceiling', async () => {
     const { billedVideoCostUsd } = await import('./router.js');
     const e = entry([perSecond('openrouter', 1.0)]);
-    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 60, resolution: '1080p' }, 'openrouter' as any);
+    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 60, resolution: '1080p' }, 'openrouter' as any, /*allowOverdraft*/ true);
     expect(cost).toBeCloseTo(60, 4);   // not clamped to 9
   });
 
   it('bills below the old $0.05 floor', async () => {
     const { billedVideoCostUsd } = await import('./router.js');
     const e = entry([perSecond('openrouter', 0.001)]);
-    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 4, resolution: '1080p' }, 'openrouter' as any);
+    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 4, resolution: '1080p' }, 'openrouter' as any, /*allowOverdraft*/ true);
     expect(cost).toBeCloseTo(0.004, 4); // not floored to 0.05
   });
 
@@ -1159,7 +1243,7 @@ describe('billedVideoCostUsd — settle-time correctness', () => {
         contextLength: 0, modality: 'video', rawPricing: { pricing_skus: { video_tokens: '0.0000024' } } },
       perSecond('provider-secondary', 5.0),
     ]);
-    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 10, resolution: '1080p' }, 'openrouter' as any);
+    const cost = billedVideoCostUsd(e, { model: 'x/y', prompt: 'p', duration: 10, resolution: '1080p' }, 'openrouter' as any, /*allowOverdraft*/ true);
     expect(cost).toBeNull();
   });
 });
@@ -1182,7 +1266,7 @@ describe('billedImageCostUsd — settle-time correctness', () => {
       perImage('provider-tertiary', [{ spec: '1024x1024', pricePerImage: 0.04 }]),
       perImage('provider-secondary', [{ spec: '1024x1024', pricePerImage: 0.09 }]),
     ]);
-    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024', n: 2 }, 'provider-tertiary' as any);
+    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024', n: 2 }, 'provider-tertiary' as any, /*allowOverdraft*/ true);
     // Must bill at provider-tertiary's 0.04 (the router that served it), not provider-secondary's higher 0.09.
     expect(cost).toBeCloseTo(0.08, 6);
   });
@@ -1196,14 +1280,14 @@ describe('billedImageCostUsd — settle-time correctness', () => {
       // sibling: valid, higher rate — must NOT be substituted in
       perImage('provider-secondary', [{ spec: '1024x1024', pricePerImage: 5.0 }]),
     ]);
-    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024' }, 'openrouter' as any);
+    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024' }, 'openrouter' as any, /*allowOverdraft*/ true);
     expect(cost).toBeNull();
   });
 
   it('is not clamped at settle time (Bug A does not apply — image billing never had a reservation-shaped clamp)', async () => {
     const { billedImageCostUsd } = await import('./router.js');
     const e = entry([perImage('openrouter', [{ spec: '1024x1024', pricePerImage: 0.0001 }])]);
-    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024', n: 3 }, 'openrouter' as any);
+    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024', n: 3 }, 'openrouter' as any, /*allowOverdraft*/ true);
     // 0.0001 * 3 = 0.0003 — far below any plausible reservation floor, and not raised to one.
     expect(cost).toBeCloseTo(0.0003, 6);
   });

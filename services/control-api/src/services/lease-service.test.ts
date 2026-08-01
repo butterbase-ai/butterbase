@@ -230,6 +230,9 @@ describeDb('grantLease — floor semantics', () => {
     });
   });
 
+  // Every test in this block exercises reserve-small settle semantics, so it
+  // passes allowOverdraft explicitly. Flag-off (legacy) settle is covered in
+  // the 'settleLease — legacy clamping (allowOverdraft off)' block below.
   describe('settleLease — signed delta', () => {
     it('charges MORE than reserved, taking the excess from credits_usd', async () => {
       await setBalance(0, 10, -25);
@@ -237,7 +240,7 @@ describeDb('grantLease — floor semantics', () => {
         userId, organizationId: orgId, region: 'us-east-1',
         amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
       });
-      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.110678 });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.110678, allowOverdraft: true });
       expect(res.chargedUsd).toBeCloseTo(0.1107, 4);
       expect(res.additionalDebitUsd).toBeCloseTo(0.1106, 4);
       const b = await balances();
@@ -251,7 +254,7 @@ describeDb('grantLease — floor semantics', () => {
         userId, organizationId: orgId, region: 'us-east-1',
         amountUsd: 2, ttlSeconds: 60, allowFloor: true,
       });
-      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.5 });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.5, allowOverdraft: true });
       expect(res.refundedUsd).toBeCloseTo(1.5, 4);
       const b = await balances();
       expect(b.topup).toBeCloseTo(9.5, 4);
@@ -263,7 +266,7 @@ describeDb('grantLease — floor semantics', () => {
         userId, organizationId: orgId, region: 'us-east-1',
         amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
       });
-      await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 5 });
+      await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 5, allowOverdraft: true });
       const b = await balances();
       expect(b.monthly).toBeGreaterThanOrEqual(0);
       expect(b.topup).toBeLessThan(0);   // debt lands in credits_usd only
@@ -275,9 +278,9 @@ describeDb('grantLease — floor semantics', () => {
         userId, organizationId: orgId, region: 'us-east-1',
         amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
       });
-      await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 1 });
+      await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 1, allowOverdraft: true });
       const before = await balances();
-      const second = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 1 });
+      const second = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 1, allowOverdraft: true });
       expect(second.chargedUsd).toBe(0);
       expect((await balances()).topup).toBeCloseTo(before.topup, 4);
     });
@@ -291,7 +294,7 @@ describeDb('grantLease — floor semantics', () => {
         userId, organizationId: orgId, region: 'us-east-1',
         amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
       });
-      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.04 });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.04, allowOverdraft: true });
       expect(res.chargedUsd).toBeCloseTo(0.04, 4);   // NOT 0.0001
       expect((await balances()).topup).toBeCloseTo(9.96, 4);
     });
@@ -303,10 +306,74 @@ describeDb('grantLease — floor semantics', () => {
         amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
       });
       await pool.query(`UPDATE credit_leases SET status = 'abandoned' WHERE lease_id = $1`, [g.leaseId]);
-      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.75 });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.75, allowOverdraft: true });
       expect(res.chargedUsd).toBeCloseTo(0.75, 4);
       // 10 (topup) − 0.75 (total actual charge) = 9.25 exactly.
       expect((await balances()).topup).toBeCloseTo(9.25, 4);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Flag-OFF settle path. This is what production runs with
+  // AI_RESERVE_SMALL_ENABLED unset, and it must stay byte-identical to the
+  // pre-reserve-small behaviour: the charge is clamped to [0, granted],
+  // nothing can debit beyond the reservation, and only 'active' settles.
+  // ---------------------------------------------------------------------
+  describe('settleLease — legacy clamping (allowOverdraft off)', () => {
+    it('clamps an actual ABOVE the reservation down to the granted amount', async () => {
+      await setBalance(0, 10, 0);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 2, ttlSeconds: 60,
+      });
+      // Upstream reports $7.50 but only $2 was reserved: legacy bills $2.
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 7.5 });
+      expect(res.chargedUsd).toBeCloseTo(2, 4);
+      expect(res.additionalDebitUsd).toBe(0);
+      expect(res.refundedUsd).toBe(0);
+      // 10 − 2 (reservation) and no true-up: the customer is not overdrafted.
+      expect((await balances()).topup).toBeCloseTo(8, 4);
+    });
+
+    // Money guard: Math.max(0, actualUsd). A negative actual would otherwise
+    // become a credit — an upstream reporting a negative cost must never pay
+    // the customer.
+    it('clamps a NEGATIVE actual to zero and refunds the whole reservation', async () => {
+      await setBalance(0, 10, 0);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 2, ttlSeconds: 60,
+      });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: -5 });
+      expect(res.chargedUsd).toBe(0);
+      expect(res.refundedUsd).toBeCloseTo(2, 4);   // exactly the reservation, no more
+      expect(res.additionalDebitUsd).toBe(0);
+      expect((await balances()).topup).toBeCloseTo(10, 4); // whole, not 15
+    });
+
+    it('clamps a NEGATIVE actual to zero on the reserve-small path too', async () => {
+      await setBalance(0, 10, -25);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 2, ttlSeconds: 60, allowFloor: true,
+      });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: -5, allowOverdraft: true });
+      expect(res.chargedUsd).toBe(0);
+      expect(res.refundedUsd).toBeCloseTo(2, 4);
+      expect((await balances()).topup).toBeCloseTo(10, 4);
+    });
+
+    it('treats an abandoned lease as terminal (no charge) when allowOverdraft is off', async () => {
+      await setBalance(0, 10, 0);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 2, ttlSeconds: 60,
+      });
+      await pool.query(`UPDATE credit_leases SET status = 'abandoned' WHERE lease_id = $1`, [g.leaseId]);
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 1.5 });
+      expect(res.chargedUsd).toBe(0);
+      expect(res.refundedUsd).toBe(0);
+      expect((await balances()).topup).toBeCloseTo(8, 4); // untouched by the settle
     });
   });
 });

@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { grantLease, settleLease, type SettleResult } from '../lease-service.js';
+import { config } from '../../config.js';
 
 export interface LeaseHandle {
   leaseId: string;
@@ -93,16 +94,24 @@ export async function acquireForEstimatedCost(
 /**
  * Settle the lease with the actual charged cost. Refunds the unspent portion.
  * Safe to call on a not-found lease — logs and returns refund=0.
+ *
+ * This is the single boundary where the reserve-small flag reaches the settle
+ * side of the money path. With AI_RESERVE_SMALL_ENABLED unset, `allowOverdraft`
+ * is false and settleLease behaves exactly as it did before this branch: the
+ * charge is clamped to the reservation and nothing can debit beyond it.
+ * `allowOverdraft` may be passed explicitly to override the flag (tests only).
  */
 export async function settleAfterCall(
   platformPool: pg.Pool,
   handle: LeaseHandle,
-  actualChargedUsd: number
+  actualChargedUsd: number,
+  allowOverdraft: boolean = config.aiRouter.reserveSmallEnabled,
 ): Promise<SettleResult> {
   try {
     return await settleLease(platformPool, {
       leaseId: handle.leaseId,
       actualUsd: actualChargedUsd,
+      allowOverdraft,
     });
   } catch (err) {
     console.error(`[billing-gate] settle failed for lease ${handle.leaseId}:`, err);
