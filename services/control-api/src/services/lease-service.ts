@@ -11,12 +11,20 @@ export interface GrantArgs {
   region: string;
   amountUsd: number;
   ttlSeconds: number;
+  /** Reserve-small mode: admit on `balance >= credit_floor_usd` and grant the
+   *  FULL amount rather than partial-granting down to the balance. Overdraft
+   *  lands in credits_usd, which may go negative. */
+  allowFloor?: boolean;
 }
 
 export interface GrantResult {
   leaseId: string | null;        // null = zero-amount grant (balance exhausted)
   amountGranted: number;         // may be less than requested if balance is low
   expiresAt: Date;
+  /** Combined balance observed under the row lock. */
+  balanceUsd: number;
+  /** The org's configured floor. */
+  floorUsd: number;
 }
 
 export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promise<GrantResult> {
@@ -30,8 +38,12 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     // is the app's owning org (AI gateway) or an explicit billing subject.
     // No implicit personal-org fallback at this layer.
     const organizationId = args.organizationId;
-    const u = await client.query<{ monthly_allowance_usd: string; credits_usd: string }>(
-      `SELECT monthly_allowance_usd, credits_usd
+    const u = await client.query<{
+      monthly_allowance_usd: string;
+      credits_usd: string;
+      credit_floor_usd: string;
+    }>(
+      `SELECT monthly_allowance_usd, credits_usd, credit_floor_usd
        FROM organizations
        WHERE id = $1 FOR UPDATE`,
       [organizationId]
@@ -40,17 +52,32 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
 
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
     const topup = parseFloat(u.rows[0].credits_usd);
+    const floor = parseFloat(u.rows[0].credit_floor_usd);
     const totalAvailable = monthly + topup;
-    const granted = Math.min(totalAvailable, args.amountUsd);
     const expires = new Date(Date.now() + args.ttlSeconds * 1000);
+
+    let granted: number;
+    if (args.allowFloor) {
+      // Admission is the floor check; the amount is then granted in full.
+      if (totalAvailable < floor) {
+        await client.query('COMMIT');
+        return { leaseId: null, amountGranted: 0, expiresAt: expires, balanceUsd: totalAvailable, floorUsd: floor };
+      }
+      granted = args.amountUsd;
+    } else {
+      granted = Math.min(totalAvailable, args.amountUsd);
+    }
 
     if (granted <= 0) {
       await client.query('COMMIT');
-      return { leaseId: null, amountGranted: 0, expiresAt: expires };
+      return { leaseId: null, amountGranted: 0, expiresAt: expires, balanceUsd: totalAvailable, floorUsd: floor };
     }
 
-    const monthlyDraw = Math.min(monthly, granted);
-    const topupDraw = granted - monthlyDraw;
+    // monthly is drawn first and never driven negative; credits_usd absorbs the
+    // remainder and is the ONLY column permitted to go negative (it persists
+    // across billing cycles, so debt cannot be erased by a monthly reset).
+    const monthlyDraw = Math.max(0, Math.min(monthly, granted));
+    const topupDraw = +(granted - monthlyDraw).toFixed(4);
     let sourcePool: 'monthly' | 'topup' | 'split';
     let topupAmountColumn: number | null;
     if (monthlyDraw > 0 && topupDraw === 0) {
@@ -85,7 +112,13 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     );
 
     await client.query('COMMIT');
-    return { leaseId: ins.rows[0].lease_id, amountGranted: granted, expiresAt: expires };
+    return {
+      leaseId: ins.rows[0].lease_id,
+      amountGranted: granted,
+      expiresAt: expires,
+      balanceUsd: totalAvailable,
+      floorUsd: floor,
+    };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
