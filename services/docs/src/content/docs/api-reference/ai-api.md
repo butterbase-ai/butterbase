@@ -377,7 +377,7 @@ with requests.get(job["content_urls"][0],
 |--------|------|---------|
 | 400 | `USE_VIDEO_ENDPOINT` | You sent a video model to `/chat/completions`; use `/videos/completions` instead. |
 | 400 | `INVALID_INDEX` | `?index=` was not a non-negative integer. |
-| 402 | `INSUFFICIENT_CREDITS` | Not enough credits to reserve the job. Response includes `required_usd`, `available_usd`, and your auto-refill state. |
+| 402 | `INSUFFICIENT_CREDITS` | Your credit balance is below the organization's credit floor, so no new job is admitted. Response includes `balance_usd` (your combined monthly allowance + top-up balance), `credit_floor_usd` (the lowest balance at which calls are still accepted — `0` unless credit has been extended to you), and your auto-refill state. |
 | 403 | `FORBIDDEN` | You're not the submitter of this job. |
 | 404 | `MODEL_NOT_FOUND` | Unknown model ID. |
 | 404 | `JOB_NOT_FOUND` | Unknown job ID, or the job belongs to a different app. |
