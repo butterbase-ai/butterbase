@@ -5,9 +5,17 @@ export interface ReclaimResult {
   totalCreditedUsd: number;
 }
 
+export interface ReclaimOptions {
+  /** Reserve-small mode: expired leases are nominal, so there is nothing worth
+   *  refunding, and the job may still settle later and must still bill. Mark
+   *  'abandoned' and leave the balance untouched. */
+  reserveSmall?: boolean;
+}
+
 export async function reclaimExpiredLeases(
   platformPool: pg.Pool,
-  graceSeconds: number
+  graceSeconds: number,
+  opts: ReclaimOptions = {}
 ): Promise<ReclaimResult> {
   const client = await platformPool.connect();
   try {
@@ -35,6 +43,15 @@ export async function reclaimExpiredLeases(
       const sourcePool = row.source_pool;
       const topupPortion = row.topup_amount_usd ? parseFloat(row.topup_amount_usd) : 0;
       const monthlyPortion = amt - topupPortion;
+
+      if (opts.reserveSmall) {
+        await client.query(
+          `UPDATE credit_leases SET status = 'abandoned', reclaimed_at = now() WHERE lease_id = $1`,
+          [row.lease_id]
+        );
+        continue;
+      }
+
       total += amt;
 
       if (sourcePool === 'monthly') {

@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { grantLease, settleLease } from '../../services/lease-service.js';
+import { config } from '../../config.js';
 
 interface GrantBody {
   userId?: string;
@@ -30,7 +31,11 @@ const internalLeaseRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: { graceSeconds?: number } }>('/v1/internal/lease/reclaim', async (request) => {
     const { reclaimExpiredLeases } = await import('../../services/lease-reclaim.js');
     const grace = request.body?.graceSeconds ?? 30;
-    return reclaimExpiredLeases(fastify.controlDb, grace);
+    return reclaimExpiredLeases(
+      fastify.controlDb,
+      grace,
+      { reserveSmall: config.aiRouter.reserveSmallEnabled },
+    );
   });
 
   fastify.post<{ Params: { lease_id: string }; Body: SettleBody }>(

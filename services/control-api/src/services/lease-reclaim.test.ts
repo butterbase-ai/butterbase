@@ -1,140 +1,259 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import crypto from 'node:crypto';
 import pg from 'pg';
-import { reclaimExpiredLeases } from './lease-reclaim.js';
+import { config } from '../config.js';
 import { grantLease } from './lease-service.js';
+import { reclaimExpiredLeases } from './lease-reclaim.js';
 
-const PLATFORM_URL = process.env.NEON_PLATFORM_PRIMARY_URL
-  ?? 'postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control';
+const describeDb = process.env.RUN_DB_TESTS ? describe : describe.skip;
 
-let pool: pg.Pool;
-let testUserId: string;
+describeDb('reclaimExpiredLeases', () => {
+  let pool: pg.Pool;
+  let testUserId: string;
+  let testOrgId: string;
 
-beforeAll(async () => { pool = new pg.Pool({ connectionString: PLATFORM_URL }); });
-afterAll(async () => { await pool.end(); });
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: config.controlDb.url });
 
-beforeEach(async () => {
-  // Look up the previous user id before deleting so we can clean up the org after.
-  // platform_users.personal_organization_id FKs organizations, so the user row must
-  // be deleted before the org row (post-Plan-05 migration 076).
-  const prev = await pool.query(
-    `SELECT id FROM platform_users WHERE email = 'reclaim-test@example.com'`,
-  );
-  const prevUserId = prev.rows[0]?.id as string | undefined;
+    const suffix = crypto.randomUUID();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const tmpId = crypto.randomUUID();
+      const orgResult = await client.query<{ id: string }>(
+        `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, auto_refill_enabled, account_status)
+         VALUES ($1, 'test org', true, 'playground', 0, false, 'active')
+         RETURNING id`,
+        [tmpId],
+      );
+      testOrgId = orgResult.rows[0].id;
+      const userResult = await client.query<{ id: string }>(
+        `INSERT INTO platform_users (id, email, cognito_sub, personal_organization_id)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [tmpId, `reclaim-test-${suffix}@example.com`, `reclaim-test-sub-${suffix}`, testOrgId],
+      );
+      testUserId = userResult.rows[0].id;
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
 
-  await pool.query(`DELETE FROM credit_leases WHERE user_id = (SELECT id FROM platform_users WHERE email = 'reclaim-test@example.com')`);
-  await pool.query(`DELETE FROM platform_users WHERE email = 'reclaim-test@example.com'`);
-  if (prevUserId) {
-    await pool.query(`DELETE FROM organizations WHERE owner_id = $1`, [prevUserId]);
-  }
+  afterAll(async () => {
+    await pool.query('DELETE FROM credit_leases WHERE organization_id = $1', [testOrgId]);
+    await pool.query('DELETE FROM platform_users WHERE id = $1', [testUserId]);
+    await pool.query('DELETE FROM organizations WHERE id = $1', [testOrgId]);
+    await pool.end();
+  });
 
-  // Generate user id upfront so we can create the personal org before the user row
-  // (platform_users.personal_organization_id is NOT NULL post-Plan-05 migration 076).
-  const userId = (await pool.query(`SELECT gen_random_uuid() AS id`)).rows[0].id as string;
-  const orgResult = await pool.query(
-    `INSERT INTO organizations (
-        owner_id, name, personal,
-        plan_id, credits_usd, auto_refill_enabled, account_status
-     )
-     VALUES ($1, $2, true, 'playground', 5.00, false, 'active')
-     RETURNING id`,
-    [userId, "reclaim-test's org"],
-  );
-  const orgId = orgResult.rows[0].id as string;
-  // Post-migration 079 dropped billing cols from platform_users; billing on orgs.
-  await pool.query(
-    `INSERT INTO platform_users (id, email, personal_organization_id)
-     VALUES ($1, 'reclaim-test@example.com', $2)`,
-    [userId, orgId],
-  );
-  testUserId = userId;
-});
+  beforeEach(async () => {
+    await pool.query('DELETE FROM credit_leases WHERE organization_id = $1', [testOrgId]);
+    await pool.query(
+      `UPDATE organizations SET monthly_allowance_usd = 0, credits_usd = 5.00, credit_floor_usd = 0 WHERE id = $1`,
+      [testOrgId],
+    );
+  });
 
-describe('reclaimExpiredLeases', () => {
   it('reclaims an expired active lease and credits balance', async () => {
-    const grant = await grantLease(pool, { userId: testUserId, region: 'us-east-1', amountUsd: 1, ttlSeconds: 300 });
+    const grant = await grantLease(pool, { userId: testUserId, organizationId: testOrgId, region: 'us-east-1', amountUsd: 1, ttlSeconds: 300 });
     await pool.query(`UPDATE credit_leases SET expires_at = now() - interval '60 seconds' WHERE lease_id = $1`, [grant.leaseId]);
     const r = await reclaimExpiredLeases(pool, 30);
     expect(r.reclaimed).toBe(1);
     const lease = await pool.query(`SELECT status FROM credit_leases WHERE lease_id = $1`, [grant.leaseId]);
     expect(lease.rows[0].status).toBe('reclaimed');
-    // Post-Plan-07: credits_usd lives on organizations. Read via personal_org.
-    const u = await pool.query(
-      `SELECT o.credits_usd FROM organizations o
-       JOIN platform_users pu ON pu.personal_organization_id = o.id
-       WHERE pu.id = $1`,
-      [testUserId],
-    );
+    const u = await pool.query(`SELECT credits_usd FROM organizations WHERE id = $1`, [testOrgId]);
     expect(parseFloat(u.rows[0].credits_usd)).toBeCloseTo(5, 2);
   });
 
   it('does not reclaim leases within the grace window', async () => {
-    await grantLease(pool, { userId: testUserId, region: 'us-east-1', amountUsd: 1, ttlSeconds: 1 });
+    await grantLease(pool, { userId: testUserId, organizationId: testOrgId, region: 'us-east-1', amountUsd: 1, ttlSeconds: 1 });
     const r = await reclaimExpiredLeases(pool, 30);
     expect(r.reclaimed).toBe(0);
   });
 
   it('skips already-reclaimed leases', async () => {
-    const grant = await grantLease(pool, { userId: testUserId, region: 'us-east-1', amountUsd: 1, ttlSeconds: 300 });
+    const grant = await grantLease(pool, { userId: testUserId, organizationId: testOrgId, region: 'us-east-1', amountUsd: 1, ttlSeconds: 300 });
     await pool.query(`UPDATE credit_leases SET expires_at = now() - interval '60 seconds', status = 'reclaimed' WHERE lease_id = $1`, [grant.leaseId]);
     const r = await reclaimExpiredLeases(pool, 30);
     expect(r.reclaimed).toBe(0);
   });
 });
 
-describe('reclaimExpiredLeases — split pools', () => {
-  // Post-migration 093: both monthly_allowance_usd and credits_usd live on
-  // organizations. Seed / read via the personal-org join.
-  const readPools = async (userId: string) => {
+describeDb('reclaimExpiredLeases — split pools', () => {
+  let pool: pg.Pool;
+  let testUserId: string;
+  let testOrgId: string;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: config.controlDb.url });
+
+    const suffix = crypto.randomUUID();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const tmpId = crypto.randomUUID();
+      const orgResult = await client.query<{ id: string }>(
+        `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, auto_refill_enabled, account_status)
+         VALUES ($1, 'test org', true, 'playground', 0, false, 'active')
+         RETURNING id`,
+        [tmpId],
+      );
+      testOrgId = orgResult.rows[0].id;
+      const userResult = await client.query<{ id: string }>(
+        `INSERT INTO platform_users (id, email, cognito_sub, personal_organization_id)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [tmpId, `reclaim-split-test-${suffix}@example.com`, `reclaim-split-test-sub-${suffix}`, testOrgId],
+      );
+      testUserId = userResult.rows[0].id;
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM credit_leases WHERE organization_id = $1', [testOrgId]);
+    await pool.query('DELETE FROM platform_users WHERE id = $1', [testUserId]);
+    await pool.query('DELETE FROM organizations WHERE id = $1', [testOrgId]);
+    await pool.end();
+  });
+
+  const readPools = async (orgId: string) => {
     const u = await pool.query(
-      `SELECT o.monthly_allowance_usd, o.credits_usd
-       FROM platform_users pu
-       JOIN organizations o ON o.id = pu.personal_organization_id
-       WHERE pu.id = $1`,
-      [userId],
+      `SELECT monthly_allowance_usd, credits_usd FROM organizations WHERE id = $1`,
+      [orgId],
     );
     return u.rows[0];
   };
-  const seedPools = async (userId: string, monthly: number, credits: number) => {
+  const seedPools = async (orgId: string, monthly: number, credits: number) => {
     await pool.query(
-      `UPDATE organizations SET monthly_allowance_usd = $1, credits_usd = $2
-       WHERE id = (SELECT personal_organization_id FROM platform_users WHERE id = $3)`,
-      [monthly, credits, userId],
+      `UPDATE organizations SET monthly_allowance_usd = $1, credits_usd = $2, credit_floor_usd = 0 WHERE id = $3`,
+      [monthly, credits, orgId],
     );
   };
 
+  beforeEach(async () => {
+    await pool.query('DELETE FROM credit_leases WHERE organization_id = $1', [testOrgId]);
+  });
+
   it('refunds monthly-only lease back to monthly_allowance', async () => {
-    await seedPools(testUserId, 10, 0);
-    const grant = await grantLease(pool, { userId: testUserId, region: 'test', amountUsd: 4, ttlSeconds: 60 });
+    await seedPools(testOrgId, 10, 0);
+    const grant = await grantLease(pool, { userId: testUserId, organizationId: testOrgId, region: 'test', amountUsd: 4, ttlSeconds: 60 });
     if (!grant.leaseId) throw new Error('grant failed');
     // After grant: monthly = 6, credits = 0.
     await pool.query(`UPDATE credit_leases SET expires_at = now() - interval '1 minute' WHERE lease_id = $1`, [grant.leaseId]);
     const result = await reclaimExpiredLeases(pool, 0);
     expect(result.reclaimed).toBeGreaterThanOrEqual(1);
-    const u = await readPools(testUserId);
+    const u = await readPools(testOrgId);
     expect(parseFloat(u.monthly_allowance_usd)).toBeCloseTo(10, 4); // 6 + 4
     expect(parseFloat(u.credits_usd)).toBeCloseTo(0, 4);
   });
 
   it('refunds topup-only lease back to credits_usd', async () => {
-    await seedPools(testUserId, 0, 10);
-    const grant = await grantLease(pool, { userId: testUserId, region: 'test', amountUsd: 4, ttlSeconds: 60 });
+    await seedPools(testOrgId, 0, 10);
+    const grant = await grantLease(pool, { userId: testUserId, organizationId: testOrgId, region: 'test', amountUsd: 4, ttlSeconds: 60 });
     if (!grant.leaseId) throw new Error('grant failed');
     await pool.query(`UPDATE credit_leases SET expires_at = now() - interval '1 minute' WHERE lease_id = $1`, [grant.leaseId]);
     await reclaimExpiredLeases(pool, 0);
-    const u = await readPools(testUserId);
+    const u = await readPools(testOrgId);
     expect(parseFloat(u.monthly_allowance_usd)).toBeCloseTo(0, 4);
     expect(parseFloat(u.credits_usd)).toBeCloseTo(10, 4);
   });
 
   it('refunds split lease back to both pools by original portions', async () => {
-    await seedPools(testUserId, 1, 10);
-    const grant = await grantLease(pool, { userId: testUserId, region: 'test', amountUsd: 3, ttlSeconds: 60 });
+    await seedPools(testOrgId, 1, 10);
+    const grant = await grantLease(pool, { userId: testUserId, organizationId: testOrgId, region: 'test', amountUsd: 3, ttlSeconds: 60 });
     if (!grant.leaseId) throw new Error('grant failed');
     // After grant: monthly = 0 (was 1, drew 1), credits = 8 (was 10, drew 2 from split).
     await pool.query(`UPDATE credit_leases SET expires_at = now() - interval '1 minute' WHERE lease_id = $1`, [grant.leaseId]);
     await reclaimExpiredLeases(pool, 0);
-    const u = await readPools(testUserId);
+    const u = await readPools(testOrgId);
     expect(parseFloat(u.monthly_allowance_usd)).toBeCloseTo(1, 4); // 0 + 1 (monthly portion)
     expect(parseFloat(u.credits_usd)).toBeCloseTo(10, 4); // 8 + 2 (topup portion)
+  });
+});
+
+describeDb('reclaimExpiredLeases — reserve-small mode', () => {
+  let pool: pg.Pool;
+  let testUserId: string;
+  let testOrgId: string;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: config.controlDb.url });
+
+    const suffix = crypto.randomUUID();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const tmpId = crypto.randomUUID();
+      const orgResult = await client.query<{ id: string }>(
+        `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, auto_refill_enabled, account_status, credit_floor_usd)
+         VALUES ($1, 'reclaim-test-org', true, 'playground', 10, false, 'active', -25)
+         RETURNING id`,
+        [tmpId],
+      );
+      testOrgId = orgResult.rows[0].id;
+      const userResult = await client.query<{ id: string }>(
+        `INSERT INTO platform_users (id, email, cognito_sub, personal_organization_id)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [tmpId, `reclaim-small-test-${suffix}@example.com`, `reclaim-small-test-sub-${suffix}`, testOrgId],
+      );
+      testUserId = userResult.rows[0].id;
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM credit_leases WHERE organization_id = $1', [testOrgId]);
+    await pool.query('DELETE FROM platform_users WHERE id = $1', [testUserId]);
+    await pool.query('DELETE FROM organizations WHERE id = $1', [testOrgId]);
+    await pool.end();
+  });
+
+  it('marks expired leases abandoned without refunding', async () => {
+    const g = await grantLease(pool, {
+      userId: testUserId,
+      organizationId: testOrgId,
+      region: 'us-east-1',
+      amountUsd: 0.0001,
+      ttlSeconds: 1,
+      allowFloor: true,
+    });
+    await pool.query(
+      `UPDATE credit_leases SET expires_at = now() - interval '1 hour' WHERE lease_id = $1`,
+      [g.leaseId],
+    );
+
+    const before = await pool.query<{ c: string }>(
+      `SELECT credits_usd AS c FROM organizations WHERE id = $1`,
+      [testOrgId],
+    );
+    await reclaimExpiredLeases(pool, 0, { reserveSmall: true });
+    const after = await pool.query<{ c: string }>(
+      `SELECT credits_usd AS c FROM organizations WHERE id = $1`,
+      [testOrgId],
+    );
+
+    expect(parseFloat(after.rows[0].c)).toBeCloseTo(parseFloat(before.rows[0].c), 4); // no refund
+
+    const st = await pool.query<{ status: string }>(
+      `SELECT status FROM credit_leases WHERE lease_id = $1`,
+      [g.leaseId],
+    );
+    expect(st.rows[0].status).toBe('abandoned');
   });
 });
