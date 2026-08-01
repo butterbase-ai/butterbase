@@ -713,12 +713,23 @@ describe('runAgentTurn — gateway HTTP error (Fix 2)', () => {
 });
 
 describe('runAgentTurn — insufficient credits (gateway 402)', () => {
-  it('emits an error event carrying code and balance', async () => {
+  // The gateway's real 402 body (see billing-gate.ts insufficientCreditsFields
+  // and gateway.ts handleRouterError): `balance_usd` / `credit_floor_usd` are
+  // current, `available_usd` is a DEPRECATED ALIAS for `balance_usd` kept for
+  // one release, and `required_usd` no longer exists — admission is "balance
+  // below the org's credit floor," not a padded cost estimate.
+  it('reads balance_usd (the current field) when present', async () => {
     global.fetch = vi.fn().mockResolvedValueOnce({
       ok: false,
       status: 402,
       json: async () => ({
-        error: { code: 'insufficient_credits', type: 'billing_error', available_usd: 0.5, required_usd: 2 },
+        error: {
+          code: 'insufficient_credits',
+          type: 'billing_error',
+          balance_usd: 0.5,
+          credit_floor_usd: 1,
+          available_usd: 0.5, // deprecated alias, still emitted alongside balance_usd
+        },
       }),
     } as unknown as Response);
 
@@ -728,7 +739,28 @@ describe('runAgentTurn — insufficient credits (gateway 402)', () => {
       type: 'error',
       code: 'insufficient_credits',
       availableUsd: 0.5,
-      requiredUsd: 2,
+    });
+    // required_usd has no honest equivalent post-credit-floor and must never
+    // be fabricated — it should not appear on the emitted event.
+    expect((err as { requiredUsd?: number }).requiredUsd).toBeUndefined();
+  });
+
+  it('falls back to the deprecated available_usd alias when balance_usd is absent', async () => {
+    // Guards a mid-rollout gateway that hasn't picked up balance_usd yet.
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 402,
+      json: async () => ({
+        error: { code: 'insufficient_credits', type: 'billing_error', available_usd: 0.5 },
+      }),
+    } as unknown as Response);
+
+    const events = await collect(runAgentTurn(baseInput));
+    const err = events.find((e) => e.type === 'error');
+    expect(err).toMatchObject({
+      type: 'error',
+      code: 'insufficient_credits',
+      availableUsd: 0.5,
     });
   });
 });

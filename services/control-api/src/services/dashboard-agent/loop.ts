@@ -249,13 +249,19 @@ export async function* streamChatCompletion(opts: {
   if (!res.ok) {
     if (res.status === 402) {
       const body = (await res.json().catch(() => null)) as
-        | { error?: { code?: string; type?: string; available_usd?: number; required_usd?: number } }
+        // `balance_usd` is the current field; `available_usd` is a DEPRECATED
+        // alias the gateway still emits for one release. `required_usd` no
+        // longer exists — admission is now "balance below the org's credit
+        // floor," not a padded cost estimate — so there is nothing honest to
+        // put there and we never fabricate one.
+        | { error?: { code?: string; type?: string; balance_usd?: number; available_usd?: number } }
         | null;
       const e = body?.error;
       if (e && (e.code === 'insufficient_credits' || e.type === 'billing_error')) {
         throw new InsufficientCreditsStreamError({
-          availableUsd: e.available_usd,
-          requiredUsd: e.required_usd,
+          // Prefer the new field; fall back to the deprecated alias so older
+          // gateway deployments (or the transition window) still populate it.
+          availableUsd: e.balance_usd ?? e.available_usd,
         });
       }
     }
