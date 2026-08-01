@@ -14,7 +14,7 @@ import {
 import { config } from '../../config.js';
 import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
-import { acquireForEstimatedCost, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
+import { acquireForEstimatedCost, acquireNominal, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
 import { pickProviderCost } from './adapters/openrouter.js';
 import { logAuditEvent } from '../audit/audit-events-service.js';
@@ -72,6 +72,13 @@ export async function acquireWithAudit(
   ttlSeconds: number,
 ): Promise<ReturnType<typeof acquireForEstimatedCost>> {
   try {
+    if (config.aiRouter.reserveSmallEnabled) {
+      // reservedUsd is deliberately ignored: admission is the credit floor and
+      // the true cost is charged at settle.
+      return await acquireNominal(
+        ctx.platformPool, ctx.userId, ctx.organizationId, ctx.region, ttlSeconds,
+      );
+    }
     return await acquireForEstimatedCost(
       ctx.platformPool, ctx.userId, ctx.organizationId, ctx.region, reservedUsd, ttlSeconds,
     );
@@ -550,7 +557,10 @@ const VIDEO_DEFAULT_ESTIMATE_USD = 3.0;
  * if the customer never polls back, the lease auto-expires per
  * credit_leases.expires_at — credits are returned to the user.
  */
-const VIDEO_LEASE_TTL_SECONDS = 15 * 60;
+// With nominal reservations the TTL no longer protects credits — it is row
+// hygiene only. 2h matches the video sweeper's lookback so a normal job never
+// transits 'abandoned'.
+const VIDEO_LEASE_TTL_SECONDS = 2 * 60 * 60;
 
 /**
  * Estimate the worst-case credit-cost (in USD, pre-markup) of a video job from
@@ -950,10 +960,11 @@ export async function settleVideoJob(
 /**
  * Images typically finish in seconds, but OpenRouter's synchronous path
  * returns terminal state on submit — so the lease only needs to outlive a
- * background poll cycle for the (rarer) async providers. 15 minutes matches
- * the video lease TTL as a conservative shared default.
+ * background poll cycle for the (rarer) async providers. With nominal
+ * reservations the TTL no longer protects credits — it is row hygiene only.
+ * 2h matches the video lease TTL as a conservative shared default.
  */
-const IMAGE_LEASE_TTL_SECONDS = 15 * 60;
+const IMAGE_LEASE_TTL_SECONDS = 2 * 60 * 60;
 
 export interface RouteImageSubmitResult {
   chosenRouter: RouterName;
