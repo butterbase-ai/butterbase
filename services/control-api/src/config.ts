@@ -72,6 +72,12 @@ export const config = {
       // Slot-cooldown TTL: how long to skip a slot after a fallback-kind failure.
       // Auto-expires — no manual intervention needed to unstick a recovered provider.
       slotCooldownSeconds: parseInt(process.env.AI_ROUTER_SLOT_COOLDOWN_SEC ?? '300', 10),
+      // Reserve-small credit holds: when true, AI calls reserve a nominal
+      // MIN_LEASE_USD instead of a predicted worst-case cost, admission is
+      // gated on organizations.credit_floor_usd, and settle charges the true
+      // cost (debiting beyond the reservation). Default false — the legacy
+      // estimate-and-pre-debit path stays until this is proven in production.
+      reserveSmallEnabled: process.env.AI_RESERVE_SMALL_ENABLED === 'true',
       v2EndpointsEnabled: process.env.AI_GATEWAY_V2_ENDPOINTS_ENABLED === 'true',
       defaultRegion: process.env.AI_ROUTER_DEFAULT_REGION ?? 'us-east-1',
       markupPct,
