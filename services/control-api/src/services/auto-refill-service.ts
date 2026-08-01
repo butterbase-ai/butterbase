@@ -82,9 +82,21 @@ export async function maybeTriggerAutoRefill(deps: Deps, organizationId: string)
   const topup = parseFloat(u.credits_usd);
   const amount = u.auto_refill_amount_usd ? parseFloat(u.auto_refill_amount_usd) : 0;
 
-  // Fire on crossing zero, not on reaching the floor — otherwise the org burns
-  // the entire negative band (down to credit_floor_usd) before topping up.
-  if (monthly + topup > 0) return { attempted: false, reason: 'not_low' };
+  // Two independent triggers, neither subsumes the other:
+  //   - lowLegacy: the original proactive-buffer rule. Requests still succeed
+  //     in the $0-$5 band, so this is the only path that can ever invoke
+  //     maybeTriggerAutoRefill for it (it's fire-and-forget from post-settle
+  //     hooks — if the org gets 402'd before a lease ever settles, e.g. by
+  //     falling straight to ~$0 with no floor to extend credit, refill is
+  //     never reached again). Keep firing early here or legacy-path orgs can
+  //     wedge into a permanent 402 despite auto-refill being enabled.
+  //   - crossedZero: fire before the negative floor (credit_floor_usd) is
+  //     consumed, so a positive monthly_allowance_usd can no longer mask a
+  //     deeply negative credits_usd and block refill entirely.
+  const LOW_LEGACY_TOPUP_USD = 5;
+  const lowLegacy = monthly <= 0 && topup < LOW_LEGACY_TOPUP_USD;
+  const crossedZero = monthly + topup <= 0;
+  if (!(lowLegacy || crossedZero)) return { attempted: false, reason: 'not_low' };
   if (!u.auto_refill_enabled || amount <= 0) return { attempted: false, reason: 'disabled' };
 
   const lockKey = LOCK_KEY_PREFIX + organizationId;
