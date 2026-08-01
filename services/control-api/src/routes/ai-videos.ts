@@ -22,7 +22,7 @@ import {
   insertVideoJob, getVideoJob, markVideoJobInProgress, markVideoJobTerminal,
   type VideoJobRow,
 } from '../services/ai-router/video-jobs.js';
-import { settleAfterCall } from '../services/ai-router/billing-gate.js';
+import { settleAfterCall, insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { readAutoRefillState } from './ai-config.js';
 
@@ -355,8 +355,7 @@ export async function handleVideoError(app: FastifyInstance, reply: any, organiz
     return reply.code(402).send({
       error: 'insufficient_credits',
       code: 'INSUFFICIENT_CREDITS',
-      balance_usd: error.balanceUsd,
-      credit_floor_usd: error.floorUsd,
+      ...insufficientCreditsFields(error),
       monthly_allowance_usd: ar.monthlyAllowanceUsd,
       credits_usd: ar.topupUsd,
       auto_refill_enabled: ar.enabled,

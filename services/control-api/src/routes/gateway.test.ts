@@ -170,6 +170,34 @@ describe('POST /v1/chat/completions', () => {
     expect(typeof body.error.credit_floor_usd).toBe('number');
   });
 
+  // Contract pin: this is the shape consumers (e.g. the dashboard agent's
+  // loop.ts) actually read off the wire. balance_usd/credit_floor_usd are
+  // current; available_usd is a DEPRECATED ALIAS for balance_usd kept for one
+  // release so older consumers don't silently read undefined. required_usd
+  // must NOT be present — admission is "balance below the org's credit
+  // floor" now, not a padded cost estimate, so there is no honest number to
+  // put there. If this test breaks, a consumer's expectations broke with it —
+  // check loop.ts (and any other 402 consumer) before changing these keys.
+  it('5b. insufficient_credits 402 body pins the exact key set consumers depend on', async () => {
+    app = await buildTestApp({ userId: 'user-jwt-credits-2', authMethod: 'jwt', scopes: [] });
+    mockRouteChatCompletion.mockRejectedValueOnce(new (InsufficientCreditsError as any)({ balanceUsd: 0.01, floorUsd: 0.05 }));
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: CHAT_BODY,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(r.statusCode).toBe(402);
+    const body = r.json();
+    expect(body.error.balance_usd).toBe(0.01);
+    expect(body.error.credit_floor_usd).toBe(0.05);
+    // Deprecated alias: must still mirror balance_usd for one release.
+    expect(body.error.available_usd).toBe(0.01);
+    // required_usd has no honest post-credit-floor equivalent — never fabricate it.
+    expect(body.error.required_usd).toBeUndefined();
+  });
+
   it('6. RouterError MODEL_NOT_FOUND → 404 invalid_request_error / model_not_found', async () => {
     app = await buildTestApp({ userId: 'user-jwt-model', authMethod: 'jwt', scopes: [] });
     mockRouteChatCompletion.mockRejectedValueOnce(new (RouterError as any)('MODEL_NOT_FOUND', 404, 'Model not found'));

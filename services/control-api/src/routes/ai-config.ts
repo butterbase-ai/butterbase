@@ -22,6 +22,7 @@ import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
+import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
@@ -340,8 +341,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         return reply.code(402).send({
           error: 'insufficient_credits',
           code: 'INSUFFICIENT_CREDITS',
-          balance_usd: error.balanceUsd,
-          credit_floor_usd: error.floorUsd,
+          ...insufficientCreditsFields(error),
           monthly_allowance_usd: ar.monthlyAllowanceUsd,
           credits_usd: ar.topupUsd,
           auto_refill_enabled: ar.enabled,
@@ -435,7 +435,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         }));
         return reply.code(402).send({
           error: 'insufficient_credits', code: 'INSUFFICIENT_CREDITS',
-          balance_usd: error.balanceUsd, credit_floor_usd: error.floorUsd,
+          ...insufficientCreditsFields(error),
           monthly_allowance_usd: ar.monthlyAllowanceUsd,
           credits_usd: ar.topupUsd,
           auto_refill_enabled: ar.enabled,

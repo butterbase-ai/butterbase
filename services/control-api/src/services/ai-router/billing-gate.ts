@@ -23,6 +23,30 @@ export class InsufficientCreditsError extends Error {
 }
 
 /**
+ * Shared field set for every insufficient-credits 402 body. Admission is now
+ * "is your balance below your organization's credit floor" — there is no more
+ * padded worst-case estimate, so `required_usd` has no honest equivalent and
+ * is intentionally NOT emitted.
+ *
+ * `available_usd` is a DEPRECATED ALIAS for `balance_usd`, kept for one
+ * deprecation release so older consumers (e.g. the dashboard agent) don't
+ * silently read `undefined` while they migrate to the new field names.
+ * Remove `available_usd` once all consumers read `balance_usd` directly.
+ */
+export function insufficientCreditsFields(error: InsufficientCreditsError): {
+  balance_usd: number;
+  credit_floor_usd: number;
+  /** @deprecated alias for balance_usd — remove after the deprecation window */
+  available_usd: number;
+} {
+  return {
+    balance_usd: error.balanceUsd,
+    credit_floor_usd: error.floorUsd,
+    available_usd: error.balanceUsd,
+  };
+}
+
+/**
  * Reserve a nominal amount and admit on the org's credit floor. The reservation
  * is deliberately not an estimate — the true cost is charged at settle, which
  * may debit beyond this. See the reserve-small design spec.

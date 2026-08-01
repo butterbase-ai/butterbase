@@ -126,6 +126,8 @@ describe('handleVideoError', () => {
     expect(body.code).toBe('INSUFFICIENT_CREDITS');
     expect(body.balance_usd).toBe(0.01);
     expect(body.credit_floor_usd).toBe(0.05);
+    // Deprecated alias for balance_usd, kept for one release for old consumers.
+    expect(body.available_usd).toBe(0.01);
     expect(body.monthly_allowance_usd).toBe(50);
     expect(body.credits_usd).toBe(5.5);
     expect(body.auto_refill_enabled).toBe(true);

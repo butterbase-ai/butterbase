@@ -11,6 +11,7 @@ import {
 import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../services/ai-router/catalog.js';
 import { rankRoutersForModel } from '../services/ai-router/select.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
+import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
@@ -87,7 +88,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
   if (err instanceof InsufficientCreditsError) {
     return reply.code(402).send(openaiError(
       err.message, 'billing_error', 'insufficient_credits',
-      { balance_usd: err.balanceUsd, credit_floor_usd: err.floorUsd },
+      insufficientCreditsFields(err),
     ));
   }
   if (err instanceof RouterError) {

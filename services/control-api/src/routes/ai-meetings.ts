@@ -13,7 +13,7 @@ import {
 import {
   reserveActorCredits,
 } from '../services/actor-providers/billing.js';
-import { InsufficientCreditsError } from '../services/ai-router/billing-gate.js';
+import { InsufficientCreditsError, insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import {
   startMeetingsRequestSchema, listMeetingsRequestSchema,
 } from '../services/actor-providers/schemas.js';
@@ -83,7 +83,7 @@ function handleError(reply: FastifyReply, err: unknown) {
   if (err instanceof InsufficientCreditsError) {
     return reply.code(402).send(openaiError(
       err.message, 'billing_error', 'insufficient_credits',
-      { balance_usd: err.balanceUsd, credit_floor_usd: err.floorUsd },
+      insufficientCreditsFields(err),
     ));
   }
   if (err instanceof ActorProviderError) {

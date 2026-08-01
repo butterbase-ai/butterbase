@@ -155,6 +155,8 @@ describe('handleImageError', () => {
     expect(body.code).toBe('INSUFFICIENT_CREDITS');
     expect(body.credit_floor_usd).toBe(0.05);
     expect(body.balance_usd).toBe(0.01);
+    // Deprecated alias for balance_usd, kept for one release for old consumers.
+    expect(body.available_usd).toBe(0.01);
     expect(body).not.toHaveProperty('required_usd');
     expect(body.monthly_allowance_usd).toBe(50);
     expect(body.credits_usd).toBe(5.5);
