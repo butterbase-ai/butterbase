@@ -808,6 +808,21 @@ function resolveImageRateForRequest(
 }
 
 /**
+ * Settle-time rate for exactly the router that served the request. Unlike
+ * resolveImageRateForRequest, this never substitutes another router's
+ * pricing — billing a customer at a provider that did not serve them is
+ * indefensible. Mirrors `rateForServingRouter` for video.
+ */
+function rateForServingImageRouter(
+  entry: import('./catalog.js').CatalogEntry,
+  req: ImageGenerationRequest,
+  router: RouterName,
+): number | null {
+  const r = entry.routers.find(x => x.name === router);
+  return r ? pricePerImageFromRouter(r.rawPricing, req) : null;
+}
+
+/**
  * Lease-time cost estimate for an image request. Selects the highest-priced
  * variant that could apply given `size`/`aspect_ratio` — so the lease is
  * always a covering upper bound. Settle path uses the actual amount_usd from
@@ -830,18 +845,32 @@ export function estimateImageCostUsd(
 
 /**
  * Compute settled billing cost for a completed image job — used when the
- * upstream's `providerCostUsd` is unavailable. Pins to the chosen router's
- * pricing variants. Returns null when neither the chosen router nor any
- * sibling has parseable pricing — the caller treats null as "unknown, use
- * $0 as guard" (mirrors billedVideoCostUsd).
+ * upstream's `providerCostUsd` is unavailable. Pins strictly to the chosen
+ * router's pricing variants (this is the exact bill, not a reservation
+ * estimate — there is no lease buffer or clamp to strip, unlike video).
+ *
+ * Returns null when the chosen router has no parseable pricing. Unlike
+ * estimateImageCostUsd, this never falls through to a sibling router's
+ * rate — billing at a provider that did not serve the request is wrong
+ * regardless of direction. The caller (routes/ai-images.ts) treats null as
+ * "unknown, use $0 as guard" (mirrors billedVideoCostUsd).
  */
 export function billedImageCostUsd(
   entry: import('./catalog.js').CatalogEntry,
   req: ImageGenerationRequest,
   chosenRouter: RouterName,
 ): number | null {
-  const perImage = resolveImageRateForRequest(entry, req, chosenRouter);
-  if (perImage === null) return null;
+  const perImage = rateForServingImageRouter(entry, req, chosenRouter);
+  if (perImage === null) {
+    // Caller (routes/ai-images.ts) only reaches here when the upstream did
+    // not report providerCostUsd, so a null result here means the job is
+    // about to be settled for $0 with no cost signal at all. That's a
+    // silent revenue loss unless someone is watching for it.
+    console.warn('[billing] uncosted_image_job', JSON.stringify({
+      event: 'billing.uncosted_image_job', model: req.model, router: chosenRouter,
+    }));
+    return null;
+  }
   const n = req.n ?? 1;
   return perImage * n;
 }

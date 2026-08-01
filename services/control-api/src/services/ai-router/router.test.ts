@@ -1164,6 +1164,51 @@ describe('billedVideoCostUsd — settle-time correctness', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// billedImageCostUsd — settle-time variant (Task 9b: parity with video)
+// ---------------------------------------------------------------------------
+
+describe('billedImageCostUsd — settle-time correctness', () => {
+  const entry = (routers: any[]) => ({ canonicalId: 'x/y', displayName: 'X', updatedAt: '', routers }) as any;
+  const perImage = (name: string, variants: Array<{ spec: string; pricePerImage: number }>) => ({
+    name, upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+    contextLength: 0, modality: 'image',
+    rawPricing: { variants },
+  });
+
+  it('bills at the serving router\'s rate, not a sibling\'s', async () => {
+    const { billedImageCostUsd } = await import('./router.js');
+    const e = entry([
+      perImage('provider-tertiary', [{ spec: '1024x1024', pricePerImage: 0.04 }]),
+      perImage('provider-secondary', [{ spec: '1024x1024', pricePerImage: 0.09 }]),
+    ]);
+    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024', n: 2 }, 'provider-tertiary' as any);
+    // Must bill at provider-tertiary's 0.04 (the router that served it), not provider-secondary's higher 0.09.
+    expect(cost).toBeCloseTo(0.08, 6);
+  });
+
+  it('returns null rather than billing a sibling router\'s higher rate when the chosen router has no parseable pricing', async () => {
+    const { billedImageCostUsd } = await import('./router.js');
+    const e = entry([
+      // chosen router: unparseable pricing shape (no `variants` array)
+      { name: 'openrouter', upstreamId: 'x/y', promptPricePerMtok: 0, completionPricePerMtok: 0,
+        contextLength: 0, modality: 'image', rawPricing: { pricing_skus: { image_tokens: '0.0000024' } } },
+      // sibling: valid, higher rate — must NOT be substituted in
+      perImage('provider-secondary', [{ spec: '1024x1024', pricePerImage: 5.0 }]),
+    ]);
+    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024' }, 'openrouter' as any);
+    expect(cost).toBeNull();
+  });
+
+  it('is not clamped at settle time (Bug A does not apply — image billing never had a reservation-shaped clamp)', async () => {
+    const { billedImageCostUsd } = await import('./router.js');
+    const e = entry([perImage('openrouter', [{ spec: '1024x1024', pricePerImage: 0.0001 }])]);
+    const cost = billedImageCostUsd(e, { model: 'x/y', prompt: 'p', size: '1024x1024', n: 3 }, 'openrouter' as any);
+    // 0.0001 * 3 = 0.0003 — far below any plausible reservation floor, and not raised to one.
+    expect(cost).toBeCloseTo(0.0003, 6);
+  });
+});
+
 describe('wrapStreamForSettlement', () => {
   // Regression: the SSE parser used to read `parsed.usage.total_cost`, but
   // OpenRouter sends `parsed.usage.cost`. The settlement callback got null
