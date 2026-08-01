@@ -1,17 +1,34 @@
 -- 098: Reserve-small credit holds.
 --
--- ORDERING: THIS MIGRATION MUST BE APPLIED STRICTLY BEFORE THE CODE DEPLOY.
--- lease-service.grantLease SELECTs organizations.credit_floor_usd
--- unconditionally, on BOTH the legacy and the reserve-small path — it is not
--- behind AI_RESERVE_SMALL_ENABLED. Deploying the image first makes every AI
--- request 500 with `column "credit_floor_usd" does not exist` until this runs.
--- Apply here, confirm, then deploy. (Rolling back the code is safe; rolling
--- back this migration while the code is live is not.)
+-- ORDERING (three-phase, do not collapse): 098 + 100 → deploy code → 101.
+-- This file and 100 are PRE-deploy and must stay backward compatible with the
+-- OLD code that is still running when they are applied — lease-service
+-- grantLease SELECTs organizations.credit_floor_usd unconditionally, on BOTH
+-- the legacy and the reserve-small path, and the OLD build reads that column
+-- with `parseFloat(row.credit_floor_usd)`, not COALESCE. If this file ever
+-- produced a NULL there, parseFloat(null) is NaN, and `balance < NaN` is
+-- always false — every AI request would be silently admitted regardless of
+-- balance, a total credit-control bypass, indistinguishable from "healthy"
+-- because nothing errors. That is why organizations.credit_floor_usd KEEPS
+-- its DEFAULT 0 here and why the null-out backfill is NOT in this file —
+-- both are deferred to migration 101, which must not run until the new
+-- COALESCE-reading code is fully live. See 101's header for the rest of the
+-- story.
+--
+-- Also apply before the code deploy: lease-service.grantLease SELECTs
+-- organizations.credit_floor_usd unconditionally, so deploying the image
+-- before this migration makes every AI request 500 with `column
+-- "credit_floor_usd" does not exist`. Apply 098 + 100, confirm, then deploy.
+-- (Rolling back the code is safe; rolling back this migration while the code
+-- is live is not.)
 --
 -- credit_floor_usd: how far below zero an org's combined balance may go before
--- new AI calls are refused. Resolution is COALESCE(organizations.credit_floor_usd,
--- plans.credit_floor_usd, 0) — the org column is a per-org OVERRIDE, NULL means
--- "inherit the plan's tier default". plans.credit_floor_usd carries the tier
+-- new AI calls are refused. Once 101 has run, resolution is
+-- COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0) — the
+-- org column is a per-org OVERRIDE, NULL means "inherit the plan's tier
+-- default". Until 101 runs, every org's credit_floor_usd is an explicit 0,
+-- which is both the old behaviour and a value the COALESCE treats as a valid
+-- override — inert either way. plans.credit_floor_usd carries the tier
 -- default and is NOT NULL (every plan has one; 0 is the safe/no-credit value).
 --
 -- 'abandoned': a lease whose TTL elapsed without settling. Distinct from
@@ -24,32 +41,32 @@ ALTER TABLE plans
 COMMENT ON COLUMN plans.credit_floor_usd IS
   'Tier default for how far below zero an org on this plan may go before new AI calls are refused. Zero or negative. Overridden per-org by organizations.credit_floor_usd when that column is non-NULL.';
 
--- organizations.credit_floor_usd is NULLABLE on purpose: NULL means "inherit
--- from plans.credit_floor_usd", a non-NULL value is a per-org override. It must
--- NOT carry a DEFAULT — a default of 0 would re-pin every newly created org to
--- 0 as an explicit override, defeating plan inheritance the moment the row is
--- inserted.
+-- organizations.credit_floor_usd is NULLABLE (post-101, NULL will mean
+-- "inherit from plans.credit_floor_usd"; a non-NULL value is a per-org
+-- override). It DELIBERATELY KEEPS its DEFAULT 0 in this migration — do not
+-- drop it here and do not "clean this up" in a later edit of this file.
+-- Dropping the default now would let a newly-inserted org get a NULL
+-- credit_floor_usd while the OLD code is still live, which the old
+-- parseFloat() read turns into NaN — `balance < NaN` is always false, so that
+-- org's credit floor is silently disabled. Same bug as the null-out backfill,
+-- just via INSERT instead of UPDATE, and just as easy to miss. The DEFAULT is
+-- dropped in 101, once the new code (which reads NULL correctly via COALESCE)
+-- is fully rolled out.
 ALTER TABLE organizations
-  ADD COLUMN IF NOT EXISTS credit_floor_usd NUMERIC(10,4);
-
-ALTER TABLE organizations
-  ALTER COLUMN credit_floor_usd DROP DEFAULT;
+  ADD COLUMN IF NOT EXISTS credit_floor_usd NUMERIC(10,4) DEFAULT 0;
 
 ALTER TABLE organizations
   ALTER COLUMN credit_floor_usd DROP NOT NULL;
 
--- All 171 existing orgs were backfilled to credit_floor_usd = 0 by the
--- NOT NULL DEFAULT 0 this migration originally added. Left as-is, relaxing the
--- NOT NULL turns those zeros into explicit per-org overrides that beat the
--- plan default — every tier would silently stay pinned at 0, the exact bug
--- this change exists to fix. Null them out so they inherit from the plan
--- instead. Scoped to = 0 (not a blanket NULL-everything) so a real future
--- override of 0 — an org deliberately pinned to "no credit" despite its plan
--- — survives a re-run of this migration.
-UPDATE organizations SET credit_floor_usd = NULL WHERE credit_floor_usd = 0;
-
+-- No backfill / null-out UPDATE here on purpose. Existing rows keep their
+-- explicit 0 (the same value the DEFAULT would have given them). Old code
+-- reads 0 and behaves exactly as today; new code sees 0 as an explicit
+-- override that happens to equal the old behaviour — inert either way. The
+-- null-out that turns these zeros into "inherit from plan" is deferred to
+-- migration 101, which must not run until the new code is live. Running it
+-- here would reproduce the exact NaN bypass this split exists to prevent.
 COMMENT ON COLUMN organizations.credit_floor_usd IS
-  'Per-org override of the combined-balance floor before new AI calls are refused. NULL inherits plans.credit_floor_usd. Zero or negative when set. Negative values extend credit.';
+  'Per-org override of the combined-balance floor before new AI calls are refused. NULL inherits plans.credit_floor_usd (only meaningful once migration 101 has run and the COALESCE-reading code is live). Zero or negative when set. Negative values extend credit.';
 
 -- Added NOT VALID on purpose. A plain ADD CONSTRAINT ... CHECK takes
 -- ACCESS EXCLUSIVE on credit_leases and full-scans it to validate, blocking

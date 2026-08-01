@@ -12,6 +12,9 @@
 --
 -- Idempotent: plain UPDATEs, safe to re-run.
 --
+-- PRE-deploy, safe: old code never reads plans, so these values are inert
+-- until the new code (and migration 101) are live.
+--
 -- playground stays at 0 explicitly (rather than relying on the column
 -- DEFAULT) so the full tier table is visible in one place and a future change
 -- to the DEFAULT can't silently change the free tier's behaviour.

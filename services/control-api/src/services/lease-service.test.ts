@@ -549,3 +549,114 @@ describeDb('grantLease — plan floor inheritance', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------
+// Migration-phasing regression guard (Task 14). 098 was split into a
+// pre-deploy half (098 + 100, keeps organizations.credit_floor_usd's
+// DEFAULT 0 and leaves existing rows at an explicit 0) and a post-deploy
+// half (101, drops the default and nulls out the explicit zeros) precisely
+// so that the OLD build — which reads credit_floor_usd directly via
+// `parseFloat(row.credit_floor_usd)`, not COALESCE — never observes a NULL
+// there. A NULL read by the old code becomes NaN, and `balance < NaN` is
+// always false, silently admitting every request regardless of balance.
+//
+// These two tests exercise the NEW code (which does COALESCE correctly)
+// against each phase's org-row shape and assert both refuse at a negative
+// balance — i.e. an explicit 0 (the 098-post/101-pre state) and a NULL on a
+// zero-floor plan (the 101-post state) must behave identically. They are a
+// regression guard for the phasing itself, not for COALESCE semantics
+// (already covered above): if a future edit ever reintroduces a null-out
+// into 098, or drops organizations.credit_floor_usd's DEFAULT there, this
+// suite doesn't run against the old build to catch the NaN bypass directly —
+// but any change that made the *new* code disagree between these two
+// equivalent states would show up here.
+// ---------------------------------------------------------------------
+describeDb('grantLease — migration phasing (098/100 vs 101 org-row shapes)', () => {
+  let pool3: pg.Pool;
+
+  beforeAll(async () => {
+    pool3 = new pg.Pool({ connectionString: config.controlDb.url });
+  });
+
+  afterAll(async () => {
+    await pool3.end();
+  });
+
+  async function createOrg(planId: string | null): Promise<{ orgId: string; userId: string }> {
+    const suffix = crypto.randomUUID();
+    const client = await pool3.connect();
+    try {
+      await client.query('BEGIN');
+      const tmpId = crypto.randomUUID();
+      const orgResult = await client.query<{ id: string }>(
+        `INSERT INTO organizations (owner_id, name, personal, plan_id, credits_usd, monthly_allowance_usd, auto_refill_enabled, account_status)
+         VALUES ($1, 'phasing-test-org', true, $2, 0, 0, false, 'active')
+         RETURNING id`,
+        [tmpId, planId],
+      );
+      const orgId = orgResult.rows[0].id;
+      const userResult = await client.query<{ id: string }>(
+        `INSERT INTO platform_users (id, email, personal_organization_id)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [tmpId, `phasing-test-${suffix}@example.com`, orgId],
+      );
+      const userId = userResult.rows[0].id;
+      await client.query('COMMIT');
+      return { orgId, userId };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function cleanupOrg(orgId: string, userId: string) {
+    await pool3.query(`DELETE FROM credit_leases WHERE organization_id = $1`, [orgId]);
+    await pool3.query(`DELETE FROM platform_users WHERE id = $1`, [userId]);
+    await pool3.query(`DELETE FROM organizations WHERE id = $1`, [orgId]);
+  }
+
+  it('098-post/101-pre state: an explicit credit_floor_usd = 0 refuses at any negative balance', async () => {
+    // This is the state every existing org is left in by the phased 098:
+    // the column is nullable, but nothing has nulled it out yet, so it still
+    // reads as an explicit 0 — exactly what old code expects.
+    const { orgId, userId } = await createOrg('launch'); // plan floor -10, irrelevant: override wins
+    try {
+      await pool3.query(
+        `UPDATE organizations SET credits_usd = -0.01, monthly_allowance_usd = 0, credit_floor_usd = 0 WHERE id = $1`,
+        [orgId],
+      );
+      const res = await grantLease(pool3, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      expect(res.leaseId).toBeNull();
+      expect(res.floorUsd).toBeCloseTo(0, 4);
+    } finally {
+      await cleanupOrg(orgId, userId);
+    }
+  });
+
+  it('101-post state: NULL credit_floor_usd on a zero-floor plan refuses at any negative balance', async () => {
+    // This is the end state 101 produces: the explicit 0 is nulled out, so
+    // the floor is inherited from the plan (playground = 0). Must match the
+    // pre-101 behaviour above exactly.
+    const { orgId, userId } = await createOrg('playground');
+    try {
+      await pool3.query(
+        `UPDATE organizations SET credits_usd = -0.01, monthly_allowance_usd = 0, credit_floor_usd = NULL WHERE id = $1`,
+        [orgId],
+      );
+      const res = await grantLease(pool3, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      expect(res.leaseId).toBeNull();
+      expect(res.floorUsd).toBeCloseTo(0, 4);
+    } finally {
+      await cleanupOrg(orgId, userId);
+    }
+  });
+});
