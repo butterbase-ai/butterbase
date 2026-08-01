@@ -134,6 +134,10 @@ export interface SettleArgs {
 
 export interface SettleResult {
   refundedUsd: number;
+  /** What the customer was actually billed for this lease. */
+  chargedUsd: number;
+  /** Amount debited beyond the original reservation (0 when refunding). */
+  additionalDebitUsd: number;
 }
 
 export async function settleLease(
@@ -159,14 +163,20 @@ export async function settleLease(
       await client.query('ROLLBACK');
       throw new NotFoundError('lease', args.leaseId);
     }
-    if (r.rows[0].status !== 'active') {
+    // 'settled' is terminal. 'abandoned' is NOT: a job whose lease expired can
+    // still complete, and it must still bill — otherwise expiry is a free-usage
+    // hole. Legacy 'reclaimed'/'expired'/'returned' were already refunded by the
+    // old reclaim path, so re-charging them would double-bill; leave terminal.
+    const status = r.rows[0].status;
+    if (status !== 'active' && status !== 'abandoned') {
       await client.query('COMMIT');
-      return { refundedUsd: 0 }; // idempotent: already settled or reclaimed
+      return { refundedUsd: 0, chargedUsd: 0, additionalDebitUsd: 0 };
     }
 
     const granted = parseFloat(r.rows[0].amount_usd);
-    const actual = Math.min(Math.max(0, args.actualUsd), granted);
-    const refund = +(granted - actual).toFixed(4);
+    const actual = Math.max(0, args.actualUsd);
+    const delta = +(actual - granted).toFixed(4);
+    const orgIdRow = r.rows[0].organization_id;
     const sourcePool = r.rows[0].source_pool;
     const topupPortion = r.rows[0].topup_amount_usd ? parseFloat(r.rows[0].topup_amount_usd) : 0;
     const monthlyPortion = granted - topupPortion;
@@ -178,38 +188,63 @@ export async function settleLease(
       [actual, args.leaseId]
     );
 
-    if (refund > 0) {
+    let refund = 0;
+    let additionalDebit = 0;
+
+    if (delta > 0) {
+      // True-up. Drain monthly to zero first, then let credits_usd go negative.
+      additionalDebit = delta;
+      const cur = await client.query<{ monthly_allowance_usd: string }>(
+        `SELECT monthly_allowance_usd FROM organizations WHERE id = $1 FOR UPDATE`,
+        [orgIdRow]
+      );
+      const monthlyNow = parseFloat(cur.rows[0].monthly_allowance_usd);
+      const fromMonthly = Math.max(0, Math.min(monthlyNow, delta));
+      const fromTopup = +(delta - fromMonthly).toFixed(4);
+      if (fromMonthly > 0) {
+        await client.query(
+          `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd - $1 WHERE id = $2`,
+          [fromMonthly, orgIdRow]
+        );
+      }
+      if (fromTopup > 0) {
+        await client.query(
+          `UPDATE organizations SET credits_usd = credits_usd - $1 WHERE id = $2`,
+          [fromTopup, orgIdRow]
+        );
+      }
+    } else if (delta < 0) {
+      refund = +(-delta).toFixed(4);
       if (sourcePool === 'monthly') {
         await client.query(
           `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-          [refund, r.rows[0].organization_id]
+          [refund, orgIdRow]
         );
       } else if (sourcePool === 'topup') {
         await client.query(
           `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
-          [refund, r.rows[0].organization_id]
+          [refund, orgIdRow]
         );
       } else {
-        // split: pro-rate the refund by the original pool proportions.
         const monthlyRefund = +((refund * monthlyPortion) / granted).toFixed(4);
-        const topupRefund = +(refund - monthlyRefund).toFixed(4); // preserve total via remainder
+        const topupRefund = +(refund - monthlyRefund).toFixed(4);
         if (monthlyRefund > 0) {
           await client.query(
             `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
-            [monthlyRefund, r.rows[0].organization_id]
+            [monthlyRefund, orgIdRow]
           );
         }
         if (topupRefund > 0) {
           await client.query(
             `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
-            [topupRefund, r.rows[0].organization_id]
+            [topupRefund, orgIdRow]
           );
         }
       }
     }
 
     await client.query('COMMIT');
-    return { refundedUsd: refund };
+    return { refundedUsd: refund, chargedUsd: actual, additionalDebitUsd: additionalDebit };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;

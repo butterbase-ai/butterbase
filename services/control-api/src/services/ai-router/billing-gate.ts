@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { grantLease, settleLease } from '../lease-service.js';
+import { grantLease, settleLease, type SettleResult } from '../lease-service.js';
 
 export interface LeaseHandle {
   leaseId: string;
@@ -69,7 +69,7 @@ export async function settleAfterCall(
   platformPool: pg.Pool,
   handle: LeaseHandle,
   actualChargedUsd: number
-): Promise<{ refundedUsd: number }> {
+): Promise<SettleResult> {
   try {
     return await settleLease(platformPool, {
       leaseId: handle.leaseId,
@@ -77,7 +77,7 @@ export async function settleAfterCall(
     });
   } catch (err) {
     console.error(`[billing-gate] settle failed for lease ${handle.leaseId}:`, err);
-    return { refundedUsd: 0 };
+    return { refundedUsd: 0, chargedUsd: 0, additionalDebitUsd: 0 };
   }
 }
 

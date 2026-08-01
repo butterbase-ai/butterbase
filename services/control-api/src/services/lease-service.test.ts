@@ -229,4 +229,84 @@ describeDb('grantLease — floor semantics', () => {
       expect(b.topup).toBeCloseTo(9.6, 3); // 8 + 1.6
     });
   });
+
+  describe('settleLease — signed delta', () => {
+    it('charges MORE than reserved, taking the excess from credits_usd', async () => {
+      await setBalance(0, 10, -25);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.110678 });
+      expect(res.chargedUsd).toBeCloseTo(0.1107, 4);
+      expect(res.additionalDebitUsd).toBeCloseTo(0.1106, 4);
+      const b = await balances();
+      // 10 − 0.0001 (reservation) − 0.1106 (true-up) = 9.8893
+      expect(b.topup).toBeCloseTo(9.8893, 4);
+    });
+
+    it('refunds when actual is below the reservation', async () => {
+      await setBalance(0, 10, -25);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 2, ttlSeconds: 60, allowFloor: true,
+      });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.5 });
+      expect(res.refundedUsd).toBeCloseTo(1.5, 4);
+      const b = await balances();
+      expect(b.topup).toBeCloseTo(9.5, 4);
+    });
+
+    it('never drives monthly_allowance_usd negative on a true-up', async () => {
+      await setBalance(0.05, 1, -25);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 5 });
+      const b = await balances();
+      expect(b.monthly).toBeGreaterThanOrEqual(0);
+      expect(b.topup).toBeLessThan(0);   // debt lands in credits_usd only
+    });
+
+    it('is idempotent once settled', async () => {
+      await setBalance(0, 10, -25);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 1 });
+      const before = await balances();
+      const second = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 1 });
+      expect(second.chargedUsd).toBe(0);
+      expect((await balances()).topup).toBeCloseTo(before.topup, 4);
+    });
+
+    // Regression for the live under-bill: an image whose rate cannot be resolved
+    // estimated $0, was floored to MIN_LEASE_USD, and settle clamped the charge
+    // to that — billing $0.0001 for real work.
+    it('bills the true cost when the reservation was the MIN_LEASE_USD floor', async () => {
+      await setBalance(0, 10, -25);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.04 });
+      expect(res.chargedUsd).toBeCloseTo(0.04, 4);   // NOT 0.0001
+      expect((await balances()).topup).toBeCloseTo(9.96, 4);
+    });
+
+    it('still charges a lease that was marked abandoned', async () => {
+      await setBalance(0, 10, -25);
+      const g = await grantLease(pool, {
+        userId, organizationId: orgId, region: 'us-east-1',
+        amountUsd: 0.0001, ttlSeconds: 60, allowFloor: true,
+      });
+      await pool.query(`UPDATE credit_leases SET status = 'abandoned' WHERE lease_id = $1`, [g.leaseId]);
+      const res = await settleLease(pool, { leaseId: g.leaseId!, actualUsd: 0.75 });
+      expect(res.chargedUsd).toBeCloseTo(0.75, 4);
+      // 10 (topup) − 0.75 (total actual charge) = 9.25 exactly.
+      expect((await balances()).topup).toBeCloseTo(9.25, 4);
+    });
+  });
 });
