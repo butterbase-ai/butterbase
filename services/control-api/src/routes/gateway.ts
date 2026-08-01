@@ -87,7 +87,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
   if (err instanceof InsufficientCreditsError) {
     return reply.code(402).send(openaiError(
       err.message, 'billing_error', 'insufficient_credits',
-      { required_usd: err.floorUsd, available_usd: err.balanceUsd },
+      { balance_usd: err.balanceUsd, credit_floor_usd: err.floorUsd },
     ));
   }
   if (err instanceof RouterError) {

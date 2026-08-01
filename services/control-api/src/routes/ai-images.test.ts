@@ -153,8 +153,9 @@ describe('handleImageError', () => {
     const body = reply._sent.body as Record<string, unknown>;
     expect(body.error).toBe('insufficient_credits');
     expect(body.code).toBe('INSUFFICIENT_CREDITS');
-    expect(body.required_usd).toBe(0.05);
-    expect(body.available_usd).toBe(0.01);
+    expect(body.credit_floor_usd).toBe(0.05);
+    expect(body.balance_usd).toBe(0.01);
+    expect(body).not.toHaveProperty('required_usd');
     expect(body.monthly_allowance_usd).toBe(50);
     expect(body.credits_usd).toBe(5.5);
     expect(body.auto_refill_enabled).toBe(true);

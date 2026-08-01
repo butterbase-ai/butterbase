@@ -117,19 +117,34 @@ describe('handleVideoError', () => {
     const app = makeApp({ rows: [dbRow] });
     const reply = makeReply();
 
-    const error = new InsufficientCreditsError(0.05, 0.01);
+    const error = new InsufficientCreditsError({ balanceUsd: 0.01, floorUsd: 0.05 });
     await handleVideoError(app, reply, 'user-1', error);
 
     expect(reply._sent.code).toBe(402);
     const body = reply._sent.body as Record<string, unknown>;
     expect(body.error).toBe('insufficient_credits');
     expect(body.code).toBe('INSUFFICIENT_CREDITS');
-    expect(body.required_usd).toBe(0.05);
-    expect(body.available_usd).toBe(0.01);
+    expect(body.balance_usd).toBe(0.01);
+    expect(body.credit_floor_usd).toBe(0.05);
     expect(body.monthly_allowance_usd).toBe(50);
     expect(body.credits_usd).toBe(5.5);
     expect(body.auto_refill_enabled).toBe(true);
     expect(body.auto_refill_amount_usd).toBe(10);
+  });
+
+  it('InsufficientCreditsError → 402 with balance and floor', async () => {
+    const app = makeApp({ rows: [{
+      auto_refill_enabled: true, auto_refill_amount_usd: '10.00',
+      monthly_allowance_usd: '0.00', credits_usd: '-30.00',
+    }] });
+    const reply = makeReply();
+    await handleVideoError(app, reply, 'user-1', new InsufficientCreditsError({ balanceUsd: -30, floorUsd: -25 }));
+    expect(reply._sent.code).toBe(402);
+    const body = reply._sent.body as Record<string, unknown>;
+    expect(body.code).toBe('INSUFFICIENT_CREDITS');
+    expect(body.balance_usd).toBe(-30);
+    expect(body.credit_floor_usd).toBe(-25);
+    expect(body).not.toHaveProperty('required_usd');
   });
 
   it('RouterError with WRONG_MODALITY → 400, public code WRONG_MODALITY', async () => {

@@ -152,7 +152,7 @@ describe('POST /v1/chat/completions', () => {
     expect(r.statusCode).toBe(200);
   });
 
-  it('5. InsufficientCreditsError → 402 billing_error / insufficient_credits with required_usd and available_usd', async () => {
+  it('5. InsufficientCreditsError → 402 billing_error / insufficient_credits with balance_usd and credit_floor_usd', async () => {
     app = await buildTestApp({ userId: 'user-jwt-credits', authMethod: 'jwt', scopes: [] });
     mockRouteChatCompletion.mockRejectedValueOnce(new (InsufficientCreditsError as any)({ balanceUsd: 0.01, floorUsd: 0.05 }));
 
@@ -166,8 +166,8 @@ describe('POST /v1/chat/completions', () => {
     const body = r.json();
     expect(body.error.type).toBe('billing_error');
     expect(body.error.code).toBe('insufficient_credits');
-    expect(typeof body.error.required_usd).toBe('number');
-    expect(typeof body.error.available_usd).toBe('number');
+    expect(typeof body.error.balance_usd).toBe('number');
+    expect(typeof body.error.credit_floor_usd).toBe('number');
   });
 
   it('6. RouterError MODEL_NOT_FOUND → 404 invalid_request_error / model_not_found', async () => {

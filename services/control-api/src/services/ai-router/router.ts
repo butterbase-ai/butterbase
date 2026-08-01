@@ -96,8 +96,8 @@ export async function acquireWithAudit(
           success: false,
           errorMessage: err.message,
           eventData: {
-            required_usd: err.floorUsd,
-            available_usd: err.balanceUsd,
+            floor_usd: err.floorUsd,
+            balance_usd: err.balanceUsd,
             region: ctx.region,
             // auto_refill state is not in scope here; omitted to avoid
             // extra SELECTs in the hot reject path.

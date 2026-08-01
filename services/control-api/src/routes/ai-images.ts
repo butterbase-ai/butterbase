@@ -446,8 +446,8 @@ export async function handleImageError(app: FastifyInstance, reply: any, organiz
     return reply.code(402).send({
       error: 'insufficient_credits',
       code: 'INSUFFICIENT_CREDITS',
-      required_usd: error.floorUsd,
-      available_usd: error.balanceUsd,
+      balance_usd: error.balanceUsd,
+      credit_floor_usd: error.floorUsd,
       monthly_allowance_usd: ar.monthlyAllowanceUsd,
       credits_usd: ar.topupUsd,
       auto_refill_enabled: ar.enabled,
