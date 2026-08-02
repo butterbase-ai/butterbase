@@ -73,6 +73,14 @@ function isEnabled(): boolean {
   return process.env.DASHBOARD_ASSISTANT_ENABLED === '1';
 }
 
+// The dashboard forwards the user's active org as `x-organization-id`. The
+// agent loop uses it to scope app-discovery tooling (manage_app list) to the
+// current org. Absent / non-string → null (loop falls back to unscoped).
+function readOrgId(request: { headers: Record<string, unknown> }): string | null {
+  const raw = request.headers['x-organization-id'];
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+}
+
 // ---------------------------------------------------------------------------
 // Helper: calculate usage cost (Plan 3e Task 16)
 // ---------------------------------------------------------------------------
@@ -419,6 +427,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userMessage: message,
         model,
         pool: app.controlDb,
+        organizationId: readOrgId(request),
       });
 
       for await (const event of gen) {
@@ -595,6 +604,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userMessage: userMessageToReplay,
         model: conversation.model,
         pool: app.controlDb,
+        organizationId: readOrgId(request),
       });
 
       for await (const event of gen) {
@@ -999,6 +1009,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userMessage: '',
         model,
         pool: app.controlDb,
+        organizationId: readOrgId(request),
       });
 
       for await (const event of gen) {

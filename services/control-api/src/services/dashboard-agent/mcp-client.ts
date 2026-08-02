@@ -45,12 +45,15 @@ function normalizeToolArgs(args: unknown): unknown {
  * @param name - The MCP tool name (e.g., 'manage_app')
  * @param args - Tool arguments as an object
  * @param jwt - Cognito Bearer JWT token
+ * @param orgId - Optional active org; forwarded as `x-organization-id` so the
+ *   MCP server carries the caller's org context into downstream API calls.
  * @returns Result object with ok flag, result, or error
  */
 export async function callMcpTool(
   name: string,
   args: unknown,
   jwt: string,
+  orgId?: string | null,
 ): Promise<McpCallResult> {
   const url = `${process.env.MCP_SERVER_URL ?? 'http://localhost:3010'}/mcp`;
   const normalizedArgs = normalizeToolArgs(args);
@@ -64,6 +67,7 @@ export async function callMcpTool(
         // (rejects with 406 Not Acceptable otherwise).
         accept: 'application/json, text/event-stream',
         authorization: `Bearer ${jwt}`,
+        ...(orgId ? { 'x-organization-id': orgId } : {}),
       },
       body: JSON.stringify({
         jsonrpc: '2.0',

@@ -389,6 +389,35 @@ const TOOL_RETRY_LIMIT = process.env.DASHBOARD_AGENT_TOOL_RETRY_LIMIT
   ? Number.parseInt(process.env.DASHBOARD_AGENT_TOOL_RETRY_LIMIT, 10)
   : 3;
 
+/**
+ * Narrow a `manage_app` action:"list" MCP result to a single org. The tool
+ * returns `{ content: [{ type: 'text', text: <json> }] }` where the JSON is
+ * `{ apps: [{ ..., organization_id }] }` (each row already carries its owning
+ * org — see routes/init.ts `/apps`). We parse that text, keep only rows whose
+ * `organization_id` matches, and re-serialize. Any shape mismatch or parse
+ * error returns the original result unchanged, so scoping can never break the
+ * tool call — it only ever removes cross-org rows.
+ */
+export function scopeAppListToOrg(result: unknown, orgId: string): unknown {
+  try {
+    const envelope = result as { content?: Array<{ type?: string; text?: string }> };
+    const content = envelope?.content;
+    if (!Array.isArray(content)) return result;
+    const idx = content.findIndex((c) => c?.type === 'text' && typeof c.text === 'string');
+    if (idx === -1) return result;
+    const parsed = JSON.parse(content[idx].text as string) as {
+      apps?: Array<{ organization_id?: string | null }>;
+    };
+    if (!parsed || !Array.isArray(parsed.apps)) return result;
+    const apps = parsed.apps.filter((a) => a?.organization_id === orgId);
+    const nextText = JSON.stringify({ ...parsed, apps }, null, 2);
+    const nextContent = content.map((c, i) => (i === idx ? { ...c, text: nextText } : c));
+    return { ...envelope, content: nextContent };
+  } catch {
+    return result;
+  }
+}
+
 export async function* runAgentTurn(
   input: {
     conversationId: string;
@@ -397,6 +426,10 @@ export async function* runAgentTurn(
     userMessage: string;
     model: string;
     pool: pg.Pool;
+    // Active org (from the dashboard's `x-organization-id` header). When set,
+    // the agent's app-discovery tooling (manage_app list) is scoped to it so
+    // the model only sees apps in the org the user is currently working in.
+    organizationId?: string | null;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
@@ -863,7 +896,21 @@ export async function* runAgentTurn(
 
         // ---- Default: MCP tool -------------------------------------------
         toolCallsCount++;
-        const call = await callMcpTool(tc.name, tc.args, input.jwt);
+        const call = await callMcpTool(tc.name, tc.args, input.jwt, input.organizationId);
+        // Scope app discovery to the active org. The shared `/apps` endpoint
+        // deliberately fans out across every org the user belongs to; here —
+        // and only on the dashboard-agent path — we narrow `manage_app` list
+        // results to the org the user is currently working in so the model
+        // isn't shown apps from unrelated orgs. Best-effort: any parse miss
+        // leaves the result untouched.
+        if (
+          call.ok &&
+          tc.name === 'manage_app' &&
+          (tc.args as { action?: string } | null)?.action === 'list' &&
+          input.organizationId
+        ) {
+          call.result = scopeAppListToOrg(call.result, input.organizationId);
+        }
         const resultPayload = call.ok ? { result: call.result } : { error: call.error };
         toolCallResults.push({ id: tc.id, ...resultPayload });
         yield { type: 'tool_result', id: tc.id, ...resultPayload };
