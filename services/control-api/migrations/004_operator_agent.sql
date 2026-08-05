@@ -7,6 +7,10 @@ CREATE INDEX IF NOT EXISTS dashboard_agent_conversations_org_idx
   ON dashboard_agent_conversations (organization_id, last_message_at DESC NULLS LAST)
   WHERE organization_id IS NOT NULL;
 
+CREATE UNIQUE INDEX IF NOT EXISTS dashboard_agent_conversations_operator_uniq
+  ON dashboard_agent_conversations (organization_id, user_id)
+  WHERE organization_id IS NOT NULL;
+
 -- Named recurring jobs. v1 seeds exactly one per org.
 CREATE TABLE IF NOT EXISTS dashboard_agent_operator_jobs (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

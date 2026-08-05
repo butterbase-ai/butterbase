@@ -29,6 +29,29 @@ describe('getOrCreateOperatorConversation', () => {
     expect(r.rows[0].user_id).toBe('operator:org-test-operator');
     expect(r.rows[0].organization_id).toBe(ORG);
   });
+
+  it('resolves concurrent calls for the same org to a single conversation', async () => {
+    // Pre-warm N pool connections so the concurrent calls below actually run
+    // on already-established sockets in parallel, instead of serializing
+    // behind lazy connection setup (which would mask the TOCTOU race).
+    const N = 8;
+    const warm = await Promise.all(Array.from({ length: N }, () => pool.connect()));
+    await Promise.all(warm.map((c) => c.release()));
+
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        getOrCreateOperatorConversation(pool, ORG, 'claude-sonnet-4-5'),
+      ),
+    );
+    const uniqueIds = new Set(results);
+    expect(uniqueIds.size).toBe(1);
+
+    const r = await pool.query(
+      `SELECT count(*)::int AS n FROM dashboard_agent_conversations WHERE organization_id = $1`,
+      [ORG],
+    );
+    expect(r.rows[0].n).toBe(1);
+  });
 });
 
 describe('claimDueJobs', () => {
