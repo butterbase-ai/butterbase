@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll, type MockedFunction } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, type MockedFunction } from 'vitest';
 
 vi.mock('../../services/dashboard-agent/approvals-store.js', () => ({
   getApprovalForOrg: vi.fn(),
@@ -8,9 +8,10 @@ vi.mock('../../services/dashboard-agent/approvals-store.js', () => ({
 vi.mock('../../services/dashboard-agent/tool-bridge.js', () => ({ executeOnce: vi.fn() }));
 
 import { Pool } from 'pg';
+import Fastify, { type FastifyInstance } from 'fastify';
 import * as approvalsModule from '../../services/dashboard-agent/approvals-store.js';
 import * as bridgeModule from '../../services/dashboard-agent/tool-bridge.js';
-import { resolveOperatorApproval, resolveCallerOrgId } from '../dashboard-agent.js';
+import { resolveOperatorApproval, resolveCallerOrgId, dashboardAgentRoutes } from '../dashboard-agent.js';
 
 const mockGet = approvalsModule.getApprovalForOrg as MockedFunction<typeof approvalsModule.getApprovalForOrg>;
 const mockResolve = approvalsModule.resolveApproval as MockedFunction<typeof approvalsModule.resolveApproval>;
@@ -154,5 +155,89 @@ describe('resolveCallerOrgId', () => {
   it('400s when the header is absent', async () => {
     const r = await resolveCallerOrgId(dbPool, { headers: {} }, MEMBER);
     expect(r).toEqual({ ok: false, code: 400, error: 'x-organization-id required' });
+  });
+
+  // organization_members.organization_id is `uuid`, so Postgres normalises a
+  // non-canonical header and the membership check passes. But
+  // dashboard_agent_conversations.organization_id is TEXT and compared exactly,
+  // so echoing the header back would give a legitimate member a silent 404 on
+  // every approval. Return the database's own canonical form instead.
+  it('returns the canonical org id from the database, not the header string', async () => {
+    const r = await resolveCallerOrgId(
+      dbPool,
+      { headers: { 'x-organization-id': ORG_A.toUpperCase() } },
+      MEMBER,
+    );
+    expect(r).toEqual({ ok: true, orgId: ORG_A });
+  });
+
+  it('400s a non-uuid header rather than 500ing on a Postgres cast error', async () => {
+    const r = await resolveCallerOrgId(dbPool, { headers: { 'x-organization-id': 'not-a-uuid' } }, MEMBER);
+    expect(r).toEqual({ ok: false, code: 400, error: 'x-organization-id must be a uuid' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Route wiring. Proves both operator routes actually invoke the membership
+// gate — testing resolveCallerOrgId in isolation would stay green if a future
+// edit dropped the call from one of them.
+//
+// Auth is stubbed by decorating request.auth (same pattern as
+// dashboard-agent.test.ts); controlDb is a stub whose membership SELECT
+// returns no rows, i.e. the caller is not a member.
+// ---------------------------------------------------------------------------
+
+describe('operator route membership wiring', () => {
+  let app: FastifyInstance;
+  const query = vi.fn();
+
+  beforeEach(async () => {
+    process.env.DASHBOARD_ASSISTANT_ENABLED = '1';
+    query.mockReset();
+    query.mockResolvedValue({ rows: [], rowCount: 0 });
+
+    app = Fastify({ logger: false });
+    app.decorateRequest('auth', null as any);
+    app.addHook('onRequest', async (request) => {
+      (request as any).auth = { userId: 'some-user', authMethod: 'jwt', scopes: ['*'] };
+    });
+    app.decorate('controlDb', { query } as any);
+    await app.register(dashboardAgentRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app?.close();
+    delete process.env.DASHBOARD_ASSISTANT_ENABLED;
+  });
+
+  it('GET /operator/approvals 403s a non-member', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals',
+      headers: { 'x-organization-id': ORG_B },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'not a member of the requested organization' });
+    expect(approvalsModule.listPendingByOrg).not.toHaveBeenCalled();
+  });
+
+  it('POST /operator/approvals/:id/resolve 403s a non-member', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/operator/approvals/appr-1/resolve',
+      headers: { 'x-organization-id': ORG_B },
+      payload: { status: 'approved' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'not a member of the requested organization' });
+    expect(approvalsModule.getApprovalForOrg).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('GET /operator/approvals 400s when the header is absent', async () => {
+    const res = await app.inject({ method: 'GET', url: '/operator/approvals' });
+    expect(res.statusCode).toBe(400);
+    expect(approvalsModule.listPendingByOrg).not.toHaveBeenCalled();
   });
 });

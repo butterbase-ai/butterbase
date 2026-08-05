@@ -270,18 +270,32 @@ export async function resolveCallerOrgId(
   request: { headers: Record<string, unknown> },
   userId: string,
 ): Promise<OperatorOrgOutcome> {
-  const orgId = readOrgId(request);
-  if (!orgId) return { ok: false, code: 400, error: 'x-organization-id required' };
+  const headerOrgId = readOrgId(request);
+  if (!headerOrgId) return { ok: false, code: 400, error: 'x-organization-id required' };
 
-  const member = await pool.query(
-    `SELECT 1 FROM organization_members WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
-    [orgId, userId],
+  // organization_members.organization_id is `uuid`; comparing a non-uuid string
+  // against it makes Postgres raise 22P02 and the route 500s on a value the
+  // client fully controls. Reject the shape before it reaches the database.
+  if (!z.string().uuid().safeParse(headerOrgId).success) {
+    return { ok: false, code: 400, error: 'x-organization-id must be a uuid' };
+  }
+
+  // Return the org id the DATABASE holds, not the header string. Both columns
+  // here are `uuid`, so Postgres normalises a non-canonical header (uppercase,
+  // braces) and the membership check passes — but the value then flows into a
+  // comparison against dashboard_agent_conversations.organization_id, which is
+  // TEXT and matched exactly. Echoing the header back would give a legitimate
+  // member a silent 404 on every approval.
+  const member = await pool.query<{ organization_id: string }>(
+    `SELECT organization_id::text AS organization_id FROM organization_members
+     WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
+    [headerOrgId, userId],
   );
   if ((member.rowCount ?? 0) === 0) {
     return { ok: false, code: 403, error: 'not a member of the requested organization' };
   }
 
-  return { ok: true, orgId };
+  return { ok: true, orgId: member.rows[0].organization_id };
 }
 
 export type OperatorResolveOutcome =

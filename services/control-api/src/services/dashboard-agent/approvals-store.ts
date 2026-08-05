@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { operatorUserId } from './operator-store.js';
 
 export type Approval = {
   id: string;
@@ -82,9 +83,22 @@ export async function getApproval(
 }
 
 /**
- * Org-scoped lookup: any member of the org may resolve the operator's approvals
- * (the operator conversation's user_id is the sentinel `operator:<org>`, which no
- * human user_id ever matches, so this is the only path a human can use to reach it).
+ * Org-scoped lookup for the OPERATOR's approvals: any member of the org may
+ * resolve them (the operator conversation's user_id is the sentinel
+ * `operator:<org>`, which no human user_id ever matches, so this is the only
+ * path a human can use to reach it).
+ *
+ * The `user_id` predicate is load-bearing, not decorative. The operator
+ * approval routes authorise on org membership alone, so without it this would
+ * match ANY conversation carrying an organization_id. That is safe today only
+ * because createConversation never sets that column — an unstated invariant
+ * nothing enforces. The moment a migration, an analytics feature, or org-scoped
+ * chat backfills it, these routes would silently widen to "any org member can
+ * read another member's tool_args and execute their gated tool calls". Scope
+ * structurally instead of relying on that accident.
+ *
+ * operatorUserId is the single source of truth for the sentinel format; do not
+ * inline the `operator:` prefix here.
  */
 export async function getApprovalForOrg(
   pool: pg.Pool,
@@ -95,8 +109,8 @@ export async function getApprovalForOrg(
     `SELECT ${APPROVAL_COLS_JOIN}
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
-     WHERE a.id = $1 AND c.organization_id = $2`,
-    [id, orgId]
+     WHERE a.id = $1 AND c.organization_id = $2 AND c.user_id = $3`,
+    [id, orgId, operatorUserId(orgId)]
   );
 
   return result.rows.length === 0 ? null : rowToApproval(result.rows[0]);
@@ -121,17 +135,20 @@ export async function listPendingByConv(
 }
 
 /**
- * List all pending approvals across an org's conversations (covers operator
- * conversations, whose user_id sentinel excludes them from any user-scoped query).
+ * List an org's pending OPERATOR approvals (the operator conversation's
+ * user_id sentinel excludes them from any user-scoped query).
+ *
+ * Scoped to the operator conversation, not merely to the org — see
+ * getApprovalForOrg for why that predicate is load-bearing.
  */
 export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<Approval[]> {
   const result = await pool.query(
     `SELECT ${APPROVAL_COLS_JOIN}
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
-     WHERE c.organization_id = $1 AND a.status = 'pending'
+     WHERE c.organization_id = $1 AND c.user_id = $2 AND a.status = 'pending'
      ORDER BY a.created_at ASC`,
-    [orgId]
+    [orgId, operatorUserId(orgId)]
   );
 
   return result.rows.map(rowToApproval);
