@@ -13,9 +13,10 @@ export type ToolSpec = {
   name: string;
   description: string;
   parameters: object; // JSON schema
-  // Base sensitivity hint (Plan 3b). Optional; defaults to 'safe'. The real
-  // gate logic is `sensitivityFor(name, args)` below, since sensitivity for
-  // several tools depends on the action/args, not just the tool name.
+  // Base sensitivity hint (Plan 3b). Optional; defaults to 'safe'. Read by
+  // `sensitivityFor(name, args)` below as the fallback tier — the args-aware
+  // rules there win, since sensitivity for several tools depends on the
+  // action/args, not just the tool name.
   sensitivity?: 'safe' | 'confirm' | 'destructive';
 };
 
@@ -252,12 +253,15 @@ export function isDeployFunctionTool(name: string): name is 'deploy_function_fro
 /**
  * Compute the effective sensitivity of a tool call from its NAME + ARGS
  * (Plan 3b Task 2). Several tools are only destructive for specific actions
- * (e.g. manage_app.delete vs manage_app.list), so this is the real gate
- * logic — the `sensitivity` field on each ToolSpec is just a coarse hint.
+ * (e.g. manage_app.delete vs manage_app.list), so the args-aware rules below
+ * take precedence; anything they don't match falls back to the `sensitivity`
+ * hint declared on the ToolSpec, and only then to 'safe'.
  */
 export function sensitivityFor(name: string, args: any): 'safe' | 'confirm' | 'destructive' {
   const a = (args ?? {}) as Record<string, unknown>;
   const action = typeof a.action === 'string' ? a.action : null;
+
+  // Explicit destructive cases — these win over any catalog hint.
   if (name === 'manage_app' && (action === 'delete' || action === 'pause')) return 'destructive';
   if (name === 'manage_repo' && action === 'wipe') return 'destructive';
   if (
@@ -270,5 +274,9 @@ export function sensitivityFor(name: string, args: any): 'safe' | 'confirm' | 'd
   }
   if (name === 'manage_billing') return 'destructive';
   if (name === 'manage_migrations' && (action === 'abort' || action === 'reverse')) return 'destructive';
-  return 'safe';
+
+  // Otherwise fall back to the catalog's declared hint. Previously these hints
+  // were dead configuration and everything not matched above returned 'safe'.
+  const spec = getToolCatalog().find((t) => t.name === name);
+  return spec?.sensitivity ?? 'safe';
 }
