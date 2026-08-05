@@ -17,6 +17,9 @@ export type Approval = {
 const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
   sensitivity, status, trust_scope, deny_reason, created_at, resolved_at`;
 
+/** Same columns as APPROVAL_COLS, `a.`-prefixed for queries that JOIN dashboard_agent_conversations. */
+const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at`;
+
 function rowToApproval(row: any): Approval {
   return {
     id: row.id,
@@ -68,7 +71,7 @@ export async function getApproval(
   userId: string
 ): Promise<Approval | null> {
   const result = await pool.query(
-    `SELECT a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at
+    `SELECT ${APPROVAL_COLS_JOIN}
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
      WHERE a.id = $1 AND c.user_id = $2`,
@@ -89,7 +92,7 @@ export async function getApprovalForOrg(
   orgId: string
 ): Promise<Approval | null> {
   const result = await pool.query(
-    `SELECT a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at
+    `SELECT ${APPROVAL_COLS_JOIN}
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
      WHERE a.id = $1 AND c.organization_id = $2`,
@@ -123,7 +126,7 @@ export async function listPendingByConv(
  */
 export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<Approval[]> {
   const result = await pool.query(
-    `SELECT a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at
+    `SELECT ${APPROVAL_COLS_JOIN}
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
      WHERE c.organization_id = $1 AND a.status = 'pending'
