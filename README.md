@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.butterbase-ai%2Fmcp.svg)](https://mcptoplist.com/server/io.github.butterbase-ai%2Fmcp)
+
 <p align="center">
   <img src=".github/assets/logo.png" alt="Butterbase" width="420" />
 </p>
