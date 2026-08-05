@@ -13,10 +13,9 @@ export type ToolSpec = {
   name: string;
   description: string;
   parameters: object; // JSON schema
-  // Base sensitivity hint (Plan 3b). Optional; defaults to 'safe'. Read by
-  // `sensitivityFor(name, args)` below as the fallback tier — the args-aware
-  // rules there win, since sensitivity for several tools depends on the
-  // action/args, not just the tool name.
+  // Base sensitivity hint (Plan 3b). Currently INERT — `sensitivityFor` does
+  // not read it (see the note at its 'safe' fallback, decided 2026-08-05).
+  // Retained as documentation of intent and for a future revisit.
   sensitivity?: 'safe' | 'confirm' | 'destructive';
 };
 
@@ -253,9 +252,9 @@ export function isDeployFunctionTool(name: string): name is 'deploy_function_fro
 /**
  * Compute the effective sensitivity of a tool call from its NAME + ARGS
  * (Plan 3b Task 2). Several tools are only destructive for specific actions
- * (e.g. manage_app.delete vs manage_app.list), so the args-aware rules below
- * take precedence; anything they don't match falls back to the `sensitivity`
- * hint declared on the ToolSpec, and only then to 'safe'.
+ * (e.g. manage_app.delete vs manage_app.list), so this is the real gate logic.
+ * The `sensitivity` field on each ToolSpec is not read — see the note on the
+ * 'safe' fallback below.
  */
 export function sensitivityFor(name: string, args: any): 'safe' | 'confirm' | 'destructive' {
   const a = (args ?? {}) as Record<string, unknown>;
@@ -275,8 +274,11 @@ export function sensitivityFor(name: string, args: any): 'safe' | 'confirm' | 'd
   if (name === 'manage_billing') return 'destructive';
   if (name === 'manage_migrations' && (action === 'abort' || action === 'reverse')) return 'destructive';
 
-  // Otherwise fall back to the catalog's declared hint. Previously these hints
-  // were dead configuration and everything not matched above returned 'safe'.
-  const spec = getToolCatalog().find((t) => t.name === name);
-  return spec?.sensitivity ?? 'safe';
+  // Everything else is 'safe'. Note the ToolSpec.sensitivity hints are all
+  // inert: nothing reads them, by decision (2026-08-05). Honouring them would
+  // put an approval modal in front of read-only calls — including the
+  // `manage_app` action="list" that opens every conversation — so the
+  // 'confirm' tier is deliberately unused for now. The hints are left in the
+  // catalog rather than deleted because this is expected to be revisited.
+  return 'safe';
 }
