@@ -77,6 +77,63 @@ describe('executeOnce', () => {
     expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
   });
 
+  // Regression: before the advisory-lock fix both concurrent callers missed
+  // the cache SELECT and both fired the tool (measured: 2 calls). ON CONFLICT
+  // DO NOTHING protected the ledger row but not the side effect.
+  it('executes once even when two callers race the same approval', async () => {
+    const approval = await makeApproval();
+    mockCallMcpTool.mockImplementation(async () => {
+      // Hold the transaction open long enough that a naive implementation's
+      // second caller would certainly have passed its cache SELECT by now.
+      await new Promise((r) => setTimeout(r, 100));
+      return { ok: true, result: { id: 'act_1' } };
+    });
+
+    const args = {
+      approvalId: approval.id, name: 'manage_substrate',
+      args: { action: 'propose' }, jwt: 'k', orgId: ORG,
+    };
+    // Warm two pool connections first, so neither caller is serialised behind
+    // connection setup rather than the lock (keeps the race deterministic).
+    const warm = await Promise.all([pool.connect(), pool.connect()]);
+    warm.forEach((c) => c.release());
+
+    const [first, second] = await Promise.all([
+      executeOnce(pool, args),
+      executeOnce(pool, args),
+    ]);
+
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(first).toEqual({ ok: true, result: { id: 'act_1' } });
+    expect(second).toEqual(first);
+
+    const rows = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM dashboard_agent_tool_executions WHERE approval_id = $1`,
+      [approval.id],
+    );
+    expect(rows.rows[0].n).toBe(1);
+  });
+
+  // Regression: PostgreSQL rejects NUL inside JSONB, so the INSERT used to
+  // throw *after* the tool had fired — nothing recorded, retry re-executes.
+  it('records a successful execution whose result contains a NUL byte', async () => {
+    const approval = await makeApproval();
+    const NUL = String.fromCharCode(0);
+    mockCallMcpTool.mockResolvedValue({ ok: true, result: { s: `a${NUL}b` } });
+
+    const args = {
+      approvalId: approval.id, name: 'manage_substrate',
+      args: {}, jwt: 'k', orgId: ORG,
+    };
+    const first = await executeOnce(pool, args);
+    expect(first).toEqual({ ok: true, result: { s: `a${NUL}b` } });
+
+    // The execution was recorded, so the replay is served from cache.
+    const second = await executeOnce(pool, args);
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(second).toEqual({ ok: true, result: { s: 'ab' } });
+  });
+
   it('refuses a tool outside the allowlist without calling MCP', async () => {
     const approval = await makeApproval();
     const r = await executeOnce(pool, {
