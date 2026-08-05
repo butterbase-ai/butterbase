@@ -1,16 +1,6 @@
 import pg from 'pg';
 import { runAgentTurn } from './loop.js';
-import { getOrCreateOperatorConversation, type OperatorJob } from './operator-store.js';
-
-// Mirrors operator-store.ts's operatorUserId(orgId) sentinel format. Not
-// imported from there directly: the module-level vi.mock in
-// operator-turn.test.ts only stubs getOrCreateOperatorConversation, so
-// importing operatorUserId from the same mocked module would resolve to
-// undefined at test time. Keep this in sync with operator-store.ts if that
-// format ever changes.
-function operatorUserId(orgId: string): string {
-  return `operator:${orgId}`;
-}
+import { getOrCreateOperatorConversation, operatorUserId, type OperatorJob } from './operator-store.js';
 import { getOperatorCredential } from './operator-credential.js';
 
 export type OperatorWake =

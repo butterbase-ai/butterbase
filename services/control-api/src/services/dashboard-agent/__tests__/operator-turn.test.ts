@@ -2,7 +2,14 @@ import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vites
 import type pg from 'pg';
 
 vi.mock('../loop.js', () => ({ runAgentTurn: vi.fn() }));
-vi.mock('../operator-store.js', () => ({ getOrCreateOperatorConversation: vi.fn() }));
+vi.mock('../operator-store.js', () => ({
+  getOrCreateOperatorConversation: vi.fn(),
+  // Passthrough matching today's format. This is intentionally NOT the guard
+  // against drift — see the "drift guard" test below, which compares against
+  // the real (unmocked) operator-store.js so a future format change in the
+  // real module is caught even if this literal is never updated.
+  operatorUserId: (orgId: string) => `operator:${orgId}`,
+}));
 vi.mock('../operator-credential.js', () => ({ getOperatorCredential: vi.fn() }));
 
 import * as loopModule from '../loop.js';
@@ -70,5 +77,43 @@ describe('runOperatorTurn', () => {
     const msg = mockRunAgentTurn.mock.calls[0][0].userMessage;
     expect(msg).toContain('learnings');
     expect(msg).toMatch(/re-read|reconcile/i);
+  });
+
+  it('sends the identical instructions body for a timer wake and an event wake, differing only in the preamble', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    const timerMsg = mockRunAgentTurn.mock.calls[0][0].userMessage as string;
+
+    vi.clearAllMocks();
+    mockGetConv.mockResolvedValue('conv-1');
+    mockGetCred.mockResolvedValue('bb_sk_test');
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    await runOperatorTurn(stubPool, {
+      job, wake: { reason: 'event', table: 'learnings', rowId: 'lrn_1' },
+    });
+    const eventMsg = mockRunAgentTurn.mock.calls[0][0].userMessage as string;
+
+    // Both must carry the job's instructions verbatim — pg_notify can drop
+    // the event entirely, so a timer wake is the only recovery path and must
+    // do the same work as an event wake, not a lesser version of it.
+    expect(timerMsg).toContain(job.instructions);
+    expect(eventMsg).toContain(job.instructions);
+
+    // The preamble (first line) is allowed to differ; everything after it
+    // — the reconcile instruction and the job instructions — must be
+    // byte-identical between the two wake reasons.
+    const timerBody = timerMsg.split('\n').slice(1).join('\n');
+    const eventBody = eventMsg.split('\n').slice(1).join('\n');
+    expect(eventBody).toBe(timerBody);
+  });
+
+  it('sends the identity operator-store.js actually produces (drift guard)', async () => {
+    const real = await vi.importActual<typeof import('../operator-store.js')>('../operator-store.js');
+
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    const input = mockRunAgentTurn.mock.calls[0][0];
+    expect(input.userId).toBe(real.operatorUserId(job.organizationId));
   });
 });
