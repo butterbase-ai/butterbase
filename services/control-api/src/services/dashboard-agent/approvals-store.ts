@@ -14,6 +14,25 @@ export type Approval = {
   resolvedAt: string | null;
 };
 
+const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
+  sensitivity, status, trust_scope, deny_reason, created_at, resolved_at`;
+
+function rowToApproval(row: any): Approval {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    turnMessageId: row.turn_message_id,
+    toolName: row.tool_name,
+    toolArgs: row.tool_args,
+    sensitivity: row.sensitivity,
+    status: row.status,
+    trustScope: row.trust_scope,
+    denyReason: row.deny_reason,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at,
+  };
+}
+
 /**
  * Create a new approval record. Stores all necessary info for later
  * approval/denial/expiration. Returns the created approval.
@@ -32,24 +51,11 @@ export async function createApproval(
     `INSERT INTO dashboard_agent_approvals
      (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status)
      VALUES ($1, $2, $3, $4, $5, 'pending')
-     RETURNING id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trust_scope, deny_reason, created_at, resolved_at`,
+     RETURNING ${APPROVAL_COLS}`,
     [input.conversationId, input.turnMessageId, input.toolName, JSON.stringify(input.toolArgs), input.sensitivity]
   );
 
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    conversationId: row.conversation_id,
-    turnMessageId: row.turn_message_id,
-    toolName: row.tool_name,
-    toolArgs: row.tool_args,
-    sensitivity: row.sensitivity,
-    status: row.status,
-    trustScope: row.trust_scope,
-    denyReason: row.deny_reason,
-    createdAt: row.created_at,
-    resolvedAt: row.resolved_at,
-  };
+  return rowToApproval(result.rows[0]);
 }
 
 /**
@@ -69,24 +75,28 @@ export async function getApproval(
     [id, userId]
   );
 
-  if (result.rows.length === 0) {
-    return null;
-  }
+  return result.rows.length === 0 ? null : rowToApproval(result.rows[0]);
+}
 
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    conversationId: row.conversation_id,
-    turnMessageId: row.turn_message_id,
-    toolName: row.tool_name,
-    toolArgs: row.tool_args,
-    sensitivity: row.sensitivity,
-    status: row.status,
-    trustScope: row.trust_scope,
-    denyReason: row.deny_reason,
-    createdAt: row.created_at,
-    resolvedAt: row.resolved_at,
-  };
+/**
+ * Org-scoped lookup: any member of the org may resolve the operator's approvals
+ * (the operator conversation's user_id is the sentinel `operator:<org>`, which no
+ * human user_id ever matches, so this is the only path a human can use to reach it).
+ */
+export async function getApprovalForOrg(
+  pool: pg.Pool,
+  id: string,
+  orgId: string
+): Promise<Approval | null> {
+  const result = await pool.query(
+    `SELECT a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at
+     FROM dashboard_agent_approvals a
+     JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
+     WHERE a.id = $1 AND c.organization_id = $2`,
+    [id, orgId]
+  );
+
+  return result.rows.length === 0 ? null : rowToApproval(result.rows[0]);
 }
 
 /**
@@ -97,26 +107,31 @@ export async function listPendingByConv(
   conversationId: string
 ): Promise<Approval[]> {
   const result = await pool.query(
-    `SELECT id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trust_scope, deny_reason, created_at, resolved_at
+    `SELECT ${APPROVAL_COLS}
      FROM dashboard_agent_approvals
      WHERE conversation_id = $1 AND status = 'pending'
      ORDER BY created_at ASC`,
     [conversationId]
   );
 
-  return result.rows.map(row => ({
-    id: row.id,
-    conversationId: row.conversation_id,
-    turnMessageId: row.turn_message_id,
-    toolName: row.tool_name,
-    toolArgs: row.tool_args,
-    sensitivity: row.sensitivity,
-    status: row.status,
-    trustScope: row.trust_scope,
-    denyReason: row.deny_reason,
-    createdAt: row.created_at,
-    resolvedAt: row.resolved_at,
-  }));
+  return result.rows.map(rowToApproval);
+}
+
+/**
+ * List all pending approvals across an org's conversations (covers operator
+ * conversations, whose user_id sentinel excludes them from any user-scoped query).
+ */
+export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<Approval[]> {
+  const result = await pool.query(
+    `SELECT a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at
+     FROM dashboard_agent_approvals a
+     JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
+     WHERE c.organization_id = $1 AND a.status = 'pending'
+     ORDER BY a.created_at ASC`,
+    [orgId]
+  );
+
+  return result.rows.map(rowToApproval);
 }
 
 /**
