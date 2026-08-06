@@ -42,13 +42,26 @@ vi.mock('../approvals-store.js', () => ({
 /**
  * The simulated future change: `write_file` is now something the operator may
  * call. Everything else keeps the real verdicts.
+ *
+ * `operatorPolicyForOrg` must be overridden TOO, not just `operatorPolicyFor`.
+ * It is the entry point loop.ts's dispatch site and `turnMcp` actually call
+ * (the table PLUS the cross-org `org_id` guard), and its internal call to
+ * `operatorPolicyFor` is module-local, so it does not see the override above.
+ * Without this the widening would silently have no effect and this file would
+ * assert against a `write_file` that never dispatches — passing vacuously on
+ * the two negative tests while the positive one fails.
  */
 vi.mock('../operator-policy.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../operator-policy.js')>();
+  const widen = (name: string, args: unknown) =>
+    name === 'write_file' ? ('allow' as const) : actual.operatorPolicyFor(name, args);
   return {
     ...actual,
-    operatorPolicyFor: (name: string, args: unknown) =>
-      name === 'write_file' ? 'allow' : actual.operatorPolicyFor(name, args),
+    operatorPolicyFor: widen,
+    operatorPolicyForOrg: (name: string, args: unknown, ownOrgId: string | null | undefined) =>
+      // Keep the real cross-org guard in front of the widened table: a foreign
+      // org_id must still be denied even for a newly allowlisted tool.
+      actual.orgIdArgIsForeign(args, ownOrgId) ? ('deny' as const) : widen(name, args),
     isOperatorToolAllowed: (name: string) =>
       name === 'write_file' ? true : actual.isOperatorToolAllowed(name),
   };

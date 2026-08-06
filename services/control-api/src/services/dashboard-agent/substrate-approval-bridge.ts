@@ -46,7 +46,7 @@
 import pg from 'pg';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
 import { executeOnce } from './tool-bridge.js';
-import { principalMayExecute } from './operator-policy.js';
+import { principalMayExecute, orgIdArgIsForeign } from './operator-policy.js';
 
 /**
  * `callMcpTool` returns the raw JSON-RPC `result`, which for a tools/call is
@@ -193,8 +193,12 @@ export async function executeApprovedOperatorTool(
     };
   }
 
-  // Preserve the propose's cross-org target so the approve lands on the same
-  // substrate the action was proposed into.
+  // Carry the propose's explicit `org_id` through so the approve lands on the
+  // same substrate the action was proposed into. This can no longer be a
+  // CROSS-org target: `executeOnce` above refuses any `org_id` that is not
+  // `opts.orgId`, so by the time we get here the value either equals our own
+  // org or is absent. Re-checked below anyway, because this leg calls
+  // `callMcpTool` directly rather than through `executeOnce`.
   const targetOrg = rawArgs.org_id;
   const approveArgs: Record<string, unknown> = {
     action: 'approve',
@@ -209,6 +213,18 @@ export async function executeApprovedOperatorTool(
   // allowlist still applies to them.
   if (!principalMayExecute('human', 'manage_substrate', approveArgs)) {
     return { ok: false, error: 'substrate approve is not permitted for the human' };
+  }
+
+  // Defence in depth for the one raw `callMcpTool` on this path: an `org_id`
+  // argument overrides the `x-organization-id` header, and this call runs on
+  // the approving human's JWT, whose org membership may span more than
+  // `opts.orgId`. Unreachable while `executeOnce`'s identical guard stands —
+  // it is here so that this call site is safe on its own terms.
+  if (orgIdArgIsForeign(approveArgs, opts.orgId)) {
+    return {
+      ok: false,
+      error: 'substrate approve names an org_id outside this operator\'s organization',
+    };
   }
 
   const approved = await callMcpTool('manage_substrate', approveArgs, opts.jwt, opts.orgId);

@@ -26,6 +26,26 @@ export function isOperatorUserId(userId: unknown): boolean {
   return typeof userId === 'string' && userId.startsWith(OPERATOR_USER_ID_PREFIX);
 }
 
+/**
+ * The organization a headless turn is running FOR, read back out of the
+ * sentinel identity. `null` for anything that is not an operator user id, and
+ * for the degenerate `operator:` with no org.
+ *
+ * Deliberately derived from `userId` rather than taken from
+ * `runAgentTurn`'s optional `organizationId`: the cross-org guard has to
+ * compare against the SAME identity the policy decision is made under, and
+ * `organizationId` can be omitted (or, in principle, disagree) while
+ * `isOperatorUserId` still answers true. Deriving it means there is no input
+ * combination that yields a governed operator turn with an unknown org — an
+ * absent org makes the guard refuse every explicit `org_id`, which is the
+ * fail-closed direction.
+ */
+export function operatorOrgIdFromUserId(userId: unknown): string | null {
+  if (!isOperatorUserId(userId)) return null;
+  const orgId = (userId as string).slice(OPERATOR_USER_ID_PREFIX.length).trim();
+  return orgId.length > 0 ? orgId : null;
+}
+
 export type OperatorJob = {
   id: string;
   organizationId: string;

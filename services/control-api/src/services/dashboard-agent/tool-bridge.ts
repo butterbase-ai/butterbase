@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
-import { principalMayExecute, type OperatorPrincipal } from './operator-policy.js';
+import { principalMayExecute, orgIdArgIsForeign, type OperatorPrincipal } from './operator-policy.js';
 
 /**
  * The allowlist and the gating rules live in ONE table, in operator-policy.ts.
@@ -13,6 +13,8 @@ export {
   isOperatorToolAllowed,
   operatorRequiresApproval,
   operatorPolicyFor,
+  operatorPolicyForOrg,
+  orgIdArgIsForeign,
   principalMayExecute,
   type OperatorPolicy,
   type OperatorPrincipal,
@@ -93,6 +95,33 @@ export async function executeOnce(
     return {
       ok: false,
       error: `tool "${opts.name}" is not permitted for the ${opts.principal}`,
+    };
+  }
+
+  /**
+   * CROSS-ORG GUARD, and this is the path that actually needed it.
+   *
+   * `opts.orgId` becomes the `x-organization-id` header, but an `org_id`
+   * ARGUMENT overrides it inside `manage_substrate`. On the approval replay
+   * `opts.jwt` is the APPROVING HUMAN's bearer token, and for JWT auth
+   * substrate resolves the org against `organization_members` — so an operator
+   * in org A could store `{action:'propose', …, org_id:'<org B>'}` in an
+   * approval row and one click from an org A member who also belongs to org B
+   * would write into org B's substrate. The operator's own turn was contained
+   * only by its credential being org-bound; here nothing contained it.
+   *
+   * Placed alongside the principal check, ahead of `pool.connect()`: a refused
+   * call never takes the advisory lock, never writes a `tool_executions` row,
+   * and can never be served back out of the cache — the exactly-once guarantee
+   * below is untouched, it simply never applies to a call we refuse.
+   *
+   * Note this is NOT principal-conditional. There is no principal for which
+   * pointing an operator approval at another org is legitimate.
+   */
+  if (orgIdArgIsForeign(opts.args, opts.orgId)) {
+    return {
+      ok: false,
+      error: `tool "${opts.name}" names an org_id outside this operator's organization`,
     };
   }
 

@@ -294,6 +294,70 @@ function readStringField(args: Record<string, unknown>, key: string): string | n
 }
 
 /**
+ * CROSS-ORG GUARD. Does this call's `org_id` ARGUMENT point somewhere other
+ * than the organization the caller is bound to?
+ *
+ * `callMcpTool` sets `x-organization-id` from the caller's own org, but
+ * `manage_substrate` also accepts an explicit `org_id` argument and forwards
+ * it as that same header — so the argument OVERRIDES the header. Nothing in
+ * the verdict tables above ever looked at it.
+ *
+ * On the operator's own turn that was contained only by an external property:
+ * the stored credential is an org-bound service key, so a foreign `org_id`
+ * 403s at the MCP server. That is a property of the credential, not of this
+ * code. On the APPROVAL REPLAY it was not contained at all — the replay runs
+ * on the approving human's JWT, and for JWT auth substrate resolves the org
+ * against `organization_members`. An operator in org A could therefore propose
+ * `{action:'propose', capability:'send_email_draft', org_id:'<org B>'}`, and
+ * one click from an org A member who also belongs to org B would write into
+ * org B's substrate.
+ *
+ * FAILS CLOSED, in the same shape as `coerceArgs`/`readAction` above:
+ *
+ *   - args unreadable                 -> foreign. We cannot prove there is no
+ *                                        `org_id` in there, so we refuse.
+ *   - `org_id` absent or undefined    -> NOT foreign. The header already
+ *                                        carries the right org; this is the
+ *                                        normal, correct call shape.
+ *   - `org_id` present, not a string  -> foreign (null, numbers, objects with
+ *                                        a crafted `toString`).
+ *   - `org_id` a string               -> trimmed + lower-cased on BOTH sides,
+ *                                        then exact-matched. Same precedent as
+ *                                        `readAction`: normalising can only
+ *                                        widen the refusal net toward equality,
+ *                                        never let a different org through, and
+ *                                        it does not match on prefixes.
+ *   - `org_id` blank after trimming   -> NOT foreign. An empty string is falsy
+ *                                        downstream and forwards no header
+ *                                        override, so it is the absent case.
+ *   - caller's own org unknown/blank  -> foreign whenever an `org_id` is
+ *                                        present. With nothing to compare
+ *                                        against we cannot authorise a target.
+ *
+ * Only the TOP-LEVEL `org_id` key is inspected — that is the only field any
+ * allowlisted tool turns into `x-organization-id`. Deliberately not widened to
+ * `organization_id`, which is an ordinary column name that `select_rows` and
+ * `manage_people` may legitimately carry in their arguments.
+ */
+export function orgIdArgIsForeign(args: unknown, ownOrgId: string | null | undefined): boolean {
+  const parsed = coerceArgs(args);
+  if (parsed === UNREADABLE) return true;
+  if (!('org_id' in parsed)) return false;
+
+  const value = parsed.org_id;
+  if (value === undefined) return false;
+  if (typeof value !== 'string') return true;
+
+  const target = value.trim().toLowerCase();
+  if (target.length === 0) return false;
+
+  const own = typeof ownOrgId === 'string' ? ownOrgId.trim().toLowerCase() : '';
+  if (own.length === 0) return true;
+
+  return target !== own;
+}
+
+/**
  * The one table. Answers, per (tool, args):
  *   'deny'     — not callable by the operator at all.
  *   'approval' — callable, but the turn must pause for a human.
@@ -352,6 +416,32 @@ export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
 
   // 5. Floor.
   return 'allow';
+}
+
+/**
+ * The table, plus the cross-org guard, for a caller whose own organization is
+ * known.
+ *
+ * Kept as a WRAPPER rather than a third parameter on `operatorPolicyFor`
+ * because the org id is not a property of the policy tables — the tables say
+ * what the operator may do, this says where it may do it — and because the
+ * dangerous principal never reaches `operatorPolicyFor` at all:
+ * `principalMayExecute('human', …)` short-circuits to the tool-level
+ * allowlist, so widening `operatorPolicyFor`'s signature alone would have left
+ * the approval replay — the one reachable path — unguarded. The guard is
+ * therefore ALSO applied directly in `executeOnce` (tool-bridge.ts).
+ *
+ * Precedence: a foreign `org_id` is 'deny' ahead of everything, including the
+ * tool allowlist. There is no tool for which targeting another org is
+ * legitimate, so nothing below it needs to be consulted.
+ */
+export function operatorPolicyForOrg(
+  name: string,
+  args: unknown,
+  operatorOrgId: string | null | undefined,
+): OperatorPolicy {
+  if (orgIdArgIsForeign(args, operatorOrgId)) return 'deny';
+  return operatorPolicyFor(name, args);
 }
 
 /** Thin wrapper over the table: may the operator call this tool at all? */

@@ -21,8 +21,8 @@ import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, upda
 import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust } from './approvals-store.js';
-import { isOperatorUserId } from './operator-store.js';
-import { operatorPolicyFor, isOperatorToolAllowed } from './operator-policy.js';
+import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
+import { operatorPolicyForOrg, isOperatorToolAllowed } from './operator-policy.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -457,6 +457,15 @@ export async function* runAgentTurn(
   const isOperator = isOperatorUserId(input.userId);
 
   /**
+   * The org this operator turn is FOR, read back out of the same sentinel that
+   * decided `isOperator`. Used only by the cross-org guard inside
+   * `operatorPolicyForOrg`: any tool call carrying an explicit `org_id`
+   * argument that is not this org is denied. `null` for human turns, where the
+   * guard is not consulted at all.
+   */
+  const operatorOrgId = operatorOrgIdFromUserId(input.userId);
+
+  /**
    * The loop makes MCP calls the MODEL did not ask for. They go through
    * `deps.mcp` (default: `defaultMcp()` → the same `callMcpTool`), not through
    * the dispatch site, so the policy check there never sees them:
@@ -477,7 +486,7 @@ export async function* runAgentTurn(
   const turnMcp: Mcp = isOperator
     ? {
         async call(name: string, args: unknown, jwt: string) {
-          if (operatorPolicyFor(name, args) !== 'allow') {
+          if (operatorPolicyForOrg(name, args, operatorOrgId) !== 'allow') {
             throw new Error(`Tool "${name}" is not permitted for the autonomous operator.`);
           }
           return deps.mcp.call(name, args, jwt);
@@ -735,8 +744,18 @@ export async function* runAgentTurn(
          *
          * `null` for a human conversation — nothing below this line changes
          * behaviour for the assistant.
+         *
+         * `operatorPolicyForOrg` is the table PLUS the cross-org guard: a tool
+         * call carrying an explicit `org_id` argument for any org other than
+         * this operator's is 'deny'. That argument overrides the
+         * `x-organization-id` header `callMcpTool` sets, so without this the
+         * only thing keeping the operator's own dispatch inside its org was the
+         * stored credential being org-bound — an external property, not a
+         * control.
          */
-        const operatorVerdict = isOperator ? operatorPolicyFor(tc.name, tc.args) : null;
+        const operatorVerdict = isOperator
+          ? operatorPolicyForOrg(tc.name, tc.args, operatorOrgId)
+          : null;
 
         // Sensitivity gate (Plan 3b Task 2): destructive/confirm-tier calls
         // pause the turn for explicit user approval, unless the conversation
