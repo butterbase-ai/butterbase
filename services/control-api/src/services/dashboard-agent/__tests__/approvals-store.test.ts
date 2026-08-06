@@ -6,6 +6,8 @@ import {
   listPendingByConv,
   resolveApproval,
   checkTrust,
+  findResumableApproval,
+  markApprovalResumed,
   type Approval,
 } from '../approvals-store.js';
 
@@ -300,5 +302,81 @@ describe('Approvals Store', () => {
 
     expect(pendingIds).toContain(pending.id);
     expect(pendingIds).not.toContain(approved.id);
+  });
+
+  /**
+   * Task D1's core persistence claim, exercised against real Postgres.
+   *
+   * The gate-boundary test in operator-turn.test.ts mocks `findResumableApproval`
+   * and `markApprovalResumed` — it proves the wiring INSIDE `runOperatorTurn`,
+   * but never that `createApproval` actually writes `trace_id`, that the
+   * `resumed_at IS NULL` predicate reads it back, or that `markApprovalResumed`
+   * makes the second call return null. A typo in either predicate (e.g.
+   * `resumed_at IS NOT NULL`, or a forgotten `trace_id` in the INSERT column
+   * list) would pass every mocked test in the repo and silently mint a fresh
+   * id on every resume in production. This is the test that would catch it.
+   */
+  describe('trace id persistence round trip (D1)', () => {
+    it('createApproval -> resolveApproval -> findResumableApproval returns it -> markApprovalResumed -> findResumableApproval returns null', async () => {
+      const approval = await createApproval(pool, {
+        conversationId,
+        turnMessageId: '00000000-0000-0000-0000-000000000011',
+        toolName: 'manage_substrate',
+        toolArgs: { action: 'propose' },
+        sensitivity: 'destructive',
+        traceId: 'optr_roundtrip-test',
+      });
+
+      // Written on INSERT, readable back before any resolution.
+      const fetched = await getApproval(pool, approval.id, testUserId);
+      expect(fetched?.traceId).toBe('optr_roundtrip-test');
+      expect(fetched?.resumedAt).toBeNull();
+
+      // Still pending -> NOT resumable. findResumableApproval only ever
+      // returns a RESOLVED gate (see its `status != 'pending'` predicate) —
+      // a still-open gate is not something a later wake should "resume" past.
+      expect(await findResumableApproval(pool, conversationId)).toBeNull();
+
+      // A human resolves it — this is the moment a later wake becomes able
+      // to resume the conversation.
+      await resolveApproval(pool, approval.id, { status: 'approved' });
+
+      const resumable = await findResumableApproval(pool, conversationId);
+      expect(resumable?.id).toBe(approval.id);
+      expect(resumable?.traceId).toBe('optr_roundtrip-test');
+      expect(resumable?.resumedAt).toBeNull();
+
+      // The wake that actually resumes commits the mark...
+      await markApprovalResumed(pool, approval.id);
+
+      // ...and every wake after that must NOT see it as resumable again, or
+      // the same trace id would be replayed forever instead of once.
+      expect(await findResumableApproval(pool, conversationId)).toBeNull();
+
+      const afterMark = await getApproval(pool, approval.id, testUserId);
+      expect(afterMark?.resumedAt).not.toBeNull();
+
+      // Idempotent: a second mark (e.g. a retried wake) must not throw and
+      // must not "re-arm" the row.
+      await markApprovalResumed(pool, approval.id);
+      expect(await findResumableApproval(pool, conversationId)).toBeNull();
+    });
+
+    it('a resolved approval with NO trace id is never offered as resumable', async () => {
+      const approval = await createApproval(pool, {
+        conversationId,
+        turnMessageId: '00000000-0000-0000-0000-000000000012',
+        toolName: 'manage_app',
+        toolArgs: { action: 'delete' },
+        sensitivity: 'destructive',
+        // No traceId — this is the human assistant's shape, which has no trace.
+      });
+      await resolveApproval(pool, approval.id, { status: 'approved' });
+
+      const resumable = await findResumableApproval(pool, conversationId);
+      // Either genuinely null, or (if an earlier row in this conversation is
+      // still legitimately resumable) definitely not THIS approval.
+      expect(resumable?.id).not.toBe(approval.id);
+    });
   });
 });

@@ -51,7 +51,20 @@ import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
  * minted. See `resolveTurnTraceId`.
  * ============================================================================
  */
-export type OperatorCheckpoint = 'woke' | 'planned' | 'acted' | 'gated' | 'resumed';
+/**
+ * `completed` is not one of the plan's five named checkpoints
+ * (woke/planned/acted/gated/resumed) — it was added after review found that a
+ * turn's START is traceable but its END was not: neither of the two
+ * pre-existing completion logs (`[operator-events]`'s per-org result line,
+ * cron-scheduler's per-batch `[operator-trigger]` summary) carried a trace
+ * id, and `runOperatorTurn`'s error path logged no traced line at all. A wake
+ * that `operatorPreflight` skips for `pending_approval` emitted `woke` and
+ * then NOTHING — indistinguishable in the logs from a turn that hung or
+ * crashed the process. `completed` closes every exit path of
+ * `runOperatorTurn`, including both `operatorPreflight` failure branches, so
+ * every `woke` has a matching terminal line under the same trace id.
+ */
+export type OperatorCheckpoint = 'woke' | 'planned' | 'acted' | 'gated' | 'resumed' | 'completed';
 
 /**
  * One structured log line per checkpoint, always carrying the trace id.
@@ -449,7 +462,23 @@ export async function runOperatorTurn(
   const model = resolveOperatorModel(opts.model);
 
   const pre = await operatorPreflight(pool, job, wake, opts.model);
-  if (!pre.ok) return pre.result;
+  if (!pre.ok) {
+    // `wake.traceId`, not a resolved one: `operatorPreflight` bails before
+    // `resolveTurnTraceId` ever runs on both its failure branches (no
+    // credential; a human decision still pending), so there is nothing to
+    // resolve — this wake did no resuming, it just didn't proceed. Best
+    // effort if the caller supplied no id at all (see `OperatorWake`'s doc
+    // comment on why that field is optional).
+    logOperatorCheckpoint('completed', {
+      traceId: wake.traceId ?? null,
+      organizationId: job.organizationId,
+      conversationId: pre.result.conversationId || null,
+      outcome: pre.result.skipped ? 'skipped' : 'error',
+      skippedReason: pre.result.skipped?.reason ?? null,
+      error: pre.result.error,
+    });
+    return pre.result;
+  }
   const { credential, conversationId, traceId } = pre;
 
   /**
@@ -492,11 +521,13 @@ export async function runOperatorTurn(
    * `planned` — the turn has everything it needs (credential, conversation,
    * scratchpad, the resolved trace id) and is about to hand the wake message
    * to the model. This is NOT `pre.resumedApprovalId ? 'resumed' : 'planned'`
-   * as an either/or: `resumed` (logged inside `operatorPreflight`, above) marks
-   * the fact that this wake is continuing a gated conversation; `planned`
-   * marks every turn's model dispatch regardless, resumed or not, so a
-   * resumed turn's timeline reads `resumed -> planned -> ...` rather than
-   * `resumed` standing in for the model actually being asked to act.
+   * as an either/or: `resumed` (logged just above, in THIS function — not
+   * inside `operatorPreflight`, see the "ONE PLACE" comment on that block for
+   * why the commit had to move here) marks the fact that this wake is
+   * continuing a gated conversation; `planned` marks every turn's model
+   * dispatch regardless, resumed or not, so a resumed turn's timeline reads
+   * `resumed -> planned -> ...` rather than `resumed` standing in for the
+   * model actually being asked to act.
    */
   logOperatorCheckpoint('planned', {
     traceId,
@@ -544,6 +575,20 @@ export async function runOperatorTurn(
       `Model ids are provider-prefixed (e.g. "${DEFAULT_OPERATOR_MODEL}"); ` +
       `check GET /v1/models and set OPERATOR_MODEL to a catalog id.`;
   }
+
+  // `completed` — the terminal checkpoint for a turn that actually reached
+  // the model, closing the timeline `woke`/`resumed` -> `planned` -> `acted`?
+  // -> `gated`? opened. Carries the RESOLVED `traceId` (post-resume, if this
+  // was a resume), not `wake.traceId` — this is the id a reader must match
+  // back to the `woke`/`resumed` line that started this same turn.
+  logOperatorCheckpoint('completed', {
+    traceId,
+    organizationId: job.organizationId,
+    conversationId,
+    events: count,
+    gated: !!approvalId,
+    error,
+  });
 
   return { conversationId, events: count, approvalId, error, skipped: null };
 }
