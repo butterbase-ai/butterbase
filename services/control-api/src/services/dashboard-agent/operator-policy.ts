@@ -93,12 +93,43 @@ export const SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES: ReadonlySet<string> = new
  *    bypass (it does not approve the blocked action), but an unattended agent
  *    closing its own principle conflicts corrupts that audit record.
  *
+ *  - approve: THE one that makes every other gate hollow.
+ *    `substrate-core/src/action-executor.ts::approveAction` (L271-306) checks
+ *    only that the action belongs to the caller's org (L292) and is still in
+ *    `proposed` state (L295). There is NO self-approval restriction — the
+ *    proposer and the approver are never compared. It then executes the
+ *    capability and stamps `approved_by_kind = 'human'` (L306).
+ *    So without this denial the operator could propose `send_email_draft`, get
+ *    the correct 'approval' verdict from this very table, and then call
+ *    `approve` on its own action_id — executing the send and leaving a ledger
+ *    row claiming a human authorised it. That is exactly the failure this
+ *    module warns about: a gate the agent can propose its way through is not a
+ *    control. It also reduced the `set_yolo` denial to a partial mitigation,
+ *    since the agent would no longer need to switch the gate off — it could
+ *    simply satisfy it itself.
+ *
+ *  - reject: lower severity, since declining its own proposal is not an
+ *    execution path. Denied anyway because `rejectAction` (L364-391) stamps the
+ *    same human-decision fields, including `approved_by_kind = 'human'` (L391).
+ *    Denying only `approve` would leave the audit record forgeable in one
+ *    direction, which is not a coherent place to stop.
+ *
+ * Resolution of a gated operator proposal is supposed to happen through the
+ * operator approvals feed: a human approves there, and the bridge calls
+ * substrate's native approve under a HUMAN identity. That is C2's job. This
+ * denial is on the OPERATOR'S OWN TOOL SURFACE, not a statement that the
+ * approve endpoint is off limits to everyone. See the note on executeOnce in
+ * tool-bridge.ts — the bridge must not route its native-approve call through
+ * this table as if the operator were the caller.
+ *
  * This is an OPERATOR-ONLY restriction. The human assistant keeps full access
- * to both actions, and both stay documented in the shared tool catalog.
+ * to all four actions, and all four stay documented in the shared tool catalog.
  */
 export const OPERATOR_DENIED_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set([
   'set_yolo',
   'resolve_policy_conflict',
+  'approve',
+  'reject',
 ]);
 
 /**
@@ -141,10 +172,64 @@ export const OPERATOR_APPROVAL_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set(
   'cancel_outbox',
 ]);
 
-function readStringField(args: unknown, key: string): string | null {
-  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
-  const value = (args as Record<string, unknown>)[key];
-  return typeof value === 'string' ? value : null;
+/** Sentinel: args were supplied but could not be understood. Fails closed. */
+const UNREADABLE = Symbol('unreadable-args');
+
+/**
+ * Coerce tool args to a plain object.
+ *
+ * A security-critical deny table must not depend on somebody else normalising
+ * its input first. The MCP tool's `z.enum` would reject a mis-cased or padded
+ * action, and both current call sites pass parsed objects — but "not
+ * exploitable today because of a downstream check" is not a property this
+ * module should rely on. So:
+ *
+ *   - absent args (undefined/null)   -> {}   (no action named; nothing to deny)
+ *   - a plain object                 -> itself
+ *   - a JSON string encoding an object -> parsed
+ *   - anything else (unparseable string, JSON array/scalar/null, a non-object)
+ *                                    -> UNREADABLE, which fails closed
+ */
+function coerceArgs(args: unknown): Record<string, unknown> | typeof UNREADABLE {
+  if (args === undefined || args === null) return {};
+  if (typeof args === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(args);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return UNREADABLE;
+    }
+    return UNREADABLE;
+  }
+  if (typeof args !== 'object' || Array.isArray(args)) return UNREADABLE;
+  return args as Record<string, unknown>;
+}
+
+/**
+ * Read and normalise an action-like field: trim surrounding whitespace and
+ * lower-case, then exact-match against the tables. Substrate action names are
+ * all lower-case with no padding, so this only ever widens the deny/approval
+ * nets toward the tables — it cannot let a denied action through, and it does
+ * not match on prefixes (`set_yolo_mode` and `approve_all` stay distinct from
+ * `set_yolo` and `approve`).
+ *
+ * Returns UNREADABLE when the field is present but not a string, so a crafted
+ * `{action: {toString(){…}}}` fails closed instead of falling through.
+ */
+function readAction(args: Record<string, unknown>): string | null | typeof UNREADABLE {
+  if (!('action' in args)) return null;
+  const value = args.action;
+  if (value === undefined) return null;
+  if (typeof value !== 'string') return UNREADABLE;
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function readStringField(args: Record<string, unknown>, key: string): string | null {
+  const value = args[key];
+  return typeof value === 'string' ? value.trim() : null;
 }
 
 /**
@@ -179,7 +264,13 @@ export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
   if (!OPERATOR_TOOL_ALLOWLIST.has(name)) return 'deny';
 
   if (name === 'manage_substrate') {
-    const action = readStringField(args, 'action');
+    // The action rules below are the whole substrate guardrail, so anything we
+    // cannot read confidently is denied rather than waved through.
+    const parsed = coerceArgs(args);
+    if (parsed === UNREADABLE) return 'deny';
+
+    const action = readAction(parsed);
+    if (action === UNREADABLE) return 'deny';
 
     if (action) {
       // 2. Controls the operator must not be able to weaken. Checked ahead of
@@ -192,7 +283,7 @@ export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
       // 4. Substrate's own policy engine: a propose of an approval_required
       // capability.
       if (action === 'propose') {
-        const capability = readStringField(args, 'capability');
+        const capability = readStringField(parsed, 'capability');
         if (capability && SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES.has(capability)) return 'approval';
       }
     }

@@ -90,10 +90,9 @@ describe('operatorPolicyFor — manage_substrate gating comes from substrate pol
     expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'not_a_capability' })).toBe('allow');
   });
 
-  it('tolerates missing / non-object args', () => {
+  it('tolerates missing args (no action named — nothing to deny)', () => {
     expect(operatorPolicyFor('manage_substrate', undefined)).toBe('allow');
     expect(operatorPolicyFor('manage_substrate', null)).toBe('allow');
-    expect(operatorPolicyFor('manage_substrate', 'nonsense')).toBe('allow');
     expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 42 })).toBe('allow');
   });
 });
@@ -219,6 +218,99 @@ describe('operatorPolicyFor — precedence: deny > approval > allow', () => {
   it('other allowlisted tools are untouched by substrate action rules', () => {
     expect(operatorPolicyFor('manage_integrations', { action: 'create_rule' })).toBe('allow');
     expect(operatorPolicyFor('select_rows', { action: 'set_yolo' })).toBe('allow');
+  });
+});
+
+describe('operatorPolicyFor — the operator cannot approve or reject its own proposals', () => {
+  it('denies approve (would execute the capability and stamp approved_by_kind=human)', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'approve', action_id: 'act_1' })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: 'approve' })).toBe('deny');
+  });
+
+  it('denies reject (no execution, but forges the same human-decision fields)', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'reject', action_id: 'act_1', reason: 'no' })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: 'reject' })).toBe('deny');
+  });
+
+  it('closes the propose-then-self-approve loop end to end', () => {
+    // The gated proposal is correctly held...
+    expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'send_email_draft' })).toBe('approval');
+    // ...and the operator cannot then satisfy that gate itself.
+    expect(operatorPolicyFor('manage_substrate', { action: 'approve', action_id: 'act_1' })).toBe('deny');
+  });
+
+  it('the denial is not reachable through propose or any crafted arg shape', () => {
+    for (const action of ['approve', 'reject']) {
+      expect(operatorPolicyFor('manage_substrate', { action, capability: 'record_decision' })).toBe('deny');
+      expect(operatorPolicyFor('manage_substrate', { action, capability: 'delete_entity' })).toBe('deny');
+      expect(operatorPolicyFor('manage_substrate', { capability: 'send_email_draft', action })).toBe('deny');
+      expect(operatorRequiresApproval('manage_substrate', { action })).toBe(false);
+    }
+    // an inner `propose` cannot smuggle an approve past the check
+    expect(operatorPolicyFor('manage_substrate', { action: 'approve', payload: { action: 'propose' } })).toBe('deny');
+  });
+
+  it('ledger READS are unaffected', () => {
+    for (const action of ['get_action', 'list_actions']) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('allow');
+    }
+  });
+
+  it('both are in the denied set alongside the round-1 pair', () => {
+    for (const action of ['approve', 'reject', 'set_yolo', 'resolve_policy_conflict']) {
+      expect(OPERATOR_DENIED_SUBSTRATE_ACTIONS.has(action)).toBe(true);
+    }
+  });
+});
+
+describe('operatorPolicyFor — the deny table normalises its own input (does not rely on downstream zod)', () => {
+  const DENIED = ['set_yolo', 'resolve_policy_conflict', 'approve', 'reject'];
+
+  it.each(DENIED)('denies %s regardless of case', (action) => {
+    expect(operatorPolicyFor('manage_substrate', { action: action.toUpperCase() })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: action[0].toUpperCase() + action.slice(1) })).toBe('deny');
+  });
+
+  it.each(DENIED)('denies %s regardless of surrounding whitespace', (action) => {
+    expect(operatorPolicyFor('manage_substrate', { action: ` ${action}` })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: `${action}  ` })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: `\t ${action} \n` })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: `  ${action.toUpperCase()}  ` })).toBe('deny');
+  });
+
+  it('normalises the approval set and the propose rule too', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: ' CREATE_RULE ' })).toBe('approval');
+    expect(operatorPolicyFor('manage_substrate', { action: ' PROPOSE ', capability: 'delete_entity' })).toBe('approval');
+  });
+
+  it('args arriving as a JSON string are parsed, not waved through', () => {
+    expect(operatorPolicyFor('manage_substrate', JSON.stringify({ action: 'set_yolo', yolo_mode: true }))).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', JSON.stringify({ action: 'approve', action_id: 'act_1' }))).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', JSON.stringify({ action: 'create_rule' }))).toBe('approval');
+    expect(operatorPolicyFor('manage_substrate', JSON.stringify({ action: 'list_rules' }))).toBe('allow');
+  });
+
+  it('unparseable or non-object string args FAIL CLOSED for manage_substrate', () => {
+    for (const bad of ['nonsense', '{"action":', '[]', '"set_yolo"', '42', 'null', '']) {
+      expect(operatorPolicyFor('manage_substrate', bad)).toBe('deny');
+    }
+  });
+
+  it('a non-string action fails closed rather than falling through to allow', () => {
+    for (const bad of [{ action: 42 }, { action: null }, { action: ['set_yolo'] }, { action: { toString: () => 'set_yolo' } }]) {
+      expect(operatorPolicyFor('manage_substrate', bad)).toBe('deny');
+    }
+  });
+
+  it('normalisation does not widen the net to unrelated actions', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'set_yolo_mode' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'approve_all' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'list_actions' })).toBe('allow');
+  });
+
+  it('other allowlisted tools keep tolerating loose args (this is a substrate-surface rule)', () => {
+    expect(operatorPolicyFor('select_rows', 'anything')).toBe('allow');
+    expect(operatorPolicyFor('manage_integrations', { action: 'APPROVE' })).toBe('allow');
   });
 });
 

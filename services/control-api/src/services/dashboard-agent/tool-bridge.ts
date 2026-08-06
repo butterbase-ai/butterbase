@@ -67,6 +67,17 @@ export async function executeOnce(
   // be replayed out of the cache. Consults the unified policy table rather than
   // a local list. A verdict of 'approval' is executable here by construction —
   // executeOnce only ever runs against an approval a human already resolved.
+  //
+  // NOTE FOR C2 (the approval bridge). This check asks "may the OPERATOR call
+  // this?", and manage_substrate approve/reject are denied to the operator
+  // because substrate has no self-approval restriction (see
+  // OPERATOR_DENIED_SUBSTRATE_ACTIONS). Replaying the operator's own stored
+  // proposal through here is fine — a gated propose is 'approval', not 'deny'.
+  // But if the bridge later calls substrate's NATIVE approve(action_id) on a
+  // human's behalf, it must NOT route that call through executeOnce as-is: the
+  // caller is then a human, not the operator, and this table would refuse it.
+  // Give that path its own entry point (or an explicit principal argument)
+  // rather than loosening this denial.
   if (operatorPolicyFor(opts.name, opts.args) === 'deny') {
     return { ok: false, error: `tool "${opts.name}" is not permitted for the operator` };
   }
