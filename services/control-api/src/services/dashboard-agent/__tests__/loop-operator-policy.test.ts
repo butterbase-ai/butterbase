@@ -37,7 +37,7 @@ vi.mock('../approvals-store.js', () => ({
 import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';
-import { getToolCatalog } from '../tool-catalog.js';
+import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL } from '../tool-catalog.js';
 import { operatorUserId } from '../operator-store.js';
 import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, type LoopEvent } from '../loop.js';
@@ -377,20 +377,118 @@ describe('operator — allow verdict', () => {
 // ---------------------------------------------------------------------------
 
 describe('operator — catalog filtering (affordance, not the control)', () => {
-  it('offers the model only tools the operator may call', async () => {
+  it('offers the model only tools the operator may call, MINUS the sandbox tool when no codeExecutor is supplied', async () => {
     const { bodies } = oneToolCallThenStop('select_rows', { app_id: 'app-1' });
 
     await collect(runAgentTurn(operatorInput()));
 
     const offered = toolNamesSent(bodies[0]);
-    const expected = getToolCatalog().map((t) => t.name).filter(isOperatorToolAllowed);
+    // `run_sandbox_code` is 'allow' in the policy table (see
+    // operator-policy.ts), but this turn supplies no `codeExecutor` — the
+    // catalog-construction filter in loop.ts is what actually withholds it,
+    // NOT operatorPolicyFor/isOperatorToolAllowed, so `expected` must exclude
+    // it explicitly rather than by relying on the policy helper.
+    const expected = getToolCatalog()
+      .map((t) => t.name)
+      .filter(isOperatorToolAllowed)
+      .filter((n) => n !== OPERATOR_SANDBOX_CODE_TOOL);
 
     expect(offered.sort()).toEqual(expected.sort());
     expect(offered.length).toBeGreaterThan(0);
     expect(offered).toContain('manage_substrate');
+    expect(offered).not.toContain(OPERATOR_SANDBOX_CODE_TOOL);
     for (const denied of ['manage_api_keys', 'manage_auth_users', 'deploy_function', 'manage_rls', 'seed_database', 'write_file']) {
       expect(offered).not.toContain(denied);
     }
+  });
+
+  it('offers the sandbox tool once a codeExecutor is supplied for the turn', async () => {
+    const { bodies } = oneToolCallThenStop('select_rows', { app_id: 'app-1' });
+    const codeExecutor = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+
+    await collect(runAgentTurn(operatorInput({ codeExecutor })));
+
+    const offered = toolNamesSent(bodies[0]);
+    expect(offered).toContain(OPERATOR_SANDBOX_CODE_TOOL);
+    // Supplying a codeExecutor must not itself invoke it — only a model tool
+    // call should.
+    expect(codeExecutor).not.toHaveBeenCalled();
+  });
+
+  it('never offers the sandbox tool to a human conversation, even with a codeExecutor supplied', async () => {
+    // Defence in depth: nothing should ever pass a codeExecutor for a human
+    // turn, but if it happened, the operatorOnly filter must still win.
+    const { bodies } = oneToolCallThenStop('manage_app', { action: 'list' });
+    const codeExecutor = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+
+    await collect(runAgentTurn(humanInput({ codeExecutor })));
+
+    const offered = toolNamesSent(bodies[0]);
+    expect(offered).not.toContain(OPERATOR_SANDBOX_CODE_TOOL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run_sandbox_code dispatch
+// ---------------------------------------------------------------------------
+
+describe('operator — run_sandbox_code dispatch', () => {
+  it('routes to codeExecutor in-process, never through MCP', async () => {
+    oneToolCallThenStop(OPERATOR_SANDBOX_CODE_TOOL, { code: 'print(1)' });
+    const codeExecutor = vi.fn().mockResolvedValue({ stdout: '1\n', stderr: '' });
+
+    const events = await collect(runAgentTurn(operatorInput({ codeExecutor })));
+
+    expect(codeExecutor).toHaveBeenCalledWith('print(1)');
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toBeUndefined();
+    expect(result!.result).toEqual({ stdout: '1\n', stderr: '' });
+  });
+
+  it('surfaces a codeExecutor rejection as an ordinary tool error, not a turn failure', async () => {
+    oneToolCallThenStop(OPERATOR_SANDBOX_CODE_TOOL, { code: 'raise Exception("boom")' });
+    const codeExecutor = vi.fn().mockRejectedValue(new Error('sandbox exec failed: boom'));
+
+    const events = await collect(runAgentTurn(operatorInput({ codeExecutor })));
+
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toContain('boom');
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
+
+  it('THE SAFETY-CRITICAL CASE: refuses the call with NO codeExecutor, and never runs code on the host', async () => {
+    // The model should never even be offered the tool in this case (covered
+    // above), but this pins the dispatch-site refusal too, in case the model
+    // names it anyway (hallucination, or a stale/cached tool list).
+    oneToolCallThenStop(OPERATOR_SANDBOX_CODE_TOOL, { code: 'import os; os.system("rm -rf /")' });
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toBeDefined();
+    expect(result!.result).toBeUndefined();
+  });
+
+  it('refuses run_sandbox_code for a human conversation even if a codeExecutor were somehow supplied', async () => {
+    oneToolCallThenStop(OPERATOR_SANDBOX_CODE_TOOL, { code: 'print(1)' });
+    const codeExecutor = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+
+    const events = await collect(runAgentTurn(humanInput({ codeExecutor })));
+
+    expect(codeExecutor).not.toHaveBeenCalled();
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toBeDefined();
   });
 });
 

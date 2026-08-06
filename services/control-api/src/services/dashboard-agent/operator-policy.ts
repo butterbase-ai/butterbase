@@ -20,7 +20,7 @@
  *    has to be structural.
  */
 
-import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
+import { OPERATOR_SCRATCHPAD_TOOL, OPERATOR_SANDBOX_CODE_TOOL } from './tool-catalog.js';
 
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
 
@@ -34,7 +34,10 @@ export type OperatorPolicy = 'allow' | 'approval' | 'deny';
  * NOT be treated as an MCP name: `principalMayExecute` (the approval-replay
  * path, which ends in `callMcpTool`) and the loop's internal `turnMcp` wrapper.
  */
-export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([OPERATOR_SCRATCHPAD_TOOL]);
+export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  OPERATOR_SCRATCHPAD_TOOL,
+  OPERATOR_SANDBOX_CODE_TOOL,
+]);
 
 /**
  * Tools the operator may call at all. Everything else is `deny`.
@@ -56,6 +59,30 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([OPERATOR_SCRAT
  * (operator-scratchpad-store.ts) — the scratchpad is model-written, so if any
  * verdict in this module ever consulted it the agent would be writing its own
  * permissions. Gating the write would not fix that; not reading it does.
+ *
+ * `run_sandbox_code` is likewise 'allow', ungated, and for a different but
+ * related reason: what it reaches, not what it writes. Every OTHER tool in
+ * this table (below) either calls out through the MCP server with the
+ * operator's own org-scoped credential, or is a local write into a row this
+ * process already trusts the operator to own — that is why the interesting
+ * question for those tools is "which org/action", answered by the rest of
+ * this table. `run_sandbox_code` is structurally different: the code runs
+ * inside a MicroVM (E2B/Alibaba FC Agent Sandbox) that holds no credential of
+ * any kind — not the operator's service key, not an MCP session, not network
+ * reachability to a customer's app or database. There is nothing in that
+ * sandbox for a gate to protect, because there is nothing in it to reach with.
+ * The one thing it CAN do — burn CPU/time — is already bounded by the
+ * platform's 30s synchronous-execution cap and by `SandboxRunner`'s
+ * kill-in-finally, neither of which an approval gate would improve on: a
+ * human clicking "approve" does not make arbitrary Python safer, it just adds
+ * latency to a call that cannot reach anything sensitive either way. Contrast
+ * `manage_integrations` above, which is ungated because of an ACCEPTED risk
+ * (it really can email a customer); this one is ungated because there is no
+ * risk of that shape to accept. Gating it structurally cannot be done here
+ * anyway: whether it is even offered on a given turn is decided by
+ * `codeExecutor` presence in the loop (see `OPERATOR_SANDBOX_CODE_TOOL`'s doc
+ * comment in tool-catalog.ts), which is orthogonal to this allow/approval/deny
+ * table and is the actual safety-critical control for this tool.
  */
 export const OPERATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'manage_substrate',

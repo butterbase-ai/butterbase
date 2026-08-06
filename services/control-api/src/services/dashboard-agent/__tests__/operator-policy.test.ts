@@ -8,13 +8,14 @@ import {
   isOperatorToolAllowed,
   operatorRequiresApproval,
   OPERATOR_TOOL_ALLOWLIST,
+  OPERATOR_LOCAL_TOOLS,
   OPERATOR_DENIED_SUBSTRATE_ACTIONS,
   OPERATOR_APPROVAL_SUBSTRATE_ACTIONS,
   OPERATOR_ALLOWED_SUBSTRATE_ACTIONS,
   SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES,
   principalMayExecute,
 } from '../operator-policy.js';
-import { getToolCatalog, sensitivityFor } from '../tool-catalog.js';
+import { getToolCatalog, sensitivityFor, OPERATOR_SCRATCHPAD_TOOL, OPERATOR_SANDBOX_CODE_TOOL } from '../tool-catalog.js';
 
 const APPROVAL_REQUIRED = [
   'send_email_draft',
@@ -405,6 +406,33 @@ describe('drift guard vs substrate-core capability registry', () => {
 // ---------------------------------------------------------------------------
 // Principal — 'operator' vs 'human'.
 // ---------------------------------------------------------------------------
+
+describe('run_sandbox_code — a second local tool, registered in the ONE policy table', () => {
+  it('is a member of OPERATOR_LOCAL_TOOLS, alongside the scratchpad tool', () => {
+    expect(OPERATOR_LOCAL_TOOLS.has(OPERATOR_SANDBOX_CODE_TOOL)).toBe(true);
+    expect(OPERATOR_LOCAL_TOOLS.has(OPERATOR_SCRATCHPAD_TOOL)).toBe(true);
+  });
+
+  it('is on OPERATOR_TOOL_ALLOWLIST (spread from OPERATOR_LOCAL_TOOLS, not a second list)', () => {
+    expect(OPERATOR_TOOL_ALLOWLIST.has(OPERATOR_SANDBOX_CODE_TOOL)).toBe(true);
+  });
+
+  it('gets an "allow" verdict — no MCP reach, no credential in the sandbox, capped at 30s', () => {
+    expect(operatorPolicyFor(OPERATOR_SANDBOX_CODE_TOOL, { code: 'print(1)' })).toBe('allow');
+    expect(isOperatorToolAllowed(OPERATOR_SANDBOX_CODE_TOOL)).toBe(true);
+    expect(operatorRequiresApproval(OPERATOR_SANDBOX_CODE_TOOL, { code: 'print(1)' })).toBe(false);
+  });
+
+  it('is unaffected by an org_id argument (no such field on this tool\'s real shape,'
+    + ' but the table must not accidentally deny it via the cross-org guard)', () => {
+    expect(operatorPolicyFor(OPERATOR_SANDBOX_CODE_TOOL, { code: 'print(1)' })).toBe('allow');
+  });
+
+  it('is refused by principalMayExecute for EITHER principal — it is loop-internal, never reachable through the approval-replay path', () => {
+    expect(principalMayExecute('operator', OPERATOR_SANDBOX_CODE_TOOL, { code: 'print(1)' })).toBe(false);
+    expect(principalMayExecute('human', OPERATOR_SANDBOX_CODE_TOOL, { code: 'print(1)' })).toBe(false);
+  });
+});
 
 describe('principalMayExecute', () => {
   it('an OPERATOR principal gets the full table, denials included', () => {

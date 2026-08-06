@@ -58,6 +58,20 @@ function flatOpen(): object {
  */
 export const OPERATOR_SCRATCHPAD_TOOL = 'update_operator_scratchpad';
 
+/**
+ * The operator's sandbox-code-execution tool.
+ *
+ * Dispatched IN-PROCESS by the loop, exactly like `OPERATOR_SCRATCHPAD_TOOL` —
+ * there is no MCP tool by this name. Unlike the scratchpad, dispatch here is
+ * conditional on a `codeExecutor` being present on the turn: `SandboxRunner`
+ * supplies one (wired to a live, credential-less MicroVM); `LocalRunner` does
+ * not, and there is deliberately NO host-execution fallback. When no
+ * `codeExecutor` is present the loop drops this entry from the catalog it
+ * offers the model (see `runAgentTurn`'s `tools` construction) — the tool must
+ * be unreachable, not merely refused, on that path.
+ */
+export const OPERATOR_SANDBOX_CODE_TOOL = 'run_sandbox_code';
+
 export function getToolCatalog(): ToolSpec[] {
   return [
     // ---- App lifecycle & discovery ----
@@ -285,11 +299,34 @@ export function getToolCatalog(): ToolSpec[] {
         },
       },
     },
+    {
+      name: OPERATOR_SANDBOX_CODE_TOOL,
+      operatorOnly: true,
+      description:
+        'Run Python code in an isolated sandbox (a MicroVM with no credentials, no MCP access, and no route to customer data) and return its stdout/stderr. Use this for computation, data shaping, or checking your own logic — NOT as a way to reach Butterbase or the customer\'s app; use the other tools for that. ' +
+        'Synchronous execution is capped at 30 seconds by the sandbox platform; a longer-running script will be cut off. ' +
+        'This tool may be entirely ABSENT from your tool list on a given wake — no sandbox is guaranteed to be available every turn, and there is no fallback that runs code anywhere else. If it is not offered, do not attempt to simulate it; proceed without it.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['code'],
+        properties: {
+          code: {
+            type: 'string',
+            description: 'Python source to execute in the sandbox.',
+          },
+        },
+      },
+    },
   ];
 }
 
 export function isOperatorScratchpadTool(name: string): name is 'update_operator_scratchpad' {
   return name === OPERATOR_SCRATCHPAD_TOOL;
+}
+
+export function isRunSandboxCodeTool(name: string): name is 'run_sandbox_code' {
+  return name === OPERATOR_SANDBOX_CODE_TOOL;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getToolCatalog, isFileOpTool, isDeployTool } from '../tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isRunSandboxCodeTool, OPERATOR_SANDBOX_CODE_TOOL } from '../tool-catalog.js';
 
 describe('Tool Catalog', () => {
   it('getToolCatalog() returns manage_app with flat schema (no params wrapper)', () => {
@@ -121,6 +121,33 @@ describe('Tool Catalog', () => {
       expect(isDeployTool('write_file')).toBe(false);
       expect(isDeployTool('create_frontend_deployment')).toBe(false);
       expect(isDeployTool('')).toBe(false);
+    });
+  });
+
+  describe('run_sandbox_code (operator-only, loop-internal)', () => {
+    it('is present in the catalog, marked operatorOnly, requiring a string "code"', () => {
+      const catalog = getToolCatalog();
+      const tool = catalog.find((t) => t.name === OPERATOR_SANDBOX_CODE_TOOL);
+      expect(tool).toBeDefined();
+      expect(tool!.operatorOnly).toBe(true);
+      const params = tool!.parameters as Record<string, unknown>;
+      expect(params).toHaveProperty('type', 'object');
+      const required = params.required as string[];
+      expect(required).toContain('code');
+    });
+
+    it('is excluded from the human-assistant catalog, exactly like the scratchpad tool', () => {
+      const humanCatalog = getToolCatalog().filter((t) => t.operatorOnly !== true);
+      expect(humanCatalog.map((t) => t.name)).not.toContain(OPERATOR_SANDBOX_CODE_TOOL);
+    });
+
+    describe('isRunSandboxCodeTool', () => {
+      it('returns true only for the exact name', () => {
+        expect(isRunSandboxCodeTool(OPERATOR_SANDBOX_CODE_TOOL)).toBe(true);
+        expect(isRunSandboxCodeTool('run_sandbox_codes')).toBe(false);
+        expect(isRunSandboxCodeTool('update_operator_scratchpad')).toBe(false);
+        expect(isRunSandboxCodeTool('')).toBe(false);
+      });
     });
   });
 });

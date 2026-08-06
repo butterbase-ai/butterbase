@@ -174,7 +174,20 @@ function buildWakeMessage(
 
 export async function runOperatorTurn(
   pool: pg.Pool,
-  opts: { job: OperatorJob; wake: OperatorWake; model?: string },
+  opts: {
+    job: OperatorJob;
+    wake: OperatorWake;
+    model?: string;
+    /**
+     * Executes model-authored code in an isolated sandbox for this turn.
+     * Supplied by `SandboxRunner` (cron-scheduler); absent when called from
+     * `LocalRunner`, which has no sandbox to offer. Threaded straight through
+     * to `runAgentTurn` — see its doc comment for the safety rule this
+     * controls (no `codeExecutor` means `run_sandbox_code` is absent from the
+     * catalog, never a fallback to host execution).
+     */
+    codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
+  },
 ): Promise<OperatorTurnResult> {
   const { job, wake } = opts;
   const model = resolveOperatorModel(opts.model);
@@ -258,6 +271,7 @@ export async function runOperatorTurn(
       model,
       pool,
       organizationId: job.organizationId,
+      codeExecutor: opts.codeExecutor,
     });
 
     for await (const event of gen) {

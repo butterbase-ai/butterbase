@@ -248,7 +248,12 @@ describe('human assistant — unchanged', () => {
     const expected = getToolCatalog().filter((t) => t.operatorOnly !== true).map((t) => t.name);
     expect(toolNamesSent(bodies[0])).toEqual(expected);
     // Sanity: the filter actually removed something, so this is not vacuous.
-    expect(expected.length).toBe(getToolCatalog().length - 1);
+    // Not hardcoded to "- 1": the operator-only count grew to 2 with
+    // `run_sandbox_code` (see tool-catalog.ts), and this assertion should
+    // track that count rather than assume the scratchpad tool is the only one.
+    const operatorOnlyCount = getToolCatalog().filter((t) => t.operatorOnly === true).length;
+    expect(operatorOnlyCount).toBeGreaterThanOrEqual(2);
+    expect(expected.length).toBe(getToolCatalog().length - operatorOnlyCount);
   });
 
   it('sends a byte-identical system prompt', async () => {

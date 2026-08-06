@@ -18,7 +18,7 @@
 import pg from 'pg';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, OPERATOR_SANDBOX_CODE_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust, createSubstrateEscalationApproval } from './approvals-store.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
@@ -469,6 +469,17 @@ export async function* runAgentTurn(
     // the agent's app-discovery tooling (manage_app list) is scoped to it so
     // the model only sees apps in the org the user is currently working in.
     organizationId?: string | null;
+    /**
+     * Executes model-authored code in an isolated sandbox for this turn.
+     * Supplied by `SandboxRunner` (cron-scheduler), absent for `LocalRunner`
+     * and for every human/assistant turn.
+     *
+     * SAFETY-CRITICAL: there is no host-execution fallback. When this is
+     * absent, `OPERATOR_SANDBOX_CODE_TOOL` must be absent from the catalog
+     * offered to the model (see the `tools` construction below) — never
+     * degrade to running code in this process.
+     */
+    codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
@@ -576,8 +587,23 @@ export async function* runAgentTurn(
   // assistant's tool list is exactly what it was before operator-only tools
   // existed. This filter IS load-bearing for the assistant (it is what keeps
   // its catalog unchanged); it is only an affordance on the operator side.
+  // SAFETY-CRITICAL, not merely an affordance, for ONE entry in this filtered
+  // list: `OPERATOR_SANDBOX_CODE_TOOL`. `operatorPolicyFor` returns 'allow' for
+  // it unconditionally (see operator-policy.ts's justification) because the
+  // policy table has no way to know whether a `codeExecutor` exists for this
+  // turn — that knowledge lives here, on `input`, not in the policy module.
+  // So this filter is the ONLY place that decides whether the tool is even
+  // reachable: drop it whenever `codeExecutor` is absent, so a turn with no
+  // sandbox (LocalRunner, or a SandboxRunner turn that fell back) never offers
+  // a tool it has no way to honour except by running code on this host, which
+  // must never happen. `allowedToolNames`, derived from this same list below,
+  // is what the dispatch guard ultimately checks — so this exclusion is
+  // enforced twice: the model is never shown the tool, and even a hallucinated
+  // call to it is refused before the dispatch route below is ever reached.
   const tools = isOperator
-    ? getToolCatalog().filter((t) => isOperatorToolAllowed(t.name))
+    ? getToolCatalog()
+        .filter((t) => isOperatorToolAllowed(t.name))
+        .filter((t) => t.name !== OPERATOR_SANDBOX_CODE_TOOL || typeof input.codeExecutor === 'function')
     : getToolCatalog().filter((t) => t.operatorOnly !== true);
 
   // Per-turn state --------------------------------------------------------
@@ -1056,6 +1082,61 @@ export async function* runAgentTurn(
               payload = {
                 result: { ok: true, characters: saved.content.length, updated_at: saved.updatedAt },
               };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: sandbox code execution (in-process) -------------------
+         *
+         * Dispatched here, never forwarded to MCP: there is no MCP tool by
+         * this name, and the whole point of `codeExecutor` is that it runs
+         * OUTSIDE this process, in an isolated MicroVM `SandboxRunner` already
+         * created for this turn.
+         *
+         * THE RULE: no `codeExecutor` means no execution, ever — not "execute
+         * on the host instead". Reaching this branch with `input.codeExecutor`
+         * missing should be IMPOSSIBLE: the tool was dropped from `tools`
+         * above whenever `codeExecutor` was absent, so it is also absent from
+         * `allowedToolNames`, and the allowlist guard a few lines up already
+         * refused it. The `typeof input.codeExecutor !== 'function'` branch
+         * below is defence in depth for exactly the reason the scratchpad
+         * route re-checks `isOperator`: a route that can execute code must not
+         * depend on a filter two hundred lines away for its only proof of
+         * safety. If this branch is ever reached, refuse — do NOT fall back to
+         * running `rcArgs.code` in this process.
+         *
+         * The `isOperator` check is the same defence-in-depth as the
+         * scratchpad route: the tool is filtered out of the human catalog and
+         * would be refused by the allowlist guard above regardless.
+         */
+        if (isRunSandboxCodeTool(tc.name)) {
+          toolCallsCount++;
+          const rcArgs = (tc.args ?? {}) as { code?: unknown };
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else if (typeof input.codeExecutor !== 'function') {
+            payload = { error: `Tool "${tc.name}" is not available: no sandbox executor for this turn.` };
+          } else if (typeof rcArgs.code !== 'string') {
+            payload = { error: `Tool "${tc.name}" requires a string "code" argument.` };
+          } else {
+            try {
+              const r = await input.codeExecutor(rcArgs.code);
+              payload = { result: r };
             } catch (err) {
               payload = { error: err instanceof Error ? err.message : String(err) };
             }
