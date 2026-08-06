@@ -343,6 +343,13 @@ export async function resolveOperatorApproval(
     approvalId: string;
     orgId: string;
     jwt: string;
+    /**
+     * The org member resolving this approval — sourced from the route's own
+     * `requireUserId(request)`, not a new parameter threaded in for this
+     * purpose. Recorded on the approval row (resolved_by) so it is auditable
+     * which human authorised an operator-raised, irreversible action.
+     */
+    userId: string;
     resolution: { status: 'approved' } | { status: 'denied'; reason?: string };
   },
 ): Promise<OperatorResolveOutcome> {
@@ -352,6 +359,7 @@ export async function resolveOperatorApproval(
   const outcome = await completeApprovalResolution(pool, {
     approval,
     resolution: input.resolution,
+    resolvedBy: input.userId,
     // Exactly-once: the advisory-lock transaction in executeOnce, plus its
     // success cache keyed on approval_id. Because a repeated execution is
     // served from that cache, a retry after a partway failure re-drives this
@@ -1132,6 +1140,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       approvalId,
       orgId: org.orgId,
       jwt,
+      userId,
       resolution:
         parsed.data.status === 'approved'
           ? { status: 'approved' }

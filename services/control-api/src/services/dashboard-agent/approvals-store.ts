@@ -13,13 +13,19 @@ export type Approval = {
   denyReason: string | null;
   createdAt: string;
   resolvedAt: string | null;
+  /**
+   * Which human resolved this approval (their platform user id / operator
+   * approval feed caller). Nullable: existing rows predate this column, and
+   * not every resolution path is guaranteed to supply one. Never backfilled.
+   */
+  resolvedBy: string | null;
 };
 
 const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
-  sensitivity, status, trust_scope, deny_reason, created_at, resolved_at`;
+  sensitivity, status, trust_scope, deny_reason, created_at, resolved_at, resolved_by`;
 
 /** Same columns as APPROVAL_COLS, `a.`-prefixed for queries that JOIN dashboard_agent_conversations. */
-const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at`;
+const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by`;
 
 function rowToApproval(row: any): Approval {
   return {
@@ -34,6 +40,7 @@ function rowToApproval(row: any): Approval {
     denyReason: row.deny_reason,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
+    resolvedBy: row.resolved_by ?? null,
   };
 }
 
@@ -170,14 +177,16 @@ export async function resolveApproval(
     status: 'approved' | 'denied' | 'expired';
     trustScope?: 'conversation';
     denyReason?: string;
+    /** Who resolved it. Optional/nullable — see Approval.resolvedBy. */
+    resolvedBy?: string | null;
   }
 ): Promise<boolean> {
   const result = await pool.query(
     `UPDATE dashboard_agent_approvals
-     SET status = $2, trust_scope = $3, deny_reason = $4, resolved_at = NOW()
+     SET status = $2, trust_scope = $3, deny_reason = $4, resolved_at = NOW(), resolved_by = $5
      WHERE id = $1 AND status = 'pending'
      RETURNING id`,
-    [id, input.status, input.trustScope ?? null, input.denyReason ?? null]
+    [id, input.status, input.trustScope ?? null, input.denyReason ?? null, input.resolvedBy ?? null]
   );
   return (result.rowCount ?? 0) > 0;
 }

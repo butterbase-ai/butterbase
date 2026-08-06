@@ -94,6 +94,7 @@ export async function resolveApprovalAndPersistResult(
   return completeApprovalResolution(pool, {
     approval,
     resolution,
+    resolvedBy: userId,
     execute: (a) => callMcpTool(a.toolName, a.toolArgs, jwt),
   });
 }
@@ -112,9 +113,15 @@ export async function completeApprovalResolution(
     approval: Approval;
     resolution: ResolutionInput;
     execute: ApprovalExecutor;
+    /**
+     * The resolving human's id, recorded on the approval row (resolved_by).
+     * Optional/nullable — see Approval.resolvedBy: not every caller is
+     * guaranteed to have one, and existing rows predate the column.
+     */
+    resolvedBy?: string | null;
   }
 ): Promise<ResolveOutcome> {
-  const { approval, resolution, execute } = params;
+  const { approval, resolution, execute, resolvedBy } = params;
   const approvalId = approval.id;
 
   // 2. Status check — fast-path 404/409 without touching MCP or the DB
@@ -159,6 +166,7 @@ export async function completeApprovalResolution(
     const resolved = await resolveApproval(pool, approvalId, {
       status: 'approved',
       trustScope: resolution.trustScope,
+      resolvedBy,
     });
     if (!resolved) {
       return { ok: false, code: 409, error: `approval already resolved` };
@@ -179,6 +187,7 @@ export async function completeApprovalResolution(
     const resolved = await resolveApproval(pool, approvalId, {
       status: 'denied',
       denyReason: reason,
+      resolvedBy,
     });
     if (!resolved) {
       return { ok: false, code: 409, error: `approval already resolved` };
