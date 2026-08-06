@@ -96,6 +96,36 @@ export async function getOrCreateOperatorConversation(
 }
 
 /**
+ * Look up the (single) enabled operator job for an org, for event-driven
+ * wakes. Unlike `claimDueJobs`, this does not touch `next_run_at` — an event
+ * wake is additional to the timer cadence, not a replacement claim for it.
+ */
+export async function getEnabledJobForOrg(
+  pool: pg.Pool,
+  orgId: string,
+): Promise<OperatorJob | null> {
+  const r = await pool.query<{
+    id: string; organization_id: string; name: string;
+    instructions: string; interval_seconds: number;
+  }>(
+    `SELECT id, organization_id, name, instructions, interval_seconds
+     FROM dashboard_agent_operator_jobs
+     WHERE organization_id = $1 AND enabled = TRUE
+     ORDER BY created_at ASC LIMIT 1`,
+    [orgId],
+  );
+  if (r.rows.length === 0) return null;
+  const row = r.rows[0];
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    name: row.name,
+    instructions: row.instructions,
+    intervalSeconds: row.interval_seconds,
+  };
+}
+
+/**
  * Claim due jobs and advance next_run_at in one transaction.
  * FOR UPDATE SKIP LOCKED mirrors attention-rule-evaluator so concurrent
  * workers never double-claim.
