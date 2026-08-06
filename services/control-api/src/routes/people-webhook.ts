@@ -5,29 +5,33 @@
 // when an async email lookup completes.  The nonce is the security gate —
 // this route carries NO auth header by design.
 //
-// ALWAYS returns HTTP 200 (with a JSON body) so People stops retrying.
+// Responses — 200 means "settled, stop retrying":
 //   { ok: true }                  — claim succeeded; credits charged, audit row written.
 //   { ok: true, billing: 'deferred' } — claim succeeded but post-claim billing/audit threw.
-//   { ignored: true }             — unknown/already-claimed nonce, null body, or any error.
+//   { ignored: true }             — unknown/already-claimed nonce, null body, or a fault
+//                                   that a retry cannot fix.
+//   503                           — a runtime region was unreadable, so "unknown nonce"
+//                                   could not be established.  Ask the provider to redeliver
+//                                   rather than silently drop a resolvable callback.
 //
-// Cross-region limitation (v1, Option C):
-//   people_email_lookups rows live in the runtime DB tier.  This receiver
-//   queries only the first configured runtime region (listRuntimeRegions()[0]).
-//   Multi-region dispatch will require a control-plane nonce index (Option B).
+// Multi-region dispatch:
+//   people_email_lookups rows live in the runtime DB of the app's OWN region, so
+//   this receiver probes every region in listRuntimeRegions() until the nonce is
+//   found.  Nonces are 32 random bytes, so the first hit owns the row.
 //
 // Email-field fallback chain (vendor shape unverified against live traffic):
 //   body.email → body.work_email → body.result.email → null
 //
 // Credit-cost source:
-//   config.people.providers[slot].creditCostHeader (per-slot header name, if present and finite >= 0)
-//   → config.people.providers[slot].fallbackCreditsPerAction (default: 1)
+//   config.people.providers[slot].creditCostHeader (per-slot header name, if present
+//   and finite >= 0) → otherwise 0.  There is deliberately NO fallbackCreditsPerAction
+//   here: the queue call already charged the real cost from its own response header,
+//   so charging a per-action default at resolve time double-bills a single lookup.
 
 import type { FastifyInstance } from 'fastify';
 import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-registry.js';
-import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { getPeoplePricing } from '../services/people/pricing.js';
 import { deductCreditsBalance, incrementUsage } from '../services/usage-metering.js';
-import { resolveOrganizationId } from '../services/org-resolver.js';
 import { config } from '../config.js';
 import type { ProviderSlot } from '../services/people/types.js';
 
@@ -50,54 +54,72 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
       return reply.code(200).send({ ignored: true });
     }
 
-    // Option C: single-region lookup (v1 limitation documented above).
     const regions = listRuntimeRegions();
     if (regions.length === 0) {
       req.log.warn('[people-webhook] no runtime regions configured — ignoring');
       return reply.code(200).send({ ignored: true });
     }
 
-    // Fix 1: runtimePoolFor can throw (uninitialized pool, misconfigured region).
-    // Wrap it so a throw returns 200 before any idempotent claim fires — stopping
-    // People retries without leaving a dangling pending row.
-    let runtimePool: ReturnType<typeof runtimePoolFor>;
-    try {
-      runtimePool = runtimePoolFor(regions[0]);
-    } catch (err) {
-      req.log.error({ err }, '[people-webhook] runtimePoolFor failed — ignoring');
-      return reply.code(200).send({ ignored: true });
-    }
-
-    // Locate the pending lookup row by nonce.  Include provider_slot so we can
-    // parse the credit header before the atomic claim UPDATE.
-    let lookupRow: {
+    // Probe every runtime region for the nonce, not just the first.
+    // people_email_lookups rows are written to the runtime DB of the app's OWN
+    // region, so a single-region probe strands every lookup belonging to an app
+    // homed anywhere else: the nonce is never found, we answer 200, the provider
+    // treats the callback as delivered, and the row stays 'pending' forever.
+    // Nonces are 32 random bytes, so the first region reporting a hit owns it.
+    interface LookupRow {
       id: string;
       app_id: string;
       user_id: string;
+      organization_id: string;
       normalized_url: string;
       provider_slot: string;
-    } | null = null;
+    }
 
-    try {
-      const find = await runtimePool.query<{
-        id: string;
-        app_id: string;
-        user_id: string;
-        normalized_url: string;
-        provider_slot: string;
-      }>(
-        `SELECT id, app_id, user_id, normalized_url, provider_slot
+    const SELECT_BY_NONCE = `SELECT id, app_id, user_id, organization_id, normalized_url, provider_slot
            FROM people_email_lookups
-           WHERE nonce = $1`,
-        [nonce],
-      );
-      if (find.rows.length === 0) {
-        req.log.info({ nonce }, '[people-webhook] unknown nonce — ignoring');
-        return reply.code(200).send({ ignored: true });
+           WHERE nonce = $1`;
+
+    let runtimePool: ReturnType<typeof runtimePoolFor> | null = null;
+    let lookupRow: LookupRow | null = null;
+    // Tracks regions we could not read.  A region that errored may well hold the
+    // nonce, so "not found" is only trustworthy once every region answered.
+    let unreadableRegion = false;
+
+    for (const region of regions) {
+      // runtimePoolFor throws on a misconfigured/uninitialized region. That is a
+      // deployment fault rather than a transient one — retrying will not fix it,
+      // so skip the region without forcing the provider into a retry loop.
+      let pool: ReturnType<typeof runtimePoolFor>;
+      try {
+        pool = runtimePoolFor(region);
+      } catch (err) {
+        req.log.error({ err, region }, '[people-webhook] runtimePoolFor failed — skipping region');
+        continue;
       }
-      lookupRow = find.rows[0];
-    } catch (err) {
-      req.log.error({ err, nonce }, '[people-webhook] DB nonce lookup failed — ignoring');
+
+      try {
+        const find = await pool.query<LookupRow>(SELECT_BY_NONCE, [nonce]);
+        if (find.rows.length > 0) {
+          runtimePool = pool;
+          lookupRow = find.rows[0];
+          break;
+        }
+      } catch (err) {
+        // Transient read failure: we genuinely do not know if this region holds
+        // the nonce, so we must not conclude "unknown" from its silence.
+        unreadableRegion = true;
+        req.log.error({ err, nonce, region }, '[people-webhook] DB nonce lookup failed — region inconclusive');
+      }
+    }
+
+    if (!lookupRow || !runtimePool) {
+      if (unreadableRegion) {
+        // Answering 200 here would discard a resolvable callback exactly the way
+        // the cross-region bug did.  503 asks the provider to deliver it again.
+        req.log.warn({ nonce }, '[people-webhook] nonce unresolved with an unreadable region — asking for retry');
+        return reply.code(503).send({ error: 'lookup_unavailable' });
+      }
+      req.log.info({ nonce }, '[people-webhook] unknown nonce in every region — ignoring');
       return reply.code(200).send({ ignored: true });
     }
 
@@ -112,11 +134,14 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
 
     // Resolve slot and parse credit count from the inbound header BEFORE the claim
     // UPDATE so we can write the real value in a single atomic operation.
+    //
+    // Bill ONLY what this callback actually reports.  There is deliberately no
+    // per-action fallback here: the callback is the provider calling us, not a
+    // billable request we made.  The queue call already charged the real cost
+    // read from its own response header, so inventing a cost at resolve time
+    // bills the customer twice for a single lookup.
     const slot = (lookupRow.provider_slot as ProviderSlot) ?? 'primary';
     const providerCfg = config.people.providers[slot];
-    if (!providerCfg?.creditCostHeader && !providerCfg?.apiKey) {
-      console.error(`[people-webhook] slot=${slot} has no configured provider; charging fallback`);
-    }
     const creditHeader = providerCfg?.creditCostHeader;
     const rawHeaderCredits = creditHeader
       ? req.headers[creditHeader.toLowerCase()]
@@ -126,7 +151,7 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
     const credits =
       Number.isFinite(headerCredits) && headerCredits >= 0
         ? headerCredits
-        : (providerCfg?.fallbackCreditsPerAction ?? 1);
+        : 0;
 
     // Atomic idempotent claim: the AND status='pending' predicate guarantees only
     // one concurrent webhook call transitions the row.  0 rows returned → already
@@ -169,14 +194,17 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
         : 0;
       let usdCharged = 0;
 
+      // Bill the org stamped on the lookup row at queue time — the app's owning
+      // org.  deductCreditsBalance keys on organizations.id, so passing a user id
+      // matches zero rows and silently charges nothing for every team org.
+      const organizationId = lookupRow.organization_id;
+
       if (usdCost > 0) {
-        usdCharged = await deductCreditsBalance(app.controlDb, lookupRow.user_id, usdCost);
-        const organizationId = await resolveOrganizationId(app.controlDb, lookupRow.user_id);
+        usdCharged = await deductCreditsBalance(app.controlDb, organizationId, usdCost);
         await incrementUsage(organizationId, lookupRow.user_id, 'people_credits', credits, lookupRow.app_id);
       }
 
       // Audit row.  Use actual key_type from the lookup row (not hardcoded 'platform').
-      const organizationId = await resolveOrgFromApp(runtimePool, lookupRow.app_id);
       await runtimePool.query(
         `INSERT INTO people_usage_logs
            (app_id, organization_id, user_id, action, credits_consumed, usd_cost, usd_charged,
