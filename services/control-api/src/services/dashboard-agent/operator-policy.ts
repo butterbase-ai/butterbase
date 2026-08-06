@@ -60,29 +60,46 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
  * verdict in this module ever consulted it the agent would be writing its own
  * permissions. Gating the write would not fix that; not reading it does.
  *
- * `run_sandbox_code` is likewise 'allow', ungated, and for a different but
- * related reason: what it reaches, not what it writes. Every OTHER tool in
- * this table (below) either calls out through the MCP server with the
- * operator's own org-scoped credential, or is a local write into a row this
- * process already trusts the operator to own — that is why the interesting
- * question for those tools is "which org/action", answered by the rest of
- * this table. `run_sandbox_code` is structurally different: the code runs
- * inside a MicroVM (E2B/Alibaba FC Agent Sandbox) that holds no credential of
- * any kind — not the operator's service key, not an MCP session, not network
- * reachability to a customer's app or database. There is nothing in that
- * sandbox for a gate to protect, because there is nothing in it to reach with.
- * The one thing it CAN do — burn CPU/time — is already bounded by the
- * platform's 30s synchronous-execution cap and by `SandboxRunner`'s
- * kill-in-finally, neither of which an approval gate would improve on: a
- * human clicking "approve" does not make arbitrary Python safer, it just adds
- * latency to a call that cannot reach anything sensitive either way. Contrast
- * `manage_integrations` above, which is ungated because of an ACCEPTED risk
- * (it really can email a customer); this one is ungated because there is no
- * risk of that shape to accept. Gating it structurally cannot be done here
- * anyway: whether it is even offered on a given turn is decided by
- * `codeExecutor` presence in the loop (see `OPERATOR_SANDBOX_CODE_TOOL`'s doc
- * comment in tool-catalog.ts), which is orthogonal to this allow/approval/deny
- * table and is the actual safety-critical control for this tool.
+ * `run_sandbox_code` is likewise 'allow', ungated. What it does NOT reach is
+ * narrower than an earlier version of this comment claimed: the MicroVM
+ * (E2B/Alibaba FC Agent Sandbox) holds no CREDENTIAL of any kind — not the
+ * operator's service key, not an MCP session, not a JWT of any shape.
+ * `createSandbox` (sandbox-provider.ts) passes only `apiKey`/`apiUrl`/
+ * `domain`/`timeoutMs` to `Sandbox.create` — no `envs`, no secret is ever
+ * placed inside the VM. That part is verified and true.
+ *
+ * What is NOT true, and must not be claimed here again: that the sandbox has
+ * no network reachability. It does — the stock `code-interpreter-v1` template
+ * has ordinary outbound internet access (that is how `pip install` works
+ * inside it), and nothing in `sandbox-provider.ts` restricts egress. So an
+ * operator turn that first calls `select_rows` (or any other allowlisted
+ * read) and then calls `run_sandbox_code` with code that POSTs the result to
+ * an attacker-controlled URL can exfiltrate customer data with no gate, no
+ * approval, and no audit trail of the exfiltration itself — only of the read
+ * that preceded it.
+ *
+ * The verdict stays 'allow' anyway, but for a narrower reason than "nothing
+ * to reach": this adds NO NEW CAPABILITY CLASS beyond what `manage_integrations`
+ * already accepts above. An operator that can already call `manage_integrations`
+ * with attacker-supplied content (the real outbound-email path, deliberately
+ * ungated, accepted risk recorded 2026-08-05/06) can already exfiltrate
+ * arbitrary data outbound with no human in the loop; `run_sandbox_code` is a
+ * second outbound channel with the same shape of risk, not a new one. If that
+ * accepted-risk decision is ever revisited, this verdict must be revisited
+ * with it — do not treat them as independent. The 30s synchronous-execution
+ * cap and `SandboxRunner`'s kill-in-finally bound CPU/wall-clock abuse, but do
+ * nothing to bound this — record that honestly rather than implying they do.
+ *
+ * Gating it structurally cannot be done here anyway: whether it is even
+ * offered on a given turn is decided by `codeExecutor` presence in the loop
+ * (see `OPERATOR_SANDBOX_CODE_TOOL`'s doc comment in tool-catalog.ts), which
+ * is orthogonal to this allow/approval/deny table and is the actual
+ * safety-critical control for this tool — NOT this verdict.
+ *
+ * Restricting egress (e.g. an allowlist, a proxy, or a template with no
+ * network at all) would close this properly, but that is a template/runtime
+ * concern for a later stage (Stage C's custom container), not something to
+ * attempt here by editing `sandbox-provider.ts`'s config plumbing.
  */
 export const OPERATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'manage_substrate',

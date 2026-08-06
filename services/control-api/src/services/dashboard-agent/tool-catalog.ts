@@ -303,7 +303,7 @@ export function getToolCatalog(): ToolSpec[] {
       name: OPERATOR_SANDBOX_CODE_TOOL,
       operatorOnly: true,
       description:
-        'Run Python code in an isolated sandbox (a MicroVM with no credentials, no MCP access, and no route to customer data) and return its stdout/stderr. Use this for computation, data shaping, or checking your own logic — NOT as a way to reach Butterbase or the customer\'s app; use the other tools for that. ' +
+        'Run Python code in an isolated MicroVM sandbox and return its stdout/stderr. The sandbox holds no credential of any kind — no service key, no MCP session, no way to call any Butterbase tool from inside it. Use this for computation, data shaping, or checking your own logic, NOT as a way to reach Butterbase or the customer\'s app; use the other tools for that. ' +
         'Synchronous execution is capped at 30 seconds by the sandbox platform; a longer-running script will be cut off. ' +
         'This tool may be entirely ABSENT from your tool list on a given wake — no sandbox is guaranteed to be available every turn, and there is no fallback that runs code anywhere else. If it is not offered, do not attempt to simulate it; proceed without it.',
       parameters: {

@@ -172,38 +172,57 @@ function buildWakeMessage(
   ].join('\n');
 }
 
-export async function runOperatorTurn(
-  pool: pg.Pool,
-  opts: {
-    job: OperatorJob;
-    wake: OperatorWake;
-    model?: string;
-    /**
-     * Executes model-authored code in an isolated sandbox for this turn.
-     * Supplied by `SandboxRunner` (cron-scheduler); absent when called from
-     * `LocalRunner`, which has no sandbox to offer. Threaded straight through
-     * to `runAgentTurn` — see its doc comment for the safety rule this
-     * controls (no `codeExecutor` means `run_sandbox_code` is absent from the
-     * catalog, never a fallback to host execution).
-     */
-    codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
-  },
-): Promise<OperatorTurnResult> {
-  const { job, wake } = opts;
-  const model = resolveOperatorModel(opts.model);
+/**
+ * Result of `operatorPreflight`: either the turn should proceed with the
+ * enclosed credential/conversation, or it should stop right here and return
+ * the enclosed terminal result without ever reaching `runAgentTurn`.
+ */
+export type OperatorPreflight =
+  | { ok: true; credential: string; conversationId: string }
+  | { ok: false; result: OperatorTurnResult };
 
+/**
+ * The cheap precondition check for a wake, extracted so a caller can run it
+ * BEFORE paying for anything a full turn would otherwise cost — most
+ * concretely, `SandboxRunner` calling this before `createSandbox`.
+ *
+ * Two terminal cases, both correspond to a wake that will do NO model work at
+ * all: no operator credential for the org, or a human decision already
+ * pending on this conversation (see the long comment that used to live
+ * inline here, now on the pending-approval branch below — it explains why
+ * this must be checked per-wake with no TTL/auto-deny).
+ *
+ * A pending-approval skip in particular is not rare or transient: on an org
+ * gated on a human decision, EVERY wake hits it, indefinitely, until someone
+ * clicks — on the 1-minute timer tick, and now on every event-driven wake
+ * too. `runOperatorTurn` calls this same function internally, so there is one
+ * implementation of "should this wake even run", not a second copy of the
+ * credential/pending logic living in `SandboxRunner` that could drift from
+ * this one.
+ */
+export async function operatorPreflight(
+  pool: pg.Pool,
+  job: OperatorJob,
+): Promise<OperatorPreflight> {
   const credential = await getOperatorCredential(pool, job.organizationId);
   if (!credential) {
     return {
-      conversationId: '',
-      events: 0,
-      approvalId: null,
-      error: `no operator credential for org ${job.organizationId}`,
-      skipped: null,
+      ok: false,
+      result: {
+        conversationId: '',
+        events: 0,
+        approvalId: null,
+        error: `no operator credential for org ${job.organizationId}`,
+        skipped: null,
+      },
     };
   }
 
-  const conversationId = await getOrCreateOperatorConversation(pool, job.organizationId, model);
+  const conversationId = await getOrCreateOperatorConversation(
+    pool,
+    job.organizationId,
+    resolveOperatorModel(),
+  );
 
   /**
    * Do not start a turn while a human decision is outstanding.
@@ -237,13 +256,43 @@ export async function runOperatorTurn(
   const pending = await listPendingByConv(pool, conversationId);
   if (pending.length > 0) {
     return {
-      conversationId,
-      events: 0,
-      approvalId: null,
-      error: null,
-      skipped: { reason: 'pending_approval', approvalId: pending[0].id },
+      ok: false,
+      result: {
+        conversationId,
+        events: 0,
+        approvalId: null,
+        error: null,
+        skipped: { reason: 'pending_approval', approvalId: pending[0].id },
+      },
     };
   }
+
+  return { ok: true, credential, conversationId };
+}
+
+export async function runOperatorTurn(
+  pool: pg.Pool,
+  opts: {
+    job: OperatorJob;
+    wake: OperatorWake;
+    model?: string;
+    /**
+     * Executes model-authored code in an isolated sandbox for this turn.
+     * Supplied by `SandboxRunner` (cron-scheduler); absent when called from
+     * `LocalRunner`, which has no sandbox to offer. Threaded straight through
+     * to `runAgentTurn` — see its doc comment for the safety rule this
+     * controls (no `codeExecutor` means `run_sandbox_code` is absent from the
+     * catalog, never a fallback to host execution).
+     */
+    codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
+  },
+): Promise<OperatorTurnResult> {
+  const { job, wake } = opts;
+  const model = resolveOperatorModel(opts.model);
+
+  const pre = await operatorPreflight(pool, job);
+  if (!pre.ok) return pre.result;
+  const { credential, conversationId } = pre;
 
   /**
    * Read the scratchpad AFTER the pending-approval check, so a wake that is a
