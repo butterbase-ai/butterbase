@@ -67,11 +67,13 @@ import { getRecentAppIds } from '../services/dashboard-agent/schema-context.js';
 import { listUsage, getConversationUsageTotal } from '../services/dashboard-agent/usage-store.js';
 import { createRepoSync } from '../services/dashboard-agent/repo-sync.js';
 import { callMcpTool } from '../services/dashboard-agent/mcp-client.js';
-import { resolveApprovalAndPersistResult } from '../services/dashboard-agent/resume.js';
+import {
+  resolveApprovalAndPersistResult,
+  completeApprovalResolution,
+} from '../services/dashboard-agent/resume.js';
 import {
   getApprovalForOrg,
   listPendingByOrg,
-  resolveApproval,
 } from '../services/dashboard-agent/approvals-store.js';
 import { executeOnce } from '../services/dashboard-agent/tool-bridge.js';
 
@@ -300,7 +302,7 @@ export async function resolveCallerOrgId(
 
 export type OperatorResolveOutcome =
   | { ok: true }
-  | { ok: false; code: 404 | 409 | 502; error: string };
+  | { ok: false; code: 400 | 404 | 409 | 502; error: string };
 
 /**
  * Org-scoped approval resolution for operator turns.
@@ -308,6 +310,26 @@ export type OperatorResolveOutcome =
  * Execution goes through executeOnce so an approve that is retried — by a
  * double-click, a proxy retry, or a warm resume in Plan 2 — cannot fire the
  * tool twice.
+ *
+ * Everything after execution is delegated to resume.ts's
+ * `completeApprovalResolution`, NOT reimplemented here. That is the whole fix
+ * for C2. The earlier version of this function resolved the approval row and
+ * stopped, on the assumption that "the operator's loop picks the resolution
+ * up". It does not, and cannot: the loop persisted an assistant row carrying a
+ * `tool_call_id` with no matching tool result, and the AI gateway rejects any
+ * history that ends that way. With exactly one operator conversation per org,
+ * reused forever, the FIRST resolved gate — approve or deny — left that org's
+ * operator sending an invalid message sequence on every wake, every ten
+ * minutes, permanently, recoverable only by hand-editing the database.
+ *
+ * The deny path must write the tool row too. Denial is not "nothing happened";
+ * it is a tool result the model has to see, and it was the path that reached
+ * the wedge first.
+ *
+ * `principal: 'human'` is correct here and is not a formality: a person
+ * clicked approve in the operator feed, so the manage_substrate action
+ * denials — which exist to stop the AGENT approving its own proposals — do not
+ * apply to this call. The tool-level allowlist still does.
  *
  * Callers MUST have already established that `input.orgId` is an org the
  * caller belongs to (see resolveCallerOrgId). This function does not authorise.
@@ -323,27 +345,26 @@ export async function resolveOperatorApproval(
 ): Promise<OperatorResolveOutcome> {
   const approval = await getApprovalForOrg(pool, input.approvalId, input.orgId);
   if (!approval) return { ok: false, code: 404, error: 'approval not found' };
-  if (approval.status !== 'pending') return { ok: false, code: 409, error: 'approval is not pending' };
 
-  if (input.resolution.status === 'approved') {
-    const result = await executeOnce(pool, {
-      approvalId: approval.id,
-      name: approval.toolName,
-      args: approval.toolArgs,
-      jwt: input.jwt,
-      orgId: input.orgId,
-    });
-    if (!result.ok) {
-      return { ok: false, code: 502, error: result.error ?? 'tool execution failed' };
-    }
-  }
-
-  const updated = await resolveApproval(pool, approval.id, {
-    status: input.resolution.status === 'approved' ? 'approved' : 'denied',
-    denyReason: input.resolution.status === 'denied' ? input.resolution.reason : undefined,
+  const outcome = await completeApprovalResolution(pool, {
+    approval,
+    resolution: input.resolution,
+    // Exactly-once: the advisory-lock transaction in executeOnce, plus its
+    // success cache keyed on approval_id. Because a repeated execution is
+    // served from that cache, a retry after a partway failure re-drives this
+    // whole path safely rather than firing the tool a second time.
+    execute: (a) =>
+      executeOnce(pool, {
+        approvalId: a.id,
+        name: a.toolName,
+        args: a.toolArgs,
+        jwt: input.jwt,
+        orgId: input.orgId,
+        principal: 'human',
+      }),
   });
-  if (!updated) return { ok: false, code: 409, error: 'approval is not pending' };
 
+  if (!outcome.ok) return { ok: false, code: outcome.code, error: outcome.error };
   return { ok: true };
 }
 
@@ -1076,9 +1097,14 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
   // ── POST /operator/approvals/:id/resolve ─────────────────────────────────
   //
   // Approve or deny an operator-raised gate. Unlike /approvals/:id/resolve
-  // this does not resume a turn — the operator's loop picks the resolution up
-  // on its next pass — and execution goes through executeOnce, which holds an
-  // advisory lock on the approval id so a retried approve fires the tool once.
+  // this does not STREAM a resumed turn — the operator's loop picks the
+  // completed history up on its next wake. It does everything else resume.ts
+  // does, via the same shared code: execute or deny the tool, write the
+  // matching `role: 'tool'` row, clear pending_approval_id. Leaving those out
+  // is what wedged the org's one operator conversation forever.
+  //
+  // Execution goes through executeOnce, which holds an advisory lock on the
+  // approval id so a retried approve fires the tool once.
   app.post('/operator/approvals/:id/resolve', async (request, reply) => {
     if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
 

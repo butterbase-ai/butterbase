@@ -20,12 +20,21 @@
  *   4. THEN start a new agent turn with an EMPTY `userMessage` — the
  *      gateway sees the full prior history (now valid) and continues
  *      generating from there.
+ *
+ * Steps 1-3 apply to EVERY approval, not just the human assistant's. The
+ * headless operator has exactly ONE conversation per org, reused forever, so
+ * skipping them there does not break one chat — it wedges that org's operator
+ * permanently, on every wake, with no rotation and no recovery. That is why
+ * `completeApprovalResolution` is exported and shared rather than reimplemented
+ * on the operator side (see resolveOperatorApproval in routes/dashboard-agent.ts).
+ * Step 4 is the human assistant's alone: the operator's turn is not resumed
+ * inline, its loop picks the completed history up on its next wake.
  */
 
 import pg from 'pg';
 import { getApproval, resolveApproval, type Approval } from './approvals-store.js';
 import { getMessageByPendingApprovalId, clearPendingApproval, appendMessage } from './store.js';
-import { callMcpTool } from './mcp-client.js';
+import { callMcpTool, type McpCallResult } from './mcp-client.js';
 
 export type ResolutionInput =
   | { status: 'approved'; trustScope?: 'conversation' }
@@ -34,6 +43,25 @@ export type ResolutionInput =
 export type ResolveOutcome =
   | { ok: true; approval: Approval }
   | { ok: false; code: 404 | 409 | 400 | 502; error: string };
+
+/**
+ * How an approved tool call actually gets executed. The two callers differ
+ * ONLY here:
+ *
+ *  - the human assistant (`resolveApprovalAndPersistResult` below) calls the
+ *    MCP tool directly under the approver's JWT;
+ *  - the headless operator's approval feed (`resolveOperatorApproval` in
+ *    routes/dashboard-agent.ts) goes through `executeOnce`, which holds a
+ *    Postgres advisory lock on the approval id so a retried approve fires the
+ *    tool exactly once.
+ *
+ * Everything after execution — resolving the approval row, writing the
+ * `role: 'tool'` row that completes the assistant/tool pair, clearing
+ * `pending_approval_id` — is identical and lives in one place below. It has to:
+ * a second copy that drifted from this one is exactly how the operator path
+ * shipped without any of it and wedged its conversation permanently.
+ */
+export type ApprovalExecutor = (approval: Approval) => Promise<McpCallResult>;
 
 /**
  * Ownership + status checks, execute-or-synthesize the tool result, and
@@ -57,6 +85,32 @@ export async function resolveApprovalAndPersistResult(
   if (!approval) {
     return { ok: false, code: 404, error: 'approval not found' };
   }
+
+  return completeApprovalResolution(pool, {
+    approval,
+    resolution,
+    execute: (a) => callMcpTool(a.toolName, a.toolArgs, jwt),
+  });
+}
+
+/**
+ * Steps 1-3 of this module's header, for an approval the caller has ALREADY
+ * fetched and authorised. Shared by the human assistant and the operator
+ * approvals feed; the only difference between them is the `execute` callback.
+ *
+ * Callers MUST have established that the approval belongs to the caller —
+ * this function does not authorise.
+ */
+export async function completeApprovalResolution(
+  pool: pg.Pool,
+  params: {
+    approval: Approval;
+    resolution: ResolutionInput;
+    execute: ApprovalExecutor;
+  }
+): Promise<ResolveOutcome> {
+  const { approval, resolution, execute } = params;
+  const approvalId = approval.id;
 
   // 2. Status check — fast-path 404/409 without touching MCP or the DB
   // write path. This is NOT the source of truth for concurrency safety —
@@ -84,10 +138,14 @@ export async function resolveApprovalAndPersistResult(
   // The final `resolveApproval` call (conditioned on status='pending') is
   // also what atomically defeats a concurrent double-resolve: whichever
   // request's UPDATE actually affects a row is the one that proceeds to
-  // persist the tool-result row and continue the turn.
+  // persist the tool-result row and continue the turn. It must stay AHEAD of
+  // the append below for that reason — moving it after would let two
+  // concurrent resolvers each write a `role: 'tool'` row for the same
+  // tool_call_id, which is a worse kind of invalid history than the one this
+  // module exists to prevent.
   let toolResult: unknown;
   if (resolution.status === 'approved') {
-    const call = await callMcpTool(approval.toolName, approval.toolArgs, jwt);
+    const call = await execute(approval);
     if (!call.ok) {
       return { ok: false, code: 502, error: `Tool execution failed: ${call.error}` };
     }
@@ -114,6 +172,16 @@ export async function resolveApprovalAndPersistResult(
   }
 
   // 5. Persist the tool-result row that completes the assistant/tool pair.
+  //
+  // Residual window: a process crash or DB outage between the resolveApproval
+  // above and this append leaves the conversation ending in an unanswered
+  // assistant tool_calls row while the approval reads resolved. Every ERROR
+  // path returns before resolveApproval, and the slow, failure-prone part (the
+  // MCP call) is already done by here, so only a hard crash in the gap between
+  // two adjacent statements can hit it. Closing it entirely needs all three
+  // writes in one transaction, which appendMessage's own BEGIN/COMMIT prevents
+  // today. The append-then-clear order below is deliberate: a crash between
+  // them leaves a valid history plus a stale marker, which is harmless.
   await appendMessage(pool, approval.conversationId, {
     role: 'tool',
     content: '',

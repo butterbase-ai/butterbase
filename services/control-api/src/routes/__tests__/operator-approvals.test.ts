@@ -1,21 +1,37 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, type MockedFunction } from 'vitest';
 
 vi.mock('../../services/dashboard-agent/approvals-store.js', () => ({
+  getApproval: vi.fn(),
   getApprovalForOrg: vi.fn(),
   listPendingByOrg: vi.fn(),
   resolveApproval: vi.fn(),
 }));
 vi.mock('../../services/dashboard-agent/tool-bridge.js', () => ({ executeOnce: vi.fn() }));
+// resolveOperatorApproval delegates its persistence to resume.ts, which reads
+// and writes messages. Stub only those three; the rest of the store is left
+// real so the route module's other imports still resolve.
+vi.mock('../../services/dashboard-agent/store.js', async () => ({
+  ...(await vi.importActual<typeof import('../../services/dashboard-agent/store.js')>(
+    '../../services/dashboard-agent/store.js',
+  )),
+  getMessageByPendingApprovalId: vi.fn(),
+  clearPendingApproval: vi.fn(),
+  appendMessage: vi.fn(),
+}));
 
 import { Pool } from 'pg';
 import Fastify, { type FastifyInstance } from 'fastify';
 import * as approvalsModule from '../../services/dashboard-agent/approvals-store.js';
 import * as bridgeModule from '../../services/dashboard-agent/tool-bridge.js';
+import * as storeModule from '../../services/dashboard-agent/store.js';
 import { resolveOperatorApproval, resolveCallerOrgId, dashboardAgentRoutes } from '../dashboard-agent.js';
 
 const mockGet = approvalsModule.getApprovalForOrg as MockedFunction<typeof approvalsModule.getApprovalForOrg>;
 const mockResolve = approvalsModule.resolveApproval as MockedFunction<typeof approvalsModule.resolveApproval>;
 const mockExecute = bridgeModule.executeOnce as MockedFunction<typeof bridgeModule.executeOnce>;
+const mockPaused = storeModule.getMessageByPendingApprovalId as MockedFunction<typeof storeModule.getMessageByPendingApprovalId>;
+const mockAppend = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
+const mockClear = storeModule.clearPendingApproval as MockedFunction<typeof storeModule.clearPendingApproval>;
 
 const stubPool = {} as any;
 const approval = {
@@ -25,7 +41,14 @@ const approval = {
   trustScope: null, denyReason: null, createdAt: '', resolvedAt: null,
 };
 
-beforeEach(() => { vi.clearAllMocks(); });
+const pausedRow = { id: 'msg-1', toolCallId: 'call_1' } as any;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockPaused.mockResolvedValue(pausedRow);
+  mockAppend.mockResolvedValue({} as any);
+  mockClear.mockResolvedValue(undefined);
+});
 
 describe('resolveOperatorApproval', () => {
   it('404s when the approval is not in the caller org', async () => {
@@ -36,7 +59,7 @@ describe('resolveOperatorApproval', () => {
     expect(r).toEqual({ ok: false, code: 404, error: 'approval not found' });
   });
 
-  it('executes through the bridge exactly once on approve', async () => {
+  it('executes through the bridge exactly once on approve, as a HUMAN principal', async () => {
     mockGet.mockResolvedValue(approval);
     mockExecute.mockResolvedValue({ ok: true, result: { id: 'act_1' } });
     mockResolve.mockResolvedValue(true);
@@ -46,13 +69,31 @@ describe('resolveOperatorApproval', () => {
     });
 
     expect(r.ok).toBe(true);
+    // principal is what lets the bridge call substrate's native approve on a
+    // person's behalf without tripping the operator's own self-approval denial.
     expect(mockExecute).toHaveBeenCalledWith(stubPool, {
       approvalId: 'appr-1', name: 'manage_substrate',
-      args: { action: 'propose' }, jwt: 'k', orgId: 'org-1',
+      args: { action: 'propose' }, jwt: 'k', orgId: 'org-1', principal: 'human',
     });
   });
 
-  it('does not execute on deny', async () => {
+  it('C2: approve persists the matching role:tool row and clears the pending marker', async () => {
+    mockGet.mockResolvedValue(approval);
+    mockExecute.mockResolvedValue({ ok: true, result: { id: 'act_1' } });
+    mockResolve.mockResolvedValue(true);
+
+    await resolveOperatorApproval(stubPool, {
+      approvalId: 'appr-1', orgId: 'org-1', jwt: 'k', resolution: { status: 'approved' },
+    });
+
+    expect(mockAppend).toHaveBeenCalledWith(stubPool, 'conv-1', expect.objectContaining({
+      role: 'tool', toolCallId: 'call_1', toolName: 'manage_substrate',
+      toolResult: { id: 'act_1' },
+    }));
+    expect(mockClear).toHaveBeenCalledWith(stubPool, 'msg-1');
+  });
+
+  it('C2: deny does not execute but STILL persists the tool row and clears the marker', async () => {
     mockGet.mockResolvedValue(approval);
     mockResolve.mockResolvedValue(true);
 
@@ -62,6 +103,24 @@ describe('resolveOperatorApproval', () => {
     });
 
     expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockAppend).toHaveBeenCalledWith(stubPool, 'conv-1', expect.objectContaining({
+      role: 'tool', toolCallId: 'call_1',
+      toolResult: { ok: false, error: 'User denied. Reason: no' },
+    }));
+    expect(mockClear).toHaveBeenCalledWith(stubPool, 'msg-1');
+  });
+
+  it('400s rather than half-resolving when no paused tool call exists', async () => {
+    mockGet.mockResolvedValue(approval);
+    mockPaused.mockResolvedValue(null);
+
+    const r = await resolveOperatorApproval(stubPool, {
+      approvalId: 'appr-1', orgId: 'org-1', jwt: 'k', resolution: { status: 'approved' },
+    });
+
+    expect(r).toEqual({ ok: false, code: 400, error: 'no paused tool call found for this approval' });
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockResolve).not.toHaveBeenCalled();
   });
 
   it('409s when the approval is no longer pending', async () => {
@@ -69,12 +128,13 @@ describe('resolveOperatorApproval', () => {
     const r = await resolveOperatorApproval(stubPool, {
       approvalId: 'appr-1', orgId: 'org-1', jwt: 'k', resolution: { status: 'approved' },
     });
-    expect(r).toEqual({ ok: false, code: 409, error: 'approval is not pending' });
+    expect(r).toEqual({ ok: false, code: 409, error: 'approval already approved' });
   });
 
-  it('does not execute when a concurrent caller already claimed the approval', async () => {
+  it('does not persist when a concurrent caller already claimed the approval', async () => {
     // getApprovalForOrg read it as pending, but the conditional UPDATE loses the
-    // race. The bridge's advisory lock still guarantees one execution.
+    // race. The bridge's advisory lock still guarantees one execution, and the
+    // loser must not write a second tool row for the same tool_call_id.
     mockGet.mockResolvedValue(approval);
     mockExecute.mockResolvedValue({ ok: true, result: { id: 'act_1' } });
     mockResolve.mockResolvedValue(false);
@@ -82,21 +142,27 @@ describe('resolveOperatorApproval', () => {
     const r = await resolveOperatorApproval(stubPool, {
       approvalId: 'appr-1', orgId: 'org-1', jwt: 'k', resolution: { status: 'approved' },
     });
-    expect(r).toEqual({ ok: false, code: 409, error: 'approval is not pending' });
+    expect(r).toEqual({ ok: false, code: 409, error: 'approval already resolved' });
+    expect(mockAppend).not.toHaveBeenCalled();
+    expect(mockClear).not.toHaveBeenCalled();
   });
 
   it('502s and leaves the approval pending when the bridge rejects the tool', async () => {
     mockGet.mockResolvedValue(approval);
-    mockExecute.mockResolvedValue({ ok: false, error: 'tool "manage_app" is not permitted for the operator' });
+    mockExecute.mockResolvedValue({ ok: false, error: 'tool "manage_app" is not permitted for the human' });
 
     const r = await resolveOperatorApproval(stubPool, {
       approvalId: 'appr-1', orgId: 'org-1', jwt: 'k', resolution: { status: 'approved' },
     });
 
     expect(r).toEqual({
-      ok: false, code: 502, error: 'tool "manage_app" is not permitted for the operator',
+      ok: false, code: 502,
+      error: 'Tool execution failed: tool "manage_app" is not permitted for the human',
     });
     expect(mockResolve).not.toHaveBeenCalled();
+    // Nothing written: the conversation is not wedged, and a retry is safe.
+    expect(mockAppend).not.toHaveBeenCalled();
+    expect(mockClear).not.toHaveBeenCalled();
   });
 });
 

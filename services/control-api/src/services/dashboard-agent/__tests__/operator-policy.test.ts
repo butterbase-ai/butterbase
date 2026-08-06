@@ -10,7 +10,9 @@ import {
   OPERATOR_TOOL_ALLOWLIST,
   OPERATOR_DENIED_SUBSTRATE_ACTIONS,
   OPERATOR_APPROVAL_SUBSTRATE_ACTIONS,
+  OPERATOR_ALLOWED_SUBSTRATE_ACTIONS,
   SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES,
+  principalMayExecute,
 } from '../operator-policy.js';
 import { getToolCatalog, sensitivityFor } from '../tool-catalog.js';
 
@@ -397,5 +399,140 @@ describe('drift guard vs substrate-core capability registry', () => {
     }
     expect(seen).toBe(16);
     expect([...found].sort()).toEqual([...SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES].sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Principal — 'operator' vs 'human'.
+// ---------------------------------------------------------------------------
+
+describe('principalMayExecute', () => {
+  it('an OPERATOR principal gets the full table, denials included', () => {
+    for (const action of OPERATOR_DENIED_SUBSTRATE_ACTIONS) {
+      expect(principalMayExecute('operator', 'manage_substrate', { action })).toBe(false);
+    }
+    expect(principalMayExecute('operator', 'manage_billing', {})).toBe(false);
+    expect(principalMayExecute('operator', 'manage_substrate', { action: 'list_actions' })).toBe(true);
+    // 'approval' is executable — executeOnce only ever runs a resolved approval.
+    expect(principalMayExecute('operator', 'manage_substrate', { action: 'create_rule' })).toBe(true);
+  });
+
+  it('a HUMAN principal is not bound by the agent-specific action denials', () => {
+    // This is precisely what makes the propose -> human-approves -> native
+    // substrate approve() bridge possible while `approve` stays denied to the
+    // operator. Deleting `approve` from the denied set instead would restore
+    // agent self-approval.
+    expect(principalMayExecute('human', 'manage_substrate', { action: 'approve', action_id: 'act_1' })).toBe(true);
+    expect(principalMayExecute('human', 'manage_substrate', { action: 'reject', action_id: 'act_1' })).toBe(true);
+    expect(principalMayExecute('operator', 'manage_substrate', { action: 'approve', action_id: 'act_1' })).toBe(false);
+  });
+
+  it('a HUMAN principal is still confined to the operator TOOL surface', () => {
+    for (const name of ['manage_billing', 'manage_app', 'manage_api_keys', 'seed_database', 'not_a_real_tool']) {
+      expect(principalMayExecute('human', name, {})).toBe(false);
+    }
+    expect(principalMayExecute('human', 'manage_substrate', { action: 'propose' })).toBe(true);
+  });
+
+  it('an unknown principal fails closed', () => {
+    for (const bogus of [undefined, null, '', 'admin', 'Operator']) {
+      expect(principalMayExecute(bogus as any, 'manage_substrate', { action: 'list_actions' })).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Enumeration guard: every advertised substrate action has a DELIBERATE verdict.
+//
+// `approve` sat on the operator's surface through three review rounds because
+// the MCP tool advertises an action list and nothing cross-checked it against
+// this policy table. That class of bug — a capability surface growing past a
+// policy table that does not know about it — recurs every time somebody adds a
+// substrate action.
+//
+// Same cross-repo limitation as the capability drift guard above: the MCP tool
+// lives in the internal monorepo (cloud/overlays/substrate/mcp-tools), which is
+// not a dependency of this OSS package, so this test skips in a standalone OSS
+// checkout. And since no CI runs these tests anywhere today, it only fires on a
+// manual local run from a monorepo checkout.
+// ---------------------------------------------------------------------------
+
+function findManageSubstrateTool(): string | null {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 12; i++) {
+    const candidate = path.join(dir, 'cloud', 'overlays', 'substrate', 'mcp-tools', 'manage-substrate.ts');
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** The `action` z.enum, verbatim from the MCP tool definition. */
+function readAdvertisedActions(file: string): string[] {
+  const src = fs.readFileSync(file, 'utf8');
+  const block = src.match(/action:\s*z\.enum\(\[([\s\S]*?)\]\)/);
+  if (!block) throw new Error('could not locate the `action: z.enum([...])` block in manage-substrate.ts');
+  return [...block[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+}
+
+describe('enumeration guard — manage_substrate actions vs the operator policy table', () => {
+  const file = findManageSubstrateTool();
+
+  it.skipIf(file === null)('every advertised action has an explicit verdict', () => {
+    const actions = readAdvertisedActions(file!);
+
+    // Sanity: the parse actually found the surface, not an empty match.
+    expect(actions.length).toBeGreaterThan(20);
+    expect(actions).toContain('approve');
+    expect(actions).toContain('propose');
+    expect(new Set(actions).size).toBe(actions.length);
+
+    const unclassified = actions.filter(
+      (a) =>
+        a !== 'propose' && // verdict is derived per-capability, not fixed
+        !OPERATOR_DENIED_SUBSTRATE_ACTIONS.has(a) &&
+        !OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.has(a) &&
+        !OPERATOR_ALLOWED_SUBSTRATE_ACTIONS.has(a),
+    );
+    expect(
+      unclassified,
+      `manage_substrate advertises action(s) with no verdict in operator-policy.ts: ${unclassified.join(', ')}. ` +
+        'Classify each one — OPERATOR_ALLOWED_/APPROVAL_/DENIED_SUBSTRATE_ACTIONS — rather than letting it ' +
+        'fall through to the allow floor unexamined.',
+    ).toEqual([]);
+  });
+
+  it.skipIf(file === null)('the policy table does not classify actions the tool does not advertise', () => {
+    // The mirror direction: a stale entry is a sign the surface moved.
+    const advertised = new Set(readAdvertisedActions(file!));
+    const classified = [
+      ...OPERATOR_DENIED_SUBSTRATE_ACTIONS,
+      ...OPERATOR_APPROVAL_SUBSTRATE_ACTIONS,
+      ...OPERATOR_ALLOWED_SUBSTRATE_ACTIONS,
+    ];
+    expect(classified.filter((a) => !advertised.has(a))).toEqual([]);
+  });
+
+  it('the three verdict sets are mutually disjoint', () => {
+    const all = [
+      ...OPERATOR_DENIED_SUBSTRATE_ACTIONS,
+      ...OPERATOR_APPROVAL_SUBSTRATE_ACTIONS,
+      ...OPERATOR_ALLOWED_SUBSTRATE_ACTIONS,
+    ];
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it('each set actually produces the verdict it claims', () => {
+    for (const action of OPERATOR_DENIED_SUBSTRATE_ACTIONS) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('deny');
+    }
+    for (const action of OPERATOR_APPROVAL_SUBSTRATE_ACTIONS) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('approval');
+    }
+    for (const action of OPERATOR_ALLOWED_SUBSTRATE_ACTIONS) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('allow');
+    }
   });
 });

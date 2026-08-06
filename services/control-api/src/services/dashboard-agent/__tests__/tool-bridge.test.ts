@@ -49,11 +49,11 @@ describe('executeOnce', () => {
 
     const first = await executeOnce(pool, {
       approvalId: approval.id, name: 'manage_substrate',
-      args: { action: 'propose' }, jwt: 'k', orgId: ORG,
+      args: { action: 'propose' }, jwt: 'k', orgId: ORG, principal: 'operator',
     });
     const second = await executeOnce(pool, {
       approvalId: approval.id, name: 'manage_substrate',
-      args: { action: 'propose' }, jwt: 'k', orgId: ORG,
+      args: { action: 'propose' }, jwt: 'k', orgId: ORG, principal: 'operator',
     });
 
     expect(first).toEqual({ ok: true, result: { id: 'act_1' } });
@@ -67,11 +67,11 @@ describe('executeOnce', () => {
 
     await executeOnce(pool, {
       approvalId: approval.id, name: 'manage_substrate',
-      args: {}, jwt: 'k', orgId: ORG,
+      args: {}, jwt: 'k', orgId: ORG, principal: 'operator',
     });
     await executeOnce(pool, {
       approvalId: approval.id, name: 'manage_substrate',
-      args: {}, jwt: 'k', orgId: ORG,
+      args: {}, jwt: 'k', orgId: ORG, principal: 'operator',
     });
 
     expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
@@ -91,7 +91,7 @@ describe('executeOnce', () => {
 
     const args = {
       approvalId: approval.id, name: 'manage_substrate',
-      args: { action: 'propose' }, jwt: 'k', orgId: ORG,
+      args: { action: 'propose' }, jwt: 'k', orgId: ORG, principal: 'operator' as const,
     };
     // Warm two pool connections first, so neither caller is serialised behind
     // connection setup rather than the lock (keeps the race deterministic).
@@ -123,7 +123,7 @@ describe('executeOnce', () => {
 
     const args = {
       approvalId: approval.id, name: 'manage_substrate',
-      args: {}, jwt: 'k', orgId: ORG,
+      args: {}, jwt: 'k', orgId: ORG, principal: 'operator' as const,
     };
     const first = await executeOnce(pool, args);
     expect(first).toEqual({ ok: true, result: { s: `a${NUL}b` } });
@@ -138,7 +138,7 @@ describe('executeOnce', () => {
     const approval = await makeApproval();
     const r = await executeOnce(pool, {
       approvalId: approval.id, name: 'manage_billing',
-      args: {}, jwt: 'k', orgId: ORG,
+      args: {}, jwt: 'k', orgId: ORG, principal: 'operator',
     });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('not permitted');

@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
-import { operatorPolicyFor } from './operator-policy.js';
+import { principalMayExecute, type OperatorPrincipal } from './operator-policy.js';
 
 /**
  * The allowlist and the gating rules live in ONE table, in operator-policy.ts.
@@ -13,7 +13,9 @@ export {
   isOperatorToolAllowed,
   operatorRequiresApproval,
   operatorPolicyFor,
+  principalMayExecute,
   type OperatorPolicy,
+  type OperatorPrincipal,
 } from './operator-policy.js';
 
 /**
@@ -60,26 +62,44 @@ function stripNulls(value: unknown): unknown {
  */
 export async function executeOnce(
   pool: pg.Pool,
-  opts: { approvalId: string; name: string; args: unknown; jwt: string; orgId: string },
+  opts: {
+    approvalId: string;
+    name: string;
+    args: unknown;
+    jwt: string;
+    orgId: string;
+    /**
+     * WHO is calling. Required, deliberately not defaulted: a new call site
+     * must be forced to state this rather than inherit whichever answer
+     * happened to be safe at the one site that existed when it was written.
+     *
+     *  'operator' — the unattended agent itself. Gets the full operator policy
+     *    table, including the manage_substrate action denials.
+     *  'human'    — the server acting on a person's click in the operator
+     *    approvals feed. The agent-specific action denials do not apply; the
+     *    tool-level allowlist still does. This is what lets the approval
+     *    bridge call substrate's native approve(action_id), which `approve`
+     *    being denied to the OPERATOR would otherwise block.
+     */
+    principal: OperatorPrincipal;
+  },
 ): Promise<McpCallResult> {
   // Ahead of every path that can reach callMcpTool, and ahead of touching the
-  // database at all: a non-allowlisted tool never takes the lock and can never
-  // be replayed out of the cache. Consults the unified policy table rather than
-  // a local list. A verdict of 'approval' is executable here by construction —
-  // executeOnce only ever runs against an approval a human already resolved.
+  // database at all: a tool this principal may not call never takes the lock
+  // and can never be replayed out of the cache. Consults the unified policy
+  // table rather than a local list. A verdict of 'approval' is executable here
+  // by construction — executeOnce only ever runs against an approval a human
+  // already resolved.
   //
-  // NOTE FOR C2 (the approval bridge). This check asks "may the OPERATOR call
-  // this?", and manage_substrate approve/reject are denied to the operator
-  // because substrate has no self-approval restriction (see
-  // OPERATOR_DENIED_SUBSTRATE_ACTIONS). Replaying the operator's own stored
-  // proposal through here is fine — a gated propose is 'approval', not 'deny'.
-  // But if the bridge later calls substrate's NATIVE approve(action_id) on a
-  // human's behalf, it must NOT route that call through executeOnce as-is: the
-  // caller is then a human, not the operator, and this table would refuse it.
-  // Give that path its own entry point (or an explicit principal argument)
-  // rather than loosening this denial.
-  if (operatorPolicyFor(opts.name, opts.args) === 'deny') {
-    return { ok: false, error: `tool "${opts.name}" is not permitted for the operator` };
+  // Do NOT collapse this back to a principal-free check by deleting `approve`
+  // from OPERATOR_DENIED_SUBSTRATE_ACTIONS: that silently restores agent
+  // self-approval (propose a gated capability, then approve your own
+  // action_id, stamping approved_by_kind='human'). See principalMayExecute.
+  if (!principalMayExecute(opts.principal, opts.name, opts.args)) {
+    return {
+      ok: false,
+      error: `tool "${opts.name}" is not permitted for the ${opts.principal}`,
+    };
   }
 
   const client = await pool.connect();

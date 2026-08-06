@@ -114,13 +114,18 @@ export const SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES: ReadonlySet<string> = new
  *    Denying only `approve` would leave the audit record forgeable in one
  *    direction, which is not a coherent place to stop.
  *
- * Resolution of a gated operator proposal is supposed to happen through the
- * operator approvals feed: a human approves there, and the bridge calls
- * substrate's native approve under a HUMAN identity. That is C2's job. This
- * denial is on the OPERATOR'S OWN TOOL SURFACE, not a statement that the
- * approve endpoint is off limits to everyone. See the note on executeOnce in
- * tool-bridge.ts — the bridge must not route its native-approve call through
- * this table as if the operator were the caller.
+ * Resolution of a gated operator proposal happens through the operator
+ * approvals feed: a human approves there, and the bridge calls substrate's
+ * native approve under a HUMAN identity. This denial is on the OPERATOR'S OWN
+ * TOOL SURFACE, not a statement that the approve endpoint is off limits to
+ * everyone.
+ *
+ * DO NOT "fix" a blocked bridge call by deleting `approve` from this set. That
+ * restores agent self-approval and makes the whole governance model
+ * decorative. The distinction is carried by the required `principal` argument
+ * on `executeOnce` (tool-bridge.ts) and enforced by `principalMayExecute`
+ * below: `'operator'` gets this table in full, `'human'` gets the tool-level
+ * allowlist only.
  *
  * This is an OPERATOR-ONLY restriction. The human assistant keeps full access
  * to all four actions, and all four stay documented in the shared tool catalog.
@@ -170,6 +175,62 @@ export const OPERATOR_APPROVAL_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set(
   'disable_rule',
   'enable_rule',
   'cancel_outbox',
+]);
+
+/**
+ * `manage_substrate` actions the operator may invoke freely — the third and
+ * last verdict, written down rather than left to fall through the floor.
+ *
+ * This set changes NO runtime behaviour: `operatorPolicyFor` already returns
+ * 'allow' for anything not denied or gated. It exists so that every action the
+ * MCP tool advertises has an explicit, deliberate verdict somewhere in this
+ * module, and so that a test can prove it (see the enumeration guard in
+ * __tests__/operator-policy.test.ts, which reads the `action` z.enum out of
+ * cloud/overlays/substrate/mcp-tools/manage-substrate.ts and fails on any
+ * action that appears in none of these sets).
+ *
+ * That guard is the answer to how `approve` stayed on the operator's surface
+ * through three review rounds: the capability surface grew and the policy
+ * table did not know about it. A new substrate action must now be classified
+ * here — allow, approval, or deny — or the guard fails.
+ *
+ * `propose` is deliberately absent: its verdict is not fixed, it is derived
+ * per-capability from SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES.
+ */
+export const OPERATOR_ALLOWED_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set([
+  // provisioning — idempotent creation of the org's own substrate self-entity
+  'provision',
+  // ledger reads
+  'list_actions',
+  'get_action',
+  // entities
+  'find_entities',
+  'get_entity',
+  // source artifacts
+  'list_source_artifacts',
+  'get_source_artifact',
+  // memory
+  'search_memory',
+  'list_memory',
+  // outbox — reads, plus retry (re-sends work a human already authorised;
+  // cancel_outbox is gated instead, see OPERATOR_APPROVAL_SUBSTRATE_ACTIONS)
+  'list_outbox',
+  'retry_outbox',
+  // attention rules — reads, plus update_rule (see the note on the approval
+  // set: the plan author named five mutations, update_rule was not one)
+  'list_rules',
+  'get_rule',
+  'update_rule',
+  'list_rule_firings',
+  // snapshots & settings reads
+  'snapshots',
+  'get_settings',
+  // policy surface reads
+  'list_capabilities',
+  'list_principles',
+  'get_principle',
+  'list_policy_conflicts',
+  'get_policy_conflict',
 ]);
 
 /** Sentinel: args were supplied but could not be understood. Fails closed. */
@@ -301,4 +362,45 @@ export function isOperatorToolAllowed(name: string): boolean {
 /** Thin wrapper over the table: must this call pause for a human? */
 export function operatorRequiresApproval(name: string, args: unknown): boolean {
   return operatorPolicyFor(name, args) === 'approval';
+}
+
+/**
+ * Who is making this call? The two are NOT interchangeable and the difference
+ * is load-bearing, which is why `executeOnce` takes it as a required argument
+ * rather than defaulting.
+ *
+ *  - 'operator' — the unattended agent, holding an org service key, nobody
+ *    watching. Gets the full table above, including the action denials whose
+ *    whole point is that an agent must not weaken the controls that govern it.
+ *
+ *  - 'human'  — a person clicked approve in the operator approvals feed, and
+ *    the server is now acting on their behalf. The action denials do not
+ *    apply: they say "the AGENT must not approve its own proposal", not "this
+ *    endpoint is off limits". Without this distinction the approval bridge
+ *    could not call substrate's native approve(action_id) at all, because
+ *    `approve` is denied to the operator.
+ */
+export type OperatorPrincipal = 'operator' | 'human';
+
+/**
+ * May `principal` execute (tool, args) through the approval bridge?
+ *
+ * A 'human' principal is still confined to the operator's TOOL surface. This
+ * path only ever executes tool calls the operator itself proposed, so nothing
+ * legitimate can name a tool outside the allowlist; keeping the tool-level
+ * check means a corrupted or hand-inserted approval row cannot turn the
+ * approve button into arbitrary tool execution. Only the substrate ACTION
+ * denials — the agent-specific ones — are lifted.
+ */
+export function principalMayExecute(
+  principal: OperatorPrincipal,
+  name: string,
+  args: unknown,
+): boolean {
+  if (principal === 'operator') return operatorPolicyFor(name, args) !== 'deny';
+  if (principal === 'human') return OPERATOR_TOOL_ALLOWLIST.has(name);
+  // Unknown principal — including `undefined` from a JavaScript caller or a
+  // test that predates the argument. Fail closed rather than inheriting
+  // whichever branch happens to be listed last.
+  return false;
 }
