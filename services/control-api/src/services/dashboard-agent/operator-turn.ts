@@ -199,10 +199,22 @@ export type OperatorPreflight =
  * implementation of "should this wake even run", not a second copy of the
  * credential/pending logic living in `SandboxRunner` that could drift from
  * this one.
+ *
+ * `model` is passed straight to `resolveOperatorModel`, exactly as
+ * `runOperatorTurn` does with its own `opts.model` — it is only CONSULTED
+ * here when `getOrCreateOperatorConversation` creates the row for the first
+ * time (the column is write-once-on-create), but it must be the same value
+ * `runOperatorTurn` resolves for the same call, or the row can record a
+ * different model than the turn that follows actually runs on. That
+ * mismatch already cost this project once, in a different shape (Plan 1
+ * shipped an unroutable default id past every mocked test) — a conversation
+ * row lying about which model ran is the same failure mode in miniature, and
+ * it would mislead exactly the debugging session that needs it most.
  */
 export async function operatorPreflight(
   pool: pg.Pool,
   job: OperatorJob,
+  model?: string,
 ): Promise<OperatorPreflight> {
   const credential = await getOperatorCredential(pool, job.organizationId);
   if (!credential) {
@@ -221,7 +233,7 @@ export async function operatorPreflight(
   const conversationId = await getOrCreateOperatorConversation(
     pool,
     job.organizationId,
-    resolveOperatorModel(),
+    resolveOperatorModel(model),
   );
 
   /**
@@ -290,7 +302,7 @@ export async function runOperatorTurn(
   const { job, wake } = opts;
   const model = resolveOperatorModel(opts.model);
 
-  const pre = await operatorPreflight(pool, job);
+  const pre = await operatorPreflight(pool, job, opts.model);
   if (!pre.ok) return pre.result;
   const { credential, conversationId } = pre;
 

@@ -405,6 +405,31 @@ describe('runOperatorTurn — model selection', () => {
     expect(mockGetConv).toHaveBeenCalledWith(stubPool, 'org-1', DEFAULT_OPERATOR_MODEL);
   });
 
+  /**
+   * Regression test for a real bug: `operatorPreflight` was extracted out of
+   * `runOperatorTurn` (so `SandboxRunner` could call it before creating a
+   * sandbox) and, in that extraction, resolved the conversation's model with
+   * `resolveOperatorModel()` — dropping `opts.model` — instead of
+   * `resolveOperatorModel(opts.model)`. The previous test above did not catch
+   * it because it only exercises the no-explicit-model path, where dropping
+   * `opts.model` is a no-op. This test pins the explicit-model path: the row
+   * `getOrCreateOperatorConversation` opens must record the SAME model the
+   * turn actually runs on, not the env/default id, or the row silently lies
+   * about which model ran — misleading exactly the debugging session that
+   * needs it most.
+   */
+  it('records the EXPLICIT opts.model on the conversation it opens, not the env/default', async () => {
+    process.env.OPERATOR_MODEL = 'anthropic/claude-sonnet-4.6';
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, {
+      job, wake: { reason: 'timer' }, model: 'openai/gpt-5',
+    });
+
+    expect(mockGetConv).toHaveBeenCalledWith(stubPool, 'org-1', 'openai/gpt-5');
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('openai/gpt-5');
+  });
+
   it('OPERATOR_MODEL overrides the default, with no code change', async () => {
     process.env.OPERATOR_MODEL = 'anthropic/claude-sonnet-4.6';
     mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
