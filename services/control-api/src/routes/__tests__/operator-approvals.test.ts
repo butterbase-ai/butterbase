@@ -71,9 +71,16 @@ describe('resolveOperatorApproval', () => {
     expect(r.ok).toBe(true);
     // principal is what lets the bridge call substrate's native approve on a
     // person's behalf without tripping the operator's own self-approval denial.
+    //
+    // `idempotency_key` is injected by the substrate approval bridge (C2b):
+    // executeOnce's cache only dedupes once its transaction COMMITs, so a crash
+    // between the MCP call and the commit would otherwise let a retry propose a
+    // SECOND ledger action. Substrate dedupes on (org, key) and replays the
+    // first one instead. See substrate-approval-bridge.ts.
     expect(mockExecute).toHaveBeenCalledWith(stubPool, {
       approvalId: 'appr-1', name: 'manage_substrate',
-      args: { action: 'propose' }, jwt: 'k', orgId: 'org-1', principal: 'human',
+      args: { action: 'propose', idempotency_key: 'appr-1' },
+      jwt: 'k', orgId: 'org-1', principal: 'human',
     });
   });
 

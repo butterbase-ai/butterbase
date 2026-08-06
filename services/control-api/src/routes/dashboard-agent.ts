@@ -75,7 +75,7 @@ import {
   getApprovalForOrg,
   listPendingByOrg,
 } from '../services/dashboard-agent/approvals-store.js';
-import { executeOnce } from '../services/dashboard-agent/tool-bridge.js';
+import { executeApprovedOperatorTool } from '../services/dashboard-agent/substrate-approval-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -307,9 +307,12 @@ export type OperatorResolveOutcome =
 /**
  * Org-scoped approval resolution for operator turns.
  *
- * Execution goes through executeOnce so an approve that is retried — by a
- * double-click, a proxy retry, or a warm resume in Plan 2 — cannot fire the
- * tool twice.
+ * Execution goes through executeApprovedOperatorTool, which wraps executeOnce
+ * so an approve that is retried — by a double-click, a proxy retry, or a warm
+ * resume in Plan 2 — cannot fire the tool twice, and additionally bridges a
+ * gated `manage_substrate` propose to substrate's own approve(action_id) so
+ * one human click executes the capability rather than parking a second
+ * approval inside substrate (see substrate-approval-bridge.ts).
  *
  * Everything after execution is delegated to resume.ts's
  * `completeApprovalResolution`, NOT reimplemented here. That is the whole fix
@@ -353,14 +356,20 @@ export async function resolveOperatorApproval(
     // success cache keyed on approval_id. Because a repeated execution is
     // served from that cache, a retry after a partway failure re-drives this
     // whole path safely rather than firing the tool a second time.
+    //
+    // executeApprovedOperatorTool wraps executeOnce (it does not replace it,
+    // and does not weaken the lock) to add the substrate approval bridge:
+    // a gated `manage_substrate` propose is followed by substrate's NATIVE
+    // approve(action_id), so the human's one click actually EXECUTES the
+    // capability instead of leaving a second pending action for them to
+    // approve again. See substrate-approval-bridge.ts.
     execute: (a) =>
-      executeOnce(pool, {
+      executeApprovedOperatorTool(pool, {
         approvalId: a.id,
         name: a.toolName,
         args: a.toolArgs,
         jwt: input.jwt,
         orgId: input.orgId,
-        principal: 'human',
       }),
   });
 
