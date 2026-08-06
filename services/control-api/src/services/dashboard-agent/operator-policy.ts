@@ -20,7 +20,21 @@
  *    has to be structural.
  */
 
+import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
+
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
+
+/**
+ * Tools the operator dispatches IN-PROCESS in the loop rather than forwarding
+ * to the MCP server. There is no MCP tool by these names.
+ *
+ * They still get a verdict from the one table below (they are spread into
+ * OPERATOR_TOOL_ALLOWLIST), so the dispatch-site control governs them exactly
+ * like any other tool. What the set adds is the two places a LOCAL name must
+ * NOT be treated as an MCP name: `principalMayExecute` (the approval-replay
+ * path, which ends in `callMcpTool`) and the loop's internal `turnMcp` wrapper.
+ */
+export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([OPERATOR_SCRATCHPAD_TOOL]);
 
 /**
  * Tools the operator may call at all. Everything else is `deny`.
@@ -32,6 +46,16 @@ export type OperatorPolicy = 'allow' | 'approval' | 'deny';
  * risk, recorded 2026-08-05 and re-confirmed by the user 2026-08-06: it is the
  * real outbound-email path, so the operator can send mail with no human in the
  * loop. Do not silently change this — revisit the decision instead.
+ *
+ * `update_operator_scratchpad` is 'allow', ungated, and deliberately so. It
+ * writes ONE control-plane row — the operator's own working notes for its own
+ * org — and reaches nothing else: no MCP call, no tenant data, no customer.
+ * The target org is the trusted sentinel org, not an argument, so there is no
+ * cross-org shape to gate. Crucially the row it writes is NEVER read by any
+ * control: see the RULE on `dashboard_agent_operator_scratchpad`
+ * (operator-scratchpad-store.ts) — the scratchpad is model-written, so if any
+ * verdict in this module ever consulted it the agent would be writing its own
+ * permissions. Gating the write would not fix that; not reading it does.
  */
 export const OPERATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'manage_substrate',
@@ -40,6 +64,7 @@ export const OPERATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'query_audit_logs',
   'select_rows',
   'butterbase_docs',
+  ...OPERATOR_LOCAL_TOOLS,
 ]);
 
 /**
@@ -487,6 +512,14 @@ export function principalMayExecute(
   name: string,
   args: unknown,
 ): boolean {
+  // Loop-internal tools are not reachable through this path for EITHER
+  // principal. `executeOnce` ends in `callMcpTool`, and no MCP tool answers to
+  // these names, so the only way one could arrive here is a corrupted or
+  // hand-inserted approval row (they never gate, so no legitimate approval can
+  // name one). Refusing by name is clearer than letting it fail at the MCP
+  // server, and keeps the allowlist from implying an execution route it does
+  // not have.
+  if (OPERATOR_LOCAL_TOOLS.has(name)) return false;
   if (principal === 'operator') return operatorPolicyFor(name, args) !== 'deny';
   if (principal === 'human') return OPERATOR_TOOL_ALLOWLIST.has(name);
   // Unknown principal — including `undefined` from a JavaScript caller or a

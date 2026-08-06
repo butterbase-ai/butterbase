@@ -18,11 +18,12 @@
 import pg from 'pg';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust } from './approvals-store.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
-import { operatorPolicyForOrg, isOperatorToolAllowed } from './operator-policy.js';
+import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
+import { setOperatorScratchpad } from './operator-scratchpad-store.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -486,7 +487,9 @@ export async function* runAgentTurn(
   const turnMcp: Mcp = isOperator
     ? {
         async call(name: string, args: unknown, jwt: string) {
-          if (operatorPolicyForOrg(name, args, operatorOrgId) !== 'allow') {
+          // Loop-internal tools have no MCP counterpart; an internal caller
+          // asking for one by name is a bug, not a permitted call.
+          if (OPERATOR_LOCAL_TOOLS.has(name) || operatorPolicyForOrg(name, args, operatorOrgId) !== 'allow') {
             throw new Error(`Tool "${name}" is not permitted for the autonomous operator.`);
           }
           return deps.mcp.call(name, args, jwt);
@@ -532,9 +535,14 @@ export async function* runAgentTurn(
   // `operatorVerdict` at the dispatch site below, which refuses a denied tool
   // whether or not it was ever in this list — including a name the model
   // invented. Never rely on this filter for safety.
+  //
+  // The non-operator branch drops `operatorOnly` specs so the human
+  // assistant's tool list is exactly what it was before operator-only tools
+  // existed. This filter IS load-bearing for the assistant (it is what keeps
+  // its catalog unchanged); it is only an affordance on the operator side.
   const tools = isOperator
     ? getToolCatalog().filter((t) => isOperatorToolAllowed(t.name))
-    : getToolCatalog();
+    : getToolCatalog().filter((t) => t.operatorOnly !== true);
 
   // Per-turn state --------------------------------------------------------
   const touchedApps = new Set<string>();
@@ -946,6 +954,64 @@ export async function* runAgentTurn(
             toolName: tc.name,
             toolArgs: tc.args,
             toolResult: { error: errorMsg },
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: operator scratchpad (in-process) ---------------------
+         *
+         * The agent's own working memory. Dispatched here rather than through
+         * MCP because there is no such MCP tool and no reason to invent one:
+         * the row lives in the control plane, which this process already owns
+         * a pool for.
+         *
+         * THE ORG IS NOT AN ARGUMENT. It is `operatorOrgId`, derived from the
+         * `operator:<org>` sentinel that `operator-turn.ts` hardcodes from the
+         * claimed job — the same trusted source the cross-org guard compares
+         * against. There is no model-supplied field that can redirect this
+         * write, so one org can never write another's scratchpad. (A stray
+         * `org_id` argument would additionally have been denied upstream by
+         * `operatorPolicyForOrg`; that is belt to this braces, not the reason
+         * this is safe.)
+         *
+         * The `isOperator` re-check is defence in depth: the tool is filtered
+         * out of the human catalog and would be refused by the allowlist guard
+         * above, but a route that writes operator state should not depend on
+         * a filter two hundred lines away for its precondition.
+         *
+         * Oversized content is REJECTED as an ordinary tool error, never
+         * truncated — see OPERATOR_SCRATCHPAD_MAX_CHARS. The model sees the
+         * failure and can shorten its own summary; silent truncation would
+         * drop whichever part did not fit with no signal.
+         */
+        if (isOperatorScratchpadTool(tc.name)) {
+          toolCallsCount++;
+          const spArgs = (tc.args ?? {}) as { content?: unknown };
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator || !operatorOrgId) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else if (typeof spArgs.content !== 'string') {
+            payload = { error: `Tool "${tc.name}" requires a string "content" argument.` };
+          } else {
+            try {
+              const saved = await setOperatorScratchpad(input.pool, operatorOrgId, spArgs.content);
+              payload = {
+                result: { ok: true, characters: saved.content.length, updated_at: saved.updatedAt },
+              };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
           });
           continue;
         }

@@ -437,13 +437,20 @@ describe('operator — loop-initiated MCP calls', () => {
 // ---------------------------------------------------------------------------
 
 describe('non-operator conversation is unaffected', () => {
-  it('is offered the FULL catalog', async () => {
+  // The assistant's catalog is every tool EXCEPT the `operatorOnly` ones,
+  // which exist only for the headless operator (currently just the scratchpad
+  // write). The assistant's list is therefore exactly what it was before those
+  // tools were added — see operator-scratchpad.test.ts, which pins that the
+  // filter actually removes something so this is not vacuous.
+  it('is offered the FULL catalog (minus operator-only tools)', async () => {
     const { bodies } = oneToolCallThenStop('manage_app', { action: 'list' });
 
     await collect(runAgentTurn(humanInput()));
 
     const offered = toolNamesSent(bodies[0]);
-    expect(offered.sort()).toEqual(getToolCatalog().map((t) => t.name).sort());
+    expect(offered.sort()).toEqual(
+      getToolCatalog().filter((t) => t.operatorOnly !== true).map((t) => t.name).sort(),
+    );
   });
 
   it('dispatches tools the OPERATOR would be denied', async () => {

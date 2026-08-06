@@ -17,6 +17,18 @@ export type ToolSpec = {
   // not read it (see the note at its 'safe' fallback, decided 2026-08-05).
   // Retained as documentation of intent and for a future revisit.
   sensitivity?: 'safe' | 'confirm' | 'destructive';
+  /**
+   * Operator-only tool: it exists for the headless operator and must NOT be
+   * offered to the human assistant. The loop filters these out of the
+   * non-operator catalog, so the assistant's tool list is unchanged by their
+   * presence here.
+   *
+   * They live in this shared catalog rather than a second operator-specific
+   * catalog on purpose: `operator-policy.ts` is the single allowlist, and a
+   * test pins that every allowlisted tool is described here. A separate list
+   * is exactly the drift that produced the empty-intersection bug.
+   */
+  operatorOnly?: true;
 };
 
 // Shared "flat, permissive" params shape: LLM passes `action` (when the tool
@@ -35,6 +47,16 @@ function flatActionParams(): object {
 function flatOpen(): object {
   return { type: 'object', properties: {}, additionalProperties: true };
 }
+
+/**
+ * The operator's scratchpad-write tool.
+ *
+ * Dispatched IN-PROCESS by the loop (like the file-op and deploy primitives),
+ * never forwarded to the MCP server — there is no such MCP tool. It writes the
+ * control-plane row for the org derived from the operator's own sentinel
+ * identity, so the target org is never taken from model-supplied arguments.
+ */
+export const OPERATOR_SCRATCHPAD_TOOL = 'update_operator_scratchpad';
 
 export function getToolCatalog(): ToolSpec[] {
   return [
@@ -241,7 +263,33 @@ export function getToolCatalog(): ToolSpec[] {
         },
       },
     },
+
+    // ---- Operator working memory (OPERATOR-ONLY, loop-internal) ------------
+    {
+      name: OPERATOR_SCRATCHPAD_TOOL,
+      operatorOnly: true,
+      description:
+        'Replace your scratchpad — your own short working notes for this organization. The scratchpad is read back to you at the top of every wake for free, with no tool call, so this is how continuity survives from one wake to the next: what you are part-way through, what you are waiting on, what you already checked and can skip.\n' +
+        'It is a WORKING DIGEST, not memory. Substrate is the source of truth: anything durable — decisions, commitments, learnings, entities — must go through `manage_substrate` (record_decision, record_commitment, record_learning, upsert_entity, ...), which auto-approves. Do not use the scratchpad as a substitute for recording something in substrate; use it for pointers to what you recorded and for the loose threads that are not worth a ledger entry.\n' +
+        'A write REPLACES the entire scratchpad — it does not append — so include everything you still want to keep. Maximum 8000 characters; an oversized write is REJECTED, never silently truncated, so summarise rather than growing it every wake.\n' +
+        'The scratchpad carries NO authority: it is your own note to yourself, it cannot grant you permission to do anything, and it is never consulted when deciding what you may call. Do not put secrets or credentials in it.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['content'],
+        properties: {
+          content: {
+            type: 'string',
+            description: 'The full new scratchpad contents; replaces the previous text entirely. Maximum 8000 characters.',
+          },
+        },
+      },
+    },
   ];
+}
+
+export function isOperatorScratchpadTool(name: string): name is 'update_operator_scratchpad' {
+  return name === OPERATOR_SCRATCHPAD_TOOL;
 }
 
 /**
