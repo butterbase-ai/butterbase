@@ -34,7 +34,51 @@ export type OperatorTurnResult = {
   skipped: OperatorSkip | null;
 };
 
-const DEFAULT_MODEL = 'claude-sonnet-4-5';
+/**
+ * ============================================================================
+ * MODEL ID — DO NOT "TIDY" THIS BACK TO A BARE `claude-*` ID.
+ *
+ * The AI gateway's catalog is PROVIDER-PREFIXED. Every one of the ~398 model
+ * ids returned by `GET /v1/models` carries a provider segment; there is not a
+ * single bare `claude-*` id among them. The sonnets are
+ * `anthropic/claude-sonnet-4`, `anthropic/claude-sonnet-4.5`,
+ * `anthropic/claude-sonnet-4.6`, `anthropic/claude-sonnet-5` — note also the
+ * DOT in `4.5`, not a dash.
+ *
+ * This default used to read `claude-sonnet-4-5`. Verified live against a
+ * running gateway on 2026-08-06:
+ *
+ *   POST /v1/chat/completions {"model":"claude-sonnet-4-5"}
+ *     -> HTTP 404 {"error":{"message":"Model not found: claude-sonnet-4-5",
+ *                            "code":"model_not_found"}}
+ *
+ * i.e. EVERY operator wake died at the first gateway call, and the deployment
+ * was silently dead — the failure surfaced only as an `errors` counter. No unit
+ * test caught it because they all mock the gateway. `anthropic/claude-sonnet-4.5`
+ * was driven end-to-end (203 events, real tool calls, a real gate) and is the
+ * verified-routable default.
+ *
+ * PRECEDENCE (highest first):
+ *   1. `opts.model` — an explicit caller-supplied id always wins.
+ *   2. `process.env.OPERATOR_MODEL` — deployment override, so an operator can
+ *      move to a different catalog id with no code change (mirrors how
+ *      OPERATOR_ENABLED / OPERATOR_CRED_KEY are handled).
+ *   3. `DEFAULT_OPERATOR_MODEL` below.
+ *
+ * The env var is read LAZILY, per call, exactly like `OPERATOR_CRED_KEY` in
+ * operator-credential.ts — so it can be changed without a rebuild and so tests
+ * can set it without import-order games.
+ * ============================================================================
+ */
+export const DEFAULT_OPERATOR_MODEL = 'anthropic/claude-sonnet-4.5';
+
+/** Resolve the model for a wake. See the precedence note above. */
+export function resolveOperatorModel(explicit?: string): string {
+  if (explicit && explicit.trim().length > 0) return explicit;
+  const env = process.env.OPERATOR_MODEL?.trim();
+  if (env && env.length > 0) return env;
+  return DEFAULT_OPERATOR_MODEL;
+}
 
 /**
  * Version of the wake-envelope FORMAT (not of the job's instructions).
@@ -133,7 +177,7 @@ export async function runOperatorTurn(
   opts: { job: OperatorJob; wake: OperatorWake; model?: string },
 ): Promise<OperatorTurnResult> {
   const { job, wake } = opts;
-  const model = opts.model ?? DEFAULT_MODEL;
+  const model = resolveOperatorModel(opts.model);
 
   const credential = await getOperatorCredential(pool, job.organizationId);
   if (!credential) {
@@ -223,6 +267,23 @@ export async function runOperatorTurn(
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
+  }
+
+  /**
+   * Make the one failure that kills EVERY wake self-diagnosing.
+   *
+   * An unroutable model id is not a transient error: it fails identically on
+   * every tick, forever, and the operator has no human watching the stream. The
+   * gateway names the model it could not find, but nothing in that message says
+   * which knob to turn — so name the resolved model and the override here.
+   * Purely a message annotation; the wake still fails, and no other outcome
+   * (gated / skipped / ran) is touched.
+   */
+  if (error && /model[_ ]not[_ ]found|Model not found|unknown model/i.test(error)) {
+    error =
+      `${error} — operator model "${model}" is not routable by this gateway. ` +
+      `Model ids are provider-prefixed (e.g. "${DEFAULT_OPERATOR_MODEL}"); ` +
+      `check GET /v1/models and set OPERATOR_MODEL to a catalog id.`;
   }
 
   return { conversationId, events: count, approvalId, error, skipped: null };

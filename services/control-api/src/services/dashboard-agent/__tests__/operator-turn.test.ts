@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockedFunction } from 'vitest';
 import type pg from 'pg';
 
 vi.mock('../loop.js', () => ({ runAgentTurn: vi.fn() }));
@@ -22,7 +22,12 @@ import * as storeModule from '../operator-store.js';
 import * as credModule from '../operator-credential.js';
 import * as approvalsModule from '../approvals-store.js';
 import * as scratchpadModule from '../operator-scratchpad-store.js';
-import { runOperatorTurn, OPERATOR_WAKE_PROMPT_VERSION } from '../operator-turn.js';
+import {
+  runOperatorTurn,
+  resolveOperatorModel,
+  DEFAULT_OPERATOR_MODEL,
+  OPERATOR_WAKE_PROMPT_VERSION,
+} from '../operator-turn.js';
 
 const mockRunAgentTurn = loopModule.runAgentTurn as MockedFunction<typeof loopModule.runAgentTurn>;
 const mockGetConv = storeModule.getOrCreateOperatorConversation as MockedFunction<typeof storeModule.getOrCreateOperatorConversation>;
@@ -359,5 +364,137 @@ describe('runOperatorTurn — misc', () => {
 
     const input = mockRunAgentTurn.mock.calls[0][0];
     expect(input.userId).toBe(real.operatorUserId(job.organizationId));
+  });
+});
+
+/**
+ * Regression cover for the 2026-08-06 live-test bug: DEFAULT_MODEL was
+ * `claude-sonnet-4-5`, which the gateway 404s ("Model not found") because its
+ * catalog is entirely provider-prefixed. Every wake died at the first gateway
+ * call and the deployment was silently dead. Every existing test mocks the
+ * gateway, so nothing here can prove routability — what these tests DO pin is
+ * the shape that broke: the default must be provider-prefixed, it must be the
+ * verified id, and it must be overridable without a code change.
+ */
+describe('runOperatorTurn — model selection', () => {
+  const savedEnv = process.env.OPERATOR_MODEL;
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.OPERATOR_MODEL;
+    else process.env.OPERATOR_MODEL = savedEnv;
+  });
+
+  it('defaults to the catalog-verified, provider-prefixed id', async () => {
+    delete process.env.OPERATOR_MODEL;
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(DEFAULT_OPERATOR_MODEL).toBe('anthropic/claude-sonnet-4.5');
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('anthropic/claude-sonnet-4.5');
+    // The exact class of id that 404s: no provider segment.
+    expect(DEFAULT_OPERATOR_MODEL).toContain('/');
+    expect(DEFAULT_OPERATOR_MODEL).not.toMatch(/^claude-/);
+  });
+
+  it('records the same model on the conversation it opens', async () => {
+    delete process.env.OPERATOR_MODEL;
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(mockGetConv).toHaveBeenCalledWith(stubPool, 'org-1', DEFAULT_OPERATOR_MODEL);
+  });
+
+  it('OPERATOR_MODEL overrides the default, with no code change', async () => {
+    process.env.OPERATOR_MODEL = 'anthropic/claude-sonnet-4.6';
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('anthropic/claude-sonnet-4.6');
+  });
+
+  it('reads OPERATOR_MODEL lazily, so a change takes effect without a re-import', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    process.env.OPERATOR_MODEL = 'anthropic/claude-sonnet-4';
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('anthropic/claude-sonnet-4');
+
+    process.env.OPERATOR_MODEL = 'anthropic/claude-sonnet-5';
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    expect(mockRunAgentTurn.mock.calls[1][0].model).toBe('anthropic/claude-sonnet-5');
+  });
+
+  it('an explicit opts.model still wins over both env and default', async () => {
+    process.env.OPERATOR_MODEL = 'anthropic/claude-sonnet-4.6';
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, {
+      job, wake: { reason: 'timer' }, model: 'openai/gpt-5',
+    });
+
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('openai/gpt-5');
+  });
+
+  it('ignores a blank OPERATOR_MODEL rather than sending an empty model id', async () => {
+    process.env.OPERATOR_MODEL = '   ';
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe(DEFAULT_OPERATOR_MODEL);
+  });
+
+  it('resolveOperatorModel documents the precedence directly', () => {
+    delete process.env.OPERATOR_MODEL;
+    expect(resolveOperatorModel()).toBe(DEFAULT_OPERATOR_MODEL);
+    process.env.OPERATOR_MODEL = 'anthropic/claude-sonnet-4.6';
+    expect(resolveOperatorModel()).toBe('anthropic/claude-sonnet-4.6');
+    expect(resolveOperatorModel('openai/gpt-5')).toBe('openai/gpt-5');
+  });
+});
+
+/**
+ * The other half of the live-test lesson: the failure surfaced only as
+ * `gateway 404`, with the gateway's own explanation discarded. The operator has
+ * no human watching a stream, so whatever lands in `error` is the entire
+ * diagnostic record of the wake.
+ */
+describe('runOperatorTurn — gateway error surfacing', () => {
+  it('carries the gateway error message through to result.error, not just a status', async () => {
+    mockRunAgentTurn.mockReturnValue(events({
+      type: 'error',
+      message: 'gateway 404: Model not found: claude-sonnet-4-5',
+    }) as any);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(r.error).toContain('Model not found: claude-sonnet-4-5');
+    expect(r.error).toContain('404');
+  });
+
+  it('annotates an unroutable-model failure with the model and the override knob', async () => {
+    delete process.env.OPERATOR_MODEL;
+    mockRunAgentTurn.mockReturnValue(events({
+      type: 'error',
+      message: 'gateway 404: {"code":"model_not_found"}',
+    }) as any);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(r.error).toContain(DEFAULT_OPERATOR_MODEL);
+    expect(r.error).toContain('OPERATOR_MODEL');
+  });
+
+  it('leaves an unrelated gateway error untouched', async () => {
+    mockRunAgentTurn.mockReturnValue(events({
+      type: 'error', message: 'gateway 500: upstream unavailable',
+    }) as any);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(r.error).toBe('gateway 500: upstream unavailable');
+    expect(r.error).not.toContain('OPERATOR_MODEL');
   });
 });

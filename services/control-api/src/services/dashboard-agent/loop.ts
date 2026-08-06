@@ -270,7 +270,41 @@ export async function* streamChatCompletion(opts: {
         });
       }
     }
-    throw new Error(`gateway ${res.status}`);
+    /**
+     * Carry the gateway's OWN message, not just the status code.
+     *
+     * A bare `gateway 404` cost a live probe to diagnose: the operator's
+     * default model id was unroutable, and the only signal anywhere was an
+     * `errors` counter with no detail. The gateway had said exactly what was
+     * wrong — `{"error":{"message":"Model not found: …","code":"model_not_found"}}`
+     * — and we threw it away. Unattended callers (the operator) have no human
+     * watching a stream, so the message is all they ever get.
+     *
+     * The `gateway <status>` PREFIX is preserved deliberately: existing callers
+     * and tests match on the status, and this is purely additive. Reading the
+     * body is best-effort — a body that is absent, unreadable, already consumed
+     * by the 402 branch above, or not JSON must never turn an HTTP error into a
+     * different error.
+     */
+    let detail = '';
+    try {
+      const raw = typeof res.text === 'function' ? await res.text() : '';
+      if (raw) {
+        let msg = raw;
+        try {
+          const parsed = JSON.parse(raw) as { error?: { message?: string } | string };
+          const e = parsed?.error;
+          if (typeof e === 'string') msg = e;
+          else if (e && typeof e.message === 'string') msg = e.message;
+        } catch {
+          // Not JSON — fall back to the raw body.
+        }
+        detail = `: ${msg.slice(0, 500)}`;
+      }
+    } catch {
+      detail = '';
+    }
+    throw new Error(`gateway ${res.status}${detail}`);
   }
 
   const reader = res.body!.getReader();
