@@ -225,7 +225,13 @@ export async function gatewayRoutes(app: FastifyInstance) {
     });
   });
 
-  app.post('/v1/chat/completions', async (request, reply) => {
+  // Fastify defaults to a 1 MB body limit, which a multi-turn conversation
+  // carrying base64 images blows through in a handful of turns — the client
+  // sees a bare 413 with no hint that the images are the cause. 25 MB clears
+  // realistic agent histories while still bounding a single request.
+  const AI_BODY_LIMIT_BYTES = 25 * 1024 * 1024;
+
+  app.post('/v1/chat/completions', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
@@ -300,7 +306,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/v1/messages', async (request, reply) => {
+  app.post('/v1/messages', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
@@ -414,7 +420,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/v1/responses', async (request, reply) => {
+  app.post('/v1/responses', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
