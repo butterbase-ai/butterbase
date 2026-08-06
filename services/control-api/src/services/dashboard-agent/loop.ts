@@ -21,6 +21,8 @@ import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, upda
 import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust } from './approvals-store.js';
+import { isOperatorUserId } from './operator-store.js';
+import { operatorPolicyFor, isOperatorToolAllowed } from './operator-policy.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -451,7 +453,22 @@ export async function* runAgentTurn(
     toolResult: null,
   });
 
-  const tools = getToolCatalog();
+  // Is this the headless operator? Derived from the identity itself, not from a
+  // flag on `input`. A flag would default to "not an operator" and so would
+  // fail OPEN — a future call site that forgot to set it would run unattended
+  // with an org service key and no policy at all. Deriving it from `userId`
+  // means every turn carrying the operator sentinel is governed, whichever call
+  // site started it, and there is nothing for a caller to get wrong.
+  const isOperator = isOperatorUserId(input.userId);
+
+  // AFFORDANCE (not the control): hide tools the operator may not call, so the
+  // model doesn't waste turns and tokens on refusals. The control is
+  // `operatorVerdict` at the dispatch site below, which refuses a denied tool
+  // whether or not it was ever in this list — including a name the model
+  // invented. Never rely on this filter for safety.
+  const tools = isOperator
+    ? getToolCatalog().filter((t) => isOperatorToolAllowed(t.name))
+    : getToolCatalog();
 
   // Per-turn state --------------------------------------------------------
   const touchedApps = new Set<string>();
@@ -493,6 +510,39 @@ export async function* runAgentTurn(
     }
   };
 
+  /**
+   * The loop makes a few MCP calls the MODEL did not ask for — most importantly
+   * `manage_schema` action="get" for live schema injection below, which runs on
+   * every turn. Those go through `deps.mcp` (default: `defaultMcp()` → the same
+   * `callMcpTool`), not through the dispatch site, so the policy check there
+   * would not see them. For an operator that would mean an org service key
+   * reading app schemas the policy denies.
+   *
+   * So for operator turns `deps.mcp` is replaced with a policy-enforcing
+   * wrapper. Only an 'allow' verdict passes: these are internal calls with no
+   * model in the loop and no turn to pause, so 'approval' is refused here too
+   * rather than silently executed. `defaultMcp`'s contract is to throw on
+   * failure, and every caller already treats a throw as best-effort — schema
+   * injection is wrapped in try/catch and skips per-app — so a refusal
+   * degrades the prompt, it does not break the turn.
+   *
+   * `repoSync` is NOT wrapped: it is constructed in `getDefaultDeps` and is
+   * reachable only from the file-op / deploy / deploy_function routes, whose
+   * tool names are all denied to the operator and refused before routing, and
+   * from the end-of-turn flush over `touchedApps`, which only those same routes
+   * ever populate. Unreachable rather than unguarded.
+   */
+  const turnMcp: Mcp = isOperator
+    ? {
+        async call(name: string, args: unknown, jwt: string) {
+          if (operatorPolicyFor(name, args) !== 'allow') {
+            throw new Error(`Tool "${name}" is not permitted for the autonomous operator.`);
+          }
+          return deps.mcp.call(name, args, jwt);
+        },
+      }
+    : deps.mcp;
+
   // Build per-turn fileOps + deployer bound to our SSE queue.
   const fileOps = deps.fileOpsFactory
     ? deps.fileOpsFactory(emit, ensureHydrated)
@@ -509,7 +559,7 @@ export async function* runAgentTurn(
     ? deps.deployerFactory(emit)
     : createDeployer({
         cache,
-        mcp: deps.mcp,
+        mcp: turnMcp,
         onDeploymentProgress: (evt) => emit({ type: 'deployment_progress', ...evt }),
       });
 
@@ -522,7 +572,7 @@ export async function* runAgentTurn(
         mcp: {
           async call(name: string, args: unknown, jwt: string) {
             try {
-              const result = await deps.mcp.call(name, args, jwt);
+              const result = await turnMcp.call(name, args, jwt);
               return { ok: true as const, result };
             } catch (e) {
               return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
@@ -548,7 +598,7 @@ export async function* runAgentTurn(
   try {
     const recentAppIds = await getRecentAppIds(input.pool, input.conversationId);
     if (recentAppIds.length > 0) {
-      const schemasByAppId = await fetchAppSchemasCached(recentAppIds, input.jwt, deps.mcp, schemaCache);
+      const schemasByAppId = await fetchAppSchemasCached(recentAppIds, input.jwt, turnMcp, schemaCache);
       schemaPromptBlock = buildSchemaPromptBlock(schemasByAppId);
     }
   } catch {
@@ -651,13 +701,76 @@ export async function* runAgentTurn(
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
 
+        /**
+         * THE CONTROL. For operator turns the policy table decides, per
+         * (tool, args), before anything is dispatched. Computed once here and
+         * consulted twice: 'approval' pauses immediately below, 'deny' refuses
+         * at the dispatch guard further down (which is where the assistant
+         * tool-call row has already been persisted, so the refusal can be
+         * written back as a tool RESULT and the model can adapt).
+         *
+         * `null` for a human conversation — nothing below this line changes
+         * behaviour for the assistant.
+         */
+        const operatorVerdict = isOperator ? operatorPolicyFor(tc.name, tc.args) : null;
+
         // Sensitivity gate (Plan 3b Task 2): destructive/confirm-tier calls
         // pause the turn for explicit user approval, unless the conversation
         // has already granted conversation-wide trust for this exact tool.
         // Gated BEFORE the assistant tool-call row is persisted (below) and
         // BEFORE the retry-budget counter is touched — an approval pause is
         // not a tool "attempt".
-        const sensitivity = sensitivityFor(tc.name, tc.args);
+        //
+        // OPERATOR TURNS USE `operatorPolicyFor` INSTEAD, NOT AS WELL. The two
+        // are not stacked, and dropping `sensitivityFor` here loses nothing:
+        // the only tools it can ever return non-'safe' for are manage_app,
+        // manage_repo, manage_schema, manage_billing and manage_migrations, and
+        // every one of those is absent from OPERATOR_TOOL_ALLOWLIST — so the
+        // operator's verdict for all five is already 'deny', which is strictly
+        // stronger than 'pause for approval'. `sensitivityFor` also encodes the
+        // assistant's premise, that a human is watching every call and its
+        // tiers are a UX affordance; that premise is exactly what is false
+        // headless. `checkTrust` is likewise NOT consulted for the operator:
+        // there is one conversation per org forever, so conversation-wide trust
+        // would be permanent org-wide auto-approval.
+        const sensitivity = isOperator ? 'safe' : sensitivityFor(tc.name, tc.args);
+        if (operatorVerdict === 'approval') {
+          const messageId = randomUUID();
+          const approval = await createApproval(input.pool, {
+            conversationId: input.conversationId,
+            turnMessageId: messageId,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            // The operator feed has one tier. 'destructive' is the tier the
+            // operator approval-resolution path (tool-bridge/resume) already
+            // expects, and there is no weaker meaning available.
+            sensitivity: 'destructive',
+          });
+          await appendMessage(
+            input.pool,
+            input.conversationId,
+            {
+              role: 'assistant',
+              content: i === 0 ? assistantText : '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: null,
+              modelUsed: input.model,
+              pendingApprovalId: approval.id,
+            },
+            messageId,
+          );
+          yield {
+            type: 'approval_required',
+            approval_id: approval.id,
+            tool_name: tc.name,
+            args: tc.args,
+            sensitivity: 'destructive',
+          };
+          terminated = true;
+          break outer;
+        }
         if (sensitivity !== 'safe') {
           const trusted = await checkTrust(input.pool, input.conversationId, tc.name);
           if (!trusted) {
@@ -738,6 +851,43 @@ export async function* runAgentTurn(
             terminated = true;
             break outer;
           }
+        }
+
+        /**
+         * THE CONTROL, part 2: operator policy deny.
+         *
+         * Deliberately placed AHEAD of the catalog allowlist guard and ahead of
+         * EVERY route below (file-op, deploy, deploy_function, MCP), so there is
+         * no dispatch path an operator can reach without passing through it.
+         * Nothing between the verdict's computation above and this point calls a
+         * tool — only message persistence, the tool_call event and the retry
+         * counter.
+         *
+         * It does not depend on the catalog: `operatorPolicyFor` denies anything
+         * not on OPERATOR_TOOL_ALLOWLIST, so a name the model invented, or one
+         * that was filtered out of the catalog, is refused here just the same.
+         * That is why the catalog filter is only an affordance.
+         *
+         * The refusal is returned as a TOOL RESULT, not thrown: the model sees
+         * an ordinary tool error, can adapt, and the conversation history keeps
+         * its assistant-tool_call → tool-result pairing (a history ending in an
+         * unanswered tool_call is rejected by the gateway and would wedge the
+         * org's one operator conversation permanently).
+         */
+        if (operatorVerdict === 'deny') {
+          const errorMsg = `Tool "${tc.name}" is not permitted for the autonomous operator.`;
+          const resultPayload = { error: errorMsg };
+          toolCallResults.push({ id: tc.id, ...resultPayload });
+          yield { type: 'tool_result', id: tc.id, ...resultPayload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: { error: errorMsg },
+          });
+          continue;
         }
 
         // Allowlist guard

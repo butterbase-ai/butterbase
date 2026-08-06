@@ -5,6 +5,27 @@ export function operatorUserId(orgId: string): string {
   return `operator:${orgId}`;
 }
 
+/**
+ * The sentinel's prefix, DERIVED from `operatorUserId` rather than written out
+ * a second time. There is exactly one literal `operator:` in this repo and it
+ * is above; a drift guard (__tests__/operator-turn.test.ts) pins the format.
+ */
+const OPERATOR_USER_ID_PREFIX = operatorUserId('');
+
+/**
+ * Is this turn running under the headless operator identity?
+ *
+ * Deliberately a PREFIX test rather than an equality test against
+ * `operatorUserId(orgId)`. `runAgentTurn`'s `organizationId` is optional, so an
+ * equality test would answer "not an operator" — i.e. fail OPEN, ungoverned —
+ * for any caller that supplies the sentinel user id but omits the org. The
+ * prefix cannot be produced by a real user id (those are Cognito subs), so the
+ * only way to be mistaken for an operator is to already be one.
+ */
+export function isOperatorUserId(userId: unknown): boolean {
+  return typeof userId === 'string' && userId.startsWith(OPERATOR_USER_ID_PREFIX);
+}
+
 export type OperatorJob = {
   id: string;
   organizationId: string;
