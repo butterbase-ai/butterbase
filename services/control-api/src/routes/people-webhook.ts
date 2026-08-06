@@ -23,8 +23,10 @@
 //   body.email → body.work_email → body.result.email → null
 //
 // Credit-cost source:
-//   config.people.providers[slot].creditCostHeader (per-slot header name, if present and finite >= 0)
-//   → config.people.providers[slot].fallbackCreditsPerAction (default: 1)
+//   config.people.providers[slot].creditCostHeader (per-slot header name, if present
+//   and finite >= 0) → otherwise 0.  There is deliberately NO fallbackCreditsPerAction
+//   here: the queue call already charged the real cost from its own response header,
+//   so charging a per-action default at resolve time double-bills a single lookup.
 
 import type { FastifyInstance } from 'fastify';
 import { listRuntimeRegions, runtimePoolFor } from '../services/runtime-pool-registry.js';
@@ -132,11 +134,14 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
 
     // Resolve slot and parse credit count from the inbound header BEFORE the claim
     // UPDATE so we can write the real value in a single atomic operation.
+    //
+    // Bill ONLY what this callback actually reports.  There is deliberately no
+    // per-action fallback here: the callback is the provider calling us, not a
+    // billable request we made.  The queue call already charged the real cost
+    // read from its own response header, so inventing a cost at resolve time
+    // bills the customer twice for a single lookup.
     const slot = (lookupRow.provider_slot as ProviderSlot) ?? 'primary';
     const providerCfg = config.people.providers[slot];
-    if (!providerCfg?.creditCostHeader && !providerCfg?.apiKey) {
-      console.error(`[people-webhook] slot=${slot} has no configured provider; charging fallback`);
-    }
     const creditHeader = providerCfg?.creditCostHeader;
     const rawHeaderCredits = creditHeader
       ? req.headers[creditHeader.toLowerCase()]
@@ -146,7 +151,7 @@ export async function peopleWebhookRoutes(app: FastifyInstance) {
     const credits =
       Number.isFinite(headerCredits) && headerCredits >= 0
         ? headerCredits
-        : (providerCfg?.fallbackCreditsPerAction ?? 1);
+        : 0;
 
     // Atomic idempotent claim: the AND status='pending' predicate guarantees only
     // one concurrent webhook call transitions the row.  0 rows returned → already

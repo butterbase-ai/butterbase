@@ -173,6 +173,7 @@ describe('POST /v1/webhooks/people/email', () => {
       method: 'POST',
       url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '1' },   // vendor-reported cost; no cost ⇒ no charge
     });
 
     expect(res.statusCode).toBe(200);
@@ -311,9 +312,10 @@ describe('POST /v1/webhooks/people/email', () => {
 
     const url = `/v1/webhooks/people/email?nonce=${NONCE}`;
     const payload = { email: 'jane@example.com' };
+    const headers = { 'x-cost': '1' };   // vendor-reported cost; no cost ⇒ no charge
 
-    const res1 = await app.inject({ method: 'POST', url, payload });
-    const res2 = await app.inject({ method: 'POST', url, payload });
+    const res1 = await app.inject({ method: 'POST', url, payload, headers });
+    const res2 = await app.inject({ method: 'POST', url, payload, headers });
 
     expect(res1.statusCode).toBe(200);
     expect(res1.json()).toEqual({ ok: true });
@@ -740,6 +742,7 @@ describe('POST /v1/webhooks/people/email — resolve-time billing target', () =>
       method: 'POST',
       url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '1' },
     });
 
     expect(deductCreditsBalance).toHaveBeenCalledWith(
@@ -762,8 +765,97 @@ describe('POST /v1/webhooks/people/email — resolve-time billing target', () =>
       method: 'POST',
       url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '1' },
     });
 
     expect(incrementUsage).toHaveBeenCalledWith(ORG_ID, USER_ID, 'people_credits', 1, APP_ID);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The callback is the provider calling US — it is not a billable request we
+// made, and it carries no credit-cost header.  Falling back to a per-action
+// credit count here invents a charge the vendor never reported: the queue call
+// already billed (and recorded) the real cost from its own response header, so
+// a fallback at resolve time bills the customer twice for one lookup.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /v1/webhooks/people/email — charges only vendor-reported credits', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(getPeoplePricing).mockReturnValue({
+      baseUsdPerCredit: 0.0168,
+      markupPct: 20,
+      usdPerCredit: USD_PER_CREDIT,
+    });
+    vi.mocked(resolveOrganizationId).mockResolvedValue(USER_ID);
+    vi.mocked(resolveOrgFromApp).mockResolvedValue(ORG_ID);
+    vi.mocked(deductCreditsBalance).mockResolvedValue(0);
+    vi.mocked(incrementUsage).mockResolvedValue(undefined);
+    app = await buildTestApp();
+    vi.mocked(listRuntimeRegions).mockReturnValue(['local']);
+  });
+
+  afterEach(async () => {
+    await app?.close();
+  });
+
+  it('charges nothing when the callback reports no credit cost', async () => {
+    // fallbackCreditsPerAction is 1 in the mocked config and 3 in production —
+    // either way, an unreported cost must not become a charge.
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },   // no x-cost header
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(deductCreditsBalance).not.toHaveBeenCalled();
+    expect(incrementUsage).not.toHaveBeenCalled();
+  });
+
+  it('records zero credits on the claim when the callback reports no cost', async () => {
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+    });
+
+    const claimCall = pool.query.mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[0] === 'string' && (c[0] as string).includes("status = 'pending'"),
+    );
+    expect(claimCall).toBeDefined();
+    // params: [status, email, credits_consumed, id]
+    expect(claimCall![1][2]).toBe(0);
+  });
+
+  it('still charges the exact cost when the callback does report one', async () => {
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+    vi.mocked(deductCreditsBalance).mockResolvedValue(4 * USD_PER_CREDIT);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '4' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(deductCreditsBalance).toHaveBeenCalledWith(
+      expect.anything(),
+      ORG_ID,
+      4 * USD_PER_CREDIT,
+    );
   });
 });
