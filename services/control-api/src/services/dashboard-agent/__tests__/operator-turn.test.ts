@@ -11,7 +11,15 @@ vi.mock('../operator-store.js', () => ({
   operatorUserId: (orgId: string) => `operator:${orgId}`,
 }));
 vi.mock('../operator-credential.js', () => ({ getOperatorCredential: vi.fn() }));
-vi.mock('../approvals-store.js', () => ({ listPendingByConv: vi.fn() }));
+vi.mock('../approvals-store.js', () => ({
+  listPendingByConv: vi.fn(),
+  // D1: trace-id resume resolution. Defaulting to "nothing resumable" keeps
+  // every pre-D1 test's turn behaving exactly as before (a freshly minted
+  // trace id, no `resumed` checkpoint) unless a test explicitly overrides
+  // these to exercise the resume path.
+  findResumableApproval: vi.fn().mockResolvedValue(null),
+  markApprovalResumed: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../operator-scratchpad-store.js', () => ({
   getOperatorScratchpad: vi.fn(),
   OPERATOR_SCRATCHPAD_MAX_CHARS: 8000,
@@ -521,5 +529,91 @@ describe('runOperatorTurn — gateway error surfacing', () => {
 
     expect(r.error).toBe('gateway 500: upstream unavailable');
     expect(r.error).not.toContain('OPERATOR_MODEL');
+  });
+});
+
+/**
+ * Task D1 — the trace id must survive the gate/resume boundary.
+ *
+ * There is no hibernation (Stage C stopped dead: Alibaba's pause requires an
+ * undocumented "snapshot feature" with no public API). The boundary that
+ * actually needs to survive is narrower but real: a turn gates on a human
+ * approval, the process that ran it may exit before that approval is
+ * resolved, and a LATER wake resumes the same conversation once it is. These
+ * tests pin that the trace id reported by that later wake is the SAME one
+ * the gating turn reported — not a fresh id minted for the new wake.
+ */
+describe('runOperatorTurn — trace id (D1)', () => {
+  const mockFindResumable = approvalsModule.findResumableApproval as MockedFunction<
+    typeof approvalsModule.findResumableApproval
+  >;
+  const mockMarkResumed = approvalsModule.markApprovalResumed as MockedFunction<
+    typeof approvalsModule.markApprovalResumed
+  >;
+
+  it('threads wake.traceId straight through to runAgentTurn when nothing is resumable', async () => {
+    mockFindResumable.mockResolvedValue(null);
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer', traceId: 'optr_fresh-wake' } });
+
+    const input = mockRunAgentTurn.mock.calls[0][0];
+    expect((input as any).traceId).toBe('optr_fresh-wake');
+    expect(mockMarkResumed).not.toHaveBeenCalled();
+  });
+
+  it('mints a fallback trace id when the wake carries none (defensive, not the production path)', async () => {
+    mockFindResumable.mockResolvedValue(null);
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    const input = mockRunAgentTurn.mock.calls[0][0];
+    expect((input as any).traceId).toMatch(/^optr_/);
+  });
+
+  it('REPORTS THE SAME TRACE ID a gated turn used, on the later wake that resumes it', async () => {
+    // The approval this org's conversation gated on, carrying the ORIGINAL
+    // turn's trace id and not yet consumed by a resume.
+    mockFindResumable.mockResolvedValue({
+      id: 'appr-gate-1',
+      conversationId: 'conv-1',
+      turnMessageId: 'msg-1',
+      toolName: 'manage_substrate',
+      toolArgs: { action: 'propose' },
+      sensitivity: 'destructive' as const,
+      status: 'approved' as const,
+      trustScope: null,
+      denyReason: null,
+      createdAt: 'earlier',
+      resolvedAt: 'now',
+      resolvedBy: 'user-1',
+      traceId: 'optr_original-gate',
+      resumedAt: null,
+    });
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    // A brand-new wake mints its OWN id, same as any other wake — the point
+    // of this test is that it gets discarded in favour of the persisted one.
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer', traceId: 'optr_new-wake-mint' } });
+
+    const input = mockRunAgentTurn.mock.calls[0][0];
+    expect((input as any).traceId).toBe('optr_original-gate');
+    expect((input as any).traceId).not.toBe('optr_new-wake-mint');
+    expect(r.error).toBeNull();
+
+    // The resume is committed exactly once, against the approval that was
+    // actually resumed — not the freshly minted wake id.
+    expect(mockMarkResumed).toHaveBeenCalledTimes(1);
+    expect(mockMarkResumed).toHaveBeenCalledWith(stubPool, 'appr-gate-1');
+  });
+
+  it('does not resume while an approval is still pending (no resumable row is even looked at)', async () => {
+    mockListPending.mockResolvedValue([pendingApproval('appr-pending')]);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer', traceId: 'optr_x' } });
+
+    expect(mockRunAgentTurn).not.toHaveBeenCalled();
+    expect(mockMarkResumed).not.toHaveBeenCalled();
   });
 });

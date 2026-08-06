@@ -47,6 +47,15 @@ function normalizeToolArgs(args: unknown): unknown {
  * @param jwt - Cognito Bearer JWT token
  * @param orgId - Optional active org; forwarded as `x-organization-id` so the
  *   MCP server carries the caller's org context into downstream API calls.
+ * @param traceId - Optional distributed trace id (see operator-turn.ts).
+ *   Forwarded as `x-butterbase-trace-id` — a NEW header; there was no
+ *   existing trace-header convention anywhere in this codebase to match
+ *   (verified: only `x-organization-id`, `x-butterbase-internal-secret` and
+ *   `x-trigger-type` exist), so this follows the same lower-kebab,
+ *   `x-butterbase-`-prefixed shape as the internal-secret header rather than
+ *   inventing an unrelated scheme. Absent for the human assistant, which has
+ *   no distributed trace; the MCP server treats an absent header as "no
+ *   trace", not an error.
  * @returns Result object with ok flag, result, or error
  */
 export async function callMcpTool(
@@ -54,6 +63,7 @@ export async function callMcpTool(
   args: unknown,
   jwt: string,
   orgId?: string | null,
+  traceId?: string | null,
 ): Promise<McpCallResult> {
   const url = `${process.env.MCP_SERVER_URL ?? 'http://localhost:3010'}/mcp`;
   const normalizedArgs = normalizeToolArgs(args);
@@ -68,6 +78,7 @@ export async function callMcpTool(
         accept: 'application/json, text/event-stream',
         authorization: `Bearer ${jwt}`,
         ...(orgId ? { 'x-organization-id': orgId } : {}),
+        ...(traceId ? { 'x-butterbase-trace-id': traceId } : {}),
       },
       body: JSON.stringify({
         jsonrpc: '2.0',

@@ -1,8 +1,9 @@
 import pg from 'pg';
+import { randomUUID } from 'crypto';
 import { runAgentTurn } from './loop.js';
 import { getOrCreateOperatorConversation, operatorUserId, type OperatorJob } from './operator-store.js';
 import { getOperatorCredential } from './operator-credential.js';
-import { listPendingByConv } from './approvals-store.js';
+import { listPendingByConv, findResumableApproval, markApprovalResumed } from './approvals-store.js';
 import {
   getOperatorScratchpad,
   OPERATOR_SCRATCHPAD_MAX_CHARS,
@@ -10,9 +11,89 @@ import {
 } from './operator-scratchpad-store.js';
 import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
 
+/**
+ * ============================================================================
+ * DISTRIBUTED TRACE ID (Task D1)
+ * ============================================================================
+ *
+ * There was no distributed trace id anywhere in this codebase before this
+ * task — correlation across the operator chain was by `run_id`/`app_id`/
+ * `build_id` only, which does not identify one wake's worth of work end to
+ * end.
+ *
+ * FORMAT: `optr_<uuid v4>`, minted with `crypto.randomUUID()` at the wake
+ * (cron-scheduler's `operator-trigger.ts` for the timer path,
+ * `operator-events.ts` for the event path — see those files). A bare UUID
+ * would work equally well for uniqueness; the `optr_` prefix exists purely so
+ * the id is self-describing when it shows up alone in a log line, a bug
+ * report, or (per the cross-cloud note below) an Alibaba SLS record next to
+ * unrelated ids — there being no existing trace-id convention in this
+ * codebase to match, this one is free to pick, and "greppable origin" was
+ * judged more useful than "matches nothing else" (there is nothing else).
+ *
+ * BOUNDARY THIS ID DOES NOT CROSS: code executed inside an E2B/Alibaba-FC
+ * sandbox (`run_sandbox_code`) runs guest-side and returns stdout over HTTP;
+ * it never touches the sandbox container's own stdout, so anything the
+ * MODEL's sandboxed code might `print()` — including this trace id — never
+ * reaches Alibaba's SLS log pipeline. This is a verified platform boundary,
+ * not a gap in this implementation, and no propagation into guest code is
+ * attempted. What DOES cross clouds is the sandbox id itself
+ * (`SandboxHandle.id` from `sandbox-provider.ts`): cron-scheduler logs it
+ * alongside the trace id whenever `SandboxRunner` creates or kills a sandbox
+ * (see operator-runner.ts), which is enough to join "this trace id" to "this
+ * Alibaba sandbox" without any guest-side cooperation.
+ *
+ * PERSISTENCE ACROSS THE GATE: `dashboard_agent_approvals.trace_id` (added by
+ * 098_operator_trace_id.sql / 006_operator_trace_id.sql) stores the trace id
+ * of the turn that created the approval. `findResumableApproval` /
+ * `markApprovalResumed` below are what let a LATER wake — one that finds the
+ * gate cleared — report that same id instead of the fresh one its own wake
+ * minted. See `resolveTurnTraceId`.
+ * ============================================================================
+ */
+export type OperatorCheckpoint = 'woke' | 'planned' | 'acted' | 'gated' | 'resumed';
+
+/**
+ * One structured log line per checkpoint, always carrying the trace id.
+ *
+ * Emitted as a single JSON line (not the `console.log(tag, obj)` shape used
+ * elsewhere in this codebase) so it can be ingested as structured data
+ * without a prefix to strip first — the `log` field plays the role the
+ * bracketed tag plays elsewhere, and `checkpoint`/`traceId` are queryable
+ * fields rather than substrings of a formatted object dump.
+ *
+ * Deliberately takes only plain, non-sensitive fields (org id, job name,
+ * conversation id, approval id, sandbox id, tool NAME, event counts) — never
+ * tool arguments and never a credential. See the "no tool args" rule in
+ * tool-catalog.ts's operator-catalog logging; the same line is held here.
+ */
+export function logOperatorCheckpoint(
+  checkpoint: OperatorCheckpoint,
+  fields: Record<string, string | number | boolean | null | undefined>,
+): void {
+  console.log(JSON.stringify({ log: 'operator-trace', checkpoint, ts: new Date().toISOString(), ...fields }));
+}
+
 export type OperatorWake =
-  | { reason: 'timer' }
-  | { reason: 'event'; table: string; rowId: string };
+  | { reason: 'timer'; traceId?: string }
+  | { reason: 'event'; table: string; rowId: string; traceId?: string };
+
+/**
+ * `traceId` on `OperatorWake` is OPTIONAL in the type, not because a wake is
+ * ever meant to arrive without one — both cron-scheduler dispatch sites
+ * (`operator-trigger.ts`'s timer loop, `operator-events.ts`'s event drain)
+ * always mint one before calling the runner — but because dozens of existing
+ * unit tests construct `OperatorWake` literals by hand
+ * (`{ reason: 'timer' }`) and requiring the field on the type would force a
+ * mechanical, low-value edit across every one of them for a field those tests
+ * are not exercising. Falling back to a freshly minted id here, rather than
+ * throwing or leaving the field empty, keeps `runOperatorTurn` itself
+ * correct — every turn reports SOME trace id — even when called from a
+ * context (a test, a future caller) that did not supply one.
+ */
+function mintFallbackTraceId(): string {
+  return `optr_${randomUUID()}`;
+}
 
 /**
  * Why a wake did no work. Distinct from both a successful turn and an error:
@@ -178,8 +259,59 @@ function buildWakeMessage(
  * the enclosed terminal result without ever reaching `runAgentTurn`.
  */
 export type OperatorPreflight =
-  | { ok: true; credential: string; conversationId: string }
+  | {
+      ok: true;
+      credential: string;
+      conversationId: string;
+      /**
+       * The trace id THIS turn must report — not necessarily `wake.traceId`.
+       * See `resolveTurnTraceId`: when this wake is resuming a conversation
+       * that gated on a human approval, this is the PERSISTED id from that
+       * approval row, and `wake.traceId` (freshly minted for this wake) is
+       * discarded in favour of it.
+       */
+      traceId: string;
+      /** Set only when `traceId` was carried forward from a resumed approval. */
+      resumedApprovalId: string | null;
+    }
   | { ok: false; result: OperatorTurnResult };
+
+/**
+ * Decide which trace id this turn WOULD report: the one freshly minted for
+ * this wake, or — when this wake is resuming a conversation that gated on a
+ * human approval — the id persisted on that approval row.
+ *
+ * "Resuming" is detected structurally, not by a flag the caller supplies:
+ * `findResumableApproval` looks for the most recent RESOLVED approval on this
+ * conversation that carries a trace id and has not already been consumed by
+ * an earlier resume (`resumed_at IS NULL`). If one exists, this wake IS the
+ * resume — `runOperatorTurn` refuses to start any turn while an approval is
+ * still pending (see the pending-approval branch above), so the only way a
+ * resolved-but-unconsumed approval can exist when a turn is about to run is
+ * that a human clicked since the last wake and this is the first wake to see
+ * the cleared gate.
+ *
+ * DELIBERATELY A PURE READ — no mark, no log. `operatorPreflight` is called
+ * TWICE per turn on the `SandboxRunner` path (once by `SandboxRunner` itself
+ * to decide whether to pay for a sandbox, once more inside `runOperatorTurn`
+ * — see the "two cheap reads" note on `operatorPreflight`'s own doc comment).
+ * If this function committed `resumed_at` on the first call, the SECOND call
+ * would find nothing resumable and silently fall back to the freshly minted
+ * id — the exact continuity bug this task exists to prevent, self-inflicted
+ * by the duplication. Keeping this a pure peek means both calls agree, and
+ * the actual commit (`markApprovalResumed`) plus the `resumed` checkpoint log
+ * happen exactly once, in `runOperatorTurn`, the one call site that is
+ * guaranteed to run only once per turn regardless of which runner is active.
+ */
+async function resolveTurnTraceId(
+  pool: pg.Pool,
+  conversationId: string,
+  mintedTraceId: string,
+): Promise<{ traceId: string; resumedApprovalId: string | null }> {
+  const resumable = await findResumableApproval(pool, conversationId);
+  if (!resumable || !resumable.traceId) return { traceId: mintedTraceId, resumedApprovalId: null };
+  return { traceId: resumable.traceId, resumedApprovalId: resumable.id };
+}
 
 /**
  * The cheap precondition check for a wake, extracted so a caller can run it
@@ -214,6 +346,7 @@ export type OperatorPreflight =
 export async function operatorPreflight(
   pool: pg.Pool,
   job: OperatorJob,
+  wake: OperatorWake,
   model?: string,
 ): Promise<OperatorPreflight> {
   const credential = await getOperatorCredential(pool, job.organizationId);
@@ -279,7 +412,20 @@ export async function operatorPreflight(
     };
   }
 
-  return { ok: true, credential, conversationId };
+  // See `resolveTurnTraceId`'s doc comment: reaching here means no approval
+  // is pending, so if a resolved-but-unconsumed one exists on this
+  // conversation, THIS is the wake that resumes it. A PURE PEEK — see that
+  // function's comment for why the commit (`markApprovalResumed`) and the
+  // `resumed` checkpoint log must NOT happen here, where this function's own
+  // "called twice per turn" contract would fire them twice (or worse, have
+  // the second call silently lose the resumed id to the first call's mark).
+  const { traceId, resumedApprovalId } = await resolveTurnTraceId(
+    pool,
+    conversationId,
+    wake.traceId ?? mintFallbackTraceId(),
+  );
+
+  return { ok: true, credential, conversationId, traceId, resumedApprovalId };
 }
 
 export async function runOperatorTurn(
@@ -302,9 +448,28 @@ export async function runOperatorTurn(
   const { job, wake } = opts;
   const model = resolveOperatorModel(opts.model);
 
-  const pre = await operatorPreflight(pool, job, opts.model);
+  const pre = await operatorPreflight(pool, job, wake, opts.model);
   if (!pre.ok) return pre.result;
-  const { credential, conversationId } = pre;
+  const { credential, conversationId, traceId } = pre;
+
+  /**
+   * THE ONE PLACE the resume is committed and logged. `runOperatorTurn` is
+   * the single call site guaranteed to run once per actual turn, whichever
+   * runner (`LocalRunner` or `SandboxRunner`) got here — `SandboxRunner`'s
+   * own earlier `operatorPreflight` call (used only to decide whether to pay
+   * for a sandbox) reads the same resumable approval but never marks or logs
+   * it. See `resolveTurnTraceId`'s doc comment.
+   */
+  if (pre.resumedApprovalId) {
+    await markApprovalResumed(pool, pre.resumedApprovalId);
+    logOperatorCheckpoint('resumed', {
+      traceId,
+      organizationId: job.organizationId,
+      conversationId,
+      approvalId: pre.resumedApprovalId,
+      mintedTraceId: wake.traceId,
+    });
+  }
 
   /**
    * Read the scratchpad AFTER the pending-approval check, so a wake that is a
@@ -323,6 +488,24 @@ export async function runOperatorTurn(
   let approvalId: string | null = null;
   let error: string | null = null;
 
+  /**
+   * `planned` — the turn has everything it needs (credential, conversation,
+   * scratchpad, the resolved trace id) and is about to hand the wake message
+   * to the model. This is NOT `pre.resumedApprovalId ? 'resumed' : 'planned'`
+   * as an either/or: `resumed` (logged inside `operatorPreflight`, above) marks
+   * the fact that this wake is continuing a gated conversation; `planned`
+   * marks every turn's model dispatch regardless, resumed or not, so a
+   * resumed turn's timeline reads `resumed -> planned -> ...` rather than
+   * `resumed` standing in for the model actually being asked to act.
+   */
+  logOperatorCheckpoint('planned', {
+    traceId,
+    organizationId: job.organizationId,
+    conversationId,
+    jobName: job.name,
+    wakeReason: wake.reason,
+  });
+
   try {
     const gen = runAgentTurn({
       conversationId,
@@ -333,6 +516,7 @@ export async function runOperatorTurn(
       pool,
       organizationId: job.organizationId,
       codeExecutor: opts.codeExecutor,
+      traceId,
     });
 
     for await (const event of gen) {

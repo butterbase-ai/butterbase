@@ -127,6 +127,11 @@ function operatorInput(overrides: Record<string, unknown> = {}) {
     model: 'claude-sonnet-4-5',
     pool: stubPool,
     organizationId: ORG_ID,
+    // D1: every real operator turn carries a trace id (see operator-turn.ts).
+    // Set here — not left undefined — so the dispatch assertions below can
+    // pin that it is actually threaded to callMcpTool as a 5th argument,
+    // not silently dropped.
+    traceId: 'trace-test-1',
     ...overrides,
   };
 }
@@ -327,6 +332,7 @@ describe('operator — allow verdict', () => {
       { app_id: 'app-1', table: 't' },
       'operator-service-key',
       ORG_ID,
+      'trace-test-1',
     );
     expect(mockCreateApproval).not.toHaveBeenCalled();
     const result = events.find((e) => e.type === 'tool_result') as
@@ -368,6 +374,7 @@ describe('operator — allow verdict', () => {
       { action: 'send_email', to: 'a@b.com' },
       'operator-service-key',
       ORG_ID,
+      'trace-test-1',
     );
   });
 });
@@ -562,6 +569,9 @@ describe('non-operator conversation is unaffected', () => {
       { action: 'create', app_id: 'app-1' },
       'user-jwt',
       ORG_ID,
+      // The human assistant carries no trace id (see `humanInput`) — D1's
+      // trace threading is operator-only.
+      undefined,
     );
     expect(events.some((e) => e.type === 'error')).toBe(false);
   });

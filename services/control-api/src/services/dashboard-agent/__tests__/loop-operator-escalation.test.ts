@@ -206,6 +206,9 @@ describe('fix E — a dispatched propose that comes back requires_approval', () 
       conversationId: 'conv-1',
       pausedMessageId: ASSISTANT_ROW_ID,
       actionId: 'act_01HZX9',
+      // No traceId set on this test's `operatorInput()` — D1 threading of
+      // the escalation approval's trace id is covered in operator-turn.test.ts.
+      traceId: null,
     });
 
     // The feed sees it.

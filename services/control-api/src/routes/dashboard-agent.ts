@@ -381,6 +381,11 @@ export async function resolveOperatorApproval(
         args: a.toolArgs,
         jwt: input.jwt,
         orgId: input.orgId,
+        // `a.traceId`, not a value derived here: the resolving human's
+        // request carries no trace of its own, and the whole point is that
+        // this execution reports the id of the TURN that gated, not a fresh
+        // one for the click that resolved it.
+        traceId: a.traceId,
       }),
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).

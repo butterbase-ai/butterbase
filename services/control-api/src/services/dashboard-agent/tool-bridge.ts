@@ -106,6 +106,15 @@ export async function executeOnce(
      *    being denied to the OPERATOR would otherwise block.
      */
     principal: OperatorPrincipal;
+    /**
+     * The gating turn's trace id, read back off the approval row (see
+     * `Approval.traceId`). Threaded to `callMcpTool` so the tool call a human
+     * approval resolves reports the SAME trace as the turn that paused for
+     * it — the id survives not just the wake boundary (operator-turn.ts's
+     * `resolveTurnTraceId`) but this execution boundary too. Optional/null
+     * for the human assistant's own approvals, which have no trace.
+     */
+    traceId?: string | null;
   },
 ): Promise<McpCallResult> {
   // Ahead of every path that can reach callMcpTool, and ahead of touching the
@@ -171,7 +180,7 @@ export async function executeOnce(
       return cached.rows[0].result;
     }
 
-    const result = await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId);
+    const result = await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId, opts.traceId);
 
     if (result.ok) {
       await client.query(

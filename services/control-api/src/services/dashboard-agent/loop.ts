@@ -21,6 +21,7 @@ import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, upda
 import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, OPERATOR_SANDBOX_CODE_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust, createSubstrateEscalationApproval } from './approvals-store.js';
+import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
 import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
@@ -480,6 +481,22 @@ export async function* runAgentTurn(
      * degrade to running code in this process.
      */
     codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
+    /**
+     * Distributed trace id for this turn (see operator-turn.ts). Supplied by
+     * `runOperatorTurn`; absent for the human assistant, which has no trace.
+     * Threaded into the actual MCP tool dispatch below as the
+     * `x-butterbase-trace-id` header, and used to tag the `acted`/`gated`
+     * structured checkpoint logs.
+     *
+     * NOT threaded into `deps.mcp` / `turnMcp` (the loop-internal MCP calls
+     * `repoSync` and `fetchAppSchemasCached` make via `Mcp.call`) — those
+     * calls don't even carry `x-organization-id` today (`defaultMcp` calls
+     * `callMcpTool(name, args, jwt)` with no org, no trace), so adding a
+     * trace header there alone would be new plumbing for a pre-existing gap
+     * this task did not set out to close. See the D1 report for the explicit
+     * "where the id is threaded and where it is not" boundary.
+     */
+    traceId?: string;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
@@ -761,6 +778,12 @@ export async function* runAgentTurn(
   // Task 5 (Plan 3d): last assistant text produced this turn, used as the
   // "Assistant: <chunk>" half of the snapshot-title summarization prompt.
   let lastAssistantText = '';
+  // D1: `acted` fires once per turn, on the FIRST tool this turn actually
+  // dispatches — not once per tool call — so a turn making several calls
+  // produces one `acted` line, not a flood. Declared outside the `outer`
+  // loop (a turn can span several model round-trips) and outside the
+  // per-round tool-call loop (several tools can dispatch in one round).
+  let actedLogged = false;
   try {
     outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
       let assistantText = '';
@@ -895,7 +918,22 @@ export async function* runAgentTurn(
             // operator approval-resolution path (tool-bridge/resume) already
             // expects, and there is no weaker meaning available.
             sensitivity: 'destructive',
+            traceId: input.traceId ?? null,
           });
+          // `gated`: the operator turn stops here, right now, and does not
+          // resume until a human resolves `approval.id` — reported via
+          // `logOperatorCheckpoint('resumed', ...)` in operator-turn.ts on
+          // whichever later wake finds the gate cleared. Tool NAME only,
+          // never `tc.args` — see the no-tool-args rule in this checkpoint's
+          // module doc comment.
+          if (input.traceId) {
+            logOperatorCheckpoint('gated', {
+              traceId: input.traceId,
+              conversationId: input.conversationId,
+              approvalId: approval.id,
+              toolName: tc.name,
+            });
+          }
           await appendMessage(
             input.pool,
             input.conversationId,
@@ -1309,7 +1347,18 @@ export async function* runAgentTurn(
 
         // ---- Default: MCP tool -------------------------------------------
         toolCallsCount++;
-        const call = await callMcpTool(tc.name, tc.args, input.jwt, input.organizationId);
+        // `acted`: the first tool call this turn actually reaches an MCP
+        // dispatch (as opposed to being denied/refused above, which is not
+        // "acting"). Once per turn — see `actedLogged`'s declaration.
+        if (isOperator && input.traceId && !actedLogged) {
+          actedLogged = true;
+          logOperatorCheckpoint('acted', {
+            traceId: input.traceId,
+            conversationId: input.conversationId,
+            toolName: tc.name,
+          });
+        }
+        const call = await callMcpTool(tc.name, tc.args, input.jwt, input.organizationId, input.traceId);
         // Scope app discovery to the active org. The shared `/apps` endpoint
         // deliberately fans out across every org the user belongs to; here —
         // and only on the dashboard-agent path — we narrow `manage_app` list
@@ -1375,8 +1424,18 @@ export async function* runAgentTurn(
               conversationId: input.conversationId,
               pausedMessageId: assistantRow.id,
               actionId: escalatedActionId,
+              traceId: input.traceId ?? null,
             });
             if (approval) {
+              if (input.traceId) {
+                logOperatorCheckpoint('gated', {
+                  traceId: input.traceId,
+                  conversationId: input.conversationId,
+                  approvalId: approval.id,
+                  toolName: tc.name,
+                  escalated: true,
+                });
+              }
               yield {
                 type: 'approval_required',
                 approval_id: approval.id,

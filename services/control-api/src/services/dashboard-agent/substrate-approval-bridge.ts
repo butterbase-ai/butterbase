@@ -179,6 +179,8 @@ export async function executeApprovedOperatorTool(
     args: unknown;
     jwt: string;
     orgId: string;
+    /** The gating turn's trace id, read off the approval row. See `executeOnce`'s doc comment. */
+    traceId?: string | null;
   },
 ): Promise<McpCallResult> {
   // Bound to a const so the type predicate's narrowing survives to the uses
@@ -198,6 +200,7 @@ export async function executeApprovedOperatorTool(
     jwt: opts.jwt,
     orgId: opts.orgId,
     principal: 'human',
+    traceId: opts.traceId,
   });
 
   // Not a gated substrate propose (a rule mutation, manage_integrations, …),
@@ -258,7 +261,7 @@ export async function executeApprovedOperatorTool(
     };
   }
 
-  const approved = await callMcpTool('manage_substrate', approveArgs, opts.jwt, opts.orgId);
+  const approved = await callMcpTool('manage_substrate', approveArgs, opts.jwt, opts.orgId, opts.traceId);
   if (!approved.ok) {
     return { ok: false, error: `substrate approve failed: ${approved.error ?? 'unknown error'}` };
   }

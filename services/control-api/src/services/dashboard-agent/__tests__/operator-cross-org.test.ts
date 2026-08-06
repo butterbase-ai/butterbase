@@ -394,6 +394,9 @@ describe('operator dispatch — a foreign org_id is refused on the operator\'s O
       { action: 'find_entities', org_id: ORG_A },
       'operator-service-key',
       ORG_A,
+      // No traceId set on this test's `operatorInput()` — D1 threading is
+      // covered separately in loop-operator-policy.test.ts.
+      undefined,
     );
     expect(toolResultOf(events)!.error).toBeUndefined();
   });
@@ -437,6 +440,7 @@ describe('operator dispatch — a foreign org_id is refused on the operator\'s O
       { action: 'find_entities', org_id: ORG_B },
       'user-jwt',
       ORG_A,
+      undefined,
     );
     expect(toolResultOf(events)!.error).toBeUndefined();
   });

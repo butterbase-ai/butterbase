@@ -19,13 +19,35 @@ export type Approval = {
    * not every resolution path is guaranteed to supply one. Never backfilled.
    */
   resolvedBy: string | null;
+  /**
+   * Distributed trace id of the operator turn that created this approval
+   * (see operator-turn.ts). Null for the human assistant's approvals and for
+   * rows that predate 098_operator_trace_id.sql — those have no meaningful
+   * backfill, since the original wake's id is gone.
+   *
+   * This is the field that lets a trace survive a gate: the turn that pauses
+   * here may run in a process that exits before a human resolves the
+   * approval, and the wake that eventually resumes the conversation needs
+   * this value to report the SAME id rather than minting a fresh,
+   * unjoinable one. See `findResumableApproval` / `markApprovalResumed`.
+   */
+  traceId: string | null;
+  /**
+   * Set the first time a wake consumes `traceId` to resume this approval's
+   * conversation. Without this marker, EVERY wake after resolution — not
+   * just the first — would see "most recent resolved approval with a trace
+   * id" and replay the same id forever, instead of only the one wake that
+   * actually continues the gated turn.
+   */
+  resumedAt: string | null;
 };
 
 const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
-  sensitivity, status, trust_scope, deny_reason, created_at, resolved_at, resolved_by`;
+  sensitivity, status, trust_scope, deny_reason, created_at, resolved_at, resolved_by,
+  trace_id, resumed_at`;
 
 /** Same columns as APPROVAL_COLS, `a.`-prefixed for queries that JOIN dashboard_agent_conversations. */
-const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by`;
+const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at`;
 
 function rowToApproval(row: any): Approval {
   return {
@@ -41,6 +63,8 @@ function rowToApproval(row: any): Approval {
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
     resolvedBy: row.resolved_by ?? null,
+    traceId: row.trace_id ?? null,
+    resumedAt: row.resumed_at ?? null,
   };
 }
 
@@ -56,17 +80,65 @@ export async function createApproval(
     toolName: string;
     toolArgs: unknown;
     sensitivity: 'confirm' | 'destructive';
+    /**
+     * The operator turn's trace id, when this approval is gating an operator
+     * turn (see the `gated` checkpoint in operator-turn.ts/loop.ts). Absent
+     * for the human assistant, which has no distributed trace.
+     */
+    traceId?: string | null;
   }
 ): Promise<Approval> {
   const result = await pool.query(
     `INSERT INTO dashboard_agent_approvals
-     (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status)
-     VALUES ($1, $2, $3, $4, $5, 'pending')
+     (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id)
+     VALUES ($1, $2, $3, $4, $5, 'pending', $6)
      RETURNING ${APPROVAL_COLS}`,
-    [input.conversationId, input.turnMessageId, input.toolName, JSON.stringify(input.toolArgs), input.sensitivity]
+    [input.conversationId, input.turnMessageId, input.toolName, JSON.stringify(input.toolArgs), input.sensitivity, input.traceId ?? null]
   );
 
   return rowToApproval(result.rows[0]);
+}
+
+/**
+ * The most recent approval for a conversation that (a) has already been
+ * resolved (not pending — a resumable approval is one whose gate has
+ * cleared), (b) carries a trace id worth carrying forward, and (c) has not
+ * already been consumed by an earlier resume. Ordered by `created_at DESC`
+ * and capped at one row: only the LATEST gate on a conversation is
+ * resumable — an older resolved approval further back in history is not
+ * what the next wake is continuing.
+ *
+ * Returns null when there is nothing to resume, which is the overwhelmingly
+ * common case (an ordinary wake with no pending gate in its history).
+ */
+export async function findResumableApproval(
+  pool: pg.Pool,
+  conversationId: string,
+): Promise<Approval | null> {
+  const result = await pool.query(
+    `SELECT ${APPROVAL_COLS}
+     FROM dashboard_agent_approvals
+     WHERE conversation_id = $1
+       AND status != 'pending'
+       AND trace_id IS NOT NULL
+       AND resumed_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [conversationId],
+  );
+  return result.rows.length === 0 ? null : rowToApproval(result.rows[0]);
+}
+
+/**
+ * Mark an approval's trace id as consumed by a resume. Idempotent — a second
+ * call (e.g. a retried wake) is a no-op via the `resumed_at IS NULL` guard,
+ * so it can never re-arm and be "resumed" a second time.
+ */
+export async function markApprovalResumed(pool: pg.Pool, approvalId: string): Promise<void> {
+  await pool.query(
+    `UPDATE dashboard_agent_approvals SET resumed_at = NOW() WHERE id = $1 AND resumed_at IS NULL`,
+    [approvalId],
+  );
 }
 
 /**
@@ -174,6 +246,8 @@ export async function createSubstrateEscalationApproval(
     pausedMessageId: string;
     /** Substrate's own action id, from the propose RESPONSE. Never model args. */
     actionId: string;
+    /** The operator turn's trace id. See `createApproval`'s `traceId` doc. */
+    traceId?: string | null;
   },
 ): Promise<Approval | null> {
   if (!isValidSubstrateActionId(input.actionId)) return null;
@@ -187,10 +261,10 @@ export async function createSubstrateEscalationApproval(
 
     const inserted = await client.query(
       `INSERT INTO dashboard_agent_approvals
-       (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status)
-       VALUES ($1, $2, $3, $4, 'destructive', 'pending')
+       (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id)
+       VALUES ($1, $2, $3, $4, 'destructive', 'pending', $5)
        RETURNING ${APPROVAL_COLS}`,
-      [input.conversationId, input.pausedMessageId, SUBSTRATE_ESCALATION_TOOL, JSON.stringify(toolArgs)],
+      [input.conversationId, input.pausedMessageId, SUBSTRATE_ESCALATION_TOOL, JSON.stringify(toolArgs), input.traceId ?? null],
     );
 
     const marked = await client.query(
