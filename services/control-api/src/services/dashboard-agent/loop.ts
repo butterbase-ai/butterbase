@@ -606,6 +606,22 @@ export async function* runAgentTurn(
         .filter((t) => t.name !== OPERATOR_SANDBOX_CODE_TOOL || typeof input.codeExecutor === 'function')
     : getToolCatalog().filter((t) => t.operatorOnly !== true);
 
+  /**
+   * One line per operator turn recording what the model was actually offered.
+   * The sandbox tool's presence is turn-local state (`input.codeExecutor`), so
+   * it cannot be inferred from config or from the catalog module — without
+   * this, "was the tool offered on this wake" is unanswerable after the fact,
+   * and the safety-critical filter above has no observable trace at all.
+   * Operator-only, so the human assistant's request path is unchanged.
+   */
+  if (isOperator) {
+    console.log('[dashboard-agent] operator tool catalog', {
+      conversationId: input.conversationId,
+      tools: tools.length,
+      sandboxCode: tools.some((t) => t.name === OPERATOR_SANDBOX_CODE_TOOL),
+    });
+  }
+
   // Per-turn state --------------------------------------------------------
   const touchedApps = new Set<string>();
   const baselineByApp = new Map<string, Map<string, string>>();
