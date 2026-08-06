@@ -55,6 +55,34 @@ import { stripJsonbNulls as stripNulls } from './store.js';
  * Failures are NOT cached: a transient MCP error must remain retryable. On a
  * failed result no row is written and the lock releases at COMMIT, leaving the
  * approval open for a retry.
+ *
+ * ── PRECONDITION, load-bearing: ONE approval id means ONE distinct call ────
+ *
+ * The cache is keyed on `approval_id` ALONE. `dashboard_agent_tool_executions.
+ * approval_id` is a UUID PRIMARY KEY with a foreign key to
+ * `dashboard_agent_approvals(id)`, so the key cannot be composite or derived
+ * without a schema change, and the stored row carries nothing that identifies
+ * WHICH call produced it.
+ *
+ * That makes the key sound only while a given approval id is executed from
+ * exactly one call site with one set of arguments. A SECOND call under the
+ * same approval — a different tool, a different action, different args — does
+ * not duplicate a side effect (the lock and the cache still prevent that), but
+ * it makes the loser of a race read back the WINNER'S envelope and report
+ * success for a call it never made. That is an audit-integrity defect: the
+ * dashboard's record can contradict what actually happened downstream. It
+ * shipped once, as a deny going through here under the same approval id as the
+ * approve (I-1); see `rejectEscalatedSubstrateAction` in
+ * substrate-approval-bridge.ts, which no longer does.
+ *
+ * So: DO NOT add a second `executeOnce` call site under an approval id that
+ * another site already uses. If a second distinct call genuinely needs
+ * exactly-once caching, that needs a composite/derived key and therefore a
+ * migration in BOTH streams (`db/control-plane/` and
+ * `submodules/butterbase-oss/services/control-api/migrations/`), not key reuse.
+ * A downstream operation that is already at-most-once on its own terms — as
+ * substrate's `approveAction`/`rejectAction` are, via `FOR UPDATE` plus a
+ * status check — needs no key here at all.
  */
 export async function executeOnce(
   pool: pg.Pool,

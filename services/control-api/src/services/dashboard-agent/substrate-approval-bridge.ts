@@ -330,11 +330,48 @@ export function readSubstrateEscalation(
  * returned so the caller can fold it into the tool result the model sees, which
  * makes the residue visible instead of silent.
  *
- * Runs through `executeOnce` on the approval id, so it inherits the principal
- * check, the cross-org guard and the advisory lock. That also means a
- * deny racing an approve cannot fire both calls: whichever executes first is
- * cached under this approval id and the loser is served that result, while
- * `resolveApproval`'s conditional UPDATE 409s it.
+ * ── WHY THIS IS NOT WRAPPED IN `executeOnce` (I-1) ────────────────────────
+ *
+ * It used to be, and that was an AUDIT-INTEGRITY BUG. `executeOnce` caches on
+ * `approval_id` ALONE, which is only sound while one approval id means one
+ * distinct call. This function put a SECOND call under that key, with
+ * DIFFERENT arguments, on the same approval that `executeApprovedOperatorTool`
+ * uses for the approve.
+ *
+ * The old comment here claimed "a deny racing an approve cannot fire both
+ * calls" as a feature. That statement is true about SIDE EFFECTS and false
+ * about the RECORD, and the record is the point. Under a genuine race both
+ * resolvers pass `completeApprovalResolution`'s status read; the winner
+ * executes and caches; the loser is served the WINNER'S envelope for a call it
+ * never made. A deny that lost the execution read back the cached APPROVE
+ * result, saw `isError` false, and reported `{ attempted: true, ok: true }` —
+ * so if that deny then won `resolveApproval`'s conditional UPDATE, the
+ * dashboard recorded `denied` + `substrate_action_rejected: true` for an action
+ * substrate had actually EXECUTED. Symmetrically in the other direction. The
+ * dashboard could invert substrate's ledger, which is the exact disagreement
+ * fix E exists to prevent.
+ *
+ * The fix restores `executeOnce`'s precondition rather than weakening its
+ * cache: ONE approval id, ONE `executeOnce` call site (the approve). The
+ * advisory-lock transaction is untouched.
+ *
+ * That is safe here for the SAME reason the approve leg above is not wrapped:
+ * substrate makes the reject at-most-once itself. `rejectAction`
+ * (substrate-core/src/action-executor.ts) takes `FOR UPDATE` on the ledger row
+ * and throws unless the status is still `proposed`, so two concurrent rejects,
+ * or a reject racing an approve, are serialised by substrate and only one
+ * transitions the action. The loser gets substrate's real answer — an honest
+ * failure — instead of a fabricated success.
+ *
+ * The guards `executeOnce` contributed are re-applied inline below, so this
+ * call site is safe on its own terms rather than by inheritance.
+ *
+ * Consequence, stated: a retried deny AFTER a successful reject is no longer
+ * served from a cache, so it reports failure ("not in proposed state") rather
+ * than success. Denial still completes — `denyCleanup` is best-effort by
+ * contract — and the residue is visible in the tool result. An honest late
+ * failure is preferable to a cached claim about a call this process did not
+ * make.
  */
 export async function rejectEscalatedSubstrateAction(
   pool: pg.Pool,
@@ -355,14 +392,35 @@ export async function rejectEscalatedSubstrateAction(
       ? opts.reason.trim()
       : 'Denied in the Butterbase operator approvals feed.';
 
-  const call = await executeOnce(pool, {
-    approvalId: opts.approvalId,
-    name: SUBSTRATE_ESCALATION_TOOL,
-    args: { action: 'reject', action_id: actionId, reason },
-    jwt: opts.jwt,
-    orgId: opts.orgId,
-    principal: 'human',
-  });
+  const rejectArgs: Record<string, unknown> = {
+    action: 'reject',
+    action_id: actionId,
+    reason,
+  };
+
+  // The two guards `executeOnce` used to contribute, re-applied here because
+  // this is now a raw `callMcpTool` site (same reasoning as the approve leg).
+  //
+  // `reject` is in OPERATOR_DENIED_SUBSTRATE_ACTIONS: `principalMayExecute(
+  // 'operator', …)` would refuse this. It is a person's click that authorises
+  // it, so the principal is 'human', and the tool-level allowlist still
+  // applies to them.
+  if (!principalMayExecute('human', SUBSTRATE_ESCALATION_TOOL, rejectArgs)) {
+    return { attempted: true, ok: false, error: 'substrate reject is not permitted for the human' };
+  }
+
+  // Cross-org: these args are built here and carry no `org_id`, so this cannot
+  // fire today. It stays because the check is per-CALL, not per-tool — the day
+  // an org-scoping argument is threaded through here it is already covered.
+  if (orgIdArgIsForeign(rejectArgs, opts.orgId)) {
+    return {
+      attempted: true,
+      ok: false,
+      error: "substrate reject names an org_id outside this operator's organization",
+    };
+  }
+
+  const call = await callMcpTool(SUBSTRATE_ESCALATION_TOOL, rejectArgs, opts.jwt, opts.orgId);
 
   if (!call.ok) return { attempted: true, ok: false, error: call.error };
   const envelope = readMcpEnvelope(call.result);
