@@ -8,6 +8,7 @@ import {
   isOperatorToolAllowed,
   operatorRequiresApproval,
   OPERATOR_TOOL_ALLOWLIST,
+  OPERATOR_DENIED_SUBSTRATE_ACTIONS,
   SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES,
 } from '../operator-policy.js';
 import { getToolCatalog, sensitivityFor } from '../tool-catalog.js';
@@ -93,6 +94,55 @@ describe('operatorPolicyFor — manage_substrate gating comes from substrate pol
     expect(operatorPolicyFor('manage_substrate', null)).toBe('allow');
     expect(operatorPolicyFor('manage_substrate', 'nonsense')).toBe('allow');
     expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 42 })).toBe('allow');
+  });
+});
+
+describe('operatorPolicyFor — control-weakening substrate actions are denied outright', () => {
+  it('denies set_yolo (would switch off substrate\'s own gate, org-wide)', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'set_yolo', yolo_mode: true })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: 'set_yolo', yolo_mode: false })).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: 'set_yolo' })).toBe('deny');
+  });
+
+  it('denies resolve_policy_conflict (the record says a HUMAN disposed of it)', () => {
+    expect(
+      operatorPolicyFor('manage_substrate', { action: 'resolve_policy_conflict', conflict_id: 'pcf_1', resolution: 'overridden' }),
+    ).toBe('deny');
+    expect(operatorPolicyFor('manage_substrate', { action: 'resolve_policy_conflict' })).toBe('deny');
+  });
+
+  it('denial is not gateable — it can never be reached via propose', () => {
+    for (const action of ['set_yolo', 'resolve_policy_conflict']) {
+      expect(operatorRequiresApproval('manage_substrate', { action })).toBe(false);
+      expect(operatorPolicyFor('manage_substrate', { action, capability: 'delete_entity' })).toBe('deny');
+    }
+  });
+
+  it('the denial is per-action: reads, settings reads and propose are unaffected', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'get_settings' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'list_policy_conflicts' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'get_policy_conflict', conflict_id: 'pcf_1' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'list_capabilities' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'record_decision' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'delete_entity' })).toBe('approval');
+  });
+
+  it('the operator surface never contains a control-weakening action', () => {
+    for (const action of OPERATOR_DENIED_SUBSTRATE_ACTIONS) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('deny');
+    }
+    expect(OPERATOR_DENIED_SUBSTRATE_ACTIONS.has('set_yolo')).toBe(true);
+    expect(OPERATOR_DENIED_SUBSTRATE_ACTIONS.has('resolve_policy_conflict')).toBe(true);
+  });
+
+  it('is an operator-only restriction — the human assistant is untouched', () => {
+    // sensitivityFor governs the human-attended assistant and must not change.
+    expect(sensitivityFor('manage_substrate', { action: 'set_yolo', yolo_mode: true })).toBe('safe');
+    expect(sensitivityFor('manage_substrate', { action: 'resolve_policy_conflict' })).toBe('safe');
+    // and the tool is still fully described in the shared catalog
+    const spec = getToolCatalog().find((t) => t.name === 'manage_substrate')!;
+    expect(spec.description).toContain('set_yolo');
+    expect(spec.description).toContain('resolve_policy_conflict');
   });
 });
 

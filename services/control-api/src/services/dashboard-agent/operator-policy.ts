@@ -69,6 +69,38 @@ export const SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES: ReadonlySet<string> = new
   'bulk_revert_actions',
 ]);
 
+/**
+ * `manage_substrate` actions the operator may never invoke, at any tier.
+ *
+ * GOVERNING PRINCIPLE: an agent must never be able to weaken the controls that
+ * govern it. These are deliberately NOT gateable-with-approval — a gate the
+ * agent can propose its way through is not a control, it is a speed bump.
+ *
+ *  - set_yolo: `cloud/overlays/substrate/routes/settings.ts` makes this a bare
+ *    org-wide `UPDATE substrate.organizations SET yolo_mode`, and
+ *    `substrate-core/src/policy/policy-engine.ts` treats
+ *    `organization_yolo_mode` as an implicit skip flag that auto-approves any
+ *    `approval_required` capability which is `yolo_eligible` for a non-app,
+ *    non-rule proposer. `send_email_draft` is exactly that: approval_required
+ *    AND yolo_eligible. So an unattended operator could switch substrate's own
+ *    gate off, org-wide, for the one gated capability that reaches a customer —
+ *    and the flip would apply to the human assistant and every other proposer
+ *    too. That defeats the premise the whole design rests on.
+ *
+ *  - resolve_policy_conflict: its own doc string says "Record how a HUMAN
+ *    disposed of a conflict", and `cloud/overlays/substrate/routes/policy.ts`
+ *    writes `resolved_by_entity_id` from the proposer. It is not an execution
+ *    bypass (it does not approve the blocked action), but an unattended agent
+ *    closing its own principle conflicts corrupts that audit record.
+ *
+ * This is an OPERATOR-ONLY restriction. The human assistant keeps full access
+ * to both actions, and both stay documented in the shared tool catalog.
+ */
+export const OPERATOR_DENIED_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set([
+  'set_yolo',
+  'resolve_policy_conflict',
+]);
+
 function readStringField(args: unknown, key: string): string | null {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   const value = (args as Record<string, unknown>)[key];
@@ -85,13 +117,26 @@ function readStringField(args: unknown, key: string): string | null {
  * `manage_substrate` propose of an approval_required capability. Every other
  * allowlisted tool is 'allow' by decision, including manage_integrations
  * (see the allowlist comment).
+ *
+ * `deny` has two dimensions: per TOOL (not on the allowlist) and, for
+ * manage_substrate, per ACTION (see OPERATOR_DENIED_SUBSTRATE_ACTIONS). The
+ * per-action denial is checked first so it can never be reached via any
+ * other path.
  */
 export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
   if (!OPERATOR_TOOL_ALLOWLIST.has(name)) return 'deny';
 
-  if (name === 'manage_substrate' && readStringField(args, 'action') === 'propose') {
-    const capability = readStringField(args, 'capability');
-    if (capability && SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES.has(capability)) return 'approval';
+  if (name === 'manage_substrate') {
+    const action = readStringField(args, 'action');
+
+    // Controls the operator must not be able to weaken. Checked ahead of the
+    // approval path: these are off the surface entirely, not gateable.
+    if (action && OPERATOR_DENIED_SUBSTRATE_ACTIONS.has(action)) return 'deny';
+
+    if (action === 'propose') {
+      const capability = readStringField(args, 'capability');
+      if (capability && SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES.has(capability)) return 'approval';
+    }
   }
 
   return 'allow';
