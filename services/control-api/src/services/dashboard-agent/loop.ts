@@ -437,11 +437,76 @@ export async function* runAgentTurn(
 ): AsyncGenerator<LoopEvent> {
   const base = getDefaultDeps();
   const deps: LoopDeps = { ...base, ...(depsOverride ?? {}) };
-  const { cache, repoSync, recordUsage, loadTemplate } = deps;
+  const { cache, recordUsage, loadTemplate } = deps;
   const snapshotTitleGatewayFactory = deps.snapshotTitleGatewayFactory ?? createGatewayChat;
   const upsertSnapshotLabelFn = deps.upsertSnapshotLabel ?? upsertSnapshotLabel;
   const getConversationFn = deps.getConversation ?? getConversation;
   const updateConversationTitleFn = deps.updateConversationTitle ?? updateConversationTitle;
+
+  // Is this the headless operator? Derived from the identity itself rather than
+  // from a flag threaded through `input`.
+  //
+  // A caller can of course pass the wrong `userId` just as easily as it could
+  // forget a flag — this is not magic. What makes it safe in practice is that
+  // `operator-turn.ts` is the SOLE operator entry point and hardcodes
+  // `operatorUserId(job.organizationId)`. What deriving buys over a flag is the
+  // failure DIRECTION: a flag's absent/default value means "not an operator",
+  // so a new call site that omitted it would run unattended with an org service
+  // key and no policy at all — failing open. There is no value of `userId` that
+  // silently disables the policy for a turn that is otherwise an operator turn.
+  const isOperator = isOperatorUserId(input.userId);
+
+  /**
+   * The loop makes MCP calls the MODEL did not ask for. They go through
+   * `deps.mcp` (default: `defaultMcp()` → the same `callMcpTool`), not through
+   * the dispatch site, so the policy check there never sees them:
+   *
+   *   - `fetchAppSchemasCached` → `manage_schema` action="get", on EVERY turn
+   *     for any app id in recent tool args. Operator-allowlisted tools all take
+   *     `app_id`, so this fires in normal operation.
+   *   - `repoSync` → `manage_repo` pull_latest / pull_snapshot / push.
+   *
+   * For operator turns `deps.mcp` is therefore replaced with a policy-enforcing
+   * wrapper. Only an 'allow' verdict passes: these are internal calls with no
+   * model in the loop and no turn to pause, so 'approval' is refused here too
+   * rather than silently executed. `defaultMcp`'s contract is to throw on
+   * failure and every caller already treats a throw as best-effort — schema
+   * injection is wrapped in try/catch and skips per-app, the flush loop logs and
+   * continues — so a refusal degrades the turn, it does not break it.
+   */
+  const turnMcp: Mcp = isOperator
+    ? {
+        async call(name: string, args: unknown, jwt: string) {
+          if (operatorPolicyFor(name, args) !== 'allow') {
+            throw new Error(`Tool "${name}" is not permitted for the autonomous operator.`);
+          }
+          return deps.mcp.call(name, args, jwt);
+        },
+      }
+    : deps.mcp;
+
+  /**
+   * `repoSync` must be rebuilt on `turnMcp` for operator turns, not merely
+   * assumed unreachable.
+   *
+   * The default `repoSync` is constructed in `getDefaultDeps` around the RAW
+   * client, so it is the one `deps.mcp` consumer that would still hold it. It is
+   * reachable only from the file-op / deploy / deploy_function routes and the
+   * end-of-turn flush they populate — all of whose tool names are currently
+   * denied to the operator. But that is a property of the current contents of
+   * OPERATOR_TOOL_ALLOWLIST, not of this code: add any workspace-touching tool
+   * to that allowlist later and the operator would silently gain `manage_repo`
+   * on the org service key, with nothing failing. Rebuilding here converts a
+   * code-reading argument into an invariant.
+   *
+   * An explicitly injected `repoSync` is honoured as-is: it is the caller's own
+   * object, never the raw default client, and silently discarding it would
+   * break dependency injection for every future operator test.
+   */
+  const repoSync: RepoSync =
+    isOperator && !depsOverride?.repoSync
+      ? createRepoSync({ cache, mcp: turnMcp })
+      : deps.repoSync;
 
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
@@ -452,14 +517,6 @@ export async function* runAgentTurn(
     toolArgs: null,
     toolResult: null,
   });
-
-  // Is this the headless operator? Derived from the identity itself, not from a
-  // flag on `input`. A flag would default to "not an operator" and so would
-  // fail OPEN — a future call site that forgot to set it would run unattended
-  // with an org service key and no policy at all. Deriving it from `userId`
-  // means every turn carrying the operator sentinel is governed, whichever call
-  // site started it, and there is nothing for a caller to get wrong.
-  const isOperator = isOperatorUserId(input.userId);
 
   // AFFORDANCE (not the control): hide tools the operator may not call, so the
   // model doesn't waste turns and tokens on refusals. The control is
@@ -509,39 +566,6 @@ export async function* runAgentTurn(
       baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
     }
   };
-
-  /**
-   * The loop makes a few MCP calls the MODEL did not ask for — most importantly
-   * `manage_schema` action="get" for live schema injection below, which runs on
-   * every turn. Those go through `deps.mcp` (default: `defaultMcp()` → the same
-   * `callMcpTool`), not through the dispatch site, so the policy check there
-   * would not see them. For an operator that would mean an org service key
-   * reading app schemas the policy denies.
-   *
-   * So for operator turns `deps.mcp` is replaced with a policy-enforcing
-   * wrapper. Only an 'allow' verdict passes: these are internal calls with no
-   * model in the loop and no turn to pause, so 'approval' is refused here too
-   * rather than silently executed. `defaultMcp`'s contract is to throw on
-   * failure, and every caller already treats a throw as best-effort — schema
-   * injection is wrapped in try/catch and skips per-app — so a refusal
-   * degrades the prompt, it does not break the turn.
-   *
-   * `repoSync` is NOT wrapped: it is constructed in `getDefaultDeps` and is
-   * reachable only from the file-op / deploy / deploy_function routes, whose
-   * tool names are all denied to the operator and refused before routing, and
-   * from the end-of-turn flush over `touchedApps`, which only those same routes
-   * ever populate. Unreachable rather than unguarded.
-   */
-  const turnMcp: Mcp = isOperator
-    ? {
-        async call(name: string, args: unknown, jwt: string) {
-          if (operatorPolicyFor(name, args) !== 'allow') {
-            throw new Error(`Tool "${name}" is not permitted for the autonomous operator.`);
-          }
-          return deps.mcp.call(name, args, jwt);
-        },
-      }
-    : deps.mcp;
 
   // Build per-turn fileOps + deployer bound to our SSE queue.
   const fileOps = deps.fileOpsFactory

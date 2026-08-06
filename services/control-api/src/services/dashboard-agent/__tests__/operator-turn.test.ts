@@ -11,15 +11,35 @@ vi.mock('../operator-store.js', () => ({
   operatorUserId: (orgId: string) => `operator:${orgId}`,
 }));
 vi.mock('../operator-credential.js', () => ({ getOperatorCredential: vi.fn() }));
+vi.mock('../approvals-store.js', () => ({ listPendingByConv: vi.fn() }));
 
 import * as loopModule from '../loop.js';
 import * as storeModule from '../operator-store.js';
 import * as credModule from '../operator-credential.js';
+import * as approvalsModule from '../approvals-store.js';
 import { runOperatorTurn } from '../operator-turn.js';
 
 const mockRunAgentTurn = loopModule.runAgentTurn as MockedFunction<typeof loopModule.runAgentTurn>;
 const mockGetConv = storeModule.getOrCreateOperatorConversation as MockedFunction<typeof storeModule.getOrCreateOperatorConversation>;
 const mockGetCred = credModule.getOperatorCredential as MockedFunction<typeof credModule.getOperatorCredential>;
+const mockListPending = approvalsModule.listPendingByConv as MockedFunction<typeof approvalsModule.listPendingByConv>;
+
+/** Minimal pending-approval row — only `id` is read by the guard. */
+function pendingApproval(id: string) {
+  return {
+    id,
+    conversationId: 'conv-1',
+    turnMessageId: 'msg-1',
+    toolName: 'manage_substrate',
+    toolArgs: { action: 'delete_rule' },
+    sensitivity: 'destructive' as const,
+    status: 'pending' as const,
+    trustScope: null,
+    denyReason: null,
+    createdAt: 'now',
+    resolvedAt: null,
+  };
+}
 
 const stubPool = {} as pg.Pool;
 const job = {
@@ -33,6 +53,86 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockGetConv.mockResolvedValue('conv-1');
   mockGetCred.mockResolvedValue('bb_sk_test');
+  mockListPending.mockResolvedValue([]);
+});
+
+/**
+ * C3 fix round 1. The 'approval' verdict went live with C3, which exposed the
+ * C2 wedge from the other side: a pause persists an assistant `tool_calls` row
+ * with no tool row answering it, so the NEXT wake would replay that message and
+ * then append a new `role:'user'` wake message — the OpenAI-invalid sequence the
+ * gateway rejects. One conversation per org, a 1-minute tick, no TTL: the
+ * operator would error on every wake until a human clicked. Approval latency is
+ * the normal case here, so the wake must be a clean no-op instead.
+ */
+describe('runOperatorTurn — pending approval blocks the wake', () => {
+  it('does not start a turn at all while an approval is unresolved', async () => {
+    mockListPending.mockResolvedValue([pendingApproval('appr-pending')]);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    // The invalid history is never constructed, because the turn never starts.
+    // runAgentTurn is what appends the wake `role:'user'` message and calls the
+    // gateway, so not calling it covers both.
+    expect(mockRunAgentTurn).not.toHaveBeenCalled();
+
+    // Distinguishable from a successful turn AND from an error.
+    expect(r.skipped).toEqual({ reason: 'pending_approval', approvalId: 'appr-pending' });
+    expect(r.error).toBeNull();
+    expect(r.events).toBe(0);
+    // NOT reported as a gate: this wake did not create an approval, and the
+    // trigger's `gated` counter would double-count the original pause.
+    expect(r.approvalId).toBeNull();
+    // The conversation id is still reported, so an operator can find the
+    // blocked conversation.
+    expect(r.conversationId).toBe('conv-1');
+  });
+
+  it('checks the OPERATOR conversation, after it has been resolved', async () => {
+    mockListPending.mockResolvedValue([pendingApproval('appr-pending')]);
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(mockListPending).toHaveBeenCalledWith(stubPool, 'conv-1');
+  });
+
+  it('blocks an EVENT wake too, not just the timer tick', async () => {
+    // The check lives in runOperatorTurn precisely because it is the single
+    // chokepoint for both wake reasons; a check in the trigger would leave
+    // pg_notify-driven wakes wedged.
+    mockListPending.mockResolvedValue([pendingApproval('appr-pending')]);
+
+    const r = await runOperatorTurn(stubPool, {
+      job,
+      wake: { reason: 'event', table: 'entities', rowId: 'row-1' },
+    });
+
+    expect(mockRunAgentTurn).not.toHaveBeenCalled();
+    expect(r.skipped?.reason).toBe('pending_approval');
+  });
+
+  it('runs normally once the approval has been resolved', async () => {
+    mockListPending.mockResolvedValue([]);
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(mockRunAgentTurn).toHaveBeenCalledTimes(1);
+    expect(r.skipped).toBeNull();
+    expect(r.error).toBeNull();
+  });
+
+  it('reports skipped: null on a normal gating turn (a NEW pause is not a skip)', async () => {
+    mockRunAgentTurn.mockReturnValue(events({
+      type: 'approval_required', approval_id: 'appr-9',
+      tool_name: 'manage_substrate', args: {}, sensitivity: 'destructive',
+    }) as any);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(r.approvalId).toBe('appr-9');
+    expect(r.skipped).toBeNull();
+  });
 });
 
 describe('runOperatorTurn', () => {
