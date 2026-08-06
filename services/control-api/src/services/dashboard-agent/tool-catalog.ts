@@ -121,6 +121,27 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'manage_billing', description: 'Read the org\'s billing state. Use sparingly; write operations are gated.', parameters: flatActionParams(), sensitivity: 'destructive' },
     { name: 'query_audit_logs', description: 'Query audit logs for an app or org. Read-only.', parameters: flatActionParams() },
 
+    // ---- Substrate (action ledger, entity graph, institutional memory) ----
+    {
+      name: 'manage_substrate',
+      description:
+        'Operate the entire Butterbase substrate: action ledger, entity graph, source artifacts, institutional memory (decisions/commitments/learnings), outbox, attention rules, snapshots, policy and settings. There is no other substrate tool.\n' +
+        'Every substrate WRITE goes through the ledger via action="propose" with a `capability` and a `payload`; reads are their own actions.\n' +
+        'Actions — writes: "propose" ({capability, payload, idempotency_key?}), "approve" ({action_id}), "reject" ({action_id, reason}).\n' +
+        'Actions — ledger reads: "list_actions", "get_action".\n' +
+        'Actions — entities: "find_entities" ({type?, q?, primary_email?, limit?, cursor?}), "get_entity" ({entity_id}).\n' +
+        'Actions — source artifacts: "list_source_artifacts", "get_source_artifact" ({artifact_id}).\n' +
+        'Actions — memory: "search_memory" ({q?, kinds?, limit?}), "list_memory".\n' +
+        'Actions — outbox: "list_outbox", "retry_outbox" ({outbox_id}), "cancel_outbox" ({outbox_id}).\n' +
+        'Actions — attention rules: "list_rules", "get_rule", "create_rule", "update_rule", "delete_rule", "enable_rule", "disable_rule", "list_rule_firings".\n' +
+        'Actions — snapshots & settings: "snapshots" ({days?}), "get_settings", "set_yolo" ({yolo_mode}).\n' +
+        'Actions — policy (read the rules that govern you BEFORE proposing): "list_capabilities", "list_principles", "get_principle" ({principle_id}), "list_policy_conflicts", "get_policy_conflict" ({conflict_id}), "resolve_policy_conflict" ({conflict_id, resolution, reason?}).\n' +
+        'Capabilities for "propose" that auto-approve: upsert_entity, update_entity, patch_entity, record_decision, record_commitment, record_learning, upsert_source_artifact, revert_action.\n' +
+        'Capabilities for "propose" that ALWAYS require human approval: record_principle, amend_principle, retire_principle, supersede_decision, delete_entity, merge_entities, bulk_revert_actions, send_email_draft. These are not reversible and the policy-layer ones cannot be auto-approved by any override — you cannot rewrite the rules that gate you. Proposing one returns a pending action rather than executing it.\n' +
+        'Principle conflicts force approval regardless of capability. Call "list_principles" before proposing rather than discovering constraints by being blocked.',
+      parameters: flatActionParams(),
+    },
+
     // ---- Docs / meta ----
     { name: 'butterbase_docs', description: 'Fetch Butterbase documentation for a capability/topic. Use when unsure how a feature works.', parameters: flatOpen() },
     { name: 'list_partner_apis', description: 'List available partner APIs that can be proxied from a Butterbase app.', parameters: flatOpen() },

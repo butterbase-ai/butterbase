@@ -1,30 +1,20 @@
 import pg from 'pg';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
+import { operatorPolicyFor } from './operator-policy.js';
 
 /**
- * Server-side allowlist. The operator runs model-generated intent, so this
- * list is authoritative and is never read from anything the model can edit.
- *
- * manage_billing, manage_app and manage_repo are deliberately absent: nothing
- * in v1 lets the operator spend money or delete infrastructure.
- *
- * manage_integrations is present and ungated. That is a deliberately accepted
- * risk recorded 2026-08-05: it is the real outbound-email path, so the operator
- * can send mail without a human in the loop. Do not silently change this
- * behaviour — revisit the decision instead.
+ * The allowlist and the gating rules live in ONE table, in operator-policy.ts.
+ * They used to be two independent lists here and in tool-catalog.ts, and they
+ * drifted until their intersection was empty. Re-exported for existing callers;
+ * `operator-policy.ts` is the source of truth.
  */
-export const OPERATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
-  'manage_substrate',
-  'manage_integrations',
-  'manage_people',
-  'query_audit_logs',
-  'select_rows',
-  'butterbase_docs',
-]);
-
-export function isOperatorToolAllowed(name: string): boolean {
-  return OPERATOR_TOOL_ALLOWLIST.has(name);
-}
+export {
+  OPERATOR_TOOL_ALLOWLIST,
+  isOperatorToolAllowed,
+  operatorRequiresApproval,
+  operatorPolicyFor,
+  type OperatorPolicy,
+} from './operator-policy.js';
 
 /**
  * PostgreSQL rejects NUL (U+0000) inside JSONB. Without this, a tool result
@@ -74,8 +64,10 @@ export async function executeOnce(
 ): Promise<McpCallResult> {
   // Ahead of every path that can reach callMcpTool, and ahead of touching the
   // database at all: a non-allowlisted tool never takes the lock and can never
-  // be replayed out of the cache.
-  if (!isOperatorToolAllowed(opts.name)) {
+  // be replayed out of the cache. Consults the unified policy table rather than
+  // a local list. A verdict of 'approval' is executable here by construction —
+  // executeOnce only ever runs against an approval a human already resolved.
+  if (operatorPolicyFor(opts.name, opts.args) === 'deny') {
     return { ok: false, error: `tool "${opts.name}" is not permitted for the operator` };
   }
 
