@@ -9,6 +9,7 @@ import {
   operatorRequiresApproval,
   OPERATOR_TOOL_ALLOWLIST,
   OPERATOR_DENIED_SUBSTRATE_ACTIONS,
+  OPERATOR_APPROVAL_SUBSTRATE_ACTIONS,
   SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES,
 } from '../operator-policy.js';
 import { getToolCatalog, sensitivityFor } from '../tool-catalog.js';
@@ -143,6 +144,81 @@ describe('operatorPolicyFor — control-weakening substrate actions are denied o
     const spec = getToolCatalog().find((t) => t.name === 'manage_substrate')!;
     expect(spec.description).toContain('set_yolo');
     expect(spec.description).toContain('resolve_policy_conflict');
+  });
+});
+
+describe('operatorPolicyFor — oversight-weakening substrate actions require approval', () => {
+  const RULE_ACTIONS = ['create_rule', 'delete_rule', 'disable_rule', 'enable_rule', 'cancel_outbox'];
+
+  it.each(RULE_ACTIONS)('%s requires approval', (action) => {
+    expect(operatorPolicyFor('manage_substrate', { action })).toBe('approval');
+    expect(operatorRequiresApproval('manage_substrate', { action })).toBe(true);
+  });
+
+  it('the exported set is exactly those five actions and every member gates', () => {
+    expect([...OPERATOR_APPROVAL_SUBSTRATE_ACTIONS].sort()).toEqual([...RULE_ACTIONS].sort());
+    for (const action of OPERATOR_APPROVAL_SUBSTRATE_ACTIONS) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('approval');
+    }
+  });
+
+  it('gates with realistic args, not just a bare action', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'create_rule', rule: { name: 'nightly' } })).toBe('approval');
+    expect(operatorPolicyFor('manage_substrate', { action: 'delete_rule', rule_id: 'rule_1' })).toBe('approval');
+    expect(operatorPolicyFor('manage_substrate', { action: 'cancel_outbox', outbox_id: 'obx_1' })).toBe('approval');
+  });
+
+  it('rule READS are unaffected — only mutations gate', () => {
+    for (const action of ['list_rules', 'get_rule', 'list_rule_firings', 'list_outbox']) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('allow');
+    }
+  });
+
+  it('update_rule and retry_outbox are deliberately NOT in this set (plan author named five)', () => {
+    expect(OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.has('update_rule')).toBe(false);
+    expect(OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.has('retry_outbox')).toBe(false);
+  });
+});
+
+describe('operatorPolicyFor — precedence: deny > approval > allow', () => {
+  it('the two gating sources are disjoint', () => {
+    for (const action of OPERATOR_DENIED_SUBSTRATE_ACTIONS) {
+      expect(OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.has(action)).toBe(false);
+    }
+  });
+
+  it('a denied action stays deny and cannot be downgraded to approval or allow', () => {
+    for (const action of OPERATOR_DENIED_SUBSTRATE_ACTIONS) {
+      expect(operatorPolicyFor('manage_substrate', { action })).toBe('deny');
+      // even paired with anything that would otherwise gate or allow
+      expect(operatorPolicyFor('manage_substrate', { action, capability: 'delete_entity' })).toBe('deny');
+      expect(operatorPolicyFor('manage_substrate', { action, capability: 'record_decision' })).toBe('deny');
+      expect(operatorRequiresApproval('manage_substrate', { action })).toBe(false);
+    }
+  });
+
+  it('deny at the TOOL level beats every action rule', () => {
+    // manage_app is not allowlisted; no action can rescue it.
+    for (const action of ['create_rule', 'set_yolo', 'propose', 'list_rules']) {
+      expect(operatorPolicyFor('manage_app', { action })).toBe('deny');
+    }
+  });
+
+  it('approval beats allow, and allow remains the floor', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'create_rule' })).toBe('approval');
+    expect(operatorPolicyFor('manage_substrate', { action: 'list_rules' })).toBe('allow');
+  });
+
+  it('the propose rule is unaffected by the new action rule', () => {
+    expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'delete_entity' })).toBe('approval');
+    expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'send_email_draft' })).toBe('approval');
+    expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'record_decision' })).toBe('allow');
+    expect(operatorPolicyFor('manage_substrate', { action: 'propose', capability: 'upsert_entity' })).toBe('allow');
+  });
+
+  it('other allowlisted tools are untouched by substrate action rules', () => {
+    expect(operatorPolicyFor('manage_integrations', { action: 'create_rule' })).toBe('allow');
+    expect(operatorPolicyFor('select_rows', { action: 'set_yolo' })).toBe('allow');
   });
 });
 

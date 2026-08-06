@@ -101,6 +101,46 @@ export const OPERATOR_DENIED_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set([
   'resolve_policy_conflict',
 ]);
 
+/**
+ * `manage_substrate` actions the operator may invoke only with a human
+ * decision. Same family of concern as the denied set above — an agent must not
+ * weaken the controls that govern it — but a different answer, because unlike
+ * `set_yolo` these are legitimate things for an operator to want.
+ *
+ * Attention rules are the OVERSIGHT mechanism, and the outbox is the queue of
+ * work already committed to. An agent that can silently delete the rule
+ * watching it, disable it, or cancel queued outbound work has weakened its own
+ * oversight. `create_rule` is here for the mirror-image reason: it lets the
+ * operator author a rule that proposes on its behalf, on a cron, unattended.
+ *
+ * Note precisely what that last one is and is not. It is NOT an approval
+ * bypass: `substrate-core/src/policy/policy-engine.ts` returns
+ * requires_approval for `source_rule_id !== null` on BOTH override branches —
+ * "rule proposer cannot skip approval" (L52-53) and "rule proposer cannot use
+ * yolo_mode" (L65-66) — so a rule cannot propose past a gate the operator
+ * itself could not. What it creates is unattended automation, and a human
+ * decision is exactly the right control for that.
+ *
+ * `update_rule` and `retry_outbox` are deliberately absent: this set is the
+ * five actions the plan author ruled on (2026-08-06), not a category I widened
+ * on my own. Revisit them explicitly if the surface changes.
+ *
+ * SECOND GATING SOURCE — deliberately explicit. Unlike the propose rule below,
+ * these are not substrate-capability proposals, so their gate cannot be derived
+ * from `default_policy`. That makes two gating RULES inside this one table.
+ * That is fine and intended: the original bug was two independent LISTS in two
+ * modules that drifted until their intersection was empty, not two rules in one
+ * place. Both rules live here, both are named, and the precedence between them
+ * is fixed below.
+ */
+export const OPERATOR_APPROVAL_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set([
+  'create_rule',
+  'delete_rule',
+  'disable_rule',
+  'enable_rule',
+  'cancel_outbox',
+]);
+
 function readStringField(args: unknown, key: string): string | null {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   const value = (args as Record<string, unknown>)[key];
@@ -118,27 +158,47 @@ function readStringField(args: unknown, key: string): string | null {
  * allowlisted tool is 'allow' by decision, including manage_integrations
  * (see the allowlist comment).
  *
- * `deny` has two dimensions: per TOOL (not on the allowlist) and, for
- * manage_substrate, per ACTION (see OPERATOR_DENIED_SUBSTRATE_ACTIONS). The
- * per-action denial is checked first so it can never be reached via any
- * other path.
+ * PRECEDENCE, in this order and no other:
+ *
+ *   deny  >  approval  >  allow
+ *
+ *   1. deny, per TOOL     — not on OPERATOR_TOOL_ALLOWLIST.
+ *   2. deny, per ACTION   — OPERATOR_DENIED_SUBSTRATE_ACTIONS. A denied action
+ *                           can never be downgraded to approval or allow by
+ *                           anything else in the args.
+ *   3. approval, per ACTION     — OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.
+ *   4. approval, per CAPABILITY — propose of a SUBSTRATE_APPROVAL_REQUIRED one.
+ *   5. allow              — the floor.
+ *
+ * The two approval rules (3 and 4) are independent gating sources and are meant
+ * to be: rule/outbox mutations are not capability proposals, so no single
+ * source could cover both. They are both here, in one table, by design.
  */
 export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
+  // 1. Tool-level deny.
   if (!OPERATOR_TOOL_ALLOWLIST.has(name)) return 'deny';
 
   if (name === 'manage_substrate') {
     const action = readStringField(args, 'action');
 
-    // Controls the operator must not be able to weaken. Checked ahead of the
-    // approval path: these are off the surface entirely, not gateable.
-    if (action && OPERATOR_DENIED_SUBSTRATE_ACTIONS.has(action)) return 'deny';
+    if (action) {
+      // 2. Controls the operator must not be able to weaken. Checked ahead of
+      // every approval path, so a denial is never downgraded.
+      if (OPERATOR_DENIED_SUBSTRATE_ACTIONS.has(action)) return 'deny';
 
-    if (action === 'propose') {
-      const capability = readStringField(args, 'capability');
-      if (capability && SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES.has(capability)) return 'approval';
+      // 3. Oversight-weakening actions that a human may still authorise.
+      if (OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.has(action)) return 'approval';
+
+      // 4. Substrate's own policy engine: a propose of an approval_required
+      // capability.
+      if (action === 'propose') {
+        const capability = readStringField(args, 'capability');
+        if (capability && SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES.has(capability)) return 'approval';
+      }
     }
   }
 
+  // 5. Floor.
   return 'allow';
 }
 
