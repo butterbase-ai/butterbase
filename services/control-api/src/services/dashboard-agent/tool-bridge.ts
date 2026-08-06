@@ -24,19 +24,13 @@ export {
  * nothing is recorded and a retry re-executes the side effect. Strip NULs from
  * keys and values so a successful execution is always recorded. Those stripped
  * bytes are the only way a replayed result can differ from a fresh one.
+ *
+ * Deliberately applied to the CACHED copy only — the executing caller still
+ * receives the raw result. That means every OTHER place which persists a tool
+ * result to JSONB carries the same constraint and must sanitise at its own
+ * write; the shared implementation lives in store.ts so there is one copy.
  */
-function stripNulls(value: unknown): unknown {
-  if (typeof value === 'string') return value.replace(/\u0000/g, '');
-  if (Array.isArray(value)) return value.map(stripNulls);
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k.replace(/\u0000/g, '')] = stripNulls(v);
-    }
-    return out;
-  }
-  return value;
-}
+import { stripJsonbNulls as stripNulls } from './store.js';
 
 /**
  * Execute a gated tool exactly once per approval_id.

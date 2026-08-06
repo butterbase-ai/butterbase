@@ -33,7 +33,12 @@
 
 import pg from 'pg';
 import { getApproval, resolveApproval, type Approval } from './approvals-store.js';
-import { getMessageByPendingApprovalId, clearPendingApproval, appendMessage } from './store.js';
+import {
+  getMessageByPendingApprovalId,
+  clearPendingApproval,
+  appendMessage,
+  stripJsonbNulls,
+} from './store.js';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
 
 export type ResolutionInput =
@@ -159,12 +164,21 @@ export async function completeApprovalResolution(
       return { ok: false, code: 409, error: `approval already resolved` };
     }
   } else {
-    const message = `User denied.${resolution.reason ? ` Reason: ${resolution.reason}` : ''}`;
+    // The deny reason is caller-supplied and lands in deny_reason, a TEXT
+    // column. Postgres rejects NUL there too — `invalid byte sequence for
+    // encoding "UTF8": 0x00` — which would throw out of resolveApproval and
+    // 500 the request on nothing but a malformed input string.
+    const reason =
+      typeof resolution.reason === 'string'
+        ? (stripJsonbNulls(resolution.reason) as string)
+        : resolution.reason;
+
+    const message = `User denied.${reason ? ` Reason: ${reason}` : ''}`;
     toolResult = { ok: false, error: message };
 
     const resolved = await resolveApproval(pool, approvalId, {
       status: 'denied',
-      denyReason: resolution.reason,
+      denyReason: reason,
     });
     if (!resolved) {
       return { ok: false, code: 409, error: `approval already resolved` };
@@ -173,22 +187,31 @@ export async function completeApprovalResolution(
 
   // 5. Persist the tool-result row that completes the assistant/tool pair.
   //
+  // stripJsonbNulls is load-bearing, not hygiene. dashboard_agent_messages.
+  // tool_result is JSONB and Postgres rejects NUL (U+0000) with `unsupported
+  // Unicode escape sequence`. A single NUL anywhere in a tool result used to
+  // throw HERE — after the tool had fired and after resolveApproval had
+  // already flipped the row — leaving no `role: 'tool'` row, an uncleared
+  // marker, a 500 to the caller, and a retry that 409s on the status guard.
+  // That is the permanent wedge this module exists to prevent, reachable with
+  // no crash at all. tool-bridge.ts sanitises its execution-cache row for the
+  // same reason but deliberately returns the raw result to its caller, so the
+  // constraint has to be met again at every write.
+  //
   // Residual window: a process crash or DB outage between the resolveApproval
-  // above and this append leaves the conversation ending in an unanswered
-  // assistant tool_calls row while the approval reads resolved. Every ERROR
-  // path returns before resolveApproval, and the slow, failure-prone part (the
-  // MCP call) is already done by here, so only a hard crash in the gap between
-  // two adjacent statements can hit it. Closing it entirely needs all three
-  // writes in one transaction, which appendMessage's own BEGIN/COMMIT prevents
-  // today. The append-then-clear order below is deliberate: a crash between
-  // them leaves a valid history plus a stale marker, which is harmless.
+  // above and this append still leaves the conversation ending in an
+  // unanswered assistant tool_calls row while the approval reads resolved.
+  // Closing it entirely needs all three writes in one transaction, which
+  // appendMessage's own BEGIN/COMMIT prevents today. The append-then-clear
+  // order below is deliberate: a crash between them leaves a valid history
+  // plus a stale marker, which is harmless.
   await appendMessage(pool, approval.conversationId, {
     role: 'tool',
     content: '',
     toolCallId: pausedMessage.toolCallId,
     toolName: approval.toolName,
-    toolArgs: approval.toolArgs,
-    toolResult,
+    toolArgs: stripJsonbNulls(approval.toolArgs),
+    toolResult: stripJsonbNulls(toolResult),
   });
 
   // 6. Clear the pending marker on the paused assistant row.

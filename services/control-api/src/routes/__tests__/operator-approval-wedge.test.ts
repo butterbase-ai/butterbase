@@ -277,3 +277,74 @@ describe('C2 — resolving an operator approval leaves a VALID conversation hist
     expect(mockCallMcpTool).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression (fix round 1): the wedge was reachable with NO crash at all.
+//
+// dashboard_agent_messages.tool_result is JSONB and Postgres rejects NUL
+// (U+0000) with `unsupported Unicode escape sequence`. tool-bridge.ts strips
+// NULs from the row it CACHES but deliberately returns the raw McpCallResult
+// to its caller — so a single NUL in a tool result threw inside
+// completeApprovalResolution, AFTER the tool had fired and AFTER the approval
+// had flipped to 'approved': no role:'tool' row, marker uncleared, 500 to the
+// caller, and a retry that 409s on the status guard. Permanent wedge, no crash
+// involved. The earlier claim that only a hard crash could reach the gap was
+// wrong. Sanitising happens at the persistence boundary, which fixes the human
+// assistant's path too (same pre-existing bug).
+// ---------------------------------------------------------------------------
+
+describe('C2 — a NUL byte in the tool result cannot wedge the conversation', () => {
+  const NUL = String.fromCharCode(0);
+
+  it('persists the tool row, clears the marker, and throws nothing', async () => {
+    const { conversationId, approval, toolCallId } = await pauseOnGatedTool();
+    mockCallMcpTool.mockResolvedValue({
+      ok: true,
+      result: { note: `before${NUL}after`, nested: { [`k${NUL}`]: [`v${NUL}`] } },
+    });
+
+    // No throw escapes.
+    const outcome = await resolveOperatorApproval(pool, {
+      approvalId: approval.id,
+      orgId: ORG,
+      jwt: 'jwt-token',
+      resolution: { status: 'approved' },
+    });
+    expect(outcome).toEqual({ ok: true });
+
+    const messages = await listMessages(pool, conversationId);
+
+    // The history is valid — this is the whole point.
+    expect(unansweredToolCalls(messages)).toEqual([]);
+
+    const toolRow = messages.find((m) => m.role === 'tool')!;
+    expect(toolRow).toBeDefined();
+    expect(toolRow.toolCallId).toBe(toolCallId);
+    // Stored with the NULs stripped: those bytes are the only way the persisted
+    // result differs from what the tool returned.
+    expect(toolRow.toolResult).toEqual({ note: 'beforeafter', nested: { k: ['v'] } });
+
+    expect(messages.every((m) => m.pendingApprovalId === null)).toBe(true);
+    expect((await getApprovalForOrg(pool, approval.id, ORG))!.status).toBe('approved');
+  });
+
+  it('a NUL in a deny reason is handled the same way', async () => {
+    const { conversationId, approval } = await pauseOnGatedTool();
+
+    const outcome = await resolveOperatorApproval(pool, {
+      approvalId: approval.id,
+      orgId: ORG,
+      jwt: 'jwt-token',
+      resolution: { status: 'denied', reason: `bad${NUL}reason` },
+    });
+    expect(outcome).toEqual({ ok: true });
+
+    const messages = await listMessages(pool, conversationId);
+    expect(unansweredToolCalls(messages)).toEqual([]);
+    expect(messages.find((m) => m.role === 'tool')!.toolResult).toEqual({
+      ok: false,
+      error: 'User denied. Reason: badreason',
+    });
+    expect(messages.every((m) => m.pendingApprovalId === null)).toBe(true);
+  });
+});

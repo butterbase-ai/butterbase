@@ -1,5 +1,33 @@
 import pg from 'pg';
 
+/**
+ * PostgreSQL rejects NUL (U+0000) inside JSONB — `unsupported Unicode escape
+ * sequence`. Any tool result containing one makes the INSERT throw, and where
+ * that INSERT is the row that completes an assistant/tool pair, the throw
+ * leaves the conversation permanently invalid (see completeApprovalResolution
+ * in resume.ts). Strip NULs from keys and values so a value that reached the
+ * persistence boundary can always be written.
+ *
+ * This is a property of the WRITE, not of the value: callers that execute a
+ * tool still receive the raw, unsanitised result. Those stripped bytes are the
+ * only way a persisted or replayed result can differ from a fresh one.
+ *
+ * Single source of truth — tool-bridge.ts's execution cache uses this same
+ * function. Do not fork a second copy.
+ */
+export function stripJsonbNulls(value: unknown): unknown {
+  if (typeof value === 'string') return value.replace(/\u0000/g, '');
+  if (Array.isArray(value)) return value.map(stripJsonbNulls);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k.replace(/\u0000/g, '')] = stripJsonbNulls(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 export type Conversation = {
   id: string;
   userId: string;
