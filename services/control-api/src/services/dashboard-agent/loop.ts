@@ -24,6 +24,7 @@ import { createApproval, checkTrust } from './approvals-store.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
 import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
+import { trimOperatorHistory } from './operator-history.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -646,9 +647,30 @@ export async function* runAgentTurn(
     // Schema injection is best-effort — never block the turn on it.
   }
 
+  /**
+   * I2: bound what an OPERATOR turn replays.
+   *
+   * One operator conversation per org, reused forever, woken ~144x/day —
+   * replaying the whole transcript is a scheduled context-window failure. The
+   * scratchpad and the wake header now carry the continuity, so a suffix is
+   * enough. `trimOperatorHistory` picks a PAIRING-VALID cut (see its header):
+   * it can never emit an assistant `tool_calls` whose result was trimmed away,
+   * nor an orphan `role:'tool'` row — the wedge that bricks an org's operator
+   * permanently.
+   *
+   * Nothing is deleted; `history` above is still the full stored record, and
+   * `turnNumber` is deliberately computed from it so the snapshot-title
+   * fallback does not reset when the replay window slides.
+   *
+   * FOR A HUMAN CONVERSATION THIS IS THE SAME ARRAY BY IDENTITY. The assistant
+   * replays exactly what it replayed before — `toGatewayMessages(history)`,
+   * every row, same order. Do not "simplify" this into an unconditional call.
+   */
+  const replayHistory = isOperator ? trimOperatorHistory(history) : history;
+
   const messages: GatewayMessage[] = [
     { role: 'system', content: schemaPromptBlock + getSystemPrompt() },
-    ...toGatewayMessages(history),
+    ...toGatewayMessages(replayHistory),
   ];
 
   // Yield and drain any queued SSE events (file_change / active_app_change /
