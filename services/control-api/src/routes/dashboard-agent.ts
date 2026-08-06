@@ -75,7 +75,10 @@ import {
   getApprovalForOrg,
   listPendingByOrg,
 } from '../services/dashboard-agent/approvals-store.js';
-import { executeApprovedOperatorTool } from '../services/dashboard-agent/substrate-approval-bridge.js';
+import {
+  executeApprovedOperatorTool,
+  rejectEscalatedSubstrateAction,
+} from '../services/dashboard-agent/substrate-approval-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -376,6 +379,24 @@ export async function resolveOperatorApproval(
         approvalId: a.id,
         name: a.toolName,
         args: a.toolArgs,
+        jwt: input.jwt,
+        orgId: input.orgId,
+      }),
+    /**
+     * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
+     *
+     * Those are raised after the propose already dispatched, so a real action
+     * sits in substrate's ledger in `proposed`. Denying at our layer alone
+     * would leave it there indefinitely — the same invisible stall this fix
+     * exists to remove, one step later. `rejectEscalatedSubstrateAction` is a
+     * no-op (attempted: false) for every other approval kind, because those
+     * paused before dispatch and there is nothing on the far side.
+     */
+    denyCleanup: (a) =>
+      rejectEscalatedSubstrateAction(pool, {
+        approvalId: a.id,
+        approval: { toolName: a.toolName, toolArgs: a.toolArgs },
+        reason: input.resolution.status === 'denied' ? input.resolution.reason : undefined,
         jwt: input.jwt,
         orgId: input.orgId,
       }),

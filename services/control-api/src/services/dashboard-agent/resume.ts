@@ -119,9 +119,29 @@ export async function completeApprovalResolution(
      * guaranteed to have one, and existing rows predate the column.
      */
     resolvedBy?: string | null;
+    /**
+     * OPTIONAL, deny path only. Undo/close whatever the approval refers to on
+     * the far side, for the one approval kind where denial is not a no-op.
+     *
+     * Only the operator's SUBSTRATE-ESCALATED approvals need this: those are
+     * raised AFTER the propose already dispatched, so a real action sits in
+     * substrate's ledger in `proposed` and denying at our layer alone would
+     * leave it there forever. Every other approval — the human assistant's, and
+     * the operator's pre-emptive gate — paused BEFORE dispatch, so nothing
+     * exists to undo. See `rejectEscalatedSubstrateAction`.
+     *
+     * The human assistant never supplies this, so its behaviour is byte-for-byte
+     * unchanged.
+     *
+     * BEST-EFFORT BY CONTRACT. Its outcome is folded into the tool result the
+     * model sees, but a failure never blocks the denial: an approval a human
+     * cannot deny wedges the org's one operator conversation, which is strictly
+     * worse than a stale row in substrate. Callers must not throw from it.
+     */
+    denyCleanup?: (approval: Approval) => Promise<{ attempted: boolean; ok: boolean; error?: string }>;
   }
 ): Promise<ResolveOutcome> {
-  const { approval, resolution, execute, resolvedBy } = params;
+  const { approval, resolution, execute, resolvedBy, denyCleanup } = params;
   const approvalId = approval.id;
 
   // 2. Status check — fast-path 404/409 without touching MCP or the DB
@@ -181,8 +201,31 @@ export async function completeApprovalResolution(
         ? (stripJsonbNulls(resolution.reason) as string)
         : resolution.reason;
 
+    // Close out the far side BEFORE flipping the row, so a retry of a denial
+    // whose cleanup failed can still re-attempt it. Never allowed to abort the
+    // denial itself — see denyCleanup's contract.
+    let cleanup: { attempted: boolean; ok: boolean; error?: string } = { attempted: false, ok: true };
+    if (denyCleanup) {
+      try {
+        cleanup = await denyCleanup(approval);
+      } catch (err) {
+        cleanup = { attempted: true, ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
     const message = `User denied.${reason ? ` Reason: ${reason}` : ''}`;
-    toolResult = { ok: false, error: message };
+    toolResult = cleanup.attempted
+      ? {
+          ok: false,
+          error: message,
+          // Stated explicitly so a stale substrate action is visible in the
+          // transcript rather than silently left behind.
+          substrate_action_rejected: cleanup.ok,
+          ...(cleanup.ok
+            ? {}
+            : { substrate_reject_error: cleanup.error ?? 'unknown error' }),
+        }
+      : { ok: false, error: message };
 
     const resolved = await resolveApproval(pool, approvalId, {
       status: 'denied',

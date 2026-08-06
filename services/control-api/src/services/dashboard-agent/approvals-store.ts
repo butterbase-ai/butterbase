@@ -70,6 +70,156 @@ export async function createApproval(
 }
 
 /**
+ * ---------------------------------------------------------------------------
+ * THE SECOND APPROVAL WRITER (fix E) — and why it is shaped like this.
+ * ---------------------------------------------------------------------------
+ *
+ * Until this function existed, the ONLY code that could insert an operator
+ * approval row was the `operatorVerdict === 'approval'` branch in loop.ts. That
+ * single-writer fact is load-bearing for a security property: the human-approved
+ * replay path deliberately lifts the operator's substrate ACTION denials
+ * (`principalMayExecute('human', …)` consults the tool-level allowlist only), so
+ * an approval row that could carry `{action:'set_yolo'}` — or `approve` of an
+ * arbitrary action id — would turn one click in the operator feed into exactly
+ * the escalation `OPERATOR_DENIED_SUBSTRATE_ACTIONS` exists to prevent.
+ *
+ * loop.ts's branch is safe because `operatorPolicyFor` already returned
+ * 'approval' for those args, and it never returns 'approval' for a denied
+ * action. This writer cannot borrow that argument: it runs AFTER dispatch, on a
+ * call whose verdict was 'allow'. So it is constrained STRUCTURALLY instead:
+ *
+ *  1. It takes no `toolName` and no `toolArgs`. The tool name is the module
+ *     constant `SUBSTRATE_ESCALATION_TOOL` and the args object is built here,
+ *     literally, as `{ action: 'approve', action_id }`. There is no parameter
+ *     any caller could use to emit a different action, a different tool, or an
+ *     extra argument. Adding one would be the bug; do not.
+ *  2. The only caller-supplied value is `actionId`, which the call site reads
+ *     out of SUBSTRATE'S RESPONSE (`readSubstrateEscalation` in
+ *     substrate-approval-bridge.ts), never out of the model's tool arguments.
+ *     It is additionally shape-checked below, so a hostile or malformed
+ *     response cannot smuggle an object, an array or an unbounded blob into
+ *     `tool_args`.
+ *  3. No `org_id` is stored. The propose that produced this action_id already
+ *     passed `operatorPolicyForOrg`'s cross-org guard, so its org was this
+ *     operator's org; at resolution time `executeOnce` sends
+ *     `x-organization-id` from the route's membership-checked `orgId`. Omitting
+ *     the argument therefore targets the same substrate while leaving zero
+ *     model-derived fields in the stored call.
+ *
+ * Net: the widest thing the replay path can be made to execute through this
+ * writer is `manage_substrate approve` of one specific, substrate-issued action
+ * id — which is precisely the human decision the row represents. It does not
+ * widen the replay path by one action. `__tests__/operator-escalation-approval.test.ts`
+ * pins all of this.
+ */
+export const SUBSTRATE_ESCALATION_TOOL = 'manage_substrate';
+
+/**
+ * Conservative shape check for a substrate ledger action id. Real ids are
+ * `act_<ULID>` (action-executor.ts), so this is far wider than the current
+ * format on purpose — it is a sanity bound, not a parser. What it rules out is
+ * the thing that matters: anything that is not a short, opaque, single-token
+ * string.
+ */
+const SUBSTRATE_ACTION_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+export function isValidSubstrateActionId(value: unknown): value is string {
+  return typeof value === 'string' && SUBSTRATE_ACTION_ID_RE.test(value);
+}
+
+/**
+ * Does this approval row represent "a human decision on a substrate action that
+ * is ALREADY `proposed`"? True only for rows this writer created.
+ *
+ * Used by the deny path to decide whether there is a substrate-side action to
+ * reject. Deliberately a pure predicate over the STORED row rather than a flag
+ * column: the shape is the fact.
+ */
+export function readSubstrateEscalationActionId(approval: {
+  toolName: string;
+  toolArgs: unknown;
+}): string | null {
+  if (approval.toolName !== SUBSTRATE_ESCALATION_TOOL) return null;
+  const args = approval.toolArgs;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const rec = args as Record<string, unknown>;
+  if (rec.action !== 'approve') return null;
+  return isValidSubstrateActionId(rec.action_id) ? rec.action_id : null;
+}
+
+/**
+ * Create the approval for a substrate-escalated propose AND mark the paused
+ * assistant row, atomically.
+ *
+ * ATOMICITY IS NOT HYGIENE HERE. `runOperatorTurn` refuses to start a turn
+ * while `listPendingByConv` reports a pending row, and
+ * `completeApprovalResolution` 400s if `getMessageByPendingApprovalId` finds
+ * nothing. An approval row without its `pending_approval_id` marker would
+ * therefore be unresolvable AND blocking — that org's operator wedged on an
+ * approval no human could clear, in either direction. Unlike the pre-dispatch
+ * pause (which creates the approval first and appends the message second, so a
+ * crash leaves a pending row with no message and the message is never written),
+ * this path cannot order its way out: the assistant row must exist before
+ * dispatch, and the action id only exists after it. So both writes go in one
+ * transaction.
+ *
+ * Returns null (having written nothing) if the target row is not a paused-able
+ * assistant tool-call row in this conversation, or already carries a marker.
+ */
+export async function createSubstrateEscalationApproval(
+  pool: pg.Pool,
+  input: {
+    conversationId: string;
+    /** id of the assistant `tool_calls` row for the propose that escalated. */
+    pausedMessageId: string;
+    /** Substrate's own action id, from the propose RESPONSE. Never model args. */
+    actionId: string;
+  },
+): Promise<Approval | null> {
+  if (!isValidSubstrateActionId(input.actionId)) return null;
+
+  // Built here, not passed in. See the header above.
+  const toolArgs = { action: 'approve', action_id: input.actionId };
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const inserted = await client.query(
+      `INSERT INTO dashboard_agent_approvals
+       (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status)
+       VALUES ($1, $2, $3, $4, 'destructive', 'pending')
+       RETURNING ${APPROVAL_COLS}`,
+      [input.conversationId, input.pausedMessageId, SUBSTRATE_ESCALATION_TOOL, JSON.stringify(toolArgs)],
+    );
+
+    const marked = await client.query(
+      `UPDATE dashboard_agent_messages
+       SET pending_approval_id = $1
+       WHERE id = $2
+         AND conversation_id = $3
+         AND role = 'assistant'
+         AND tool_call_id IS NOT NULL
+         AND tool_result IS NULL
+         AND pending_approval_id IS NULL`,
+      [inserted.rows[0].id, input.pausedMessageId, input.conversationId],
+    );
+    if ((marked.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    await client.query('COMMIT');
+    return rowToApproval(inserted.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Get an approval by ID, scoped to a user (returns null if user doesn't own
  * the conversation or approval doesn't exist).
  */

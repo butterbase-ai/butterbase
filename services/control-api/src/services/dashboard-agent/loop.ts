@@ -20,7 +20,8 @@ import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { callMcpTool } from './mcp-client.js';
-import { createApproval, checkTrust } from './approvals-store.js';
+import { createApproval, checkTrust, createSubstrateEscalationApproval } from './approvals-store.js';
+import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
 import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
@@ -882,7 +883,7 @@ export async function* runAgentTurn(
           }
         }
 
-        await appendMessage(input.pool, input.conversationId, {
+        const assistantRow = await appendMessage(input.pool, input.conversationId, {
           role: 'assistant',
           content: i === 0 ? assistantText : '',
           toolCallId: tc.id,
@@ -1192,6 +1193,72 @@ export async function* runAgentTurn(
         ) {
           call.result = scopeAppListToOrg(call.result, input.organizationId);
         }
+
+        /**
+         * FIX E — SUBSTRATE-ESCALATED APPROVAL, raised AFTER dispatch.
+         *
+         * `operatorPolicyFor` pauses a propose BEFORE dispatch only for the
+         * eight capabilities on the static `default_policy: 'approval_required'`
+         * mirror. That mirror is documented as the FLOOR, not the ceiling:
+         * substrate's policy engine ALSO escalates at propose time — a principle
+         * conflict returns requires_approval even on an 'auto' capability, per
+         * org, dynamically. Those calls legitimately get verdict 'allow' and
+         * dispatch, and substrate correctly holds the line: nothing executes,
+         * the action parks in `proposed`.
+         *
+         * What was missing is only visibility. No dashboard approval existed, so
+         * the action sat in substrate's ledger where the operator feed cannot
+         * see it, and the operator's own way out (`manage_substrate approve`) is
+         * correctly denied to it. The work stalled silently and every subsequent
+         * wake burned a cycle rediscovering it.
+         *
+         * NOT a second gate and NOT a widening of the static mirror — conflicts
+         * are dynamic and per-org, and predicting them is the wrong shape. This
+         * reacts to what substrate actually answered.
+         *
+         * The approval stores the APPROVE of that action id, never the propose:
+         * the propose has already happened, so resolution must call
+         * `approve(action_id)` only and must never re-propose. Everything about
+         * what may be stored is enforced inside
+         * `createSubstrateEscalationApproval` — read its header before changing
+         * anything here; the action id comes from `readSubstrateEscalation`,
+         * i.e. from SUBSTRATE'S RESPONSE, never from `tc.args`.
+         *
+         * Operator-only (`isOperator`), so the human assistant is untouched.
+         *
+         * Deliberately NO `role:'tool'` row is written for the propose here.
+         * The turn pauses in exactly the same shape the pre-dispatch gate uses —
+         * assistant tool_call row + `pending_approval_id`, answered later by
+         * `completeApprovalResolution` — which is what keeps the resolution path,
+         * and the wedge fix it carries, identical for both approval kinds.
+         *
+         * If the atomic create returns null (the row was already marked, or is
+         * not a pausable assistant row) we fall through and record the pending
+         * propose as an ordinary tool result: today's behaviour, never a
+         * half-paused turn.
+         */
+        if (isOperator && call.ok) {
+          const escalatedActionId = readSubstrateEscalation(tc.name, tc.args, call.result);
+          if (escalatedActionId) {
+            const approval = await createSubstrateEscalationApproval(input.pool, {
+              conversationId: input.conversationId,
+              pausedMessageId: assistantRow.id,
+              actionId: escalatedActionId,
+            });
+            if (approval) {
+              yield {
+                type: 'approval_required',
+                approval_id: approval.id,
+                tool_name: tc.name,
+                args: tc.args,
+                sensitivity: 'destructive',
+              };
+              terminated = true;
+              break outer;
+            }
+          }
+        }
+
         const resultPayload = call.ok ? { result: call.result } : { error: call.error };
         toolCallResults.push({ id: tc.id, ...resultPayload });
         yield { type: 'tool_result', id: tc.id, ...resultPayload };

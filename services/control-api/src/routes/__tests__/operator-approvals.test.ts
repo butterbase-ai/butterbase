@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, type MockedFunction } from 'vitest';
 
-vi.mock('../../services/dashboard-agent/approvals-store.js', () => ({
+// importActual-spread, NOT a bare object: substrate-approval-bridge.ts imports
+// the escalation predicates (`readSubstrateEscalationActionId`,
+// `isValidSubstrateActionId`, `SUBSTRATE_ESCALATION_TOOL`) from this module, and
+// stubbing them away makes the deny path throw on a missing function rather than
+// exercise the real "is there a parked substrate action?" decision.
+vi.mock('../../services/dashboard-agent/approvals-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/dashboard-agent/approvals-store.js')>()),
   getApproval: vi.fn(),
   getApprovalForOrg: vi.fn(),
   listPendingByOrg: vi.fn(),

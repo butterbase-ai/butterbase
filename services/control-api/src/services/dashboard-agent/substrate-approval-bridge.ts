@@ -37,16 +37,47 @@
  *    a gated capability, approve your own action_id, forge an
  *    `approved_by_kind = 'human'` ledger row. Do not.
  *
- * DENY needs nothing from this module. loop.ts pauses BEFORE dispatch, so a
- * denied approval never reached substrate at all: there is no pending action
- * to reject. The deny path stays exactly as the C2 fix left it — synthesize a
- * denial result, write the `role: 'tool'` row, clear `pending_approval_id`.
+ * DENY needs nothing from this module FOR THE PRE-EMPTED PATH. loop.ts pauses
+ * BEFORE dispatch, so a denied approval never reached substrate at all: there
+ * is no pending action to reject. That path stays exactly as the C2 fix left
+ * it — synthesize a denial result, write the `role: 'tool'` row, clear
+ * `pending_approval_id`.
+ *
+ * ── FIX E: the POST-DISPATCH case, which is a different shape ───────────────
+ *
+ * Everything above concerns a propose we PRE-EMPTED, because the capability is
+ * on the static `SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES` mirror. That mirror
+ * is the FLOOR, not the ceiling: substrate's policy engine also escalates at
+ * PROPOSE time — a principle conflict returns requires_approval even for a
+ * capability whose `default_policy` is 'auto'. Those calls get verdict 'allow',
+ * dispatch, and come back `{ action_id, requires_approval: true }` with the
+ * action parked in substrate's ledger. Nothing executed (substrate held the
+ * line), but no dashboard approval existed either, so the work stalled where
+ * the operator feed could not see it and the operator's own route to resolve it
+ * (`approve`) is correctly denied to it.
+ *
+ * For that case the propose has ALREADY HAPPENED and the action already exists.
+ * So resolution must call `approve(action_id)` ONLY and must never re-propose —
+ * which is why the approval row created for it stores the APPROVE call, not the
+ * propose (see `createSubstrateEscalationApproval` in approvals-store.ts). That
+ * row flows through the ordinary `executeApprovedOperatorTool` path below,
+ * where `isSubstratePropose` is false, so it is a single `executeOnce` of
+ * `manage_substrate approve` and the bridging block is skipped entirely.
+ *
+ * DENY, for that case only, DOES need something: the substrate action is real
+ * and sits in `proposed` forever if we walk away. `rejectEscalatedSubstrateAction`
+ * below closes it out under the same human identity.
  */
 
 import pg from 'pg';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
 import { executeOnce } from './tool-bridge.js';
 import { principalMayExecute, orgIdArgIsForeign } from './operator-policy.js';
+import {
+  isValidSubstrateActionId,
+  readSubstrateEscalationActionId,
+  SUBSTRATE_ESCALATION_TOOL,
+} from './approvals-store.js';
 
 /**
  * `callMcpTool` returns the raw JSON-RPC `result`, which for a tools/call is
@@ -239,4 +270,102 @@ export async function executeApprovedOperatorTool(
 
   // The turn resumes with the EXECUTED outcome, not the pending propose.
   return approved;
+}
+
+/**
+ * FIX E, read side. Did this DISPATCHED operator tool call come back as a
+ * substrate escalation — a propose that substrate parked in `proposed` pending
+ * a human decision?
+ *
+ * Returns the action id from SUBSTRATE'S RESPONSE, or null. This is the ONLY
+ * source `createSubstrateEscalationApproval` is ever given an action id from;
+ * the model's own arguments are read here solely to answer "was this a
+ * propose?", never to supply the id.
+ *
+ * Deliberately conservative — every not-sure answer is null, which leaves
+ * today's behaviour (record the pending result as an ordinary tool result and
+ * carry on) rather than raising an approval nobody asked for:
+ *
+ *   - not a `manage_substrate` propose            -> null
+ *   - the MCP call failed, or the envelope is a
+ *     tool-level error / unparseable              -> null
+ *   - `requires_approval` is not exactly `true`   -> null (an 'auto' capability
+ *                                                   executed, or a `replay: true`
+ *                                                   of an action already past
+ *                                                   `proposed`)
+ *   - `action_id` missing or not a plausible id   -> null
+ */
+export function readSubstrateEscalation(
+  name: string,
+  args: unknown,
+  result: unknown,
+): string | null {
+  if (!isSubstratePropose(name, args)) return null;
+  const envelope = readMcpEnvelope(result);
+  if (!envelope || envelope.isError) return null;
+  const shape = (envelope.json ?? {}) as ProposeShape;
+  if (shape.requires_approval !== true) return null;
+  return isValidSubstrateActionId(shape.action_id) ? shape.action_id : null;
+}
+
+/**
+ * FIX E, deny side. Close out the substrate action a DENIED escalation
+ * approval refers to.
+ *
+ * THE DECISION, stated rather than left ambiguous: a denied escalation is
+ * REJECTED IN SUBSTRATE. The action is real and already in `proposed`; leaving
+ * it there would be exactly the invisible stall this fix exists to remove, just
+ * moved one step later — the operator would keep rediscovering an action the
+ * human has already refused, and substrate's ledger would disagree with the
+ * dashboard about what was decided.
+ *
+ * `reject` is in OPERATOR_DENIED_SUBSTRATE_ACTIONS and stays there. This call
+ * is made with `principal: 'human'` for the same reason the approve leg is: a
+ * PERSON clicked deny. The agent's own tool surface still cannot reach it.
+ *
+ * BEST-EFFORT, and the tradeoff is deliberate. If substrate refuses the reject
+ * (already resolved, transport failure), we do NOT block the denial: an
+ * approval a human cannot deny is a wedge, and wedging the org's one operator
+ * conversation is strictly worse than a stale `proposed` row. The failure is
+ * returned so the caller can fold it into the tool result the model sees, which
+ * makes the residue visible instead of silent.
+ *
+ * Runs through `executeOnce` on the approval id, so it inherits the principal
+ * check, the cross-org guard and the advisory lock. That also means a
+ * deny racing an approve cannot fire both calls: whichever executes first is
+ * cached under this approval id and the loser is served that result, while
+ * `resolveApproval`'s conditional UPDATE 409s it.
+ */
+export async function rejectEscalatedSubstrateAction(
+  pool: pg.Pool,
+  opts: {
+    approvalId: string;
+    approval: { toolName: string; toolArgs: unknown };
+    reason?: string;
+    jwt: string;
+    orgId: string;
+  },
+): Promise<{ attempted: boolean; ok: boolean; error?: string }> {
+  const actionId = readSubstrateEscalationActionId(opts.approval);
+  if (!actionId) return { attempted: false, ok: true };
+
+  // `reason` is required by the MCP tool and lands in substrate's audit trail.
+  const reason =
+    typeof opts.reason === 'string' && opts.reason.trim().length > 0
+      ? opts.reason.trim()
+      : 'Denied in the Butterbase operator approvals feed.';
+
+  const call = await executeOnce(pool, {
+    approvalId: opts.approvalId,
+    name: SUBSTRATE_ESCALATION_TOOL,
+    args: { action: 'reject', action_id: actionId, reason },
+    jwt: opts.jwt,
+    orgId: opts.orgId,
+    principal: 'human',
+  });
+
+  if (!call.ok) return { attempted: true, ok: false, error: call.error };
+  const envelope = readMcpEnvelope(call.result);
+  if (envelope?.isError) return { attempted: true, ok: false, error: envelope.text };
+  return { attempted: true, ok: true };
 }
