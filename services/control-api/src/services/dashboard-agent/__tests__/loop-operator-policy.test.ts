@@ -333,6 +333,8 @@ describe('operator — allow verdict', () => {
       'operator-service-key',
       ORG_ID,
       'trace-test-1',
+      // Ledger provenance; undefined for a turn with no operator wake behind it.
+      undefined,
     );
     expect(mockCreateApproval).not.toHaveBeenCalled();
     const result = events.find((e) => e.type === 'tool_result') as
@@ -375,6 +377,8 @@ describe('operator — allow verdict', () => {
       'operator-service-key',
       ORG_ID,
       'trace-test-1',
+      // Ledger provenance; undefined for a turn with no operator wake behind it.
+      undefined,
     );
   });
 });
@@ -571,6 +575,8 @@ describe('non-operator conversation is unaffected', () => {
       ORG_ID,
       // The human assistant carries no trace id (see `humanInput`) — D1's
       // trace threading is operator-only.
+      undefined,
+      // Nor any trigger context: its actions are user-instructed by definition.
       undefined,
     );
     expect(events.some((e) => e.type === 'error')).toBe(false);
