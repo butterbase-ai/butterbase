@@ -148,9 +148,21 @@ export type OperatorTurnResult = {
  *
  * i.e. EVERY operator wake died at the first gateway call, and the deployment
  * was silently dead — the failure surfaced only as an `errors` counter. No unit
- * test caught it because they all mock the gateway. `anthropic/claude-sonnet-4.5`
- * was driven end-to-end (203 events, real tool calls, a real gate) and is the
- * verified-routable default.
+ * test caught it because they all mock the gateway.
+ *
+ * The default is `qwen/qwen3.7-flash` (catalog-verified 2026-08-07: 1M context,
+ * $0.03/$0.13 per Mtok). Measured operator spend on `anthropic/claude-sonnet-4.5`
+ * was ~$28/day for ONE org — 8.93M prompt tokens across 141 turns, ~430x the
+ * sandbox compute cost — so the model, not the compute, is the bill.
+ *
+ * TRADE-OFF, know it before changing this back or forward: qwen has NO chat
+ * models on imarouter (only wan-*/happyhorse-* video), so this id is
+ * SINGLE-HOMED on openrouter — `select.ts` rankRoutersPresenceMode returns a
+ * one-element list and an openrouter outage has no fallback.
+ * `anthropic/claude-sonnet-4.5` is dual-homed (openrouter + provider-secondary)
+ * and remains the one-env-var revert: OPERATOR_MODEL=anthropic/claude-sonnet-4.5.
+ * `deepseek/deepseek-v4-flash` could be dual-homed but needs a pricing rule
+ * added to provider-secondary-pricing.json first.
  *
  * PRECEDENCE (highest first):
  *   1. `opts.model` — an explicit caller-supplied id always wins.
@@ -164,7 +176,7 @@ export type OperatorTurnResult = {
  * can set it without import-order games.
  * ============================================================================
  */
-export const DEFAULT_OPERATOR_MODEL = 'anthropic/claude-sonnet-4.5';
+export const DEFAULT_OPERATOR_MODEL = 'qwen/qwen3.7-flash';
 
 /** Resolve the model for a wake. See the precedence note above. */
 export function resolveOperatorModel(explicit?: string): string {
