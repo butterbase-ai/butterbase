@@ -73,7 +73,7 @@ import {
   operatorPolicyFor,
   operatorPolicyForOrg,
   principalMayExecute,
-  OPERATOR_TOOL_ALLOWLIST,
+  OPERATOR_TOOL_SURFACE,
 } from '../operator-policy.js';
 import { operatorUserId, operatorOrgIdFromUserId, getOrCreateOperatorConversation } from '../operator-store.js';
 import { executeOnce } from '../tool-bridge.js';
@@ -212,10 +212,16 @@ describe('operatorPolicyForOrg', () => {
    * them ever grows such an argument it is covered on the day it lands rather
    * than on the day somebody remembers to extend a list.
    */
-  it('applies to every allowlisted tool, not just manage_substrate', () => {
-    for (const tool of OPERATOR_TOOL_ALLOWLIST) {
-      expect(operatorPolicyForOrg(tool, { org_id: ORG_B }, ORG_A)).toBe('deny');
-      expect(operatorPolicyForOrg(tool, {}, ORG_A)).not.toBe('deny');
+  it('applies to every tool on the operator surface, not just manage_substrate', () => {
+    for (const tool of OPERATOR_TOOL_SURFACE) {
+      expect(operatorPolicyForOrg(tool, { org_id: ORG_B }, ORG_A), tool).toBe('deny');
+      expect(operatorPolicyForOrg(tool, {}, ORG_A), tool).not.toBe('deny');
+    }
+  });
+
+  it('outranks yolo_mode — pre-authorising YOUR org authorises nothing in another', () => {
+    for (const tool of OPERATOR_TOOL_SURFACE) {
+      expect(operatorPolicyForOrg(tool, { org_id: ORG_B }, ORG_A, { yoloMode: true }), tool).toBe('deny');
     }
   });
 });
@@ -419,7 +425,11 @@ describe('operator dispatch — a foreign org_id is refused on the operator\'s O
 
     const events = await collect(runAgentTurn(operatorInput()));
 
-    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    // `manage_substrate get_settings` (the yolo probe) is the one call a gated
+    // verdict legitimately makes; the PROPOSE itself must not have dispatched.
+    expect(
+      mockCallMcpTool.mock.calls.filter((c) => (c[1] as { action?: string })?.action !== 'get_settings'),
+    ).toEqual([]);
     expect(mockCreateApproval).toHaveBeenCalledTimes(1);
     expect(events.some((e) => e.type === 'approval_required')).toBe(true);
   });

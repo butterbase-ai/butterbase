@@ -54,7 +54,7 @@ import {
 import { getSystemPrompt } from '../prompt.js';
 import { operatorUserId } from '../operator-store.js';
 import {
-  OPERATOR_TOOL_ALLOWLIST,
+  OPERATOR_TOOL_TIERS,
   OPERATOR_LOCAL_TOOLS,
   operatorPolicyFor,
   operatorPolicyForOrg,
@@ -206,7 +206,7 @@ describe('scratchpad tool — catalog and policy table', () => {
   });
 
   it('has a deliberate verdict in the operator policy table: allow', () => {
-    expect(OPERATOR_TOOL_ALLOWLIST.has(OPERATOR_SCRATCHPAD_TOOL)).toBe(true);
+    expect(OPERATOR_TOOL_TIERS.get(OPERATOR_SCRATCHPAD_TOOL)).toBe('allow');
     expect(operatorPolicyFor(OPERATOR_SCRATCHPAD_TOOL, { content: 'x' })).toBe('allow');
   });
 

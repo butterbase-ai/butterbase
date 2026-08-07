@@ -25,12 +25,44 @@ import { OPERATOR_SCRATCHPAD_TOOL, OPERATOR_SANDBOX_CODE_TOOL } from './tool-cat
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
 
 /**
+ * The two TOOL-level tiers (spec 2026-08-07). There is deliberately no
+ * tool-level `deny` tier any more: the operator may reach every tool in the
+ * catalog, either freely or through the owner's approval queue.
+ *
+ * `deny` still exists in `OperatorPolicy` and is still returned — but only by
+ * the `manage_substrate` ACTION rules below, which are self-approval and
+ * control-weakening guards, not a policy tier. See
+ * OPERATOR_DENIED_SUBSTRATE_ACTIONS.
+ */
+export type OperatorToolTier = 'allow' | 'approval';
+
+/**
+ * Per-turn context for a verdict.
+ *
+ * `yoloMode` is the org's substrate `yolo_mode` flag, read once per operator
+ * turn from `manage_substrate action="get_settings"` (see
+ * `readOperatorYoloMode` in operator-yolo.ts). It is NOT a property of the
+ * policy tables — the tables say what tier a tool is in; this says whether
+ * this particular org has pre-authorised the `approval` tier.
+ *
+ * ABSENT MEANS FALSE, and that is the whole safety argument for threading it
+ * as an optional field rather than a required one: every existing caller, and
+ * any future one that forgets, gets the GATED behaviour. There is no value of
+ * this object that turns a `deny` into anything else.
+ */
+export type OperatorPolicyContext = {
+  /** The org's substrate yolo_mode. Absent/undefined = false = gate normally. */
+  yoloMode?: boolean;
+};
+
+/**
  * Tools the operator dispatches IN-PROCESS in the loop rather than forwarding
  * to the MCP server. There is no MCP tool by these names.
  *
- * They still get a verdict from the one table below (they are spread into
- * OPERATOR_TOOL_ALLOWLIST), so the dispatch-site control governs them exactly
- * like any other tool. What the set adds is the two places a LOCAL name must
+ * They still get a verdict from the one table below (both are listed in
+ * OPERATOR_TOOL_TIERS by name, and the sufficiency test fails the build if
+ * either is missing), so the dispatch-site control governs them exactly like
+ * any other tool. What the set adds is the two places a LOCAL name must
  * NOT be treated as an MCP name: `principalMayExecute` (the approval-replay
  * path, which ends in `callMcpTool`) and the loop's internal `turnMcp` wrapper.
  */
@@ -40,12 +72,38 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Tools the operator may call at all. Everything else is `deny`.
+ * THE ONE TOOL TABLE. Every tool the catalog advertises, with a deliberate
+ * tier. Replaces the six-tool allowlist (spec
+ * docs/superpowers/specs/2026-08-07-operator-full-tool-access.md).
  *
- * manage_billing, manage_app and manage_repo are deliberately absent: nothing
- * in v1 lets the operator spend money or delete infrastructure.
+ * WHY THE ALLOWLIST WENT AWAY. Six tools was under-inclusive by accident, not
+ * by design — the old comment justified three deliberate exclusions and was
+ * silent on the other thirty. The operator could `select_rows` an app's data
+ * and change nothing: it could not reschedule a booking, resolve a ticket, or
+ * call the app's own reminder function, so for anything touching the business
+ * a substrate memo was the only verb it had. Nothing tested that the allowlist
+ * was SUFFICIENT, only that it was ENFORCED, which is why that stayed
+ * invisible for two weeks. The sufficiency guard in
+ * __tests__/operator-policy.test.ts is the fix for the class, not just the
+ * instance: a catalog tool with no entry HERE fails the build.
  *
- * manage_integrations is present and UNGATED. That is a deliberately accepted
+ * DENY-BY-DEFAULT AT THE CODE LEVEL, even though no tool is denied by policy.
+ * `operatorToolTier` resolves an unlisted name to 'approval', never 'allow'
+ * (see OPERATOR_UNLISTED_TOOL_TIER). Adding a tool to the catalog can
+ * therefore never silently grant unsupervised access — the worst case is that
+ * it lands in the owner's queue until somebody classifies it here.
+ *
+ * THE `allow` TIER IS READS AND INWARD WRITES. It is the spec's enumeration
+ * verbatim, not a category I widened. Note in particular what is NOT here:
+ * `read_file` / `list_files` / `list_partner_apis` are ordinary reads that
+ * could defensibly be 'allow', and are deliberately left at 'approval'
+ * because the spec's allow list is closed. Widening it is a spec change.
+ *
+ * `manage_substrate` is 'allow' AT THE TOOL LEVEL ONLY. Its real verdict is
+ * per-action and is computed below — including the self-approval denial,
+ * which this tier does not and must not override.
+ *
+ * manage_integrations is 'allow' and UNGATED. That is a deliberately accepted
  * risk, recorded 2026-08-05 and re-confirmed by the user 2026-08-06: it is the
  * real outbound-email path, so the operator can send mail with no human in the
  * loop. Do not silently change this — revisit the decision instead.
@@ -101,15 +159,94 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
  * concern for a later stage (Stage C's custom container), not something to
  * attempt here by editing `sandbox-provider.ts`'s config plumbing.
  */
-export const OPERATOR_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
-  'manage_substrate',
-  'manage_integrations',
-  'manage_people',
-  'query_audit_logs',
-  'select_rows',
-  'butterbase_docs',
-  ...OPERATOR_LOCAL_TOOLS,
+export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Map<string, OperatorToolTier>([
+  // ---- allow: reads, and writes that stay inside the org's own memory ----
+  ['butterbase_docs', 'allow'],
+  ['list_regions', 'allow'],
+  ['select_rows', 'allow'],
+  ['query_audit_logs', 'allow'],
+  ['rag_query', 'allow'],
+  ['manage_people', 'allow'],
+  // per-action below; the tool-level tier is only the floor for actions with
+  // no rule of their own
+  ['manage_substrate', 'allow'],
+  // the real outbound-email path — ungated, accepted risk, see above
+  ['manage_integrations', 'allow'],
+  // loop-internal tools, unchanged (see OPERATOR_LOCAL_TOOLS)
+  [OPERATOR_SCRATCHPAD_TOOL, 'allow'],
+  [OPERATOR_SANDBOX_CODE_TOOL, 'allow'],
+
+  // ---- approval: everything else the catalog advertises ----
+  // app lifecycle & discovery
+  ['manage_app', 'approval'],
+  ['init_app', 'approval'],
+  // schema, RLS, migrations
+  ['manage_schema', 'approval'],
+  ['manage_rls', 'approval'],
+  ['manage_migrations', 'approval'],
+  // auth
+  ['manage_auth_config', 'approval'],
+  ['manage_auth_users', 'approval'],
+  ['manage_oauth', 'approval'],
+  ['manage_api_keys', 'approval'],
+  // functions & data
+  ['deploy_function', 'approval'],
+  ['manage_function', 'approval'],
+  ['invoke_function', 'approval'],
+  ['insert_row', 'approval'],
+  ['seed_database', 'approval'],
+  // storage, kv, realtime, edge
+  ['manage_storage', 'approval'],
+  ['manage_kv', 'approval'],
+  ['manage_realtime', 'approval'],
+  ['manage_durable_objects', 'approval'],
+  ['manage_edge_ssr', 'approval'],
+  // AI & RAG
+  ['manage_ai', 'approval'],
+  ['manage_rag_content', 'approval'],
+  ['manage_agents', 'approval'],
+  // platform
+  ['manage_repo', 'approval'],
+  ['manage_billing', 'approval'],
+  ['list_partner_apis', 'approval'],
+  ['submit_suggestion', 'approval'],
+  // workspace file ops & workspace deploys
+  ['write_file', 'approval'],
+  ['read_file', 'approval'],
+  ['list_files', 'approval'],
+  ['delete_file', 'approval'],
+  ['deploy_frontend', 'approval'],
+  ['deploy_function_from_workspace', 'approval'],
 ]);
+
+/**
+ * The tier for a tool with no entry above.
+ *
+ * 'approval', never 'allow'. This is the deny-by-default property: a tool
+ * added to the catalog, or a name the model invented, cannot reach the
+ * unsupervised tier by omission. The sufficiency test makes omission a build
+ * failure as well, but this is the runtime half — the test can be skipped in a
+ * standalone OSS checkout, this cannot.
+ */
+export const OPERATOR_UNLISTED_TOOL_TIER: OperatorToolTier = 'approval';
+
+/** The tool-level tier, with the deny-by-default floor applied. */
+export function operatorToolTier(name: string): OperatorToolTier {
+  return OPERATOR_TOOL_TIERS.get(name) ?? OPERATOR_UNLISTED_TOOL_TIER;
+}
+
+/**
+ * The operator's TOOL SURFACE — every tool it has a deliberate verdict for.
+ *
+ * DERIVED from the one table, never written out a second time. This is not the
+ * old allowlist under a new name: nothing consults it to decide whether the
+ * operator may call something (the answer is now "yes, at some tier"). Its one
+ * job is in `principalMayExecute('human', …)`, where it keeps the approve
+ * button confined to tools the operator could actually have proposed, so a
+ * corrupted or hand-inserted approval row cannot turn it into arbitrary tool
+ * execution.
+ */
+export const OPERATOR_TOOL_SURFACE: ReadonlySet<string> = new Set(OPERATOR_TOOL_TIERS.keys());
 
 /**
  * Substrate capabilities whose `default_policy` is 'approval_required'.
@@ -427,36 +564,35 @@ export function orgIdArgIsForeign(args: unknown, ownOrgId: string | null | undef
 }
 
 /**
- * The one table. Answers, per (tool, args):
- *   'deny'     — not callable by the operator at all.
- *   'approval' — callable, but the turn must pause for a human.
- *   'allow'    — callable freely.
+ * The pre-yolo verdict: the tables alone, with no per-org context.
  *
- * Gating comes from substrate's own policy engine and nothing else: a
- * `manage_substrate` propose of an approval_required capability. Every other
- * allowlisted tool is 'allow' by decision, including manage_integrations
- * (see the allowlist comment).
+ * Split out from `operatorPolicyFor` so that the one place `yolo_mode` is
+ * applied is a single, greppable line — and so that it is structurally
+ * impossible for yolo to touch the `deny` branch, since this function has
+ * already returned by then.
  *
  * PRECEDENCE, in this order and no other:
  *
  *   deny  >  approval  >  allow
  *
- *   1. deny, per TOOL     — not on OPERATOR_TOOL_ALLOWLIST.
- *   2. deny, per ACTION   — OPERATOR_DENIED_SUBSTRATE_ACTIONS. A denied action
+ *   1. deny, per ACTION   — OPERATOR_DENIED_SUBSTRATE_ACTIONS. A denied action
  *                           can never be downgraded to approval or allow by
  *                           anything else in the args.
- *   3. approval, per ACTION     — OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.
- *   4. approval, per CAPABILITY — propose of a SUBSTRATE_APPROVAL_REQUIRED one.
- *   5. allow              — the floor.
+ *   2. approval, per ACTION     — OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.
+ *   3. approval, per CAPABILITY — propose of a SUBSTRATE_APPROVAL_REQUIRED one.
+ *   4. the TOOL tier      — OPERATOR_TOOL_TIERS, floored at 'approval' for any
+ *                           name with no entry.
  *
- * The two approval rules (3 and 4) are independent gating sources and are meant
+ * There is no longer a tool-level deny step. That is the point of the
+ * 2026-08-07 spec: the operator reaches the whole catalog, at one of two
+ * tiers. `deny` survives only for the substrate actions that would let the
+ * agent weaken the controls governing it.
+ *
+ * The two approval rules (2 and 3) are independent gating sources and are meant
  * to be: rule/outbox mutations are not capability proposals, so no single
  * source could cover both. They are both here, in one table, by design.
  */
-export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
-  // 1. Tool-level deny.
-  if (!OPERATOR_TOOL_ALLOWLIST.has(name)) return 'deny';
-
+function tableVerdict(name: string, args: unknown): OperatorPolicy {
   if (name === 'manage_substrate') {
     // The action rules below are the whole substrate guardrail, so anything we
     // cannot read confidently is denied rather than waved through.
@@ -467,14 +603,14 @@ export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
     if (action === UNREADABLE) return 'deny';
 
     if (action) {
-      // 2. Controls the operator must not be able to weaken. Checked ahead of
+      // 1. Controls the operator must not be able to weaken. Checked ahead of
       // every approval path, so a denial is never downgraded.
       if (OPERATOR_DENIED_SUBSTRATE_ACTIONS.has(action)) return 'deny';
 
-      // 3. Oversight-weakening actions that a human may still authorise.
+      // 2. Oversight-weakening actions that a human may still authorise.
       if (OPERATOR_APPROVAL_SUBSTRATE_ACTIONS.has(action)) return 'approval';
 
-      // 4. Substrate's own policy engine: a propose of an approval_required
+      // 3. Substrate's own policy engine: a propose of an approval_required
       // capability.
       if (action === 'propose') {
         const capability = readStringField(parsed, 'capability');
@@ -483,8 +619,47 @@ export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
     }
   }
 
-  // 5. Floor.
-  return 'allow';
+  // 4. The tool tier, deny-by-default floored at 'approval'.
+  return operatorToolTier(name);
+}
+
+/**
+ * The one table. Answers, per (tool, args, org context):
+ *   'deny'     — not callable by the operator at all.
+ *   'approval' — callable, but the turn must pause for a human.
+ *   'allow'    — callable freely.
+ *
+ * YOLO MODE. `ctx.yoloMode` is the org's substrate `yolo_mode` flag. When it is
+ * true, an `approval` verdict becomes `allow`: the owner has pre-authorised the
+ * gated tier for this org, so the operator acts unsupervised across the whole
+ * catalog. Three properties of that, all load-bearing:
+ *
+ *  - IT CANNOT REACH `deny`. `tableVerdict` returns before this line for every
+ *    denied action, so `approve`/`reject`/`set_yolo`/`resolve_policy_conflict`
+ *    stay denied at every setting of the flag. An agent that could approve its
+ *    own proposals would make every gate above it decorative, and `set_yolo`
+ *    being denied is what stops the operator switching this on for itself.
+ *
+ *  - PRINCIPLES STILL DOMINATE. This flag governs only the OPERATOR-side gate,
+ *    which decides whether the loop pauses. Substrate's own policy engine still
+ *    runs on every propose, and `cloud/packages/substrate-core/src/policy/
+ *    policy-engine.ts` returns requires_approval for a principle conflict
+ *    BEFORE it consults `organization_yolo_mode`. A customer principle that
+ *    forbids an action therefore blocks it whatever this says, and the
+ *    substrate escalation bridge surfaces that as an approval anyway.
+ *
+ *  - ABSENT MEANS GATED. `ctx?.yoloMode` is undefined for every caller that
+ *    does not pass it, which is the safe direction. Only `=== true` opens the
+ *    gate; a truthy non-boolean does not.
+ */
+export function operatorPolicyFor(
+  name: string,
+  args: unknown,
+  ctx?: OperatorPolicyContext,
+): OperatorPolicy {
+  const verdict = tableVerdict(name, args);
+  if (verdict === 'approval' && ctx?.yoloMode === true) return 'allow';
+  return verdict;
 }
 
 /**
@@ -500,27 +675,41 @@ export function operatorPolicyFor(name: string, args: unknown): OperatorPolicy {
  * the approval replay — the one reachable path — unguarded. The guard is
  * therefore ALSO applied directly in `executeOnce` (tool-bridge.ts).
  *
- * Precedence: a foreign `org_id` is 'deny' ahead of everything, including the
- * tool allowlist. There is no tool for which targeting another org is
- * legitimate, so nothing below it needs to be consulted.
+ * Precedence: a foreign `org_id` is 'deny' ahead of everything, including
+ * `yolo_mode`. There is no tool for which targeting another org is legitimate,
+ * so nothing below it needs to be consulted — and pre-authorising the approval
+ * tier for YOUR org says nothing about somebody else's.
  */
 export function operatorPolicyForOrg(
   name: string,
   args: unknown,
   operatorOrgId: string | null | undefined,
+  ctx?: OperatorPolicyContext,
 ): OperatorPolicy {
   if (orgIdArgIsForeign(args, operatorOrgId)) return 'deny';
-  return operatorPolicyFor(name, args);
+  return operatorPolicyFor(name, args, ctx);
 }
 
-/** Thin wrapper over the table: may the operator call this tool at all? */
+/**
+ * Thin wrapper over the table: may the operator call this tool at all?
+ *
+ * Since 2026-08-07 this is true for every tool: there is no tool-level deny
+ * tier, so the answer is "yes, at some tier". Retained because the loop uses it
+ * to build the operator's offered catalog and because it keeps that call site
+ * asking the policy module rather than assuming — if a tool-level denial is
+ * ever reintroduced, the filter picks it up with no edit.
+ */
 export function isOperatorToolAllowed(name: string): boolean {
   return operatorPolicyFor(name, undefined) !== 'deny';
 }
 
 /** Thin wrapper over the table: must this call pause for a human? */
-export function operatorRequiresApproval(name: string, args: unknown): boolean {
-  return operatorPolicyFor(name, args) === 'approval';
+export function operatorRequiresApproval(
+  name: string,
+  args: unknown,
+  ctx?: OperatorPolicyContext,
+): boolean {
+  return operatorPolicyFor(name, args, ctx) === 'approval';
 }
 
 /**
@@ -546,10 +735,14 @@ export type OperatorPrincipal = 'operator' | 'human';
  *
  * A 'human' principal is still confined to the operator's TOOL surface. This
  * path only ever executes tool calls the operator itself proposed, so nothing
- * legitimate can name a tool outside the allowlist; keeping the tool-level
- * check means a corrupted or hand-inserted approval row cannot turn the
- * approve button into arbitrary tool execution. Only the substrate ACTION
+ * legitimate can name a tool outside OPERATOR_TOOL_SURFACE; keeping the
+ * tool-level check means a corrupted or hand-inserted approval row cannot turn
+ * the approve button into arbitrary tool execution. Only the substrate ACTION
  * denials — the agent-specific ones — are lifted.
+ *
+ * NO `ctx` HERE, deliberately. This path runs only for an approval a human has
+ * already resolved, so there is no gate left for `yolo_mode` to open — passing
+ * it could only ever widen what a stale approval row is allowed to execute.
  */
 export function principalMayExecute(
   principal: OperatorPrincipal,
@@ -565,7 +758,7 @@ export function principalMayExecute(
   // not have.
   if (OPERATOR_LOCAL_TOOLS.has(name)) return false;
   if (principal === 'operator') return operatorPolicyFor(name, args) !== 'deny';
-  if (principal === 'human') return OPERATOR_TOOL_ALLOWLIST.has(name);
+  if (principal === 'human') return OPERATOR_TOOL_SURFACE.has(name);
   // Unknown principal — including `undefined` from a JavaScript caller or a
   // test that predates the argument. Fail closed rather than inheriting
   // whichever branch happens to be listed last.

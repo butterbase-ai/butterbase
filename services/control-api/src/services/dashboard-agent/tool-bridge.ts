@@ -3,13 +3,16 @@ import { callMcpTool, type McpCallResult } from './mcp-client.js';
 import { principalMayExecute, orgIdArgIsForeign, type OperatorPrincipal } from './operator-policy.js';
 
 /**
- * The allowlist and the gating rules live in ONE table, in operator-policy.ts.
- * They used to be two independent lists here and in tool-catalog.ts, and they
- * drifted until their intersection was empty. Re-exported for existing callers;
- * `operator-policy.ts` is the source of truth.
+ * The tool surface and the gating rules live in ONE table, in
+ * operator-policy.ts. They used to be two independent lists here and in
+ * tool-catalog.ts, and they drifted until their intersection was empty.
+ * Re-exported for existing callers; `operator-policy.ts` is the source of
+ * truth.
  */
 export {
-  OPERATOR_TOOL_ALLOWLIST,
+  OPERATOR_TOOL_TIERS,
+  OPERATOR_TOOL_SURFACE,
+  operatorToolTier,
   isOperatorToolAllowed,
   operatorRequiresApproval,
   operatorPolicyFor,
@@ -17,7 +20,9 @@ export {
   orgIdArgIsForeign,
   principalMayExecute,
   type OperatorPolicy,
+  type OperatorPolicyContext,
   type OperatorPrincipal,
+  type OperatorToolTier,
 } from './operator-policy.js';
 
 /**

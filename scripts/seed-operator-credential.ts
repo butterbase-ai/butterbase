@@ -40,8 +40,36 @@ import pg from 'pg';
 import { setOperatorCredential } from '../services/control-api/src/services/dashboard-agent/operator-credential.js';
 
 export const DEFAULT_JOB_NAME = 'sweep';
-export const DEFAULT_JOB_INSTRUCTIONS =
-  'Review recent learnings, entities, and commitments. Flag anything at risk. Propose follow-ups.';
+/**
+ * The previous text — "Review recent learnings, entities, and commitments.
+ * Flag anything at risk. Propose follow-ups." — produced exactly what it asked
+ * for. Across 42 recorded actions, 100% were `auto_approved` substrate writes:
+ * a client 14 days overdue and at churn risk got an `upsert_entity`; a customer
+ * asking "what's my next step here?" got a `record_learning`; a commitment TO
+ * SEND A REMINDER got a row noting the reminder was due. "Propose" was read as
+ * *write down a suggestion*, not *create a proposed action*.
+ *
+ * Do not soften this back toward "flag" / "review" / "surface" verbs. The
+ * change that matters is the explicit demotion of decision and learning rows
+ * from output to context. See
+ * docs/superpowers/specs/2026-08-07-operator-full-tool-access.md.
+ */
+export const DEFAULT_JOB_INSTRUCTIONS = [
+  'Review recent learnings, entities and commitments.',
+  '',
+  'When you find something that needs doing, DO IT or PROPOSE IT — do not merely',
+  'record that it needs doing. A decision or learning row is not an action;',
+  'nobody reads them.',
+  '',
+  '- If it is something you may do on your own, do it.',
+  '- If it needs approval, propose the actual action — the real email draft, the',
+  '  real refund, the real reschedule — so it reaches the owner\'s queue.',
+  '- Record a decision or learning only when there is genuinely nothing to act',
+  '  on, or to capture context that will inform a later action.',
+  '',
+  'Never write "X requires immediate attention" as your output. If it requires',
+  'attention, propose the thing that addresses it.',
+].join('\n');
 export const DEFAULT_JOB_INTERVAL_SECONDS = 600;
 
 export function parseArgs(argv: string[]): { orgId: string } {

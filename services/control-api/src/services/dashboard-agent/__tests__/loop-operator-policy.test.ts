@@ -178,64 +178,12 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('operator — deny verdict', () => {
-  // The headline defect: an unattended operator holding an org service key
-  // could call ~33 tools with no gate of any kind.
-  it.each([
-    ['manage_api_keys', { action: 'create' }],
-    ['manage_auth_users', { action: 'delete' }],
-    ['deploy_function', { action: 'deploy' }],
-    ['manage_rls', { action: 'disable' }],
-    ['seed_database', { action: 'seed' }],
-    ['write_file', { app_id: 'a', path: 'p', content: 'c' }],
-  ])('does NOT dispatch %s, and returns the refusal as a tool result', async (name, args) => {
-    oneToolCallThenStop(name, args);
-
-    const events = await collect(runAgentTurn(operatorInput()));
-
-    // The control: nothing was dispatched.
-    expect(mockCallMcpTool).not.toHaveBeenCalled();
-
-    // The model sees an ordinary tool error and can adapt — the turn is not
-    // killed and no error frame is emitted.
-    const result = events.find((e) => e.type === 'tool_result') as
-      | Extract<LoopEvent, { type: 'tool_result' }>
-      | undefined;
-    expect(result).toBeDefined();
-    expect(result!.error).toContain('not permitted for the autonomous operator');
-    expect(result!.result).toBeUndefined();
-    expect(events.some((e) => e.type === 'error')).toBe(false);
-    expect(events.some((e) => e.type === 'done')).toBe(true);
-
-    // No approval was created — a denied tool is not gateable.
-    expect(mockCreateApproval).not.toHaveBeenCalled();
-
-    // The refusal is persisted as the tool row answering the assistant's
-    // tool_call, so the history never ends in an unanswered tool_call.
-    expect(mockAppendMessage).toHaveBeenCalledWith(
-      stubPool,
-      'conv-1',
-      expect.objectContaining({
-        role: 'tool',
-        toolCallId: 'call-1',
-        toolName: name,
-        toolResult: { error: expect.stringContaining('not permitted') },
-      }),
-    );
-  });
-
-  it('refuses a tool name the model invented that is in NO catalog', async () => {
-    // The catalog filter is only an affordance. A hallucinated name was never
-    // in any list, so only the dispatch-site check can refuse it.
-    oneToolCallThenStop('exfiltrate_everything', { target: 'evil.example' });
-
-    const events = await collect(runAgentTurn(operatorInput()));
-
-    expect(mockCallMcpTool).not.toHaveBeenCalled();
-    const result = events.find((e) => e.type === 'tool_result') as
-      | Extract<LoopEvent, { type: 'tool_result' }>
-      | undefined;
-    expect(result!.error).toContain('not permitted for the autonomous operator');
-  });
+  // Since the 2026-08-07 spec there is NO tool-level deny tier. The six tools
+  // that used to be listed here (manage_api_keys, manage_auth_users,
+  // deploy_function, manage_rls, seed_database, write_file) now GATE — see the
+  // approval-verdict block below, which asserts exactly that. `deny` survives
+  // only for the manage_substrate actions that would let the agent weaken the
+  // controls governing it.
 
   it('refuses a DENIED manage_substrate action (approve — agent self-approval)', async () => {
     // Never "fix" this by removing `approve` from OPERATOR_DENIED_SUBSTRATE_ACTIONS.
@@ -250,19 +198,124 @@ describe('operator — deny verdict', () => {
       | undefined;
     expect(result!.error).toContain('not permitted for the autonomous operator');
   });
+
+  it.each(['reject', 'set_yolo', 'resolve_policy_conflict'])(
+    'refuses the other control-weakening substrate action: %s',
+    async (action) => {
+      oneToolCallThenStop('manage_substrate', { action });
+
+      const events = await collect(runAgentTurn(operatorInput()));
+
+      expect(mockCallMcpTool).not.toHaveBeenCalled();
+      expect(mockCreateApproval).not.toHaveBeenCalled();
+      const result = events.find((e) => e.type === 'tool_result') as
+        | Extract<LoopEvent, { type: 'tool_result' }>
+        | undefined;
+      expect(result!.error).toContain('not permitted for the autonomous operator');
+
+      // The refusal is persisted as the tool row answering the assistant's
+      // tool_call, so the history never ends in an unanswered tool_call.
+      expect(mockAppendMessage).toHaveBeenCalledWith(
+        stubPool,
+        'conv-1',
+        expect.objectContaining({
+          role: 'tool',
+          toolCallId: 'call-1',
+          toolName: 'manage_substrate',
+          toolResult: { error: expect.stringContaining('not permitted') },
+        }),
+      );
+    },
+  );
+
+  it('refuses a tool name the model invented that is in NO catalog', async () => {
+    // An invented name now resolves to 'approval' rather than 'deny' (there is
+    // no tool-level deny tier), so it is the CATALOG guard that refuses it —
+    // and it must do so without opening an approval for a tool that does not
+    // exist, and without spending an MCP request probing yolo_mode.
+    oneToolCallThenStop('exfiltrate_everything', { target: 'evil.example' });
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toContain('not available in this agent\'s catalog');
+    expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // approval
 // ---------------------------------------------------------------------------
 
+/**
+ * `mockCallMcpTool` answers the yolo probe (`manage_substrate get_settings`)
+ * as well as real dispatches, so "was the tool dispatched?" is no longer
+ * "was the mock called?". These two helpers keep that distinction explicit
+ * rather than leaving every assertion to count calls by hand.
+ */
+function yoloProbes() {
+  return mockCallMcpTool.mock.calls.filter(
+    (c) => c[0] === 'manage_substrate' && (c[1] as { action?: string })?.action === 'get_settings',
+  );
+}
+function realDispatches() {
+  return mockCallMcpTool.mock.calls.filter(
+    (c) => !(c[0] === 'manage_substrate' && (c[1] as { action?: string })?.action === 'get_settings'),
+  );
+}
+/** Turn the yolo probe's answer on for this test. */
+function withYolo(yolo: boolean) {
+  mockCallMcpTool.mockImplementation(async (name: string, args: unknown) => {
+    if (name === 'manage_substrate' && (args as { action?: string })?.action === 'get_settings') {
+      return { ok: true, result: { content: [{ type: 'text', text: JSON.stringify({ yolo_mode: yolo }) }] } } as never;
+    }
+    return { ok: true, result: { content: [{ type: 'text', text: '{}' }] } } as never;
+  });
+}
+
 describe('operator — approval verdict', () => {
+  // The six tools this file used to assert were DENIED. They are now on the
+  // operator's surface at the 'approval' tier: it can reach them, but only
+  // through the owner's queue. That is the point of the 2026-08-07 spec — the
+  // operator could previously read an app's data and change nothing.
+  it.each([
+    ['manage_api_keys', { action: 'create' }],
+    ['manage_auth_users', { action: 'delete' }],
+    ['deploy_function', { action: 'deploy' }],
+    ['manage_rls', { action: 'disable' }],
+    ['seed_database', { action: 'seed' }],
+    ['write_file', { app_id: 'a', path: 'p', content: 'c' }],
+    ['invoke_function', { app_id: 'a', name: 'send-reminder' }],
+    ['insert_row', { app_id: 'a', table: 't' }],
+  ])('gates %s rather than executing it', async (name, args) => {
+    withYolo(false);
+    oneToolCallThenStop(name, args);
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    // The control: the tool itself never ran.
+    expect(realDispatches()).toEqual([]);
+
+    expect(mockCreateApproval).toHaveBeenCalledTimes(1);
+    expect(mockCreateApproval).toHaveBeenCalledWith(
+      stubPool,
+      expect.objectContaining({ toolName: name, toolArgs: args, sensitivity: 'destructive' }),
+    );
+    expect(events.some((e) => e.type === 'approval_required')).toBe(true);
+    // Paused, not completed.
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  });
+
   it('pauses the turn and creates an approval instead of executing (delete_rule)', async () => {
     oneToolCallThenStop('manage_substrate', { action: 'delete_rule', rule_id: 'r-1' });
 
     const events = await collect(runAgentTurn(operatorInput()));
 
-    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    expect(realDispatches()).toEqual([]);
     expect(mockCreateApproval).toHaveBeenCalledTimes(1);
     expect(mockCreateApproval).toHaveBeenCalledWith(
       stubPool,
@@ -300,7 +353,7 @@ describe('operator — approval verdict', () => {
 
     const events = await collect(runAgentTurn(operatorInput()));
 
-    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    expect(realDispatches()).toEqual([]);
     expect(mockCreateApproval).toHaveBeenCalledTimes(1);
     expect(events.some((e) => e.type === 'approval_required')).toBe(true);
   });
@@ -313,6 +366,113 @@ describe('operator — approval verdict', () => {
 
     expect(mockCheckTrust).not.toHaveBeenCalled();
     expect(mockCreateApproval).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// yolo_mode — the per-org pre-authorisation of the 'approval' tier
+// ---------------------------------------------------------------------------
+
+describe('operator — yolo_mode', () => {
+  it('with yolo OFF, a gated tool creates a pending approval and pauses', async () => {
+    withYolo(false);
+    oneToolCallThenStop('invoke_function', { app_id: 'app-1', name: 'send-reminder' });
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    expect(realDispatches()).toEqual([]);
+    expect(mockCreateApproval).toHaveBeenCalledTimes(1);
+    expect(events.some((e) => e.type === 'approval_required')).toBe(true);
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  });
+
+  it('with yolo ON, the SAME call dispatches with no approval', async () => {
+    withYolo(true);
+    oneToolCallThenStop('invoke_function', { app_id: 'app-1', name: 'send-reminder' });
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(realDispatches()).toEqual([
+      ['invoke_function', { app_id: 'app-1', name: 'send-reminder' }, 'operator-service-key', ORG_ID, 'trace-test-1'],
+    ]);
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+    expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
+
+  it('yolo does NOT lift the substrate self-approval denial', async () => {
+    withYolo(true);
+    oneToolCallThenStop('manage_substrate', { action: 'approve', action_id: 'act-1' });
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    expect(realDispatches()).toEqual([]);
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toContain('not permitted for the autonomous operator');
+  });
+
+  it('yolo does NOT lift the set_yolo denial — the operator cannot enable itself', async () => {
+    withYolo(true);
+    oneToolCallThenStop('manage_substrate', { action: 'set_yolo', yolo_mode: true });
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    expect(realDispatches()).toEqual([]);
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toContain('not permitted for the autonomous operator');
+  });
+
+  it('is not probed at all when nothing on the turn gates', async () => {
+    // The flag costs a request only when it can change an outcome. An
+    // allow-tier read — the overwhelmingly common operator turn — must not pay
+    // for it.
+    withYolo(false);
+    oneToolCallThenStop('select_rows', { app_id: 'app-1', table: 't' });
+
+    await collect(runAgentTurn(operatorInput()));
+
+    expect(yoloProbes()).toEqual([]);
+  });
+
+  it('is probed at most once per turn, however many calls gate', async () => {
+    withYolo(false);
+    // Two gated tool calls in one gateway pass. The first pauses the turn, so
+    // this also pins that the probe is not repeated on the way to that pause.
+    oneToolCallThenStop('invoke_function', { app_id: 'app-1', name: 'f' });
+
+    await collect(runAgentTurn(operatorInput()));
+
+    expect(yoloProbes().length).toBeLessThanOrEqual(1);
+  });
+
+  it('an unreadable yolo answer gates rather than opening', async () => {
+    mockCallMcpTool.mockImplementation(async (name: string, args: unknown) => {
+      if (name === 'manage_substrate' && (args as { action?: string })?.action === 'get_settings') {
+        throw new Error('substrate unreachable');
+      }
+      return { ok: true, result: { content: [{ type: 'text', text: '{}' }] } } as never;
+    });
+    oneToolCallThenStop('invoke_function', { app_id: 'app-1', name: 'f' });
+
+    const events = await collect(runAgentTurn(operatorInput()));
+
+    expect(realDispatches()).toEqual([]);
+    expect(mockCreateApproval).toHaveBeenCalledTimes(1);
+    expect(events.some((e) => e.type === 'approval_required')).toBe(true);
+  });
+
+  it('a human turn never probes yolo at all', async () => {
+    withYolo(true);
+    oneToolCallThenStop('select_rows', { app_id: 'app-1', table: 't' });
+
+    await collect(runAgentTurn(humanInput()));
+
+    expect(yoloProbes()).toEqual([]);
   });
 });
 
@@ -384,7 +544,7 @@ describe('operator — allow verdict', () => {
 // ---------------------------------------------------------------------------
 
 describe('operator — catalog filtering (affordance, not the control)', () => {
-  it('offers the model only tools the operator may call, MINUS the sandbox tool when no codeExecutor is supplied', async () => {
+  it('offers the model the WHOLE catalog, MINUS the sandbox tool when no codeExecutor is supplied', async () => {
     const { bodies } = oneToolCallThenStop('select_rows', { app_id: 'app-1' });
 
     await collect(runAgentTurn(operatorInput()));
@@ -404,8 +564,14 @@ describe('operator — catalog filtering (affordance, not the control)', () => {
     expect(offered.length).toBeGreaterThan(0);
     expect(offered).toContain('manage_substrate');
     expect(offered).not.toContain(OPERATOR_SANDBOX_CODE_TOOL);
-    for (const denied of ['manage_api_keys', 'manage_auth_users', 'deploy_function', 'manage_rls', 'seed_database', 'write_file']) {
-      expect(offered).not.toContain(denied);
+
+    // The six that used to be withheld are now OFFERED — this is the fix, not
+    // a regression. They are reachable at the 'approval' tier, and the model
+    // being able to see them is what lets it propose one. The gate is the
+    // dispatch-site verdict, asserted in the approval-verdict block above,
+    // never this list.
+    for (const gated of ['manage_api_keys', 'manage_auth_users', 'deploy_function', 'manage_rls', 'seed_database', 'write_file']) {
+      expect(offered).toContain(gated);
     }
   });
 

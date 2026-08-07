@@ -318,7 +318,10 @@ describe('fix E — cases that must NOT raise an approval', () => {
 
     const events = await collect(runAgentTurn(operatorInput()));
 
-    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    // The yolo probe (`get_settings`) is allowed; the propose is not.
+    expect(
+      mockCallMcpTool.mock.calls.filter((c) => (c[1] as { action?: string })?.action !== 'get_settings'),
+    ).toEqual([]);
     expect(mockCreateEscalation).not.toHaveBeenCalled();
     expect(mockCreateApproval).toHaveBeenCalledTimes(1);
     const approvalEvent = events.find((e) => e.type === 'approval_required') as

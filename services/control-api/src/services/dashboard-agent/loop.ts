@@ -25,6 +25,7 @@ import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
 import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
+import { readOperatorYoloMode } from './operator-yolo.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
 import { trimOperatorHistory } from './operator-history.js';
 import { getSystemPrompt } from './prompt.js';
@@ -543,7 +544,14 @@ export async function* runAgentTurn(
    * For operator turns `deps.mcp` is therefore replaced with a policy-enforcing
    * wrapper. Only an 'allow' verdict passes: these are internal calls with no
    * model in the loop and no turn to pause, so 'approval' is refused here too
-   * rather than silently executed. `defaultMcp`'s contract is to throw on
+   * rather than silently executed.
+   *
+   * `yolo_mode` is deliberately NOT passed here. These are calls the loop makes
+   * on its own behalf, not actions the org pre-authorised; nobody proposed them
+   * and no ledger row describes them. So this wrapper stays on the strict
+   * table at every setting of the flag — which also avoids the ordering knot of
+   * needing a yolo verdict to make the MCP call that reads yolo.
+   * `defaultMcp`'s contract is to throw on
    * failure and every caller already treats a throw as best-effort — schema
    * injection is wrapped in try/catch and skips per-app, the flush loop logs and
    * continues — so a refusal degrades the turn, it does not break it.
@@ -568,12 +576,13 @@ export async function* runAgentTurn(
    * The default `repoSync` is constructed in `getDefaultDeps` around the RAW
    * client, so it is the one `deps.mcp` consumer that would still hold it. It is
    * reachable only from the file-op / deploy / deploy_function routes and the
-   * end-of-turn flush they populate — all of whose tool names are currently
-   * denied to the operator. But that is a property of the current contents of
-   * OPERATOR_TOOL_ALLOWLIST, not of this code: add any workspace-touching tool
-   * to that allowlist later and the operator would silently gain `manage_repo`
-   * on the org service key, with nothing failing. Rebuilding here converts a
-   * code-reading argument into an invariant.
+   * end-of-turn flush they populate. Those tools used to be denied outright;
+   * since 2026-08-07 they are on the operator's surface at the 'approval'
+   * tier, and under `yolo_mode` an approved one executes unattended — so the
+   * argument that this path is unreachable no longer holds at all. Rebuilding
+   * `repoSync` on `turnMcp` is what keeps `manage_repo` on the org service key
+   * behind the policy table on that path, rather than behind a code-reading
+   * argument about which routes are live.
    *
    * An explicitly injected `repoSync` is honoured as-is: it is the caller's own
    * object, never the raw default client, and silently discarding it would
@@ -583,6 +592,36 @@ export async function* runAgentTurn(
     isOperator && !depsOverride?.repoSync
       ? createRepoSync({ cache, mcp: turnMcp })
       : deps.repoSync;
+
+  /**
+   * The org's substrate `yolo_mode` — read LAZILY, at most once per turn, and
+   * only when a verdict actually gates.
+   *
+   * When true, an 'approval' verdict at the dispatch site becomes 'allow': the
+   * owner has pre-authorised the gated tier for this org. It cannot reach a
+   * 'deny' (see `operatorPolicyFor`), so the substrate self-approval guard
+   * survives it, and substrate's own policy engine still gates on principle
+   * conflicts independently of this flag.
+   *
+   * LAZY, not eager, and that is a correctness property rather than a micro-
+   * optimisation. Eagerly reading it put an extra MCP round-trip on EVERY
+   * operator turn, including the overwhelmingly common one that only makes
+   * allow-tier substrate reads and would never consult the answer. Deferring
+   * it means the flag costs a request exactly when it can change an outcome.
+   *
+   * Read HERE rather than passed in on `input` for the same reason `isOperator`
+   * is derived rather than flagged: a permission-widening input that a caller
+   * can forget to compute is a bad shape. Reading it in the loop means every
+   * operator turn gets the org's real setting, or `false`.
+   *
+   * Never called on a human turn — `operatorVerdict` is null there, so the
+   * assistant's behaviour and its request count are unchanged.
+   */
+  let yoloModeCache: boolean | null = null;
+  const resolveYoloMode = async (): Promise<boolean> => {
+    if (yoloModeCache === null) yoloModeCache = await readOperatorYoloMode(turnMcp, input.jwt);
+    return yoloModeCache;
+  };
 
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
@@ -883,9 +922,32 @@ export async function* runAgentTurn(
          * stored credential being org-bound — an external property, not a
          * control.
          */
-        const operatorVerdict = isOperator
+        let operatorVerdict = isOperator
           ? operatorPolicyForOrg(tc.name, tc.args, operatorOrgId)
           : null;
+
+        /**
+         * `yolo_mode`, applied only where it can matter. A 'deny' never reaches
+         * this branch and an 'allow' has nothing left to grant, so the flag is
+         * consulted for exactly one verdict — which is also what keeps its
+         * inability to override a denial structural rather than argued.
+         *
+         * The re-evaluation goes back through `operatorPolicyForOrg` with the
+         * context rather than assigning 'allow' here. The policy module stays
+         * the only thing that decides a verdict; this site only supplies the
+         * per-org fact it could not know.
+         *
+         * `allowedToolNames` is checked first so a name the model INVENTED —
+         * which now resolves to 'approval' rather than 'deny' — costs no MCP
+         * request. It falls through to the catalog guard below either way.
+         */
+        if (
+          operatorVerdict === 'approval' &&
+          allowedToolNames.has(tc.name) &&
+          (await resolveYoloMode())
+        ) {
+          operatorVerdict = operatorPolicyForOrg(tc.name, tc.args, operatorOrgId, { yoloMode: true });
+        }
 
         // Sensitivity gate (Plan 3b Task 2): destructive/confirm-tier calls
         // pause the turn for explicit user approval, unless the conversation
@@ -898,16 +960,27 @@ export async function* runAgentTurn(
         // are not stacked, and dropping `sensitivityFor` here loses nothing:
         // the only tools it can ever return non-'safe' for are manage_app,
         // manage_repo, manage_schema, manage_billing and manage_migrations, and
-        // every one of those is absent from OPERATOR_TOOL_ALLOWLIST — so the
-        // operator's verdict for all five is already 'deny', which is strictly
-        // stronger than 'pause for approval'. `sensitivityFor` also encodes the
+        // all five sit at the 'approval' tier in OPERATOR_TOOL_TIERS — the same
+        // answer `sensitivityFor` would give, reached from the table that
+        // actually governs this principal. (Under `yolo_mode` the org has
+        // pre-authorised that tier, which is the deliberate point of the flag,
+        // not a case `sensitivityFor` would have caught: it has no notion of
+        // per-org pre-authorisation.) `sensitivityFor` also encodes the
         // assistant's premise, that a human is watching every call and its
         // tiers are a UX affordance; that premise is exactly what is false
         // headless. `checkTrust` is likewise NOT consulted for the operator:
         // there is one conversation per org forever, so conversation-wide trust
         // would be permanent org-wide auto-approval.
         const sensitivity = isOperator ? 'safe' : sensitivityFor(tc.name, tc.args);
-        if (operatorVerdict === 'approval') {
+        // `allowedToolNames` is re-checked HERE, ahead of the gate, and again
+        // as the catalog guard below. Since 2026-08-07 an unknown tool name
+        // resolves to 'approval' rather than 'deny' (deny-by-default at the
+        // tier level), so without this a name the model INVENTED would open a
+        // pending approval, halt the turn, and put a tool that does not exist
+        // in front of the owner. Falling through to the catalog guard instead
+        // returns it to the model as an ordinary tool error, which is what it
+        // was before the tiers changed.
+        if (operatorVerdict === 'approval' && allowedToolNames.has(tc.name)) {
           const messageId = randomUUID();
           const approval = await createApproval(input.pool, {
             conversationId: input.conversationId,
@@ -1051,10 +1124,12 @@ export async function* runAgentTurn(
          * tool — only message persistence, the tool_call event and the retry
          * counter.
          *
-         * It does not depend on the catalog: `operatorPolicyFor` denies anything
-         * not on OPERATOR_TOOL_ALLOWLIST, so a name the model invented, or one
-         * that was filtered out of the catalog, is refused here just the same.
-         * That is why the catalog filter is only an affordance.
+         * Since 2026-08-07 there is no tool-level deny tier, so this branch is
+         * reached only by the `manage_substrate` action denials — the
+         * self-approval guard and the other controls the agent must not be able
+         * to weaken. A name the model INVENTED no longer lands here; it lands on
+         * the catalog guard immediately below, which is why that guard is now
+         * also consulted before the approval gate above.
          *
          * The refusal is returned as a TOOL RESULT, not thrown: the model sees
          * an ordinary tool error, can adapt, and the conversation history keeps

@@ -7,7 +7,8 @@ import {
   operatorPolicyFor,
   isOperatorToolAllowed,
   operatorRequiresApproval,
-  OPERATOR_TOOL_ALLOWLIST,
+  OPERATOR_TOOL_SURFACE,
+  OPERATOR_TOOL_TIERS,
   OPERATOR_LOCAL_TOOLS,
   OPERATOR_DENIED_SUBSTRATE_ACTIONS,
   OPERATOR_APPROVAL_SUBSTRATE_ACTIONS,
@@ -39,16 +40,24 @@ const AUTO = [
   'upsert_source_artifact',
 ];
 
-describe('operatorPolicyFor — deny', () => {
-  it('denies anything not on the allowlist', () => {
-    for (const name of ['manage_app', 'manage_billing', 'manage_api_keys', 'seed_database', 'write_file', 'not_a_real_tool']) {
-      expect(operatorPolicyFor(name, {})).toBe('deny');
-      expect(isOperatorToolAllowed(name)).toBe(false);
+describe('operatorPolicyFor — no tool-level deny tier (2026-08-07 spec)', () => {
+  it('gates, rather than denies, the tools the old six-tool allowlist excluded', () => {
+    // This is the change: the operator can now REACH these, through the
+    // owner's approval queue. Denying them was what left it able to read an
+    // app's data and change nothing.
+    for (const name of ['manage_app', 'manage_billing', 'manage_api_keys', 'seed_database', 'write_file']) {
+      expect(operatorPolicyFor(name, {}), name).toBe('approval');
+      expect(isOperatorToolAllowed(name), name).toBe(true);
     }
   });
 
-  it('denies the empty / malformed tool name', () => {
-    expect(operatorPolicyFor('', {})).toBe('deny');
+  it('an unknown or empty tool name resolves to approval, never allow', () => {
+    // Deny-by-default at the code level: omission cannot grant unsupervised
+    // access. The catalog guard in loop.ts is what actually refuses a name
+    // that does not exist; this only pins that the POLICY never says 'allow'.
+    for (const name of ['', 'not_a_real_tool']) {
+      expect(operatorPolicyFor(name, {}), name).toBe('approval');
+    }
   });
 });
 
@@ -199,10 +208,12 @@ describe('operatorPolicyFor — precedence: deny > approval > allow', () => {
     }
   });
 
-  it('deny at the TOOL level beats every action rule', () => {
-    // manage_app is not allowlisted; no action can rescue it.
+  it('the substrate action rules apply to manage_substrate ONLY', () => {
+    // A stray `action` field on another tool must not borrow manage_substrate's
+    // verdicts in either direction — it neither rescues nor condemns.
     for (const action of ['create_rule', 'set_yolo', 'propose', 'list_rules']) {
-      expect(operatorPolicyFor('manage_app', { action })).toBe('deny');
+      expect(operatorPolicyFor('manage_app', { action }), action).toBe('approval');
+      expect(operatorPolicyFor('select_rows', { action }), action).toBe('allow');
     }
   });
 
@@ -317,20 +328,23 @@ describe('operatorPolicyFor — the deny table normalises its own input (does no
   });
 });
 
-describe('C1 regression — allowlist ∩ gateable is no longer empty', () => {
-  it('at least one allowlisted tool can actually produce an approval', () => {
-    const gateable = [...OPERATOR_TOOL_ALLOWLIST].filter((name) =>
-      // every approval_required capability, tried against every allowlisted tool
+describe('C1 regression — tool surface ∩ gateable is no longer empty', () => {
+  it('at least one tool on the surface can actually produce an approval', () => {
+    const gateable = [...OPERATOR_TOOL_SURFACE].filter((name) =>
+      // every approval_required capability, tried against every surfaced tool
       APPROVAL_REQUIRED.some((capability) => operatorPolicyFor(name, { action: 'propose', capability }) === 'approval'),
     );
     expect(gateable.length).toBeGreaterThan(0);
     expect(gateable).toContain('manage_substrate');
   });
 
-  it('every gateable call is also callable by the operator (no approval for a denied tool)', () => {
-    for (const name of [...OPERATOR_TOOL_ALLOWLIST, 'manage_billing', 'manage_app']) {
+  it('every gateable call is also callable by the operator', () => {
+    // The original bug: an approval could name a tool the bridge refused to
+    // run, so the two lists' intersection was empty. With one table this
+    // cannot recur by construction — pinned anyway, since that is the claim.
+    for (const name of [...OPERATOR_TOOL_SURFACE, 'manage_billing', 'manage_app']) {
       const verdict = operatorPolicyFor(name, { action: 'propose', capability: 'delete_entity' });
-      if (verdict === 'approval') expect(OPERATOR_TOOL_ALLOWLIST.has(name)).toBe(true);
+      if (verdict === 'approval') expect(OPERATOR_TOOL_SURFACE.has(name), name).toBe(true);
     }
   });
 
@@ -355,9 +369,9 @@ describe('I1 regression — manage_substrate is in the tool catalog', () => {
     expect(spec.parameters).toBeTypeOf('object');
   });
 
-  it('every allowlisted tool exists in the catalog', () => {
+  it('every tool on the operator surface exists in the catalog', () => {
     const names = new Set(catalog.map((t) => t.name));
-    for (const name of OPERATOR_TOOL_ALLOWLIST) expect(names).toContain(name);
+    for (const name of OPERATOR_TOOL_SURFACE) expect(names).toContain(name);
   });
 });
 
@@ -413,8 +427,8 @@ describe('run_sandbox_code — a second local tool, registered in the ONE policy
     expect(OPERATOR_LOCAL_TOOLS.has(OPERATOR_SCRATCHPAD_TOOL)).toBe(true);
   });
 
-  it('is on OPERATOR_TOOL_ALLOWLIST (spread from OPERATOR_LOCAL_TOOLS, not a second list)', () => {
-    expect(OPERATOR_TOOL_ALLOWLIST.has(OPERATOR_SANDBOX_CODE_TOOL)).toBe(true);
+  it('has its own entry in OPERATOR_TOOL_TIERS, at the allow tier', () => {
+    expect(OPERATOR_TOOL_TIERS.get(OPERATOR_SANDBOX_CODE_TOOL)).toBe('allow');
   });
 
   it('gets an "allow" verdict — no MCP reach, no credential in the sandbox, capped at 30s', () => {
@@ -439,7 +453,10 @@ describe('principalMayExecute', () => {
     for (const action of OPERATOR_DENIED_SUBSTRATE_ACTIONS) {
       expect(principalMayExecute('operator', 'manage_substrate', { action })).toBe(false);
     }
-    expect(principalMayExecute('operator', 'manage_billing', {})).toBe(false);
+    // manage_billing is no longer denied — it is gated, and 'approval' is
+    // executable here by construction (executeOnce only ever runs a resolved
+    // approval). The denials that remain are the substrate ones above.
+    expect(principalMayExecute('operator', 'manage_billing', {})).toBe(true);
     expect(principalMayExecute('operator', 'manage_substrate', { action: 'list_actions' })).toBe(true);
     // 'approval' is executable — executeOnce only ever runs a resolved approval.
     expect(principalMayExecute('operator', 'manage_substrate', { action: 'create_rule' })).toBe(true);
@@ -456,8 +473,16 @@ describe('principalMayExecute', () => {
   });
 
   it('a HUMAN principal is still confined to the operator TOOL surface', () => {
-    for (const name of ['manage_billing', 'manage_app', 'manage_api_keys', 'seed_database', 'not_a_real_tool']) {
-      expect(principalMayExecute('human', name, {})).toBe(false);
+    // The surface is now the whole catalog, so the tools that used to prove
+    // this are on it. What the check still buys is the same thing it always
+    // did: a corrupted or hand-inserted approval row naming a tool that is not
+    // on the operator's surface at all cannot turn the approve button into
+    // arbitrary tool execution.
+    for (const name of ['not_a_real_tool', '', 'exfiltrate_everything', 'manage_organizations']) {
+      expect(principalMayExecute('human', name, {}), name).toBe(false);
+    }
+    for (const name of ['manage_billing', 'manage_app', 'manage_api_keys', 'seed_database']) {
+      expect(principalMayExecute('human', name, {}), name).toBe(true);
     }
     expect(principalMayExecute('human', 'manage_substrate', { action: 'propose' })).toBe(true);
   });
