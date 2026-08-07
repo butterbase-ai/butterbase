@@ -100,6 +100,18 @@ export type BuildExecutorRequest = {
   files: Array<{ path: string; url: string }>;
   /** sha256 of the lockfile (or package.json). Keys node_modules reuse. */
   installKey: string;
+  /**
+   * Presigned GET/PUT for the app's SHARED node_modules cache tar — the same
+   * R2 object the build-runner reads and writes, so a deploy warms the
+   * operator's cache and vice versa. `null` when it could not be minted; the
+   * build then runs cold, because the cache is advisory.
+   *
+   * The PUT url is the most dangerous single value that crosses this boundary:
+   * a leaked GET exposes a node_modules tar, but a leaked PUT can overwrite
+   * the object the deploy path installs from. It is short-lived (600s) and
+   * app-scoped by `authorizeRepoWrite` at the route.
+   */
+  cache: { getUrl: string; putUrl: string } | null;
 };
 
 export type BuildExecutorResult = {
@@ -109,6 +121,8 @@ export type BuildExecutorResult = {
   stdout: string;
   stderr: string;
   installSkipped: boolean;
+  cacheRestored: boolean;
+  cacheSaved: boolean;
   truncated: boolean;
   timedOut: boolean;
   durationMs: number;
@@ -1423,6 +1437,7 @@ export async function* runAgentTurn(
                 workspaceId: appId,
                 files: h.files,
                 installKey: h.installKey,
+                cache: h.cache,
               });
               // snake_case out to the model, matching every other tool result
               // it sees, rather than leaking this module's camelCase.
@@ -1434,6 +1449,9 @@ export async function* runAgentTurn(
                   stdout: r.stdout,
                   stderr: r.stderr,
                   install_skipped: r.installSkipped,
+                  // Surfaced to the model so a slow first build reads as "cold
+                  // cache", not as "something is wrong with my code".
+                  dependency_cache_hit: r.cacheRestored,
                   output_truncated: r.truncated,
                   timed_out: r.timedOut,
                   duration_ms: r.durationMs,

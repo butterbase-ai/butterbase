@@ -52,6 +52,14 @@ function harness(opts: { missing?: string[] } = {}) {
         missing_blobs: [...new Set(missing)].map((sha) => ({ sha256: sha, uploadUrl: `https://s3.example/put/${sha}?sig=p` })),
       }), { status: 200 });
     }
+    if (u.includes('/repo/build-cache')) {
+      const { lockfile_hash } = JSON.parse(String(init!.body)) as { lockfile_hash: string };
+      return new Response(JSON.stringify({
+        downloadUrl: `https://s3.example/cache/${lockfile_hash}.tar?sig=cg`,
+        uploadUrl: `https://s3.example/cache/${lockfile_hash}.tar?sig=cp`,
+        expiresIn: 600,
+      }), { status: 200 });
+    }
     if (u.includes('/repo/blobs/batch')) {
       const { shas } = JSON.parse(String(init!.body)) as { shas: string[] };
       return new Response(JSON.stringify({
@@ -191,6 +199,42 @@ describe('createBuildHydrator — the dependency cache key', () => {
   });
 });
 
+describe('createBuildHydrator — the shared R2 node_modules cache', () => {
+  it('mints a GET and a PUT url for the cache, keyed on the SAME hash as the install key', async () => {
+    // The sharing guarantee, at this end: the operator asks for the cache
+    // object the build-runner will read (`cache/<appId>/<lockfileHash>.tar`,
+    // r2.ts `buildCacheKey`). Asking on a different hash than the one the
+    // sandbox installs against would warm a cache nobody reads.
+    const h = harness();
+    h.cache.write(CONV, APP, 'package-lock.json', '{"lockfileVersion":3}');
+    const r = await hydratorFor(h).hydrate({ convId: CONV, appId: APP, jwt: JWT });
+
+    expect(r.cache).toBeDefined();
+    expect(r.cache!.getUrl).toContain(r.installKey);
+    expect(r.cache!.putUrl).toContain(r.installKey);
+
+    const req = h.calls.find((c) => c.url.includes('/repo/build-cache'))!;
+    expect(JSON.parse(req.body!)).toEqual({ lockfile_hash: r.installKey });
+  });
+
+  it('still builds when the cache presign fails — the cache is advisory', async () => {
+    // A build that cannot be accelerated is a slow build. A build that REFUSES
+    // to run because a cache url could not be minted is a broken operator, and
+    // the cache is a performance layer, not a dependency.
+    const h = harness();
+    const inner = h.fetchImpl.getMockImplementation()!;
+    h.fetchImpl.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes('/repo/build-cache')) return new Response('nope', { status: 500 });
+      return inner(url, init);
+    });
+    h.cache.write(CONV, APP, 'a.ts', 'x');
+
+    const r = await hydratorFor(h).hydrate({ convId: CONV, appId: APP, jwt: JWT });
+    expect(r.files).toHaveLength(1);
+    expect(r.cache).toBeNull();
+  });
+});
+
 describe('credential — the service key reaches control-api and nothing else', () => {
   it('is attached to control-api calls', async () => {
     const h = harness();
@@ -215,11 +259,13 @@ describe('credential — the service key reaches control-api and nothing else', 
 
   it('is absent from the RETURNED value — the thing that crosses into the guest', async () => {
     // THE assertion. Everything this returns is handed to a sandbox running
-    // model-authored code with unrestricted egress.
+    // model-authored code with unrestricted egress. Includes the cache urls:
+    // they are inside the same guarantee, not alongside it.
     const h = harness();
     h.cache.write(CONV, APP, 'package.json', '{}');
     h.cache.write(CONV, APP, 'src/a.ts', 'x');
     const r = await hydratorFor(h).hydrate({ convId: CONV, appId: APP, jwt: JWT });
+    expect(r.cache).not.toBeNull();
 
     const serialized = JSON.stringify(r);
     expect(serialized).not.toContain(JWT);

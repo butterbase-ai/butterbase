@@ -250,14 +250,95 @@ export function appArtifactKey(appId: string): string {
   return `app-artifact/${appId}.zip`;
 }
 
+/**
+ * The node_modules cache object for (app, lockfile hash).
+ *
+ * Deliberately NOT keyed on deployment id — that is what makes it persist
+ * across deploys, and now across operator wakes too. The autonomous operator's
+ * sandbox build (services/dashboard-agent/build-hydration.ts) reads and writes
+ * this SAME object, so a deploy warms the cache for the operator and an
+ * operator build warms it for the next deploy.
+ *
+ * Exported as its own function rather than left inline in `buildKeys` so there
+ * is exactly ONE definition for both writers. If they ever disagreed nothing
+ * would fail loudly — the sharing would just degrade into two half-warm
+ * caches, each paying the cold install the other had already paid for.
+ * `r2.test.ts` asserts the two agree.
+ */
+export function buildCacheKey(appId: string, lockfileHash: string): string {
+  return BUILD_KEY_PREFIXES.cache(appId, lockfileHash);
+}
+
 export function buildKeys(deploymentId: string, appId: string, lockfileHash: string) {
   return {
     source: BUILD_KEY_PREFIXES.source(deploymentId),
     artifact: BUILD_KEY_PREFIXES.artifact(deploymentId),
     log: BUILD_KEY_PREFIXES.log(deploymentId),
     status: BUILD_KEY_PREFIXES.status(deploymentId),
-    cache: BUILD_KEY_PREFIXES.cache(appId, lockfileHash),
+    cache: buildCacheKey(appId, lockfileHash),
   };
+}
+
+/**
+ * How long the operator's build-cache urls stay valid.
+ *
+ * GET is generous because a restore competes with everything else in a turn.
+ * PUT is short and deliberately so: it is a WRITE url for an object the deploy
+ * path also reads, so the window in which a leaked one could overwrite the
+ * cache should be as small as the work allows. A cold install was measured at
+ * 84.3s and the tar of that tree at 1.5s, so 600s is ample.
+ */
+const BUILD_CACHE_GET_SECONDS = 3600;
+const BUILD_CACHE_PUT_SECONDS = 600;
+
+/**
+ * Presigned GET for the node_modules cache tar.
+ *
+ * Minted control-api side and handed to a CREDENTIAL-LESS sandbox — see
+ * services/dashboard-agent/build-hydration.ts for why the operator's `bb_sk_*`
+ * must never make that trip. Authorization for the app happens at the route
+ * (routes/repo.ts), never here: this function, like everything else in this
+ * module, takes `appId` as a plain parameter and authorizes nothing.
+ */
+export async function presignBuildCacheGet(appId: string, lockfileHash: string): Promise<string> {
+  const cmd = new GetObjectCommand({
+    Bucket: config.s3.bucket,
+    Key: buildCacheKey(appId, lockfileHash),
+  });
+  return getSignedUrl(r2ClientForPresigning, cmd, { expiresIn: BUILD_CACHE_GET_SECONDS });
+}
+
+/**
+ * Presigned PUT for the node_modules cache tar.
+ *
+ * CONCURRENT WRITERS ARE ACCEPTED, AND NOT LOCKED. The build-runner
+ * (services/build-runner/container/entry.mjs:186-188) and the operator sandbox
+ * can now both write this key. That is safe for three reasons, recorded here so
+ * the next person does not add locking reflexively:
+ *
+ *  1. A PUT IS ATOMIC. S3/R2 has no partial-object visibility — a reader sees
+ *     either the previous complete object or the new complete object, never a
+ *     torn one. An upload that dies mid-flight leaves the old object intact.
+ *     So a failed writer cannot poison a reader.
+ *  2. THE WRITERS AGREE BY CONSTRUCTION. The key contains the lockfile hash,
+ *     so every writer of a given key installed from the same dependency
+ *     declaration. Last-writer-wins therefore swaps one valid tree for another
+ *     valid tree, not a correct one for a wrong one.
+ *  3. THE CACHE IS ADVISORY. Both consumers restore it and then run `npm
+ *     install` anyway (entry.mjs:137-141 then :146, and the same order in the
+ *     sandbox). A stale or partial-but-complete tree is reconciled by the
+ *     install; it costs time, never correctness.
+ *
+ * Locking would add a distributed lock to a path whose worst failure is a slow
+ * build. Revisit only if the key ever stops carrying the lockfile hash.
+ */
+export async function presignBuildCachePut(appId: string, lockfileHash: string): Promise<string> {
+  const cmd = new PutObjectCommand({
+    Bucket: config.s3.bucket,
+    Key: buildCacheKey(appId, lockfileHash),
+    ContentType: 'application/x-tar',
+  });
+  return getSignedUrl(r2ClientForPresigning, cmd, { expiresIn: BUILD_CACHE_PUT_SECONDS });
 }
 
 export async function getObjectAsBuffer(key: string): Promise<Buffer> {

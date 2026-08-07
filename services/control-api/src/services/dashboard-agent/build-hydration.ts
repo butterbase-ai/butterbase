@@ -106,8 +106,25 @@ function defaultBaseUrl(): string {
  */
 export type BuildHydrationFile = { path: string; url: string }
 
+/**
+ * Presigned urls for the app's node_modules cache tar.
+ *
+ * THE SAME OBJECT THE BUILD-RUNNER USES — `cache/<appId>/<lockfileHash>.tar`,
+ * minted through `buildCacheKey` (services/r2.ts), restored by
+ * services/build-runner/container/entry.mjs:137-141 and re-uploaded at
+ * :186-188. So a deploy warms the cache for the operator and an operator build
+ * warms it for the next deploy, with no new key scheme and no second bucket.
+ *
+ * NULLABLE, and that nullability is a decision: the cache is ADVISORY. If the
+ * presign fails the build still runs, it just pays the measured 84.3s cold
+ * install. A build that refused to run because a cache url could not be minted
+ * would be a performance layer turned into a dependency.
+ */
+export type BuildCacheUrls = { getUrl: string; putUrl: string }
+
 export type BuildHydration = {
   files: BuildHydrationFile[]
+  cache: BuildCacheUrls | null
   /**
    * sha256 of the lockfile, or of package.json when there is none. Keys the
    * sandbox's node_modules reuse; hex so it is safe to interpolate into the
@@ -244,7 +261,36 @@ export function createBuildHydrator(deps: BuildHydratorDeps) {
         return { path: f.path, url }
       })
 
-      return { files: out, installKey: installKeyFor(tree), fileCount: out.length, totalBytes }
+      const installKey = installKeyFor(tree)
+
+      /**
+       * The shared node_modules cache. Requested on the SAME hash the sandbox
+       * will install against — asking on a different one would warm an object
+       * nobody reads and quietly halve the cache hit rate for both writers.
+       *
+       * BEST-EFFORT BY CONSTRUCTION. Swallowed and reported as `null`, never
+       * rethrown: this is the one part of hydration whose failure costs time
+       * rather than correctness, and the caller must be able to tell "no cache
+       * this build" from "the source did not reach the sandbox".
+       */
+      // Named `cacheUrls`, not `cache` — `cache` in this scope is the
+      // WorkingTreeCache from `deps`, and shadowing it here is a temporal-dead-
+      // zone bug that fires on the FIRST line of this function.
+      let cacheUrls: BuildCacheUrls | null = null
+      try {
+        const res = await api<{ downloadUrl: string; uploadUrl: string }>(
+          `/v1/${appId}/repo/build-cache`, jwt, { lockfile_hash: installKey },
+        )
+        if (res?.downloadUrl && res?.uploadUrl) {
+          cacheUrls = { getUrl: res.downloadUrl, putUrl: res.uploadUrl }
+        }
+      } catch (err) {
+        console.warn(
+          `[dashboard-agent] build cache presign failed for app ${appId} (building without it): ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+
+      return { files: out, cache: cacheUrls, installKey, fileCount: out.length, totalBytes }
     },
   }
 }

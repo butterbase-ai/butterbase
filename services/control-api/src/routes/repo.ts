@@ -22,6 +22,7 @@ import {
   wipeRepo,
   sumRepoBlobBytes,
 } from '../services/repo-storage.js';
+import { presignBuildCacheGet, presignBuildCachePut } from '../services/r2.js';
 import { planRetention } from '../services/repo-retention.js';
 import { listActiveCloneSnapshotIdsForApp } from '../services/clone-jobs.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
@@ -349,6 +350,64 @@ export async function repoRoutes(app: FastifyInstance) {
       return reply.send({ sha256, size: head.size, downloadUrl, expiresIn: 3600 });
     } catch (error) {
       return handleRepoRouteError(app, request, reply, error, 'Failed to load blob');
+    }
+  });
+
+  /**
+   * POST /v1/:app_id/repo/build-cache
+   *
+   * Mints presigned GET + PUT urls for this app's node_modules cache tar, so
+   * the autonomous operator's CREDENTIAL-LESS sandbox can restore and update it
+   * without ever holding the org's `bb_sk_*`. Same pattern, and same reasoning,
+   * as `blobs/batch` above.
+   *
+   * IT IS THE SAME OBJECT THE BUILD-RUNNER USES — `buildCacheKey` is shared
+   * with `buildKeys` (services/r2.ts), so a deploy warms the cache for the
+   * operator and an operator build warms it for the next deploy. That sharing
+   * is the whole point; see r2.ts for why concurrent writers are safe and
+   * deliberately unlocked.
+   *
+   * `authorizeRepoWrite`, NOT `authorizeRepoRead`, and that is the load-bearing
+   * choice here: this hands back a WRITE url. Without it any member who may
+   * read an app could overwrite the object that app's next deploy installs
+   * from. The read url is minted on the same authorization rather than being
+   * split into a second endpoint — a caller entitled to write the cache is
+   * necessarily entitled to read it.
+   *
+   * LIVES IN THE REPO ROUTES because these are the authorizers the operator's
+   * whole source path already goes through (`repo-http.ts`, `build-hydration.ts`),
+   * and a second hand-written tenancy check on a path that mints write urls is
+   * exactly what repo-http.ts's header argues against. The build cache is not
+   * literally part of the repo; the authorization question is identical.
+   */
+  app.post('/v1/:app_id/repo/build-cache', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+    const body = request.body as { lockfile_hash?: unknown } | null;
+    const lockfileHash = typeof body?.lockfile_hash === 'string' ? body.lockfile_hash : null;
+    // Hex-only, and validated here rather than trusted: this value is
+    // concatenated into an object KEY. A path separator or a `..` in it would
+    // address an object outside this app's cache prefix.
+    if (!lockfileHash || !/^[a-f0-9]{8,64}$/.test(lockfileHash)) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Body must include `lockfile_hash` as an 8-64 char lowercase hex string.',
+        remediation: 'Pass { lockfile_hash: "<sha256 of the lockfile or package.json>" }.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    try {
+      const ctx = await authorizeRepoWrite(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
+      const [downloadUrl, uploadUrl] = await Promise.all([
+        presignBuildCacheGet(ctx.appId, lockfileHash),
+        presignBuildCachePut(ctx.appId, lockfileHash),
+      ]);
+      // No audit row. This mints urls for a derived, reconstructible artifact
+      // (node_modules), not for customer source or data — and it is called on
+      // every build, so logging it would bury the `app.repo.prepare` rows that
+      // do matter. The prepare call that always accompanies it IS audited.
+      return reply.send({ downloadUrl, uploadUrl, expiresIn: 600 });
+    } catch (error) {
+      return handleRepoRouteError(app, request, reply, error, 'Failed to presign the build cache');
     }
   });
 

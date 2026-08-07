@@ -110,7 +110,8 @@ function toolNamesSent(body: string): string[] {
 const okBuild = {
   ok: true, step: 'done' as const, exitCode: 0,
   stdout: 'vite v5.0.0 building for production...\n42 modules transformed.',
-  stderr: '', installSkipped: false, truncated: false, timedOut: false, durationMs: 91_000,
+  stderr: '', installSkipped: false, cacheRestored: true, cacheSaved: true,
+  truncated: false, timedOut: false, durationMs: 91_000,
 };
 
 /**
@@ -124,6 +125,10 @@ function withTree(files: Record<string, string> = { 'package.json': '{}', 'src/A
   const buildHydratorFactory = () => ({
     hydrate: vi.fn(async () => ({
       files: Object.keys(files).map((p) => ({ path: p, url: `https://s3.example/blob/${encodeURIComponent(p)}?sig=abc` })),
+      cache: {
+        getUrl: 'https://r2.example/cache/app-1/aaa.tar?sig=cg',
+        putUrl: 'https://r2.example/cache/app-1/aaa.tar?sig=cp',
+      },
       installKey: 'a'.repeat(64),
       fileCount: Object.keys(files).length,
       totalBytes: 100,
@@ -277,6 +282,10 @@ describe('build_app — dispatch', () => {
     expect(req.installKey).toMatch(/^[a-f0-9]{64}$/);
     expect(req.files.every((f) => f.url.startsWith('https://'))).toBe(true);
     expect(req.workspaceId).toBe(APP);
+    expect(req.cache).toEqual({
+      getUrl: expect.stringContaining('sig=cg'),
+      putUrl: expect.stringContaining('sig=cp'),
+    });
   });
 
   it('A RED BUILD IS A RESULT, not a turn failure', async () => {
@@ -397,8 +406,13 @@ describe('credential — the service key never reaches anything sandbox-bound', 
     await collect(runAgentTurn(operatorInput({ buildExecutor }), { cache, buildHydratorFactory }));
 
     const req = (buildExecutor as unknown as MockedFunction<BuildExecutor>).mock.calls[0][0];
-    expect(Object.keys(req).sort()).toEqual(['files', 'installKey', 'workspaceId']);
+    expect(Object.keys(req).sort()).toEqual(['cache', 'files', 'installKey', 'workspaceId']);
     for (const f of req.files) expect(Object.keys(f).sort()).toEqual(['path', 'url']);
+    // The cache urls are NEW fields crossing the boundary, so they are inside
+    // the closed shape rather than alongside it. The PUT url especially: a
+    // leaked read url exposes a node_modules tar, but a leaked write url can
+    // overwrite the object the DEPLOY path installs from.
+    expect(Object.keys(req.cache!).sort()).toEqual(['getUrl', 'putUrl']);
   });
 
   it('does not send file CONTENT to the sandbox — presigned urls only', async () => {
