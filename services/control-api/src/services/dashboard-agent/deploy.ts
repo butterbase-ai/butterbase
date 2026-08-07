@@ -24,8 +24,20 @@ export function createDeployer(deps: DeployDeps) {
   const pollMs = deps.pollIntervalMs ?? 3000
   const maxMs = deps.maxWaitMs ?? 5 * 60 * 1000
 
-  return {
-    async deploy(input: { convId: string; appId: string; jwt: string }) {
+  /**
+   * Never throws. Every failure is `{ ok: false, error }`, because the
+   * dispatch site in loop.ts reads `r.ok` with no try/catch — a throw out of
+   * here ends the whole turn.
+   *
+   * The path that actually escaped was `deps.mcp.call('manage_frontend', …)`.
+   * `manage_frontend` is internal-only — absent from both the tool catalogue
+   * and the operator policy table — so `turnMcp` refuses it on every operator
+   * turn. Observed 2026-08-07: an operator got 371 events in, tried to deploy
+   * a frontend, and lost the turn along with the backend work it had already
+   * finished. A frontend deploy is best-effort; taking the turn down with it
+   * is not.
+   */
+  async function runDeploy(input: { convId: string; appId: string; jwt: string }) {
       const tree = deps.cache.get(input.convId, input.appId)
       if (!tree || tree.size === 0) return { ok: false as const, error: 'no files to deploy' }
 
@@ -79,6 +91,15 @@ export function createDeployer(deps: DeployDeps) {
         if (row.status === 'failed') return { ok: false as const, error: row.error ?? 'build failed' }
       }
       return { ok: false as const, error: 'deployment timed out' }
+  }
+
+  return {
+    async deploy(input: { convId: string; appId: string; jwt: string }) {
+      try {
+        return await runDeploy(input)
+      } catch (err) {
+        return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+      }
     },
   }
 }
