@@ -394,7 +394,9 @@ describe('operator — yolo_mode', () => {
 
     expect(mockCreateApproval).not.toHaveBeenCalled();
     expect(realDispatches()).toEqual([
-      ['invoke_function', { app_id: 'app-1', name: 'send-reminder' }, 'operator-service-key', ORG_ID, 'trace-test-1'],
+      // Trailing undefined is the trigger-context argument; this turn has no
+      // operator wake behind it.
+      ['invoke_function', { app_id: 'app-1', name: 'send-reminder' }, 'operator-service-key', ORG_ID, 'trace-test-1', undefined],
     ]);
     expect(events.some((e) => e.type === 'approval_required')).toBe(false);
     expect(events.some((e) => e.type === 'done')).toBe(true);

@@ -219,3 +219,50 @@ describe('operator — repoSync cannot reach the raw MCP client', () => {
     expect(mockCallMcpTool.mock.calls.map((c) => c[0])).not.toContain('manage_repo');
   });
 });
+
+/**
+ * Refusing manage_repo was always meant to DEGRADE an operator turn, not end
+ * it. From the turnMcp comment in loop.ts: "a refusal degrades the turn, it
+ * does not break it", justified by "every caller already treats a throw as
+ * best-effort".
+ *
+ * Every caller did not. Schema injection is wrapped per-app and the end-of-turn
+ * flush is wrapped at its call site, and the two deploy routes wrap
+ * ensureHydrated defensively — but the file-op route calls fileOps.execute()
+ * unguarded, and fileOps calls ensureHydrated -> repoSync.pullLatest ->
+ * turnMcp('manage_repo') on the way into every write_file.
+ *
+ * Observed on a real wake 2026-08-07: the operator read the tickets, read the
+ * app schema, called write_file, and the turn died with
+ *   error: Tool "manage_repo" is not permitted for the autonomous operator.
+ * after 69 events. write_file is the FIRST thing a build-and-deploy agent does,
+ * so this made the operator unable to ship anything at any yolo setting.
+ */
+describe('operator — a refused manage_repo degrades the turn, it does not end it', () => {
+  it('survives write_file and keeps going', async () => {
+    oneToolCallThenStop('write_file', { app_id: 'app-1', path: 'index.ts', content: 'x' });
+
+    const events = await collect(
+      runAgentTurn({
+        conversationId: 'conv-op-survives',
+        userId: operatorUserId(ORG_ID),
+        jwt: 'operator-service-key',
+        userMessage: 'Scheduled wake.',
+        model: 'claude-sonnet-4-5',
+        pool: stubPool,
+        organizationId: ORG_ID,
+      }),
+    );
+
+    const errors = events.filter((e) => e.type === 'error');
+    expect(errors, JSON.stringify(errors)).toHaveLength(0);
+
+    // It must still have refused the call — degrading is not the same as
+    // quietly handing the operator manage_repo on the org service key.
+    expect(mockCallMcpTool.mock.calls.map((c) => c[0])).not.toContain('manage_repo');
+
+    // And the write must have been reported back to the model rather than
+    // vanishing, so the turn can carry on and deploy.
+    expect(events.some((e) => e.type === 'tool_result')).toBe(true);
+  });
+});

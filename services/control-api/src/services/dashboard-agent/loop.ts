@@ -708,20 +708,53 @@ export async function* runAgentTurn(
 
   const apiUrl = process.env.PUBLIC_API_URL ?? 'https://api.butterbase.dev';
 
-  // ensureHydrated captures the baseline the first time an app is touched.
+  /**
+   * ensureHydrated captures the baseline the first time an app is touched.
+   *
+   * Hydration is BEST-EFFORT and must never throw. `repoSync.pullLatest` goes
+   * through `turnMcp` on an operator turn, where `manage_repo` sits at the
+   * 'approval' tier and the wrapper requires 'allow' — so it is refused on
+   * every operator turn, by design, at every yolo setting.
+   *
+   * That refusal was always meant to degrade the turn rather than end it, but
+   * the guarantee lived at the call sites and one of them did not have it: the
+   * file-op route calls `fileOps.execute()` unguarded, fileOps calls this on
+   * the way into every `write_file`, and the throw reached the turn-level
+   * handler. Observed 2026-08-07 — the operator read its tickets, read the
+   * schema, called write_file, and died after 69 events. write_file is the
+   * first thing a build-and-deploy agent does, so nothing could ever ship.
+   *
+   * Swallowing it HERE rather than at a fourth call site is the point: three
+   * callers each remembering to wrap is the bug, not the fix. An unhydrated
+   * workspace is a legitimate state — the scaffold path below handles it, and
+   * the deploy routes already report "no files" / "entry file not found" when
+   * it turns out to be genuinely empty.
+   */
   const ensureHydrated = async ({ convId, appId, jwt }: { convId: string; appId: string; jwt: string }) => {
-    if (!cache.get(convId, appId)) {
-      const r = await repoSync.pullLatest({ convId, appId, jwt });
-      if (!r.hydrated) {
-        // Capture baseline BEFORE scaffold so every template file counts as
-        // "new" and is included in the end-of-turn push to manage_repo.
-        if (!baselineByApp.has(appId)) {
-          baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
+    try {
+      if (!cache.get(convId, appId)) {
+        const r = await repoSync.pullLatest({ convId, appId, jwt });
+        if (!r.hydrated) {
+          // Capture baseline BEFORE scaffold so every template file counts as
+          // "new" and is included in the end-of-turn push to manage_repo.
+          if (!baselineByApp.has(appId)) {
+            baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
+          }
+          const files = await loadTemplate({ appId, apiUrl });
+          for (const f of files) cache.write(convId, appId, f.path, f.content);
         }
-        const files = await loadTemplate({ appId, apiUrl });
-        for (const f of files) cache.write(convId, appId, f.path, f.content);
       }
+    } catch (err) {
+      // Logged, never rethrown. Both failure modes here are survivable: a
+      // refused manage_repo (operator turns, always) and a template fetch that
+      // did not load. Either leaves an unhydrated workspace, which the writer
+      // and the deploy routes already handle.
+      console.warn(
+        `[dashboard-agent] hydration failed for app ${appId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+    // Runs regardless: an unhydrated app still needs a baseline, or the
+    // end-of-turn flush would treat every file as unchanged.
     if (!baselineByApp.has(appId)) {
       baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
     }
@@ -1341,12 +1374,10 @@ export async function* runAgentTurn(
             });
             continue;
           }
-          // Ensure the workspace is hydrated before bundling.
-          try {
-            await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
-          } catch {
-            // Fall through — deployer will report "no files" if truly empty.
-          }
+          // Ensure the workspace is hydrated before bundling. ensureHydrated
+          // never throws; if it could not hydrate, the deployer reports
+          // "no files" when the workspace is truly empty.
+          await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
           touchedApps.add(args.app_id);
           const r = await deployer.deploy({
             convId: input.conversationId,
@@ -1396,11 +1427,9 @@ export async function* runAgentTurn(
             });
             continue;
           }
-          try {
-            await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
-          } catch {
-            // Fall through — deployer will report "entry file not found" if truly empty.
-          }
+          // ensureHydrated never throws; the deployer reports "entry file not
+          // found" if the workspace is truly empty.
+          await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
           touchedApps.add(args.app_id);
           const r = await functionDeployer.deploy({
             convId: input.conversationId,
