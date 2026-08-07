@@ -156,7 +156,7 @@ export type OperatorTurnResult = {
  * sandbox compute cost — so the model, not the compute, is the bill.
  *
  * TRADE-OFF, know it before changing this back or forward: qwen has NO chat
- * models on imarouter (only wan-*/happyhorse-* video), so this id is
+ * models on imarouter (only the wan- and happyhorse- video families), so it is
  * SINGLE-HOMED on openrouter — `select.ts` rankRoutersPresenceMode returns a
  * one-element list and an openrouter outage has no fallback.
  * `anthropic/claude-sonnet-4.5` is dual-homed (openrouter + provider-secondary)
