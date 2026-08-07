@@ -13,11 +13,13 @@ const corsPlugin: FastifyPluginAsync = async (fastify) => {
         return;
       }
 
-      // Always allow the platform dashboard, admin dashboard, and public submissions dashboard
+      // Always allow the platform dashboard, admin dashboard, public submissions
+      // dashboard, and Office
       if (
         origin === config.dashboardUrl
         || origin === config.adminDashboardUrl
         || origin === config.submissionsDashboardUrl
+        || origin === config.officeUrl
       ) {
         callback(null, true);
         return;
