@@ -18,6 +18,15 @@
  *
  * Separate file because the policy mock is module-wide and must not leak into
  * loop-operator-policy.test.ts, which deliberately uses the real table.
+ *
+ * STILL LOAD-BEARING AFTER repo-http.ts (2026-08-08). An operator turn's
+ * `repoSync` is now `createHttpRepoSync`, which has no MCP client at all, so
+ * the assertions below hold for a second and stronger reason than when they
+ * were written. They are kept rather than deleted because what they pin is the
+ * OUTCOME — "an operator turn does not call `manage_repo` on the org service
+ * key" — not the mechanism that produces it. If someone ever routes the
+ * operator back through `deps.mcp` for repo I/O, this file is what fails.
+ * See loop-operator-repo-http.test.ts for the positive wiring assertions.
  */
 
 import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest';

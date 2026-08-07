@@ -33,6 +33,7 @@ import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from '
 import { WorkingTreeCache } from './working-tree.js';
 import { createFileOps, type FileOpName } from './file-ops.js';
 import { createRepoSync, type RepoSync } from './repo-sync.js';
+import { createHttpRepoSync } from './repo-http.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { loadTemplate as loadTemplateDefault } from './template-loader.js';
@@ -579,19 +580,29 @@ export async function* runAgentTurn(
     : deps.mcp;
 
   /**
-   * `repoSync` must be rebuilt on `turnMcp` for operator turns, not merely
-   * assumed unreachable.
+   * An operator turn gets a DIFFERENT `RepoSync` implementation: `repo-http.ts`,
+   * which talks to the repo HTTP routes directly instead of to `manage_repo`
+   * over MCP.
    *
-   * The default `repoSync` is constructed in `getDefaultDeps` around the RAW
-   * client, so it is the one `deps.mcp` consumer that would still hold it. It is
-   * reachable only from the file-op / deploy / deploy_function routes and the
-   * end-of-turn flush they populate. Those tools used to be denied outright;
-   * since 2026-08-07 they are on the operator's surface at the 'approval'
-   * tier, and under `yolo_mode` an approved one executes unattended — so the
-   * argument that this path is unreachable no longer holds at all. Rebuilding
-   * `repoSync` on `turnMcp` is what keeps `manage_repo` on the org service key
-   * behind the policy table on that path, rather than behind a code-reading
-   * argument about which routes are live.
+   * WHY. The default `repoSync` reaches the repo through `manage_repo`, and on
+   * an operator turn that call goes through `turnMcp`, which admits only an
+   * 'allow' verdict. `manage_repo` sits at the 'approval' tier, so hydration
+   * was refused on EVERY operator turn at EVERY yolo setting. The operator
+   * therefore started each turn with an empty working tree and lost the whole
+   * tree again at turn end — it could not read or persist app source at all.
+   *
+   * Rebuilding `repoSync` on `turnMcp` (the previous behaviour) was the right
+   * containment for a path that had to go through MCP, but it contained the
+   * path into uselessness. The fix is not to widen the policy — `manage_repo`
+   * stays at 'approval', `turnMcp` is untouched — but to stop needing MCP for
+   * repo I/O at all. `repo-http.ts` uses the org service key this turn already
+   * carries, and the routes' own `requireUserId` + `authorizeRepoWrite` decide
+   * access, so tenancy is enforced by the same middleware every human turn
+   * depends on rather than by anything reimplemented here. See repo-http.ts's
+   * header for why that beat calling `repo-storage.ts` in-process.
+   *
+   * The HUMAN assistant keeps the MCP `repoSync` exactly as it was — its
+   * `manage_repo` calls carry a user JWT and were never gated.
    *
    * An explicitly injected `repoSync` is honoured as-is: it is the caller's own
    * object, never the raw default client, and silently discarding it would
@@ -599,7 +610,7 @@ export async function* runAgentTurn(
    */
   const repoSync: RepoSync =
     isOperator && !depsOverride?.repoSync
-      ? createRepoSync({ cache, mcp: turnMcp })
+      ? createHttpRepoSync({ cache })
       : deps.repoSync;
 
   /**
@@ -711,24 +722,26 @@ export async function* runAgentTurn(
   /**
    * ensureHydrated captures the baseline the first time an app is touched.
    *
-   * Hydration is BEST-EFFORT and must never throw. `repoSync.pullLatest` goes
-   * through `turnMcp` on an operator turn, where `manage_repo` sits at the
-   * 'approval' tier and the wrapper requires 'allow' — so it is refused on
-   * every operator turn, by design, at every yolo setting.
+   * Hydration is BEST-EFFORT and must never throw.
    *
-   * That refusal was always meant to degrade the turn rather than end it, but
-   * the guarantee lived at the call sites and one of them did not have it: the
-   * file-op route calls `fileOps.execute()` unguarded, fileOps calls this on
-   * the way into every `write_file`, and the throw reached the turn-level
-   * handler. Observed 2026-08-07 — the operator read its tickets, read the
-   * schema, called write_file, and died after 69 events. write_file is the
-   * first thing a build-and-deploy agent does, so nothing could ever ship.
+   * That guarantee used to live at the call sites, and one of them did not have
+   * it: the file-op route calls `fileOps.execute()` unguarded, fileOps calls
+   * this on the way into every `write_file`, and the throw reached the
+   * turn-level handler. Observed 2026-08-07 — the operator read its tickets,
+   * read the schema, called write_file, and died after 69 events. write_file is
+   * the first thing a build-and-deploy agent does, so nothing could ever ship.
    *
-   * Swallowing it HERE rather than at a fourth call site is the point: three
-   * callers each remembering to wrap is the bug, not the fix. An unhydrated
-   * workspace is a legitimate state — the scaffold path below handles it, and
-   * the deploy routes already report "no files" / "entry file not found" when
-   * it turns out to be genuinely empty.
+   * The specific throw that triggered that incident is gone: an operator turn's
+   * `repoSync` is now `repo-http.ts` and no longer needs the `manage_repo`
+   * verdict that `turnMcp` refused on every turn. The swallow stays, because
+   * the failure MODES it covers are not gone — a repo route that 5xxs, a
+   * presigned download that fails, a template fetch that does not load. Each
+   * leaves an unhydrated workspace, which is a legitimate state: the scaffold
+   * path below handles it, and the deploy routes already report "no files" /
+   * "entry file not found" when it turns out to be genuinely empty.
+   *
+   * Swallowing HERE rather than at a fourth call site remains the point: three
+   * callers each remembering to wrap is the bug, not the fix.
    */
   const ensureHydrated = async ({ convId, appId, jwt }: { convId: string; appId: string; jwt: string }) => {
     try {
