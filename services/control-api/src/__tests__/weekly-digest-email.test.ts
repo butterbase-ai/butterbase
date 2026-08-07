@@ -1,13 +1,38 @@
 // Snapshot the weekly_digest template across the three shapes that matter:
 // empty (quiet week), single-item, multi-item. These snapshots are the spec
 // — if you change wording, review the diff and confirm the intent matches.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   buildBillingEmailSubject,
   buildBillingEmailBody,
   buildBillingEmailHtml,
 } from '../services/auth/email-service.js';
 import { isoWeekKey } from '../services/digest-notifier.js';
+
+/**
+ * These snapshots bake in the PRODUCTION dashboard origin, which
+ * `email-service.ts` derives from `process.env.DASHBOARD_URL` with a
+ * `https://dashboard.butterbase.ai` fallback — i.e. they assume the variable is
+ * unset. That assumption was implicit, and vitest.config.ts runs this suite
+ * `singleFork`, so all 297 spec files share ONE process: `oauth.test.ts` and
+ * `oauth-mcp-e2e.test.ts` both assign `process.env.DASHBOARD_URL =
+ * 'http://localhost:5173'` at module scope and never restore it. Whether this
+ * file passed came down to whether vitest happened to schedule it before or
+ * after those two — so merely ADDING an unrelated spec file elsewhere in the
+ * repo could turn these six snapshots red, which is exactly what happened.
+ *
+ * Establishing the precondition here (and restoring it, so this fix does not
+ * become the next file's landmine) makes the outcome independent of ordering.
+ */
+let savedDashboardUrl: string | undefined;
+beforeAll(() => {
+  savedDashboardUrl = process.env.DASHBOARD_URL;
+  delete process.env.DASHBOARD_URL;
+});
+afterAll(() => {
+  if (savedDashboardUrl === undefined) delete process.env.DASHBOARD_URL;
+  else process.env.DASHBOARD_URL = savedDashboardUrl;
+});
 
 const items3 = [
   { appId: 'app_pantry', appName: 'pantry', functionName: 'capture-lead', failureCount: 47, lastError: 'TypeError: Cannot read properties of undefined (reading \'rows\')' },
