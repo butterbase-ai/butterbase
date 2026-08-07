@@ -498,6 +498,15 @@ export async function* runAgentTurn(
      * "where the id is threaded and where it is not" boundary.
      */
     traceId?: string;
+    /**
+     * Provenance for anything this turn writes to the substrate ledger — the
+     * operator job name, the wake reason, the trace id. Forwarded to the MCP
+     * dispatch as a header so the model never sees it and cannot be asked to
+     * pass it (an optional field the agent must remember is a field the agent
+     * skips). Absent for the human assistant, whose actions are by definition
+     * user-instructed.
+     */
+    triggerContext?: Record<string, unknown>;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
@@ -1433,7 +1442,9 @@ export async function* runAgentTurn(
             toolName: tc.name,
           });
         }
-        const call = await callMcpTool(tc.name, tc.args, input.jwt, input.organizationId, input.traceId);
+        const call = await callMcpTool(
+          tc.name, tc.args, input.jwt, input.organizationId, input.traceId, input.triggerContext,
+        );
         // Scope app discovery to the active org. The shared `/apps` endpoint
         // deliberately fans out across every org the user belongs to; here —
         // and only on the dashboard-agent path — we narrow `manage_app` list

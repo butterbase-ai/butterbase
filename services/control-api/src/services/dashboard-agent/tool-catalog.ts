@@ -173,6 +173,7 @@ export function getToolCatalog(): ToolSpec[] {
         'Actions — snapshots & settings: "snapshots" ({days?}), "get_settings", "set_yolo" ({yolo_mode}).\n' +
         'Actions — policy (read the rules that govern you BEFORE proposing): "list_capabilities", "list_principles", "get_principle" ({principle_id}), "list_policy_conflicts", "get_policy_conflict" ({conflict_id}), "resolve_policy_conflict" ({conflict_id, resolution, reason?}).\n' +
         'Capabilities for "propose" that auto-approve: upsert_entity, update_entity, patch_entity, record_decision, record_commitment, record_learning, upsert_source_artifact, revert_action.\n' +
+        'When proposing record_decision, record_commitment or record_learning about something you read, set `source_artifact_id` in the payload to the artifact you read it in. The owner sees where each observation came from; one with no source cannot be checked.\n' +
         'Capabilities for "propose" that ALWAYS require human approval: record_principle, amend_principle, retire_principle, supersede_decision, delete_entity, merge_entities, bulk_revert_actions, send_email_draft. These are not reversible and the policy-layer ones cannot be auto-approved by any override — you cannot rewrite the rules that gate you. Proposing one returns a pending action rather than executing it.\n' +
         'Principle conflicts force approval regardless of capability. Call "list_principles" before proposing rather than discovering constraints by being blocked.',
       parameters: flatActionParams(),

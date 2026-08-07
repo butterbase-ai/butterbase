@@ -64,6 +64,7 @@ export async function callMcpTool(
   jwt: string,
   orgId?: string | null,
   traceId?: string | null,
+  triggerContext?: Record<string, unknown> | null,
 ): Promise<McpCallResult> {
   const url = `${process.env.MCP_SERVER_URL ?? 'http://localhost:3010'}/mcp`;
   const normalizedArgs = normalizeToolArgs(args);
@@ -79,6 +80,17 @@ export async function callMcpTool(
         authorization: `Bearer ${jwt}`,
         ...(orgId ? { 'x-organization-id': orgId } : {}),
         ...(traceId ? { 'x-butterbase-trace-id': traceId } : {}),
+        // Base64 so arbitrary job names and wake reasons cannot break header
+        // framing. Lands in substrate.action_ledger.trigger_context; see
+        // TriggerContext in @butterbase/substrate-core.
+        ...(triggerContext
+          ? {
+              'x-butterbase-trigger-context': Buffer.from(
+                JSON.stringify(triggerContext),
+                'utf8',
+              ).toString('base64'),
+            }
+          : {}),
       },
       body: JSON.stringify({
         jsonrpc: '2.0',

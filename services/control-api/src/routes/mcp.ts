@@ -35,8 +35,16 @@ async function handleMcp(
     // orgs tool calls resolve against. bb_sk_* keys ignore this downstream.
     const rawOrgId = request.headers['x-organization-id'];
     const organizationId = typeof rawOrgId === 'string' && rawOrgId.length > 0 ? rawOrgId : undefined;
+    // Provenance for the substrate ledger — which operator job, which wake,
+    // which trace. Until now this hop dropped it: the operator minted a trace
+    // id, carried it across approval gates, sent it as x-butterbase-trace-id,
+    // and it died here because nothing read it. Audit metadata only; it is
+    // forgeable and must never reach a policy decision.
+    const rawTrigger = request.headers['x-butterbase-trigger-context'];
+    const triggerContext =
+      typeof rawTrigger === 'string' && rawTrigger.length > 0 ? rawTrigger : undefined;
 
-    await runWithRequestAuth({ authorizationHeader, testUserId, organizationId }, async () => {
+    await runWithRequestAuth({ authorizationHeader, testUserId, organizationId, triggerContext }, async () => {
       await transport.handleRequest(request.raw, reply.raw, request.body);
     });
   } catch (error) {

@@ -194,7 +194,22 @@ export function resolveOperatorModel(explicit?: string): string {
  * conversation per org runs for a long time, and the header will change under
  * it. Bump on any change to the header's fields or delimiters.
  */
-export const OPERATOR_WAKE_PROMPT_VERSION = 'operator-wake/2026-08-06.1';
+export const OPERATOR_WAKE_PROMPT_VERSION = 'operator-wake/2026-08-07.1';
+
+/**
+ * `source_artifact_id` is documented on record_learning, record_decision and
+ * record_commitment — "set when this learning was extracted from a meeting
+ * transcript, email, etc." — and the agent ignores it. Measured 2026-08-07:
+ * 1 of 25 learnings and 2 of 111 decisions carry one; commitments, which the
+ * agent does fill, sit at 7 of 8.
+ *
+ * That gap is a prompting problem, not a schema one. The field exists, the
+ * schema describes it, and nothing tells the agent it matters — the same shape
+ * as the file-memos-instead-of-acting defect. So say it here, in the wake
+ * envelope, which reaches every job rather than only newly seeded ones.
+ */
+const PROVENANCE_INSTRUCTION =
+  'When you record a learning, decision or commitment that came from something you read — a call transcript, an email, a support ticket — set `source_artifact_id` to that artifact. An observation with no source cannot be checked by the person relying on it, and the owner sees these in their feed. If you read something that is not yet an artifact, record it with `upsert_source_artifact` first and cite the id it returns.';
 
 const HEADER_OPEN = '=== OPERATOR WAKE (platform-authored) ===';
 const HEADER_CLOSE = '=== END OPERATOR WAKE ===';
@@ -238,7 +253,10 @@ const SCRATCHPAD_CLOSE = '--- END SCRATCHPAD ---';
  * as a hint, and told to reconcile regardless. Everything after the header is
  * byte-identical between the two wake reasons for exactly that reason.
  */
-function buildWakeMessage(
+/** Exported so a live sweep can put the *real* wake message in front of a real
+ *  model. Whether the agent fills an optional field is not something a mocked
+ *  test can answer, and a paraphrased prompt would not answer it either. */
+export function buildWakeMessage(
   job: OperatorJob,
   wake: OperatorWake,
   scratchpad: OperatorScratchpad | null,
@@ -273,6 +291,8 @@ function buildWakeMessage(
     'Treat the wake reason above only as a hint that something may have changed — re-read current state and reconcile before acting. Events can be dropped, so a scheduled wake must do the same work as an event wake.',
     '',
     scratchpadBlock,
+    '',
+    PROVENANCE_INSTRUCTION,
     '',
     job.instructions,
   ].join('\n');
@@ -560,6 +580,17 @@ export async function runOperatorTurn(
       organizationId: job.organizationId,
       codeExecutor: opts.codeExecutor,
       traceId,
+      // Until now, job name and wake reason existed only as prose inside the
+      // wake message — in the model's context window, in no structured field.
+      // The ledger recorded every one of these as triggered_by
+      // 'user_instruction', which for an unattended 3am tick is false.
+      triggerContext: {
+        source: 'operator_wake',
+        job: job.name,
+        wake_reason:
+          wake.reason === 'timer' ? 'timer' : `event (${wake.table} row ${wake.rowId})`,
+        trace_id: traceId,
+      },
     });
 
     for await (const event of gen) {
