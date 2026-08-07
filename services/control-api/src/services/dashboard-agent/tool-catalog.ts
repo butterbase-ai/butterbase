@@ -72,6 +72,25 @@ export const OPERATOR_SCRATCHPAD_TOOL = 'update_operator_scratchpad';
  */
 export const OPERATOR_SANDBOX_CODE_TOOL = 'run_sandbox_code';
 
+/**
+ * The operator's BUILD tool — phase 3's one new model-facing capability.
+ *
+ * Dispatched IN-PROCESS, gated on a `buildExecutor` for the turn, exactly like
+ * `OPERATOR_SANDBOX_CODE_TOOL` and for the identical reason: the build runs in
+ * the MicroVM, there is no host-side fallback, and a turn with no sandbox must
+ * find the tool ABSENT rather than merely refused.
+ *
+ * NOT a second flavour of `run_sandbox_code`, even though both end in the same
+ * VM. `run_sandbox_code` runs a Python string the model wrote, and knows
+ * nothing about the app. This one hydrates the app's ACTUAL working tree from
+ * presigned blob urls, runs the SAME `npm install` + `npm run build` the
+ * from-source deploy will run, and hands back the compiler's own diagnostics.
+ * The model could in principle reconstruct that from `run_sandbox_code` — but
+ * only by being handed the source, which is the one thing the credential rule
+ * forbids putting in its hands as literal text on the way in.
+ */
+export const OPERATOR_BUILD_TOOL = 'build_app';
+
 export function getToolCatalog(): ToolSpec[] {
   return [
     // ---- App lifecycle & discovery ----
@@ -319,6 +338,26 @@ export function getToolCatalog(): ToolSpec[] {
         },
       },
     },
+    {
+      name: OPERATOR_BUILD_TOOL,
+      operatorOnly: true,
+      description:
+        'Compile the app you are currently working on and return the REAL compiler output. Your current working-tree files (including every edit you have made this turn, committed or not) are copied into an isolated sandbox, dependencies are installed, and `npm run build` is run — the same build command the deploy will run. ' +
+        'Returns { ok, step, exit_code, stdout, stderr, install_skipped, duration_ms }. When ok is false, `stdout`/`stderr` contain the actual TypeScript/bundler diagnostics: read them, fix the files with write_file, and call this again. Repeat builds in the same wake reuse the installed dependencies and are much faster than the first. ' +
+        'This does NOT deploy anything and does not change what any user sees. Use it BEFORE deploying, every time you have changed source — a deploy is not a way to find out whether your code compiles. ' +
+        'This tool may be entirely ABSENT from your tool list on a given wake — no sandbox is guaranteed to be available. If it is not offered, do not attempt to simulate a build; say plainly that you could not verify the build.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id'],
+        properties: {
+          app_id: {
+            type: 'string',
+            description: 'The app whose working tree should be built.',
+          },
+        },
+      },
+    },
   ];
 }
 
@@ -328,6 +367,10 @@ export function isOperatorScratchpadTool(name: string): name is 'update_operator
 
 export function isRunSandboxCodeTool(name: string): name is 'run_sandbox_code' {
   return name === OPERATOR_SANDBOX_CODE_TOOL;
+}
+
+export function isBuildAppTool(name: string): name is 'build_app' {
+  return name === OPERATOR_BUILD_TOOL;
 }
 
 /**

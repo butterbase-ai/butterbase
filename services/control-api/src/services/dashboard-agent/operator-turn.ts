@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { randomUUID } from 'crypto';
-import { runAgentTurn } from './loop.js';
+import { runAgentTurn, type BuildExecutor } from './loop.js';
 import { getOrCreateOperatorConversation, operatorUserId, type OperatorJob } from './operator-store.js';
 import { getOperatorCredential } from './operator-credential.js';
 import { listPendingByConv, findResumableApproval, markApprovalResumed } from './approvals-store.js';
@@ -488,6 +488,14 @@ export async function runOperatorTurn(
      * catalog, never a fallback to host execution).
      */
     codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
+    /**
+     * Runs the app's build in this turn's sandbox (phase 3). Supplied by
+     * `SandboxRunner`; absent from `LocalRunner`. Threaded straight through to
+     * `runAgentTurn` — see its doc comment for the safety rule this controls
+     * (no `buildExecutor` means `build_app` is absent from the catalog, never
+     * a fallback to building on the control plane).
+     */
+    buildExecutor?: BuildExecutor;
   },
 ): Promise<OperatorTurnResult> {
   const { job, wake } = opts;
@@ -579,6 +587,7 @@ export async function runOperatorTurn(
       pool,
       organizationId: job.organizationId,
       codeExecutor: opts.codeExecutor,
+      buildExecutor: opts.buildExecutor,
       traceId,
       // Until now, job name and wake reason existed only as prose inside the
       // wake message — in the model's context window, in no structured field.

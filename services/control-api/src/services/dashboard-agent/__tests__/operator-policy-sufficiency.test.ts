@@ -82,7 +82,7 @@ describe('sufficiency — every reachable tool has an explicit tier', () => {
     expect([...OPERATOR_TOOL_SURFACE].sort()).toEqual([...OPERATOR_TOOL_TIERS.keys()].sort());
   });
 
-  it('both loop-internal tools are classified', () => {
+  it('every loop-internal tool is classified', () => {
     for (const name of OPERATOR_LOCAL_TOOLS) {
       expect(OPERATOR_TOOL_TIERS.has(name), `${name} is not in OPERATOR_TOOL_TIERS`).toBe(true);
     }
@@ -131,6 +131,22 @@ describe('the allow tier is the spec list, nothing more', () => {
     // wins. Recorded here rather than silently, because gating it would be the
     // more conservative reading and somebody will want to know this was seen.
     'manage_integrations',
+    // PHASE 3 (2026-08-08), and postdating the spec rather than contradicting
+    // it: `build_app` did not exist when the 2026-08-07 allow list was closed.
+    //
+    // It is 'allow' by argument, not by convenience, and the argument is
+    // written out in full in operator-policy.ts's tier-table comment. The short
+    // form: it executes arbitrary project code (npm lifecycle scripts) in the
+    // SAME credential-less MicroVM `run_sandbox_code` already reaches ungated,
+    // so it adds no capability class; its only mutation is content-addressed
+    // blob uploads that create no snapshot and move no `latest` pointer; and
+    // gating the CHECK while `deploy_frontend` stays gated would make the
+    // verified path the slow one, whose predictable result is an operator that
+    // skips the build and ships — the exact failure the tool exists to remove.
+    //
+    // Adding a line here is where that decision has to be defended. If
+    // `run_sandbox_code`'s verdict is ever revisited, revisit this WITH it.
+    'build_app',
   ];
 
   it('exactly these tools are allow-tier', () => {

@@ -20,7 +20,7 @@
  *    has to be structural.
  */
 
-import { OPERATOR_SCRATCHPAD_TOOL, OPERATOR_SANDBOX_CODE_TOOL } from './tool-catalog.js';
+import { OPERATOR_SCRATCHPAD_TOOL, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL } from './tool-catalog.js';
 
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
 
@@ -69,6 +69,7 @@ export type OperatorPolicyContext = {
 export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
   OPERATOR_SCRATCHPAD_TOOL,
   OPERATOR_SANDBOX_CODE_TOOL,
+  OPERATOR_BUILD_TOOL,
 ]);
 
 /**
@@ -158,6 +159,51 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
  * network at all) would close this properly, but that is a template/runtime
  * concern for a later stage (Stage C's custom container), not something to
  * attempt here by editing `sandbox-provider.ts`'s config plumbing.
+ *
+ * -------------------------------------------------------------------------
+ * `build_app` is 'allow'. THE ARGUMENT, since this one genuinely is arguable.
+ * -------------------------------------------------------------------------
+ * It looks read-ish — "compile my code and tell me what's wrong" — but it is
+ * NOT a read, and the tier must not be defaulted on that appearance. Two
+ * things it actually does:
+ *
+ *  1. IT EXECUTES ARBITRARY PROJECT CODE. `npm install` runs whatever
+ *     lifecycle scripts the app's dependency tree declares, and `npm run
+ *     build` runs whatever `package.json` says. That is arbitrary code
+ *     execution with unrestricted egress, no different in kind from
+ *     `run_sandbox_code`.
+ *  2. IT WRITES BLOBS. `build-hydration.ts` calls the repo `prepare` route and
+ *     PUTs the blobs storage is missing, which consumes the app's storage
+ *     quota. That is a mutation, not a read.
+ *
+ * It is 'allow' anyway, for three reasons, in order of weight:
+ *
+ *  - IT ADDS NO CAPABILITY CLASS. Every turn that could call this can already
+ *    call `run_sandbox_code`, which is 'allow' and can `subprocess.run` the
+ *    same npm from the same VM. Gating the tidy, fixed-command version of a
+ *    thing while the arbitrary version stays ungated is theatre — it changes
+ *    which door the capability comes through, not whether it exists. If
+ *    `run_sandbox_code`'s verdict is ever revisited, revisit this WITH it; do
+ *    not treat them as independent.
+ *  - THE WRITE IS INVISIBLE AND ALREADY INTENDED. No commit is made, no
+ *    snapshot is created, and `latest` does not move — see build-hydration.ts.
+ *    The blobs are content-addressed and are the same bytes the end-of-turn
+ *    flush was going to write regardless, so the only real effect is that
+ *    quota is consumed slightly earlier than it would have been. No reader of
+ *    the app sees anything change because the operator compiled.
+ *  - GATING IT DEFEATS ITS PURPOSE, and its purpose is a safety property. The
+ *    tool exists so the operator stops discovering its mistakes BY DEPLOYING
+ *    THEM. A per-build approval means the fix-and-re-run loop stalls on a
+ *    human for every compiler error, and the predictable outcome is an
+ *    operator that skips the build and ships — which is the exact failure this
+ *    phase was built to remove. `deploy_frontend` stays at 'approval', so the
+ *    gate is still in front of the thing that reaches users; putting a second
+ *    one in front of the CHECK makes the checked path the slow one.
+ *
+ * What would change this verdict: giving the sandbox any credential, or giving
+ * this tool a model-supplied build command. Neither is true today — the
+ * command is fixed (`npm run build`, matching deploy.ts) and the sandbox holds
+ * nothing but presigned, blob-scoped, one-hour GET urls.
  */
 export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Map<string, OperatorToolTier>([
   // ---- allow: reads, and writes that stay inside the org's own memory ----
@@ -175,6 +221,8 @@ export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Ma
   // loop-internal tools, unchanged (see OPERATOR_LOCAL_TOOLS)
   [OPERATOR_SCRATCHPAD_TOOL, 'allow'],
   [OPERATOR_SANDBOX_CODE_TOOL, 'allow'],
+  // see the `build_app` section of this comment block for the argument
+  [OPERATOR_BUILD_TOOL, 'allow'],
 
   // ---- approval: everything else the catalog advertises ----
   // app lifecycle & discovery

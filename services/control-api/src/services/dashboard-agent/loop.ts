@@ -18,7 +18,8 @@
 import pg from 'pg';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, OPERATOR_SANDBOX_CODE_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
 import { createApproval, checkTrust, createSubstrateEscalationApproval } from './approvals-store.js';
 import { logOperatorCheckpoint } from './operator-turn.js';
@@ -78,6 +79,43 @@ export class InsufficientCreditsStreamError extends Error {
 
 type Mcp = { call(name: string, args: unknown, jwt: string): Promise<any> };
 
+/**
+ * PHASE 3 — the seam that runs a build in the turn's sandbox.
+ *
+ * Mirrors `codeExecutor`: supplied by `SandboxRunner` (cron-scheduler), absent
+ * for `LocalRunner` and for every human turn, and its ABSENCE is what makes
+ * `build_app` unreachable rather than merely refused.
+ *
+ * THE ARGUMENT SHAPE IS THE SECURITY BOUNDARY. Everything in it is on its way
+ * into a MicroVM that runs model-authored code with unrestricted egress, so it
+ * carries presigned, blob-scoped, time-limited GET urls and NOTHING else — no
+ * jwt, no org id, no file content. The operator's `bb_sk_*` can wipe the app
+ * repo (`DELETE /v1/:app_id/repo` shares `authorizeRepoWrite` with commit), so
+ * it stays on this side; `prepare`/`commit` happen here, never there. Asserted
+ * by the `credential` block in __tests__/loop-operator-build.test.ts.
+ */
+export type BuildExecutorRequest = {
+  /** Names the guest workspace directory. The app id in practice. */
+  workspaceId: string;
+  files: Array<{ path: string; url: string }>;
+  /** sha256 of the lockfile (or package.json). Keys node_modules reuse. */
+  installKey: string;
+};
+
+export type BuildExecutorResult = {
+  ok: boolean;
+  step: 'hydrate' | 'install' | 'build' | 'done';
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  installSkipped: boolean;
+  truncated: boolean;
+  timedOut: boolean;
+  durationMs: number;
+};
+
+export type BuildExecutor = (req: BuildExecutorRequest) => Promise<BuildExecutorResult>;
+
 export type LoopDeps = {
   cache: WorkingTreeCache;
   mcp: Mcp;
@@ -98,6 +136,13 @@ export type LoopDeps = {
   // the store reads/writes; production uses the real store functions.
   getConversation?: typeof getConversation;
   updateConversationTitle?: typeof updateConversationTitle;
+  /**
+   * Phase 3: mints the presigned, blob-scoped urls a credential-less sandbox
+   * uses to fetch the app's source. Injectable so `loop-operator-build.test.ts`
+   * can inspect exactly what crosses the boundary; production builds a real
+   * `createBuildHydrator` over the turn's cache.
+   */
+  buildHydratorFactory?: () => { hydrate: (i: { convId: string; appId: string; jwt: string }) => Promise<BuildHydration> };
 };
 
 let _sharedCache: WorkingTreeCache | undefined;
@@ -484,6 +529,17 @@ export async function* runAgentTurn(
      */
     codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
     /**
+     * Runs `npm install` + `npm run build` over the app's working tree in this
+     * turn's sandbox and returns the compiler's own output. Supplied by
+     * `SandboxRunner`; absent for `LocalRunner` and every human turn.
+     *
+     * SAFETY-CRITICAL, identically to `codeExecutor`: there is no host-side
+     * build fallback and there must never be one. When this is absent,
+     * `OPERATOR_BUILD_TOOL` must be absent from the catalog offered to the
+     * model (see the `tools` construction below).
+     */
+    buildExecutor?: BuildExecutor;
+    /**
      * Distributed trace id for this turn (see operator-turn.ts). Supplied by
      * `runOperatorTurn`; absent for the human assistant, which has no trace.
      * Threaded into the actual MCP tool dispatch below as the
@@ -676,10 +732,16 @@ export async function* runAgentTurn(
   // is what the dispatch guard ultimately checks — so this exclusion is
   // enforced twice: the model is never shown the tool, and even a hallucinated
   // call to it is refused before the dispatch route below is ever reached.
+  // SAFETY-CRITICAL for `OPERATOR_BUILD_TOOL` on exactly the same terms: its
+  // policy verdict is 'allow' unconditionally, so this filter is the only
+  // thing that decides whether a turn with no sandbox can reach it. There is
+  // no host-side build, and a build that ran in THIS process would execute the
+  // customer's `postinstall` scripts on the control plane.
   const tools = isOperator
     ? getToolCatalog()
         .filter((t) => isOperatorToolAllowed(t.name))
         .filter((t) => t.name !== OPERATOR_SANDBOX_CODE_TOOL || typeof input.codeExecutor === 'function')
+        .filter((t) => t.name !== OPERATOR_BUILD_TOOL || typeof input.buildExecutor === 'function')
     : getToolCatalog().filter((t) => t.operatorOnly !== true);
 
   /**
@@ -695,6 +757,7 @@ export async function* runAgentTurn(
       conversationId: input.conversationId,
       tools: tools.length,
       sandboxCode: tools.some((t) => t.name === OPERATOR_SANDBOX_CODE_TOOL),
+      buildApp: tools.some((t) => t.name === OPERATOR_BUILD_TOOL),
     });
   }
 
@@ -772,6 +835,18 @@ export async function* runAgentTurn(
       baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
     }
   };
+
+  /**
+   * Phase 3: mints the presigned urls the sandbox fetches the source from.
+   *
+   * Built unconditionally rather than only when a `buildExecutor` exists — it
+   * is inert until the build route calls it, and a conditional here would be a
+   * second, weaker copy of the catalogue filter's decision. The filter is the
+   * control; this is just a client.
+   */
+  const buildHydrator = deps.buildHydratorFactory
+    ? deps.buildHydratorFactory()
+    : createBuildHydrator({ cache });
 
   // Build per-turn fileOps + deployer bound to our SSE queue.
   const fileOps = deps.fileOpsFactory
@@ -1267,6 +1342,110 @@ export async function* runAgentTurn(
                 result: { ok: true, characters: saved.content.length, updated_at: saved.updatedAt },
               };
             } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: build_app (in-process) --------------------------------
+         *
+         * PHASE 3's whole point: put a real compiler between "write" and
+         * "deploy". Before this, nothing type-checked or compiled what the
+         * operator wrote — functions had no build at all, and frontends
+         * compiled only INSIDE a deploy, so the agent learned it was wrong by
+         * shipping.
+         *
+         * THE SHAPE, and why it is this shape:
+         *
+         *   1. `ensureHydrated` first, so a turn that has not touched this app
+         *      yet still builds its real source rather than an empty tree.
+         *      Same call the deploy routes make, and it never throws.
+         *   2. `buildHydrator.hydrate` mints presigned, blob-scoped GET urls
+         *      for the CURRENT tree — including this turn's unflushed edits,
+         *      which is the entire reason it uses `prepare` rather than the
+         *      last snapshot. It does NOT commit; a build is not a save.
+         *   3. `buildExecutor` runs the build in the sandbox and returns the
+         *      compiler's own output.
+         *
+         * THE CREDENTIAL RULE: `input.jwt` goes to `hydrate` (a control-api
+         * call, where the key belongs) and NEVER into the object handed to
+         * `buildExecutor`. That object crosses into a MicroVM running
+         * model-authored code with unrestricted egress, and the operator's
+         * `bb_sk_*` can wipe the app repo. The three fields below are the
+         * whole payload, and a test asserts that closed shape.
+         *
+         * THE RULE, same as `run_sandbox_code`: no `buildExecutor` means no
+         * build, ever — never "build on the host instead", which would run the
+         * customer's `postinstall` scripts on the control plane. The tool was
+         * dropped from `tools` above in that case so this branch should be
+         * unreachable; it re-checks anyway, for the same reason the scratchpad
+         * route re-checks `isOperator` — a route that executes code must not
+         * rely on a filter two hundred lines away as its only proof.
+         *
+         * A FAILING BUILD IS A RESULT, not a tool error. `payload.result`
+         * carries `ok: false` plus the diagnostics, because the model has to
+         * read them to fix them, and because a turn that treats a red build as
+         * a failure throws away everything it did before the build.
+         */
+        if (isBuildAppTool(tc.name)) {
+          toolCallsCount++;
+          const bArgs = (tc.args ?? {}) as { app_id?: unknown };
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else if (typeof input.buildExecutor !== 'function') {
+            payload = { error: `Tool "${tc.name}" is not available: no sandbox for this turn.` };
+          } else if (typeof bArgs.app_id !== 'string' || bArgs.app_id.length === 0) {
+            payload = { error: `Tool "${tc.name}" requires a string "app_id" argument.` };
+          } else {
+            const appId = bArgs.app_id;
+            try {
+              await ensureHydrated({ convId: input.conversationId, appId, jwt: input.jwt });
+              touchedApps.add(appId);
+              const h = await buildHydrator.hydrate({
+                convId: input.conversationId,
+                appId,
+                jwt: input.jwt,
+              });
+              const r = await input.buildExecutor({
+                workspaceId: appId,
+                files: h.files,
+                installKey: h.installKey,
+              });
+              // snake_case out to the model, matching every other tool result
+              // it sees, rather than leaking this module's camelCase.
+              payload = {
+                result: {
+                  ok: r.ok,
+                  step: r.step,
+                  exit_code: r.exitCode,
+                  stdout: r.stdout,
+                  stderr: r.stderr,
+                  install_skipped: r.installSkipped,
+                  output_truncated: r.truncated,
+                  timed_out: r.timedOut,
+                  duration_ms: r.durationMs,
+                  files_built: h.fileCount,
+                },
+              };
+            } catch (err) {
+              // Hydration failures (a 403, a storage quota, an unreachable
+              // repo route) and transport failures land here. They are tool
+              // ERRORS, not build reports: telling the model "your build
+              // failed" when the source never reached the sandbox would send
+              // it looking for a bug in code that never compiled.
               payload = { error: err instanceof Error ? err.message : String(err) };
             }
           }

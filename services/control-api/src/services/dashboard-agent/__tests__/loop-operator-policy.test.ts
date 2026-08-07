@@ -37,7 +37,7 @@ vi.mock('../approvals-store.js', () => ({
 import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';
-import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL } from '../tool-catalog.js';
+import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL } from '../tool-catalog.js';
 import { operatorUserId } from '../operator-store.js';
 import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, type LoopEvent } from '../loop.js';
@@ -550,7 +550,7 @@ describe('operator — allow verdict', () => {
 // ---------------------------------------------------------------------------
 
 describe('operator — catalog filtering (affordance, not the control)', () => {
-  it('offers the model the WHOLE catalog, MINUS the sandbox tool when no codeExecutor is supplied', async () => {
+  it('offers the model the WHOLE catalog, MINUS the sandbox-backed tools when no executor is supplied', async () => {
     const { bodies } = oneToolCallThenStop('select_rows', { app_id: 'app-1' });
 
     await collect(runAgentTurn(operatorInput()));
@@ -561,15 +561,22 @@ describe('operator — catalog filtering (affordance, not the control)', () => {
     // catalog-construction filter in loop.ts is what actually withholds it,
     // NOT operatorPolicyFor/isOperatorToolAllowed, so `expected` must exclude
     // it explicitly rather than by relying on the policy helper.
+    //
+    // `build_app` (phase 3) is withheld by the SAME mechanism and for the same
+    // reason — its executor is `input.buildExecutor`, also absent here — so it
+    // is excluded on the same terms rather than being treated as a special
+    // case. Both are 'allow' in the table; neither is reachable without a
+    // sandbox.
     const expected = getToolCatalog()
       .map((t) => t.name)
       .filter(isOperatorToolAllowed)
-      .filter((n) => n !== OPERATOR_SANDBOX_CODE_TOOL);
+      .filter((n) => n !== OPERATOR_SANDBOX_CODE_TOOL && n !== OPERATOR_BUILD_TOOL);
 
     expect(offered.sort()).toEqual(expected.sort());
     expect(offered.length).toBeGreaterThan(0);
     expect(offered).toContain('manage_substrate');
     expect(offered).not.toContain(OPERATOR_SANDBOX_CODE_TOOL);
+    expect(offered).not.toContain(OPERATOR_BUILD_TOOL);
 
     // The six that used to be withheld are now OFFERED — this is the fix, not
     // a regression. They are reachable at the 'approval' tier, and the model
