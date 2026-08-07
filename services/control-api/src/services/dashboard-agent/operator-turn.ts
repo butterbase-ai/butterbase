@@ -241,7 +241,10 @@ const SCRATCHPAD_CLOSE = '--- END SCRATCHPAD ---';
  * as a hint, and told to reconcile regardless. Everything after the header is
  * byte-identical between the two wake reasons for exactly that reason.
  */
-function buildWakeMessage(
+/** Exported so a live sweep can put the *real* wake message in front of a real
+ *  model. Whether the agent fills an optional field is not something a mocked
+ *  test can answer, and a paraphrased prompt would not answer it either. */
+export function buildWakeMessage(
   job: OperatorJob,
   wake: OperatorWake,
   scratchpad: OperatorScratchpad | null,
