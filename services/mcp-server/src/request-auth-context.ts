@@ -12,6 +12,15 @@ interface RequestAuthContext {
   // which validates membership before honoring it. bb_sk_* keys ignore this
   // (their org is baked into the key).
   organizationId?: string;
+  // Provenance for the substrate action ledger: which operator job, which
+  // wake, which trace. Carried as x-butterbase-trigger-context (base64 JSON)
+  // and forwarded verbatim to control-api, which writes it to
+  // action_ledger.trigger_context.
+  //
+  // NOT a credential. Anything that can POST to /mcp can set it, so it may
+  // only ever inform the audit trail — never a policy or authorization
+  // decision.
+  triggerContext?: string;
 }
 
 const requestAuthStorage = new AsyncLocalStorage<RequestAuthContext>();
@@ -29,7 +38,7 @@ export async function runWithRequestAuthorizationHeader<T>(
  * (non-E2E) traffic this is identical to runWithRequestAuthorizationHeader.
  */
 export async function runWithRequestAuth<T>(
-  ctx: { authorizationHeader?: string; testUserId?: string; organizationId?: string },
+  ctx: RequestAuthContext,
   callback: () => Promise<T>
 ): Promise<T> {
   return requestAuthStorage.run(ctx, callback);
@@ -45,4 +54,8 @@ export function getRequestTestUserId(): string | undefined {
 
 export function getRequestOrganizationId(): string | undefined {
   return requestAuthStorage.getStore()?.organizationId;
+}
+
+export function getRequestTriggerContext(): string | undefined {
+  return requestAuthStorage.getStore()?.triggerContext;
 }
