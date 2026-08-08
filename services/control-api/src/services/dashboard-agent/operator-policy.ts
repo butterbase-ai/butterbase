@@ -20,7 +20,12 @@
  *    has to be structural.
  */
 
-import { OPERATOR_SCRATCHPAD_TOOL, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL } from './tool-catalog.js';
+import {
+  OPERATOR_SCRATCHPAD_TOOL,
+  OPERATOR_SANDBOX_CODE_TOOL,
+  OPERATOR_BUILD_TOOL,
+  OPERATOR_PENDING_DECISIONS_TOOL,
+} from './tool-catalog.js';
 
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
 
@@ -70,6 +75,7 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
   OPERATOR_SCRATCHPAD_TOOL,
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
+  OPERATOR_PENDING_DECISIONS_TOOL,
 ]);
 
 /**
@@ -223,6 +229,20 @@ export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Ma
   [OPERATOR_SANDBOX_CODE_TOOL, 'allow'],
   // see the `build_app` section of this comment block for the argument
   [OPERATOR_BUILD_TOOL, 'allow'],
+  /**
+   * `list_pending_decisions` is 'allow', and this is the easiest 'allow' in the
+   * table: it is a READ of the operator's own conversation's pending approval
+   * rows, in the control plane, with no arguments at all. It reaches no tenant
+   * data, no MCP call and no other org — the conversation is derived from the
+   * turn, never from a model argument. It cannot approve, deny, cancel or
+   * expire anything; the approval routes are the only writers and they require
+   * a human's org membership.
+   *
+   * Gating it would be actively harmful: the whole point is that the agent can
+   * check what is already waiting BEFORE proposing, and a read the agent must
+   * queue for the owner's approval would never be used.
+   */
+  [OPERATOR_PENDING_DECISIONS_TOOL, 'allow'],
 
   // ---- approval: everything else the catalog advertises ----
   // app lifecycle & discovery

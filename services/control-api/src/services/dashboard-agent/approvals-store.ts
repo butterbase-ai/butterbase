@@ -366,6 +366,79 @@ export async function listPendingByConv(
 }
 
 /**
+ * The pending decisions on a conversation, expressed as the CALLS the owner is
+ * actually deciding on — the input to the re-proposal guard (layer 1; see
+ * operator-duplicate-guard.ts) and to `list_pending_decisions` (layer 3).
+ *
+ * WHY THIS IS NOT JUST `listPendingByConv`. There are two kinds of operator
+ * approval row and they disagree about what `tool_args` means:
+ *
+ *  - the PRE-DISPATCH gate (loop.ts's `operatorVerdict === 'approval'` branch)
+ *    stores the model's own call verbatim, so the approval row IS the call;
+ *  - the SUBSTRATE-ESCALATED approval (`createSubstrateEscalationApproval`)
+ *    stores a literal `{action:'approve', action_id}` built by that writer,
+ *    while the call the owner is deciding on is the original propose — which
+ *    lives on the paused assistant message the row points at.
+ *
+ * Comparing only the approval row would therefore let an escalated propose be
+ * re-proposed forever: every retry mints a NEW substrate action id, so no two
+ * escalation rows ever look alike. Both candidates are emitted, so a match
+ * against either counts as "already waiting".
+ *
+ * `createdAt` is the approval's, not the message's: it is when the DECISION
+ * started waiting, which is what the owner-facing wait time means.
+ */
+export type PendingGatedCallRow = {
+  approvalId: string;
+  toolName: string;
+  toolArgs: unknown;
+  createdAt: string;
+};
+
+export async function listPendingGatedCalls(
+  pool: pg.Pool,
+  conversationId: string,
+): Promise<PendingGatedCallRow[]> {
+  const result = await pool.query(
+    `SELECT a.id, a.tool_name, a.tool_args, a.created_at,
+            m.tool_name AS msg_tool_name, m.tool_args AS msg_tool_args
+     FROM dashboard_agent_approvals a
+     LEFT JOIN dashboard_agent_messages m
+       ON m.id = a.turn_message_id
+      AND m.role = 'assistant'
+      AND m.tool_call_id IS NOT NULL
+     WHERE a.conversation_id = $1 AND a.status = 'pending'
+     ORDER BY a.created_at ASC`,
+    [conversationId],
+  );
+
+  const calls: PendingGatedCallRow[] = [];
+  for (const row of result.rows) {
+    calls.push({
+      approvalId: row.id,
+      toolName: row.tool_name,
+      toolArgs: row.tool_args,
+      createdAt: row.created_at,
+    });
+    // The gated call as the MODEL made it. Emitted whenever the paused message
+    // exists, without trying to decide whether it "differs" — an escalated
+    // propose carries the SAME tool name as its approval row
+    // (`manage_substrate`) and differs only in args, so a name comparison would
+    // silently drop exactly the case this exists for. A redundant duplicate is
+    // free: it carries the same approval id, so a match reports one decision.
+    if (row.msg_tool_name) {
+      calls.push({
+        approvalId: row.id,
+        toolName: row.msg_tool_name,
+        toolArgs: row.msg_tool_args,
+        createdAt: row.created_at,
+      });
+    }
+  }
+  return calls;
+}
+
+/**
  * List an org's pending OPERATOR approvals (the operator conversation's
  * user_id sentinel excludes them from any user-scoped query).
  *

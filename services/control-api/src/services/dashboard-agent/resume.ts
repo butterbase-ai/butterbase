@@ -37,6 +37,7 @@ import {
   getMessageByPendingApprovalId,
   clearPendingApproval,
   appendMessage,
+  replaceToolResultForCall,
   stripJsonbNulls,
 } from './store.js';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
@@ -257,14 +258,41 @@ export async function completeApprovalResolution(
   // appendMessage's own BEGIN/COMMIT prevents today. The append-then-clear
   // order below is deliberate: a crash between them leaves a valid history
   // plus a stale marker, which is harmless.
-  await appendMessage(pool, approval.conversationId, {
-    role: 'tool',
-    content: '',
-    toolCallId: pausedMessage.toolCallId,
-    toolName: approval.toolName,
-    toolArgs: stripJsonbNulls(approval.toolArgs),
-    toolResult: stripJsonbNulls(toolResult),
+  //
+  // REPLACE-OR-APPEND, added 2026-08-08. An OPERATOR gate no longer leaves its
+  // assistant `tool_calls` row unanswered while the owner thinks: the next wake
+  // writes a placeholder `role:'tool'` row ("not executed — waiting on the
+  // owner") in the adjacent position, so that the operator can keep working
+  // without a turn's worth of messages landing between the two halves of the
+  // pair (see `closeUnansweredToolCall`). When that placeholder exists, the
+  // owner's real answer must OVERWRITE it: appending would leave a second
+  // `role:'tool'` row for the same tool_call_id, at the end of the
+  // conversation, with no assistant call in front of it — the same invalid
+  // history in a new shape.
+  //
+  // When no placeholder exists — the human assistant, always; an operator
+  // approval raised before this existed — `replaceToolResultForCall` matches
+  // nothing and the append below runs exactly as it always did. That is why
+  // this is a fallback rather than a branch on principal: it is keyed on what
+  // is actually in the conversation, not on an assumption about who owns it.
+  const toolName = approval.toolName;
+  const toolArgs = stripJsonbNulls(approval.toolArgs);
+  const sanitizedResult = stripJsonbNulls(toolResult);
+  const replaced = await replaceToolResultForCall(pool, approval.conversationId, pausedMessage.toolCallId, {
+    toolName,
+    toolArgs,
+    toolResult: sanitizedResult,
   });
+  if (!replaced) {
+    await appendMessage(pool, approval.conversationId, {
+      role: 'tool',
+      content: '',
+      toolCallId: pausedMessage.toolCallId,
+      toolName,
+      toolArgs,
+      toolResult: sanitizedResult,
+    });
+  }
 
   // 6. Clear the pending marker on the paused assistant row.
   await clearPendingApproval(pool, pausedMessage.id);

@@ -18,10 +18,17 @@
 import pg from 'pg';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
-import { createApproval, checkTrust, createSubstrateEscalationApproval } from './approvals-store.js';
+import {
+  createApproval,
+  checkTrust,
+  createSubstrateEscalationApproval,
+  listPendingGatedCalls,
+  type PendingGatedCallRow,
+} from './approvals-store.js';
+import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-guard.js';
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
@@ -973,6 +980,15 @@ export async function* runAgentTurn(
   // loop (a turn can span several model round-trips) and outside the
   // per-round tool-call loop (several tools can dispatch in one round).
   let actedLogged = false;
+  /**
+   * Decisions already sitting with the owner, for the re-proposal guard and
+   * for `list_pending_decisions`. `null` means "not read yet" — read lazily on
+   * the first operator tool call of the turn, so a turn that calls no tool (or
+   * a human turn) never issues this query. Read once and reused for the whole
+   * turn: a decision raised BY this turn is caught by the gate itself, so
+   * re-reading per call would buy nothing.
+   */
+  let pendingGatedCalls: PendingGatedCallRow[] | null = null;
   try {
     outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
       let assistantText = '';
@@ -1097,6 +1113,100 @@ export async function* runAgentTurn(
           (await resolveYoloMode())
         ) {
           operatorVerdict = operatorPolicyForOrg(tc.name, tc.args, operatorOrgId, { yoloMode: true });
+        }
+
+        /**
+         * ====================================================================
+         * LAYER 1 — THE HARD RE-PROPOSAL GUARD.
+         * ====================================================================
+         *
+         * Until 2026-08-08 a pending approval skipped the entire wake, so the
+         * operator could not re-propose anything: it could not do anything.
+         * That skip is gone (operator-turn.ts) so an owner's overnight decision
+         * no longer costs a night of work, and THIS is the price of removing
+         * it. An operator on a one-minute tick with a decision outstanding can
+         * otherwise put sixty copies of the same email in the owner's queue
+         * before breakfast.
+         *
+         * The prompt is told about pending decisions too (layer 2) and can ask
+         * for their detail (layer 3). Neither is a control. This is: it refuses
+         * in code, and it refuses whether the model cooperated or not.
+         *
+         * WHERE IT SITS, and why exactly here:
+         *   - AFTER the policy verdict (including yolo), so it can never turn a
+         *     'deny' into anything, and never runs before the module that
+         *     decides verdicts has spoken. It only ever REFUSES; there is no
+         *     input to it that widens what the operator may do.
+         *   - BEFORE the approval gate, so a duplicate creates no second
+         *     approval row.
+         *   - BEFORE dispatch, which is load-bearing for the OTHER kind of
+         *     operator approval: a substrate-escalated one is raised AFTER the
+         *     propose has already landed in substrate's ledger, so refusing
+         *     post-dispatch would still park a second real action there. See
+         *     `listPendingGatedCalls` for how that kind is matched at all.
+         *
+         * The refusal is an ordinary TOOL RESULT — assistant row then tool row,
+         * then `continue` — never a thrown error and never a terminated turn.
+         * The model reads it, adapts, and gets on with the rest of the wake;
+         * and the conversation keeps the assistant/tool pairing the gateway
+         * requires.
+         *
+         * `pendingGatedCalls` is read at most ONCE per turn, lazily, and only
+         * for an operator turn — a human conversation never queries it.
+         */
+        if (isOperator) {
+          if (pendingGatedCalls === null) {
+            try {
+              pendingGatedCalls = await listPendingGatedCalls(input.pool, input.conversationId);
+            } catch {
+              // A read failure must not silently DISABLE the guard for the rest
+              // of the turn, but it also must not fail the wake. Leave the
+              // cache unset so the next tool call retries, and treat this call
+              // as unguarded — the approvals feed still shows the owner both
+              // rows, which is the recoverable direction.
+              pendingGatedCalls = null;
+            }
+          }
+          const duplicate = pendingGatedCalls
+            ? findDuplicatePendingCall(pendingGatedCalls, tc.name, tc.args)
+            : null;
+          if (duplicate) {
+            const waited = pendingGatedCalls?.find((p) => p.approvalId === duplicate.approvalId);
+            const errorMsg =
+              `Refused: an equivalent action is already waiting on the owner (approval ${duplicate.approvalId}` +
+              `${waited ? `, raised ${humanizeWait(waited.createdAt, new Date())} ago` : ''}). ` +
+              `It has NOT been approved${duplicate.match === 'target' ? ' — this proposal differs only in wording, not in what it would do' : ''}. ` +
+              'Do not propose it again. It will execute by itself if the owner approves it. ' +
+              'Work on something that does not depend on it.';
+            const messageId = randomUUID();
+            await appendMessage(
+              input.pool,
+              input.conversationId,
+              {
+                role: 'assistant',
+                content: i === 0 ? assistantText : '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: null,
+                modelUsed: input.model,
+              },
+              messageId,
+            );
+            yield { type: 'tool_call', ...tc };
+            const resultPayload = { error: errorMsg };
+            toolCallResults.push({ id: tc.id, ...resultPayload });
+            yield { type: 'tool_result', id: tc.id, ...resultPayload };
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: { error: errorMsg },
+            });
+            continue;
+          }
         }
 
         // Sensitivity gate (Plan 3b Task 2): destructive/confirm-tier calls
@@ -1361,6 +1471,74 @@ export async function* runAgentTurn(
               payload = {
                 result: { ok: true, characters: saved.content.length, updated_at: saved.updatedAt },
               };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: list_pending_decisions (in-process) -------------------
+         *
+         * LAYER 3. Detail on demand about what the owner has not answered yet,
+         * so the always-present wake block can stay one terse line per
+         * decision.
+         *
+         * READ-ONLY AND ARGUMENT-FREE, by construction: the conversation comes
+         * from the turn, never from `tc.args`, so there is no shape in which a
+         * model argument could point this at another org's queue — the same
+         * property that makes the scratchpad route safe, for the same reason.
+         * It cannot approve, deny, cancel or expire anything.
+         *
+         * `listPendingGatedCalls` deliberately emits TWO views of a
+         * substrate-escalated decision (the approval row and the paused call)
+         * because matching needs both. Showing both would tell the owner's
+         * agent there are two decisions when there is one, so they are
+         * collapsed by approval id here — keeping the view the model actually
+         * proposed, which is the one it will recognise.
+         *
+         * The `isOperator` re-check is the same defence in depth the scratchpad
+         * route uses: the tool is filtered out of the human catalog and would
+         * be refused by the allowlist guard above, but a route that reads
+         * approval arguments should not depend on a filter two hundred lines
+         * away for its precondition.
+         */
+        if (isListPendingDecisionsTool(tc.name)) {
+          toolCallsCount++;
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else {
+            try {
+              const rows: PendingGatedCallRow[] =
+                pendingGatedCalls ?? (await listPendingGatedCalls(input.pool, input.conversationId));
+              pendingGatedCalls = rows;
+              const now = new Date();
+              const seen = new Set<string>();
+              const pending: unknown[] = [];
+              for (const row of rows) {
+                if (seen.has(row.approvalId)) continue;
+                seen.add(row.approvalId);
+                pending.push({
+                  approval_id: row.approvalId,
+                  tool_name: row.toolName,
+                  tool_args: row.toolArgs,
+                  raised_at: row.createdAt,
+                  waiting: humanizeWait(row.createdAt, now),
+                });
+              }
+              payload = { result: { pending, count: pending.length } };
             } catch (err) {
               payload = { error: err instanceof Error ? err.message : String(err) };
             }

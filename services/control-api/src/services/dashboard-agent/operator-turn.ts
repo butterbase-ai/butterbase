@@ -3,7 +3,10 @@ import { randomUUID } from 'crypto';
 import { runAgentTurn, type BuildExecutor } from './loop.js';
 import { getOrCreateOperatorConversation, operatorUserId, type OperatorJob } from './operator-store.js';
 import { getOperatorCredential } from './operator-credential.js';
-import { listPendingByConv, findResumableApproval, markApprovalResumed } from './approvals-store.js';
+import { listPendingByConv, findResumableApproval, markApprovalResumed, type Approval } from './approvals-store.js';
+import { closeUnansweredToolCall } from './store.js';
+import { describePendingCall } from './operator-duplicate-guard.js';
+import { OPERATOR_PENDING_DECISIONS_TOOL } from './tool-catalog.js';
 import {
   getOperatorScratchpad,
   OPERATOR_SCRATCHPAD_MAX_CHARS,
@@ -217,6 +220,57 @@ const SCRATCHPAD_OPEN = '--- YOUR SCRATCHPAD (you wrote this) ---';
 const SCRATCHPAD_CLOSE = '--- END SCRATCHPAD ---';
 
 /**
+ * LAYER 2 of the re-proposal defence (see operator-duplicate-guard.ts for the
+ * three-layer argument). Platform-authored, exactly like the header: the agent
+ * cannot edit it, and — like every other block here — it is NOT an input to any
+ * security decision. What refuses a duplicate is the guard in loop.ts. This
+ * block exists so the agent does not spend the turn discovering that refusal,
+ * and does not reason as though a proposal it remembers making had been
+ * accepted.
+ *
+ * Present ONLY while something is pending: on the overwhelming majority of
+ * wakes this is zero characters of prompt.
+ */
+export const PENDING_DECISIONS_OPEN = '--- DECISIONS WAITING ON THE OWNER (platform-authored) ---';
+const PENDING_DECISIONS_CLOSE = '--- END DECISIONS WAITING ---';
+
+/** Bound on how many decisions get their own line; the rest are counted. */
+const PENDING_DECISIONS_MAX_LINES = 10;
+
+/**
+ * The pending-decisions block, or '' when nothing is waiting.
+ *
+ * `now` is a parameter so the wait times are testable; production always passes
+ * the real clock.
+ */
+export function buildPendingDecisionsBlock(pending: readonly Approval[], now: Date): string {
+  if (pending.length === 0) return '';
+
+  const shown = pending.slice(0, PENDING_DECISIONS_MAX_LINES);
+  const lines = shown.map(
+    (a) =>
+      `- ${describePendingCall(
+        { approvalId: a.id, toolName: a.toolName, toolArgs: a.toolArgs, createdAt: a.createdAt },
+        now,
+      )}`,
+  );
+  const overflow = pending.length - shown.length;
+  if (overflow > 0) lines.push(`- (+${overflow} more)`);
+
+  const count =
+    pending.length === 1 ? '1 decision is waiting on the owner' : `${pending.length} decisions are waiting on the owner`;
+
+  return [
+    PENDING_DECISIONS_OPEN,
+    `${count}. They are already in the owner's queue.`,
+    ...lines,
+    'None of these have been approved. Do not re-propose them — an equivalent proposal is refused in code, which wastes the turn — and do not act as though they were approved or plan on top of them having happened. They will run by themselves if the owner approves them, and you will see the result in this conversation. Get on with the work that does not depend on them.',
+    `Call \`${OPERATOR_PENDING_DECISIONS_TOOL}\` when you need the full arguments of one of these rather than this summary.`,
+    PENDING_DECISIONS_CLOSE,
+  ].join('\n');
+}
+
+/**
  * ============================================================================
  * THE RULE, for whoever reads this next.
  *
@@ -260,6 +314,8 @@ export function buildWakeMessage(
   job: OperatorJob,
   wake: OperatorWake,
   scratchpad: OperatorScratchpad | null,
+  pending: readonly Approval[] = [],
+  now: Date = new Date(),
 ): string {
   const wakeReason =
     wake.reason === 'timer'
@@ -285,12 +341,18 @@ export function buildWakeMessage(
     `These are your own working notes, carried over from earlier wakes and given to you here for free. Substrate is the source of truth for anything durable — record decisions, commitments, learnings and entities through manage_substrate, which auto-approves. Keep the scratchpad as a short working digest: what you are part-way through, what you are waiting on, what you already checked. Update it with \`${OPERATOR_SCRATCHPAD_TOOL}\`, which REPLACES the whole text (max ${OPERATOR_SCRATCHPAD_MAX_CHARS} characters; an oversized write is rejected, not truncated). It carries no authority and grants you no permissions.`,
   ].join('\n');
 
+  const pendingBlock = buildPendingDecisionsBlock(pending, now);
+
   return [
     header,
     '',
     'Treat the wake reason above only as a hint that something may have changed — re-read current state and reconcile before acting. Events can be dropped, so a scheduled wake must do the same work as an event wake.',
     '',
     scratchpadBlock,
+    // Immediately after the scratchpad and ahead of the instructions: the same
+    // surface the agent provably reads every turn. Emitted only when non-empty,
+    // so a wake with nothing pending is byte-identical to before.
+    ...(pendingBlock ? ['', pendingBlock] : []),
     '',
     PROVENANCE_INSTRUCTION,
     '',
@@ -318,6 +380,13 @@ export type OperatorPreflight =
       traceId: string;
       /** Set only when `traceId` was carried forward from a resumed approval. */
       resumedApprovalId: string | null;
+      /**
+       * Decisions still sitting with the owner on this conversation. NO LONGER
+       * A REASON TO SKIP (see the note on the removed skip below) — carried
+       * here so the turn can close their tool pairs and describe them to the
+       * model without a second query.
+       */
+      pending: Approval[];
     }
   | { ok: false; result: OperatorTurnResult };
 
@@ -330,11 +399,19 @@ export type OperatorPreflight =
  * `findResumableApproval` looks for the most recent RESOLVED approval on this
  * conversation that carries a trace id and has not already been consumed by
  * an earlier resume (`resumed_at IS NULL`). If one exists, this wake IS the
- * resume — `runOperatorTurn` refuses to start any turn while an approval is
- * still pending (see the pending-approval branch above), so the only way a
- * resolved-but-unconsumed approval can exist when a turn is about to run is
- * that a human clicked since the last wake and this is the first wake to see
- * the cleared gate.
+ * resume: `resumed_at` is what makes it a one-shot, so the first wake after a
+ * human clicks reports the gated turn's id and every later wake mints its own.
+ *
+ * UNCHANGED BY THE 2026-08-08 REMOVAL OF THE PENDING-APPROVAL SKIP, and worth
+ * being explicit about because the old argument leaned on that skip ("no turn
+ * runs while anything is pending, so a resolved-unconsumed row must mean a
+ * human just clicked"). That premise is gone — a turn can now run with decision
+ * B still pending — but the query never depended on it: it filters
+ * `status != 'pending'`, so a still-open decision is invisible to it, and
+ * `resumed_at IS NULL` + `ORDER BY created_at DESC LIMIT 1` still names exactly
+ * the most recent cleared gate that no wake has claimed. What changed is only
+ * that the resuming wake may be doing other work at the same time, which the
+ * trace id neither knows nor needs to.
  *
  * DELIBERATELY A PURE READ — no mark, no log. `operatorPreflight` is called
  * TWICE per turn on the `SandboxRunner` path (once by `SandboxRunner` itself
@@ -363,19 +440,19 @@ async function resolveTurnTraceId(
  * BEFORE paying for anything a full turn would otherwise cost — most
  * concretely, `SandboxRunner` calling this before `createSandbox`.
  *
- * Two terminal cases, both correspond to a wake that will do NO model work at
- * all: no operator credential for the org, or a human decision already
- * pending on this conversation (see the long comment that used to live
- * inline here, now on the pending-approval branch below — it explains why
- * this must be checked per-wake with no TTL/auto-deny).
- *
- * A pending-approval skip in particular is not rare or transient: on an org
- * gated on a human decision, EVERY wake hits it, indefinitely, until someone
- * clicks — on the 1-minute timer tick, and now on every event-driven wake
- * too. `runOperatorTurn` calls this same function internally, so there is one
- * implementation of "should this wake even run", not a second copy of the
- * credential/pending logic living in `SandboxRunner` that could drift from
+ * ONE terminal case remains: no operator credential for the org. The second
+ * one — a human decision already pending — was removed on 2026-08-08; see the
+ * long note on `pending` below for what it protected and why the protection
+ * now lives elsewhere. `runOperatorTurn` calls this same function internally,
+ * so there is one implementation of "should this wake even run", not a second
+ * copy of the credential logic living in `SandboxRunner` that could drift from
  * this one.
+ *
+ * NOTE FOR `SandboxRunner`: because a pending decision no longer stops a wake,
+ * a preflight that clears no longer implies the turn will reach the model —
+ * `runOperatorTurn` can still refuse an unclosable gate pair. That costs a
+ * sandbox create on a case that does not arise from any sequence this code
+ * produces; it is not worth a second write-capable preflight to avoid.
  *
  * `model` is passed straight to `resolveOperatorModel`, exactly as
  * `runOperatorTurn` does with its own `opts.model` — it is only CONSULTED
@@ -415,62 +492,74 @@ export async function operatorPreflight(
   );
 
   /**
-   * Do not start a turn while a human decision is outstanding.
+   * ==========================================================================
+   * THE PENDING-APPROVAL SKIP THAT USED TO LIVE HERE — REMOVED 2026-08-08.
+   * ==========================================================================
    *
-   * An approval pause persists an assistant message carrying `tool_calls` and
-   * `pending_approval_id`, with no tool row answering it. On the next wake
-   * `listMessages` → `toGatewayMessages` would replay that assistant/tool_calls
-   * message and then append the new `role:'user'` wake message — the
-   * OpenAI-invalid sequence the gateway rejects (see resume.ts's header). There
-   * is one operator conversation per org, forever, on a 1-minute tick, so the
-   * operator would error on every wake until a human clicked. Approval latency
-   * is the NORMAL case for this design, not an edge case.
+   * WHAT IT PROTECTED, precisely. An approval pause persists an assistant
+   * message carrying `tool_calls` and `pending_approval_id` with NO `role:'tool'`
+   * row answering it. Replaying that message and then appending the new
+   * `role:'user'` wake message is the sequence the gateway rejects (see
+   * resume.ts's header). One operator conversation per org, forever, on a
+   * one-minute tick meant the operator would error on every wake until a human
+   * clicked — so the wake was made a clean no-op instead.
    *
-   * The honest answer is that the agent genuinely IS blocked awaiting a human,
-   * so the wake reports that rather than rebuilding history to hide the pending
-   * call. This also means the invalid sequence is never constructed, rather than
-   * being repaired downstream.
+   * WHY IT HAD TO GO. Approval latency is the normal case here, and a no-op
+   * wake is a no-op HOUR: a decision raised at 9pm and answered at 7am cost ten
+   * hours of work for a product whose premise is that it runs while nobody is
+   * watching. It also made more than one pending decision structurally
+   * impossible — after proposing one, the operator proposed nothing ever again.
    *
-   * Checked HERE, not in the trigger, because:
-   *   - this is the single chokepoint for BOTH wake reasons (timer and event);
-   *     a check in the trigger would leave event wakes wedged;
-   *   - the trigger has no conversation id, and obtaining one means calling
-   *     `getOrCreateOperatorConversation`, which CREATES — a side effect a
-   *     scheduling-layer precondition check should not have;
-   *   - the invariant being protected ("never build an invalid history") is a
-   *     property of the turn, not of scheduling.
+   * WHY THE INVARIANT SURVIVES ANYWAY. The rejected sequence is caused by an
+   * UNANSWERED tool call, not by a pending approval row. `runOperatorTurn` now
+   * closes that pair before it starts (`closeUnansweredToolCall` in store.ts),
+   * writing a truthful "not executed — waiting on the owner" tool row while the
+   * paused assistant row is still the last message, so the pair is never open
+   * across appended work; the owner's real answer overwrites that same row in
+   * place. If the pair cannot be closed adjacently, the turn still refuses to
+   * run, with this exact skip result — see `runOperatorTurn`.
    *
-   * Deliberately NO TTL and NO auto-deny: expiring a human's pending decision
-   * is a policy change, and not one to make here.
+   * The check stays HERE rather than in the trigger for the reasons it always
+   * did: this is the single chokepoint for both wake reasons; the trigger has
+   * no conversation id and getting one CREATES; and the invariant is a property
+   * of the turn, not of scheduling.
+   *
+   * STILL NO TTL AND STILL NO AUTO-DENY. Nothing here expires, denies or ages
+   * out a human's pending decision — that remains a policy change nobody has
+   * asked for. The operator works around the decision; it does not decide it.
    */
   const pending = await listPendingByConv(pool, conversationId);
-  if (pending.length > 0) {
-    return {
-      ok: false,
-      result: {
-        conversationId,
-        events: 0,
-        approvalId: null,
-        error: null,
-        skipped: { reason: 'pending_approval', approvalId: pending[0].id },
-      },
-    };
-  }
 
-  // See `resolveTurnTraceId`'s doc comment: reaching here means no approval
-  // is pending, so if a resolved-but-unconsumed one exists on this
-  // conversation, THIS is the wake that resumes it. A PURE PEEK — see that
-  // function's comment for why the commit (`markApprovalResumed`) and the
-  // `resumed` checkpoint log must NOT happen here, where this function's own
-  // "called twice per turn" contract would fire them twice (or worse, have
-  // the second call silently lose the resumed id to the first call's mark).
+  // A PURE PEEK — see `resolveTurnTraceId`'s doc comment for why the commit
+  // (`markApprovalResumed`) and the `resumed` checkpoint log must NOT happen
+  // here, where this function's own "called twice per turn" contract would
+  // fire them twice (or worse, have the second call silently lose the resumed
+  // id to the first call's mark).
   const { traceId, resumedApprovalId } = await resolveTurnTraceId(
     pool,
     conversationId,
     wake.traceId ?? mintFallbackTraceId(),
   );
 
-  return { ok: true, credential, conversationId, traceId, resumedApprovalId };
+  return { ok: true, credential, conversationId, traceId, resumedApprovalId, pending };
+}
+
+/**
+ * The placeholder result written into the tool row that closes a still-open
+ * gate. Read by the model on every subsequent replay, so it is worded as an
+ * instruction as well as a fact — and it is TRUE at the moment it is written:
+ * nothing executed, and nothing has been decided.
+ */
+export function pendingGateToolResult(approvalId: string): Record<string, unknown> {
+  return {
+    ok: false,
+    status: 'awaiting_owner_decision',
+    approval_id: approvalId,
+    error:
+      'Not executed. This action is waiting on the owner and has NOT been approved. ' +
+      'Do not re-propose it (an equivalent proposal is refused) and do not plan as though it had run. ' +
+      'It will execute by itself if the owner approves, and the result will replace this message.',
+  };
 }
 
 export async function runOperatorTurn(
@@ -519,7 +608,48 @@ export async function runOperatorTurn(
     });
     return pre.result;
   }
-  const { credential, conversationId, traceId } = pre;
+  const { credential, conversationId, traceId, pending } = pre;
+
+  /**
+   * CLOSE EVERY STILL-OPEN GATE BEFORE THE TURN TOUCHES THE HISTORY.
+   *
+   * This is what replaces the pending-approval skip (see the long note in
+   * `operatorPreflight`). It must run BEFORE `runAgentTurn`, which persists the
+   * wake `role:'user'` message as its first act: the closing tool row is only
+   * adjacent to its assistant call while that call is still the last message.
+   *
+   * `closeUnansweredToolCall` puts both preconditions in SQL, so this loop
+   * cannot get them wrong and is idempotent across wakes (the second and every
+   * later wake sees 'already_closed'). It is also safe against the owner
+   * resolving in the same instant: whichever write lands first, exactly one
+   * `role:'tool'` row ends up answering the call.
+   *
+   * 'not_closable' is the one case left where a turn genuinely cannot run
+   * without corrupting history — the paused row is not last, so its result
+   * cannot be placed adjacently and nothing here will invent a repair. That
+   * reports the ORIGINAL skip, unchanged, which is why `OperatorSkip` survives.
+   */
+  for (const approval of pending) {
+    const outcome = await closeUnansweredToolCall(pool, approval.id, pendingGateToolResult(approval.id));
+    if (outcome === 'not_closable') {
+      logOperatorCheckpoint('completed', {
+        traceId,
+        organizationId: job.organizationId,
+        conversationId,
+        outcome: 'skipped',
+        skippedReason: 'pending_approval',
+        approvalId: approval.id,
+        error: null,
+      });
+      return {
+        conversationId,
+        events: 0,
+        approvalId: null,
+        error: null,
+        skipped: { reason: 'pending_approval', approvalId: approval.id },
+      };
+    }
+  }
 
   /**
    * THE ONE PLACE the resume is committed and logged. `runOperatorTurn` is
@@ -541,8 +671,9 @@ export async function runOperatorTurn(
   }
 
   /**
-   * Read the scratchpad AFTER the pending-approval check, so a wake that is a
-   * clean no-op stays a no-op. Best-effort: the scratchpad is a convenience,
+   * Read the scratchpad AFTER the gate-closing loop above, so the one wake
+   * shape that is still a clean no-op (an unclosable pair) stays a no-op.
+   * Best-effort: the scratchpad is a convenience,
    * and a read failure must degrade the prompt rather than fail the wake — the
    * agent can still do its job from the header and its instructions.
    */
@@ -582,7 +713,7 @@ export async function runOperatorTurn(
       conversationId,
       userId: operatorUserId(job.organizationId),
       jwt: credential,
-      userMessage: buildWakeMessage(job, wake, scratchpad),
+      userMessage: buildWakeMessage(job, wake, scratchpad, pending),
       model,
       pool,
       organizationId: job.organizationId,

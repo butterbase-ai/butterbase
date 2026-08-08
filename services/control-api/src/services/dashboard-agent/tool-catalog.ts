@@ -91,6 +91,29 @@ export const OPERATOR_SANDBOX_CODE_TOOL = 'run_sandbox_code';
  */
 export const OPERATOR_BUILD_TOOL = 'build_app';
 
+/**
+ * LAYER 3 of the re-proposal defence: detail on demand about what is already
+ * sitting with the owner.
+ *
+ * Dispatched IN-PROCESS like the scratchpad — the rows live in the control
+ * plane this process already owns a pool for, and there is no MCP tool by this
+ * name to invent. It reads ONLY this operator's own conversation's approvals:
+ * no argument selects the conversation, so there is no shape in which a model
+ * argument could point it at another org's queue.
+ *
+ * STRICTLY AN AFFORDANCE, and the ordering of the three layers matters. What
+ * actually stops a flooded approval queue is the guard in loop.ts that refuses
+ * an equivalent proposal in code; what stops the agent wasting turns on that
+ * refusal is the always-present block in the wake message. This tool exists so
+ * the agent can get the full arguments of a pending decision without every
+ * turn's prompt carrying them. It is not, and must never become, the thing
+ * relied on to prevent the duplicate — this repo has already watched two
+ * documented-but-optional capabilities be ignored by this same agent
+ * (`source_artifact_id`, set 1 time in 25; the file-a-memo-instead-of-acting
+ * defect), and a tool the model MAY call is not a control.
+ */
+export const OPERATOR_PENDING_DECISIONS_TOOL = 'list_pending_decisions';
+
 export function getToolCatalog(): ToolSpec[] {
   return [
     // ---- App lifecycle & discovery ----
@@ -358,7 +381,21 @@ export function getToolCatalog(): ToolSpec[] {
         },
       },
     },
+    {
+      name: OPERATOR_PENDING_DECISIONS_TOOL,
+      operatorOnly: true,
+      description:
+        'List the decisions you have already put in front of the owner and which they have not answered yet, with the FULL arguments of each, when it was raised and how long it has been waiting. ' +
+        'You are given a one-line summary of these at the top of every wake; call this when you need the actual arguments of one of them — for example to check whether the thing you are about to do is already waiting. ' +
+        'These have NOT been approved. Nothing here executes, nothing here is a way to approve, deny, cancel or expire anything, and no argument changes what it returns. ' +
+        'Re-proposing something that is already in this list is refused before it reaches the owner, so read this instead of proposing again.',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
+    },
   ];
+}
+
+export function isListPendingDecisionsTool(name: string): name is 'list_pending_decisions' {
+  return name === OPERATOR_PENDING_DECISIONS_TOOL;
 }
 
 export function isOperatorScratchpadTool(name: string): name is 'update_operator_scratchpad' {

@@ -147,6 +147,23 @@ describe('the allow tier is the spec list, nothing more', () => {
     // Adding a line here is where that decision has to be defended. If
     // `run_sandbox_code`'s verdict is ever revisited, revisit this WITH it.
     'build_app',
+    // 2026-08-08, and likewise postdating the closed spec list rather than
+    // widening it: `list_pending_decisions` did not exist on 2026-08-07.
+    //
+    // It is a READ, with NO ARGUMENTS AT ALL, of the operator's own
+    // conversation's pending approval rows. The conversation comes from the
+    // turn, never from a model argument, so — unlike every other 'allow' entry
+    // here — there is no argument shape at all in which it could be pointed
+    // somewhere else. It reaches no tenant data, makes no MCP call, and cannot
+    // approve, deny, cancel or expire anything; the approval routes are the
+    // only writers and they require a human's org membership.
+    //
+    // It exists so the agent can check what is ALREADY waiting on the owner
+    // before proposing. Gating it would be self-defeating in the strictest
+    // sense: a read the agent must queue for the owner's approval is a read the
+    // agent will never do, and the duplicate proposals it exists to help avoid
+    // would go up, not down.
+    'list_pending_decisions',
   ];
 
   it('exactly these tools are allow-tier', () => {
