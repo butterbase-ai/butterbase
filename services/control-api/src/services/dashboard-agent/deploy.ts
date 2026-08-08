@@ -1,5 +1,5 @@
 import JSZip from 'jszip'
-import { createHash } from 'node:crypto'
+import { installKeyFor } from './install-key.js'
 import type { WorkingTreeCache } from './working-tree.js'
 
 export type DeploymentProgressEvent = {
@@ -42,18 +42,22 @@ export function createDeployer(deps: DeployDeps) {
       if (!tree || tree.size === 0) return { ok: false as const, error: 'no files to deploy' }
 
       const zip = new JSZip()
-      let lockfileContent = ''
-      for (const f of tree.values()) {
-        zip.file(f.path, f.content)
-        if (f.path === 'package-lock.json' || f.path === 'pnpm-lock.yaml' || f.path === 'yarn.lock') {
-          lockfileContent = f.content
-        }
-      }
-      if (!lockfileContent) {
-        const pkg = tree.get('package.json')?.content ?? ''
-        lockfileContent = pkg
-      }
-      const lockfile_hash = createHash('sha256').update(lockfileContent, 'utf8').digest('hex')
+      for (const f of tree.values()) zip.file(f.path, f.content)
+
+      /**
+       * The dependency-cache key. Imported, not inlined: the operator's
+       * sandbox build (build-hydration.ts) presigns the SAME shared R2 object
+       * on this hash, and the baked sandbox image records it too. The rule and
+       * the reasons live in install-key.ts.
+       *
+       * NOTE the behaviour change this import makes explicit rather than
+       * introduces: the old loop here kept the LAST lockfile it saw while
+       * build-hydration.ts took the FIRST in `LOCKFILE_NAMES` order. They
+       * differed only for a tree carrying two lockfiles at once, which is
+       * impossible for a scaffolded app (file-ops.ts:23 denies both), but it
+       * was a real divergence between two writers of one cache object.
+       */
+      const lockfile_hash = installKeyFor(tree)
       const zipBuf = await zip.generateAsync({ type: 'uint8array' })
 
       const create = await deps.mcp.call('manage_frontend', { action: 'create_from_source', app_id: input.appId }, input.jwt)

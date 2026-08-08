@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { installKeyFor } from './install-key.js'
 import type { WorkingTreeCache } from './working-tree.js'
 
 /**
@@ -78,14 +78,6 @@ type ManifestFile = { path: string; sha256: string; size: number }
 
 /** Matches the blobs/batch route's server-side cap (routes/repo.ts:368). */
 const BLOB_BATCH_LIMIT = 1000
-
-/**
- * Lockfile names, in the order deploy.ts:44-48 checks them. Kept in the same
- * order deliberately: if two lockfiles somehow coexist, the sandbox and the
- * build-runner must pick the same one or their caches key differently and the
- * build stops predicting the deploy.
- */
-const LOCKFILE_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'] as const
 
 /**
  * Same default-resolution order as repo-http.ts's, and for the same reason —
@@ -168,27 +160,6 @@ export function createBuildHydrator(deps: BuildHydratorDeps) {
       throw new Error(`build hydrate POST ${path} failed (${res.status}): ${text.slice(0, 500)}`)
     }
     try { return text ? (JSON.parse(text) as T) : null } catch { return null }
-  }
-
-  /**
-   * The dependency-cache key.
-   *
-   * Reimplemented rather than imported from deploy.ts because that module is
-   * the from-source DEPLOY path and is deliberately not being touched by this
-   * phase. deploy.ts:40-53 is the source of truth; if it moves, this moves with
-   * it, and `__tests__/build-hydration.test.ts` records the agreement. The
-   * package.json fallback is not an edge case — dashboard-agent-template ships
-   * no lockfile at all, so it is the COMMON path, which is also why the
-   * sandbox runs `npm install` and never `npm ci`.
-   */
-  function installKeyFor(tree: Map<string, { path: string; content: string }>): string {
-    let source = ''
-    for (const name of LOCKFILE_NAMES) {
-      const f = tree.get(name)
-      if (f) { source = f.content; break }
-    }
-    if (!source) source = tree.get('package.json')?.content ?? ''
-    return createHash('sha256').update(source, 'utf8').digest('hex')
   }
 
   return {
