@@ -79,6 +79,9 @@ import {
   executeApprovedOperatorTool,
   rejectEscalatedSubstrateAction,
 } from '../services/dashboard-agent/substrate-approval-bridge.js';
+// TEMPORARY — dev-mode operator trace viewer. Delete with GET /operator/traces.
+import { operatorUserId } from '../services/dashboard-agent/operator-store.js';
+import { listOperatorTraces } from '../services/dashboard-agent/operator-traces.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -1135,6 +1138,55 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     if (!org.ok) return reply.code(org.code).send({ error: org.error });
 
     return reply.send({ approvals: await listPendingByOrg(app.controlDb, org.orgId) });
+  });
+
+  // ── GET /operator/traces ─────────────────────────────────────────────────
+  //
+  // TEMPORARY (2026-08-07). Read-only view of what the operator actually did,
+  // turn by turn, for the dev-mode trace viewer in the dashboard. Delete this
+  // route with operator-traces.ts and the dashboard's `features/operator-traces`
+  // when it stops being useful.
+  //
+  // Scoped exactly like /operator/approvals above and for the same reason: the
+  // operator conversation's user_id is the sentinel `operator:<org>`, so no
+  // user-scoped query can reach it, and membership of the org is what
+  // authorises the read. Do not relax this to a conversation id supplied by
+  // the caller — that would turn a debugging view into a way to read any
+  // org's operator transcript.
+  //
+  // Looks the conversation up rather than calling getOrCreateOperatorConversation:
+  // a GET must not create the row, and an org whose operator has never run
+  // should read as "no turns yet", not be given a conversation as a side
+  // effect of someone opening a page.
+  app.get('/operator/traces', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    const { limit } = request.query as { limit?: string };
+    const parsedLimit = Number.parseInt(limit ?? '10', 10);
+
+    const conv = await app.controlDb.query<{ id: string }>(
+      `SELECT id FROM dashboard_agent_conversations
+        WHERE organization_id = $1 AND user_id = $2
+        LIMIT 1`,
+      [org.orgId, operatorUserId(org.orgId)],
+    );
+    if (conv.rows.length === 0) {
+      return reply.send({ conversationId: null, traces: [] });
+    }
+
+    const conversationId = conv.rows[0].id;
+    return reply.send({
+      conversationId,
+      traces: await listOperatorTraces(
+        app.controlDb,
+        conversationId,
+        Number.isFinite(parsedLimit) ? parsedLimit : 10,
+      ),
+    });
   });
 
   // ── POST /operator/approvals/:id/resolve ─────────────────────────────────
