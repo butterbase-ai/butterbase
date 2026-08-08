@@ -73,3 +73,36 @@ describe('deploy_frontend', () => {
     }
   })
 })
+
+/**
+ * `deploy()` reports every failure it anticipates as `{ ok: false, error }` —
+ * 'no files to deploy', 'upload failed', 'build failed', 'deployment timed
+ * out'. A throw out of `deps.mcp.call` was the one path that escaped, and the
+ * dispatch site in loop.ts (`const r = await deployer.deploy(...)`) reads
+ * `r.ok` with no try/catch, so it killed the whole turn.
+ *
+ * Observed on a real wake 2026-08-07: the operator got 371 events in and died
+ * with `Tool "manage_frontend" is not permitted for the autonomous operator.`
+ * `manage_frontend` is internal-only — it is in neither the tool catalogue nor
+ * the operator policy table — so it is refused by turnMcp on every operator
+ * turn, and the frontend deploy is best-effort anyway. Losing the turn's
+ * completed backend work to it is not.
+ */
+describe('deploy_frontend — a throwing mcp is a failed deploy, not a failed turn', () => {
+  it('returns ok:false instead of throwing when manage_frontend is refused', async () => {
+    const cache = new WorkingTreeCache()
+    cache.write(CONV, APP, 'package.json', '{"name":"x"}')
+
+    const mcp = {
+      call: vi.fn(async () => {
+        throw new Error('Tool "manage_frontend" is not permitted for the autonomous operator.')
+      }),
+    }
+
+    const d = createDeployer({ cache, mcp, onDeploymentProgress: () => {} })
+    const r = await d.deploy({ convId: CONV, appId: APP, jwt: JWT })
+
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.error).toMatch(/manage_frontend/)
+  })
+})

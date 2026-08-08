@@ -24,6 +24,9 @@
  *          approve/deny + resume-and-execute steps described in the Plan 3b
  *          Task 3 brief into a single endpoint (documented choice — see brief
  *          "For simplicity ... pick and document").
+ *   GET    /operator/approvals – pending approvals raised by the headless
+ *          operator for the caller's org (org-scoped, membership-checked).
+ *   POST   /operator/approvals/:id/resolve – approve/deny one of those.
  *
  * Feature flag: DASHBOARD_ASSISTANT_ENABLED must equal '1' or all routes
  * return 404.
@@ -35,6 +38,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
+import type pg from 'pg';
 import { z } from 'zod';
 import { requireUserId } from '../utils/require-auth.js';
 import {
@@ -63,7 +67,21 @@ import { getRecentAppIds } from '../services/dashboard-agent/schema-context.js';
 import { listUsage, getConversationUsageTotal } from '../services/dashboard-agent/usage-store.js';
 import { createRepoSync } from '../services/dashboard-agent/repo-sync.js';
 import { callMcpTool } from '../services/dashboard-agent/mcp-client.js';
-import { resolveApprovalAndPersistResult } from '../services/dashboard-agent/resume.js';
+import {
+  resolveApprovalAndPersistResult,
+  completeApprovalResolution,
+} from '../services/dashboard-agent/resume.js';
+import {
+  getApprovalForOrg,
+  listPendingByOrg,
+} from '../services/dashboard-agent/approvals-store.js';
+import {
+  executeApprovedOperatorTool,
+  rejectEscalatedSubstrateAction,
+} from '../services/dashboard-agent/substrate-approval-bridge.js';
+// TEMPORARY — dev-mode operator trace viewer. Delete with GET /operator/traces.
+import { operatorUserId } from '../services/dashboard-agent/operator-store.js';
+import { listOperatorTraces } from '../services/dashboard-agent/operator-traces.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -226,6 +244,175 @@ const rateMessageBody = z.object({
   rating: z.union([z.literal(1), z.literal(-1), z.literal(0)]),
   reason: z.string().max(2000).optional(),
 });
+
+// ---------------------------------------------------------------------------
+// Operator approvals (org-scoped)
+// ---------------------------------------------------------------------------
+
+export type OperatorOrgOutcome =
+  | { ok: true; orgId: string }
+  | { ok: false; code: 400 | 403; error: string };
+
+/**
+ * Resolve the org an operator-approval request is scoped to, and prove the
+ * caller belongs to it.
+ *
+ * `x-organization-id` is a plain client-supplied header — `readOrgId` above
+ * does NOT authorise anything, it only reads. Everywhere else in this file the
+ * header is used as a *hint* that narrows an already user-scoped query
+ * (`getConversation(pool, id, userId)`), so a forged value can only ever
+ * narrow the caller's own data. The operator routes have no such user filter:
+ * the operator conversation's `user_id` is the sentinel `operator:<org>`, so
+ * the org id IS the entire authorisation boundary. Trusting the raw header
+ * here would let any logged-in user list and resolve any other org's pending
+ * approvals — and execute their gated tools — by changing one header.
+ *
+ * So this checks `organization_members` directly. The auth plugin performs the
+ * same check when populating `request.auth.organizationId`, but it silently
+ * nulls a non-member header rather than rejecting, which would surface here as
+ * an indistinguishable "no org supplied". An explicit check gives a truthful
+ * 403 and does not depend on the auth plugin's fallback behaviour.
+ */
+export async function resolveCallerOrgId(
+  pool: pg.Pool,
+  request: { headers: Record<string, unknown> },
+  userId: string,
+): Promise<OperatorOrgOutcome> {
+  const headerOrgId = readOrgId(request);
+  if (!headerOrgId) return { ok: false, code: 400, error: 'x-organization-id required' };
+
+  // organization_members.organization_id is `uuid`; comparing a non-uuid string
+  // against it makes Postgres raise 22P02 and the route 500s on a value the
+  // client fully controls. Reject the shape before it reaches the database.
+  if (!z.string().uuid().safeParse(headerOrgId).success) {
+    return { ok: false, code: 400, error: 'x-organization-id must be a uuid' };
+  }
+
+  // Return the org id the DATABASE holds, not the header string. Both columns
+  // here are `uuid`, so Postgres normalises a non-canonical header (uppercase,
+  // braces) and the membership check passes — but the value then flows into a
+  // comparison against dashboard_agent_conversations.organization_id, which is
+  // TEXT and matched exactly. Echoing the header back would give a legitimate
+  // member a silent 404 on every approval.
+  const member = await pool.query<{ organization_id: string }>(
+    `SELECT organization_id::text AS organization_id FROM organization_members
+     WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
+    [headerOrgId, userId],
+  );
+  if ((member.rowCount ?? 0) === 0) {
+    return { ok: false, code: 403, error: 'not a member of the requested organization' };
+  }
+
+  return { ok: true, orgId: member.rows[0].organization_id };
+}
+
+export type OperatorResolveOutcome =
+  | { ok: true }
+  | { ok: false; code: 400 | 404 | 409 | 502; error: string };
+
+/**
+ * Org-scoped approval resolution for operator turns.
+ *
+ * Execution goes through executeApprovedOperatorTool, which wraps executeOnce
+ * so an approve that is retried — by a double-click, a proxy retry, or a warm
+ * resume in Plan 2 — cannot fire the tool twice, and additionally bridges a
+ * gated `manage_substrate` propose to substrate's own approve(action_id) so
+ * one human click executes the capability rather than parking a second
+ * approval inside substrate (see substrate-approval-bridge.ts).
+ *
+ * Everything after execution is delegated to resume.ts's
+ * `completeApprovalResolution`, NOT reimplemented here. That is the whole fix
+ * for C2. The earlier version of this function resolved the approval row and
+ * stopped, on the assumption that "the operator's loop picks the resolution
+ * up". It does not, and cannot: the loop persisted an assistant row carrying a
+ * `tool_call_id` with no matching tool result, and the AI gateway rejects any
+ * history that ends that way. With exactly one operator conversation per org,
+ * reused forever, the FIRST resolved gate — approve or deny — left that org's
+ * operator sending an invalid message sequence on every wake, every ten
+ * minutes, permanently, recoverable only by hand-editing the database.
+ *
+ * The deny path must write the tool row too. Denial is not "nothing happened";
+ * it is a tool result the model has to see, and it was the path that reached
+ * the wedge first.
+ *
+ * `principal: 'human'` is correct here and is not a formality: a person
+ * clicked approve in the operator feed, so the manage_substrate action
+ * denials — which exist to stop the AGENT approving its own proposals — do not
+ * apply to this call. The tool-level allowlist still does.
+ *
+ * Callers MUST have already established that `input.orgId` is an org the
+ * caller belongs to (see resolveCallerOrgId). This function does not authorise.
+ */
+export async function resolveOperatorApproval(
+  pool: pg.Pool,
+  input: {
+    approvalId: string;
+    orgId: string;
+    jwt: string;
+    /**
+     * The org member resolving this approval — sourced from the route's own
+     * `requireUserId(request)`, not a new parameter threaded in for this
+     * purpose. Recorded on the approval row (resolved_by) so it is auditable
+     * which human authorised an operator-raised, irreversible action.
+     */
+    userId: string;
+    resolution: { status: 'approved' } | { status: 'denied'; reason?: string };
+  },
+): Promise<OperatorResolveOutcome> {
+  const approval = await getApprovalForOrg(pool, input.approvalId, input.orgId);
+  if (!approval) return { ok: false, code: 404, error: 'approval not found' };
+
+  const outcome = await completeApprovalResolution(pool, {
+    approval,
+    resolution: input.resolution,
+    resolvedBy: input.userId,
+    // Exactly-once: the advisory-lock transaction in executeOnce, plus its
+    // success cache keyed on approval_id. Because a repeated execution is
+    // served from that cache, a retry after a partway failure re-drives this
+    // whole path safely rather than firing the tool a second time.
+    //
+    // executeApprovedOperatorTool wraps executeOnce (it does not replace it,
+    // and does not weaken the lock) to add the substrate approval bridge:
+    // a gated `manage_substrate` propose is followed by substrate's NATIVE
+    // approve(action_id), so the human's one click actually EXECUTES the
+    // capability instead of leaving a second pending action for them to
+    // approve again. See substrate-approval-bridge.ts.
+    execute: (a) =>
+      executeApprovedOperatorTool(pool, {
+        approvalId: a.id,
+        name: a.toolName,
+        args: a.toolArgs,
+        jwt: input.jwt,
+        orgId: input.orgId,
+        // `a.traceId`, not a value derived here: the resolving human's
+        // request carries no trace of its own, and the whole point is that
+        // this execution reports the id of the TURN that gated, not a fresh
+        // one for the click that resolved it.
+        traceId: a.traceId,
+      }),
+    /**
+     * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
+     *
+     * Those are raised after the propose already dispatched, so a real action
+     * sits in substrate's ledger in `proposed`. Denying at our layer alone
+     * would leave it there indefinitely — the same invisible stall this fix
+     * exists to remove, one step later. `rejectEscalatedSubstrateAction` is a
+     * no-op (attempted: false) for every other approval kind, because those
+     * paused before dispatch and there is nothing on the far side.
+     */
+    denyCleanup: (a) =>
+      rejectEscalatedSubstrateAction(pool, {
+        approvalId: a.id,
+        approval: { toolName: a.toolName, toolArgs: a.toolArgs },
+        reason: input.resolution.status === 'denied' ? input.resolution.reason : undefined,
+        jwt: input.jwt,
+        orgId: input.orgId,
+      }),
+  });
+
+  if (!outcome.ok) return { ok: false, code: outcome.code, error: outcome.error };
+  return { ok: true };
+}
 
 // ---------------------------------------------------------------------------
 // Route plugin
@@ -935,6 +1122,111 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ rows });
+  });
+
+  // ── GET /operator/approvals ──────────────────────────────────────────────
+  //
+  // Pending approvals raised by the headless operator for the caller's org.
+  // Scoped by org, not by user: the operator conversation's user_id is the
+  // sentinel `operator:<org>`, so no user-scoped query can ever see these.
+  // Membership in that org is what authorises the read.
+  app.get('/operator/approvals', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    return reply.send({ approvals: await listPendingByOrg(app.controlDb, org.orgId) });
+  });
+
+  // ── GET /operator/traces ─────────────────────────────────────────────────
+  //
+  // TEMPORARY (2026-08-07). Read-only view of what the operator actually did,
+  // turn by turn, for the dev-mode trace viewer in the dashboard. Delete this
+  // route with operator-traces.ts and the dashboard's `features/operator-traces`
+  // when it stops being useful.
+  //
+  // Scoped exactly like /operator/approvals above and for the same reason: the
+  // operator conversation's user_id is the sentinel `operator:<org>`, so no
+  // user-scoped query can reach it, and membership of the org is what
+  // authorises the read. Do not relax this to a conversation id supplied by
+  // the caller — that would turn a debugging view into a way to read any
+  // org's operator transcript.
+  //
+  // Looks the conversation up rather than calling getOrCreateOperatorConversation:
+  // a GET must not create the row, and an org whose operator has never run
+  // should read as "no turns yet", not be given a conversation as a side
+  // effect of someone opening a page.
+  app.get('/operator/traces', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    const { limit } = request.query as { limit?: string };
+    const parsedLimit = Number.parseInt(limit ?? '10', 10);
+
+    const conv = await app.controlDb.query<{ id: string }>(
+      `SELECT id FROM dashboard_agent_conversations
+        WHERE organization_id = $1 AND user_id = $2
+        LIMIT 1`,
+      [org.orgId, operatorUserId(org.orgId)],
+    );
+    if (conv.rows.length === 0) {
+      return reply.send({ conversationId: null, traces: [] });
+    }
+
+    const conversationId = conv.rows[0].id;
+    return reply.send({
+      conversationId,
+      traces: await listOperatorTraces(
+        app.controlDb,
+        conversationId,
+        Number.isFinite(parsedLimit) ? parsedLimit : 10,
+      ),
+    });
+  });
+
+  // ── POST /operator/approvals/:id/resolve ─────────────────────────────────
+  //
+  // Approve or deny an operator-raised gate. Unlike /approvals/:id/resolve
+  // this does not STREAM a resumed turn — the operator's loop picks the
+  // completed history up on its next wake. It does everything else resume.ts
+  // does, via the same shared code: execute or deny the tool, write the
+  // matching `role: 'tool'` row, clear pending_approval_id. Leaving those out
+  // is what wedged the org's one operator conversation forever.
+  //
+  // Execution goes through executeOnce, which holds an advisory lock on the
+  // approval id so a retried approve fires the tool once.
+  app.post('/operator/approvals/:id/resolve', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    const parsed = resolveApprovalBody.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+
+    const { id: approvalId } = request.params as { id: string };
+    const authHeader = request.headers.authorization ?? '';
+    const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+
+    const outcome = await resolveOperatorApproval(app.controlDb, {
+      approvalId,
+      orgId: org.orgId,
+      jwt,
+      userId,
+      resolution:
+        parsed.data.status === 'approved'
+          ? { status: 'approved' }
+          : { status: 'denied', reason: parsed.data.reason },
+    });
+
+    if (!outcome.ok) return reply.code(outcome.code).send({ error: outcome.error });
+    return reply.send({ ok: true });
   });
 
   // ── POST /approvals/:id/resolve ───────────────────────

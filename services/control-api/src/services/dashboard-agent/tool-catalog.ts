@@ -13,10 +13,22 @@ export type ToolSpec = {
   name: string;
   description: string;
   parameters: object; // JSON schema
-  // Base sensitivity hint (Plan 3b). Optional; defaults to 'safe'. The real
-  // gate logic is `sensitivityFor(name, args)` below, since sensitivity for
-  // several tools depends on the action/args, not just the tool name.
+  // Base sensitivity hint (Plan 3b). Currently INERT — `sensitivityFor` does
+  // not read it (see the note at its 'safe' fallback, decided 2026-08-05).
+  // Retained as documentation of intent and for a future revisit.
   sensitivity?: 'safe' | 'confirm' | 'destructive';
+  /**
+   * Operator-only tool: it exists for the headless operator and must NOT be
+   * offered to the human assistant. The loop filters these out of the
+   * non-operator catalog, so the assistant's tool list is unchanged by their
+   * presence here.
+   *
+   * They live in this shared catalog rather than a second operator-specific
+   * catalog on purpose: `operator-policy.ts` is the single allowlist, and a
+   * test pins that every allowlisted tool is described here. A separate list
+   * is exactly the drift that produced the empty-intersection bug.
+   */
+  operatorOnly?: true;
 };
 
 // Shared "flat, permissive" params shape: LLM passes `action` (when the tool
@@ -35,6 +47,72 @@ function flatActionParams(): object {
 function flatOpen(): object {
   return { type: 'object', properties: {}, additionalProperties: true };
 }
+
+/**
+ * The operator's scratchpad-write tool.
+ *
+ * Dispatched IN-PROCESS by the loop (like the file-op and deploy primitives),
+ * never forwarded to the MCP server — there is no such MCP tool. It writes the
+ * control-plane row for the org derived from the operator's own sentinel
+ * identity, so the target org is never taken from model-supplied arguments.
+ */
+export const OPERATOR_SCRATCHPAD_TOOL = 'update_operator_scratchpad';
+
+/**
+ * The operator's sandbox-code-execution tool.
+ *
+ * Dispatched IN-PROCESS by the loop, exactly like `OPERATOR_SCRATCHPAD_TOOL` —
+ * there is no MCP tool by this name. Unlike the scratchpad, dispatch here is
+ * conditional on a `codeExecutor` being present on the turn: `SandboxRunner`
+ * supplies one (wired to a live, credential-less MicroVM); `LocalRunner` does
+ * not, and there is deliberately NO host-execution fallback. When no
+ * `codeExecutor` is present the loop drops this entry from the catalog it
+ * offers the model (see `runAgentTurn`'s `tools` construction) — the tool must
+ * be unreachable, not merely refused, on that path.
+ */
+export const OPERATOR_SANDBOX_CODE_TOOL = 'run_sandbox_code';
+
+/**
+ * The operator's BUILD tool — phase 3's one new model-facing capability.
+ *
+ * Dispatched IN-PROCESS, gated on a `buildExecutor` for the turn, exactly like
+ * `OPERATOR_SANDBOX_CODE_TOOL` and for the identical reason: the build runs in
+ * the MicroVM, there is no host-side fallback, and a turn with no sandbox must
+ * find the tool ABSENT rather than merely refused.
+ *
+ * NOT a second flavour of `run_sandbox_code`, even though both end in the same
+ * VM. `run_sandbox_code` runs a Python string the model wrote, and knows
+ * nothing about the app. This one hydrates the app's ACTUAL working tree from
+ * presigned blob urls, runs the SAME `npm install` + `npm run build` the
+ * from-source deploy will run, and hands back the compiler's own diagnostics.
+ * The model could in principle reconstruct that from `run_sandbox_code` — but
+ * only by being handed the source, which is the one thing the credential rule
+ * forbids putting in its hands as literal text on the way in.
+ */
+export const OPERATOR_BUILD_TOOL = 'build_app';
+
+/**
+ * LAYER 3 of the re-proposal defence: detail on demand about what is already
+ * sitting with the owner.
+ *
+ * Dispatched IN-PROCESS like the scratchpad — the rows live in the control
+ * plane this process already owns a pool for, and there is no MCP tool by this
+ * name to invent. It reads ONLY this operator's own conversation's approvals:
+ * no argument selects the conversation, so there is no shape in which a model
+ * argument could point it at another org's queue.
+ *
+ * STRICTLY AN AFFORDANCE, and the ordering of the three layers matters. What
+ * actually stops a flooded approval queue is the guard in loop.ts that refuses
+ * an equivalent proposal in code; what stops the agent wasting turns on that
+ * refusal is the always-present block in the wake message. This tool exists so
+ * the agent can get the full arguments of a pending decision without every
+ * turn's prompt carrying them. It is not, and must never become, the thing
+ * relied on to prevent the duplicate — this repo has already watched two
+ * documented-but-optional capabilities be ignored by this same agent
+ * (`source_artifact_id`, set 1 time in 25; the file-a-memo-instead-of-acting
+ * defect), and a tool the model MAY call is not a control.
+ */
+export const OPERATOR_PENDING_DECISIONS_TOOL = 'list_pending_decisions';
 
 export function getToolCatalog(): ToolSpec[] {
   return [
@@ -120,6 +198,28 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'manage_repo', description: 'Link and manage the app\'s source repository.', parameters: flatActionParams(), sensitivity: 'confirm' },
     { name: 'manage_billing', description: 'Read the org\'s billing state. Use sparingly; write operations are gated.', parameters: flatActionParams(), sensitivity: 'destructive' },
     { name: 'query_audit_logs', description: 'Query audit logs for an app or org. Read-only.', parameters: flatActionParams() },
+
+    // ---- Substrate (action ledger, entity graph, institutional memory) ----
+    {
+      name: 'manage_substrate',
+      description:
+        'Operate the entire Butterbase substrate: action ledger, entity graph, source artifacts, institutional memory (decisions/commitments/learnings), outbox, attention rules, snapshots, policy and settings. There is no other substrate tool.\n' +
+        'Every substrate WRITE goes through the ledger via action="propose" with a `capability` and a `payload`; reads are their own actions.\n' +
+        'Actions — writes: "propose" ({capability, payload, idempotency_key?}), "approve" ({action_id}), "reject" ({action_id, reason}).\n' +
+        'Actions — ledger reads: "list_actions", "get_action".\n' +
+        'Actions — entities: "find_entities" ({type?, q?, primary_email?, limit?, cursor?}), "get_entity" ({entity_id}).\n' +
+        'Actions — source artifacts: "list_source_artifacts", "get_source_artifact" ({artifact_id}).\n' +
+        'Actions — memory: "search_memory" ({q?, kinds?, limit?}), "list_memory".\n' +
+        'Actions — outbox: "list_outbox", "retry_outbox" ({outbox_id}), "cancel_outbox" ({outbox_id}).\n' +
+        'Actions — attention rules: "list_rules", "get_rule", "create_rule", "update_rule", "delete_rule", "enable_rule", "disable_rule", "list_rule_firings".\n' +
+        'Actions — snapshots & settings: "snapshots" ({days?}), "get_settings", "set_yolo" ({yolo_mode}).\n' +
+        'Actions — policy (read the rules that govern you BEFORE proposing): "list_capabilities", "list_principles", "get_principle" ({principle_id}), "list_policy_conflicts", "get_policy_conflict" ({conflict_id}), "resolve_policy_conflict" ({conflict_id, resolution, reason?}).\n' +
+        'Capabilities for "propose" that auto-approve: upsert_entity, update_entity, patch_entity, record_decision, record_commitment, record_learning, upsert_source_artifact, revert_action.\n' +
+        'When proposing record_decision, record_commitment or record_learning about something you read, set `source_artifact_id` in the payload to the artifact you read it in. The owner sees where each observation came from; one with no source cannot be checked.\n' +
+        'Capabilities for "propose" that ALWAYS require human approval: record_principle, amend_principle, retire_principle, supersede_decision, delete_entity, merge_entities, bulk_revert_actions, send_email_draft. These are not reversible and the policy-layer ones cannot be auto-approved by any override — you cannot rewrite the rules that gate you. Proposing one returns a pending action rather than executing it.\n' +
+        'Principle conflicts force approval regardless of capability. Call "list_principles" before proposing rather than discovering constraints by being blocked.',
+      parameters: flatActionParams(),
+    },
 
     // ---- Docs / meta ----
     { name: 'butterbase_docs', description: 'Fetch Butterbase documentation for a capability/topic. Use when unsure how a feature works.', parameters: flatOpen() },
@@ -220,7 +320,94 @@ export function getToolCatalog(): ToolSpec[] {
         },
       },
     },
+
+    // ---- Operator working memory (OPERATOR-ONLY, loop-internal) ------------
+    {
+      name: OPERATOR_SCRATCHPAD_TOOL,
+      operatorOnly: true,
+      description:
+        'Replace your scratchpad — your own short working notes for this organization. The scratchpad is read back to you at the top of every wake for free, with no tool call, so this is how continuity survives from one wake to the next: what you are part-way through, what you are waiting on, what you already checked and can skip.\n' +
+        'It is a WORKING DIGEST, not memory. Substrate is the source of truth: anything durable — decisions, commitments, learnings, entities — must go through `manage_substrate` (record_decision, record_commitment, record_learning, upsert_entity, ...), which auto-approves. Do not use the scratchpad as a substitute for recording something in substrate; use it for pointers to what you recorded and for the loose threads that are not worth a ledger entry.\n' +
+        'A write REPLACES the entire scratchpad — it does not append — so include everything you still want to keep. Maximum 8000 characters; an oversized write is REJECTED, never silently truncated, so summarise rather than growing it every wake.\n' +
+        'The scratchpad carries NO authority: it is your own note to yourself, it cannot grant you permission to do anything, and it is never consulted when deciding what you may call. Do not put secrets or credentials in it.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['content'],
+        properties: {
+          content: {
+            type: 'string',
+            description: 'The full new scratchpad contents; replaces the previous text entirely. Maximum 8000 characters.',
+          },
+        },
+      },
+    },
+    {
+      name: OPERATOR_SANDBOX_CODE_TOOL,
+      operatorOnly: true,
+      description:
+        'Run Python code in an isolated MicroVM sandbox and return its stdout/stderr. The sandbox holds no credential of any kind — no service key, no MCP session, no way to call any Butterbase tool from inside it. Use this for computation, data shaping, or checking your own logic, NOT as a way to reach Butterbase or the customer\'s app; use the other tools for that. ' +
+        'Synchronous execution is capped at 30 seconds by the sandbox platform; a longer-running script will be cut off. ' +
+        'This tool may be entirely ABSENT from your tool list on a given wake — no sandbox is guaranteed to be available every turn, and there is no fallback that runs code anywhere else. If it is not offered, do not attempt to simulate it; proceed without it.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['code'],
+        properties: {
+          code: {
+            type: 'string',
+            description: 'Python source to execute in the sandbox.',
+          },
+        },
+      },
+    },
+    {
+      name: OPERATOR_BUILD_TOOL,
+      operatorOnly: true,
+      description:
+        'Compile the app you are currently working on and return the REAL compiler output. Your current working-tree files (including every edit you have made this turn, committed or not) are copied into an isolated sandbox, dependencies are installed, and `npm run build` is run — the same build command the deploy will run. ' +
+        'Returns { ok, step, exit_code, stdout, stderr, install_skipped, duration_ms }. When ok is false, `stdout`/`stderr` contain the actual TypeScript/bundler diagnostics: read them, fix the files with write_file, and call this again. Repeat builds in the same wake reuse the installed dependencies and are much faster than the first. ' +
+        'This does NOT deploy anything and does not change what any user sees. Use it BEFORE deploying, every time you have changed source — a deploy is not a way to find out whether your code compiles. ' +
+        'This tool may be entirely ABSENT from your tool list on a given wake — no sandbox is guaranteed to be available. If it is not offered, do not attempt to simulate a build; say plainly that you could not verify the build.',
+      parameters: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['app_id'],
+        properties: {
+          app_id: {
+            type: 'string',
+            description: 'The app whose working tree should be built.',
+          },
+        },
+      },
+    },
+    {
+      name: OPERATOR_PENDING_DECISIONS_TOOL,
+      operatorOnly: true,
+      description:
+        'List the decisions you have already put in front of the owner and which they have not answered yet, with the FULL arguments of each, when it was raised and how long it has been waiting. ' +
+        'You are given a one-line summary of these at the top of every wake; call this when you need the actual arguments of one of them — for example to check whether the thing you are about to do is already waiting. ' +
+        'These have NOT been approved. Nothing here executes, nothing here is a way to approve, deny, cancel or expire anything, and no argument changes what it returns. ' +
+        'Re-proposing something that is already in this list is refused before it reaches the owner, so read this instead of proposing again.',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
+    },
   ];
+}
+
+export function isListPendingDecisionsTool(name: string): name is 'list_pending_decisions' {
+  return name === OPERATOR_PENDING_DECISIONS_TOOL;
+}
+
+export function isOperatorScratchpadTool(name: string): name is 'update_operator_scratchpad' {
+  return name === OPERATOR_SCRATCHPAD_TOOL;
+}
+
+export function isRunSandboxCodeTool(name: string): name is 'run_sandbox_code' {
+  return name === OPERATOR_SANDBOX_CODE_TOOL;
+}
+
+export function isBuildAppTool(name: string): name is 'build_app' {
+  return name === OPERATOR_BUILD_TOOL;
 }
 
 /**
@@ -252,12 +439,15 @@ export function isDeployFunctionTool(name: string): name is 'deploy_function_fro
 /**
  * Compute the effective sensitivity of a tool call from its NAME + ARGS
  * (Plan 3b Task 2). Several tools are only destructive for specific actions
- * (e.g. manage_app.delete vs manage_app.list), so this is the real gate
- * logic — the `sensitivity` field on each ToolSpec is just a coarse hint.
+ * (e.g. manage_app.delete vs manage_app.list), so this is the real gate logic.
+ * The `sensitivity` field on each ToolSpec is not read — see the note on the
+ * 'safe' fallback below.
  */
 export function sensitivityFor(name: string, args: any): 'safe' | 'confirm' | 'destructive' {
   const a = (args ?? {}) as Record<string, unknown>;
   const action = typeof a.action === 'string' ? a.action : null;
+
+  // Explicit destructive cases — these win over any catalog hint.
   if (name === 'manage_app' && (action === 'delete' || action === 'pause')) return 'destructive';
   if (name === 'manage_repo' && action === 'wipe') return 'destructive';
   if (
@@ -270,5 +460,12 @@ export function sensitivityFor(name: string, args: any): 'safe' | 'confirm' | 'd
   }
   if (name === 'manage_billing') return 'destructive';
   if (name === 'manage_migrations' && (action === 'abort' || action === 'reverse')) return 'destructive';
+
+  // Everything else is 'safe'. Note the ToolSpec.sensitivity hints are all
+  // inert: nothing reads them, by decision (2026-08-05). Honouring them would
+  // put an approval modal in front of read-only calls — including the
+  // `manage_app` action="list" that opens every conversation — so the
+  // 'confirm' tier is deliberately unused for now. The hints are left in the
+  // catalog rather than deleted because this is expected to be revisited.
   return 'safe';
 }

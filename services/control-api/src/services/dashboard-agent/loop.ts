@@ -18,14 +18,30 @@
 import pg from 'pg';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
-import { createApproval, checkTrust } from './approvals-store.js';
+import {
+  createApproval,
+  checkTrust,
+  createSubstrateEscalationApproval,
+  listPendingGatedCalls,
+  type PendingGatedCallRow,
+} from './approvals-store.js';
+import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-guard.js';
+import { logOperatorCheckpoint } from './operator-turn.js';
+import { readSubstrateEscalation } from './substrate-approval-bridge.js';
+import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
+import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
+import { readOperatorYoloMode } from './operator-yolo.js';
+import { setOperatorScratchpad } from './operator-scratchpad-store.js';
+import { trimOperatorHistory } from './operator-history.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
 import { createFileOps, type FileOpName } from './file-ops.js';
 import { createRepoSync, type RepoSync } from './repo-sync.js';
+import { createHttpRepoSync } from './repo-http.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { loadTemplate as loadTemplateDefault } from './template-loader.js';
@@ -70,6 +86,63 @@ export class InsufficientCreditsStreamError extends Error {
 
 type Mcp = { call(name: string, args: unknown, jwt: string): Promise<any> };
 
+/**
+ * PHASE 3 — the seam that runs a build in the turn's sandbox.
+ *
+ * Mirrors `codeExecutor`: supplied by `SandboxRunner` (cron-scheduler), absent
+ * for `LocalRunner` and for every human turn, and its ABSENCE is what makes
+ * `build_app` unreachable rather than merely refused.
+ *
+ * THE ARGUMENT SHAPE IS THE SECURITY BOUNDARY. Everything in it is on its way
+ * into a MicroVM that runs model-authored code with unrestricted egress, so it
+ * carries presigned, blob-scoped, time-limited GET urls and NOTHING else — no
+ * jwt, no org id, no file content. The operator's `bb_sk_*` can wipe the app
+ * repo (`DELETE /v1/:app_id/repo` shares `authorizeRepoWrite` with commit), so
+ * it stays on this side; `prepare`/`commit` happen here, never there. Asserted
+ * by the `credential` block in __tests__/loop-operator-build.test.ts.
+ */
+export type BuildExecutorRequest = {
+  /** Names the guest workspace directory. The app id in practice. */
+  workspaceId: string;
+  files: Array<{ path: string; url: string }>;
+  /** sha256 of the lockfile (or package.json). Keys node_modules reuse. */
+  installKey: string;
+  /**
+   * Presigned GET/PUT for the app's SHARED node_modules cache tar — the same
+   * R2 object the build-runner reads and writes, so a deploy warms the
+   * operator's cache and vice versa. `null` when it could not be minted; the
+   * build then runs cold, because the cache is advisory.
+   *
+   * The PUT url is the most dangerous single value that crosses this boundary:
+   * a leaked GET exposes a node_modules tar, but a leaked PUT can overwrite
+   * the object the deploy path installs from. It is short-lived (600s) and
+   * app-scoped by `authorizeRepoWrite` at the route.
+   */
+  cache: { getUrl: string; putUrl: string } | null;
+};
+
+export type BuildExecutorResult = {
+  ok: boolean;
+  step: 'hydrate' | 'install' | 'build' | 'done';
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  installSkipped: boolean;
+  /**
+   * The node_modules came from the tree BAKED INTO THE SANDBOX IMAGE — no
+   * install, no R2 round trip. Optional because an executor on an older
+   * sandbox image cannot report it; absent means false.
+   */
+  bakedModules?: boolean;
+  cacheRestored: boolean;
+  cacheSaved: boolean;
+  truncated: boolean;
+  timedOut: boolean;
+  durationMs: number;
+};
+
+export type BuildExecutor = (req: BuildExecutorRequest) => Promise<BuildExecutorResult>;
+
 export type LoopDeps = {
   cache: WorkingTreeCache;
   mcp: Mcp;
@@ -90,6 +163,13 @@ export type LoopDeps = {
   // the store reads/writes; production uses the real store functions.
   getConversation?: typeof getConversation;
   updateConversationTitle?: typeof updateConversationTitle;
+  /**
+   * Phase 3: mints the presigned, blob-scoped urls a credential-less sandbox
+   * uses to fetch the app's source. Injectable so `loop-operator-build.test.ts`
+   * can inspect exactly what crosses the boundary; production builds a real
+   * `createBuildHydrator` over the turn's cache.
+   */
+  buildHydratorFactory?: () => { hydrate: (i: { convId: string; appId: string; jwt: string }) => Promise<BuildHydration> };
 };
 
 let _sharedCache: WorkingTreeCache | undefined;
@@ -265,7 +345,41 @@ export async function* streamChatCompletion(opts: {
         });
       }
     }
-    throw new Error(`gateway ${res.status}`);
+    /**
+     * Carry the gateway's OWN message, not just the status code.
+     *
+     * A bare `gateway 404` cost a live probe to diagnose: the operator's
+     * default model id was unroutable, and the only signal anywhere was an
+     * `errors` counter with no detail. The gateway had said exactly what was
+     * wrong — `{"error":{"message":"Model not found: …","code":"model_not_found"}}`
+     * — and we threw it away. Unattended callers (the operator) have no human
+     * watching a stream, so the message is all they ever get.
+     *
+     * The `gateway <status>` PREFIX is preserved deliberately: existing callers
+     * and tests match on the status, and this is purely additive. Reading the
+     * body is best-effort — a body that is absent, unreadable, already consumed
+     * by the 402 branch above, or not JSON must never turn an HTTP error into a
+     * different error.
+     */
+    let detail = '';
+    try {
+      const raw = typeof res.text === 'function' ? await res.text() : '';
+      if (raw) {
+        let msg = raw;
+        try {
+          const parsed = JSON.parse(raw) as { error?: { message?: string } | string };
+          const e = parsed?.error;
+          if (typeof e === 'string') msg = e;
+          else if (e && typeof e.message === 'string') msg = e.message;
+        } catch {
+          // Not JSON — fall back to the raw body.
+        }
+        detail = `: ${msg.slice(0, 500)}`;
+      }
+    } catch {
+      detail = '';
+    }
+    throw new Error(`gateway ${res.status}${detail}`);
   }
 
   const reader = res.body!.getReader();
@@ -430,16 +544,187 @@ export async function* runAgentTurn(
     // the agent's app-discovery tooling (manage_app list) is scoped to it so
     // the model only sees apps in the org the user is currently working in.
     organizationId?: string | null;
+    /**
+     * Executes model-authored code in an isolated sandbox for this turn.
+     * Supplied by `SandboxRunner` (cron-scheduler), absent for `LocalRunner`
+     * and for every human/assistant turn.
+     *
+     * SAFETY-CRITICAL: there is no host-execution fallback. When this is
+     * absent, `OPERATOR_SANDBOX_CODE_TOOL` must be absent from the catalog
+     * offered to the model (see the `tools` construction below) — never
+     * degrade to running code in this process.
+     */
+    codeExecutor?: (code: string) => Promise<{ stdout: string; stderr: string }>;
+    /**
+     * Runs `npm install` + `npm run build` over the app's working tree in this
+     * turn's sandbox and returns the compiler's own output. Supplied by
+     * `SandboxRunner`; absent for `LocalRunner` and every human turn.
+     *
+     * SAFETY-CRITICAL, identically to `codeExecutor`: there is no host-side
+     * build fallback and there must never be one. When this is absent,
+     * `OPERATOR_BUILD_TOOL` must be absent from the catalog offered to the
+     * model (see the `tools` construction below).
+     */
+    buildExecutor?: BuildExecutor;
+    /**
+     * Distributed trace id for this turn (see operator-turn.ts). Supplied by
+     * `runOperatorTurn`; absent for the human assistant, which has no trace.
+     * Threaded into the actual MCP tool dispatch below as the
+     * `x-butterbase-trace-id` header, and used to tag the `acted`/`gated`
+     * structured checkpoint logs.
+     *
+     * NOT threaded into `deps.mcp` / `turnMcp` (the loop-internal MCP calls
+     * `repoSync` and `fetchAppSchemasCached` make via `Mcp.call`) — those
+     * calls don't even carry `x-organization-id` today (`defaultMcp` calls
+     * `callMcpTool(name, args, jwt)` with no org, no trace), so adding a
+     * trace header there alone would be new plumbing for a pre-existing gap
+     * this task did not set out to close. See the D1 report for the explicit
+     * "where the id is threaded and where it is not" boundary.
+     */
+    traceId?: string;
+    /**
+     * Provenance for anything this turn writes to the substrate ledger — the
+     * operator job name, the wake reason, the trace id. Forwarded to the MCP
+     * dispatch as a header so the model never sees it and cannot be asked to
+     * pass it (an optional field the agent must remember is a field the agent
+     * skips). Absent for the human assistant, whose actions are by definition
+     * user-instructed.
+     */
+    triggerContext?: Record<string, unknown>;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
   const base = getDefaultDeps();
   const deps: LoopDeps = { ...base, ...(depsOverride ?? {}) };
-  const { cache, repoSync, recordUsage, loadTemplate } = deps;
+  const { cache, recordUsage, loadTemplate } = deps;
   const snapshotTitleGatewayFactory = deps.snapshotTitleGatewayFactory ?? createGatewayChat;
   const upsertSnapshotLabelFn = deps.upsertSnapshotLabel ?? upsertSnapshotLabel;
   const getConversationFn = deps.getConversation ?? getConversation;
   const updateConversationTitleFn = deps.updateConversationTitle ?? updateConversationTitle;
+
+  // Is this the headless operator? Derived from the identity itself rather than
+  // from a flag threaded through `input`.
+  //
+  // A caller can of course pass the wrong `userId` just as easily as it could
+  // forget a flag — this is not magic. What makes it safe in practice is that
+  // `operator-turn.ts` is the SOLE operator entry point and hardcodes
+  // `operatorUserId(job.organizationId)`. What deriving buys over a flag is the
+  // failure DIRECTION: a flag's absent/default value means "not an operator",
+  // so a new call site that omitted it would run unattended with an org service
+  // key and no policy at all — failing open. There is no value of `userId` that
+  // silently disables the policy for a turn that is otherwise an operator turn.
+  const isOperator = isOperatorUserId(input.userId);
+
+  /**
+   * The org this operator turn is FOR, read back out of the same sentinel that
+   * decided `isOperator`. Used only by the cross-org guard inside
+   * `operatorPolicyForOrg`: any tool call carrying an explicit `org_id`
+   * argument that is not this org is denied. `null` for human turns, where the
+   * guard is not consulted at all.
+   */
+  const operatorOrgId = operatorOrgIdFromUserId(input.userId);
+
+  /**
+   * The loop makes MCP calls the MODEL did not ask for. They go through
+   * `deps.mcp` (default: `defaultMcp()` → the same `callMcpTool`), not through
+   * the dispatch site, so the policy check there never sees them:
+   *
+   *   - `fetchAppSchemasCached` → `manage_schema` action="get", on EVERY turn
+   *     for any app id in recent tool args. Operator-allowlisted tools all take
+   *     `app_id`, so this fires in normal operation.
+   *   - `repoSync` → `manage_repo` pull_latest / pull_snapshot / push.
+   *
+   * For operator turns `deps.mcp` is therefore replaced with a policy-enforcing
+   * wrapper. Only an 'allow' verdict passes: these are internal calls with no
+   * model in the loop and no turn to pause, so 'approval' is refused here too
+   * rather than silently executed.
+   *
+   * `yolo_mode` is deliberately NOT passed here. These are calls the loop makes
+   * on its own behalf, not actions the org pre-authorised; nobody proposed them
+   * and no ledger row describes them. So this wrapper stays on the strict
+   * table at every setting of the flag — which also avoids the ordering knot of
+   * needing a yolo verdict to make the MCP call that reads yolo.
+   * `defaultMcp`'s contract is to throw on
+   * failure and every caller already treats a throw as best-effort — schema
+   * injection is wrapped in try/catch and skips per-app, the flush loop logs and
+   * continues — so a refusal degrades the turn, it does not break it.
+   */
+  const turnMcp: Mcp = isOperator
+    ? {
+        async call(name: string, args: unknown, jwt: string) {
+          // Loop-internal tools have no MCP counterpart; an internal caller
+          // asking for one by name is a bug, not a permitted call.
+          if (OPERATOR_LOCAL_TOOLS.has(name) || operatorPolicyForOrg(name, args, operatorOrgId) !== 'allow') {
+            throw new Error(`Tool "${name}" is not permitted for the autonomous operator.`);
+          }
+          return deps.mcp.call(name, args, jwt);
+        },
+      }
+    : deps.mcp;
+
+  /**
+   * An operator turn gets a DIFFERENT `RepoSync` implementation: `repo-http.ts`,
+   * which talks to the repo HTTP routes directly instead of to `manage_repo`
+   * over MCP.
+   *
+   * WHY. The default `repoSync` reaches the repo through `manage_repo`, and on
+   * an operator turn that call goes through `turnMcp`, which admits only an
+   * 'allow' verdict. `manage_repo` sits at the 'approval' tier, so hydration
+   * was refused on EVERY operator turn at EVERY yolo setting. The operator
+   * therefore started each turn with an empty working tree and lost the whole
+   * tree again at turn end — it could not read or persist app source at all.
+   *
+   * Rebuilding `repoSync` on `turnMcp` (the previous behaviour) was the right
+   * containment for a path that had to go through MCP, but it contained the
+   * path into uselessness. The fix is not to widen the policy — `manage_repo`
+   * stays at 'approval', `turnMcp` is untouched — but to stop needing MCP for
+   * repo I/O at all. `repo-http.ts` uses the org service key this turn already
+   * carries, and the routes' own `requireUserId` + `authorizeRepoWrite` decide
+   * access, so tenancy is enforced by the same middleware every human turn
+   * depends on rather than by anything reimplemented here. See repo-http.ts's
+   * header for why that beat calling `repo-storage.ts` in-process.
+   *
+   * The HUMAN assistant keeps the MCP `repoSync` exactly as it was — its
+   * `manage_repo` calls carry a user JWT and were never gated.
+   *
+   * An explicitly injected `repoSync` is honoured as-is: it is the caller's own
+   * object, never the raw default client, and silently discarding it would
+   * break dependency injection for every future operator test.
+   */
+  const repoSync: RepoSync =
+    isOperator && !depsOverride?.repoSync
+      ? createHttpRepoSync({ cache })
+      : deps.repoSync;
+
+  /**
+   * The org's substrate `yolo_mode` — read LAZILY, at most once per turn, and
+   * only when a verdict actually gates.
+   *
+   * When true, an 'approval' verdict at the dispatch site becomes 'allow': the
+   * owner has pre-authorised the gated tier for this org. It cannot reach a
+   * 'deny' (see `operatorPolicyFor`), so the substrate self-approval guard
+   * survives it, and substrate's own policy engine still gates on principle
+   * conflicts independently of this flag.
+   *
+   * LAZY, not eager, and that is a correctness property rather than a micro-
+   * optimisation. Eagerly reading it put an extra MCP round-trip on EVERY
+   * operator turn, including the overwhelmingly common one that only makes
+   * allow-tier substrate reads and would never consult the answer. Deferring
+   * it means the flag costs a request exactly when it can change an outcome.
+   *
+   * Read HERE rather than passed in on `input` for the same reason `isOperator`
+   * is derived rather than flagged: a permission-widening input that a caller
+   * can forget to compute is a bad shape. Reading it in the loop means every
+   * operator turn gets the org's real setting, or `false`.
+   *
+   * Never called on a human turn — `operatorVerdict` is null there, so the
+   * assistant's behaviour and its request count are unchanged.
+   */
+  let yoloModeCache: boolean | null = null;
+  const resolveYoloMode = async (): Promise<boolean> => {
+    if (yoloModeCache === null) yoloModeCache = await readOperatorYoloMode(turnMcp, input.jwt);
+    return yoloModeCache;
+  };
 
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
@@ -451,7 +736,57 @@ export async function* runAgentTurn(
     toolResult: null,
   });
 
-  const tools = getToolCatalog();
+  // AFFORDANCE (not the control): hide tools the operator may not call, so the
+  // model doesn't waste turns and tokens on refusals. The control is
+  // `operatorVerdict` at the dispatch site below, which refuses a denied tool
+  // whether or not it was ever in this list — including a name the model
+  // invented. Never rely on this filter for safety.
+  //
+  // The non-operator branch drops `operatorOnly` specs so the human
+  // assistant's tool list is exactly what it was before operator-only tools
+  // existed. This filter IS load-bearing for the assistant (it is what keeps
+  // its catalog unchanged); it is only an affordance on the operator side.
+  // SAFETY-CRITICAL, not merely an affordance, for ONE entry in this filtered
+  // list: `OPERATOR_SANDBOX_CODE_TOOL`. `operatorPolicyFor` returns 'allow' for
+  // it unconditionally (see operator-policy.ts's justification) because the
+  // policy table has no way to know whether a `codeExecutor` exists for this
+  // turn — that knowledge lives here, on `input`, not in the policy module.
+  // So this filter is the ONLY place that decides whether the tool is even
+  // reachable: drop it whenever `codeExecutor` is absent, so a turn with no
+  // sandbox (LocalRunner, or a SandboxRunner turn that fell back) never offers
+  // a tool it has no way to honour except by running code on this host, which
+  // must never happen. `allowedToolNames`, derived from this same list below,
+  // is what the dispatch guard ultimately checks — so this exclusion is
+  // enforced twice: the model is never shown the tool, and even a hallucinated
+  // call to it is refused before the dispatch route below is ever reached.
+  // SAFETY-CRITICAL for `OPERATOR_BUILD_TOOL` on exactly the same terms: its
+  // policy verdict is 'allow' unconditionally, so this filter is the only
+  // thing that decides whether a turn with no sandbox can reach it. There is
+  // no host-side build, and a build that ran in THIS process would execute the
+  // customer's `postinstall` scripts on the control plane.
+  const tools = isOperator
+    ? getToolCatalog()
+        .filter((t) => isOperatorToolAllowed(t.name))
+        .filter((t) => t.name !== OPERATOR_SANDBOX_CODE_TOOL || typeof input.codeExecutor === 'function')
+        .filter((t) => t.name !== OPERATOR_BUILD_TOOL || typeof input.buildExecutor === 'function')
+    : getToolCatalog().filter((t) => t.operatorOnly !== true);
+
+  /**
+   * One line per operator turn recording what the model was actually offered.
+   * The sandbox tool's presence is turn-local state (`input.codeExecutor`), so
+   * it cannot be inferred from config or from the catalog module — without
+   * this, "was the tool offered on this wake" is unanswerable after the fact,
+   * and the safety-critical filter above has no observable trace at all.
+   * Operator-only, so the human assistant's request path is unchanged.
+   */
+  if (isOperator) {
+    console.log('[dashboard-agent] operator tool catalog', {
+      conversationId: input.conversationId,
+      tools: tools.length,
+      sandboxCode: tools.some((t) => t.name === OPERATOR_SANDBOX_CODE_TOOL),
+      buildApp: tools.some((t) => t.name === OPERATOR_BUILD_TOOL),
+    });
+  }
 
   // Per-turn state --------------------------------------------------------
   const touchedApps = new Set<string>();
@@ -474,24 +809,71 @@ export async function* runAgentTurn(
 
   const apiUrl = process.env.PUBLIC_API_URL ?? 'https://api.butterbase.dev';
 
-  // ensureHydrated captures the baseline the first time an app is touched.
+  /**
+   * ensureHydrated captures the baseline the first time an app is touched.
+   *
+   * Hydration is BEST-EFFORT and must never throw.
+   *
+   * That guarantee used to live at the call sites, and one of them did not have
+   * it: the file-op route calls `fileOps.execute()` unguarded, fileOps calls
+   * this on the way into every `write_file`, and the throw reached the
+   * turn-level handler. Observed 2026-08-07 — the operator read its tickets,
+   * read the schema, called write_file, and died after 69 events. write_file is
+   * the first thing a build-and-deploy agent does, so nothing could ever ship.
+   *
+   * The specific throw that triggered that incident is gone: an operator turn's
+   * `repoSync` is now `repo-http.ts` and no longer needs the `manage_repo`
+   * verdict that `turnMcp` refused on every turn. The swallow stays, because
+   * the failure MODES it covers are not gone — a repo route that 5xxs, a
+   * presigned download that fails, a template fetch that does not load. Each
+   * leaves an unhydrated workspace, which is a legitimate state: the scaffold
+   * path below handles it, and the deploy routes already report "no files" /
+   * "entry file not found" when it turns out to be genuinely empty.
+   *
+   * Swallowing HERE rather than at a fourth call site remains the point: three
+   * callers each remembering to wrap is the bug, not the fix.
+   */
   const ensureHydrated = async ({ convId, appId, jwt }: { convId: string; appId: string; jwt: string }) => {
-    if (!cache.get(convId, appId)) {
-      const r = await repoSync.pullLatest({ convId, appId, jwt });
-      if (!r.hydrated) {
-        // Capture baseline BEFORE scaffold so every template file counts as
-        // "new" and is included in the end-of-turn push to manage_repo.
-        if (!baselineByApp.has(appId)) {
-          baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
+    try {
+      if (!cache.get(convId, appId)) {
+        const r = await repoSync.pullLatest({ convId, appId, jwt });
+        if (!r.hydrated) {
+          // Capture baseline BEFORE scaffold so every template file counts as
+          // "new" and is included in the end-of-turn push to manage_repo.
+          if (!baselineByApp.has(appId)) {
+            baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
+          }
+          const files = await loadTemplate({ appId, apiUrl });
+          for (const f of files) cache.write(convId, appId, f.path, f.content);
         }
-        const files = await loadTemplate({ appId, apiUrl });
-        for (const f of files) cache.write(convId, appId, f.path, f.content);
       }
+    } catch (err) {
+      // Logged, never rethrown. Both failure modes here are survivable: a
+      // refused manage_repo (operator turns, always) and a template fetch that
+      // did not load. Either leaves an unhydrated workspace, which the writer
+      // and the deploy routes already handle.
+      console.warn(
+        `[dashboard-agent] hydration failed for app ${appId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+    // Runs regardless: an unhydrated app still needs a baseline, or the
+    // end-of-turn flush would treat every file as unchanged.
     if (!baselineByApp.has(appId)) {
       baselineByApp.set(appId, cache.snapshotBaseline(convId, appId));
     }
   };
+
+  /**
+   * Phase 3: mints the presigned urls the sandbox fetches the source from.
+   *
+   * Built unconditionally rather than only when a `buildExecutor` exists — it
+   * is inert until the build route calls it, and a conditional here would be a
+   * second, weaker copy of the catalogue filter's decision. The filter is the
+   * control; this is just a client.
+   */
+  const buildHydrator = deps.buildHydratorFactory
+    ? deps.buildHydratorFactory()
+    : createBuildHydrator({ cache });
 
   // Build per-turn fileOps + deployer bound to our SSE queue.
   const fileOps = deps.fileOpsFactory
@@ -509,7 +891,7 @@ export async function* runAgentTurn(
     ? deps.deployerFactory(emit)
     : createDeployer({
         cache,
-        mcp: deps.mcp,
+        mcp: turnMcp,
         onDeploymentProgress: (evt) => emit({ type: 'deployment_progress', ...evt }),
       });
 
@@ -522,7 +904,7 @@ export async function* runAgentTurn(
         mcp: {
           async call(name: string, args: unknown, jwt: string) {
             try {
-              const result = await deps.mcp.call(name, args, jwt);
+              const result = await turnMcp.call(name, args, jwt);
               return { ok: true as const, result };
             } catch (e) {
               return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
@@ -548,16 +930,37 @@ export async function* runAgentTurn(
   try {
     const recentAppIds = await getRecentAppIds(input.pool, input.conversationId);
     if (recentAppIds.length > 0) {
-      const schemasByAppId = await fetchAppSchemasCached(recentAppIds, input.jwt, deps.mcp, schemaCache);
+      const schemasByAppId = await fetchAppSchemasCached(recentAppIds, input.jwt, turnMcp, schemaCache);
       schemaPromptBlock = buildSchemaPromptBlock(schemasByAppId);
     }
   } catch {
     // Schema injection is best-effort — never block the turn on it.
   }
 
+  /**
+   * I2: bound what an OPERATOR turn replays.
+   *
+   * One operator conversation per org, reused forever, woken ~144x/day —
+   * replaying the whole transcript is a scheduled context-window failure. The
+   * scratchpad and the wake header now carry the continuity, so a suffix is
+   * enough. `trimOperatorHistory` picks a PAIRING-VALID cut (see its header):
+   * it can never emit an assistant `tool_calls` whose result was trimmed away,
+   * nor an orphan `role:'tool'` row — the wedge that bricks an org's operator
+   * permanently.
+   *
+   * Nothing is deleted; `history` above is still the full stored record, and
+   * `turnNumber` is deliberately computed from it so the snapshot-title
+   * fallback does not reset when the replay window slides.
+   *
+   * FOR A HUMAN CONVERSATION THIS IS THE SAME ARRAY BY IDENTITY. The assistant
+   * replays exactly what it replayed before — `toGatewayMessages(history)`,
+   * every row, same order. Do not "simplify" this into an unconditional call.
+   */
+  const replayHistory = isOperator ? trimOperatorHistory(history) : history;
+
   const messages: GatewayMessage[] = [
     { role: 'system', content: schemaPromptBlock + getSystemPrompt() },
-    ...toGatewayMessages(history),
+    ...toGatewayMessages(replayHistory),
   ];
 
   // Yield and drain any queued SSE events (file_change / active_app_change /
@@ -571,6 +974,21 @@ export async function* runAgentTurn(
   // Task 5 (Plan 3d): last assistant text produced this turn, used as the
   // "Assistant: <chunk>" half of the snapshot-title summarization prompt.
   let lastAssistantText = '';
+  // D1: `acted` fires once per turn, on the FIRST tool this turn actually
+  // dispatches — not once per tool call — so a turn making several calls
+  // produces one `acted` line, not a flood. Declared outside the `outer`
+  // loop (a turn can span several model round-trips) and outside the
+  // per-round tool-call loop (several tools can dispatch in one round).
+  let actedLogged = false;
+  /**
+   * Decisions already sitting with the owner, for the re-proposal guard and
+   * for `list_pending_decisions`. `null` means "not read yet" — read lazily on
+   * the first operator tool call of the turn, so a turn that calls no tool (or
+   * a human turn) never issues this query. Read once and reused for the whole
+   * turn: a decision raised BY this turn is caught by the gate itself, so
+   * re-reading per call would buy nothing.
+   */
+  let pendingGatedCalls: PendingGatedCallRow[] | null = null;
   try {
     outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
       let assistantText = '';
@@ -651,13 +1069,229 @@ export async function* runAgentTurn(
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
 
+        /**
+         * THE CONTROL. For operator turns the policy table decides, per
+         * (tool, args), before anything is dispatched. Computed once here and
+         * consulted twice: 'approval' pauses immediately below, 'deny' refuses
+         * at the dispatch guard further down (which is where the assistant
+         * tool-call row has already been persisted, so the refusal can be
+         * written back as a tool RESULT and the model can adapt).
+         *
+         * `null` for a human conversation — nothing below this line changes
+         * behaviour for the assistant.
+         *
+         * `operatorPolicyForOrg` is the table PLUS the cross-org guard: a tool
+         * call carrying an explicit `org_id` argument for any org other than
+         * this operator's is 'deny'. That argument overrides the
+         * `x-organization-id` header `callMcpTool` sets, so without this the
+         * only thing keeping the operator's own dispatch inside its org was the
+         * stored credential being org-bound — an external property, not a
+         * control.
+         */
+        let operatorVerdict = isOperator
+          ? operatorPolicyForOrg(tc.name, tc.args, operatorOrgId)
+          : null;
+
+        /**
+         * `yolo_mode`, applied only where it can matter. A 'deny' never reaches
+         * this branch and an 'allow' has nothing left to grant, so the flag is
+         * consulted for exactly one verdict — which is also what keeps its
+         * inability to override a denial structural rather than argued.
+         *
+         * The re-evaluation goes back through `operatorPolicyForOrg` with the
+         * context rather than assigning 'allow' here. The policy module stays
+         * the only thing that decides a verdict; this site only supplies the
+         * per-org fact it could not know.
+         *
+         * `allowedToolNames` is checked first so a name the model INVENTED —
+         * which now resolves to 'approval' rather than 'deny' — costs no MCP
+         * request. It falls through to the catalog guard below either way.
+         */
+        if (
+          operatorVerdict === 'approval' &&
+          allowedToolNames.has(tc.name) &&
+          (await resolveYoloMode())
+        ) {
+          operatorVerdict = operatorPolicyForOrg(tc.name, tc.args, operatorOrgId, { yoloMode: true });
+        }
+
+        /**
+         * ====================================================================
+         * LAYER 1 — THE HARD RE-PROPOSAL GUARD.
+         * ====================================================================
+         *
+         * Until 2026-08-08 a pending approval skipped the entire wake, so the
+         * operator could not re-propose anything: it could not do anything.
+         * That skip is gone (operator-turn.ts) so an owner's overnight decision
+         * no longer costs a night of work, and THIS is the price of removing
+         * it. An operator on a one-minute tick with a decision outstanding can
+         * otherwise put sixty copies of the same email in the owner's queue
+         * before breakfast.
+         *
+         * The prompt is told about pending decisions too (layer 2) and can ask
+         * for their detail (layer 3). Neither is a control. This is: it refuses
+         * in code, and it refuses whether the model cooperated or not.
+         *
+         * WHERE IT SITS, and why exactly here:
+         *   - AFTER the policy verdict (including yolo), so it can never turn a
+         *     'deny' into anything, and never runs before the module that
+         *     decides verdicts has spoken. It only ever REFUSES; there is no
+         *     input to it that widens what the operator may do.
+         *   - BEFORE the approval gate, so a duplicate creates no second
+         *     approval row.
+         *   - BEFORE dispatch, which is load-bearing for the OTHER kind of
+         *     operator approval: a substrate-escalated one is raised AFTER the
+         *     propose has already landed in substrate's ledger, so refusing
+         *     post-dispatch would still park a second real action there. See
+         *     `listPendingGatedCalls` for how that kind is matched at all.
+         *
+         * The refusal is an ordinary TOOL RESULT — assistant row then tool row,
+         * then `continue` — never a thrown error and never a terminated turn.
+         * The model reads it, adapts, and gets on with the rest of the wake;
+         * and the conversation keeps the assistant/tool pairing the gateway
+         * requires.
+         *
+         * `pendingGatedCalls` is read at most ONCE per turn, lazily, and only
+         * for an operator turn — a human conversation never queries it.
+         */
+        if (isOperator) {
+          if (pendingGatedCalls === null) {
+            try {
+              pendingGatedCalls = await listPendingGatedCalls(input.pool, input.conversationId);
+            } catch {
+              // A read failure must not silently DISABLE the guard for the rest
+              // of the turn, but it also must not fail the wake. Leave the
+              // cache unset so the next tool call retries, and treat this call
+              // as unguarded — the approvals feed still shows the owner both
+              // rows, which is the recoverable direction.
+              pendingGatedCalls = null;
+            }
+          }
+          const duplicate = pendingGatedCalls
+            ? findDuplicatePendingCall(pendingGatedCalls, tc.name, tc.args)
+            : null;
+          if (duplicate) {
+            const waited = pendingGatedCalls?.find((p) => p.approvalId === duplicate.approvalId);
+            const errorMsg =
+              `Refused: an equivalent action is already waiting on the owner (approval ${duplicate.approvalId}` +
+              `${waited ? `, raised ${humanizeWait(waited.createdAt, new Date())} ago` : ''}). ` +
+              `It has NOT been approved${duplicate.match === 'target' ? ' — this proposal differs only in wording, not in what it would do' : ''}. ` +
+              'Do not propose it again. It will execute by itself if the owner approves it. ' +
+              'Work on something that does not depend on it.';
+            const messageId = randomUUID();
+            await appendMessage(
+              input.pool,
+              input.conversationId,
+              {
+                role: 'assistant',
+                content: i === 0 ? assistantText : '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: null,
+                modelUsed: input.model,
+              },
+              messageId,
+            );
+            yield { type: 'tool_call', ...tc };
+            const resultPayload = { error: errorMsg };
+            toolCallResults.push({ id: tc.id, ...resultPayload });
+            yield { type: 'tool_result', id: tc.id, ...resultPayload };
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: { error: errorMsg },
+            });
+            continue;
+          }
+        }
+
         // Sensitivity gate (Plan 3b Task 2): destructive/confirm-tier calls
         // pause the turn for explicit user approval, unless the conversation
         // has already granted conversation-wide trust for this exact tool.
         // Gated BEFORE the assistant tool-call row is persisted (below) and
         // BEFORE the retry-budget counter is touched — an approval pause is
         // not a tool "attempt".
-        const sensitivity = sensitivityFor(tc.name, tc.args);
+        //
+        // OPERATOR TURNS USE `operatorPolicyFor` INSTEAD, NOT AS WELL. The two
+        // are not stacked, and dropping `sensitivityFor` here loses nothing:
+        // the only tools it can ever return non-'safe' for are manage_app,
+        // manage_repo, manage_schema, manage_billing and manage_migrations, and
+        // all five sit at the 'approval' tier in OPERATOR_TOOL_TIERS — the same
+        // answer `sensitivityFor` would give, reached from the table that
+        // actually governs this principal. (Under `yolo_mode` the org has
+        // pre-authorised that tier, which is the deliberate point of the flag,
+        // not a case `sensitivityFor` would have caught: it has no notion of
+        // per-org pre-authorisation.) `sensitivityFor` also encodes the
+        // assistant's premise, that a human is watching every call and its
+        // tiers are a UX affordance; that premise is exactly what is false
+        // headless. `checkTrust` is likewise NOT consulted for the operator:
+        // there is one conversation per org forever, so conversation-wide trust
+        // would be permanent org-wide auto-approval.
+        const sensitivity = isOperator ? 'safe' : sensitivityFor(tc.name, tc.args);
+        // `allowedToolNames` is re-checked HERE, ahead of the gate, and again
+        // as the catalog guard below. Since 2026-08-07 an unknown tool name
+        // resolves to 'approval' rather than 'deny' (deny-by-default at the
+        // tier level), so without this a name the model INVENTED would open a
+        // pending approval, halt the turn, and put a tool that does not exist
+        // in front of the owner. Falling through to the catalog guard instead
+        // returns it to the model as an ordinary tool error, which is what it
+        // was before the tiers changed.
+        if (operatorVerdict === 'approval' && allowedToolNames.has(tc.name)) {
+          const messageId = randomUUID();
+          const approval = await createApproval(input.pool, {
+            conversationId: input.conversationId,
+            turnMessageId: messageId,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            // The operator feed has one tier. 'destructive' is the tier the
+            // operator approval-resolution path (tool-bridge/resume) already
+            // expects, and there is no weaker meaning available.
+            sensitivity: 'destructive',
+            traceId: input.traceId ?? null,
+          });
+          // `gated`: the operator turn stops here, right now, and does not
+          // resume until a human resolves `approval.id` — reported via
+          // `logOperatorCheckpoint('resumed', ...)` in operator-turn.ts on
+          // whichever later wake finds the gate cleared. Tool NAME only,
+          // never `tc.args` — see the no-tool-args rule in this checkpoint's
+          // module doc comment.
+          if (input.traceId) {
+            logOperatorCheckpoint('gated', {
+              traceId: input.traceId,
+              conversationId: input.conversationId,
+              approvalId: approval.id,
+              toolName: tc.name,
+            });
+          }
+          await appendMessage(
+            input.pool,
+            input.conversationId,
+            {
+              role: 'assistant',
+              content: i === 0 ? assistantText : '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: null,
+              modelUsed: input.model,
+              pendingApprovalId: approval.id,
+            },
+            messageId,
+          );
+          yield {
+            type: 'approval_required',
+            approval_id: approval.id,
+            tool_name: tc.name,
+            args: tc.args,
+            sensitivity: 'destructive',
+          };
+          terminated = true;
+          break outer;
+        }
         if (sensitivity !== 'safe') {
           const trusted = await checkTrust(input.pool, input.conversationId, tc.name);
           if (!trusted) {
@@ -696,7 +1330,7 @@ export async function* runAgentTurn(
           }
         }
 
-        await appendMessage(input.pool, input.conversationId, {
+        const assistantRow = await appendMessage(input.pool, input.conversationId, {
           role: 'assistant',
           content: i === 0 ? assistantText : '',
           toolCallId: tc.id,
@@ -740,6 +1374,45 @@ export async function* runAgentTurn(
           }
         }
 
+        /**
+         * THE CONTROL, part 2: operator policy deny.
+         *
+         * Deliberately placed AHEAD of the catalog allowlist guard and ahead of
+         * EVERY route below (file-op, deploy, deploy_function, MCP), so there is
+         * no dispatch path an operator can reach without passing through it.
+         * Nothing between the verdict's computation above and this point calls a
+         * tool — only message persistence, the tool_call event and the retry
+         * counter.
+         *
+         * Since 2026-08-07 there is no tool-level deny tier, so this branch is
+         * reached only by the `manage_substrate` action denials — the
+         * self-approval guard and the other controls the agent must not be able
+         * to weaken. A name the model INVENTED no longer lands here; it lands on
+         * the catalog guard immediately below, which is why that guard is now
+         * also consulted before the approval gate above.
+         *
+         * The refusal is returned as a TOOL RESULT, not thrown: the model sees
+         * an ordinary tool error, can adapt, and the conversation history keeps
+         * its assistant-tool_call → tool-result pairing (a history ending in an
+         * unanswered tool_call is rejected by the gateway and would wedge the
+         * org's one operator conversation permanently).
+         */
+        if (operatorVerdict === 'deny') {
+          const errorMsg = `Tool "${tc.name}" is not permitted for the autonomous operator.`;
+          const resultPayload = { error: errorMsg };
+          toolCallResults.push({ id: tc.id, ...resultPayload });
+          yield { type: 'tool_result', id: tc.id, ...resultPayload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: { error: errorMsg },
+          });
+          continue;
+        }
+
         // Allowlist guard
         if (!allowedToolNames.has(tc.name)) {
           const errorMsg = `Tool "${tc.name}" is not available in this agent's catalog.`;
@@ -753,6 +1426,303 @@ export async function* runAgentTurn(
             toolName: tc.name,
             toolArgs: tc.args,
             toolResult: { error: errorMsg },
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: operator scratchpad (in-process) ---------------------
+         *
+         * The agent's own working memory. Dispatched here rather than through
+         * MCP because there is no such MCP tool and no reason to invent one:
+         * the row lives in the control plane, which this process already owns
+         * a pool for.
+         *
+         * THE ORG IS NOT AN ARGUMENT. It is `operatorOrgId`, derived from the
+         * `operator:<org>` sentinel that `operator-turn.ts` hardcodes from the
+         * claimed job — the same trusted source the cross-org guard compares
+         * against. There is no model-supplied field that can redirect this
+         * write, so one org can never write another's scratchpad. (A stray
+         * `org_id` argument would additionally have been denied upstream by
+         * `operatorPolicyForOrg`; that is belt to this braces, not the reason
+         * this is safe.)
+         *
+         * The `isOperator` re-check is defence in depth: the tool is filtered
+         * out of the human catalog and would be refused by the allowlist guard
+         * above, but a route that writes operator state should not depend on
+         * a filter two hundred lines away for its precondition.
+         *
+         * Oversized content is REJECTED as an ordinary tool error, never
+         * truncated — see OPERATOR_SCRATCHPAD_MAX_CHARS. The model sees the
+         * failure and can shorten its own summary; silent truncation would
+         * drop whichever part did not fit with no signal.
+         */
+        if (isOperatorScratchpadTool(tc.name)) {
+          toolCallsCount++;
+          const spArgs = (tc.args ?? {}) as { content?: unknown };
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator || !operatorOrgId) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else if (typeof spArgs.content !== 'string') {
+            payload = { error: `Tool "${tc.name}" requires a string "content" argument.` };
+          } else {
+            try {
+              const saved = await setOperatorScratchpad(input.pool, operatorOrgId, spArgs.content);
+              payload = {
+                result: { ok: true, characters: saved.content.length, updated_at: saved.updatedAt },
+              };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: list_pending_decisions (in-process) -------------------
+         *
+         * LAYER 3. Detail on demand about what the owner has not answered yet,
+         * so the always-present wake block can stay one terse line per
+         * decision.
+         *
+         * READ-ONLY AND ARGUMENT-FREE, by construction: the conversation comes
+         * from the turn, never from `tc.args`, so there is no shape in which a
+         * model argument could point this at another org's queue — the same
+         * property that makes the scratchpad route safe, for the same reason.
+         * It cannot approve, deny, cancel or expire anything.
+         *
+         * `listPendingGatedCalls` deliberately emits TWO views of a
+         * substrate-escalated decision (the approval row and the paused call)
+         * because matching needs both. Showing both would tell the owner's
+         * agent there are two decisions when there is one, so they are
+         * collapsed by approval id here — keeping the view the model actually
+         * proposed, which is the one it will recognise.
+         *
+         * The `isOperator` re-check is the same defence in depth the scratchpad
+         * route uses: the tool is filtered out of the human catalog and would
+         * be refused by the allowlist guard above, but a route that reads
+         * approval arguments should not depend on a filter two hundred lines
+         * away for its precondition.
+         */
+        if (isListPendingDecisionsTool(tc.name)) {
+          toolCallsCount++;
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else {
+            try {
+              const rows: PendingGatedCallRow[] =
+                pendingGatedCalls ?? (await listPendingGatedCalls(input.pool, input.conversationId));
+              pendingGatedCalls = rows;
+              const now = new Date();
+              const seen = new Set<string>();
+              const pending: unknown[] = [];
+              for (const row of rows) {
+                if (seen.has(row.approvalId)) continue;
+                seen.add(row.approvalId);
+                pending.push({
+                  approval_id: row.approvalId,
+                  tool_name: row.toolName,
+                  tool_args: row.toolArgs,
+                  raised_at: row.createdAt,
+                  waiting: humanizeWait(row.createdAt, now),
+                });
+              }
+              payload = { result: { pending, count: pending.length } };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: build_app (in-process) --------------------------------
+         *
+         * PHASE 3's whole point: put a real compiler between "write" and
+         * "deploy". Before this, nothing type-checked or compiled what the
+         * operator wrote — functions had no build at all, and frontends
+         * compiled only INSIDE a deploy, so the agent learned it was wrong by
+         * shipping.
+         *
+         * THE SHAPE, and why it is this shape:
+         *
+         *   1. `ensureHydrated` first, so a turn that has not touched this app
+         *      yet still builds its real source rather than an empty tree.
+         *      Same call the deploy routes make, and it never throws.
+         *   2. `buildHydrator.hydrate` mints presigned, blob-scoped GET urls
+         *      for the CURRENT tree — including this turn's unflushed edits,
+         *      which is the entire reason it uses `prepare` rather than the
+         *      last snapshot. It does NOT commit; a build is not a save.
+         *   3. `buildExecutor` runs the build in the sandbox and returns the
+         *      compiler's own output.
+         *
+         * THE CREDENTIAL RULE: `input.jwt` goes to `hydrate` (a control-api
+         * call, where the key belongs) and NEVER into the object handed to
+         * `buildExecutor`. That object crosses into a MicroVM running
+         * model-authored code with unrestricted egress, and the operator's
+         * `bb_sk_*` can wipe the app repo. The three fields below are the
+         * whole payload, and a test asserts that closed shape.
+         *
+         * THE RULE, same as `run_sandbox_code`: no `buildExecutor` means no
+         * build, ever — never "build on the host instead", which would run the
+         * customer's `postinstall` scripts on the control plane. The tool was
+         * dropped from `tools` above in that case so this branch should be
+         * unreachable; it re-checks anyway, for the same reason the scratchpad
+         * route re-checks `isOperator` — a route that executes code must not
+         * rely on a filter two hundred lines away as its only proof.
+         *
+         * A FAILING BUILD IS A RESULT, not a tool error. `payload.result`
+         * carries `ok: false` plus the diagnostics, because the model has to
+         * read them to fix them, and because a turn that treats a red build as
+         * a failure throws away everything it did before the build.
+         */
+        if (isBuildAppTool(tc.name)) {
+          toolCallsCount++;
+          const bArgs = (tc.args ?? {}) as { app_id?: unknown };
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else if (typeof input.buildExecutor !== 'function') {
+            payload = { error: `Tool "${tc.name}" is not available: no sandbox for this turn.` };
+          } else if (typeof bArgs.app_id !== 'string' || bArgs.app_id.length === 0) {
+            payload = { error: `Tool "${tc.name}" requires a string "app_id" argument.` };
+          } else {
+            const appId = bArgs.app_id;
+            try {
+              await ensureHydrated({ convId: input.conversationId, appId, jwt: input.jwt });
+              touchedApps.add(appId);
+              const h = await buildHydrator.hydrate({
+                convId: input.conversationId,
+                appId,
+                jwt: input.jwt,
+              });
+              const r = await input.buildExecutor({
+                workspaceId: appId,
+                files: h.files,
+                installKey: h.installKey,
+                cache: h.cache,
+              });
+              // snake_case out to the model, matching every other tool result
+              // it sees, rather than leaking this module's camelCase.
+              payload = {
+                result: {
+                  ok: r.ok,
+                  step: r.step,
+                  exit_code: r.exitCode,
+                  stdout: r.stdout,
+                  stderr: r.stderr,
+                  install_skipped: r.installSkipped,
+                  // Surfaced to the model so a slow first build reads as "cold
+                  // cache", not as "something is wrong with my code".
+                  dependency_cache_hit: r.cacheRestored,
+                  // WHICH tier answered. `install_skipped` alone cannot say:
+                  // it is true both for the baked image and for a re-build in
+                  // a sandbox that already installed. Without this flag,
+                  // "is the baked image actually being used in production?"
+                  // has no answer short of timing builds and guessing.
+                  // Coerced rather than passed through, so it is `false` and
+                  // not `undefined` for an executor that predates it.
+                  baked_modules: r.bakedModules === true,
+                  output_truncated: r.truncated,
+                  timed_out: r.timedOut,
+                  duration_ms: r.durationMs,
+                  files_built: h.fileCount,
+                },
+              };
+            } catch (err) {
+              // Hydration failures (a 403, a storage quota, an unreachable
+              // repo route) and transport failures land here. They are tool
+              // ERRORS, not build reports: telling the model "your build
+              // failed" when the source never reached the sandbox would send
+              // it looking for a bug in code that never compiled.
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: sandbox code execution (in-process) -------------------
+         *
+         * Dispatched here, never forwarded to MCP: there is no MCP tool by
+         * this name, and the whole point of `codeExecutor` is that it runs
+         * OUTSIDE this process, in an isolated MicroVM `SandboxRunner` already
+         * created for this turn.
+         *
+         * THE RULE: no `codeExecutor` means no execution, ever — not "execute
+         * on the host instead". Reaching this branch with `input.codeExecutor`
+         * missing should be IMPOSSIBLE: the tool was dropped from `tools`
+         * above whenever `codeExecutor` was absent, so it is also absent from
+         * `allowedToolNames`, and the allowlist guard a few lines up already
+         * refused it. The `typeof input.codeExecutor !== 'function'` branch
+         * below is defence in depth for exactly the reason the scratchpad
+         * route re-checks `isOperator`: a route that can execute code must not
+         * depend on a filter two hundred lines away for its only proof of
+         * safety. If this branch is ever reached, refuse — do NOT fall back to
+         * running `rcArgs.code` in this process.
+         *
+         * The `isOperator` check is the same defence-in-depth as the
+         * scratchpad route: the tool is filtered out of the human catalog and
+         * would be refused by the allowlist guard above regardless.
+         */
+        if (isRunSandboxCodeTool(tc.name)) {
+          toolCallsCount++;
+          const rcArgs = (tc.args ?? {}) as { code?: unknown };
+          let payload: { result?: unknown; error?: string };
+          if (!isOperator) {
+            payload = { error: `Tool "${tc.name}" is only available to the autonomous operator.` };
+          } else if (typeof input.codeExecutor !== 'function') {
+            payload = { error: `Tool "${tc.name}" is not available: no sandbox executor for this turn.` };
+          } else if (typeof rcArgs.code !== 'string') {
+            payload = { error: `Tool "${tc.name}" requires a string "code" argument.` };
+          } else {
+            try {
+              const r = await input.codeExecutor(rcArgs.code);
+              payload = { result: r };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
           });
           continue;
         }
@@ -806,12 +1776,10 @@ export async function* runAgentTurn(
             });
             continue;
           }
-          // Ensure the workspace is hydrated before bundling.
-          try {
-            await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
-          } catch {
-            // Fall through — deployer will report "no files" if truly empty.
-          }
+          // Ensure the workspace is hydrated before bundling. ensureHydrated
+          // never throws; if it could not hydrate, the deployer reports
+          // "no files" when the workspace is truly empty.
+          await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
           touchedApps.add(args.app_id);
           const r = await deployer.deploy({
             convId: input.conversationId,
@@ -861,11 +1829,9 @@ export async function* runAgentTurn(
             });
             continue;
           }
-          try {
-            await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
-          } catch {
-            // Fall through — deployer will report "entry file not found" if truly empty.
-          }
+          // ensureHydrated never throws; the deployer reports "entry file not
+          // found" if the workspace is truly empty.
+          await ensureHydrated({ convId: input.conversationId, appId: args.app_id, jwt: input.jwt });
           touchedApps.add(args.app_id);
           const r = await functionDeployer.deploy({
             convId: input.conversationId,
@@ -896,7 +1862,20 @@ export async function* runAgentTurn(
 
         // ---- Default: MCP tool -------------------------------------------
         toolCallsCount++;
-        const call = await callMcpTool(tc.name, tc.args, input.jwt, input.organizationId);
+        // `acted`: the first tool call this turn actually reaches an MCP
+        // dispatch (as opposed to being denied/refused above, which is not
+        // "acting"). Once per turn — see `actedLogged`'s declaration.
+        if (isOperator && input.traceId && !actedLogged) {
+          actedLogged = true;
+          logOperatorCheckpoint('acted', {
+            traceId: input.traceId,
+            conversationId: input.conversationId,
+            toolName: tc.name,
+          });
+        }
+        const call = await callMcpTool(
+          tc.name, tc.args, input.jwt, input.organizationId, input.traceId, input.triggerContext,
+        );
         // Scope app discovery to the active org. The shared `/apps` endpoint
         // deliberately fans out across every org the user belongs to; here —
         // and only on the dashboard-agent path — we narrow `manage_app` list
@@ -911,6 +1890,82 @@ export async function* runAgentTurn(
         ) {
           call.result = scopeAppListToOrg(call.result, input.organizationId);
         }
+
+        /**
+         * FIX E — SUBSTRATE-ESCALATED APPROVAL, raised AFTER dispatch.
+         *
+         * `operatorPolicyFor` pauses a propose BEFORE dispatch only for the
+         * eight capabilities on the static `default_policy: 'approval_required'`
+         * mirror. That mirror is documented as the FLOOR, not the ceiling:
+         * substrate's policy engine ALSO escalates at propose time — a principle
+         * conflict returns requires_approval even on an 'auto' capability, per
+         * org, dynamically. Those calls legitimately get verdict 'allow' and
+         * dispatch, and substrate correctly holds the line: nothing executes,
+         * the action parks in `proposed`.
+         *
+         * What was missing is only visibility. No dashboard approval existed, so
+         * the action sat in substrate's ledger where the operator feed cannot
+         * see it, and the operator's own way out (`manage_substrate approve`) is
+         * correctly denied to it. The work stalled silently and every subsequent
+         * wake burned a cycle rediscovering it.
+         *
+         * NOT a second gate and NOT a widening of the static mirror — conflicts
+         * are dynamic and per-org, and predicting them is the wrong shape. This
+         * reacts to what substrate actually answered.
+         *
+         * The approval stores the APPROVE of that action id, never the propose:
+         * the propose has already happened, so resolution must call
+         * `approve(action_id)` only and must never re-propose. Everything about
+         * what may be stored is enforced inside
+         * `createSubstrateEscalationApproval` — read its header before changing
+         * anything here; the action id comes from `readSubstrateEscalation`,
+         * i.e. from SUBSTRATE'S RESPONSE, never from `tc.args`.
+         *
+         * Operator-only (`isOperator`), so the human assistant is untouched.
+         *
+         * Deliberately NO `role:'tool'` row is written for the propose here.
+         * The turn pauses in exactly the same shape the pre-dispatch gate uses —
+         * assistant tool_call row + `pending_approval_id`, answered later by
+         * `completeApprovalResolution` — which is what keeps the resolution path,
+         * and the wedge fix it carries, identical for both approval kinds.
+         *
+         * If the atomic create returns null (the row was already marked, or is
+         * not a pausable assistant row) we fall through and record the pending
+         * propose as an ordinary tool result: today's behaviour, never a
+         * half-paused turn.
+         */
+        if (isOperator && call.ok) {
+          const escalatedActionId = readSubstrateEscalation(tc.name, tc.args, call.result);
+          if (escalatedActionId) {
+            const approval = await createSubstrateEscalationApproval(input.pool, {
+              conversationId: input.conversationId,
+              pausedMessageId: assistantRow.id,
+              actionId: escalatedActionId,
+              traceId: input.traceId ?? null,
+            });
+            if (approval) {
+              if (input.traceId) {
+                logOperatorCheckpoint('gated', {
+                  traceId: input.traceId,
+                  conversationId: input.conversationId,
+                  approvalId: approval.id,
+                  toolName: tc.name,
+                  escalated: true,
+                });
+              }
+              yield {
+                type: 'approval_required',
+                approval_id: approval.id,
+                tool_name: tc.name,
+                args: tc.args,
+                sensitivity: 'destructive',
+              };
+              terminated = true;
+              break outer;
+            }
+          }
+        }
+
         const resultPayload = call.ok ? { result: call.result } : { error: call.error };
         toolCallResults.push({ id: tc.id, ...resultPayload });
         yield { type: 'tool_result', id: tc.id, ...resultPayload };

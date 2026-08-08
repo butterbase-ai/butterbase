@@ -1,5 +1,33 @@
 import pg from 'pg';
 
+/**
+ * PostgreSQL rejects NUL (U+0000) inside JSONB — `unsupported Unicode escape
+ * sequence`. Any tool result containing one makes the INSERT throw, and where
+ * that INSERT is the row that completes an assistant/tool pair, the throw
+ * leaves the conversation permanently invalid (see completeApprovalResolution
+ * in resume.ts). Strip NULs from keys and values so a value that reached the
+ * persistence boundary can always be written.
+ *
+ * This is a property of the WRITE, not of the value: callers that execute a
+ * tool still receive the raw, unsanitised result. Those stripped bytes are the
+ * only way a persisted or replayed result can differ from a fresh one.
+ *
+ * Single source of truth — tool-bridge.ts's execution cache uses this same
+ * function. Do not fork a second copy.
+ */
+export function stripJsonbNulls(value: unknown): unknown {
+  if (typeof value === 'string') return value.replace(/\u0000/g, '');
+  if (Array.isArray(value)) return value.map(stripJsonbNulls);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k.replace(/\u0000/g, '')] = stripJsonbNulls(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 export type Conversation = {
   id: string;
   userId: string;
@@ -551,6 +579,126 @@ export async function getMessageByPendingApprovalId(
     ratingReason: row.rating_reason ?? null,
     createdAt: new Date(row.created_at),
   };
+}
+
+/**
+ * ============================================================================
+ * KEEP A GATED CONVERSATION'S HISTORY VALID WHILE THE OWNER THINKS.
+ * ============================================================================
+ *
+ * THE INVARIANT, stated exactly. Chat-completions histories are rejected when
+ * an assistant `tool_calls` message is not IMMEDIATELY followed by the
+ * `role:'tool'` message answering it. Adjacency, not merely existence — and
+ * adjacency is a structural property of how this store is written today
+ * (loop.ts appends assistant-then-tool per call, resume.ts appends the tool row
+ * while the paused assistant row is still last). `trimOperatorHistory` relies
+ * on that property; it can drop an unanswered call, it cannot re-pair one.
+ *
+ * WHAT BROKE IT. Until 2026-08-08 a pending approval skipped the whole wake, so
+ * nothing could ever be appended between a paused call and its eventual result.
+ * Now the operator keeps working while a decision waits — which would put a
+ * turn's worth of messages between the two halves of that pair, and the tool
+ * row resume.ts appends on resolution would land non-adjacent. That is the
+ * wedge, in a new shape.
+ *
+ * THE FIX, which is why this function exists: close the pair AT ONCE, while the
+ * paused assistant row is still the last message, with a truthful placeholder
+ * ("not executed — waiting on the owner"). The pair is never open across
+ * appended work. When the owner answers, `replaceToolResultForCall` overwrites
+ * that same row IN PLACE (see resume.ts) — no second row, no re-ordering, no
+ * change to the approvals data model.
+ *
+ * BOTH PRECONDITIONS ARE IN THE SQL, not in the caller:
+ *   - nothing already answers this tool_call_id (idempotent across wakes, and
+ *     safe against a concurrent resolution writing the real result first);
+ *   - the paused row is still the LAST message in its conversation, so the row
+ *     this inserts is adjacent to it by construction. If it is not last, this
+ *     refuses ('not_closable') and the caller falls back to skipping the wake —
+ *     never inserting a result in the wrong place.
+ *
+ * Deliberately does NOT touch `last_message_at`: this is bookkeeping about a
+ * turn that already happened, not new conversation activity.
+ */
+export type CloseGateOutcome = 'closed' | 'already_closed' | 'not_closable';
+
+export async function closeUnansweredToolCall(
+  pool: pg.Pool,
+  approvalId: string,
+  placeholderResult: unknown,
+): Promise<CloseGateOutcome> {
+  const inserted = await pool.query(
+    `INSERT INTO dashboard_agent_messages
+       (conversation_id, role, content, tool_call_id, tool_name, tool_args, tool_result)
+     SELECT p.conversation_id, 'tool', '', p.tool_call_id, p.tool_name, p.tool_args, $2::jsonb
+     FROM dashboard_agent_messages p
+     WHERE p.pending_approval_id = $1
+       AND p.role = 'assistant'
+       AND p.tool_call_id IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM dashboard_agent_messages t
+         WHERE t.conversation_id = p.conversation_id
+           AND t.role = 'tool'
+           AND t.tool_call_id = p.tool_call_id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM dashboard_agent_messages n
+         WHERE n.conversation_id = p.conversation_id
+           AND n.created_at > p.created_at
+       )
+     RETURNING id`,
+    [approvalId, JSON.stringify(placeholderResult ?? {})],
+  );
+  if ((inserted.rowCount ?? 0) > 0) return 'closed';
+
+  // Zero rows means one of two very different things. Distinguish them: an
+  // already-answered call is the ordinary steady state (every wake after the
+  // first), while anything else means the pair is open and cannot be closed
+  // adjacently — the caller must NOT run a turn on that history.
+  const answered = await pool.query(
+    `SELECT 1
+     FROM dashboard_agent_messages p
+     JOIN dashboard_agent_messages t
+       ON t.conversation_id = p.conversation_id
+      AND t.role = 'tool'
+      AND t.tool_call_id = p.tool_call_id
+     WHERE p.pending_approval_id = $1
+     LIMIT 1`,
+    [approvalId],
+  );
+  return (answered.rowCount ?? 0) > 0 ? 'already_closed' : 'not_closable';
+}
+
+/**
+ * Overwrite the `role:'tool'` row answering a given tool_call_id, if one
+ * exists. Returns false when there is none, in which case the caller appends
+ * as it always did.
+ *
+ * This is the other half of `closeUnansweredToolCall`: the placeholder that
+ * function wrote is a real row in the real position, so the owner's actual
+ * decision must REPLACE it rather than append a second answer to the same call.
+ * A conversation that never had a placeholder — the human assistant's, and any
+ * operator approval raised before 2026-08-08 — matches nothing here and takes
+ * the unchanged append path.
+ */
+export async function replaceToolResultForCall(
+  pool: pg.Pool,
+  conversationId: string,
+  toolCallId: string,
+  fields: { toolName: string | null; toolArgs: unknown; toolResult: unknown },
+): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE dashboard_agent_messages
+     SET tool_name = $3, tool_args = $4::jsonb, tool_result = $5::jsonb
+     WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2`,
+    [
+      conversationId,
+      toolCallId,
+      fields.toolName,
+      fields.toolArgs === undefined || fields.toolArgs === null ? null : JSON.stringify(fields.toolArgs),
+      JSON.stringify(fields.toolResult ?? {}),
+    ],
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 /**
