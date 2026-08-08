@@ -121,6 +121,12 @@ export type BuildExecutorResult = {
   stdout: string;
   stderr: string;
   installSkipped: boolean;
+  /**
+   * The node_modules came from the tree BAKED INTO THE SANDBOX IMAGE — no
+   * install, no R2 round trip. Optional because an executor on an older
+   * sandbox image cannot report it; absent means false.
+   */
+  bakedModules?: boolean;
   cacheRestored: boolean;
   cacheSaved: boolean;
   truncated: boolean;
@@ -1452,6 +1458,14 @@ export async function* runAgentTurn(
                   // Surfaced to the model so a slow first build reads as "cold
                   // cache", not as "something is wrong with my code".
                   dependency_cache_hit: r.cacheRestored,
+                  // WHICH tier answered. `install_skipped` alone cannot say:
+                  // it is true both for the baked image and for a re-build in
+                  // a sandbox that already installed. Without this flag,
+                  // "is the baked image actually being used in production?"
+                  // has no answer short of timing builds and guessing.
+                  // Coerced rather than passed through, so it is `false` and
+                  // not `undefined` for an executor that predates it.
+                  baked_modules: r.bakedModules === true,
                   output_truncated: r.truncated,
                   timed_out: r.timedOut,
                   duration_ms: r.durationMs,

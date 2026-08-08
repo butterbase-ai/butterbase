@@ -309,6 +309,45 @@ describe('build_app — dispatch', () => {
     expect(events.some((e) => e.type === 'done')).toBe(true);
   });
 
+  it('reports WHICH dependency tier answered, so a slow build is diagnosable', async () => {
+    /**
+     * There are now three ways a build can end up with a node_modules: the
+     * tree baked into the sandbox image, the shared R2 tar, or a cold
+     * `npm install`. They differ by ~84s, and from the outside all three look
+     * like "the build took a while".
+     *
+     * `install_skipped` cannot tell them apart — it is true for the baked tier
+     * AND for a within-sandbox re-build. Without a distinct flag there is no
+     * way to answer "is the baked image actually being used?" after the
+     * switchover except by timing builds and guessing, which is exactly how an
+     * optimisation ends up silently dead for months.
+     */
+    oneToolCallThenStop(OPERATOR_BUILD_TOOL, { app_id: APP });
+    const { cache, buildHydratorFactory } = withTree();
+    const buildExecutor = vi.fn(async () => ({
+      ...okBuild, installSkipped: true, bakedModules: true, cacheRestored: false,
+    })) as unknown as BuildExecutor;
+
+    const events = await collect(runAgentTurn(operatorInput({ buildExecutor }), { cache, buildHydratorFactory }));
+
+    expect(resultOf(events)!.result).toMatchObject({
+      install_skipped: true,
+      baked_modules: true,
+      dependency_cache_hit: false,
+    });
+  });
+
+  it('says baked_modules is false for an executor that does not report it', async () => {
+    // Any sandbox on an older template. The field must be present and false,
+    // not absent — an absent field reads to the model as "unknown", and to a
+    // dashboard query as null.
+    oneToolCallThenStop(OPERATOR_BUILD_TOOL, { app_id: APP });
+    const { cache, buildHydratorFactory } = withTree();
+    const buildExecutor = vi.fn(async () => okBuild) as unknown as BuildExecutor;
+    const events = await collect(runAgentTurn(operatorInput({ buildExecutor }), { cache, buildHydratorFactory }));
+    expect(resultOf(events)!.result).toMatchObject({ baked_modules: false });
+  });
+
   it('requires app_id', async () => {
     oneToolCallThenStop(OPERATOR_BUILD_TOOL, {});
     const { cache, buildHydratorFactory } = withTree();
