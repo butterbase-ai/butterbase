@@ -162,8 +162,26 @@ export async function registerFrontendFromSourceRoutes(fastify: FastifyInstance)
       }));
     }
 
-    // Load + decrypt app env vars from DB; client-supplied vars override stored ones.
-    const appEnv = await loadAppEnvVars(controlDb, appId);
+    /**
+     * Load + decrypt app env vars; client-supplied vars override stored ones.
+     *
+     * FROM THE APP'S RUNTIME DB, not `controlDb`. `app_frontend_env_vars` is
+     * runtime-tier — control-plane migration 061_post_cutover_drop_runtime_tables
+     * DROPPED it from the control plane — and this call site was left pointing
+     * at the old home. The result was a 500 on EVERY from-source build start,
+     * in every environment where 061 had run (which is all of them, production
+     * included):
+     *
+     *     DatabaseError: relation "app_frontend_env_vars" does not exist
+     *
+     * It surfaced as a generic INTERNAL_ERROR from `/start`, i.e. as "the build
+     * failed", which is why it survived: nothing about the message points at a
+     * plane mismatch, and the create step immediately before it succeeds.
+     *
+     * `runtimeDb` is already resolved above for `app_deployments` — the same
+     * per-app connection, and the same reason: both tables are runtime-tier.
+     */
+    const appEnv = await loadAppEnvVars(await getRuntimeDbForApp(controlDb, appId), appId);
     const mergedEnv = { ...appEnv, ...body.userEnv };
 
     await BuildDriver.startBuild(controlDb, {
