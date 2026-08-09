@@ -43,6 +43,7 @@ import { createFileOps, type FileOpName } from './file-ops.js';
 import { createRepoSync, type RepoSync } from './repo-sync.js';
 import { createHttpRepoSync } from './repo-http.js';
 import { createHttpFrontendMcp } from './frontend-http.js';
+import { createHttpFunctionMcp } from './function-http.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { loadTemplate as loadTemplateDefault } from './template-loader.js';
@@ -914,8 +915,16 @@ export async function* runAgentTurn(
         onDeploymentProgress: (evt) => emit({ type: 'deployment_progress', ...evt }),
       });
 
+  /**
+   * On an operator turn the inner `deploy_function` call goes over HTTP, not
+   * MCP — see `function-http.ts` for why `turnMcp` refuses it at every setting
+   * of `yolo_mode`, and why widening the policy is the wrong fix. Same branch
+   * the frontend deployer takes a few lines above.
+   */
+  const functionMcp: Mcp = isOperator ? createHttpFunctionMcp() : turnMcp;
+
   // createFunctionDeployer's Mcp contract never throws (returns {ok:false,error}
-  // instead) — deps.mcp (the loop's default) throws on failure, so adapt it here.
+  // instead) — both transports above throw on failure, so adapt here.
   const functionDeployer = deps.functionDeployerFactory
     ? deps.functionDeployerFactory(emit)
     : createFunctionDeployer({
@@ -923,7 +932,7 @@ export async function* runAgentTurn(
         mcp: {
           async call(name: string, args: unknown, jwt: string) {
             try {
-              const result = await turnMcp.call(name, args, jwt);
+              const result = await functionMcp.call(name, args, jwt);
               return { ok: true as const, result };
             } catch (e) {
               return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
