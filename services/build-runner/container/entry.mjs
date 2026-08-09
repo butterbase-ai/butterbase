@@ -142,10 +142,30 @@ async function runBuild(sink) {
     }
 
     // 3. Install
+    //
+    // DEV DEPENDENCIES MUST BE INSTALLED, and saying so explicitly is
+    // load-bearing. This image sets `ENV NODE_ENV=production` (Dockerfile),
+    // which every package manager reads as "skip devDependencies" — and the
+    // platform's OWN scaffold template puts vite, @vitejs/plugin-react,
+    // typescript and tailwindcss in devDependencies. So the default behaviour
+    // installed only runtime deps and then ran a build command that needed a
+    // bundler that was never installed:
+    //
+    //     added 5 packages in 14s
+    //     > vite build
+    //     sh: 1: vite: not found
+    //
+    // That is a build failure with no hint of a cause — the log says the
+    // install succeeded, because it did.
+    //
+    // Forced per-package-manager rather than by clearing NODE_ENV, because
+    // NODE_ENV=production is CORRECT for the build step immediately below
+    // (bundlers use it to drop dev-only code and minify). Only the install
+    // should ignore it.
     const pm = env.packageManager;
-    const installArgs = pm === 'pnpm' ? ['install', '--frozen-lockfile=false']
-                       : pm === 'yarn' ? ['install']
-                       : ['install', '--no-audit', '--no-fund'];
+    const installArgs = pm === 'pnpm' ? ['install', '--frozen-lockfile=false', '--prod=false']
+                       : pm === 'yarn' ? ['install', '--production=false']
+                       : ['install', '--no-audit', '--no-fund', '--include=dev'];
     emit(log, sink, Buffer.from(`[runner] ${pm} ${installArgs.join(' ')}\n`));
     let code = await exec(pm, installArgs, { cwd: projectDir, env: { ...process.env, ...env.userEnv }, log, sink });
     if (code !== 0) { exitCode = code; failureReason = 'BUILD_NONZERO_EXIT'; throw new Error('install failed'); }
