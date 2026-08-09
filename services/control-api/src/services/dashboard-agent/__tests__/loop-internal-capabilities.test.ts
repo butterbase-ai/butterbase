@@ -13,14 +13,30 @@
  *   manage_frontend — absent from the table entirely, so the deny-by-default
  *                     floor makes it 'approval'
  *
- * The consequence is the one recorded on 2026-08-07: hydration is refused, so
+ * The consequence was the one recorded on 2026-08-07: hydration is refused, so
  * every operator turn starts with an empty working tree, and a frontend deploy
  * 371 events into a turn is refused too.
  *
- * These assertions PIN CURRENT BEHAVIOUR. They are expected to change when the
- * loop-internal path is given its own admission rule; the point of writing them
- * now is that the change should be deliberate and visible in a diff, rather
- * than something a future edit to the tier table does by accident.
+ * ---------------------------------------------------------------------------
+ * BOTH SYMPTOMS ARE NOW FIXED — AND THE ASSERTIONS BELOW STILL PASS.
+ * ---------------------------------------------------------------------------
+ * That combination is the point, so read it before "updating" this file. The
+ * fix was NOT to widen the tier table or to loosen `turnMcp`. Both are exactly
+ * as they were, which is why every assertion here is still green. What changed
+ * is that the loop no longer ROUTES these two calls through `turnMcp` at all:
+ *
+ *   manage_repo      -> repo-http.ts      (loop.ts, `repoSync` on operator turns)
+ *   manage_frontend  -> frontend-http.ts  (loop.ts, the deployer's transport)
+ *
+ * Both talk to the same control-api HTTP routes the human dashboard uses, with
+ * the org's `bb_sk_*`, so `requireUserId` + `authorizeRepoWrite` /
+ * `AppResolver.resolveApp` still decide access. Authorization moved layer, not
+ * strength.
+ *
+ * So these tests keep their original job: they pin that the MCP path stays
+ * shut. If one of them ever goes red, someone has widened the policy — which
+ * may be right, but must be deliberate and visible in a diff rather than a
+ * side effect of an edit to the tier table.
  */
 
 import { describe, it, expect } from 'vitest';
