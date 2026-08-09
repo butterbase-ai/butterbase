@@ -22,7 +22,27 @@ export type DeployDeps = {
 
 export function createDeployer(deps: DeployDeps) {
   const pollMs = deps.pollIntervalMs ?? 3000
-  const maxMs = deps.maxWaitMs ?? 5 * 60 * 1000
+  /**
+   * 15 minutes, raised from 5.
+   *
+   * WHY. A frontend build is `npm install` plus a bundle in a cold container,
+   * and on 2026-08-09 three consecutive operator builds landed 5-6 minutes
+   * after being started — just outside the old window. Every one of them
+   * reached READY. The operator was told each had "timed out", so it deployed
+   * again, and again, until the duplicate-call guard ended the turn with a
+   * half-shipped feature: a conflicts UI live on the site with no backend
+   * function behind it, 404ing on use.
+   *
+   * That is the failure mode a too-short poll produces here — not a lost
+   * deploy, but a SUCCESSFUL deploy reported as a failure to an agent whose
+   * natural response is to start another one. The cost of waiting longer is a
+   * slower turn; the cost of waiting too little is redundant builds and a
+   * corrupted deploy history.
+   *
+   * Still bounded, because unbounded would hang a turn forever on a build that
+   * genuinely died. If this fires now it means something is actually wrong.
+   */
+  const maxMs = deps.maxWaitMs ?? 15 * 60 * 1000
 
   /**
    * Never throws. Every failure is `{ ok: false, error }`, because the
@@ -94,7 +114,13 @@ export function createDeployer(deps: DeployDeps) {
         if (row.status === 'live') return { ok: true as const, deployment_id, url: row.url }
         if (row.status === 'failed') return { ok: false as const, error: row.error ?? 'build failed' }
       }
-      return { ok: false as const, error: 'deployment timed out' }
+      return {
+        ok: false as const,
+        error:
+          `deployment did not reach a terminal status within ${Math.round(maxMs / 60000)} minutes. ` +
+          `It may still be building — check list_deployments before deploying again, ` +
+          `because starting another build does not cancel this one.`,
+      }
   }
 
   return {
