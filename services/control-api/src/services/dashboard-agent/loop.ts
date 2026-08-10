@@ -64,7 +64,11 @@ export type LoopEvent =
   | { type: 'error'; message: string; code?: string; availableUsd?: number; requiredUsd?: number }
   | { type: 'file_change'; app_id: string; path: string; kind: 'write' | 'delete'; content?: string; sha256?: string }
   | { type: 'active_app_change'; app_id: string; app_name?: string }
-  | { type: 'deployment_progress'; deployment_id: string; status: 'queued' | 'building' | 'live' | 'failed'; url?: string; log_tail?: string; error?: string }
+  // `status` is `app_deployments.status` verbatim — WAITING / BUILDING /
+  // READY / ERROR. It was typed 'queued'|'building'|'live'|'failed', a
+  // vocabulary nothing writes; see DeploymentProgressEvent in deploy.ts for
+  // the poll bug that union helped hide.
+  | { type: 'deployment_progress'; deployment_id: string; status: string; url?: string; log_tail?: string; error?: string }
   | { type: 'function_deployment_progress'; function_name: string; status: 'queued' | 'uploading' | 'live' | 'failed'; url?: string; error?: string }
   | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' }
   | { type: 'title_updated'; title: string };
