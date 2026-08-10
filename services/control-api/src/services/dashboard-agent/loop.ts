@@ -44,6 +44,7 @@ import { createRepoSync, type RepoSync } from './repo-sync.js';
 import { createHttpRepoSync } from './repo-http.js';
 import { createHttpFrontendMcp } from './frontend-http.js';
 import { createHttpFunctionMcp } from './function-http.js';
+import { applyMcpToolSchemas, fetchMcpToolSchemas } from './mcp-tool-schemas.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { loadTemplate as loadTemplateDefault } from './template-loader.js';
@@ -160,6 +161,23 @@ export type LoopDeps = {
   fileOpsFactory?: (emit: (evt: LoopEvent) => void, ensureHydrated: (i: { convId: string; appId: string; jwt: string }) => Promise<void>) => ReturnType<typeof createFileOps>;
   deployerFactory?: (emit: (evt: LoopEvent) => void) => ReturnType<typeof createDeployer>;
   functionDeployerFactory?: (emit: (evt: LoopEvent) => void) => ReturnType<typeof createFunctionDeployer>;
+  /**
+   * Supplies the REAL argument schemas for MCP tools, replacing the
+   * hand-written ones in `tool-catalog.ts` — see `mcp-tool-schemas.ts` for the
+   * mismatch that motivates it.
+   *
+   * INJECTED RATHER THAN CALLED DIRECTLY, deliberately. It performs a network
+   * round-trip, and a turn must not acquire one that callers cannot see or
+   * control: the first version of this called `fetchMcpToolSchemas` inline and
+   * broke 96 tests, because it consumed responses their mocked `fetch` had
+   * queued for the model. That was a real signal, not test friction — an
+   * unannounced fetch in the hot path is exactly what an injected dependency
+   * exists to prevent.
+   *
+   * Omitted means "do not fetch": the hand-written catalog is used unchanged,
+   * which is the behaviour every existing caller already had.
+   */
+  toolSchemas?: (jwt: string) => Promise<Map<string, Record<string, unknown>>>;
   // Task 5 (Plan 3d): snapshot auto-naming. Tests can inject a stub gateway
   // and/or a spy for the store write; production builds a real gateway chat
   // client bound to the request's JWT and use the real store.upsertSnapshotLabel.
@@ -210,6 +228,19 @@ function getDefaultDeps(): LoopDeps {
       upsertSnapshotLabel,
       getConversation,
       updateConversationTitle,
+      /**
+       * Real MCP argument schemas, replacing the hand-written ones the model
+       * is otherwise shown — see `toolSchemas` on LoopDeps.
+       *
+       * BEHIND A FLAG, default off, for two reasons. It changes what EVERY
+       * agent turn is told about EVERY tool, which is a large blast radius for
+       * a correctness fix and deserves a deliberate rollout rather than
+       * arriving with a deploy. And it adds a network round-trip to the turn
+       * path, which the default deps must not impose on callers that never
+       * asked for it — including the whole test suite, which supplies its own
+       * `fetch` and had 96 tests broken by an unflagged version of this.
+       */
+      toolSchemas: process.env.MCP_REAL_TOOL_SCHEMAS === '1' ? fetchMcpToolSchemas : undefined,
     };
   }
   return _defaultDeps;
@@ -770,12 +801,27 @@ export async function* runAgentTurn(
   // thing that decides whether a turn with no sandbox can reach it. There is
   // no host-side build, and a build that ran in THIS process would execute the
   // customer's `postinstall` scripts on the control plane.
-  const tools = isOperator
+  const baseTools = isOperator
     ? getToolCatalog()
         .filter((t) => isOperatorToolAllowed(t.name))
         .filter((t) => t.name !== OPERATOR_SANDBOX_CODE_TOOL || typeof input.codeExecutor === 'function')
         .filter((t) => t.name !== OPERATOR_BUILD_TOOL || typeof input.buildExecutor === 'function')
     : getToolCatalog().filter((t) => t.operatorOnly !== true);
+
+  /**
+   * Replace the hand-written argument schemas with the ones the MCP server
+   * actually validates against — see `mcp-tool-schemas.ts` for the mismatch
+   * this fixes (most notably `required: ['action']` advertised on tools that
+   * reject an `action` argument outright).
+   *
+   * Degrades to `baseTools` on any failure, so an unreachable MCP server costs
+   * argument accuracy and never a turn. Loop-internal tools with no MCP
+   * counterpart — write_file, deploy_frontend, the scratchpad — keep their
+   * hand-written schema, which for them is the only source there is.
+   */
+  const tools = deps.toolSchemas
+    ? applyMcpToolSchemas(baseTools, await deps.toolSchemas(input.jwt))
+    : baseTools;
 
   /**
    * One line per operator turn recording what the model was actually offered.
