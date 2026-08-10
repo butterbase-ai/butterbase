@@ -106,3 +106,76 @@ describe('deploy_frontend — a throwing mcp is a failed deploy, not a failed tu
     expect(r.ok === false && r.error).toMatch(/manage_frontend/)
   })
 })
+
+/**
+ * THE STATUS VOCABULARY, pinned against the producer rather than against what
+ * this file used to assume.
+ *
+ * The tests above poll `'live'` and `'failed'`. Nothing in the platform ever
+ * writes those: `build-driver.service.ts` sets 'READY' on success and 'ERROR'
+ * on failure, and `GET /v1/:appId/frontend/deployments` passes
+ * `app_deployments.status` through verbatim. So for as long as the poll
+ * compared against the lowercase pair, it could not recognise a terminal state
+ * at ALL — every real deploy ran the full timeout and returned "did not reach
+ * a terminal status", whether the build had gone live or died in 8 seconds.
+ *
+ * The suite stayed green throughout, because it fed the code the same
+ * invented vocabulary the code was checking for. That is the specific way this
+ * bug survived: the mock agreed with the bug instead of with production.
+ *
+ * These cases use the REAL values and would have failed before the fix. Keep
+ * the lowercase ones above too — the poll accepts both now, and a deploy path
+ * that silently stopped honouring one of them should fail loudly here.
+ */
+describe('terminal status detection (real platform vocabulary)', () => {
+  const okFetch = () => vi.fn(async () => new Response('', { status: 200 }) as any) as any
+
+  async function deployWith(statusRow: Record<string, unknown>) {
+    const cache = new WorkingTreeCache()
+    cache.write(CONV, APP, 'package.json', '{}')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = okFetch()
+    const mcp = makeMcp({
+      create_from_source: () => ({ deployment_id: 'dep_x', upload_url: 'https://s3/put' }),
+      start_from_source: () => ({ deployment_id: 'dep_x', status: 'WAITING' }),
+      list_deployments: () => ({ deployments: [{ id: 'dep_x', ...statusRow }] }),
+    })
+    try {
+      const d = createDeployer({ cache, mcp, onDeploymentProgress: () => {}, pollIntervalMs: 1, maxWaitMs: 200 })
+      return await d.deploy({ convId: CONV, appId: APP, jwt: JWT })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  it('treats READY as success and returns the url', async () => {
+    expect(await deployWith({ status: 'READY', url: 'https://x.butterbase.dev' })).toMatchObject({
+      ok: true, deployment_id: 'dep_x', url: 'https://x.butterbase.dev',
+    })
+  })
+
+  it('treats ERROR as failure rather than waiting out the whole window', async () => {
+    expect(await deployWith({ status: 'ERROR', error: 'BUILD_NONZERO_EXIT' })).toMatchObject({
+      ok: false, error: 'BUILD_NONZERO_EXIT',
+    })
+  })
+
+  it('surfaces error_message when the row carries that instead of error', async () => {
+    // The deployments route has used both spellings; reporting "build failed"
+    // when a real reason was available is what sent the operator looking for a
+    // bug in its own source.
+    expect(await deployWith({ status: 'ERROR', error_message: 'npm ERR! missing script: build' })).toMatchObject({
+      ok: false, error: 'npm ERR! missing script: build',
+    })
+  })
+
+  it('still reports a genuine timeout when the build never terminates', async () => {
+    const r = await deployWith({ status: 'BUILDING' });
+    expect(r).toMatchObject({ ok: false });
+    expect((r as any).error).toMatch(/did not reach a terminal status/);
+    // The old text told the caller to "check list_deployments", which no
+    // operator-reachable tool can do; following it cost a turn to a validation
+    // error on 2026-08-10.
+    expect((r as any).error).not.toMatch(/list_deployments/);
+  })
+})

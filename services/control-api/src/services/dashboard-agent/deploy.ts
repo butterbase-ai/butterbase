@@ -4,7 +4,18 @@ import type { WorkingTreeCache } from './working-tree.js'
 
 export type DeploymentProgressEvent = {
   deployment_id: string
-  status: 'queued' | 'building' | 'live' | 'failed'
+  /**
+   * Whatever `app_deployments.status` holds, passed through verbatim — in
+   * practice WAITING / BUILDING / READY / ERROR.
+   *
+   * Deliberately widened to `string` from the old
+   * `'queued'|'building'|'live'|'failed'` union, which described a vocabulary
+   * nothing in this system produces. That union was not merely unused: it made
+   * the wrong values look SANCTIONED, and the poll below was written to match
+   * it. A narrow type that disagrees with its producer is worse than no type,
+   * because it moves the bug from "obviously untyped" to "apparently checked".
+   */
+  status: string
   url?: string
   log_tail?: string
   error?: string
@@ -23,24 +34,25 @@ export type DeployDeps = {
 export function createDeployer(deps: DeployDeps) {
   const pollMs = deps.pollIntervalMs ?? 3000
   /**
-   * 15 minutes, raised from 5.
+   * 15 minutes, raised from 5 on 2026-08-09.
    *
-   * WHY. A frontend build is `npm install` plus a bundle in a cold container,
-   * and on 2026-08-09 three consecutive operator builds landed 5-6 minutes
-   * after being started — just outside the old window. Every one of them
-   * reached READY. The operator was told each had "timed out", so it deployed
-   * again, and again, until the duplicate-call guard ended the turn with a
-   * half-shipped feature: a conflicts UI live on the site with no backend
-   * function behind it, 404ing on use.
+   * THAT RAISE WAS A MISDIAGNOSIS, and it is left here as a worked example
+   * rather than quietly corrected. The symptom was real — operator builds
+   * reaching READY while the tool reported a timeout — but the cause was not
+   * impatience. The poll below compared `row.status` against 'live'/'failed',
+   * two values nothing in this system ever writes, so it could not recognise a
+   * terminal state at any window length. Widening it only made each doomed
+   * deploy waste 15 minutes instead of 5.
    *
-   * That is the failure mode a too-short poll produces here — not a lost
-   * deploy, but a SUCCESSFUL deploy reported as a failure to an agent whose
-   * natural response is to start another one. The cost of waiting longer is a
-   * slower turn; the cost of waiting too little is redundant builds and a
-   * corrupted deploy history.
+   * The lesson worth keeping: "a build that succeeded was reported as a
+   * timeout" is evidence that the poll cannot READ the outcome, and the first
+   * thing to check is the status vocabulary, not the clock. The actual fix is
+   * at the comparison itself.
    *
-   * Still bounded, because unbounded would hang a turn forever on a build that
-   * genuinely died. If this fires now it means something is actually wrong.
+   * The window still earns its size independently — a frontend build is
+   * `npm install` plus a bundle in a cold container, and 5-6 minutes is
+   * ordinary. It stays bounded because unbounded would hang a turn forever on
+   * a build that genuinely died.
    */
   const maxMs = deps.maxWaitMs ?? 15 * 60 * 1000
 
@@ -111,15 +123,50 @@ export function createDeployer(deps: DeployDeps) {
           log_tail: row.log_tail,
           error: row.error,
         })
-        if (row.status === 'live') return { ok: true as const, deployment_id, url: row.url }
-        if (row.status === 'failed') return { ok: false as const, error: row.error ?? 'build failed' }
+        /**
+         * MATCHED CASE-INSENSITIVELY AND IN BOTH VOCABULARIES, because these
+         * two lines used to read `=== 'live'` and `=== 'failed'` and NEITHER
+         * COULD EVER BE TRUE.
+         *
+         * `row.status` is `app_deployments.status` passed through verbatim by
+         * `GET /v1/:appId/frontend/deployments`, and the only values anything
+         * writes there are WAITING / BUILDING / READY / ERROR — see
+         * `build-driver.service.ts` (READY on success, ERROR on failure) and
+         * `deployment.service.ts`. The lowercase pair was a vocabulary that
+         * exists nowhere in the system.
+         *
+         * So the loop was unreachable on BOTH branches: every deploy ran the
+         * full `maxMs` and returned the timeout string below, whether the build
+         * had succeeded, failed, or was still going. The operator was told
+         * "timed out" for builds that had already failed in 8 seconds.
+         *
+         * This is also why raising `maxMs` from 5 to 15 minutes changed
+         * nothing. That edit was made on 2026-08-09 against exactly this
+         * symptom and misdiagnosed it as a too-short window — see the comment
+         * on `maxMs`, which is preserved above with its correction, because the
+         * reasoning in it is the trap: "builds reached READY but we reported a
+         * timeout" is evidence of a status the poll cannot recognise, not of a
+         * poll that is too impatient.
+         */
+        const status = String(row.status ?? '').toUpperCase()
+        if (status === 'READY' || status === 'LIVE') return { ok: true as const, deployment_id, url: row.url }
+        if (status === 'ERROR' || status === 'FAILED') {
+          return { ok: false as const, error: row.error ?? row.error_message ?? 'build failed' }
+        }
       }
       return {
         ok: false as const,
         error:
+          // Does NOT tell the caller to "check list_deployments": the operator
+          // has no tool that can. `manage_frontend` is deliberately unlisted
+          // for operator turns and `manage_app` has no such action, so the
+          // advice produced a guaranteed validation error — observed
+          // 2026-08-10, the model tried it and got
+          // `invalid_enum_value: "received": "list_deployments"`. Advice a
+          // reader cannot follow is worse than none; it costs a turn.
           `deployment did not reach a terminal status within ${Math.round(maxMs / 60000)} minutes. ` +
-          `It may still be building — check list_deployments before deploying again, ` +
-          `because starting another build does not cancel this one.`,
+          `It may still be building. Do NOT start another build — that does not cancel this one, ` +
+          `and two builds racing on the same app is how a half-shipped deploy happens.`,
       }
   }
 
