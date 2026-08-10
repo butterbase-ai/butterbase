@@ -83,6 +83,8 @@ export const config = {
       markupPct,
       platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-sonnet-4.6',
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
+      minimaxApiKey: process.env.MINIMAX_API_KEY ?? '',
+      minimaxRegion: (process.env.MINIMAX_REGION === 'cn_zh' ? 'cn_zh' : 'global_en') as 'global_en' | 'cn_zh',
       providerPrimaryApiKey: process.env.AI_PROVIDER_PRIMARY_API_KEY ?? '',
       providerPrimaryBaseUrl: process.env.AI_PROVIDER_PRIMARY_BASE_URL || undefined,
       providerSecondaryApiKey: process.env.AI_PROVIDER_SECONDARY_API_KEY ?? '',

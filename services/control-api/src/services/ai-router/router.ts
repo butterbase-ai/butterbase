@@ -36,7 +36,7 @@ const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 
  * slot-cooldown MGET stays O(known-slots) instead of scanning Redis keys.
  * Extend when adding new named slots.
  */
-const KNOWN_ROUTER_SLOTS = ['provider-primary', 'provider-secondary', 'provider-tertiary', 'openrouter'] as const;
+const KNOWN_ROUTER_SLOTS = ['provider-primary', 'provider-secondary', 'provider-tertiary', 'minimax', 'openrouter'] as const;
 
 /**
  * Pick the active ranker. Waterfall wins over presence-mode when both are

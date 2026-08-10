@@ -1,12 +1,16 @@
 import type { RouterName } from './normalize.js';
-import type { Modality } from './adapters/types.js';
+import type { InputModality, Modality, ThinkingMode } from './adapters/types.js';
 
 export interface CatalogRouter {
   name: RouterName;
   upstreamId: string;
   promptPricePerMtok: number;
   completionPricePerMtok: number;
+  cacheReadPricePerMtok?: number;
+  cacheWritePricePerMtok?: number | null;
   contextLength: number;
+  inputModalities?: InputModality[];
+  thinking?: ThinkingMode[];
   // Defaults to 'chat' for entries written before this field existed.
   modality?: Modality;
   // Router-native pricing for non-chat modalities. See UpstreamModel.rawPricing.
@@ -196,6 +200,7 @@ export function rankRoutersPresenceMode(
   const er = available.find(r => r.name === 'provider-primary');
   const ir = available.find(r => r.name === 'provider-secondary');
   const tr = available.find(r => r.name === 'provider-tertiary');
+  const mm = available.find(r => r.name === 'minimax');
   const or = available.find(r => r.name === 'openrouter');
 
   const head: CatalogRouter[] = [];
@@ -210,6 +215,7 @@ export function rankRoutersPresenceMode(
   // The PREFERRED_ROUTER_BY_MODEL hook can still promote it to the head when
   // applicable; this default keeps it routable for non-preferred models too.
   if (tr) head.push(tr);
+  if (mm) head.push(mm);
   if (or) head.push(or);
   return promotePreferred(entry.canonicalId, head);
 }

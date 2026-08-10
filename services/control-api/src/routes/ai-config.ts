@@ -24,6 +24,7 @@ import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
+import { minimaxAdapter } from '../services/ai-router/adapters/minimax.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
@@ -71,6 +72,10 @@ async function getAppDefaultModel(runtimePool: pg.Pool, appId: string): Promise<
 async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
   if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
+  if (config.aiRouter.minimaxApiKey) m.set('minimax', minimaxAdapter({
+    apiKey: config.aiRouter.minimaxApiKey,
+    region: config.aiRouter.minimaxRegion,
+  }));
   try {
     // @ts-expect-error — overlay path resolved at runtime
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
@@ -87,7 +92,7 @@ async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
       apiKey: config.aiRouter.providerTertiaryApiKey,
       baseUrl: config.aiRouter.providerTertiaryBaseUrl,
     }));
-  } catch { /* OSS mode: only openrouter is available */ }
+  } catch { /* OSS mode: direct adapters remain available */ }
   return m;
 }
 
@@ -482,6 +487,10 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             modality,
             prompt_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.promptPricePerMtok : null,
             completion_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.completionPricePerMtok : null,
+            cache_read_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.cacheReadPricePerMtok ?? null : null,
+            cache_write_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.cacheWritePricePerMtok ?? null : null,
+            input_modalities: firstRouter?.inputModalities ?? null,
+            thinking: firstRouter?.thinking ?? null,
             raw_pricing: !isTokenPriced && firstRouter ? firstRouter.rawPricing ?? null : null,
           };
         });

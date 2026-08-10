@@ -5,13 +5,19 @@ import type {
 } from '../schemas.js';
 
 export type Modality = 'chat' | 'embedding' | 'image' | 'video' | 'audio';
+export type InputModality = 'text' | 'image' | 'video';
+export type ThinkingMode = 'adaptive' | 'disabled' | 'always_on';
 
 export interface UpstreamModel {
   upstreamId: string;
   displayName: string;
   promptPricePerMtok: number;
   completionPricePerMtok: number;
+  cacheReadPricePerMtok?: number;
+  cacheWritePricePerMtok?: number | null;
   contextLength: number;
+  inputModalities?: InputModality[];
+  thinking?: ThinkingMode[];
   // Defaults to 'chat' when omitted. Non-chat modalities (image/video/audio)
   // surface for future media-router integration; chat-completion selection
   // should filter by modality === 'chat'.

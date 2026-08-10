@@ -7,6 +7,7 @@ describe('config.aiRouter', () => {
     vi.resetModules();
     delete process.env.AI_ROUTER_PRESENCE_MODE;
     delete process.env.AI_ROUTER_DEFAULT_REGION;
+    delete process.env.MINIMAX_REGION;
   });
 
   afterEach(() => {
@@ -37,5 +38,17 @@ describe('config.aiRouter', () => {
     vi.resetModules();
     const mod = await import('../config.js');
     expect(mod.config.aiRouter.defaultRegion).toBe('eu-west-1');
+  });
+
+  it('minimaxRegion defaults to global_en', async () => {
+    const mod = await import('../config.js');
+    expect(mod.config.aiRouter.minimaxRegion).toBe('global_en');
+  });
+
+  it('minimaxRegion accepts cn_zh', async () => {
+    process.env.MINIMAX_REGION = 'cn_zh';
+    vi.resetModules();
+    const mod = await import('../config.js');
+    expect(mod.config.aiRouter.minimaxRegion).toBe('cn_zh');
   });
 });

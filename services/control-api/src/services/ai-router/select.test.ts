@@ -190,7 +190,7 @@ describe('estimateWorstCaseUsd', () => {
 });
 
 describe('rankRoutersPresenceMode', () => {
-  const mk = (name: 'openrouter' | 'provider-primary' | 'provider-secondary' | 'provider-tertiary'): CatalogRouter => ({
+  const mk = (name: 'openrouter' | 'minimax' | 'provider-primary' | 'provider-secondary' | 'provider-tertiary'): CatalogRouter => ({
     name: name as any,
     upstreamId: `${name}-id`,
     promptPricePerMtok: 1,
@@ -271,6 +271,15 @@ describe('rankRoutersPresenceMode', () => {
   it('OR only', () => {
     const r = rankRoutersPresenceMode(entry([mk('openrouter')]), allEnabled, () => 0);
     expect(r.map(x => x.name)).toEqual(['openrouter']);
+  });
+
+  it('keeps the MiniMax slot eligible ahead of the generic fallback', () => {
+    const r = rankRoutersPresenceMode(
+      entry([mk('openrouter'), mk('minimax')]),
+      new Set(['openrouter', 'minimax']),
+      () => 0,
+    );
+    expect(r.map(x => x.name)).toEqual(['minimax', 'openrouter']);
   });
 
   it('ER disabled in enabled-set is filtered out before tiebreak', () => {
