@@ -21,6 +21,7 @@ export interface ImageJobRow {
   provider_cost_usd: string | null;
   charged_credits_usd: string | null;
   markup_pct: string;
+  markup_source: string | null;
   settled_at: Date | null;
   created_at: Date;
 }
@@ -39,6 +40,7 @@ export async function insertImageJob(
     leaseId: string;
     estimatedCostUsd: number;
     markupPct: number;
+    markupSource: string;
   },
 ): Promise<string> {
   const organizationId = await resolveOrgFromApp(pool, args.appId);
@@ -46,14 +48,14 @@ export async function insertImageJob(
     `INSERT INTO ai_image_jobs
        (app_id, user_id, end_user_sub, model, request_json, status,
         upstream_router, upstream_job_id, upstream_polling_url,
-        lease_id, estimated_cost_usd, markup_pct, organization_id)
-     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10, $11, $12)
+        lease_id, estimated_cost_usd, markup_pct, organization_id, markup_source)
+     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10, $11, $12, $13)
      RETURNING id`,
     [
       args.appId, args.userId, args.endUserSub, args.model, args.requestJson,
       args.upstreamRouter, args.upstreamJobId, args.upstreamPollingUrl,
       args.leaseId, args.estimatedCostUsd, args.markupPct,
-      organizationId,
+      organizationId, args.markupSource,
     ],
   );
   return r.rows[0].id;

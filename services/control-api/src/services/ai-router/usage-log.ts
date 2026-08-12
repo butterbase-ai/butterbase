@@ -14,6 +14,7 @@ export interface AiUsageRow {
   providerCostUsd: number;
   chargedCreditsUsd: number;
   markupPct: number;
+  markupSource: string;
   fallbackChain: string[];   // router_name:reason entries from upstream fallbacks
   leaseId: string | null;
   keyType: 'platform' | 'byok';
@@ -39,8 +40,8 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
        app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
        cost_usd, key_type, charged_to_user, request_metadata,
        router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id,
-       cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, organization_id
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+       cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, organization_id, markup_source
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
     [
       row.appId,
       row.userId,
@@ -63,6 +64,7 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.cacheCreationInputTokens ?? 0,
       row.reasoningTokens ?? null,
       row.organizationId,
+      row.markupSource,
     ]
   );
 

@@ -63,7 +63,7 @@ describe('routeChatCompletion fallback', () => {
       runtimePool: makePoolStub(),
       redis: { get: vi.fn(async () => null) } as any,
       adapters: new Map(),
-      markupPct: 20, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 20, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
     await expect(routeChatCompletion(ctx as any, { model: 'm', messages: [] }))
       .rejects.toBeInstanceOf(RouterError);
@@ -75,7 +75,7 @@ describe('routeChatCompletion fallback', () => {
       runtimePool: makePoolStub(),
       redis: makeRedis(entry('openrouter'), [{ name: 'openrouter', enabled: false, lastRefreshAt: '', lastRefreshStatus: 'failed' }]),
       adapters: new Map(),
-      markupPct: 20, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 20, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
     await expect(routeChatCompletion(ctx as any, { model: 'm', messages: [] }))
       .rejects.toMatchObject({ code: 'NO_ROUTERS_AVAILABLE' });
@@ -129,7 +129,7 @@ describe('catalog upstreamId passthrough (date-suffixed ids)', () => {
       runtimePool: makePoolStub(),
       redis,
       adapters: new Map<string, RouterAdapter>([['openrouter', adapter]]),
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     await routeChatCompletion(ctx as any, {
@@ -196,7 +196,7 @@ describe('presence mode ranker selection', () => {
       runtimePool: makePoolStub(),
       redis,
       adapters,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     await routeChatCompletion(ctx as any, { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
@@ -267,7 +267,7 @@ describe('presence mode fallback', () => {
       runtimePool: makePoolStub(),
       redis,
       adapters,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     const result = await routeChatCompletion(ctx as any, { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
@@ -298,7 +298,7 @@ describe('nullable appId', () => {
       runtimePool: makePoolStub(),
       redis: makeRedis(catalogEntry, [{ name: 'openrouter', enabled: true }]),
       adapters: new Map([['openrouter', adapter]]),
-      markupPct: 0, appId: null, userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: null, userId: 'u', region: 'r',
     };
 
     const result = await routeChatCompletion(ctx as any, { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
@@ -322,7 +322,7 @@ describe('settlement-fallback cost is cache-aware (Task 13)', () => {
       platformPool: makePoolStub(),
       runtimePool: makePoolStub(),
       redis: makeRedis(entry('openrouter', 10, 10), [{ name: 'openrouter', enabled: true }]),
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     });
 
     const noCacheAdapter: RouterAdapter = {
@@ -416,7 +416,7 @@ describe('routeVideoSubmit', () => {
       runtimePool: makePoolStub(),
       redis,
       adapters: new Map([['openrouter', adapter]]),
-      markupPct: 0,
+      markupPct: 0, markupSource: 'global',
       appId: 'a',
       userId: 'u',
       region: 'r',
@@ -456,7 +456,7 @@ describe('routeVideoSubmit', () => {
       runtimePool: makePoolStub(),
       redis,
       adapters: new Map([['openrouter', adapter]]),
-      markupPct: 0,
+      markupPct: 0, markupSource: 'global',
       appId: 'a',
       userId: 'u',
       region: 'r',
@@ -496,7 +496,7 @@ describe('routeVideoPoll', () => {
       runtimePool: makePoolStub(),
       redis: { get: vi.fn(async () => null) } as any,
       adapters: new Map([['openrouter', adapter]]),
-      markupPct: 0,
+      markupPct: 0, markupSource: 'global',
       appId: 'a',
       userId: 'u',
       region: 'r',
@@ -529,7 +529,7 @@ describe('routeVideoPoll', () => {
       runtimePool: makePoolStub(),
       redis: { get: vi.fn(async () => null) } as any,
       adapters: new Map([['openrouter', adapter]]),
-      markupPct: 0,
+      markupPct: 0, markupSource: 'global',
       appId: 'a',
       userId: 'u',
       region: 'r',
@@ -567,7 +567,7 @@ describe('routeVideoSubmit wrong-modality', () => {
       runtimePool: makePoolStub(),
       redis,
       adapters: new Map(),
-      markupPct: 0,
+      markupPct: 0, markupSource: 'global',
       appId: 'a',
       userId: 'u',
       region: 'r',
@@ -591,7 +591,7 @@ describe('settleVideoJob', () => {
       runtimePool: makePoolStub(),
       redis: { get: vi.fn(async () => null) } as any,
       adapters: new Map(),
-      markupPct: 20,
+      markupPct: 20, markupSource: 'global',
       appId: 'a',
       userId: 'u',
       region: 'r',
@@ -710,7 +710,7 @@ async function submitVideoWithEntry(entry: any, req: Partial<VideoGenerationRequ
     runtimePool: makePoolStub(),
     redis,
     adapters,
-    markupPct: 0,
+    markupPct: 0, markupSource: 'global',
     appId: 'a',
     userId: 'u',
     region: 'r',

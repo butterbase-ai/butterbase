@@ -14,6 +14,7 @@ import {
 import { config } from '../../config.js';
 import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
+import type { MarkupSource } from './special-pricing.js';
 import { acquireForEstimatedCost, acquireNominal, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
 import { pickProviderCost } from './adapters/openrouter.js';
@@ -143,6 +144,7 @@ export interface RouteContext {
   redis: Redis;
   adapters: Map<RouterName, RouterAdapter>;
   markupPct: number;
+  markupSource: MarkupSource;
   appId: string | null;
   organizationId: string;
   userId: string;
@@ -302,7 +304,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         totalTokens: usage.promptTokens + usage.completionTokens,
         providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+        markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain, leaseId: lease.leaseId,
         keyType: 'platform', chargedToUser: true,
         cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
         cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
@@ -319,6 +321,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         provider_cost_usd: cost,
         charged_credits_usd: chargedCredits,
         markup_pct: ctx.markupPct,
+        markup_source: ctx.markupSource,
         latency_ms: t1 - t0,
         status: result.status,
       }));
@@ -343,7 +346,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
     totalTokens: usage.promptTokens + usage.completionTokens,
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain, leaseId: lease.leaseId,
     keyType: 'platform', chargedToUser: true,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
@@ -360,6 +363,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     provider_cost_usd: providerCost,
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     latency_ms: t1 - t0,
     status: result.status,
   }));
@@ -518,7 +522,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     promptTokens: usage.promptTokens, completionTokens: 0,
     totalTokens: usage.promptTokens,
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain, leaseId: lease.leaseId,
     keyType: 'platform', chargedToUser: true,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
@@ -535,6 +539,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     provider_cost_usd: providerCost,
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     latency_ms: t1 - t0,
     status: result.status,
   }));
@@ -1050,7 +1055,7 @@ export async function settleVideoJob(
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
     keyType: 'platform', chargedToUser: true,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   console.log(JSON.stringify({
@@ -1064,6 +1069,7 @@ export async function settleVideoJob(
     provider_cost_usd: args.providerCostUsd,
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     modality: 'video',
   }));
   return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };
@@ -1232,7 +1238,7 @@ export async function settleImageJob(
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
     keyType: 'platform', chargedToUser: true,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   console.log(JSON.stringify({
@@ -1246,6 +1252,7 @@ export async function settleImageJob(
     provider_cost_usd: args.providerCostUsd,
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     modality: 'image',
   }));
   return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };

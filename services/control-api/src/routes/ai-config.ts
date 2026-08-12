@@ -281,7 +281,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         }
 
 
-        const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
+        const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
 
         const result = await routeChatCompletion(
           {
@@ -290,6 +290,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct,
+            markupSource,
             appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
@@ -407,7 +408,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
-        const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
+        const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
 
         const result = await routeEmbedding(
           {
@@ -416,6 +417,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             redis: getRedisClient(),
             adapters,
             markupPct,
+            markupSource,
             appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }

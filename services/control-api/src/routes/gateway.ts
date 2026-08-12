@@ -254,7 +254,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
-      const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeChatCompletion(
         {
           platformPool: app.controlDb,
@@ -262,6 +262,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
           redis: getRedisClient(),
           adapters,
           markupPct,
+          markupSource,
           appId: null,
           organizationId,
           userId: user.userId,
@@ -357,11 +358,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
       const { model: markupModel } = stripThinkingSuffix(body.model);
-      const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, markupModel);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, markupModel);
       const result = await routeMessages(
         {
           platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct,
+          adapters, markupPct, markupSource,
           appId: request.auth.appId ?? null, organizationId, userId: user.userId, region: user.region,
         },
         body,
@@ -466,10 +467,10 @@ export async function gatewayRoutes(app: FastifyInstance) {
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
-      const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeResponses(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct,
+          adapters, markupPct, markupSource,
           appId: request.auth.appId ?? null, organizationId, userId: user.userId, region: user.region },
         body,
       );
@@ -530,7 +531,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
-      const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeEmbedding(
         {
           platformPool: app.controlDb,
@@ -538,6 +539,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
           redis: getRedisClient(),
           adapters,
           markupPct,
+          markupSource,
           appId: null,
           organizationId,
           userId: user.userId,

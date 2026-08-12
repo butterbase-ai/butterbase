@@ -39,7 +39,7 @@ describeDb('video-jobs DB helpers', () => {
       upstreamPollingUrl: 'https://example.com/poll/abc',
       leaseId: crypto.randomUUID(),
       estimatedCostUsd: 0.5,
-      markupPct: 20,
+      markupPct: 20, markupSource: 'global',
       ...overrides,
     };
   }

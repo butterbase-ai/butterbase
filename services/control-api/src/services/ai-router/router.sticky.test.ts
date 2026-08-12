@@ -138,7 +138,7 @@ describe('chat sticky routing', () => {
       ]),
       adapters,
       stickyBindings: kvSpy.bindings,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     await routeChatCompletion(ctx as any, { ...baseReq, session_id: 's1' } as any);
@@ -176,7 +176,7 @@ describe('chat sticky routing', () => {
       ]),
       adapters,
       stickyBindings: kvSpy.bindings,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     await routeChatCompletion(ctx as any, req as any);
@@ -197,7 +197,7 @@ describe('chat sticky routing', () => {
       redis: makeRedis(singleRouterEntry('openrouter'), [{ name: 'openrouter', enabled: true }]),
       adapters,
       stickyBindings: kvSpy.bindings,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     await routeChatCompletion(ctx as any, { ...baseReq, session_id: 's-unbound' } as any);
@@ -216,7 +216,7 @@ describe('chat sticky routing', () => {
       redis: makeRedis(singleRouterEntry('openrouter'), [{ name: 'openrouter', enabled: true }]),
       adapters,
       stickyBindings: kvSpy.bindings,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     await routeChatCompletion(ctx as any, {
@@ -248,7 +248,7 @@ describe('chat sticky routing', () => {
       ]),
       adapters,
       stickyBindings: kvSpy.bindings,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     const result = await routeChatCompletion(ctx as any, { ...baseReq, session_id: 's-fail' } as any);
@@ -273,7 +273,7 @@ describe('chat sticky routing', () => {
       redis: makeRedis(singleRouterEntry('openrouter'), [{ name: 'openrouter', enabled: true }]),
       adapters,
       stickyBindings: kvSpy.bindings,
-      markupPct: 0, appId: 'a', userId: 'u', region: 'r',
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
     };
 
     await routeChatCompletion(ctx as any, {
