@@ -12,6 +12,7 @@ import { requireUserId } from '../utils/require-auth.js';
 import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
+import { resolveMarkupPct } from '../services/ai-router/special-pricing.js';
 import {
   chatCompletionRequestSchema,
   embeddingRequestSchema,
@@ -279,13 +280,15 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         }
 
 
+        const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
+
         const result = await routeChatCompletion(
           {
             platformPool: app.controlDb,
             runtimePool,
             redis: getRedisClient(),
             adapters,
-            markupPct: config.aiRouter.markupPct,
+            markupPct,
             appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
@@ -403,13 +406,15 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
+
         const result = await routeEmbedding(
           {
             platformPool: app.controlDb,
             runtimePool,
             redis: getRedisClient(),
             adapters,
-            markupPct: config.aiRouter.markupPct,
+            markupPct,
             appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
