@@ -83,7 +83,7 @@ function wrapNativeAnthropicStreamForSettlement(
         promptTokens: inputTokens, completionTokens: outputTokens,
         totalTokens: inputTokens + outputTokens,
         providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+        markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: [], leaseId: lease.leaseId,
         keyType: 'platform', chargedToUser: true,
         cacheReadInputTokens: cacheReadTokens,
         cacheCreationInputTokens: cacheCreateTokens,
@@ -99,6 +99,7 @@ function wrapNativeAnthropicStreamForSettlement(
         provider_cost_usd: providerCost,
         charged_credits_usd: chargedCredits,
         markup_pct: ctx.markupPct,
+        markup_source: ctx.markupSource,
         latency_ms: Date.now() - startedAt,
         status: 200,
       }));
@@ -242,7 +243,7 @@ export async function routeMessages(
       promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
       totalTokens: usage.promptTokens + usage.completionTokens,
       providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-      markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+      markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: [], leaseId: lease.leaseId,
       keyType: 'platform', chargedToUser: true,
       cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
       cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
@@ -258,6 +259,7 @@ export async function routeMessages(
       provider_cost_usd: providerCost,
       charged_credits_usd: chargedCredits,
       markup_pct: ctx.markupPct,
+      markup_source: ctx.markupSource,
       latency_ms: Date.now() - startedAt,
       status: result.status,
     }));

@@ -76,7 +76,7 @@ function makeCtx(overrides: Partial<{ redis: any; adapters: Map<string, RouterAd
     runtimePool: makePoolStub(),
     redis: overrides.redis ?? makeImageRedis(null, []),
     adapters: overrides.adapters ?? new Map(),
-    markupPct: 0,
+    markupPct: 0, markupSource: 'global',
     appId: 'a',
     organizationId: 'org-1',
     userId: 'u',

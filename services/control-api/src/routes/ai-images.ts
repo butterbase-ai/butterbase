@@ -26,6 +26,7 @@ import {
 import { settleAfterCall, insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { readAutoRefillState } from './ai-config.js';
+import { resolveMarkupPct, type MarkupSource } from '../services/ai-router/special-pricing.js';
 
 // Public URLs returned to clients must honor the X-Forwarded-* headers that
 // Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
@@ -134,6 +135,8 @@ export async function aiImageRoutes(app: FastifyInstance) {
     try {
       const body = imageSubmitSchema.parse(request.body);
 
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+
       const unsupported = validateImageParams(body, adapters);
       if (unsupported) return reply.code(400).send(unsupported);
 
@@ -141,7 +144,7 @@ export async function aiImageRoutes(app: FastifyInstance) {
 
       const submit = await routeImageSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct: config.aiRouter.markupPct,
+          adapters, markupPct, markupSource,
           appId, organizationId, userId: ownerId, region },
         body,
       );
@@ -155,7 +158,8 @@ export async function aiImageRoutes(app: FastifyInstance) {
           upstreamPollingUrl: submit.pollingUrl,
           leaseId: submit.leaseId,
           estimatedCostUsd: submit.estimatedCostUsd,
-          markupPct: config.aiRouter.markupPct,
+          markupPct,
+          markupSource,
         });
       } catch (insertErr) {
         // Upstream job is running but we have no row to track it. Refund the lease
@@ -189,12 +193,12 @@ export async function aiImageRoutes(app: FastifyInstance) {
           unsignedUrls: inline.unsignedUrls,
           contentType: inline.contentType,
           providerCostUsd: cost,
-          chargedCreditsUsd: applyMarkup(cost, config.aiRouter.markupPct),
+          chargedCreditsUsd: applyMarkup(cost, markupPct),
           error: inline.error,
         });
         await settleImageJob(
           { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-            adapters, markupPct: config.aiRouter.markupPct,
+            adapters, markupPct, markupSource,
             appId, organizationId, userId: ownerId, region },
           { leaseId: submit.leaseId, chosenRouter: submit.chosenRouter, canonicalModel: body.model, providerCostUsd: cost },
         );
@@ -238,6 +242,7 @@ export async function aiImageRoutes(app: FastifyInstance) {
       const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
+        markupSource: (job.markup_source ?? 'global') as MarkupSource,
         appId, organizationId, userId: ownerId, region,
       };
       const result = await pollAndSettleImageJob(ctx, job);

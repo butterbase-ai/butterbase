@@ -65,6 +65,7 @@ export interface AdminOrganizationDetail {
     auto_refill_enabled: boolean;
     auto_refill_amount_usd: number | null;
     billing_period_start: string | null;
+    special_pricing: boolean;
   };
   members: Array<{
     user_id: string;
@@ -214,6 +215,7 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
               o.credits_usd::float8 AS credits_usd,
               coalesce(o.monthly_allowance_usd, 0)::float8 AS monthly_allowance_usd,
               o.auto_refill_enabled,
+              o.special_pricing,
               o.auto_refill_amount_usd::float8 AS auto_refill_amount_usd,
               o.auto_refill_last_attempt_at, o.auto_refill_last_failure_reason,
               o.billing_period_start, o.created_at

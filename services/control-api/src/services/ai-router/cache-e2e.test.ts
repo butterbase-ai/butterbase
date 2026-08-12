@@ -202,7 +202,7 @@ describe('cache e2e: sticky routing + usage-log + fallback billing', () => {
     const adapters = new Map([['provider-primary', adapter]]);
 
     const result = await routeChatCompletion(
-      { platformPool, runtimePool, redis, adapters, stickyBindings: kvSpy.bindings, markupPct: 0, appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
+      { platformPool, runtimePool, redis, adapters, stickyBindings: kvSpy.bindings, markupPct: 0, markupSource: 'global', appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
       cacheReq,
     );
 
@@ -235,7 +235,7 @@ describe('cache e2e: sticky routing + usage-log + fallback billing', () => {
     const adapters = new Map([['provider-primary', adapter]]);
 
     const result = await routeChatCompletion(
-      { platformPool, runtimePool, redis, adapters, stickyBindings: kvSpy.bindings, markupPct: 0, appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
+      { platformPool, runtimePool, redis, adapters, stickyBindings: kvSpy.bindings, markupPct: 0, markupSource: 'global', appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
       cacheReq,
     );
 
@@ -262,7 +262,7 @@ describe('cache e2e: sticky routing + usage-log + fallback billing', () => {
         redis: makeRedis(singleRouterEntry(), [{ name: 'provider-primary', enabled: true }]),
         adapters: new Map([['provider-primary', adapterNoCache]]),
         stickyBindings: makeKvSpy().bindings,
-        markupPct: 0, appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1',
       } as any,
       { ...cacheReq, session_id: 'session-no-cache' } as any,
     );
@@ -282,7 +282,7 @@ describe('cache e2e: sticky routing + usage-log + fallback billing', () => {
         redis: makeRedis(singleRouterEntry(), [{ name: 'provider-primary', enabled: true }]),
         adapters: new Map([['provider-primary', adapterWithCache]]),
         stickyBindings: makeKvSpy().bindings,
-        markupPct: 0, appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1',
       } as any,
       { ...cacheReq, session_id: 'session-cache-hit' } as any,
     );
@@ -299,7 +299,7 @@ describe('cache e2e: sticky routing + usage-log + fallback billing', () => {
 
     // Call 1
     const r1 = await routeChatCompletion(
-      { platformPool, runtimePool, redis, adapters: new Map([['provider-primary', adapter1]]), stickyBindings: kvSpy.bindings, markupPct: 0, appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
+      { platformPool, runtimePool, redis, adapters: new Map([['provider-primary', adapter1]]), stickyBindings: kvSpy.bindings, markupPct: 0, markupSource: 'global', appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
       cacheReq,
     );
     const router1 = r1.chosen!;
@@ -309,7 +309,7 @@ describe('cache e2e: sticky routing + usage-log + fallback billing', () => {
 
     // Call 2 — same session_id; must be routed to the same router
     const r2 = await routeChatCompletion(
-      { platformPool, runtimePool, redis, adapters: adapters2, stickyBindings: kvSpy.bindings, markupPct: 0, appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
+      { platformPool, runtimePool, redis, adapters: adapters2, stickyBindings: kvSpy.bindings, markupPct: 0, markupSource: 'global', appId: 'app-e2e', userId: 'u-e2e', region: 'us-east-1' } as any,
       cacheReq,
     );
     const router2 = r2.chosen!;
