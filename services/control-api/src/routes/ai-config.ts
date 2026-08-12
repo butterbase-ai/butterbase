@@ -13,6 +13,7 @@ import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js'
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
 import { resolveMarkupPct } from '../services/ai-router/special-pricing.js';
+import { applyMarkup } from '../services/ai-router/markup.js';
 import {
   chatCompletionRequestSchema,
   embeddingRequestSchema,
@@ -471,25 +472,32 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     try {
       // ---- v2 path: multi-router catalog ----
       if (config.aiRouter.enabled) {
+        const { appId } = request.params as { appId: string };
+        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+        const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
         const redis = getRedisClient();
         const ids = await listCatalogModels(redis);
         const entries = await Promise.all(ids.map(id => readCatalogEntry(redis, id)));
-        const models = entries.filter(Boolean).map(e => {
+        const models = await Promise.all(entries.filter(Boolean).map(async e => {
           const firstRouter = e!.routers.length > 0 ? e!.routers[0] : null;
           // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
           const modality = firstRouter?.modality ?? 'chat';
           // For token-priced modalities (chat, embedding), expose token pricing
           const isTokenPriced = modality === 'chat' || modality === 'embedding';
+          const { pct } = await resolveMarkupPct(app.controlDb, organizationId, e!.canonicalId);
           return {
             id: e!.canonicalId,
             name: e!.displayName,
             context_length: e!.routers.length > 0 ? Math.max(...e!.routers.map(r => r.contextLength)) : 0,
             modality,
-            prompt_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.promptPricePerMtok : null,
-            completion_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.completionPricePerMtok : null,
+            prompt_price_per_mtok: isTokenPriced && firstRouter
+              ? applyMarkup(firstRouter.promptPricePerMtok, pct) : null,
+            completion_price_per_mtok: isTokenPriced && firstRouter
+              ? applyMarkup(firstRouter.completionPricePerMtok, pct) : null,
             raw_pricing: !isTokenPriced && firstRouter ? firstRouter.rawPricing ?? null : null,
           };
-        });
+        }));
         return { models };
       }
 
