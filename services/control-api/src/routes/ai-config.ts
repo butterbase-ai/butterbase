@@ -473,7 +473,15 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       // ---- v2 path: multi-router catalog ----
       if (config.aiRouter.enabled) {
         const { appId } = request.params as { appId: string };
-        const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+        const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+        if (!authz.ok) return reply.code(authz.status).send(authz.body);
+        let runtimePool;
+        try {
+          runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+        } catch (err) {
+          if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'app_not_found' });
+          throw err;
+        }
         const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
         const redis = getRedisClient();

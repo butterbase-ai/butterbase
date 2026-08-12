@@ -26,6 +26,7 @@ import { responsesRequestSchema, guardResponsesRoutingShape } from '../services/
 import { routeResponses } from '../services/ai-router/responses.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
 import { resolveMarkupPct } from '../services/ai-router/special-pricing.js';
+import { stripThinkingSuffix } from '../services/ai-router/reasoning.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
@@ -355,7 +356,8 @@ export async function gatewayRoutes(app: FastifyInstance) {
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
       const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
-      const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+      const { model: markupModel } = stripThinkingSuffix(body.model);
+      const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, markupModel);
       const result = await routeMessages(
         {
           platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
