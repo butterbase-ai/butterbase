@@ -25,6 +25,7 @@ import {
 import { settleAfterCall, insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { readAutoRefillState } from './ai-config.js';
+import { resolveMarkupPct } from '../services/ai-router/special-pricing.js';
 
 // Public URLs returned to clients must honor the X-Forwarded-* headers that
 // Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
@@ -173,11 +174,12 @@ export async function aiVideoRoutes(app: FastifyInstance) {
 
     try {
       const body = videoSubmitSchema.parse(request.body);
+      const { pct: markupPct } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const region = await resolveAppHomeRegion(app.controlDb, appId);
 
       const submit = await routeVideoSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct: config.aiRouter.markupPct,
+          adapters, markupPct,
           appId, organizationId, userId: ownerId, region },
         body,
       );
@@ -191,7 +193,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
           upstreamPollingUrl: submit.pollingUrl,
           leaseId: submit.leaseId,
           estimatedCostUsd: submit.estimatedCostUsd,
-          markupPct: config.aiRouter.markupPct,
+          markupPct,
         });
       } catch (insertErr) {
         // Upstream job is running but we have no row to track it. Refund the lease
