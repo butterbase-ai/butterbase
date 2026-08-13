@@ -34,8 +34,8 @@ BEGIN
           EXECUTE format(
             'CREATE POLICY "butterbase_service_policy" ON %I.%I
              FOR ALL
-             USING (current_setting(''app.role'', true) = ''butterbase_service'')
-             WITH CHECK (current_setting(''app.role'', true) = ''butterbase_service'')',
+             USING ((select current_setting(''app.role'', true)) = ''butterbase_service'')
+             WITH CHECK ((select current_setting(''app.role'', true)) = ''butterbase_service'')',
             schema_name, table_name
           );
 
@@ -74,8 +74,8 @@ BEGIN
       EXECUTE format(
         'CREATE POLICY "butterbase_service_policy" ON %I.%I
          FOR ALL
-         USING (current_setting(''app.role'', true) = ''butterbase_service'')
-         WITH CHECK (current_setting(''app.role'', true) = ''butterbase_service'')',
+         USING ((select current_setting(''app.role'', true)) = ''butterbase_service'')
+         WITH CHECK ((select current_setting(''app.role'', true)) = ''butterbase_service'')',
         tbl.schemaname, tbl.tablename
       );
 
