@@ -159,7 +159,7 @@ export function makeKv(opts: MakeKvOptions): KvShim {
     async expire(key: string, ttl: number | null): Promise<boolean> {
       const res = await call('POST', `${key}/expire`, { ttl });
       if (!res.ok) throwForStatus(res, await res.json().catch(() => null));
-      return (await res.json() as { ok: boolean }).ok;
+      return (await res.json() as { applied: boolean }).applied;
     },
 
     async mget<T>(keys: string[]): Promise<(T | null)[]> {

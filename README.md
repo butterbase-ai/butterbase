@@ -244,9 +244,7 @@ If you need these for self-host, implement against the interfaces in `packages/s
 - [`CHANGELOG.md`](./CHANGELOG.md) — release notes (latest: **v0.2.0**, 2026-05-25 — KV store)
 - [`ROADMAP.md`](./ROADMAP.md) — what's next
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor workflow and OSS scope
-- [`SUBDOMAIN_IMPLEMENTATION.md`](./SUBDOMAIN_IMPLEMENTATION.md) — tenant subdomain routing
-- [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md) — multi-region E2E stack
-- [`docs/runbooks`](./docs/runbooks) — operational runbooks
+- [`dispatch-worker/`](./dispatch-worker) — tenant subdomain routing
 - [`Examples/`](./Examples) — example apps (todo, grocery list)
 - Docs site (local): `http://localhost:4321` after `docker compose up`
 
