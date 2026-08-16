@@ -1165,8 +1165,36 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const org = await resolveCallerOrgId(app.controlDb, request, userId);
     if (!org.ok) return reply.code(org.code).send({ error: org.error });
 
-    const { limit } = request.query as { limit?: string };
-    const parsedLimit = Number.parseInt(limit ?? '10', 10);
+    const q = request.query as {
+      limit?: string;
+      cursor?: string;
+      since?: string;
+      until?: string;
+      order?: string;
+    };
+    const parsedLimit = Number.parseInt(q.limit ?? '10', 10);
+
+    // A date that does not parse is rejected rather than ignored. Silently
+    // dropping a filter shows the caller MORE than they asked for and reads as
+    // if the range simply had that much in it.
+    const parseDate = (raw: string | undefined, field: string) => {
+      if (raw === undefined || raw === '') return null;
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) throw new Error(`invalid ${field}: ${raw}`);
+      return d;
+    };
+
+    let since: Date | null;
+    let until: Date | null;
+    try {
+      since = parseDate(q.since, 'since');
+      until = parseDate(q.until, 'until');
+    } catch (e) {
+      return reply.code(400).send({ error: e instanceof Error ? e.message : 'invalid date' });
+    }
+    if (since && until && since > until) {
+      return reply.code(400).send({ error: 'since is after until' });
+    }
 
     const conv = await app.controlDb.query<{ id: string }>(
       `SELECT id FROM dashboard_agent_conversations
@@ -1175,18 +1203,18 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       [org.orgId, operatorUserId(org.orgId)],
     );
     if (conv.rows.length === 0) {
-      return reply.send({ conversationId: null, traces: [] });
+      return reply.send({ conversationId: null, traces: [], nextCursor: null, truncated: false });
     }
 
     const conversationId = conv.rows[0].id;
-    return reply.send({
-      conversationId,
-      traces: await listOperatorTraces(
-        app.controlDb,
-        conversationId,
-        Number.isFinite(parsedLimit) ? parsedLimit : 10,
-      ),
+    const page = await listOperatorTraces(app.controlDb, conversationId, {
+      limit: Number.isFinite(parsedLimit) ? parsedLimit : 10,
+      cursor: q.cursor ?? null,
+      since,
+      until,
+      order: q.order === 'oldest' ? 'oldest' : 'newest',
     });
+    return reply.send({ conversationId, ...page });
   });
 
   // ── POST /operator/approvals/:id/resolve ─────────────────────────────────
