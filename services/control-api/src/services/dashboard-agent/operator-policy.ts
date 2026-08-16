@@ -334,6 +334,11 @@ export const OPERATOR_TOOL_SURFACE: ReadonlySet<string> = new Set(OPERATOR_TOOL_
  */
 export const SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES: ReadonlySet<string> = new Set([
   'send_email_draft',
+  // Reaches a named person in real time, in the organization's name, and
+  // cannot be recalled — the same category as an email, further out. Mirrors
+  // cloud/packages/substrate-core/src/capabilities/place-call.ts, where it is
+  // also NOT yolo-eligible.
+  'place_call',
   'delete_entity',
   'merge_entities',
   'record_principle',
