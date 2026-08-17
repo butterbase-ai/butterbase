@@ -196,13 +196,13 @@ export function mergeSnapshotsWithLabels(
 
 const createConversationBody = z.object({
   title: z.string().min(1).max(500).default('New conversation'),
-  model: z.string().min(1).default('claude-sonnet-4-5'),
+  model: z.string().min(1).default('qwen/qwen3.8-max'),
 });
 
 const postMessageBody = z.object({
   conversation_id: z.string().uuid(),
   message: z.string().min(1),
-  model: z.string().min(1).default('claude-sonnet-4-5'),
+  model: z.string().min(1).default('qwen/qwen3.8-max'),
 });
 
 const rewindBody = z.object({
@@ -1316,7 +1316,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
 
     try {
       const conversation = await getConversation(app.controlDb, conversationId, userId);
-      const model = conversation?.model ?? 'claude-sonnet-4-5';
+      const model = conversation?.model ?? 'qwen/qwen3.8-max';
 
       // Empty userMessage: the resumed turn's history already contains the
       // just-persisted tool-result row (via resolveApprovalAndPersistResult).
