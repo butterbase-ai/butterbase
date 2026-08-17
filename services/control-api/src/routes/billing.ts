@@ -101,6 +101,14 @@ export async function billingRoutes(app: FastifyInstance) {
     try {
       // Get billing state for the resolved org: either the ?org_id path arg
       // (membership already checked above) or the caller's personal org.
+      //
+      // The plans join is a LEFT JOIN keyed on a COALESCE'd plan id on purpose.
+      // plan_id is nullable, and an org whose plan_id is NULL (or names a plan
+      // row that no longer exists) is still a real org that may be holding a
+      // real credit balance. An inner join drops the row entirely, which turned
+      // the whole endpoint into a 404 and made the org's topped-up balance
+      // invisible in the dashboard — money present in the ledger, unreadable in
+      // the UI. Fall back to playground limits so the balance always renders.
       const userResult = await app.controlDb.query(
         `SELECT o.id AS org_id, o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
                 p.name as plan_name, p.price_monthly_cents,
@@ -109,13 +117,15 @@ export async function billingRoutes(app: FastifyInstance) {
                 p.max_projects, p.overage_rates, p.features
          FROM platform_users pu
          JOIN organizations o ON o.id = COALESCE($2::uuid, pu.personal_organization_id)
-         JOIN plans p ON p.id = o.plan_id
+         LEFT JOIN plans p ON p.id = COALESCE(o.plan_id, 'playground')
          WHERE pu.id = $1`,
         [userId, targetOrgId]
       );
 
+      // Zero rows now means only what it says: no such platform user, or the
+      // requested org does not exist. A missing plan no longer lands here.
       if (userResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'User not found' });
+        return reply.code(404).send({ error: 'Organization not found' });
       }
 
       const user = userResult.rows[0];
@@ -124,7 +134,8 @@ export async function billingRoutes(app: FastifyInstance) {
 
       // Get active subscription — subscriptions is a controlDb (platform) table
       const subscriptionResult = await app.controlDb.query(
-        `SELECT stripe_subscription_id, status, current_period_start, current_period_end, cancel_at_period_end
+        `SELECT stripe_subscription_id, status, current_period_start, current_period_end,
+                cancel_at_period_end, cancel_at
          FROM subscriptions
          WHERE organization_id = $1 AND status IN ('active', 'trialing', 'past_due')
          ORDER BY created_at DESC
@@ -140,7 +151,8 @@ export async function billingRoutes(app: FastifyInstance) {
       // payment-failure / orphan-sub states visible to the user.
       if (!subscription && user.plan_id && user.plan_id !== 'playground') {
         const lastCanceled = await app.controlDb.query(
-          `SELECT stripe_subscription_id, status, current_period_start, current_period_end, cancel_at_period_end
+          `SELECT stripe_subscription_id, status, current_period_start, current_period_end,
+                  cancel_at_period_end, cancel_at
            FROM subscriptions
            WHERE organization_id = $1 AND status = 'canceled'
            ORDER BY current_period_end DESC NULLS LAST, updated_at DESC
@@ -175,12 +187,20 @@ export async function billingRoutes(app: FastifyInstance) {
         project_count: projectCountResult.rows[0].count,
       };
 
-      const maxAiCreditsUsd = parseFloat(user.max_ai_credits_usd);
-      const maxStorageGb = parseFloat(user.max_storage_gb);
-      const maxBandwidthGb = parseFloat(user.max_bandwidth_gb);
-      const maxDbSizeGb = parseFloat(user.max_db_size_gb);
-      const maxMau = user.max_mau;
-      const maxProjects = user.max_projects;
+      // The plans join is a LEFT JOIN, so every p.* column can be null if the
+      // fallback plan row is itself missing. parseFloat(null) is NaN, which
+      // would serialize as null and poison every percentage below — treat an
+      // absent limit as 0 (i.e. "no stated limit") rather than NaN.
+      const num = (v: unknown) => {
+        const n = parseFloat(v as string);
+        return Number.isFinite(n) ? n : 0;
+      };
+      const maxAiCreditsUsd = num(user.max_ai_credits_usd);
+      const maxStorageGb = num(user.max_storage_gb);
+      const maxBandwidthGb = num(user.max_bandwidth_gb);
+      const maxDbSizeGb = num(user.max_db_size_gb);
+      const maxMau = user.max_mau ?? 0;
+      const maxProjects = user.max_projects ?? 0;
 
       // Calculate usage percentages (only for non-unlimited limits)
       const pct = (current: number, limit: number) => limit > 0 ? (current / limit) * 100 : 0;
@@ -250,7 +270,7 @@ export async function billingRoutes(app: FastifyInstance) {
             maxAiCreditsUsd: maxAiCreditsUsd,
             aiCreditsLifetime: isLifetime,
             maxLambdaInvocations: user.max_lambda_invocations,
-            maxDbSizeGb: parseFloat(user.max_db_size_gb),
+            maxDbSizeGb: maxDbSizeGb,
             maxBandwidthGb: maxBandwidthGb,
             maxMau: maxMau,
             maxProjects: maxProjects,
@@ -264,6 +284,11 @@ export async function billingRoutes(app: FastifyInstance) {
           currentPeriodStart: subscription.current_period_start,
           currentPeriodEnd: subscription.current_period_end,
           cancelAtPeriodEnd: subscription.cancel_at_period_end,
+          // Portal cancellations set cancel_at and leave cancel_at_period_end
+          // false, so neither field alone answers "is this cancelling?".
+          // Clients should branch on isCancelling and date from cancelAt.
+          cancelAt: subscription.cancel_at,
+          isCancelling: Boolean(subscription.cancel_at) || Boolean(subscription.cancel_at_period_end),
         } : null,
         usage,
         usagePercentages,
