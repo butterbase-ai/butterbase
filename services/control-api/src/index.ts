@@ -684,7 +684,12 @@ try {
   // @ts-expect-error — overlay path resolved at runtime
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/admin-remediation.js');
   await app.register(overlay.default ?? overlay.adminRemediationRoutes);
-} catch { /* OSS mode: no billing remediation */ }
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a
+  // genuine registration error here would otherwise silently 404 the whole
+  // admin billing remediation console in production.
+  console.warn('[control-api] admin-remediation overlay not registered:', err);
+}
 app.register(apiKeyRoutes);
 app.register(realtimeRoutes);
 app.register(ragRoutes);
