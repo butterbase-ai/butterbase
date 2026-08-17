@@ -680,6 +680,11 @@ try {
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/admin-enterprise-billing.js');
   await app.register(overlay.default ?? overlay.adminEnterpriseBillingRoutes);
 } catch { /* OSS mode: no enterprise billing */ }
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/admin-remediation.js');
+  await app.register(overlay.default ?? overlay.adminRemediationRoutes);
+} catch { /* OSS mode: no billing remediation */ }
 app.register(apiKeyRoutes);
 app.register(realtimeRoutes);
 app.register(ragRoutes);
