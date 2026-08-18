@@ -49,6 +49,7 @@ export async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
     if (config.aiRouter.providerPrimaryApiKey) m.set('provider-primary', overlay.providerPrimaryAdapter({ apiKey: config.aiRouter.providerPrimaryApiKey, baseUrl: config.aiRouter.providerPrimaryBaseUrl }));
     if (config.aiRouter.providerSecondaryApiKey) m.set('provider-secondary', overlay.providerSecondaryAdapter({ apiKey: config.aiRouter.providerSecondaryApiKey, baseUrl: config.aiRouter.providerSecondaryBaseUrl, catalogUrl: config.aiRouter.providerSecondaryCatalogUrl }));
     if (config.aiRouter.providerTertiaryApiKey) m.set('provider-tertiary', overlay.providerTertiaryAdapter({ apiKey: config.aiRouter.providerTertiaryApiKey, baseUrl: config.aiRouter.providerTertiaryBaseUrl }));
+    if (config.aiRouter.providerQuaternaryApiKey) m.set('provider-quaternary', overlay.providerQuaternaryAdapter({ apiKey: config.aiRouter.providerQuaternaryApiKey, baseUrl: config.aiRouter.providerQuaternaryBaseUrl }));
   } catch { /* OSS mode: only openrouter is available */ }
   return m;
 }
