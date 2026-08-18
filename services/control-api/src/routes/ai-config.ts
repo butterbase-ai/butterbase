@@ -89,6 +89,10 @@ async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
       apiKey: config.aiRouter.providerTertiaryApiKey,
       baseUrl: config.aiRouter.providerTertiaryBaseUrl,
     }));
+    if (config.aiRouter.providerQuaternaryApiKey) m.set('provider-quaternary', overlay.providerQuaternaryAdapter({
+      apiKey: config.aiRouter.providerQuaternaryApiKey,
+      baseUrl: config.aiRouter.providerQuaternaryBaseUrl,
+    }));
   } catch { /* OSS mode: only openrouter is available */ }
   return m;
 }

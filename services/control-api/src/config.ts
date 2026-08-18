@@ -90,6 +90,11 @@ export const config = {
       providerSecondaryCatalogUrl: process.env.AI_PROVIDER_SECONDARY_CATALOG_URL || undefined,
       providerTertiaryApiKey: process.env.AI_PROVIDER_TERTIARY_API_KEY ?? '',
       providerTertiaryBaseUrl: process.env.AI_PROVIDER_TERTIARY_BASE_URL || undefined,
+      // Quaternary has no default base URL on purpose: the upstream's endpoint,
+      // API key and model must all belong to the same region, so guessing a
+      // default would silently send traffic to the wrong one.
+      providerQuaternaryApiKey: process.env.AI_PROVIDER_QUATERNARY_API_KEY ?? '',
+      providerQuaternaryBaseUrl: process.env.AI_PROVIDER_QUATERNARY_BASE_URL || undefined,
       catalogRefreshLockTtlSec: parseInt(process.env.AI_CATALOG_LOCK_TTL_SEC ?? '600', 10),
     } as const;
   })(),

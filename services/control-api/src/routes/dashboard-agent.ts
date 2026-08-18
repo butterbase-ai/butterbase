@@ -190,19 +190,52 @@ export function mergeSnapshotsWithLabels(
   return merged;
 }
 
+/**
+ * ============================================================================
+ * ASSISTANT MODEL — currently the ONE model the assistant runs on.
+ *
+ * The assistant is pinned to a single model on purpose: this id is in
+ * PREFERRED_ROUTER_BY_MODEL (select.ts), so every assistant turn is served
+ * direct by the vendor slot rather than through an aggregator.
+ *
+ * PRICE, and why this id specifically: the vendor's PUBLIC pricing page omits
+ * every qwen3.8 variant, but the Model Studio console quotes qwen3.8-max at
+ * $0.002/1K in and $0.006/1K out — i.e. $2.00/$6.00 per Mtok, flat, no
+ * input-size tiers. That is exactly what the aggregator charges for the same
+ * id, so routing it direct is cost-neutral. It matters that this is a real
+ * quoted rate rather than an estimate: the direct adapter reports
+ * `providerCostUsd: null` and billing settles from the catalog price, so a
+ * guessed number here would bill customers a guess.
+ *
+ * `resolveAssistantModel` ignores any caller-supplied or previously-stored id.
+ * That is deliberate — a conversation's `model` column may hold whatever was
+ * picked before the lock, and honouring it would send old threads to a
+ * different provider. Remove the override (not just the default) when
+ * re-opening model choice.
+ * ============================================================================
+ */
+export const ASSISTANT_MODEL = 'qwen/qwen3.8-max';
+
+/** Single source of truth while the assistant is locked to one model. */
+function resolveAssistantModel(_requested?: string | null): string {
+  return ASSISTANT_MODEL;
+}
+
 // ---------------------------------------------------------------------------
 // Validation schemas
 // ---------------------------------------------------------------------------
 
 const createConversationBody = z.object({
   title: z.string().min(1).max(500).default('New conversation'),
-  model: z.string().min(1).default('qwen/qwen3.8-max'),
+  // Accepted for backward compatibility but ignored — see ASSISTANT_MODEL.
+  model: z.string().min(1).default(ASSISTANT_MODEL),
 });
 
 const postMessageBody = z.object({
   conversation_id: z.string().uuid(),
   message: z.string().min(1),
-  model: z.string().min(1).default('qwen/qwen3.8-max'),
+  // Accepted for backward compatibility but ignored — see ASSISTANT_MODEL.
+  model: z.string().min(1).default(ASSISTANT_MODEL),
 });
 
 const rewindBody = z.object({
@@ -444,7 +477,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       app.controlDb,
       userId,
       parsed.data.title,
-      parsed.data.model,
+      resolveAssistantModel(parsed.data.model),
     );
 
     return reply.code(201).send({ conversation });
@@ -503,7 +536,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = patchConversationBody.parse(request.body);
 
-    const updated = await updateConversationModel(app.controlDb, id, userId, body.model);
+    // Model choice is locked; accept the call but always write the pinned id.
+    const updated = await updateConversationModel(app.controlDb, id, userId, resolveAssistantModel(body.model));
     if (!updated) return reply.code(404).send({ error: 'conversation not found' });
     return reply.send({ conversation: updated });
   });
@@ -789,7 +823,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: userMessageToReplay,
-        model: conversation.model,
+        model: resolveAssistantModel(conversation.model),
         pool: app.controlDb,
         organizationId: readOrgId(request),
       });
@@ -1316,7 +1350,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
 
     try {
       const conversation = await getConversation(app.controlDb, conversationId, userId);
-      const model = conversation?.model ?? 'qwen/qwen3.8-max';
+      const model = resolveAssistantModel(conversation?.model);
 
       // Empty userMessage: the resumed turn's history already contains the
       // just-persisted tool-result row (via resolveApprovalAndPersistResult).

@@ -42,6 +42,33 @@ function score(r: CatalogRouter): number {
 const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
   'bytedance/seedance-2.0': 'provider-tertiary',
   'bytedance/seedance-2.0-fast': 'provider-tertiary',
+  // Qwen models the vendor serves first-party: pin them to the direct slot so
+  // they stop being single-sourced through OpenRouter. This list must stay a
+  // subset of the ids in the quaternary adapter's static model table — a model
+  // pinned here but absent from that table has no quaternary row on its catalog
+  // entry, so promotePreferred finds nothing and price/waterfall ordering wins
+  // unchanged (soft hint, not a hard route).
+  // qwen3.8-max is the dashboard assistant's locked model (ASSISTANT_MODEL in
+  // routes/dashboard-agent.ts) and is at price parity with OpenRouter, so this
+  // pin costs nothing.
+  'qwen/qwen3.8-max': 'provider-quaternary',
+  'qwen/qwen3.7-max': 'provider-quaternary',
+  'qwen/qwen3.7-plus': 'provider-quaternary',
+  'qwen/qwen3.6-flash': 'provider-quaternary',
+  'qwen/qwen3.6-plus': 'provider-quaternary',
+  'qwen/qwen3-max': 'provider-quaternary',
+  'qwen/qwen3-coder-plus': 'provider-quaternary',
+  'qwen/qwen3-coder-flash': 'provider-quaternary',
+  'qwen/qwen-plus': 'provider-quaternary',
+  'qwen/qwen3-235b-a22b': 'provider-quaternary',
+  'qwen/qwen3-8b': 'provider-quaternary',
+  'qwen/qwen3-30b-a3b': 'provider-quaternary',
+  'qwen/qwen3-next-80b-a3b-instruct': 'provider-quaternary',
+  'qwen/qwen3-vl-32b-instruct': 'provider-quaternary',
+  'qwen/qwen3-vl-8b-instruct': 'provider-quaternary',
+  'qwen/qwen3.5-27b': 'provider-quaternary',
+  'qwen/qwen3.5-122b-a10b': 'provider-quaternary',
+  'qwen/qwen3.6-27b': 'provider-quaternary',
 };
 
 /**

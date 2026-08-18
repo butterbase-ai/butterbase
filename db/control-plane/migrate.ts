@@ -1,7 +1,7 @@
 import pg from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -285,7 +285,11 @@ async function migrate(): Promise<void> {
 }
 
 // Only auto-run when invoked directly, not when imported by tests.
-const isDirectInvocation = import.meta.url === `file://${process.argv[1]}`;
+// pathToFileURL, not `file://${argv[1]}`: the latter never matches on Windows
+// (backslash paths, percent-encoding), so the runner exited 0 having applied
+// nothing.
+const isDirectInvocation =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectInvocation) {
   migrate().catch((err) => {
     console.error('Migration error:', err);

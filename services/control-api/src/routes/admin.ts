@@ -2148,12 +2148,14 @@ export async function adminRoutes(app: FastifyInstance) {
       let providerPrimaryAdapter: any = null;
       let providerSecondaryAdapter: any = null;
       let providerTertiaryAdapter: any = null;
+      let providerQuaternaryAdapter: any = null;
       try {
         // @ts-expect-error — overlay path resolved at runtime
         const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
         providerPrimaryAdapter = overlay.providerPrimaryAdapter;
         providerSecondaryAdapter = overlay.providerSecondaryAdapter;
         providerTertiaryAdapter = overlay.providerTertiaryAdapter;
+        providerQuaternaryAdapter = overlay.providerQuaternaryAdapter;
       } catch { /* OSS mode */ }
 
       const adapters = [];
@@ -2177,6 +2179,12 @@ export async function adminRoutes(app: FastifyInstance) {
         adapters.push(providerTertiaryAdapter({
           apiKey: config.aiRouter.providerTertiaryApiKey,
           baseUrl: config.aiRouter.providerTertiaryBaseUrl,
+        }));
+      }
+      if (providerQuaternaryAdapter && config.aiRouter.providerQuaternaryApiKey) {
+        adapters.push(providerQuaternaryAdapter({
+          apiKey: config.aiRouter.providerQuaternaryApiKey,
+          baseUrl: config.aiRouter.providerQuaternaryBaseUrl,
         }));
       }
       if (adapters.length === 0) {
@@ -2211,6 +2219,7 @@ export async function adminRoutes(app: FastifyInstance) {
       { name: 'provider-primary', configured: !!config.aiRouter.providerPrimaryApiKey },
       { name: 'provider-secondary', configured: !!config.aiRouter.providerSecondaryApiKey },
       { name: 'provider-tertiary', configured: !!config.aiRouter.providerTertiaryApiKey },
+      { name: 'provider-quaternary', configured: !!config.aiRouter.providerQuaternaryApiKey },
     ];
     // ai_usage_logs.router exists; rows are written only on settle so every row
     // is a "success". Treat the presence of any fallback_chain entry naming a
