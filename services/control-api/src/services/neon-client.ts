@@ -601,3 +601,23 @@ export async function createProjectForApp(params: {
 
   return { projectId, databaseName: params.databaseName, connectionUri };
 }
+
+/**
+ * Look up a project by its exact name. Used to make tenant provisioning
+ * idempotent: a retried task must adopt the project a crashed earlier
+ * attempt created rather than create a second one.
+ *
+ * `search` does partial matching, so the exact name is re-checked locally.
+ */
+export async function findProjectByName(
+  name: string,
+  orgId: string = config.neon.orgId,
+): Promise<{ id: string } | null> {
+  const params = new URLSearchParams({ search: name, limit: '400' });
+  if (orgId) params.set('org_id', orgId);
+
+  const res = await neonFetch(`/projects?${params}`);
+  const data = await res.json() as { projects?: { id: string; name: string }[] };
+  const match = data.projects?.find((p) => p.name === name);
+  return match ? { id: match.id } : null;
+}

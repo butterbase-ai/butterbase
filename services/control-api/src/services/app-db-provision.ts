@@ -20,6 +20,7 @@ export interface ProvisionDeps {
   waitUntilUriQueryable: typeof neonClient.waitUntilUriQueryable;
   getDataProjectIdForRegion: typeof getDataProjectIdForRegion;
   getNeonRegionIdForRegion: typeof getNeonRegionIdForRegion;
+  findProjectByName: typeof neonClient.findProjectByName;
 }
 
 function defaultDeps(): ProvisionDeps {
@@ -33,6 +34,7 @@ function defaultDeps(): ProvisionDeps {
     waitUntilUriQueryable: neonClient.waitUntilUriQueryable,
     getDataProjectIdForRegion,
     getNeonRegionIdForRegion,
+    findProjectByName: neonClient.findProjectByName,
   };
 }
 
@@ -78,29 +80,43 @@ export async function provisionNeonDbForApp(
   const owner = config.neon.databaseOwner;
 
   if (config.neon.projectPerTenant) {
-    const created = await deps.createProjectForApp({
-      appId,
-      neonRegionId: deps.getNeonRegionIdForRegion(region),
-      databaseName: neonDbName,
-      ownerRole: owner,
-    });
+    // Idempotency: a retried neon_task must adopt the project a crashed
+    // earlier attempt already created, or we leak a billed project per retry.
+    const existing = await deps.findProjectByName(neonClient.projectNameForApp(appId));
+
+    let projectId: string;
+    let connectionUri: string;
+
+    if (existing) {
+      projectId = existing.id;
+      connectionUri = (await deps.getConnectionString(projectId, neonDbName, owner)).connectionUri;
+    } else {
+      const created = await deps.createProjectForApp({
+        appId,
+        neonRegionId: deps.getNeonRegionIdForRegion(region),
+        databaseName: neonDbName,
+        ownerRole: owner,
+      });
+      projectId = created.projectId;
+      connectionUri = created.connectionUri;
+    }
 
     // POST /projects returns while create_timeline/start_compute are still running.
-    await deps.waitUntilUriQueryable(created.connectionUri, neonDbName);
+    await deps.waitUntilUriQueryable(connectionUri, neonDbName);
 
     // The pooled URI is a nice-to-have; a failure here must not fail provisioning.
     let poolerConnectionString: string | null = null;
     try {
-      const conn = await deps.getConnectionString(created.projectId, neonDbName, owner);
-      poolerConnectionString = pooledFrom(created.connectionUri, conn.pooledConnectionUri, conn.poolerHost);
+      const conn = await deps.getConnectionString(projectId, neonDbName, owner);
+      poolerConnectionString = pooledFrom(connectionUri, conn.pooledConnectionUri, conn.poolerHost);
     } catch {
       poolerConnectionString = null;
     }
 
     return {
-      connectionUri: created.connectionUri,
+      connectionUri,
       poolerConnectionString,
-      neonProjectId: created.projectId,
+      neonProjectId: projectId,
       neonDatabaseName: neonDbName,
     };
   }

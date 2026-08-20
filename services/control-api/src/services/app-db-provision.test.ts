@@ -28,6 +28,7 @@ function makeDeps(overrides: Partial<ProvisionDeps> = {}) {
     waitUntilUriQueryable: async () => { calls.push('waitUntilUriQueryable'); },
     getDataProjectIdForRegion: () => 'shared-proj-us-east-1',
     getNeonRegionIdForRegion: () => 'aws-us-east-1',
+    findProjectByName: async () => { calls.push('findProjectByName'); return null; },
     ...overrides,
   };
   return { deps, calls };
@@ -86,6 +87,25 @@ describe('provisionNeonDbForApp', () => {
       const result = await provisionNeonDbForApp(REGION, APP_ID, deps);
       expect(result.poolerConnectionString).toBeNull();
       expect(result.connectionUri).toBe('postgres://u:p@direct/db');
+    });
+
+    it('adopts an existing project instead of creating a duplicate on retry', async () => {
+      const { deps, calls } = makeDeps({
+        findProjectByName: async () => ({ id: 'already-there' }),
+      });
+
+      const result = await provisionNeonDbForApp(REGION, APP_ID, deps);
+
+      expect(result.neonProjectId).toBe('already-there');
+      expect(calls).not.toContain('createProjectForApp');
+    });
+
+    it('creates a project when none exists yet', async () => {
+      const { deps, calls } = makeDeps({ findProjectByName: async () => null });
+      const result = await provisionNeonDbForApp(REGION, APP_ID, deps);
+
+      expect(result.neonProjectId).toBe('tenant-proj-1');
+      expect(calls).toContain('createProjectForApp');
     });
   });
 

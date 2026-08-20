@@ -32,6 +32,9 @@ vi.mock('../neon-client.js', () => ({
   // though the legacy (flag-off) path never calls them.
   createProjectForApp: vi.fn().mockResolvedValue(undefined),
   waitUntilUriQueryable: vi.fn().mockResolvedValue(undefined),
+  // Task 7 added findProjectByName to ProvisionDeps/defaultDeps(); same
+  // eager-read trap as above — the legacy (flag-off) path never calls it.
+  findProjectByName: vi.fn(),
 }));
 
 vi.mock('../neon-projects.js', () => ({
