@@ -33,6 +33,18 @@ export function getRuntimeProjectIdForRegion(region: string): string {
   return value;
 }
 
+/**
+ * Butterbase region → Neon `region_id` for project creation.
+ * Neon ids look like `aws-us-east-1`; our regions look like `us-east-1`,
+ * so the default is a prefix. Override per-region when a region lives on
+ * a different cloud.
+ */
+export function getNeonRegionIdForRegion(region: string): string {
+  const explicit = process.env[envKey('NEON_REGION', region)];
+  if (explicit) return explicit;
+  return `aws-${region}`;
+}
+
 export function assertNeonProjectsConfig(): void {
   const regionsRaw = process.env.BUTTERBASE_REGIONS ?? '';
   const regions = regionsRaw.split(',').map((s) => s.trim()).filter(Boolean);

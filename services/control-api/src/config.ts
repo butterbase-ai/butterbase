@@ -185,6 +185,16 @@ export const config = {
     /** Postgres role that owns per-app DBs; created via Neon API if missing on the branch */
     databaseOwner: process.env.NEON_DATA_DATABASE_OWNER ?? 'butterbase',
     enabled: process.env.NEON_API_KEY !== undefined && process.env.NEON_API_KEY !== '',
+    /** Neon organization id. Required by GET /projects. */
+    orgId: process.env.NEON_ORG_ID ?? '',
+    /** Provision each app into its own Neon project instead of a shared one. */
+    projectPerTenant: process.env.BUTTERBASE_PROJECT_PER_TENANT === 'true',
+    /** Sustained Neon API call rate. Account budget is 700/min ≈ 11.6/s. */
+    rateLimitRps: parseInt(process.env.NEON_API_RATE_LIMIT_RPS ?? '10', 10),
+    /** Burst allowance. Neon documents 40/s per route. */
+    rateLimitBurst: parseInt(process.env.NEON_API_RATE_LIMIT_BURST ?? '20', 10),
+    /** Postgres major version for newly created tenant projects. */
+    pgVersion: parseInt(process.env.NEON_PG_VERSION ?? '17', 10),
     orphanReconciler: {
       // Off by default. Flip to true only after inspecting a dry-run cycle.
       enabled: process.env.NEON_ORPHAN_RECONCILER_ENABLED === 'true',

@@ -3,6 +3,7 @@ import {
   getDataProjectIdForRegion,
   getRuntimeProjectIdForRegion,
   assertNeonProjectsConfig,
+  getNeonRegionIdForRegion,
   __resetNeonProjectsCache,
 } from './neon-projects.js';
 
@@ -57,5 +58,28 @@ describe('assertNeonProjectsConfig', () => {
     process.env.NEON_DATA_PROJECT_ID_EU_WEST_1 = 'd-euw1';
     // missing NEON_RUNTIME_PROJECT_ID_EU_WEST_1
     expect(() => assertNeonProjectsConfig()).toThrow(/NEON_RUNTIME_PROJECT_ID_EU_WEST_1/);
+  });
+});
+
+describe('getNeonRegionIdForRegion', () => {
+  beforeEach(() => {
+    __resetNeonProjectsCache();
+    delete process.env.NEON_REGION_US_EAST_1;
+    delete process.env.NEON_REGION_AP_SOUTH_1;
+  });
+
+  it('defaults to aws-<region>', () => {
+    expect(getNeonRegionIdForRegion('us-east-1')).toBe('aws-us-east-1');
+    expect(getNeonRegionIdForRegion('us-west-2')).toBe('aws-us-west-2');
+  });
+
+  it('honours an explicit NEON_REGION_<REGION> override', () => {
+    process.env.NEON_REGION_AP_SOUTH_1 = 'azure-ap-south-1';
+    expect(getNeonRegionIdForRegion('ap-south-1')).toBe('azure-ap-south-1');
+  });
+
+  it('derives the env key by upper-casing and underscoring the region', () => {
+    process.env.NEON_REGION_US_EAST_1 = 'aws-us-east-1-custom';
+    expect(getNeonRegionIdForRegion('us-east-1')).toBe('aws-us-east-1-custom');
   });
 });
