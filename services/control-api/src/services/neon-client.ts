@@ -118,8 +118,13 @@ export async function withNeonProjectLock<T>(
 }
 
 /**
- * Account-wide limiter. Neon's budget is per-account, not per-project, so a
- * single module-level bucket is the correct scope.
+ * Per-process limiter. A single module-level bucket covers every Neon call this
+ * process makes (Neon's budget is per-account, not per-project, so limiting per
+ * project would be the wrong axis). It is NOT account-wide: the total fleet rate
+ * is `rateLimitRps × control-api process count`, so two regional processes at
+ * 10 rps can exceed the ~700/min account budget in theory. Acceptable at current
+ * volume — Neon calls are bursty and rare — but revisit before scaling the
+ * process count or raising the rps.
  */
 const neonLimiter = new TokenBucket({
   ratePerSecond: config.neon.rateLimitRps,
@@ -152,8 +157,21 @@ export function computeRetryDelayMs(
   return base;
 }
 
-async function neonFetch(path: string, options: RequestInit = {}): Promise<Response> {
-  const maxAttempts = 6;
+export interface NeonFetchOptions extends RequestInit {
+  /**
+   * Set to false for non-idempotent requests (e.g. `POST /projects`). A retry
+   * after a lost response or a 502 would issue a second create and produce a
+   * duplicate billed project, which this loop cannot detect. With retry off the
+   * failure surfaces to the caller, whose own task-level retry re-enters the
+   * adopt-before-create path. Defaults to true — GETs and DELETEs are
+   * idempotent and must keep retrying.
+   */
+  retry?: boolean;
+}
+
+async function neonFetch(path: string, options: NeonFetchOptions = {}): Promise<Response> {
+  const { retry = true, ...requestInit } = options;
+  const maxAttempts = retry ? 6 : 1;
   const backoffMs = [500, 1000, 2000, 4000, 8000];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -161,11 +179,11 @@ async function neonFetch(path: string, options: RequestInit = {}): Promise<Respo
     await neonLimiter.acquire();
     try {
       res = await fetch(`${BASE_URL}${path}`, {
-        ...options,
+        ...requestInit,
         headers: {
           'Authorization': `Bearer ${config.neon.apiKey}`,
           'Content-Type': 'application/json',
-          ...options.headers,
+          ...requestInit.headers,
         },
       });
     } catch (err: unknown) {
@@ -574,8 +592,14 @@ export async function createProjectForApp(params: {
   orgId?: string;
   pgVersion?: number;
 }): Promise<CreatedProject> {
+  // retry: false — POST /projects is not idempotent. If Neon creates the
+  // project but the response is lost (network error) or arrives as a 5xx, a
+  // retry here would create a second billed project with the same name. The
+  // error instead propagates to provisionNeonDbForApp's caller; the neon_tasks
+  // queue re-runs the task and adopt-before-create picks up whatever landed.
   const res = await neonFetch('/projects', {
     method: 'POST',
+    retry: false,
     body: JSON.stringify(
       buildCreateProjectBody({ ...params, orgId: params.orgId ?? config.neon.orgId }),
     ),

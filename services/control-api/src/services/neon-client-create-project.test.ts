@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { buildCreateProjectBody, projectNameForApp } from './neon-client.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { buildCreateProjectBody, projectNameForApp, createProjectForApp, findProjectByName } from './neon-client.js';
 
 describe('projectNameForApp', () => {
   it('prefixes the app id so the reconciler can search for it', () => {
@@ -38,5 +38,70 @@ describe('buildCreateProjectBody', () => {
       project: Record<string, unknown>;
     };
     expect('org_id' in body.project).toBe(false);
+  });
+});
+
+describe('createProjectForApp retry semantics', () => {
+  const params = {
+    appId: 'app_k3f9x2m1qp0z',
+    neonRegionId: 'aws-us-east-1',
+    databaseName: 'db_app_k3f9x2m1qp0z',
+    ownerRole: 'butterbase',
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('does NOT retry POST /projects on a network error (a retry would double-bill a project)', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNRESET'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createProjectForApp(params)).rejects.toThrow('ECONNRESET');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT retry POST /projects on a 5xx — Neon may already have created it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('bad gateway', { status: 502 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createProjectForApp(params)).rejects.toThrow('Neon API error 502');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('issues exactly one POST on success', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          project: { id: 'proj-123' },
+          connection_uris: [{ connection_uri: 'postgresql://u:p@host/db' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const created = await createProjectForApp(params);
+    expect(created.projectId).toBe('proj-123');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+  });
+
+  it('still retries idempotent GETs (opt-out is scoped to project creation)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ projects: [{ id: 'proj-9', name: 'bb-app_x' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(findProjectByName('bb-app_x')).resolves.toEqual({ id: 'proj-9' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -145,9 +145,17 @@ export async function provisionAppBackground(
       const provisioned = await provisionNeonDbForApp(region, appId);
 
       await runtimeDb.query(
+        // DO UPDATE, not DO NOTHING: a re-provision (e.g. clone-resume) can
+        // create a fresh Neon project, and dropping the row would leave the app
+        // pointing at the old database while the new project bills unrecorded.
+        // With project-per-tenant off this rewrites identical values.
         `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (app_id) DO NOTHING`,
+         ON CONFLICT (app_id) DO UPDATE
+           SET connection_string = EXCLUDED.connection_string,
+               pooler_connection_string = EXCLUDED.pooler_connection_string,
+               neon_project_id = EXCLUDED.neon_project_id,
+               neon_database_name = EXCLUDED.neon_database_name`,
         [
           appId,
           provisioned.connectionUri,

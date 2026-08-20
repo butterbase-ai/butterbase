@@ -21,6 +21,17 @@ function resolveSesRegion(): string {
   return 'us-east-1';
 }
 
+/**
+ * Parse a strictly-positive integer env var, falling back to `fallback` for
+ * unset, non-numeric (NaN) or non-positive values. Used for the Neon rate
+ * limiter, where a 0 would throw inside the TokenBucket constructor at import
+ * time (control-api never boots) and a NaN would busy-loop every Neon call.
+ */
+export function positiveIntOr(raw: string | undefined, fallback: number): number {
+  const parsed = parseInt(raw ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export const config = {
   port: parseInt(process.env.CONTROL_API_PORT ?? '4000', 10),
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -190,9 +201,9 @@ export const config = {
     /** Provision each app into its own Neon project instead of a shared one. */
     projectPerTenant: process.env.BUTTERBASE_PROJECT_PER_TENANT === 'true',
     /** Sustained Neon API call rate. Account budget is 700/min ≈ 11.6/s. */
-    rateLimitRps: parseInt(process.env.NEON_API_RATE_LIMIT_RPS ?? '10', 10),
+    rateLimitRps: positiveIntOr(process.env.NEON_API_RATE_LIMIT_RPS, 10),
     /** Burst allowance. Neon documents 40/s per route. */
-    rateLimitBurst: parseInt(process.env.NEON_API_RATE_LIMIT_BURST ?? '20', 10),
+    rateLimitBurst: positiveIntOr(process.env.NEON_API_RATE_LIMIT_BURST, 20),
     /** Postgres major version for newly created tenant projects. */
     pgVersion: parseInt(process.env.NEON_PG_VERSION ?? '17', 10),
     orphanReconciler: {

@@ -252,11 +252,20 @@ async function executeProvision(
 
     const provisioned = await provisionNeonDbForApp(appRegion, appId);
 
-    // app_db_connections is a runtime-tier table
+    // app_db_connections is a runtime-tier table.
+    // DO UPDATE, not DO NOTHING: the clone-resume re-provision path can reach
+    // here with a row already present. Dropping the insert would leave the app
+    // pointing at the old database while the freshly created tenant project
+    // bills unrecorded. With project-per-tenant off this rewrites identical
+    // values (same shared project id, same db_<appId> name).
     await runtimePool.query(
       `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (app_id) DO NOTHING`,
+       ON CONFLICT (app_id) DO UPDATE
+         SET connection_string = EXCLUDED.connection_string,
+             pooler_connection_string = EXCLUDED.pooler_connection_string,
+             neon_project_id = EXCLUDED.neon_project_id,
+             neon_database_name = EXCLUDED.neon_database_name`,
       [
         appId,
         provisioned.connectionUri,
