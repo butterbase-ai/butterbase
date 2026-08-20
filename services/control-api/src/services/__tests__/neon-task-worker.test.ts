@@ -27,6 +27,11 @@ vi.mock('../neon-client.js', () => ({
   }),
   grantSchemaPrivileges: vi.fn().mockResolvedValue(undefined),
   deleteDatabase: vi.fn().mockResolvedValue(undefined),
+  // provisionNeonDbForApp's defaultDeps() reads every member of this module up
+  // front, so the mock must define the project-per-tenant members too even
+  // though the legacy (flag-off) path never calls them.
+  createProjectForApp: vi.fn().mockResolvedValue(undefined),
+  waitUntilUriQueryable: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../neon-projects.js', () => ({
@@ -34,6 +39,8 @@ vi.mock('../neon-projects.js', () => ({
     if (region === 'us-east-1') return 'neon-proj-us-east-1';
     throw new Error(`Missing env var NEON_DATA_PROJECT_ID_${region.toUpperCase().replace(/-/g, '_')} for region ${region}`);
   }),
+  // Also read by defaultDeps(); unused on the legacy path.
+  getNeonRegionIdForRegion: vi.fn(() => 'aws-us-east-1'),
 }));
 
 vi.mock('../provisioner.js', () => ({

@@ -4,7 +4,7 @@ import { config, assertRegionConfig } from '../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import * as neonClient from './neon-client.js';
-import { getDataProjectIdForRegion } from './neon-projects.js';
+import { provisionNeonDbForApp } from './app-db-provision.js';
 import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notifications.service.js';
@@ -242,58 +242,31 @@ async function executeProvision(
   const runtimePool = await getRuntimeDbForApp(controlDb, appId);
 
   if (config.neon.enabled) {
-    const neonDbName = `db_${appId}`;
-    const owner = config.neon.databaseOwner;
-
-    // Resolve which Neon data project to use based on the app's region
+    // The app's home region may differ from this worker's region.
     const appRegionRow = await runtimePool.query<{ region: string }>(
       `SELECT region FROM apps WHERE id = $1`,
       [appId],
     );
     if (appRegionRow.rows.length === 0) throw new Error(`neon-task-worker: app ${appId} not found`);
     const appRegion = appRegionRow.rows[0].region;
-    const dataProjectId = getDataProjectIdForRegion(appRegion);
 
-    // Serialize mutating Neon API calls
-    await neonClient.withNeonProjectLock(dataProjectId, async () => {
-      await neonClient.ensureRoleExists(dataProjectId, owner);
-      try {
-        await neonClient.createDatabase(dataProjectId, neonDbName, owner);
-      } catch (err) {
-        // Idempotency: if DB already exists (crashed previous attempt), continue
-        const msg = err instanceof Error ? err.message : '';
-        if (msg.includes('already exists')) {
-          logger.info({ appId, neonDbName }, '[neon-task-worker] Database already exists, continuing');
-        } else {
-          throw err;
-        }
-      }
-    });
-
-    const { connectionUri, poolerHost, pooledConnectionUri } =
-      await neonClient.getConnectionString(dataProjectId, neonDbName, owner);
-
-    await neonClient.grantSchemaPrivileges(dataProjectId, neonDbName, owner);
-
-    let poolerConnectionString: string | null = null;
-    if (pooledConnectionUri) {
-      poolerConnectionString = pooledConnectionUri;
-    } else if (poolerHost) {
-      const url = new URL(connectionUri);
-      url.hostname = poolerHost;
-      url.port = '6543';
-      poolerConnectionString = url.toString();
-    }
+    const provisioned = await provisionNeonDbForApp(appRegion, appId);
 
     // app_db_connections is a runtime-tier table
     await runtimePool.query(
       `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (app_id) DO NOTHING`,
-      [appId, connectionUri, poolerConnectionString, dataProjectId, neonDbName],
+      [
+        appId,
+        provisioned.connectionUri,
+        provisioned.poolerConnectionString,
+        provisioned.neonProjectId,
+        provisioned.neonDatabaseName,
+      ],
     );
 
-    await runMigrationsWithRetry(connectionUri);
+    await runMigrationsWithRetry(provisioned.connectionUri);
   } else {
     // Local dev
     const client = await dataPlaneDb.connect();
