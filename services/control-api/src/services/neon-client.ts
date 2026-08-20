@@ -518,3 +518,86 @@ export async function getConnectionString(
     pooledConnectionUri,
   };
 }
+
+export interface CreatedProject {
+  projectId: string;
+  databaseName: string;
+  connectionUri: string;
+}
+
+/** Project naming convention. The `bb-` prefix makes the tenant reconciler's
+ *  `GET /projects?search=bb-app_` query precise. */
+export function projectNameForApp(appId: string): string {
+  return `bb-${appId}`;
+}
+
+/** Extracted so the request shape is unit-testable without touching the network. */
+export function buildCreateProjectBody(params: {
+  appId: string;
+  neonRegionId: string;
+  databaseName: string;
+  ownerRole: string;
+  orgId?: string;
+  pgVersion?: number;
+}): Record<string, unknown> {
+  const project: Record<string, unknown> = {
+    name: projectNameForApp(params.appId),
+    region_id: params.neonRegionId,
+    pg_version: params.pgVersion ?? config.neon.pgVersion,
+    branch: {
+      database_name: params.databaseName,
+      role_name: params.ownerRole,
+    },
+  };
+  // Sending org_id: '' is rejected; omit it entirely when unset.
+  if (params.orgId) project.org_id = params.orgId;
+  return { project };
+}
+
+/**
+ * Create a dedicated Neon project for one app: project, default branch,
+ * database and owner role in a single API call.
+ *
+ * Unlike the shared-project path this needs NO `ensureRoleExists` (the role
+ * is created here), NO `grantSchemaPrivileges` (the role owns the database,
+ * and `neondb_owner` does not exist on such a project), and NO project lock
+ * (a brand-new project has no concurrent operations to conflict with).
+ *
+ * The response's operations are still running on return, so the caller must
+ * `waitUntilUriQueryable` before using the URI.
+ */
+export async function createProjectForApp(params: {
+  appId: string;
+  neonRegionId: string;
+  databaseName: string;
+  ownerRole: string;
+  orgId?: string;
+  pgVersion?: number;
+}): Promise<CreatedProject> {
+  const res = await neonFetch('/projects', {
+    method: 'POST',
+    body: JSON.stringify(
+      buildCreateProjectBody({ ...params, orgId: params.orgId ?? config.neon.orgId }),
+    ),
+  });
+
+  const data = await res.json() as {
+    project?: { id?: string };
+    connection_uris?: { connection_uri?: string }[];
+  };
+
+  const projectId = data.project?.id;
+  if (!projectId) {
+    throw new Error(`Neon create-project response missing project.id for app ${params.appId}`);
+  }
+
+  // POST /projects returns the connection URI inline. Fall back to the
+  // dedicated endpoint if a future API version stops doing so.
+  let connectionUri = data.connection_uris?.[0]?.connection_uri ?? '';
+  if (!connectionUri) {
+    const resolved = await getConnectionString(projectId, params.databaseName, params.ownerRole);
+    connectionUri = resolved.connectionUri;
+  }
+
+  return { projectId, databaseName: params.databaseName, connectionUri };
+}
