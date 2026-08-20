@@ -2,6 +2,7 @@ import pg from 'pg';
 import { config } from '../config.js';
 import { getRedisClient } from './redis.js';
 import { randomBytes } from 'node:crypto';
+import { TokenBucket } from './neon-rate-limiter.js';
 
 const BASE_URL = 'https://console.neon.tech/api/v2';
 
@@ -116,12 +117,48 @@ export async function withNeonProjectLock<T>(
   throw new Error(`Timed out waiting for Neon project lock (project=${projectId})`.replace(/(:\/\/[^:]*:)[^@]+(@)/g, '$1***$2'));
 }
 
+/**
+ * Account-wide limiter. Neon's budget is per-account, not per-project, so a
+ * single module-level bucket is the correct scope.
+ */
+const neonLimiter = new TokenBucket({
+  ratePerSecond: config.neon.rateLimitRps,
+  burst: config.neon.rateLimitBurst,
+});
+
+/**
+ * Decide whether an HTTP status is retryable and how long to wait.
+ * Returns null when the caller should not retry.
+ *
+ *   423 — Neon "conflicting operations on this project" (shared-project topology)
+ *   429 — account rate limit; Retry-After wins when it is longer than our backoff
+ *   5xx — Neon server error
+ */
+export function computeRetryDelayMs(
+  status: number,
+  retryAfter: string | null,
+  attempt: number,
+  backoffMs: number[],
+): number | null {
+  const retryable = status === 423 || status === 429 || status >= 500;
+  if (!retryable) return null;
+
+  const base = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)] ?? backoffMs[backoffMs.length - 1];
+
+  if (status === 429 && retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.max(base, seconds * 1000);
+  }
+  return base;
+}
+
 async function neonFetch(path: string, options: RequestInit = {}): Promise<Response> {
   const maxAttempts = 6;
   const backoffMs = [500, 1000, 2000, 4000, 8000];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let res: Response;
+    await neonLimiter.acquire();
     try {
       res = await fetch(`${BASE_URL}${path}`, {
         ...options,
@@ -141,9 +178,8 @@ async function neonFetch(path: string, options: RequestInit = {}): Promise<Respo
       throw err;
     }
 
-    // Retry on 423 (conflict / operation in progress) and 5xx (server errors)
-    if ((res.status === 423 || res.status >= 500) && attempt < maxAttempts) {
-      const delay = backoffMs[attempt - 1] ?? 8000;
+    const delay = computeRetryDelayMs(res.status, res.headers.get('retry-after'), attempt, backoffMs);
+    if (delay !== null && attempt < maxAttempts) {
       await new Promise((resolve) => globalThis.setTimeout(resolve, delay));
       continue;
     }
