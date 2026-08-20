@@ -82,14 +82,25 @@ export async function provisionNeonDbForApp(
   if (config.neon.projectPerTenant) {
     // Idempotency: a retried neon_task must adopt the project a crashed
     // earlier attempt already created, or we leak a billed project per retry.
+    // This lookup runs on EVERY tenant provision, not just retries, and an
+    // unguarded throw here aborts the provision — that is deliberate. If the
+    // lookup fails transiently while a project already exists, degrading to
+    // create would produce exactly the duplicate billed project this task
+    // exists to prevent, so we fail closed instead. Aborting is safe: the
+    // neon_tasks queue retries the whole task, and neonFetch already retries
+    // transient failures (423/429/5xx and network errors) before this throws.
     const existing = await deps.findProjectByName(neonClient.projectNameForApp(appId));
 
     let projectId: string;
     let connectionUri: string;
+    // Reused for the pooler lookup below when we adopted rather than created,
+    // so we don't call getConnectionString twice for the same project.
+    let adoptedConn: Awaited<ReturnType<typeof deps.getConnectionString>> | null = null;
 
     if (existing) {
       projectId = existing.id;
-      connectionUri = (await deps.getConnectionString(projectId, neonDbName, owner)).connectionUri;
+      adoptedConn = await deps.getConnectionString(projectId, neonDbName, owner);
+      connectionUri = adoptedConn.connectionUri;
     } else {
       const created = await deps.createProjectForApp({
         appId,
@@ -107,7 +118,7 @@ export async function provisionNeonDbForApp(
     // The pooled URI is a nice-to-have; a failure here must not fail provisioning.
     let poolerConnectionString: string | null = null;
     try {
-      const conn = await deps.getConnectionString(projectId, neonDbName, owner);
+      const conn = adoptedConn ?? (await deps.getConnectionString(projectId, neonDbName, owner));
       poolerConnectionString = pooledFrom(connectionUri, conn.pooledConnectionUri, conn.poolerHost);
     } catch {
       poolerConnectionString = null;
