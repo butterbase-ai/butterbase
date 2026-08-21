@@ -3,8 +3,8 @@ import * as Sentry from '@sentry/node';
 import { config, assertRegionConfig } from '../config.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
-import * as neonClient from './neon-client.js';
 import { provisionNeonDbForApp } from './app-db-provision.js';
+import { teardownAppDb } from './app-db-teardown.js';
 import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notifications.service.js';
@@ -338,18 +338,32 @@ async function executeDeprovision(
 
     if (connRow.rows.length > 0) {
       const { neon_project_id, neon_database_name } = connRow.rows[0];
-      try {
-        await neonClient.withNeonProjectLock(neon_project_id, () =>
-          neonClient.deleteDatabase(neon_project_id, neon_database_name),
+      // teardownAppDb decides from the app's stored neon_project_id whether
+      // this is a legacy database inside the region's shared data project or a
+      // dedicated project-per-tenant project that must be deleted whole (else
+      // it bills forever). Region is this worker's instance region, which is
+      // the app's home region — see the comment on runtimePool above.
+      // Idempotency (404 = already gone) is handled inside; other errors still
+      // throw so the task retries, exactly as before.
+      const result = await teardownAppDb({
+        region: assertRegionConfig().instanceRegion,
+        neonProjectId: neon_project_id,
+        neonDatabaseName: neon_database_name,
+      });
+      if (result.degraded) {
+        // getDataProjectIdForRegion threw for this worker's instance region —
+        // see AppDbTeardownResult.degraded — so this fell back to the legacy
+        // branch unable to prove it isn't actually an orphaned tenant project.
+        logger.warn(
+          { appId, neon_database_name, mode: result.mode, neonProjectId: result.projectId },
+          '[neon-task-worker] Neon teardown fell back to legacy without verifying tenant status (region config gap)',
         );
-      } catch (err) {
-        // Idempotency: if DB is already gone (404), treat as success
-        const msg = err instanceof Error ? err.message : '';
-        if (msg.includes('404') || msg.includes('not found')) {
-          logger.info({ appId, neon_database_name }, '[neon-task-worker] Database already deleted, continuing');
-        } else {
-          throw err;
-        }
+      }
+      if (result.alreadyGone) {
+        logger.info(
+          { appId, neon_database_name, mode: result.mode, neonProjectId: result.projectId, degraded: result.degraded },
+          '[neon-task-worker] Neon resource already deleted, continuing',
+        );
       }
     }
   } else {

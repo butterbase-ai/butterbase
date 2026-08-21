@@ -1,7 +1,6 @@
 import type { StepHandler } from './saga-executor.js';
 import { invalidateAppRegion } from '../region-resolver.js';
-import * as neonClient from '../neon-client.js';
-import { getDataProjectIdForRegion } from '../neon-projects.js';
+import { teardownAppDb } from '../app-db-teardown.js';
 import { clearKvBlock } from '../kv/migration-sentinel.js';
 import { kvRedisFor } from '../kv/redis-registry.js';
 import { wrap } from '../kv/redis-client.js';
@@ -79,50 +78,37 @@ export const executeAbort: StepHandler = async (ctx, m) => {
   //     'schema "realtime" already exists' (or similar) because the prior
   //     attempt's restore left objects behind in the same Neon DB.
   //     Under project-per-tenant the dest is a whole project, not a database
-  //     inside the shared one, so the tenant branch deletes the project.
-  const tenantProjectId =
-    destConn?.neon_project_id &&
-    destConn.neon_project_id !== getDataProjectIdForRegion(m.dest_region)
-      ? destConn.neon_project_id
-      : null;
-
-  if (tenantProjectId) {
-    try {
-      await neonClient.withNeonProjectLock(tenantProjectId, async () => {
-        await neonClient.deleteProject(tenantProjectId);
-      });
-    } catch (err) {
-      // Idempotency: an already-deleted project (404) is success, not an error.
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('404') || msg.includes('not found')) {
-        ctx.log.info(
-          { migrationId: m.id, neonProjectId: tenantProjectId },
-          '[move-app abort] dest Neon project already deleted, continuing',
-        );
-      } else {
-        ctx.log.warn(
-          { migrationId: m.id, neonProjectId: tenantProjectId, err: msg },
-          '[move-app abort] dest Neon project delete failed; continuing (manual cleanup may be needed)',
-        );
-      }
+  //     inside the shared one; teardownAppDb picks the shape from destConn's
+  //     stored neon_project_id (see its docs for why the flag is not the test).
+  //     Best-effort: teardown failures warn and continue, never abort the abort.
+  const neonDbName = m.dest_resources.neon_db_name as string | undefined;
+  try {
+    const result = await teardownAppDb({
+      region: m.dest_region,
+      neonProjectId: destConn?.neon_project_id,
+      neonDatabaseName: neonDbName,
+    });
+    if (result.degraded) {
+      // getDataProjectIdForRegion threw for m.dest_region — see
+      // AppDbTeardownResult.degraded — so this took the legacy branch
+      // unable to prove it isn't actually an orphaned tenant project.
+      ctx.log.warn(
+        { migrationId: m.id, mode: result.mode, neonProjectId: result.projectId, neonDbName, destRegion: m.dest_region },
+        '[move-app abort] dest Neon teardown fell back to legacy without verifying tenant status (region config gap)',
+      );
     }
-  } else {
-    const neonDbName = m.dest_resources.neon_db_name as string | undefined;
-    if (neonDbName) {
-      const dataProjectId = getDataProjectIdForRegion(m.dest_region);
-      if (dataProjectId) {
-        try {
-          await neonClient.withNeonProjectLock(dataProjectId, async () => {
-            await neonClient.deleteDatabase(dataProjectId, neonDbName);
-          });
-        } catch (err) {
-          ctx.log.warn(
-            { migrationId: m.id, neonDbName, err: (err as Error).message },
-            '[move-app abort] dest Neon DB delete failed; continuing (manual cleanup may be needed)',
-          );
-        }
-      }
+    if (result.alreadyGone) {
+      // Idempotency: an already-deleted project/database (404) is success.
+      ctx.log.info(
+        { migrationId: m.id, mode: result.mode, neonProjectId: result.projectId, neonDbName, degraded: result.degraded },
+        '[move-app abort] dest Neon resource already deleted, continuing',
+      );
     }
+  } catch (err) {
+    ctx.log.warn(
+      { migrationId: m.id, neonDbName, neonProjectId: destConn?.neon_project_id, err: (err as Error).message },
+      '[move-app abort] dest Neon teardown failed; continuing (manual cleanup may be needed)',
+    );
   }
 
   // 2) Restore source provisioning_status if blocking_writes flipped it.
