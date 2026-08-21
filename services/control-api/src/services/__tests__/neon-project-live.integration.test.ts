@@ -30,6 +30,7 @@ describe.skipIf(!LIVE)('Neon tenant project provisioning (live)', () => {
       Array.from({ length: CONCURRENCY }, (_, i) =>
         createProjectForApp({
           appId: `app_livetest${String(i).padStart(4, '0')}`,
+          region: 'us-east-1',
           neonRegionId: 'aws-us-east-1',
           databaseName: `db_app_livetest${String(i).padStart(4, '0')}`,
           ownerRole: config.neon.databaseOwner,
@@ -51,6 +52,6 @@ describe.skipIf(!LIVE)('Neon tenant project provisioning (live)', () => {
   }, 120_000);
 
   it('names projects so the reconciler can find them', () => {
-    expect(projectNameForApp('app_livetest0000')).toBe('bb-app_livetest0000');
+    expect(projectNameForApp('app_livetest0000', 'us-east-1')).toBe('bb-app_livetest0000-us-east-1');
   });
 });

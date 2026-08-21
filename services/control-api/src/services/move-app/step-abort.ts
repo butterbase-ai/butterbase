@@ -27,6 +27,30 @@ import { wrap } from '../kv/redis-client.js';
  * (saga-executor enforces this).
  */
 export const executeAbort: StepHandler = async (ctx, m) => {
+  // 0) Read the dest `app_db_connections` row BEFORE step 1 deletes it. Its
+  //    `neon_project_id` is the discriminator between the two teardown shapes
+  //    (same one `executeDeprovision` uses): equal to the region's shared data
+  //    project means the legacy `cust_*` database lives inside it; anything
+  //    else means provisionAppDb took the project-per-tenant path and created
+  //    a dedicated project that must be deleted whole, or it bills forever and
+  //    a retry adopts a project that already has the schema.
+  let destConn: { neon_project_id: string; neon_database_name: string } | null = null;
+  if (m.dest_resources.dest_app_id) {
+    try {
+      const destPool = ctx.runtimePoolFor(m.dest_region);
+      const r = await destPool.query<{ neon_project_id: string; neon_database_name: string }>(
+        `SELECT neon_project_id, neon_database_name FROM app_db_connections WHERE app_id = $1`,
+        [m.app_id],
+      );
+      destConn = r.rows?.[0] ?? null;
+    } catch (err) {
+      ctx.log.warn(
+        { migrationId: m.id, err: (err as Error).message },
+        '[move-app abort] dest app_db_connections lookup failed; falling back to shared-project teardown',
+      );
+    }
+  }
+
   // 1) Remove the dest reservation row, if reserving_dest got far enough
   //    to create it. Idempotent: row may already be gone.
   if (m.dest_resources.dest_app_id) {
@@ -54,19 +78,49 @@ export const executeAbort: StepHandler = async (ctx, m) => {
   //     Without this, restoring_data fails on the second attempt with
   //     'schema "realtime" already exists' (or similar) because the prior
   //     attempt's restore left objects behind in the same Neon DB.
-  const neonDbName = m.dest_resources.neon_db_name as string | undefined;
-  if (neonDbName) {
-    const dataProjectId = getDataProjectIdForRegion(m.dest_region);
-    if (dataProjectId) {
-      try {
-        await neonClient.withNeonProjectLock(dataProjectId, async () => {
-          await neonClient.deleteDatabase(dataProjectId, neonDbName);
-        });
-      } catch (err) {
-        ctx.log.warn(
-          { migrationId: m.id, neonDbName, err: (err as Error).message },
-          '[move-app abort] dest Neon DB delete failed; continuing (manual cleanup may be needed)',
+  //     Under project-per-tenant the dest is a whole project, not a database
+  //     inside the shared one, so the tenant branch deletes the project.
+  const tenantProjectId =
+    destConn?.neon_project_id &&
+    destConn.neon_project_id !== getDataProjectIdForRegion(m.dest_region)
+      ? destConn.neon_project_id
+      : null;
+
+  if (tenantProjectId) {
+    try {
+      await neonClient.withNeonProjectLock(tenantProjectId, async () => {
+        await neonClient.deleteProject(tenantProjectId);
+      });
+    } catch (err) {
+      // Idempotency: an already-deleted project (404) is success, not an error.
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('404') || msg.includes('not found')) {
+        ctx.log.info(
+          { migrationId: m.id, neonProjectId: tenantProjectId },
+          '[move-app abort] dest Neon project already deleted, continuing',
         );
+      } else {
+        ctx.log.warn(
+          { migrationId: m.id, neonProjectId: tenantProjectId, err: msg },
+          '[move-app abort] dest Neon project delete failed; continuing (manual cleanup may be needed)',
+        );
+      }
+    }
+  } else {
+    const neonDbName = m.dest_resources.neon_db_name as string | undefined;
+    if (neonDbName) {
+      const dataProjectId = getDataProjectIdForRegion(m.dest_region);
+      if (dataProjectId) {
+        try {
+          await neonClient.withNeonProjectLock(dataProjectId, async () => {
+            await neonClient.deleteDatabase(dataProjectId, neonDbName);
+          });
+        } catch (err) {
+          ctx.log.warn(
+            { migrationId: m.id, neonDbName, err: (err as Error).message },
+            '[move-app abort] dest Neon DB delete failed; continuing (manual cleanup may be needed)',
+          );
+        }
       }
     }
   }

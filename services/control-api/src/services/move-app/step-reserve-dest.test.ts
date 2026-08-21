@@ -40,4 +40,23 @@ describe('executeReserveDest', () => {
     expect(res.next).toBe('blocking_writes');
     expect(ctx.provisionAppDb).not.toHaveBeenCalled();
   });
+
+  it('rejects a same-region move before touching either region', async () => {
+    const runtime = { query: vi.fn() };
+    const ctx: any = {
+      controlPool: { query: vi.fn() },
+      runtimePoolFor: () => runtime,
+      redisFor: () => null,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      provisionAppDb: vi.fn(),
+    };
+    const m: any = {
+      id: 'mig-3', app_id: 'app-x', user_id: 'u', source_region: 'us-east-1',
+      dest_region: 'us-east-1', current_step: 'reserving_dest', dest_resources: {},
+    };
+
+    await expect(executeReserveDest(ctx, m)).rejects.toThrow(/us-east-1/);
+    expect(ctx.provisionAppDb).not.toHaveBeenCalled();
+    expect(runtime.query).not.toHaveBeenCalled();
+  });
 });
