@@ -544,14 +544,25 @@ export interface CreatedProject {
 }
 
 /** Project naming convention. The `bb-` prefix makes the tenant reconciler's
- *  `GET /projects?search=bb-app_` query precise. */
-export function projectNameForApp(appId: string): string {
-  return `bb-${appId}`;
+ *  `GET /projects?search=bb-app_` query precise.
+ *
+ *  The region suffix is load-bearing, not decoration: an app keeps its `app_id`
+ *  across a region move and the source database is retained after cutover, so
+ *  one app legitimately owns storage in two regions at once. Without the
+ *  suffix, source and destination projects would share a name and
+ *  `findProjectByName`'s exact match could adopt the wrong side of an
+ *  in-flight move. `region` is the Butterbase region (`us-west-2`), not the
+ *  Neon region id (`aws-us-west-2`). */
+export function projectNameForApp(appId: string, region: string): string {
+  return `bb-${appId}-${region}`;
 }
 
 /** Extracted so the request shape is unit-testable without touching the network. */
 export function buildCreateProjectBody(params: {
   appId: string;
+  /** Butterbase region, e.g. `us-west-2`. Used only for the project name. */
+  region: string;
+  /** Neon region id, e.g. `aws-us-west-2`. Sent as `region_id`. */
   neonRegionId: string;
   databaseName: string;
   ownerRole: string;
@@ -559,7 +570,7 @@ export function buildCreateProjectBody(params: {
   pgVersion?: number;
 }): Record<string, unknown> {
   const project: Record<string, unknown> = {
-    name: projectNameForApp(params.appId),
+    name: projectNameForApp(params.appId, params.region),
     region_id: params.neonRegionId,
     pg_version: params.pgVersion ?? config.neon.pgVersion,
     branch: {
@@ -592,6 +603,9 @@ export function buildCreateProjectBody(params: {
  */
 export async function createProjectForApp(params: {
   appId: string;
+  /** Butterbase region, e.g. `us-west-2`. Used only for the project name. */
+  region: string;
+  /** Neon region id, e.g. `aws-us-west-2`. Sent as `region_id`. */
   neonRegionId: string;
   databaseName: string;
   ownerRole: string;

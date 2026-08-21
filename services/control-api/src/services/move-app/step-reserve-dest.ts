@@ -12,6 +12,17 @@ export interface ReserveDestCtx {
 
 export const executeReserveDest: StepHandler = async (ctx, m) => {
   const cx = ctx as unknown as ReserveDestCtx & typeof ctx;
+
+  // Moving an app to the region it already occupies is a no-op, and it is the
+  // one case where the source and destination Neon projects would collide on
+  // name under region-scoped naming (`bb-<appId>-<region>`) — the source
+  // database is retained after cutover, so both would exist at once.
+  if (m.dest_region === m.source_region) {
+    throw new Error(
+      `cannot move app ${m.app_id} to its current region ${m.dest_region}: source and destination regions must differ`,
+    );
+  }
+
   const destPool = ctx.runtimePoolFor(m.dest_region);
 
   if (!m.dest_resources.dest_app_id) {

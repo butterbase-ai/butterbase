@@ -9,6 +9,7 @@ const REGION = 'us-east-1';
 function makeDeps(overrides: Partial<ProvisionDeps> = {}) {
   const calls: string[] = [];
   const createProjectForAppCalls: Parameters<ProvisionDeps['createProjectForApp']>[0][] = [];
+  const findProjectByNameCalls: string[] = [];
   const deps: ProvisionDeps = {
     createProjectForApp: async (p) => {
       calls.push('createProjectForApp');
@@ -31,10 +32,14 @@ function makeDeps(overrides: Partial<ProvisionDeps> = {}) {
     getDataProjectIdForRegion: () => 'shared-proj-us-east-1',
     getNeonRegionIdForRegion: () => 'aws-us-east-1',
     getNeonPgVersionForRegion: () => 18,
-    findProjectByName: async () => { calls.push('findProjectByName'); return null; },
+    findProjectByName: async (name) => {
+      calls.push('findProjectByName');
+      findProjectByNameCalls.push(name);
+      return null;
+    },
     ...overrides,
   };
-  return { deps, calls, createProjectForAppCalls };
+  return { deps, calls, createProjectForAppCalls, findProjectByNameCalls };
 }
 
 describe('provisionNeonDbForApp', () => {
@@ -109,6 +114,34 @@ describe('provisionNeonDbForApp', () => {
 
       expect(result.neonProjectId).toBe('tenant-proj-1');
       expect(calls).toContain('createProjectForApp');
+    });
+
+    it('looks up the adoptable project by its region-scoped name', async () => {
+      const { deps, findProjectByNameCalls } = makeDeps();
+      await provisionNeonDbForApp(REGION, APP_ID, deps);
+
+      expect(findProjectByNameCalls).toEqual([`bb-${APP_ID}-${REGION}`]);
+    });
+
+    it('scopes the adopt lookup per region so a retained source is never adopted by the dest', async () => {
+      const { deps, findProjectByNameCalls } = makeDeps();
+      await provisionNeonDbForApp('us-east-1', APP_ID, deps);
+      await provisionNeonDbForApp('eu-west-1', APP_ID, deps);
+
+      expect(findProjectByNameCalls).toEqual([
+        `bb-${APP_ID}-us-east-1`,
+        `bb-${APP_ID}-eu-west-1`,
+      ]);
+    });
+
+    it('passes the Butterbase region and the Neon region id as separate params', async () => {
+      const { deps, createProjectForAppCalls } = makeDeps({
+        getNeonRegionIdForRegion: () => 'aws-us-east-1',
+      });
+      await provisionNeonDbForApp(REGION, APP_ID, deps);
+
+      expect(createProjectForAppCalls[0]?.region).toBe(REGION);
+      expect(createProjectForAppCalls[0]?.neonRegionId).toBe('aws-us-east-1');
     });
 
     it('passes the per-region pgVersion through to createProjectForApp', async () => {

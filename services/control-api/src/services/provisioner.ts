@@ -422,9 +422,16 @@ async function formatResponse(app: App, runtimeDb: pg.Pool): Promise<InitRespons
 }
 
 /**
- * Phase 5 / E2E: create the customer DB in the region's data plane and return
- * the connection URI. Does NOT write app_db_connections or run customer
- * migrations — the move-app saga's reserving_dest step does that separately.
+ * Phase 5 / E2E: create the customer DB in the region's data plane, write the
+ * `app_db_connections` row for it, and return the connection URI. Does NOT run
+ * customer migrations — the move-app saga's restoring_data step does that.
+ *
+ * Two shapes, selected by `config.neon.projectPerTenant`:
+ *
+ *   tenant — delegates to `provisionNeonDbForApp`, which creates a dedicated
+ *            Neon project per app (adopt-before-create on retry).
+ *   legacy — a `cust_<appId>_<region>` database inside the region's shared
+ *            project. Byte-for-byte unchanged; this is the deployed path.
  *
  * Idempotent: returns the same name + URI on re-run; CREATE DATABASE is
  * guarded by an existence check.
@@ -438,6 +445,35 @@ export async function provisionAppDb(
   // already asserted) and cron-scheduler (which never registers the
   // plugin). Idempotent guard handles the first case.
   assertRuntimeDbConfig();
+
+  if (config.neon.projectPerTenant) {
+    // One Neon project per app. The shared helper owns adopt-before-create,
+    // the queryability wait and the pooled-URI lookup; all this branch adds is
+    // the app_db_connections row, which step-restore-data reads in the dest
+    // region to find its restore target.
+    const provisioned = await provisionNeonDbForApp(region, appId);
+    const tenantPool = getRuntimeDbPool(config.runtimeDb, region);
+    await tenantPool.query(
+      `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (app_id) DO UPDATE
+         SET connection_string = EXCLUDED.connection_string,
+             pooler_connection_string = EXCLUDED.pooler_connection_string,
+             neon_project_id = EXCLUDED.neon_project_id,
+             neon_database_name = EXCLUDED.neon_database_name`,
+      [
+        appId,
+        provisioned.connectionUri,
+        provisioned.poolerConnectionString,
+        provisioned.neonProjectId,
+        provisioned.neonDatabaseName,
+      ],
+    );
+    return {
+      neonDbName: provisioned.neonDatabaseName,
+      connectionUri: provisioned.connectionUri,
+    };
+  }
 
   // NEON_DATA_PROJECT_ID_<REGION> holds a Neon project ID (e.g.
   // "silent-cake-48449293"), NOT a postgres connection string. Use the

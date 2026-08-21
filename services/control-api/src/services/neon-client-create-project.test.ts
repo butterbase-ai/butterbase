@@ -3,13 +3,19 @@ import { buildCreateProjectBody, projectNameForApp, createProjectForApp, findPro
 
 describe('projectNameForApp', () => {
   it('prefixes the app id so the reconciler can search for it', () => {
-    expect(projectNameForApp('app_k3f9x2m1qp0z')).toBe('bb-app_k3f9x2m1qp0z');
+    expect(projectNameForApp('app_k3f9x2m1qp0z', 'us-east-1')).toBe('bb-app_k3f9x2m1qp0z-us-east-1');
+  });
+
+  it('suffixes the region so a moved app cannot collide with its retained source', () => {
+    expect(projectNameForApp('app_x', 'us-west-2')).toBe('bb-app_x-us-west-2');
+    expect(projectNameForApp('app_x', 'us-west-2')).not.toBe(projectNameForApp('app_x', 'us-east-1'));
   });
 });
 
 describe('buildCreateProjectBody', () => {
   const params = {
     appId: 'app_k3f9x2m1qp0z',
+    region: 'us-east-1',
     neonRegionId: 'aws-us-east-1',
     databaseName: 'db_app_k3f9x2m1qp0z',
     ownerRole: 'butterbase',
@@ -25,12 +31,23 @@ describe('buildCreateProjectBody', () => {
       };
     };
 
-    expect(body.project.name).toBe('bb-app_k3f9x2m1qp0z');
+    expect(body.project.name).toBe('bb-app_k3f9x2m1qp0z-us-east-1');
     expect(body.project.org_id).toBe('org-round-cell-11808374');
     expect(body.project.region_id).toBe('aws-us-east-1');
     expect(body.project.pg_version).toBe(17);
     expect(body.project.branch.database_name).toBe('db_app_k3f9x2m1qp0z');
     expect(body.project.branch.role_name).toBe('butterbase');
+  });
+
+  it('keeps the region-scoped name and the Neon region id as separate fields', () => {
+    const body = buildCreateProjectBody({
+      ...params,
+      region: 'us-west-2',
+      neonRegionId: 'aws-us-west-2',
+    }) as { project: { name: string; region_id: string } };
+
+    expect(body.project.name).toBe('bb-app_k3f9x2m1qp0z-us-west-2');
+    expect(body.project.region_id).toBe('aws-us-west-2');
   });
 
   it('omits org_id when none is configured rather than sending an empty string', () => {
@@ -44,6 +61,7 @@ describe('buildCreateProjectBody', () => {
 describe('createProjectForApp retry semantics', () => {
   const params = {
     appId: 'app_k3f9x2m1qp0z',
+    region: 'us-east-1',
     neonRegionId: 'aws-us-east-1',
     databaseName: 'db_app_k3f9x2m1qp0z',
     ownerRole: 'butterbase',

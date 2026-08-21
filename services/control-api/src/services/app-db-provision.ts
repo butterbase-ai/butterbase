@@ -105,7 +105,7 @@ export async function provisionNeonDbForApp(
     // exists to prevent, so we fail closed instead. Aborting is safe: the
     // neon_tasks queue retries the whole task, and neonFetch already retries
     // transient failures (423/429/5xx and network errors) before this throws.
-    const existing = await deps.findProjectByName(neonClient.projectNameForApp(appId));
+    const existing = await deps.findProjectByName(neonClient.projectNameForApp(appId, region));
 
     let projectId: string;
     let connectionUri: string;
@@ -120,6 +120,7 @@ export async function provisionNeonDbForApp(
     } else {
       const created = await deps.createProjectForApp({
         appId,
+        region,
         neonRegionId: deps.getNeonRegionIdForRegion(region),
         databaseName: neonDbName,
         ownerRole: owner,
