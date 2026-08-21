@@ -4,8 +4,10 @@ import {
   getRuntimeProjectIdForRegion,
   assertNeonProjectsConfig,
   getNeonRegionIdForRegion,
+  getNeonPgVersionForRegion,
   __resetNeonProjectsCache,
 } from './neon-projects.js';
+import { config } from '../config.js';
 
 const SAVED_ENV = { ...process.env };
 
@@ -81,5 +83,26 @@ describe('getNeonRegionIdForRegion', () => {
   it('derives the env key by upper-casing and underscoring the region', () => {
     process.env.NEON_REGION_US_EAST_1 = 'aws-us-east-1-custom';
     expect(getNeonRegionIdForRegion('us-east-1')).toBe('aws-us-east-1-custom');
+  });
+});
+
+describe('getNeonPgVersionForRegion', () => {
+  beforeEach(() => {
+    delete process.env.NEON_PG_VERSION_US_WEST_2;
+    delete process.env.NEON_PG_VERSION_US_EAST_1;
+  });
+
+  it('honours NEON_PG_VERSION_US_WEST_2', () => {
+    process.env.NEON_PG_VERSION_US_WEST_2 = '18';
+    expect(getNeonPgVersionForRegion('us-west-2')).toBe(18);
+  });
+
+  it('falls back to the global default when unset', () => {
+    expect(getNeonPgVersionForRegion('us-west-2')).toBe(config.neon.pgVersion);
+  });
+
+  it('falls back to the global default on a non-numeric value', () => {
+    process.env.NEON_PG_VERSION_US_WEST_2 = 'not-a-number';
+    expect(getNeonPgVersionForRegion('us-west-2')).toBe(config.neon.pgVersion);
   });
 });

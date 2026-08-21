@@ -1,6 +1,10 @@
 import { config } from '../config.js';
 import * as neonClient from './neon-client.js';
-import { getDataProjectIdForRegion, getNeonRegionIdForRegion } from './neon-projects.js';
+import {
+  getDataProjectIdForRegion,
+  getNeonRegionIdForRegion,
+  getNeonPgVersionForRegion,
+} from './neon-projects.js';
 
 export interface ProvisionedDb {
   connectionUri: string;
@@ -20,6 +24,7 @@ export interface ProvisionDeps {
   waitUntilUriQueryable: typeof neonClient.waitUntilUriQueryable;
   getDataProjectIdForRegion: typeof getDataProjectIdForRegion;
   getNeonRegionIdForRegion: typeof getNeonRegionIdForRegion;
+  getNeonPgVersionForRegion: typeof getNeonPgVersionForRegion;
   findProjectByName: typeof neonClient.findProjectByName;
 }
 
@@ -34,6 +39,7 @@ function defaultDeps(): ProvisionDeps {
     waitUntilUriQueryable: neonClient.waitUntilUriQueryable,
     getDataProjectIdForRegion,
     getNeonRegionIdForRegion,
+    getNeonPgVersionForRegion,
     findProjectByName: neonClient.findProjectByName,
   };
 }
@@ -117,6 +123,7 @@ export async function provisionNeonDbForApp(
         neonRegionId: deps.getNeonRegionIdForRegion(region),
         databaseName: neonDbName,
         ownerRole: owner,
+        pgVersion: deps.getNeonPgVersionForRegion(region),
       });
       projectId = created.projectId;
       connectionUri = created.connectionUri;

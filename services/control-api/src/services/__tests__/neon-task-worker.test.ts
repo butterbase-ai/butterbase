@@ -44,6 +44,9 @@ vi.mock('../neon-projects.js', () => ({
   }),
   // Also read by defaultDeps(); unused on the legacy path.
   getNeonRegionIdForRegion: vi.fn(() => 'aws-us-east-1'),
+  // defaultDeps() eagerly reads every member of neon-projects.js; unused on
+  // the legacy path but required or the mock factory throws "No export".
+  getNeonPgVersionForRegion: vi.fn(() => 17),
 }));
 
 vi.mock('../provisioner.js', () => ({

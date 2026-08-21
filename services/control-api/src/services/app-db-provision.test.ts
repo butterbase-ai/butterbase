@@ -8,9 +8,11 @@ const REGION = 'us-east-1';
 /** Records every dependency call so tests can assert what was and was NOT called. */
 function makeDeps(overrides: Partial<ProvisionDeps> = {}) {
   const calls: string[] = [];
+  const createProjectForAppCalls: Parameters<ProvisionDeps['createProjectForApp']>[0][] = [];
   const deps: ProvisionDeps = {
     createProjectForApp: async (p) => {
       calls.push('createProjectForApp');
+      createProjectForAppCalls.push(p);
       return { projectId: 'tenant-proj-1', databaseName: p.databaseName, connectionUri: 'postgres://u:p@direct/db' };
     },
     ensureRoleExists: async () => { calls.push('ensureRoleExists'); },
@@ -28,10 +30,11 @@ function makeDeps(overrides: Partial<ProvisionDeps> = {}) {
     waitUntilUriQueryable: async () => { calls.push('waitUntilUriQueryable'); },
     getDataProjectIdForRegion: () => 'shared-proj-us-east-1',
     getNeonRegionIdForRegion: () => 'aws-us-east-1',
+    getNeonPgVersionForRegion: () => 18,
     findProjectByName: async () => { calls.push('findProjectByName'); return null; },
     ...overrides,
   };
-  return { deps, calls };
+  return { deps, calls, createProjectForAppCalls };
 }
 
 describe('provisionNeonDbForApp', () => {
@@ -50,7 +53,7 @@ describe('provisionNeonDbForApp', () => {
       expect(result.connectionUri).toBe('postgres://u:p@direct/db');
     });
 
-    it('NEVER calls grantSchemaPrivileges — neondb_owner does not exist on a tenant project', async () => {
+    it('NEVER calls grantSchemaPrivileges — the owning role already has schema rights', async () => {
       const { deps, calls } = makeDeps();
       await provisionNeonDbForApp(REGION, APP_ID, deps);
       expect(calls).not.toContain('grantSchemaPrivileges');
@@ -106,6 +109,16 @@ describe('provisionNeonDbForApp', () => {
 
       expect(result.neonProjectId).toBe('tenant-proj-1');
       expect(calls).toContain('createProjectForApp');
+    });
+
+    it('passes the per-region pgVersion through to createProjectForApp', async () => {
+      const { deps, createProjectForAppCalls } = makeDeps({
+        getNeonPgVersionForRegion: () => 18,
+      });
+      await provisionNeonDbForApp(REGION, APP_ID, deps);
+
+      expect(createProjectForAppCalls).toHaveLength(1);
+      expect(createProjectForAppCalls[0]?.pgVersion).toBe(18);
     });
   });
 
