@@ -578,8 +578,14 @@ export function buildCreateProjectBody(params: {
  *
  * Unlike the shared-project path this needs NO `ensureRoleExists` (the role
  * is created here), NO `grantSchemaPrivileges` (the role owns the database,
- * and `neondb_owner` does not exist on such a project), and NO project lock
- * (a brand-new project has no concurrent operations to conflict with).
+ * so the grant is redundant), and NO project lock (a brand-new project has no
+ * concurrent operations to conflict with).
+ *
+ * Note: an earlier comment here claimed `grantSchemaPrivileges` would *fail*
+ * because `neondb_owner` does not exist on such a project. That is wrong in
+ * production, where NEON_DATA_DATABASE_OWNER is itself `neondb_owner`, so the
+ * owner role and the grant's connecting role are the same. Skipping the call
+ * is still correct — it is simply redundant, not fatal.
  *
  * The response's operations are still running on return, so the caller must
  * `waitUntilUriQueryable` before using the URI.
