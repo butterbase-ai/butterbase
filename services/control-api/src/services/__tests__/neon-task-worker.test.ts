@@ -27,6 +27,9 @@ vi.mock('../neon-client.js', () => ({
   }),
   grantSchemaPrivileges: vi.fn().mockResolvedValue(undefined),
   deleteDatabase: vi.fn().mockResolvedValue(undefined),
+  // executeDeprovision now routes through teardownAppDb, which reads
+  // deleteProject off this module for the project-per-tenant branch.
+  deleteProject: vi.fn().mockResolvedValue(undefined),
   // provisionNeonDbForApp's defaultDeps() reads every member of this module up
   // front, so the mock must define the project-per-tenant members too even
   // though the legacy (flag-off) path never calls them.
@@ -235,6 +238,108 @@ describe('neon-task-worker: executeProvision uses per-region data project', () =
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ error: expect.stringContaining('missing-app') }),
       expect.stringContaining('[neon-task-worker] Task failed'),
+    );
+  });
+});
+
+describe('neon-task-worker: executeDeprovision discriminates project vs database', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    (neonClient.withNeonProjectLock as any).mockImplementation(
+      async (_projectId: string, fn: () => Promise<void>) => fn(),
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // runtimePool.query call sequence for a deprovision task:
+  //   1. recoverStaleTasks: reset UPDATE
+  //   2. recoverStaleTasks: fail UPDATE
+  //   3. processNextTask: claim UPDATE            → deprovision task row
+  //   4. executeDeprovision: SELECT app_db_connections
+  //   5. executeDeprovision: DELETE FROM apps
+  //   6. processNextTask: mark completed
+  async function runDeprovision(connRow: Record<string, string>) {
+    const runtimePool = makeMockPool([
+      { rows: [], rowCount: 0 },
+      { rows: [], rowCount: 0 },
+      {
+        rows: [{
+          id: 3,
+          app_id: APP_ID,
+          task_type: 'deprovision',
+          status: 'processing',
+          attempts: 1,
+          max_attempts: 3,
+          last_error: null,
+          locked_at: null,
+          run_after: new Date(),
+          created_at: new Date(),
+        }],
+        rowCount: 1,
+      },
+      { rows: [connRow], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+    ]);
+    (getRuntimeDbPool as any).mockReturnValue(runtimePool);
+    runtimePoolHolder.value = runtimePool;
+
+    const controlDb = makeMockPool();
+    const dataPlaneDb = makeMockPool();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const interval = startNeonTaskWorker(controlDb, dataPlaneDb, logger);
+    await vi.advanceTimersByTimeAsync(1100);
+    clearInterval(interval);
+    return { logger, runtimePool };
+  }
+
+  it('tenant: deletes the whole Neon project, never the database inside it', async () => {
+    const { logger } = await runDeprovision({
+      neon_project_id: 'tenant-proj-9',
+      neon_database_name: `db_${APP_ID}`,
+    });
+
+    expect(neonClient.deleteProject).toHaveBeenCalledWith('tenant-proj-9');
+    expect(neonClient.deleteDatabase).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('[neon-task-worker] Task failed'),
+    );
+  });
+
+  it('legacy: a row on the region shared data project still deletes the database', async () => {
+    await runDeprovision({
+      neon_project_id: 'neon-proj-us-east-1',
+      neon_database_name: `db_${APP_ID}`,
+    });
+
+    expect(neonClient.deleteDatabase).toHaveBeenCalledWith('neon-proj-us-east-1', `db_${APP_ID}`);
+    expect(neonClient.deleteProject).not.toHaveBeenCalled();
+  });
+
+  it('tenant: an already-gone project (404) is success, not a task failure', async () => {
+    (neonClient.deleteProject as any).mockRejectedValueOnce(
+      new Error('Neon API error 404 /projects/tenant-proj-9: not found'),
+    );
+
+    const { logger, runtimePool } = await runDeprovision({
+      neon_project_id: 'tenant-proj-9',
+      neon_database_name: `db_${APP_ID}`,
+    });
+
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('[neon-task-worker] Task failed'),
+    );
+    // Teardown continued: the apps row was still deleted.
+    expect(runtimePool.query).toHaveBeenCalledWith(
+      expect.stringContaining('DELETE FROM apps'),
+      [APP_ID],
     );
   });
 });

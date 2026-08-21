@@ -37,7 +37,7 @@ async function loadSponsorOverlay(): Promise<SponsorOverlay | null> {
 }
 import { requireUserId } from '../utils/require-auth.js';
 import { apiError } from '../utils/api-error.js';
-import * as neonClient from '../services/neon-client.js';
+import { teardownAppDb } from '../services/app-db-teardown.js';
 import * as DeploymentService from '../services/deployment.service.js';
 import { deleteObject } from '../services/s3.js';
 import { config, assertRegionConfig } from '../config.js';
@@ -705,9 +705,15 @@ export async function billingRoutes(app: FastifyInstance) {
         );
         if (connRow.rows.length > 0) {
           try {
-            await neonClient.withNeonProjectLock(connRow.rows[0].neon_project_id, () =>
-              neonClient.deleteDatabase(connRow.rows[0].neon_project_id, connRow.rows[0].neon_database_name)
-            );
+            // Discriminates on the app's stored neon_project_id: a legacy app
+            // loses just its database inside the region's shared data project,
+            // a project-per-tenant app loses its whole project (deleting only
+            // the database would leave the project orphaned and billing).
+            await teardownAppDb({
+              region,
+              neonProjectId: connRow.rows[0].neon_project_id,
+              neonDatabaseName: connRow.rows[0].neon_database_name,
+            });
           } catch (err) {
             app.log.warn({ err, appId: appRow.id }, 'Failed to delete Neon database during account deletion');
           }
