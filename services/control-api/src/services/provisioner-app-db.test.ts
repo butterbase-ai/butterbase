@@ -7,8 +7,13 @@ vi.mock('./app-db-provision.js', () => ({
   provisionNeonDbForApp: (...args: unknown[]) => provisionNeonDbForApp(...args),
 }));
 
+// Captures its arguments: step-restore-data reads app_db_connections from the
+// DEST region's runtime DB, so writing it to the wrong region's pool would be
+// silently invisible to a mock that ignored them.
+const getRuntimeDbPool = vi.fn(() => ({ query: runtimeQuery }));
+
 vi.mock('./runtime-db.js', () => ({
-  getRuntimeDbPool: () => ({ query: runtimeQuery }),
+  getRuntimeDbPool: (...args: unknown[]) => getRuntimeDbPool(...(args as [])),
 }));
 
 vi.mock('../config.js', async (importOriginal) => {
@@ -36,6 +41,7 @@ describe('provisionAppDb — tenant branch (projectPerTenant = true)', () => {
       neonDatabaseName: `db_${APP_ID}`,
     });
     runtimeQuery.mockClear();
+    getRuntimeDbPool.mockClear();
   });
 
   afterEach(() => { config.neon.projectPerTenant = original; });
@@ -54,14 +60,43 @@ describe('provisionAppDb — tenant branch (projectPerTenant = true)', () => {
 
     expect(runtimeQuery).toHaveBeenCalledTimes(1);
     const [sql, params] = runtimeQuery.mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain('INSERT INTO app_db_connections');
     expect(sql).toContain('ON CONFLICT (app_id) DO UPDATE');
-    expect(params).toEqual([
-      APP_ID,
-      'postgres://u:p@direct/db_app',
-      'postgres://u:p@pooler/db_app',
-      'tenant-proj-1',
-      `db_${APP_ID}`,
+
+    // Column list and placeholder list asserted together, so a reordered
+    // column list no longer matches even though `params` order would.
+    const columns = /INSERT INTO app_db_connections\s*\(([^)]*)\)/
+      .exec(sql)?.[1]
+      .split(',')
+      .map((c) => c.trim());
+    const placeholders = /VALUES\s*\(([^)]*)\)/
+      .exec(sql)?.[1]
+      .split(',')
+      .map((p) => p.trim());
+    expect(columns).toEqual([
+      'app_id',
+      'connection_string',
+      'pooler_connection_string',
+      'neon_project_id',
+      'neon_database_name',
     ]);
+    expect(placeholders).toEqual(['$1', '$2', '$3', '$4', '$5']);
+
+    // Column -> value correspondence, keyed by name rather than position.
+    const byColumn = Object.fromEntries(
+      columns!.map((c, i) => [c, params[Number(placeholders![i].slice(1)) - 1]]),
+    );
+    expect(byColumn).toEqual({
+      app_id: APP_ID,
+      connection_string: 'postgres://u:p@direct/db_app',
+      pooler_connection_string: 'postgres://u:p@pooler/db_app',
+      neon_project_id: 'tenant-proj-1',
+      neon_database_name: `db_${APP_ID}`,
+    });
+  });
+
+  it('writes app_db_connections to the requested region’s runtime pool', async () => {
+    await provisionAppDb(REGION, APP_ID, 'owner');
+
+    expect(getRuntimeDbPool).toHaveBeenCalledWith(expect.anything(), REGION);
   });
 });

@@ -427,6 +427,19 @@ export async function deleteDatabase(
   });
 }
 
+/**
+ * Delete an entire Neon project. Used by the project-per-tenant teardown
+ * paths, where the app owns its project outright and deleting only the
+ * database would leave a billed empty project behind.
+ *
+ * Retry stays on (neonFetch's default): DELETE is idempotent, and a repeat
+ * after a lost response either succeeds or 404s, which callers treat as
+ * already-gone.
+ */
+export async function deleteProject(projectId: string): Promise<void> {
+  await neonFetch(`/projects/${projectId}`, { method: 'DELETE' });
+}
+
 export interface NeonDatabaseSummary {
   name: string;
   createdAt: string;
