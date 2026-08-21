@@ -709,11 +709,15 @@ export async function billingRoutes(app: FastifyInstance) {
             // loses just its database inside the region's shared data project,
             // a project-per-tenant app loses its whole project (deleting only
             // the database would leave the project orphaned and billing).
-            await teardownAppDb({
+            const result = await teardownAppDb({
               region,
               neonProjectId: connRow.rows[0].neon_project_id,
               neonDatabaseName: connRow.rows[0].neon_database_name,
             });
+            app.log.info(
+              { appId: appRow.id, mode: result.mode, alreadyGone: result.alreadyGone, degraded: result.degraded },
+              'Deleted Neon resource during account deletion',
+            );
           } catch (err) {
             app.log.warn({ err, appId: appRow.id }, 'Failed to delete Neon database during account deletion');
           }

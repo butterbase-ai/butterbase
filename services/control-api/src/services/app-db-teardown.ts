@@ -19,6 +19,18 @@ export interface AppDbTeardownResult {
   databaseName?: string;
   /** True when Neon answered 404 / "not found" — already gone, treated as success. */
   alreadyGone: boolean;
+  /**
+   * True when `getDataProjectIdForRegion(region)` threw — the region is no
+   * longer in `BUTTERBASE_REGIONS` — and the teardown fell back to the
+   * legacy branch *unable to prove* this app isn't actually a tenant
+   * project. The fallback direction is correct (see function doc), but if
+   * this app really does own a dedicated Neon project, that project is now
+   * orphaned and `neon-orphan-reconciler.ts` can't see it either, since it
+   * calls the same throwing helper. Only ever set (to `true`) on the
+   * degraded path; absent otherwise, so it never fires for the normal case
+   * where the region simply has no shared data project configured.
+   */
+  degraded?: boolean;
 }
 
 export interface TeardownAppDbArgs {
@@ -61,13 +73,18 @@ export async function teardownAppDb(args: TeardownAppDbArgs): Promise<AppDbTeard
 
   // A region with no configured shared data project id cannot prove the app is
   // a tenant, so fall back to legacy — the pre-existing behaviour — rather than
-  // deleting a project we may not own.
+  // deleting a project we may not own. `degraded` distinguishes "the helper
+  // threw" (region config gap — the risky case, see AppDbTeardownResult) from
+  // the ordinary "no shared project configured for this region" case.
   let sharedProjectId: string | null = null;
+  let degraded = false;
   try {
     sharedProjectId = getDataProjectIdForRegion(region) || null;
   } catch {
     sharedProjectId = null;
+    degraded = true;
   }
+  const degradedFlag = degraded ? { degraded: true as const } : {};
 
   if (neonProjectId && sharedProjectId && neonProjectId !== sharedProjectId) {
     try {
@@ -81,7 +98,7 @@ export async function teardownAppDb(args: TeardownAppDbArgs): Promise<AppDbTeard
 
   const projectId = neonProjectId || sharedProjectId;
   if (!projectId || !neonDatabaseName) {
-    return { mode: 'skipped', alreadyGone: false };
+    return { mode: 'skipped', alreadyGone: false, ...degradedFlag };
   }
 
   try {
@@ -90,7 +107,7 @@ export async function teardownAppDb(args: TeardownAppDbArgs): Promise<AppDbTeard
     );
   } catch (err) {
     if (!isAlreadyGone(err)) throw err;
-    return { mode: 'legacy', projectId, databaseName: neonDatabaseName, alreadyGone: true };
+    return { mode: 'legacy', projectId, databaseName: neonDatabaseName, alreadyGone: true, ...degradedFlag };
   }
-  return { mode: 'legacy', projectId, databaseName: neonDatabaseName, alreadyGone: false };
+  return { mode: 'legacy', projectId, databaseName: neonDatabaseName, alreadyGone: false, ...degradedFlag };
 }

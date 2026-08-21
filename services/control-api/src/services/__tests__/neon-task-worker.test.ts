@@ -322,6 +322,23 @@ describe('neon-task-worker: executeDeprovision discriminates project vs database
     expect(neonClient.deleteProject).not.toHaveBeenCalled();
   });
 
+  it('warns when the region config lookup throws, so a degraded legacy fallback is observable', async () => {
+    (getDataProjectIdForRegion as any).mockImplementationOnce(() => {
+      throw new Error('Missing env var NEON_DATA_PROJECT_ID_US_EAST_1 for region us-east-1');
+    });
+
+    const { logger } = await runDeprovision({
+      neon_project_id: 'some-proj',
+      neon_database_name: `db_${APP_ID}`,
+    });
+
+    expect(neonClient.deleteDatabase).toHaveBeenCalledWith('some-proj', `db_${APP_ID}`);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'legacy' }),
+      expect.stringContaining('[neon-task-worker] Neon teardown fell back to legacy without verifying tenant status'),
+    );
+  });
+
   it('tenant: an already-gone project (404) is success, not a task failure', async () => {
     (neonClient.deleteProject as any).mockRejectedValueOnce(
       new Error('Neon API error 404 /projects/tenant-proj-9: not found'),

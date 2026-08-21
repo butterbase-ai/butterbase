@@ -350,9 +350,18 @@ async function executeDeprovision(
         neonProjectId: neon_project_id,
         neonDatabaseName: neon_database_name,
       });
+      if (result.degraded) {
+        // getDataProjectIdForRegion threw for this worker's instance region —
+        // see AppDbTeardownResult.degraded — so this fell back to the legacy
+        // branch unable to prove it isn't actually an orphaned tenant project.
+        logger.warn(
+          { appId, neon_database_name, mode: result.mode, neonProjectId: result.projectId },
+          '[neon-task-worker] Neon teardown fell back to legacy without verifying tenant status (region config gap)',
+        );
+      }
       if (result.alreadyGone) {
         logger.info(
-          { appId, neon_database_name, mode: result.mode, neonProjectId: result.projectId },
+          { appId, neon_database_name, mode: result.mode, neonProjectId: result.projectId, degraded: result.degraded },
           '[neon-task-worker] Neon resource already deleted, continuing',
         );
       }

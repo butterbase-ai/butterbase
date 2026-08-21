@@ -91,7 +91,7 @@ describe('teardownAppDb', () => {
       expect(deleteProject).not.toHaveBeenCalled();
     });
 
-    it('stays legacy when the shared project id cannot be resolved', async () => {
+    it('stays legacy when the shared project id cannot be resolved, and flags the result as degraded', async () => {
       vi.mocked(getDataProjectIdForRegion).mockImplementation(() => {
         throw new Error('Missing env var NEON_DATA_PROJECT_ID_US_EAST_1 for region us-east-1');
       });
@@ -103,8 +103,22 @@ describe('teardownAppDb', () => {
       });
 
       expect(res.mode).toBe('legacy');
+      expect(res.degraded).toBe(true);
       expect(deleteDatabase).toHaveBeenCalledWith('some-proj', 'cust_app_x');
       expect(deleteProject).not.toHaveBeenCalled();
+    });
+
+    it('is not marked degraded when the region simply has no shared project configured', async () => {
+      vi.mocked(getDataProjectIdForRegion).mockReturnValue(undefined as unknown as string);
+
+      const res = await teardownAppDb({
+        region: REGION,
+        neonProjectId: 'some-proj',
+        neonDatabaseName: 'cust_app_x',
+      });
+
+      expect(res.mode).toBe('legacy');
+      expect(res.degraded).toBeUndefined();
     });
   });
 
@@ -174,5 +188,16 @@ describe('teardownAppDb', () => {
     expect(res).toEqual({ mode: 'skipped', alreadyGone: false });
     expect(deleteDatabase).not.toHaveBeenCalled();
     expect(deleteProject).not.toHaveBeenCalled();
+  });
+
+  it('flags skipped as degraded too when the region config lookup threw', async () => {
+    vi.mocked(getDataProjectIdForRegion).mockImplementation(() => {
+      throw new Error('Missing env var NEON_DATA_PROJECT_ID_US_EAST_1 for region us-east-1');
+    });
+
+    const res = await teardownAppDb({ region: REGION, neonProjectId: null, neonDatabaseName: null });
+
+    expect(res.mode).toBe('skipped');
+    expect(res.degraded).toBe(true);
   });
 });

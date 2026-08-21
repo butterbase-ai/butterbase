@@ -88,10 +88,19 @@ export const executeAbort: StepHandler = async (ctx, m) => {
       neonProjectId: destConn?.neon_project_id,
       neonDatabaseName: neonDbName,
     });
+    if (result.degraded) {
+      // getDataProjectIdForRegion threw for m.dest_region — see
+      // AppDbTeardownResult.degraded — so this took the legacy branch
+      // unable to prove it isn't actually an orphaned tenant project.
+      ctx.log.warn(
+        { migrationId: m.id, mode: result.mode, neonProjectId: result.projectId, neonDbName, destRegion: m.dest_region },
+        '[move-app abort] dest Neon teardown fell back to legacy without verifying tenant status (region config gap)',
+      );
+    }
     if (result.alreadyGone) {
       // Idempotency: an already-deleted project/database (404) is success.
       ctx.log.info(
-        { migrationId: m.id, mode: result.mode, neonProjectId: result.projectId, neonDbName },
+        { migrationId: m.id, mode: result.mode, neonProjectId: result.projectId, neonDbName, degraded: result.degraded },
         '[move-app abort] dest Neon resource already deleted, continuing',
       );
     }
