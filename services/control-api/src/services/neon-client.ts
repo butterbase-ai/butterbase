@@ -2,6 +2,7 @@ import pg from 'pg';
 import { config } from '../config.js';
 import { getRedisClient } from './redis.js';
 import { randomBytes } from 'node:crypto';
+import { TokenBucket } from './neon-rate-limiter.js';
 
 const BASE_URL = 'https://console.neon.tech/api/v2';
 
@@ -116,19 +117,73 @@ export async function withNeonProjectLock<T>(
   throw new Error(`Timed out waiting for Neon project lock (project=${projectId})`.replace(/(:\/\/[^:]*:)[^@]+(@)/g, '$1***$2'));
 }
 
-async function neonFetch(path: string, options: RequestInit = {}): Promise<Response> {
-  const maxAttempts = 6;
+/**
+ * Per-process limiter. A single module-level bucket covers every Neon call this
+ * process makes (Neon's budget is per-account, not per-project, so limiting per
+ * project would be the wrong axis). It is NOT account-wide: the total fleet rate
+ * is `rateLimitRps × control-api process count`, so two regional processes at
+ * 10 rps can exceed the ~700/min account budget in theory. Acceptable at current
+ * volume — Neon calls are bursty and rare — but revisit before scaling the
+ * process count or raising the rps.
+ */
+const neonLimiter = new TokenBucket({
+  ratePerSecond: config.neon.rateLimitRps,
+  burst: config.neon.rateLimitBurst,
+});
+
+/**
+ * Decide whether an HTTP status is retryable and how long to wait.
+ * Returns null when the caller should not retry.
+ *
+ *   423 — Neon "conflicting operations on this project" (shared-project topology)
+ *   429 — account rate limit; Retry-After wins when it is longer than our backoff
+ *   5xx — Neon server error
+ */
+export function computeRetryDelayMs(
+  status: number,
+  retryAfter: string | null,
+  attempt: number,
+  backoffMs: number[],
+): number | null {
+  const retryable = status === 423 || status === 429 || status >= 500;
+  if (!retryable) return null;
+
+  const base = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)] ?? backoffMs[backoffMs.length - 1];
+
+  if (status === 429 && retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.max(base, seconds * 1000);
+  }
+  return base;
+}
+
+export interface NeonFetchOptions extends RequestInit {
+  /**
+   * Set to false for non-idempotent requests (e.g. `POST /projects`). A retry
+   * after a lost response or a 502 would issue a second create and produce a
+   * duplicate billed project, which this loop cannot detect. With retry off the
+   * failure surfaces to the caller, whose own task-level retry re-enters the
+   * adopt-before-create path. Defaults to true — GETs and DELETEs are
+   * idempotent and must keep retrying.
+   */
+  retry?: boolean;
+}
+
+async function neonFetch(path: string, options: NeonFetchOptions = {}): Promise<Response> {
+  const { retry = true, ...requestInit } = options;
+  const maxAttempts = retry ? 6 : 1;
   const backoffMs = [500, 1000, 2000, 4000, 8000];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let res: Response;
+    await neonLimiter.acquire();
     try {
       res = await fetch(`${BASE_URL}${path}`, {
-        ...options,
+        ...requestInit,
         headers: {
           'Authorization': `Bearer ${config.neon.apiKey}`,
           'Content-Type': 'application/json',
-          ...options.headers,
+          ...requestInit.headers,
         },
       });
     } catch (err: unknown) {
@@ -141,9 +196,8 @@ async function neonFetch(path: string, options: RequestInit = {}): Promise<Respo
       throw err;
     }
 
-    // Retry on 423 (conflict / operation in progress) and 5xx (server errors)
-    if ((res.status === 423 || res.status >= 500) && attempt < maxAttempts) {
-      const delay = backoffMs[attempt - 1] ?? 8000;
+    const delay = computeRetryDelayMs(res.status, res.headers.get('retry-after'), attempt, backoffMs);
+    if (delay !== null && attempt < maxAttempts) {
       await new Promise((resolve) => globalThis.setTimeout(resolve, delay));
       continue;
     }
@@ -481,4 +535,119 @@ export async function getConnectionString(
     poolerHost: cachedPoolerHost ?? undefined,
     pooledConnectionUri,
   };
+}
+
+export interface CreatedProject {
+  projectId: string;
+  databaseName: string;
+  connectionUri: string;
+}
+
+/** Project naming convention. The `bb-` prefix makes the tenant reconciler's
+ *  `GET /projects?search=bb-app_` query precise. */
+export function projectNameForApp(appId: string): string {
+  return `bb-${appId}`;
+}
+
+/** Extracted so the request shape is unit-testable without touching the network. */
+export function buildCreateProjectBody(params: {
+  appId: string;
+  neonRegionId: string;
+  databaseName: string;
+  ownerRole: string;
+  orgId?: string;
+  pgVersion?: number;
+}): Record<string, unknown> {
+  const project: Record<string, unknown> = {
+    name: projectNameForApp(params.appId),
+    region_id: params.neonRegionId,
+    pg_version: params.pgVersion ?? config.neon.pgVersion,
+    branch: {
+      database_name: params.databaseName,
+      role_name: params.ownerRole,
+    },
+  };
+  // Sending org_id: '' is rejected; omit it entirely when unset.
+  if (params.orgId) project.org_id = params.orgId;
+  return { project };
+}
+
+/**
+ * Create a dedicated Neon project for one app: project, default branch,
+ * database and owner role in a single API call.
+ *
+ * Unlike the shared-project path this needs NO `ensureRoleExists` (the role
+ * is created here), NO `grantSchemaPrivileges` (the role owns the database,
+ * so the grant is redundant), and NO project lock (a brand-new project has no
+ * concurrent operations to conflict with).
+ *
+ * Note: an earlier comment here claimed `grantSchemaPrivileges` would *fail*
+ * because `neondb_owner` does not exist on such a project. That is wrong in
+ * production, where NEON_DATA_DATABASE_OWNER is itself `neondb_owner`, so the
+ * owner role and the grant's connecting role are the same. Skipping the call
+ * is still correct — it is simply redundant, not fatal.
+ *
+ * The response's operations are still running on return, so the caller must
+ * `waitUntilUriQueryable` before using the URI.
+ */
+export async function createProjectForApp(params: {
+  appId: string;
+  neonRegionId: string;
+  databaseName: string;
+  ownerRole: string;
+  orgId?: string;
+  pgVersion?: number;
+}): Promise<CreatedProject> {
+  // retry: false — POST /projects is not idempotent. If Neon creates the
+  // project but the response is lost (network error) or arrives as a 5xx, a
+  // retry here would create a second billed project with the same name. The
+  // error instead propagates to provisionNeonDbForApp's caller; the neon_tasks
+  // queue re-runs the task and adopt-before-create picks up whatever landed.
+  const res = await neonFetch('/projects', {
+    method: 'POST',
+    retry: false,
+    body: JSON.stringify(
+      buildCreateProjectBody({ ...params, orgId: params.orgId ?? config.neon.orgId }),
+    ),
+  });
+
+  const data = await res.json() as {
+    project?: { id?: string };
+    connection_uris?: { connection_uri?: string }[];
+  };
+
+  const projectId = data.project?.id;
+  if (!projectId) {
+    throw new Error(`Neon create-project response missing project.id for app ${params.appId}`);
+  }
+
+  // POST /projects returns the connection URI inline. Fall back to the
+  // dedicated endpoint if a future API version stops doing so.
+  let connectionUri = data.connection_uris?.[0]?.connection_uri ?? '';
+  if (!connectionUri) {
+    const resolved = await getConnectionString(projectId, params.databaseName, params.ownerRole);
+    connectionUri = resolved.connectionUri;
+  }
+
+  return { projectId, databaseName: params.databaseName, connectionUri };
+}
+
+/**
+ * Look up a project by its exact name. Used to make tenant provisioning
+ * idempotent: a retried task must adopt the project a crashed earlier
+ * attempt created rather than create a second one.
+ *
+ * `search` does partial matching, so the exact name is re-checked locally.
+ */
+export async function findProjectByName(
+  name: string,
+  orgId: string = config.neon.orgId,
+): Promise<{ id: string } | null> {
+  const params = new URLSearchParams({ search: name, limit: '400' });
+  if (orgId) params.set('org_id', orgId);
+
+  const res = await neonFetch(`/projects?${params}`);
+  const data = await res.json() as { projects?: { id: string; name: string }[] };
+  const match = data.projects?.find((p) => p.name === name);
+  return match ? { id: match.id } : null;
 }

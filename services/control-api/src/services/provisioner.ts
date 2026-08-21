@@ -5,6 +5,7 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import * as neonClient from './neon-client.js';
 import { getDataProjectIdForRegion } from './neon-projects.js';
+import { provisionNeonDbForApp } from './app-db-provision.js';
 import {
   APP_ID_PREFIX,
   APP_ID_LENGTH,
@@ -141,40 +142,30 @@ export async function provisionAppBackground(
 
   try {
     if (config.neon.enabled) {
-      const dataProjectId = getDataProjectIdForRegion(region);
-      const neonDbName = `db_${appId}`;
-      const owner = config.neon.databaseOwner;
-
-      // Serialize mutating Neon API calls; read-only getConnectionString runs outside the lock.
-      await neonClient.withNeonProjectLock(dataProjectId, async () => {
-        await neonClient.ensureRoleExists(dataProjectId, owner);
-        await neonClient.createDatabase(dataProjectId, neonDbName, owner);
-      });
-
-      const { connectionUri, poolerHost, pooledConnectionUri } =
-        await neonClient.getConnectionString(dataProjectId, neonDbName, owner);
-
-      // PG 15+ revokes CREATE on public schema by default; grant it to the app role
-      await neonClient.grantSchemaPrivileges(dataProjectId, neonDbName, owner);
-
-      let poolerConnectionString: string | null = null;
-      if (pooledConnectionUri) {
-        poolerConnectionString = pooledConnectionUri;
-      } else if (poolerHost) {
-        const url = new URL(connectionUri);
-        url.hostname = poolerHost;
-        url.port = '6543';
-        poolerConnectionString = url.toString();
-      }
+      const provisioned = await provisionNeonDbForApp(region, appId);
 
       await runtimeDb.query(
+        // DO UPDATE, not DO NOTHING: a re-provision (e.g. clone-resume) can
+        // create a fresh Neon project, and dropping the row would leave the app
+        // pointing at the old database while the new project bills unrecorded.
+        // With project-per-tenant off this rewrites identical values.
         `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (app_id) DO NOTHING`,
-        [appId, connectionUri, poolerConnectionString, dataProjectId, neonDbName]
+         ON CONFLICT (app_id) DO UPDATE
+           SET connection_string = EXCLUDED.connection_string,
+               pooler_connection_string = EXCLUDED.pooler_connection_string,
+               neon_project_id = EXCLUDED.neon_project_id,
+               neon_database_name = EXCLUDED.neon_database_name`,
+        [
+          appId,
+          provisioned.connectionUri,
+          provisioned.poolerConnectionString,
+          provisioned.neonProjectId,
+          provisioned.neonDatabaseName,
+        ]
       );
 
-      await runMigrationsWithRetry(connectionUri);
+      await runMigrationsWithRetry(provisioned.connectionUri);
     } else {
       const client = await dataPlaneDb.connect();
       try {
