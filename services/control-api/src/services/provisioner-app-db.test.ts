@@ -23,9 +23,13 @@ vi.mock('../config.js', async (importOriginal) => {
   return { ...actual, assertRuntimeDbConfig: () => {} };
 });
 
-vi.mock('./neon-projects.js', () => ({
-  getDataProjectIdForRegion: vi.fn(() => 'legacy-shared-proj-1'),
-}));
+// Spread the real module so the genuine `isProjectPerTenantForRegion` runs
+// (and so a future export can't break this partial factory); only the
+// shared-project lookup is stubbed, to avoid needing NEON_DATA_PROJECT_ID_*.
+vi.mock('./neon-projects.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./neon-projects.js')>();
+  return { ...actual, getDataProjectIdForRegion: vi.fn(() => 'legacy-shared-proj-1') };
+});
 
 vi.mock('./neon-client.js', () => ({
   withNeonProjectLock: async (_projectId: string, fn: () => Promise<void>) => fn(),
@@ -141,5 +145,45 @@ describe('provisionAppDb — legacy branch (projectPerTenant = false)', () => {
 
     expect(out.neonDbName).toBe(custDbNameFor(APP_ID, REGION));
     expect(out.neonDbName).toBe('cust_app_k3f9x2m1qp0z_us_west_2');
+  });
+});
+
+describe('provisionAppDb — per-region override', () => {
+  const original = config.neon.projectPerTenant;
+
+  beforeEach(() => {
+    provisionNeonDbForApp.mockReset().mockResolvedValue({
+      connectionUri: 'postgres://u:p@direct/db_app',
+      poolerConnectionString: null,
+      neonProjectId: 'tenant-proj-1',
+      neonDatabaseName: `db_${APP_ID}`,
+    });
+    runtimeQuery.mockClear();
+    getRuntimeDbPool.mockClear();
+  });
+
+  afterEach(() => {
+    config.neon.projectPerTenant = original;
+    delete process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2;
+  });
+
+  it('takes the tenant branch when only the region is enabled', async () => {
+    config.neon.projectPerTenant = false;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2 = 'true';
+
+    const out = await provisionAppDb(REGION, APP_ID, 'owner');
+
+    expect(provisionNeonDbForApp).toHaveBeenCalledWith(REGION, APP_ID);
+    expect(out.neonDbName).toBe(`db_${APP_ID}`);
+  });
+
+  it('takes the legacy branch when the region is disabled despite a true global', async () => {
+    config.neon.projectPerTenant = true;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2 = 'false';
+
+    const out = await provisionAppDb(REGION, APP_ID, 'owner');
+
+    expect(provisionNeonDbForApp).not.toHaveBeenCalled();
+    expect(out.neonDbName).toBe(custDbNameFor(APP_ID, REGION));
   });
 });

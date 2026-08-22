@@ -175,4 +175,43 @@ describe('provisionNeonDbForApp', () => {
       expect(calls).not.toContain('createProjectForApp');
     });
   });
+
+  describe('per-region override', () => {
+    afterEach(() => {
+      delete process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1;
+      delete process.env.BUTTERBASE_PROJECT_PER_TENANT_EU_WEST_1;
+    });
+
+    it('takes the tenant path when the region is on and the global is off', async () => {
+      config.neon.projectPerTenant = false;
+      process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = 'true';
+
+      const { deps, calls } = makeDeps();
+      const result = await provisionNeonDbForApp('us-east-1', APP_ID, deps);
+
+      expect(result.neonProjectId).toBe('tenant-proj-1');
+      expect(calls).toContain('createProjectForApp');
+    });
+
+    it('takes the legacy path when the region is off even though the global is on', async () => {
+      config.neon.projectPerTenant = true;
+      process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = 'false';
+
+      const { deps, calls } = makeDeps();
+      const result = await provisionNeonDbForApp('us-east-1', APP_ID, deps);
+
+      expect(result.neonProjectId).toBe('shared-proj-us-east-1');
+      expect(calls).not.toContain('createProjectForApp');
+    });
+
+    it('leaves other regions on the global flag — one region at a time', async () => {
+      config.neon.projectPerTenant = false;
+      process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = 'true';
+
+      const { deps, calls } = makeDeps();
+      await provisionNeonDbForApp('eu-west-1', APP_ID, deps);
+
+      expect(calls).not.toContain('createProjectForApp');
+    });
+  });
 });

@@ -50,6 +50,9 @@ vi.mock('../neon-projects.js', () => ({
   // defaultDeps() eagerly reads every member of neon-projects.js; unused on
   // the legacy path but required or the mock factory throws "No export".
   getNeonPgVersionForRegion: vi.fn(() => 17),
+  // provisionNeonDbForApp branches on this directly. These tests exercise the
+  // legacy path, so it stays off.
+  isProjectPerTenantForRegion: vi.fn(() => false),
 }));
 
 vi.mock('../provisioner.js', () => ({

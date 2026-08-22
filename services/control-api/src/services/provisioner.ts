@@ -4,7 +4,7 @@ import { config, assertRegionConfig, assertRuntimeDbConfig } from '../config.js'
 import { getRuntimeDbPool } from './runtime-db.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import * as neonClient from './neon-client.js';
-import { getDataProjectIdForRegion } from './neon-projects.js';
+import { getDataProjectIdForRegion, isProjectPerTenantForRegion } from './neon-projects.js';
 import { provisionNeonDbForApp } from './app-db-provision.js';
 import {
   APP_ID_PREFIX,
@@ -445,7 +445,9 @@ async function formatResponse(app: App, runtimeDb: pg.Pool): Promise<InitRespons
  * `app_db_connections` row for it, and return the connection URI. Does NOT run
  * customer migrations — the move-app saga's restoring_data step does that.
  *
- * Two shapes, selected by `config.neon.projectPerTenant`:
+ * Two shapes, selected by `isProjectPerTenantForRegion(region)` — the
+ * per-region override `BUTTERBASE_PROJECT_PER_TENANT_<REGION>` when set,
+ * otherwise the global `config.neon.projectPerTenant`:
  *
  *   tenant — delegates to `provisionNeonDbForApp`, which creates a dedicated
  *            Neon project per app (adopt-before-create on retry).
@@ -465,7 +467,7 @@ export async function provisionAppDb(
   // plugin). Idempotent guard handles the first case.
   assertRuntimeDbConfig();
 
-  if (config.neon.projectPerTenant) {
+  if (isProjectPerTenantForRegion(region)) {
     // One Neon project per app. The shared helper owns adopt-before-create,
     // the queryability wait and the pooled-URI lookup; all this branch adds is
     // the app_db_connections row, which step-restore-data reads in the dest
