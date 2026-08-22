@@ -23,7 +23,23 @@ vi.mock('../config.js', async (importOriginal) => {
   return { ...actual, assertRuntimeDbConfig: () => {} };
 });
 
-const { provisionAppDb } = await import('./provisioner.js');
+vi.mock('./neon-projects.js', () => ({
+  getDataProjectIdForRegion: vi.fn(() => 'legacy-shared-proj-1'),
+}));
+
+vi.mock('./neon-client.js', () => ({
+  withNeonProjectLock: async (_projectId: string, fn: () => Promise<void>) => fn(),
+  ensureRoleExists: vi.fn().mockResolvedValue(undefined),
+  createDatabase: vi.fn().mockResolvedValue(undefined),
+  grantSchemaPrivileges: vi.fn().mockResolvedValue(undefined),
+  getConnectionString: vi.fn().mockResolvedValue({
+    connectionUri: 'postgres://u:p@direct/legacy-db',
+    poolerHost: undefined,
+    pooledConnectionUri: undefined,
+  }),
+}));
+
+const { provisionAppDb, custDbNameFor } = await import('./provisioner.js');
 const { config } = await import('../config.js');
 
 const APP_ID = 'app_k3f9x2m1qp0z';
@@ -98,5 +114,32 @@ describe('provisionAppDb — tenant branch (projectPerTenant = true)', () => {
     await provisionAppDb(REGION, APP_ID, 'owner');
 
     expect(getRuntimeDbPool).toHaveBeenCalledWith(expect.anything(), REGION);
+  });
+});
+
+describe('provisionAppDb — legacy branch (projectPerTenant = false)', () => {
+  const original = config.neon.projectPerTenant;
+
+  beforeEach(() => {
+    config.neon.projectPerTenant = false;
+    runtimeQuery.mockClear();
+    getRuntimeDbPool.mockClear();
+  });
+
+  afterEach(() => { config.neon.projectPerTenant = original; });
+
+  // Regression guard for the reconciler's orphan detection: the reconciler
+  // decides which cust_* databases are live by recomputing this same name
+  // via the shared `custDbNameFor` export. If provisionAppDb's actual
+  // database name ever drifts from `custDbNameFor`'s output — e.g. someone
+  // reintroduces a second inline copy of the naming instead of calling the
+  // shared helper — every live cust_* database becomes a false orphan and
+  // gets deleted. This test calls the real `provisionAppDb` legacy path
+  // (not just the helper in isolation) and asserts the two stay identical.
+  it('names the cust_* database exactly as custDbNameFor computes it', async () => {
+    const out = await provisionAppDb(REGION, APP_ID, 'owner');
+
+    expect(out.neonDbName).toBe(custDbNameFor(APP_ID, REGION));
+    expect(out.neonDbName).toBe('cust_app_k3f9x2m1qp0z_us_west_2');
   });
 });

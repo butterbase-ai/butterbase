@@ -516,10 +516,13 @@ export async function getConnectionString(
   const cachedPoolerHost = direct.poolerHost ?? poolerHostCache.get(projectId);
 
   if (cachedPoolerHost) {
-    // Build pooled URI from cached pooler host — skip the extra API call
+    // Build pooled URI from cached pooler host — skip the extra API call.
+    // Swap the HOST only. Neon's pooled endpoint returns
+    // `ep-<id>-pooler.<region>.aws.neon.tech` with no explicit port (i.e. the
+    // default 5432); the `:6543` we used to inject here is an obsolete
+    // convention and produced an unusable URI.
     const url = new URL(direct.connectionUri);
     url.hostname = cachedPoolerHost;
-    url.port = '6543';
     pooledConnectionUri = url.toString();
   } else {
     // No pooler host known yet — fetch via pooled=true endpoint
