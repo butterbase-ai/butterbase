@@ -163,4 +163,25 @@ describe('isProjectPerTenantForRegion', () => {
     delete process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2;
     expect(isProjectPerTenantForRegion('us-west-2')).toBe(false);
   });
+
+  it('treats an empty-string value as unset and falls back to the global (global true) — the footgun case', () => {
+    // A Fly secret declared with no value, or a bare `- VAR` line in
+    // docker-compose, passes through as ''. It must NOT resolve to false
+    // and silently disable a region the global flag had enabled.
+    config.neon.projectPerTenant = true;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = '';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(true);
+  });
+
+  it('treats an empty-string value as unset and falls back to the global (global false)', () => {
+    config.neon.projectPerTenant = false;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = '';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(false);
+  });
+
+  it('treats a whitespace-only value as unset and falls back to the global (global true)', () => {
+    config.neon.projectPerTenant = true;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = '   ';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(true);
+  });
 });

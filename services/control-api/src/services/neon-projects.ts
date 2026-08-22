@@ -68,11 +68,21 @@ export function getNeonPgVersionForRegion(region: string): number {
  * and one may be closed to new provisioning), so the flag must be flippable
  * one region at a time rather than globally.
  *
- * `BUTTERBASE_PROJECT_PER_TENANT_<REGION>` — when set — DECIDES, in both
- * directions: `'true'` enables, any other value disables even if the global
- * flag is on. It is an override, not an OR. When unset we fall back to the
- * global `config.neon.projectPerTenant`, so with no per-region vars set the
- * behaviour is exactly what it is today.
+ * `BUTTERBASE_PROJECT_PER_TENANT_<REGION>` — when set to a non-empty,
+ * non-whitespace value — DECIDES, in both directions: `'true'` enables, any
+ * other non-empty value disables even if the global flag is on. It is an
+ * override, not an OR. When unset, OR set to `''`/whitespace-only, we fall
+ * back to the global `config.neon.projectPerTenant`.
+ *
+ * The empty-string case matters operationally: a Fly secret declared as
+ * `BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1=` (no value), or a bare
+ * `- BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1` line in docker-compose, is
+ * "set" from the shell's point of view but passes through as `''`. Unlike
+ * the sibling resolvers below (which use truthiness and therefore already
+ * treat `''` as unset), this one cannot use plain truthiness — truthiness
+ * can't express an explicit `false` override. So it special-cases blank
+ * strings to fall back instead of silently resolving to `false` and
+ * disabling a region the global flag had enabled.
  *
  * Reads env on every call — no caching, matching getNeonRegionIdForRegion.
  *
@@ -82,7 +92,7 @@ export function getNeonPgVersionForRegion(region: string): number {
  */
 export function isProjectPerTenantForRegion(region: string): boolean {
   const raw = process.env[envKey('BUTTERBASE_PROJECT_PER_TENANT', region)];
-  if (raw !== undefined) return raw === 'true';
+  if (raw !== undefined && raw.trim() !== '') return raw === 'true';
   return config.neon.projectPerTenant;
 }
 

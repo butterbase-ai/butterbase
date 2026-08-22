@@ -205,13 +205,17 @@ describe('provisionNeonDbForApp', () => {
     });
 
     it('leaves other regions on the global flag — one region at a time', async () => {
-      config.neon.projectPerTenant = false;
-      process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = 'true';
+      // Global is ON; only us-east-1 is explicitly overridden OFF. If the
+      // override leaked across regions, eu-west-1 would wrongly take the
+      // legacy path too — this pins that it stays on the (true) global.
+      config.neon.projectPerTenant = true;
+      process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = 'false';
 
       const { deps, calls } = makeDeps();
-      await provisionNeonDbForApp('eu-west-1', APP_ID, deps);
+      const result = await provisionNeonDbForApp('eu-west-1', APP_ID, deps);
 
-      expect(calls).not.toContain('createProjectForApp');
+      expect(result.neonProjectId).toBe('tenant-proj-1');
+      expect(calls).toContain('createProjectForApp');
     });
   });
 });
