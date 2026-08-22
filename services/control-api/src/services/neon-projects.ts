@@ -61,6 +61,41 @@ export function getNeonPgVersionForRegion(region: string): number {
   return config.neon.pgVersion;
 }
 
+/**
+ * Is project-per-app provisioning enabled for `region`?
+ *
+ * Staged rollout: the regions are not equivalent (different Neon PG majors,
+ * and one may be closed to new provisioning), so the flag must be flippable
+ * one region at a time rather than globally.
+ *
+ * `BUTTERBASE_PROJECT_PER_TENANT_<REGION>` — when set to a non-empty,
+ * non-whitespace value — DECIDES, in both directions: `'true'` enables, any
+ * other non-empty value disables even if the global flag is on. It is an
+ * override, not an OR. When unset, OR set to `''`/whitespace-only, we fall
+ * back to the global `config.neon.projectPerTenant`.
+ *
+ * The empty-string case matters operationally: a Fly secret declared as
+ * `BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1=` (no value), or a bare
+ * `- BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1` line in docker-compose, is
+ * "set" from the shell's point of view but passes through as `''`. Unlike
+ * the sibling resolvers below (which use truthiness and therefore already
+ * treat `''` as unset), this one cannot use plain truthiness — truthiness
+ * can't express an explicit `false` override. So it special-cases blank
+ * strings to fall back instead of silently resolving to `false` and
+ * disabling a region the global flag had enabled.
+ *
+ * Reads env on every call — no caching, matching getNeonRegionIdForRegion.
+ *
+ * Provisioning paths only. Teardown deliberately discriminates on the app's
+ * stored `neon_project_id`, because the flag can change between an app's
+ * provision and its deletion.
+ */
+export function isProjectPerTenantForRegion(region: string): boolean {
+  const raw = process.env[envKey('BUTTERBASE_PROJECT_PER_TENANT', region)];
+  if (raw !== undefined && raw.trim() !== '') return raw === 'true';
+  return config.neon.projectPerTenant;
+}
+
 export function assertNeonProjectsConfig(): void {
   const regionsRaw = process.env.BUTTERBASE_REGIONS ?? '';
   const regions = regionsRaw.split(',').map((s) => s.trim()).filter(Boolean);

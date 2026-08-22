@@ -4,6 +4,7 @@ import {
   getDataProjectIdForRegion,
   getNeonRegionIdForRegion,
   getNeonPgVersionForRegion,
+  isProjectPerTenantForRegion,
 } from './neon-projects.js';
 
 export interface ProvisionedDb {
@@ -76,7 +77,9 @@ function pooledFrom(
  * Provision the customer Postgres database for one app and return everything
  * the caller needs to write `app_db_connections`.
  *
- * Two shapes, selected by `config.neon.projectPerTenant`:
+ * Two shapes, selected by `isProjectPerTenantForRegion(region)` — the
+ * per-region override `BUTTERBASE_PROJECT_PER_TENANT_<REGION>` when set,
+ * otherwise the global `config.neon.projectPerTenant`:
  *
  *   tenant — one Neon project per app. Single POST creates project, database
  *            and owner role. No role bootstrap, no schema grant, no lock.
@@ -94,7 +97,7 @@ export async function provisionNeonDbForApp(
   const neonDbName = `db_${appId}`;
   const owner = config.neon.databaseOwner;
 
-  if (config.neon.projectPerTenant) {
+  if (isProjectPerTenantForRegion(region)) {
     // Idempotency: a retried neon_task must adopt the project a crashed
     // earlier attempt already created, or we leak a billed project per retry.
     // This lookup runs on EVERY tenant provision, not just retries, and an

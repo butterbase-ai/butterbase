@@ -5,6 +5,7 @@ import {
   assertNeonProjectsConfig,
   getNeonRegionIdForRegion,
   getNeonPgVersionForRegion,
+  isProjectPerTenantForRegion,
   __resetNeonProjectsCache,
 } from './neon-projects.js';
 import { config } from '../config.js';
@@ -104,5 +105,83 @@ describe('getNeonPgVersionForRegion', () => {
   it('falls back to the global default on a non-numeric value', () => {
     process.env.NEON_PG_VERSION_US_WEST_2 = 'not-a-number';
     expect(getNeonPgVersionForRegion('us-west-2')).toBe(config.neon.pgVersion);
+  });
+});
+
+describe('isProjectPerTenantForRegion', () => {
+  const original = config.neon.projectPerTenant;
+  afterEach(() => { config.neon.projectPerTenant = original; });
+
+  it('enables the region when BUTTERBASE_PROJECT_PER_TENANT_<REGION> is "true"', () => {
+    config.neon.projectPerTenant = false;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2 = 'true';
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(true);
+  });
+
+  it('is a true override: per-region "false" disables even when the global is true', () => {
+    config.neon.projectPerTenant = true;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = 'false';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(false);
+  });
+
+  it('treats any non-"true" value as off', () => {
+    config.neon.projectPerTenant = true;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = '1';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(false);
+  });
+
+  it("does not leak one region's override into another", () => {
+    config.neon.projectPerTenant = false;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2 = 'true';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(false);
+  });
+
+  it('falls back to the global flag when unset (global true)', () => {
+    config.neon.projectPerTenant = true;
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(true);
+  });
+
+  it('falls back to the global flag when unset (global false)', () => {
+    config.neon.projectPerTenant = false;
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(false);
+  });
+
+  it('derives the env key by upper-casing and underscoring the region', () => {
+    config.neon.projectPerTenant = false;
+    // us-west-2 -> US_WEST_2; the raw-region key must NOT be consulted.
+    process.env['BUTTERBASE_PROJECT_PER_TENANT_us-west-2'] = 'true';
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(false);
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2 = 'true';
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(true);
+  });
+
+  it('reads env on every call — no caching', () => {
+    config.neon.projectPerTenant = false;
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(false);
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2 = 'true';
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(true);
+    delete process.env.BUTTERBASE_PROJECT_PER_TENANT_US_WEST_2;
+    expect(isProjectPerTenantForRegion('us-west-2')).toBe(false);
+  });
+
+  it('treats an empty-string value as unset and falls back to the global (global true) — the footgun case', () => {
+    // A Fly secret declared with no value, or a bare `- VAR` line in
+    // docker-compose, passes through as ''. It must NOT resolve to false
+    // and silently disable a region the global flag had enabled.
+    config.neon.projectPerTenant = true;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = '';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(true);
+  });
+
+  it('treats an empty-string value as unset and falls back to the global (global false)', () => {
+    config.neon.projectPerTenant = false;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = '';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(false);
+  });
+
+  it('treats a whitespace-only value as unset and falls back to the global (global true)', () => {
+    config.neon.projectPerTenant = true;
+    process.env.BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1 = '   ';
+    expect(isProjectPerTenantForRegion('us-east-1')).toBe(true);
   });
 });
