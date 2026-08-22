@@ -31,6 +31,14 @@ interface Logger {
  *     go first.
  *   - dry-run default: unless `NEON_ORPHAN_DRY_RUN=false` is explicit, we just
  *     log what we WOULD drop.
+ *   - ambiguity bail-out (cust_* only): if we cannot reconstruct the database
+ *     name exactly from a known app id, we treat it as NOT an orphan. A missed
+ *     orphan costs storage; a wrong drop destroys customer data.
+ *
+ * Two naming shapes exist:
+ *   - `db_app_<id>`            — provisionAppBackground / executeProvision.
+ *   - `cust_<appId>_<region>`  — provisionAppDb, the move-app destination DB.
+ * See `custDbNameFor` for why the second is matched forwards, never inverted.
  */
 
 export interface ReconcileResult {
@@ -43,6 +51,9 @@ export interface ReconcileResult {
   wouldDrop: string[];
   skippedYoung: number;
   skippedInflight: number;
+  /** cust_* databases we refused to classify because the name could not be
+   *  reconstructed unambiguously. Always treated as NOT orphans. */
+  skippedAmbiguous: number;
   dropErrors: { db: string; error: string }[];
 }
 
@@ -57,6 +68,36 @@ export interface ReconcileOptions {
 /** Named prefix for per-app data-plane databases — matches provisioner.ts:145. */
 const APP_DB_PREFIX = 'db_app_';
 
+/** Prefix for move-app destination databases — matches `provisionAppDb`. */
+const CUST_DB_PREFIX = 'cust_';
+
+/** Postgres `datname` limit. `provisionAppDb` truncates to this. */
+const PG_MAX_DATNAME = 63;
+
+/**
+ * Reproduce `provisionAppDb`'s destination-database name EXACTLY.
+ *
+ * We match forwards (compute the expected name for every known app id and
+ * compare) rather than inverting the name back to an app id, because the
+ * transform is not injective:
+ *   - `-` → `_` collapses two distinct characters into one,
+ *   - `.toLowerCase()` collapses case,
+ *   - `.slice(0, 63)` is outright lossy.
+ * Inverting would mean guessing, and a wrong guess here drops a live customer
+ * database. Forward-matching cannot produce a false positive.
+ */
+export function custDbNameFor(appId: string, region: string): string {
+  return `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
+    .toLowerCase()
+    .slice(0, PG_MAX_DATNAME);
+}
+
+/** Same normalisation applied to the app-id segment alone — used to line a
+ *  cust_* name up with `neon_tasks.app_id` for the in-flight guard. */
+function appIdSlug(appId: string): string {
+  return appId.replace(/-/g, '_').toLowerCase();
+}
+
 export async function reconcileOrphansForRegion(
   region: string,
   controlDb: pg.Pool,
@@ -70,9 +111,10 @@ export async function reconcileOrphansForRegion(
   const nowMs = opts.now ? new Date(opts.now).getTime() : Date.now();
   const graceMs = opts.graceHours * 3600 * 1000;
 
-  // 1. Full Neon inventory for this project's default branch.
+  // 1. Full Neon inventory for this project's default branch. Both naming
+  //    shapes are in scope; anything else (neondb, internal dbs) is ignored.
   const neonDbs = (await neonClient.listDatabases(projectId))
-    .filter((db) => db.name.startsWith(APP_DB_PREFIX));
+    .filter((db) => db.name.startsWith(APP_DB_PREFIX) || db.name.startsWith(CUST_DB_PREFIX));
 
   // 2. Every app row currently registered for this region.
   const liveRes = await runtimePool.query<{ db_name: string }>(
@@ -80,6 +122,25 @@ export async function reconcileOrphansForRegion(
     [region],
   );
   const liveDbNames = new Set(liveRes.rows.map((r) => r.db_name));
+
+  // 2b. cust_* liveness. Deliberately NOT region-filtered: a move-app
+  //     destination database is created in the target region before the app's
+  //     `apps.region` flips over, so filtering by region here would make a
+  //     mid-move database look like an orphan.
+  const custAppsRes = await runtimePool.query<{ id: string }>(`SELECT id FROM apps`);
+  const liveCustNames = new Set(
+    custAppsRes.rows.map((r) => r.id).filter(Boolean).map((id) => custDbNameFor(id, region)),
+  );
+
+  // 2c. Anything already registered in app_db_connections is owned by an app,
+  //     even if the corresponding `apps` row lives in the source region's
+  //     runtime DB. `provisionAppDb` writes this row as its first durable act.
+  const registeredRes = await runtimePool.query<{ neon_database_name: string | null }>(
+    `SELECT neon_database_name FROM app_db_connections`,
+  );
+  const registeredDbNames = new Set(
+    registeredRes.rows.map((r) => r.neon_database_name).filter((n): n is string => Boolean(n)),
+  );
 
   // 3. In-flight provision/deprovision tasks — do NOT touch their app_ids.
   //    A pending 'provision' task means the DB may exist but the app row
@@ -91,15 +152,54 @@ export async function reconcileOrphansForRegion(
         AND status IN ('pending', 'processing')`,
   );
   const inflightAppIds = new Set(inflightRes.rows.map((r) => r.app_id));
+  const inflightAppIdSlugs = new Set([...inflightAppIds].map(appIdSlug));
 
-  // 4. Diff. Neon db_app_<id> ↔ apps.db_name is 'app_<id>' — strip the 'db_' prefix.
+  // 4. Diff.
+  //    db_app_<id> ↔ apps.db_name is 'app_<id>' — strip the 'db_' prefix.
+  //    cust_<appId>_<region> is matched forwards against custDbNameFor().
+  const custSuffix = `_${region.replace(/-/g, '_').toLowerCase()}`;
   const orphans: { name: string; appId: string; createdAt: string; ageMs: number }[] = [];
   let skippedYoung = 0;
   let skippedInflight = 0;
+  let skippedAmbiguous = 0;
   let unmatchedNeonCount = 0; // Neon dbs with no live app row (before grace/inflight filters)
   for (const db of neonDbs) {
-    const appId = db.name.slice('db_'.length); // 'db_app_XXX' → 'app_XXX'
-    if (liveDbNames.has(appId)) continue;
+    let appId: string;
+
+    if (db.name.startsWith(APP_DB_PREFIX)) {
+      appId = db.name.slice('db_'.length); // 'db_app_XXX' → 'app_XXX'
+      if (liveDbNames.has(appId)) continue;
+    } else {
+      // cust_* — a move-app destination database.
+      if (registeredDbNames.has(db.name) || liveCustNames.has(db.name)) continue;
+
+      // Everything below is a reason we cannot *prove* the database is
+      // unowned, so we decline to classify it rather than risk a bad drop.
+      //
+      //  - length >= 63: the name may have been truncated, so the app-id
+      //    segment (and possibly the region suffix) is incomplete.
+      //  - missing region suffix: not the shape provisionAppDb produces for
+      //    this region, so we do not understand who created it.
+      //  - empty app-id segment: nothing to guard the in-flight check with.
+      if (db.name.length >= PG_MAX_DATNAME || !db.name.endsWith(custSuffix)) {
+        skippedAmbiguous++;
+        continue;
+      }
+      const slug = db.name.slice(CUST_DB_PREFIX.length, db.name.length - custSuffix.length);
+      if (!slug) {
+        skippedAmbiguous++;
+        continue;
+      }
+      // The slug is only used for the in-flight guard and for logging — never
+      // to decide liveness, which was settled by the forward match above.
+      appId = slug;
+      if (inflightAppIdSlugs.has(slug)) {
+        unmatchedNeonCount++;
+        skippedInflight++;
+        continue;
+      }
+    }
+
     unmatchedNeonCount++;
     if (inflightAppIds.has(appId)) {
       skippedInflight++;
@@ -114,9 +214,11 @@ export async function reconcileOrphansForRegion(
   }
   // Live apps whose db_name doesn't exist in Neon — the inverse orphan class
   // (broken app that will 3D000 on query). We only log the count; fixing them
-  // is out of scope for this reconciler.
+  // is out of scope for this reconciler. Scoped to the db_app_ shape only.
   const missingNeonForLive = liveDbNames.size
-    - neonDbs.filter((db) => liveDbNames.has(db.name.slice('db_'.length))).length;
+    - neonDbs.filter((db) =>
+        db.name.startsWith(APP_DB_PREFIX) && liveDbNames.has(db.name.slice('db_'.length)),
+      ).length;
 
   // Oldest first — pick from the most-clearly-orphaned end when the cap bites.
   orphans.sort((a, b) => a.ageMs - b.ageMs > 0 ? -1 : 1);
@@ -133,6 +235,7 @@ export async function reconcileOrphansForRegion(
     wouldDrop: [],
     skippedYoung,
     skippedInflight,
+    skippedAmbiguous,
     dropErrors: [],
   };
 
@@ -149,6 +252,7 @@ export async function reconcileOrphansForRegion(
       eligibleCount,
       skippedYoung,
       skippedInflight,
+      skippedAmbiguous,
       cappedAt: opts.maxDropsPerRun,
       willProcess: toProcess.length,
       mode: opts.dryRun ? 'dry-run' : 'drop',
@@ -219,9 +323,10 @@ export async function reconcileOrphans(
       wouldDrop: a.wouldDrop + r.wouldDrop.length,
       skippedYoung: a.skippedYoung + r.skippedYoung,
       skippedInflight: a.skippedInflight + r.skippedInflight,
+      skippedAmbiguous: a.skippedAmbiguous + r.skippedAmbiguous,
       errors: a.errors + r.dropErrors.length,
     }),
-    { dropped: 0, wouldDrop: 0, skippedYoung: 0, skippedInflight: 0, errors: 0 },
+    { dropped: 0, wouldDrop: 0, skippedYoung: 0, skippedInflight: 0, skippedAmbiguous: 0, errors: 0 },
   );
   logger.info(
     { ...totals, regionsScanned: results.length, mode: opts.dryRun ? 'dry-run' : 'drop' },

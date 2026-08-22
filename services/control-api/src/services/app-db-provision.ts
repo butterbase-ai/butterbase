@@ -46,12 +46,11 @@ function defaultDeps(): ProvisionDeps {
 
 /** Pick the pooled connection string for `app_db_connections`.
  *
- *  This function does not itself append the historical `:6543` port. It does
- *  NOT, however, guarantee the port is absent: `getConnectionString` in
- *  neon-client.ts still sets `url.port = '6543'` on its cached-pooler-host
- *  branch, and the `pooled` value is returned here verbatim. So the obsolete
- *  `:6543` convention (design doc §6.2) is not yet fixed — the rewrite just
- *  lives upstream.
+ *  This function does not append the historical `:6543` port, and as of the
+ *  fix to `getConnectionString` in neon-client.ts neither does the upstream
+ *  cached-pooler-host branch — it now swaps the host only. Neon's pooled host
+ *  (`ep-<id>-pooler.<region>.aws.neon.tech`) carries no explicit port, so the
+ *  obsolete `:6543` convention (design doc §6.2) is gone from both paths.
  *
  *  Because `getConnectionString` never returns a truthy `poolerHost` without
  *  also returning `pooledConnectionUri`, the host-construct branch below is

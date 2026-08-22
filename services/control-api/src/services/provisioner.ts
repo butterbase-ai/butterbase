@@ -288,9 +288,10 @@ export async function provisionApp(
     if (pooledConnectionUri) {
       poolerConnectionString = pooledConnectionUri;
     } else if (poolerHost) {
+      // Host swap only — Neon's pooled host carries no explicit port. (The
+      // obsolete `:6543` convention used to be injected here.)
       const url = new URL(connectionUri);
       url.hostname = poolerHost;
-      url.port = '6543';
       poolerConnectionString = url.toString();
     }
 
@@ -511,9 +512,10 @@ export async function provisionAppDb(
   if (pooledConnectionUri) {
     poolerConnectionString = pooledConnectionUri;
   } else if (poolerHost) {
+    // Host swap only — Neon's pooled host carries no explicit port. (The
+    // obsolete `:6543` convention used to be injected here.)
     const url = new URL(connectionUri);
     url.hostname = poolerHost;
-    url.port = '6543';
     poolerConnectionString = url.toString();
   }
   const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
