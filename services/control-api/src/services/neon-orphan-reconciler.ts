@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { getDataProjectIdForRegion } from './neon-projects.js';
 import { getRuntimeDbPool, type RuntimeDbConfig } from './runtime-db.js';
 import * as neonClient from './neon-client.js';
+import { custDbNameFor, PG_MAX_DATNAME } from './provisioner.js';
 
 interface Logger {
   info(obj: unknown, msg?: string): void;
@@ -71,11 +72,11 @@ const APP_DB_PREFIX = 'db_app_';
 /** Prefix for move-app destination databases — matches `provisionAppDb`. */
 const CUST_DB_PREFIX = 'cust_';
 
-/** Postgres `datname` limit. `provisionAppDb` truncates to this. */
-const PG_MAX_DATNAME = 63;
-
 /**
- * Reproduce `provisionAppDb`'s destination-database name EXACTLY.
+ * `custDbNameFor` reproduces `provisionAppDb`'s destination-database name
+ * EXACTLY — it is imported from provisioner.ts (the single source of truth
+ * for that naming), not reimplemented here. Re-exported so existing callers
+ * (and this file's tests) can keep importing it from the reconciler.
  *
  * We match forwards (compute the expected name for every known app id and
  * compare) rather than inverting the name back to an app id, because the
@@ -86,11 +87,7 @@ const PG_MAX_DATNAME = 63;
  * Inverting would mean guessing, and a wrong guess here drops a live customer
  * database. Forward-matching cannot produce a false positive.
  */
-export function custDbNameFor(appId: string, region: string): string {
-  return `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
-    .toLowerCase()
-    .slice(0, PG_MAX_DATNAME);
-}
+export { custDbNameFor };
 
 /** Same normalisation applied to the app-id segment alone — used to line a
  *  cust_* name up with `neon_tasks.app_id` for the in-flight guard. */

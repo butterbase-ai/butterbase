@@ -22,6 +22,24 @@ export function generateAppId(): string {
   return `${APP_ID_PREFIX}${generateId()}`;
 }
 
+/** Postgres `datname` limit. `custDbNameFor` truncates to this. */
+export const PG_MAX_DATNAME = 63;
+
+/**
+ * The `cust_<appId>_<region>` move-app destination database name used by the
+ * legacy (non-project-per-tenant) branch of `provisionAppDb` below.
+ *
+ * Exported so `neon-orphan-reconciler.ts` can reproduce it EXACTLY when
+ * deciding which `cust_*` databases belong to live apps — any drift here
+ * silently reclassifies live customer databases as orphans and deletes them.
+ * Keep this the single source of truth for the naming; do not fork a copy.
+ */
+export function custDbNameFor(appId: string, region: string): string {
+  return `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
+    .toLowerCase()
+    .slice(0, PG_MAX_DATNAME);
+}
+
 /**
  * Retries runDataPlaneMigrations with exponential backoff for transient errors that occur while
  * Neon is waking up a cold compute or finishing async DB creation:
@@ -484,10 +502,7 @@ export async function provisionAppDb(
   if (!dataProjectId) throw new Error(`No data project for region ${region}`);
 
   const owner = config.neon.databaseOwner;
-  // Postgres datname max length = 63 bytes
-  const neonDbName = `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
-    .toLowerCase()
-    .slice(0, 63);
+  const neonDbName = custDbNameFor(appId, region);
 
   // Serialize Neon API calls per project; idempotent on "already exists".
   await neonClient.withNeonProjectLock(dataProjectId, async () => {
