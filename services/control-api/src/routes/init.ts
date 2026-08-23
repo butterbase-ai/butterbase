@@ -7,6 +7,11 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
+import {
+  parseRegionList,
+  getProvisionAllowedRegions,
+  resolveProvisionRegion,
+} from '../services/provision-region.js';
 import { addOrgAppIndex, removeOrgAppIndex, listAppsForUserAcrossOrgs } from '../services/org-app-index.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { checkProjectQuota } from '../services/project-quota.js';
@@ -147,18 +152,9 @@ export async function initRoutes(app: FastifyInstance) {
     // geographically nearest, so a user in California silently got their
     // app provisioned in us-west-2 even when they didn't pick a region.
     // The default needs to be deterministic across machines.
-    const allowedRegions = (process.env.BUTTERBASE_REGIONS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    // Regions that accept NEW app provisioning. Defaults to allowedRegions
-    // (BUTTERBASE_REGIONS gates both serving and provisioning). Setting
-    // BUTTERBASE_PROVISION_ALLOWED_REGIONS to a subset (e.g. "us-west-2")
-    // lets operators temporarily close a region to new writes without
-    // breaking traffic to apps already homed there — needed when one
-    // region has hit an infra ceiling (Neon's 500 databases-per-branch).
-    const provisionAllowed = (
-      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
-        ?? process.env.BUTTERBASE_REGIONS
-        ?? ''
-    ).split(',').map((s) => s.trim()).filter(Boolean);
+    const allowedRegions = parseRegionList(process.env.BUTTERBASE_REGIONS);
+    // Regions that accept NEW app provisioning — see services/provision-region.ts.
+    const provisionAllowed = getProvisionAllowedRegions();
     const bodyRegion = (request.body as { region?: string } | undefined)?.region;
     const requestedRegion =
       bodyRegion ??
@@ -173,20 +169,18 @@ export async function initRoutes(app: FastifyInstance) {
         allowed: allowedRegions,
       });
     }
-    // If the caller asked for a region that's temporarily closed to new
-    // apps, silently redirect to the first open region rather than 400ing.
-    // Dashboard/CLI flows often pin a region from the template's source and
-    // failing them mid-hackathon is worse UX than a transparent move. The
-    // response body doesn't currently expose region, so callers see nothing
-    // surprising; we log the override so operators can audit it.
-    let provisionRegion = requestedRegion;
-    if (provisionAllowed.length > 0 && !provisionAllowed.includes(requestedRegion)) {
-      const fallback = provisionAllowed[0];
+    // If the caller asked for a region that's temporarily closed to new apps,
+    // redirect to the first open region rather than 400ing — a working app in
+    // another region beats a failed request. The redirect is reported back to
+    // the caller (`region` / `region_redirected_from` below) so it is never a
+    // silent relocation of their data.
+    const placement = resolveProvisionRegion(requestedRegion, provisionAllowed);
+    const provisionRegion = placement.region;
+    if (placement.redirected) {
       request.log.warn(
-        { requestedRegion, provisionRegion: fallback, allowed: provisionAllowed },
+        { requestedRegion, provisionRegion, allowed: provisionAllowed },
         '[init] redirecting new app to open region',
       );
-      provisionRegion = fallback;
     }
     try {
       getDataProjectIdForRegion(provisionRegion);
@@ -274,6 +268,9 @@ export async function initRoutes(app: FastifyInstance) {
         api_url: `${config.apiBaseUrl}/v1/${appRow.id}`,
         subdomain: existingSubdomain,
         url: `https://${existingSubdomain}.${config.subdomain.baseDomain}`,
+        // The app already existed, so its home region is whatever it was
+        // provisioned into originally — not this request's placement.
+        region: (appRow as any).region ?? provisionRegion,
         created_at: appRow.created_at.toISOString(),
       });
     }
@@ -343,8 +340,17 @@ export async function initRoutes(app: FastifyInstance) {
       api_url: `${config.apiBaseUrl}/v1/${appId}`,
       subdomain,
       url: `https://${subdomain}.${config.subdomain.baseDomain}`,
+      region: provisionRegion,
+      // Only present when the app did NOT land in the requested region, so
+      // clients can branch on its presence alone.
+      ...(placement.redirected ? { region_redirected_from: placement.requestedRegion } : {}),
       created_at: new Date().toISOString(),
       _meta: {
+        ...(placement.redirected
+          ? {
+              notice: `Region "${placement.requestedRegion}" is temporarily closed to new apps; this app was provisioned in "${provisionRegion}" instead.`,
+            }
+          : {}),
         next_actions: [
           { action: 'poll_status', description: 'Poll GET /apps/:app_id/status until provisioning_status is "ready"', recommended: true },
           { action: 'apply_schema', description: 'Define your database tables (after provisioning completes)', recommended: true },

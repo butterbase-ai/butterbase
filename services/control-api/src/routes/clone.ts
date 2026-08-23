@@ -18,6 +18,7 @@ import { AppNotFoundError } from '../services/app-resolver.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { checkProjectQuota } from '../services/project-quota.js';
+import { getProvisionAllowedRegions, resolveProvisionRegion } from '../services/provision-region.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import {
   VALIDATION_INVALID_SCHEMA,
@@ -246,24 +247,19 @@ export function cloneRoutes(app: FastifyInstance) {
       process.env.BUTTERBASE_DEFAULT_REGION ??
       src.region;
 
-    // If the caller pinned a region temporarily closed to new apps (e.g.
-    // dashboard clone form defaults to source.region), silently redirect
-    // to the first open region rather than 400ing. Silent-failing clones
-    // during a hackathon is worse UX than a transparent cross-region
-    // clone. We log the override so operators can audit it.
-    const provisionAllowed = (
-      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
-        ?? process.env.BUTTERBASE_REGIONS
-        ?? ''
-    ).split(',').map((s) => s.trim()).filter(Boolean);
-    let destRegion = requestedDestRegion;
-    if (provisionAllowed.length > 0 && !provisionAllowed.includes(destRegion)) {
-      const fallback = provisionAllowed[0];
+    // If the caller pinned a region temporarily closed to new apps (e.g. the
+    // dashboard clone form defaulting to source.region), redirect to the first
+    // open region rather than 400ing — see services/provision-region.ts. The
+    // redirect is reported on the job response so the clone never lands in a
+    // different region without the caller being told.
+    const provisionAllowed = getProvisionAllowedRegions();
+    const placement = resolveProvisionRegion(requestedDestRegion, provisionAllowed);
+    const destRegion = placement.region;
+    if (placement.redirected) {
       request.log.warn(
-        { requestedDestRegion, destRegion: fallback, sourceRegion: src.region, allowed: provisionAllowed },
+        { requestedDestRegion, destRegion, sourceRegion: src.region, allowed: provisionAllowed },
         '[clone] redirecting new clone to open region',
       );
-      destRegion = fallback;
     }
     const job = await createCloneJob(app.controlDb, {
       sourceAppId: source_app_id,
@@ -279,7 +275,17 @@ export function cloneRoutes(app: FastifyInstance) {
 
     await enqueueCloneTask(source_app_id, src.region, job.id);
 
-    return reply.send({ job_id: job.id, status: 'pending' });
+    return reply.send({
+      job_id: job.id,
+      status: 'pending',
+      dest_region: destRegion,
+      ...(placement.redirected
+        ? {
+            dest_region_redirected_from: placement.requestedRegion,
+            notice: `Region "${placement.requestedRegion}" is temporarily closed to new apps; this clone will be created in "${destRegion}" instead.`,
+          }
+        : {}),
+    });
   });
 
   // GET /v1/clone-jobs/:job_id
