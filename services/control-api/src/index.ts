@@ -105,6 +105,7 @@ import { enforceExpiredGracePeriods } from './services/billing-service.js';
 import { autoRestoreSoftLockedUsers } from './services/billing-service.js';
 import { startNeonTaskWorker } from './services/neon-task-worker.js';
 import { reconcileOrphans } from './services/neon-orphan-reconciler.js';
+import { reconcileTenantProjects, PartialInventoryError } from './services/neon-tenant-reconciler.js';
 import { startFailureNotifier } from './services/failure-notifier.js';
 import { startDigestNotifier } from './services/digest-notifier.js';
 import { startRagWorker } from './services/rag-worker.js';
@@ -859,6 +860,50 @@ Promise.resolve(app.ready())
       app.log.info(
         { intervalHours: rc.runIntervalHours, dryRun: rc.dryRun, graceHours: rc.graceHours, maxDropsPerRun: rc.maxDropsPerRun },
         'Neon orphan reconciler started',
+      );
+    }
+
+    // Tenant-PROJECT reconciler (project-per-app Phase 4). Separate flags from
+    // the database reconciler above — see config.neon.tenantReconciler for why.
+    if (config.neon.enabled && config.neon.tenantReconciler.enabled) {
+      const tc = config.neon.tenantReconciler;
+      const runTenantReconciler = async () => {
+        const redis = getRedisClient();
+        const lockTtlSeconds = Math.max(60, tc.runIntervalHours * 3600);
+        const acquired = await redis.set('lock:tenant-reconciler', '1', 'EX', lockTtlSeconds, 'NX');
+        if (acquired !== 'OK') {
+          app.log.info('Tenant reconciler skipped (another instance holds the lock)');
+          return;
+        }
+        try {
+          await reconcileTenantProjects(app.controlDb, config.runtimeDb, app.log, {
+            graceHours: tc.graceHours,
+            maxDeletesPerRun: tc.maxDeletesPerRun,
+            dryRun: tc.dryRun,
+          });
+        } catch (err) {
+          // A partial inventory is an expected, benign outcome — the cycle
+          // refused to act because it could not see everything. Log it as a
+          // warning so it is visible without paging anyone.
+          if (err instanceof PartialInventoryError) {
+            app.log.warn({ err: err.message }, 'Tenant reconciler aborted (partial inventory)');
+          } else {
+            app.log.error({ err }, 'Tenant reconciler cycle failed');
+          }
+        } finally {
+          await redis.del('lock:tenant-reconciler').catch(() => {});
+        }
+      };
+      // Offset from the database reconciler's 30s so the two do not stack.
+      setTimeout(runTenantReconciler, 90_000);
+      const tenantReconcilerInterval = setInterval(
+        runTenantReconciler,
+        tc.runIntervalHours * 60 * 60 * 1000,
+      );
+      (app as any).tenantReconcilerInterval = tenantReconcilerInterval;
+      app.log.info(
+        { intervalHours: tc.runIntervalHours, dryRun: tc.dryRun, graceHours: tc.graceHours, maxDeletesPerRun: tc.maxDeletesPerRun },
+        'Neon tenant-project reconciler started',
       );
     }
 
