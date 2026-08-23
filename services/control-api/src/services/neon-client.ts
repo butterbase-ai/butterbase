@@ -440,6 +440,44 @@ export async function deleteProject(projectId: string): Promise<void> {
   await neonFetch(`/projects/${projectId}`, { method: 'DELETE' });
 }
 
+export interface NeonProjectSummary {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+/**
+ * One page of the org's projects, for a full inventory scan.
+ *
+ * Distinct from `findProjectByName`, which uses `search` and needs only a
+ * single hit: this is the tenant reconciler's enumeration, where **missing a
+ * page is not a smaller answer, it is a wrong one** — an unlisted project
+ * looks like it does not exist. The caller is responsible for following
+ * `cursor` to exhaustion and for aborting if any page throws.
+ */
+export async function listProjectsPage(
+  params: { cursor?: string; limit?: number; orgId?: string } = {},
+): Promise<{ projects: NeonProjectSummary[]; cursor?: string }> {
+  const orgId = params.orgId ?? config.neon.orgId;
+  const q = new URLSearchParams({ limit: String(params.limit ?? 400) });
+  if (orgId) q.set('org_id', orgId);
+  if (params.cursor) q.set('cursor', params.cursor);
+
+  const res = await neonFetch(`/projects?${q}`);
+  const data = await res.json() as {
+    projects?: NeonProjectSummary[];
+    pagination?: { cursor?: string };
+  };
+  return {
+    projects: (data.projects ?? []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      created_at: p.created_at,
+    })),
+    cursor: data.pagination?.cursor,
+  };
+}
+
 export interface NeonDatabaseSummary {
   name: string;
   createdAt: string;

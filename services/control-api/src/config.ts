@@ -221,6 +221,23 @@ export const config = {
       // Cadence between runs. Default 6h — orphans accrue slowly.
       runIntervalHours: parseInt(process.env.NEON_ORPHAN_RUN_INTERVAL_HOURS ?? '6', 10),
     },
+    /**
+     * Tenant-PROJECT reconciler (project-per-app Phase 4).
+     *
+     * Deliberately has its OWN enable and dry-run flags rather than sharing
+     * `orphanReconciler`'s. Dropping a database inside a shared project is
+     * recoverable-ish; deleting a Neon project destroys the database, its
+     * branches, history and backups in one irreversible call. Setting
+     * NEON_ORPHAN_DRY_RUN=false to arm the database reconciler must never
+     * silently arm this one too.
+     */
+    tenantReconciler: {
+      enabled: process.env.NEON_TENANT_RECONCILER_ENABLED === 'true',
+      dryRun: process.env.NEON_TENANT_DRY_RUN !== 'false',
+      graceHours: parseInt(process.env.NEON_TENANT_GRACE_HOURS ?? '24', 10),
+      maxDeletesPerRun: parseInt(process.env.NEON_TENANT_MAX_DELETES_PER_RUN ?? '5', 10),
+      runIntervalHours: parseInt(process.env.NEON_TENANT_RUN_INTERVAL_HOURS ?? '6', 10),
+    },
   },
 
   realtime: {
