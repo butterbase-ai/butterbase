@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 describe('GET /v1/clone-jobs/:job_id — warnings field', () => {
   it('round-trips warnings from the JSONB column', async () => {
@@ -93,6 +93,19 @@ vi.mock('../plugins/quota-enforcement.js', () => ({ default: { name: 'quota-enfo
 vi.mock('../services/auth/email-service.js', () => ({ sendBillingEmail: vi.fn() }));
 vi.mock('../services/redis.js', () => ({ getRedisClient: vi.fn(() => null) }));
 vi.mock('../services/app-plan-resolver.js', () => ({ getLimitsForApp: vi.fn(async () => ({ maxRequestsPerMin: 100 })) }));
+
+// The route gained org resolution and a project-quota check after this suite was
+// written. Both read the control DB, and the stub below returns `{ rows: [] }`
+// for everything, so unmocked they throw and every case 500s regardless of what
+// it was asserting. Mock them to the "allowed" answer so the assertions test what
+// they claim to.
+vi.mock('../services/org-resolver.js', () => ({
+  resolveOrganizationId: vi.fn(async () => 'org_test'),
+  assertOrgMember: vi.fn(async () => undefined),
+}));
+vi.mock('../services/project-quota.js', () => ({
+  checkProjectQuota: vi.fn(async () => ({ ok: true, current: 0, limit: 100 })),
+}));
 
 // A fixed "good" source app row returned by the runtime pool query.
 const GOOD_SRC_ROW = {
@@ -256,6 +269,81 @@ describe('POST /v1/templates/:source_app_id/clone — new fields', () => {
         pendingEnvVarValues: undefined,
         autoMintRequests: undefined,
       }),
+    );
+
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Region placement — a redirect must be visible to the caller
+// ---------------------------------------------------------------------------
+
+describe('POST /v1/templates/:source_app_id/clone — region placement', () => {
+  const saved = {
+    allowed: process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS,
+    regions: process.env.BUTTERBASE_REGIONS,
+    dflt: process.env.BUTTERBASE_DEFAULT_REGION,
+  };
+
+  afterEach(() => {
+    const restore = (k: string, v: string | undefined) => {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    };
+    restore('BUTTERBASE_PROVISION_ALLOWED_REGIONS', saved.allowed);
+    restore('BUTTERBASE_REGIONS', saved.regions);
+    restore('BUTTERBASE_DEFAULT_REGION', saved.dflt);
+  });
+
+  it('reports dest_region and no redirect marker when the region is open', async () => {
+    process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS = 'us-east-1,us-west-2';
+    delete process.env.BUTTERBASE_DEFAULT_REGION;
+
+    const app = await buildCloneApp();
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+    mockCreateCloneJob.mockResolvedValueOnce({ id: 'cj_open', status: 'pending' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: { dest_region: 'us-east-1' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dest_region).toBe('us-east-1');
+    expect(res.json().dest_region_redirected_from).toBeUndefined();
+    expect(res.json().notice).toBeUndefined();
+
+    await app.close();
+  });
+
+  it('tells the caller when the clone was redirected to another region', async () => {
+    // The point of the fix: a closed region still yields a working clone, but
+    // the caller is told it moved rather than discovering it later — or never.
+    process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS = 'us-west-2';
+    delete process.env.BUTTERBASE_DEFAULT_REGION;
+
+    const app = await buildCloneApp();
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+    mockCreateCloneJob.mockResolvedValueOnce({ id: 'cj_moved', status: 'pending' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: { dest_region: 'us-east-1' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dest_region).toBe('us-west-2');
+    expect(res.json().dest_region_redirected_from).toBe('us-east-1');
+    expect(res.json().notice).toMatch(/us-east-1.*closed.*us-west-2/);
+
+    // The job must actually be created in the region we reported, not the one
+    // that was asked for — a mismatch would make the response a lie.
+    expect(mockCreateCloneJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ destRegion: 'us-west-2' }),
     );
 
     await app.close();
