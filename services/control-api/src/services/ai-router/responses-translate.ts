@@ -80,6 +80,8 @@ export interface ResponsesResponseBody {
     content: Array<{ type: 'output_text'; text: string }>;
   } | {
     type: 'function_call';
+    /** Item id. Optional: the non-streaming path does not mint one. */
+    id?: string;
     call_id: string; name: string; arguments: string;
   }>;
   usage: { input_tokens: number; output_tokens: number; total_tokens: number; reasoning_tokens?: number };
