@@ -30,7 +30,28 @@ import { stripThinkingSuffix } from '../services/ai-router/reasoning.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
-async function resolveGatewayOrg(controlDb: pg.Pool, userId: string): Promise<string> {
+/**
+ * The organization AI spend is attributed to: usage rows, credit gating, and
+ * markup all key off this.
+ *
+ * Prefers the caller's ACTIVE organization over their personal one. Every other
+ * route already honours that org — `plugins/auth.ts` resolves it from
+ * `X-Organization-Id` for JWT sessions and from the bound org for `bb_sk_*`
+ * keys, and it is membership-validated there before it ever reaches us (a
+ * header naming an org the caller does not belong to is dropped, not honoured).
+ * The gateway previously ignored it and always billed personal, so a team's AI
+ * spend landed on whichever member happened to make the call and team-scoped
+ * pricing never applied.
+ *
+ * Falls back to the personal org when no active org is present, which is the
+ * pre-existing behaviour for callers that send no org context.
+ */
+async function resolveGatewayOrg(
+  controlDb: pg.Pool,
+  userId: string,
+  activeOrgId?: string | null,
+): Promise<string> {
+  if (activeOrgId) return activeOrgId;
   const r = await controlDb.query<{ personal_organization_id: string }>(
     'SELECT personal_organization_id FROM platform_users WHERE id = $1',
     [userId],
@@ -254,7 +275,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
       const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeChatCompletion(
         {
@@ -357,7 +378,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
       const { model: markupModel } = stripThinkingSuffix(body.model);
       const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, markupModel);
       const result = await routeMessages(
@@ -467,7 +488,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
       const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeResponses(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
@@ -531,7 +552,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
       const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeEmbedding(
         {
