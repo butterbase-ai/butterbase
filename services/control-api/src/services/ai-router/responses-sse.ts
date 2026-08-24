@@ -1,4 +1,8 @@
-import type { ResponsesResponseBody } from './responses-translate.js';
+import {
+  namespacedFunctionCall,
+  type NamespaceToolMap,
+  type ResponsesResponseBody,
+} from './responses-translate.js';
 
 export function translateCcStreamToResponsesSse(args: {
   id: string;
@@ -6,6 +10,8 @@ export function translateCcStreamToResponsesSse(args: {
   createdAt: number;
   previousResponseId?: string | null;
   ccStream: ReadableStream<Uint8Array>;
+  /** Flattened -> namespaced tool mapping from the request translation, if any. */
+  namespaceTools?: NamespaceToolMap;
   onClose: (final: ResponsesResponseBody) => Promise<void>;
 }): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -142,11 +148,8 @@ export function translateCcStreamToResponsesSse(args: {
        */
       for (const call of toolCalls.values()) {
         const item = {
-          type: 'function_call' as const,
+          ...namespacedFunctionCall(call.call_id, call.name, call.arguments, args.namespaceTools),
           id: `fc_${args.id.slice(4, 12)}_${outputIndex}`,
-          call_id: call.call_id,
-          name: call.name,
-          arguments: call.arguments,
         };
         controller.enqueue(evt('response.output_item.added', { output_index: outputIndex, item }));
         controller.enqueue(

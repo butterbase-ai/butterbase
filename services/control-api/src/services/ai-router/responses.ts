@@ -5,6 +5,7 @@ import {
   responsesRequestToChatCompletion,
   chatCompletionResponseToResponses,
   BUILTIN_TOOL_TYPES,
+  type NamespaceToolMap,
   type ResponsesResponseBody,
 } from './responses-translate.js';
 import { parseReasoningFromBody } from './reasoning.js';
@@ -68,7 +69,15 @@ export async function routeResponses(
   }
 
   const reasoning = parseReasoningFromBody(req as unknown as Record<string, unknown>);
-  const ccReq = responsesRequestToChatCompletion(req, priorInput, priorOutput, reasoning);
+  /**
+   * Built here so both halves of the translation share one mapping: the request
+   * translation flattens `type: "namespace"` tools into it, and the response
+   * translation reads it back to split a called tool into `name` + `namespace`.
+   * Deriving it from the flattened string instead would be ambiguous —
+   * namespace names contain `__` themselves.
+   */
+  const namespaceTools: NamespaceToolMap = new Map();
+  const ccReq = responsesRequestToChatCompletion(req, priorInput, priorOutput, reasoning, namespaceTools);
   const id = generateResponseId();
   const createdAt = nowSeconds();
 
@@ -81,6 +90,7 @@ export async function routeResponses(
       createdAt,
       previousResponseId: req.previous_response_id ?? null,
       ccStream: cc.stream,
+      namespaceTools,
       onClose: async (finalBody) => {
         await insertResponseRow(ctx.runtimePool, {
           id,
@@ -111,6 +121,7 @@ export async function routeResponses(
     createdAt,
     previousResponseId: req.previous_response_id ?? null,
     cc: cc.body as any,
+    namespaceTools,
   });
   await insertResponseRow(ctx.runtimePool, {
     id,
