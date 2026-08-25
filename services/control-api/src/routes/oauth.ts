@@ -6,6 +6,7 @@ import { ApiKeyService } from '../services/api-key-service.js';
 import { config } from '../config.js';
 
 const ALLOWED_SCOPES = new Set(['mcp', 'ai:gateway']);
+const DEFAULT_SCOPE = 'mcp';
 
 // In-memory token bucket per IP for /oauth/register. Phase-1 mitigation against
 // trivial filling of oauth_clients. Follow-up: replace with a Redis counter so
@@ -92,23 +93,13 @@ export async function oauthRoutes(app: FastifyInstance) {
     handler: async (request, reply) => {
       const q = request.query as Record<string, string | undefined>;
 
-      if (q.response_type !== 'code') {
-        return reply.code(400).send({ error: 'unsupported_response_type', error_description: 'response_type must be "code"' });
-      }
-      if (q.code_challenge_method !== 'S256') {
-        return reply.code(400).send({ error: 'invalid_request', error_description: 'code_challenge_method must be S256' });
-      }
-      if (!q.code_challenge || !/^[A-Za-z0-9_-]{43,128}$/.test(q.code_challenge)) {
-        return reply.code(400).send({ error: 'invalid_request', error_description: 'code_challenge missing or malformed' });
-      }
-      if (!q.client_id || !q.redirect_uri || !q.scope || !q.state) {
-        return reply.code(400).send({ error: 'invalid_request', error_description: 'client_id, redirect_uri, scope, state are required' });
-      }
-      const scopes = q.scope.split(/\s+/).filter(Boolean);
-      for (const s of scopes) {
-        if (!ALLOWED_SCOPES.has(s)) {
-          return reply.code(400).send({ error: 'invalid_scope', error_description: `scope "${s}" is not supported` });
-        }
+      // client_id and redirect_uri are validated FIRST and are the only two
+      // failures answered with a direct 400. RFC 6749 §4.1.2.1: when either is
+      // missing or untrusted the AS MUST NOT redirect, because the redirect
+      // target itself cannot be trusted. Everything after this point CAN be
+      // reported to the client, and must be — see redirectError below.
+      if (!q.client_id || !q.redirect_uri) {
+        return reply.code(400).send({ error: 'invalid_request', error_description: 'client_id and redirect_uri are required' });
       }
       const client = await OAuthClientService.lookup(app.controlDb, q.client_id);
       if (!client) {
@@ -118,10 +109,47 @@ export async function oauthRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: 'invalid_request', error_description: 'redirect_uri is not registered for this client' });
       }
 
+      // §4.1.2.1 requires every remaining error to come back on the redirect
+      // URI so the waiting client actually learns what went wrong. Returning
+      // JSON here instead left conformant clients blocked on a loopback
+      // callback that never fired — a hang rather than a diagnosable error.
+      const redirectError = (error: string, description: string) => {
+        const u = new URL(q.redirect_uri as string);
+        u.searchParams.set('error', error);
+        u.searchParams.set('error_description', description);
+        if (q.state) u.searchParams.set('state', q.state);
+        return reply.code(302).header('location', u.toString()).send();
+      };
+
+      if (q.response_type !== 'code') {
+        return redirectError('unsupported_response_type', 'response_type must be "code"');
+      }
+      if (q.code_challenge_method !== 'S256') {
+        return redirectError('invalid_request', 'code_challenge_method must be S256');
+      }
+      if (!q.code_challenge || !/^[A-Za-z0-9_-]{43,128}$/.test(q.code_challenge)) {
+        return redirectError('invalid_request', 'code_challenge missing or malformed');
+      }
+      // RFC 6749 §3.1.2 makes `scope` OPTIONAL on /authorize; when the client
+      // omits it the AS applies its own default. Requiring it locked out every
+      // client that does not send one (Qoder's MCP connector, among others) at
+      // the very first hop. `mcp` is the scope we advertise in the
+      // WWW-Authenticate challenge and in oauth-protected-resource metadata.
+      const requestedScope = q.scope && q.scope.trim() ? q.scope : DEFAULT_SCOPE;
+      const scopes = requestedScope.split(/\s+/).filter(Boolean);
+      for (const s of scopes) {
+        if (!ALLOWED_SCOPES.has(s)) {
+          return redirectError('invalid_scope', `scope "${s}" is not supported`);
+        }
+      }
+
       const st = OAuthStateService.sign({
         client_id: q.client_id,
         redirect_uri: q.redirect_uri,
-        scope: q.scope,
+        scope: requestedScope,
+        // §4.1.1 makes `state` RECOMMENDED, not required, and OAuth 2.1 §4.1.1
+        // says it MAY be omitted when PKCE provides the CSRF binding — which is
+        // the MCP profile exactly. Requiring it was the same bug as `scope`.
         state: q.state,
         code_challenge: q.code_challenge,
       });
@@ -194,7 +222,7 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (body.decision === 'deny') {
         const u = new URL(payload.redirect_uri);
         u.searchParams.set('error', 'access_denied');
-        u.searchParams.set('state', payload.state);
+        if (payload.state) u.searchParams.set('state', payload.state);
         return reply.send({ redirect_to: u.toString() });
       }
 
@@ -228,7 +256,7 @@ export async function oauthRoutes(app: FastifyInstance) {
 
       const u = new URL(payload.redirect_uri);
       u.searchParams.set('code', code);
-      u.searchParams.set('state', payload.state);
+      if (payload.state) u.searchParams.set('state', payload.state);
       return reply.send({ redirect_to: u.toString() });
     },
   });

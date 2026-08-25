@@ -6,7 +6,7 @@ export interface AuthorizePayload {
   client_id: string;
   redirect_uri: string;
   scope: string;
-  state: string;
+  state?: string;
   code_challenge: string;
 }
 

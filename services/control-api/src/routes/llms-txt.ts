@@ -145,7 +145,7 @@ Example:
 
 - Full API docs: https://docs.butterbase.ai
 - Error reference: https://docs.butterbase.ai/errors
-- Schema DSL: https://docs.butterbase.ai/schema
+- Schema DSL: https://docs.butterbase.ai/core-concepts/database/
 - MCP tools: Use \`butterbase_docs\` tool for detailed reference
 
 ## Support
