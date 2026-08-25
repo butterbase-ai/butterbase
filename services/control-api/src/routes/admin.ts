@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { requireAdmin } from './admin-auth.js';
+import { queryPaidConversion } from '../services/paid-conversion.js';
 async function getStripeClient(): Promise<any> {
   // Stripe client lives in the cloud overlay; OSS builds reach an explicit failure.
   // @ts-expect-error — overlay path resolved at runtime
@@ -66,6 +67,7 @@ export async function adminRoutes(app: FastifyInstance) {
       planDist,
       recentSignups,
       aiDailyRows,
+      conversion,
     ] = await Promise.all([
       app.controlDb.query(`SELECT count(*)::int AS c FROM platform_users`),
       fanOutQuery<{ c: number }>(`SELECT count(*)::int AS c FROM apps`),
@@ -106,6 +108,10 @@ export async function adminRoutes(app: FastifyInstance) {
          GROUP BY date(created_at)
          ORDER BY date ASC`
       ),
+      // Paid-conversion metric. Reads the subscriptions table rather than
+      // organizations.plan_id, which disagrees in both directions. See
+      // services/paid-conversion.ts for the full definition.
+      queryPaidConversion(app.controlDb),
     ]);
 
     // Merge daily ai_usage_logs rows by date across regions.
@@ -135,6 +141,7 @@ export async function adminRoutes(app: FastifyInstance) {
       planDistribution: planDist.rows,
       recentSignups: recentSignups.rows,
       aiUsageLast30Days: aiDaily,
+      conversion,
     };
   });
 
