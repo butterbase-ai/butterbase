@@ -22,7 +22,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         authorization_servers: [base],
         scopes_supported: ['mcp', 'ai:gateway'],
         bearer_methods_supported: ['header'],
-        resource_documentation: 'https://docs.butterbase.ai/mcp',
+        resource_documentation: 'https://docs.butterbase.ai/getting-started/mcp-setup/',
       });
     },
   });

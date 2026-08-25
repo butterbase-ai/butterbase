@@ -20,6 +20,18 @@ describe('GET /.well-known/oauth-protected-resource', () => {
     await app.close();
   });
 
+  // A 404 here is invisible in prod but is the first link an MCP client — or a
+  // marketplace reviewer — follows from discovery. Pin the path so a docs-site
+  // reshuffle has to update it deliberately.
+  it('advertises a resource_documentation path that exists on the docs site', async () => {
+    const app = await buildAppForTest();
+    const res = await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource' });
+    expect(res.json().resource_documentation).toBe(
+      'https://docs.butterbase.ai/getting-started/mcp-setup/',
+    );
+    await app.close();
+  });
+
   it('is reachable without an Authorization header', async () => {
     const app = await buildAppForTest();
     const res = await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource' });

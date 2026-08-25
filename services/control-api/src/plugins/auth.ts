@@ -42,7 +42,10 @@ function mcpAuthRequiredBody() {
     code: 'AUTH_REQUIRED',
     message:
       'MCP requires authentication. Run an OAuth flow against this server (see WWW-Authenticate header) or supply a bb_sk_ API key.',
-    remediation: `In Claude Code: \`claude mcp add butterbase ${base}/mcp\`. A browser window will open for you to log in and grant access.`,
+    remediation:
+      `Add ${base}/mcp as a Streamable HTTP MCP server in your client and complete the OAuth flow ` +
+      '(your browser will open to log in and grant access), or send an `Authorization: Bearer bb_sk_...` ' +
+      'header. Per-client setup: https://docs.butterbase.ai/getting-started/mcp-setup/',
     documentation_url: getDocUrl('AUTH_REQUIRED'),
   });
 }

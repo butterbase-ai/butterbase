@@ -209,6 +209,25 @@ describe('GET /oauth/authorize', () => {
     await app.close();
   });
 
+  // Regression: Qoder's MCP connector omits `scope` on /authorize. RFC 6749
+  // §3.1.2 makes it optional, but we required it and 400'd every such client at
+  // the first hop. Query below is a real Qoder authorize URL, scope and all.
+  it('accepts an authorize request with no scope and defaults it to mcp', async () => {
+    const app = await buildAppForTest();
+    const client = await registerClient(app, 'http://127.0.0.1:19888/callback');
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}`
+        + `&redirect_uri=${encodeURIComponent('http://127.0.0.1:19888/callback')}`
+        + `&code_challenge=E4Kkq02ZefjL8aXyB8nY5M6clGZNr6l85x-1aPtC4bc&code_challenge_method=S256`
+        + `&resource=${encodeURIComponent('https://api.butterbase.ai/mcp')}`
+        + `&state=3kUI3Kr511KoM13Z-K0kiRUP1RcvrPHs`,
+    });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toMatch(/\/oauth\/consent\?st=/);
+    await app.close();
+  });
+
   it('400s on unregistered redirect_uri', async () => {
     const app = await buildAppForTest();
     const client = await registerClient(app);

@@ -6,6 +6,7 @@ import { ApiKeyService } from '../services/api-key-service.js';
 import { config } from '../config.js';
 
 const ALLOWED_SCOPES = new Set(['mcp', 'ai:gateway']);
+const DEFAULT_SCOPE = 'mcp';
 
 // In-memory token bucket per IP for /oauth/register. Phase-1 mitigation against
 // trivial filling of oauth_clients. Follow-up: replace with a Redis counter so
@@ -101,10 +102,16 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (!q.code_challenge || !/^[A-Za-z0-9_-]{43,128}$/.test(q.code_challenge)) {
         return reply.code(400).send({ error: 'invalid_request', error_description: 'code_challenge missing or malformed' });
       }
-      if (!q.client_id || !q.redirect_uri || !q.scope || !q.state) {
-        return reply.code(400).send({ error: 'invalid_request', error_description: 'client_id, redirect_uri, scope, state are required' });
+      if (!q.client_id || !q.redirect_uri || !q.state) {
+        return reply.code(400).send({ error: 'invalid_request', error_description: 'client_id, redirect_uri, state are required' });
       }
-      const scopes = q.scope.split(/\s+/).filter(Boolean);
+      // RFC 6749 §3.1.2 makes `scope` OPTIONAL on /authorize; when the client
+      // omits it the AS applies its own default. Requiring it locked out every
+      // client that does not send one (Qoder's MCP connector, among others) at
+      // the very first hop. `mcp` is the scope we advertise in the
+      // WWW-Authenticate challenge and in oauth-protected-resource metadata.
+      const requestedScope = q.scope && q.scope.trim() ? q.scope : DEFAULT_SCOPE;
+      const scopes = requestedScope.split(/\s+/).filter(Boolean);
       for (const s of scopes) {
         if (!ALLOWED_SCOPES.has(s)) {
           return reply.code(400).send({ error: 'invalid_scope', error_description: `scope "${s}" is not supported` });
@@ -121,7 +128,7 @@ export async function oauthRoutes(app: FastifyInstance) {
       const st = OAuthStateService.sign({
         client_id: q.client_id,
         redirect_uri: q.redirect_uri,
-        scope: q.scope,
+        scope: requestedScope,
         state: q.state,
         code_challenge: q.code_challenge,
       });
