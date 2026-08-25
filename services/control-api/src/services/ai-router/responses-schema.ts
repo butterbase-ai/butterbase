@@ -14,6 +14,8 @@ const messageItem = z.object({
 const fnCall = z.object({
   type: z.literal('function_call'),
   call_id: z.string(), name: z.string(), arguments: z.string(),
+  /** Set when the tool came from a `type: "namespace"` group (e.g. Codex MCP tools). */
+  namespace: z.string().optional(),
 }).passthrough();
 
 const fnCallOut = z.object({
@@ -28,6 +30,8 @@ const tool = z.object({
   name: z.string().optional(),
   description: z.string().optional(),
   parameters: z.record(z.unknown()).optional(),
+  /** Nested tools of a `type: "namespace"` group. */
+  tools: z.array(z.record(z.unknown())).optional(),
 }).passthrough();
 
 export const responsesRequestSchema = z.object({

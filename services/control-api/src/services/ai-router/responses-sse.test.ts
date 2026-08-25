@@ -204,3 +204,53 @@ describe('translateCcStreamToResponsesSse', () => {
   });
 
 });
+
+describe('namespaced tool calls', () => {
+  const NS_TOOL_STREAM = [
+    'data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"mcp__butterbase__manage_app","arguments":"{\\"a\\":"}}]}}]}\n\n',
+    'data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}\n\n',
+    'data: {"id":"1","choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n',
+    'data: [DONE]\n\n',
+  ].join('');
+
+  it('emits separate name + namespace in SSE items and in the persisted body', async () => {
+    let final: any = null;
+    const s = translateCcStreamToResponsesSse({
+      id: 'rsp_abcdefgh',
+      model: 'm',
+      createdAt: 1,
+      ccStream: streamOf(NS_TOOL_STREAM),
+      namespaceTools: new Map([
+        ['mcp__butterbase__manage_app', { namespace: 'mcp__butterbase', name: 'manage_app' }],
+      ]),
+      onClose: async (f) => { final = f; },
+    });
+    const raw = await collect(s);
+    const items = [...raw.matchAll(/^data: (.+)$/gm)]
+      .map((m) => JSON.parse(m[1]))
+      .filter((e) => e.item?.type === 'function_call')
+      .map((e) => e.item);
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item.name).toBe('manage_app');
+      expect(item.namespace).toBe('mcp__butterbase');
+    }
+    expect(final.output[0].name).toBe('manage_app');
+    expect(final.output[0].namespace).toBe('mcp__butterbase');
+    expect(final.output[0].arguments).toBe('{"a":1}');
+  });
+
+  it('leaves a non-namespaced tool call untouched', async () => {
+    let final: any = null;
+    const s = translateCcStreamToResponsesSse({
+      id: 'rsp_abcdefgh',
+      model: 'm',
+      createdAt: 1,
+      ccStream: streamOf(NS_TOOL_STREAM),
+      onClose: async (f) => { final = f; },
+    });
+    await collect(s);
+    expect(final.output[0].name).toBe('mcp__butterbase__manage_app');
+    expect(final.output[0].namespace).toBeUndefined();
+  });
+});
