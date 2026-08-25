@@ -19,18 +19,26 @@ const EXPOSED_HEADERS = ['WWW-Authenticate', 'Mcp-Session-Id'];
 // http://localhost:6274, the tool a marketplace reviewer is most likely to
 // reach for. These responses carry no cookies and no ambient authority, so
 // reflecting an arbitrary origin is safe as long as credentials stay off.
+// `/mcp` is included deliberately. Discovery, registration and token exchange
+// are useless to a browser client if the endpoint it was all for stays behind
+// the allowlist — the client would authenticate successfully and then be unable
+// to call a single tool. `/mcp` authenticates with an explicit Authorization
+// header and never with cookies, so with credentials off there is no ambient
+// authority for a hostile page to borrow; it would still need a token it does
+// not have.
 function isPublicOAuthPath(url: string): boolean {
   const path = url.split('?')[0];
   return path.startsWith('/.well-known/')
     || path === '/oauth/register'
-    || path === '/oauth/token';
+    || path === '/oauth/token'
+    || path === '/mcp';
 }
 
 const PUBLIC_CORS: FastifyCorsOptions = {
   origin: true,
   credentials: false,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'MCP-Protocol-Version'],
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'MCP-Protocol-Version', 'Mcp-Session-Id', 'Last-Event-ID'],
   exposedHeaders: EXPOSED_HEADERS,
 };
 
