@@ -153,6 +153,7 @@ import { runtimePoolFor, listRuntimeRegions } from './services/runtime-pool-regi
 import { redisFor } from './services/redis-registry.js';
 import { auditRuntimeTablesForPool } from './services/move-app/runtime-table-audit.js';
 import { waitForReplicationCaughtUp, promoteSourceToPrimary } from './services/move-app/neon-replication.js';
+import { writePaidConversionSnapshot } from './services/paid-conversion.js';
 
 // Initialize Sentry
 if (config.sentry.enabled) {
@@ -994,6 +995,12 @@ Promise.resolve(app.ready())
                 });
               }
             }
+            // Daily paid-conversion snapshot. Subscription rows carry no
+            // status history, so a day not captured here is a day of the
+            // trend permanently lost. Idempotent on date.
+            await writePaidConversionSnapshot(app.controlDb).catch((err) => {
+              app.log.error({ err }, 'Failed to write paid-conversion snapshot');
+            });
           } finally {
             await redis.del('lock:nightly-billing').catch(() => {});
           }
