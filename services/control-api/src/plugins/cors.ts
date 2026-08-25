@@ -1,11 +1,41 @@
 import fp from 'fastify-plugin';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import type { FastifyCorsOptions } from '@fastify/cors';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 
-const corsPlugin: FastifyPluginAsync = async (fastify) => {
-  await fastify.register(cors, {
+// `WWW-Authenticate` is not a CORS-safelisted response header, so without this a
+// browser client cannot read the 401 challenge — and that challenge is what
+// carries `resource_metadata`, the entry point to the whole discovery flow.
+const EXPOSED_HEADERS = ['WWW-Authenticate', 'Mcp-Session-Id'];
+
+// Endpoints any origin must be able to read for OAuth discovery to work from a
+// browser-hosted client. RFC 9728 §3.1 and RFC 8414 §3 both say metadata
+// endpoints should be publicly readable, and the MCP authorization spec assumes
+// a browser client can complete discovery, registration and token exchange.
+// Our normal policy is an allowlist backed by apps.allowed_origins, which blocks
+// every third-party MCP client — including MCP Inspector on
+// http://localhost:6274, the tool a marketplace reviewer is most likely to
+// reach for. These responses carry no cookies and no ambient authority, so
+// reflecting an arbitrary origin is safe as long as credentials stay off.
+function isPublicOAuthPath(url: string): boolean {
+  const path = url.split('?')[0];
+  return path.startsWith('/.well-known/')
+    || path === '/oauth/register'
+    || path === '/oauth/token';
+}
+
+const PUBLIC_CORS: FastifyCorsOptions = {
+  origin: true,
+  credentials: false,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'MCP-Protocol-Version'],
+  exposedHeaders: EXPOSED_HEADERS,
+};
+
+function defaultCorsOptions(fastify: FastifyInstance): FastifyCorsOptions {
+  return {
     origin: (origin, callback) => {
       // Allow requests with no origin (mobile apps, curl, Postman, etc.)
       if (!origin) {
@@ -73,6 +103,16 @@ const corsPlugin: FastifyPluginAsync = async (fastify) => {
       'X-Organization-Id',
       'X-Butterbase-As-User',
     ],
+    exposedHeaders: EXPOSED_HEADERS,
+  };
+}
+
+const corsPlugin: FastifyPluginAsync = async (fastify) => {
+  const fallback = defaultCorsOptions(fastify);
+  await fastify.register(cors, {
+    delegator: (req, callback) => {
+      callback(null, isPublicOAuthPath(req.url ?? '') ? PUBLIC_CORS : fallback);
+    },
   });
 };
 

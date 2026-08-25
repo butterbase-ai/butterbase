@@ -32,6 +32,19 @@ describe('GET /.well-known/oauth-protected-resource', () => {
     await app.close();
   });
 
+  // RFC 9728 §3.1: for a resource identifier with a path component
+  // (https://host/mcp) the well-known URI is the path-INSERTED form. Clients
+  // that probe discovery directly, rather than reading resource_metadata off
+  // the WWW-Authenticate challenge, only ever look here.
+  it('serves the same metadata at the path-inserted URL', async () => {
+    const app = await buildAppForTest();
+    const root = await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource' });
+    const inserted = await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource/mcp' });
+    expect(inserted.statusCode).toBe(200);
+    expect(inserted.json()).toEqual(root.json());
+    await app.close();
+  });
+
   it('is reachable without an Authorization header', async () => {
     const app = await buildAppForTest();
     const res = await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource' });
