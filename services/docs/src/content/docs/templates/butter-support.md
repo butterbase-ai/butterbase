@@ -5,11 +5,15 @@ description: Clone an AI support desk — embeddable widget, RAG over your docs,
 
 **App ID:** `app_0ycj4ad7odud` · **Region:** `us-east-1` · **30 functions + a Durable Object** · **19 clones**
 
-An AI support desk. An embeddable widget takes questions, RAG answers them from your own documentation, and an agent drafts replies that a human approves before anything is sent. Approved patterns get promoted into policies, so the system gets more autonomous as you teach it.
+An AI support desk. An embeddable widget takes questions, RAG answers them from your own documentation, and an agent handles replies — either drafting for human approval or resolving on its own, depending on how you set its autonomy. Approved patterns get promoted into policies, so the system gets more autonomous as you teach it.
+
+:::danger
+**A fresh clone ships at the highest autonomy setting.** Default mode is `AUTO-RESOLVE` — the agent replies and closes tickets on its own judgement, with no human in the loop. Only a few classified issue types (`account_deletion`, `billing`, `cancellation`) are overridden to `ALWAYS ESCALATE`. Read step 5 before you point the widget at real customers.
+:::
 
 This is the better of the two templates for seeing [RAG](/core-concepts/rag/), [Durable Objects](/core-concepts/durable-objects/), and [Substrate](/core-concepts/substrate/) working together. It needs a little more configuration than [Butterbase CRM](/templates/butterbase-crm/) — two function keys and six Durable Object keys.
 
-<!-- SCREENSHOT: support-overview.png -->
+![Butter Support's Autonomy settings on a fresh clone: default mode is AUTO-RESOLVE](/img/templates/support-overview.png)
 
 ## What's in it
 
@@ -56,7 +60,7 @@ A good resolution can be promoted into a reusable policy. Commitments made to a 
 4. **The env-vars step asks you for two values** — `SUBSTRATE_OUTBOX_SECRET` and `RAG_COLLECTION`. Fill them now, or leave blank and set them in the function editor later.
 5. Click **Start clone**.
 
-<!-- SCREENSHOT: support-clone-env-step.png -->
+![Cloning Butter Support: the env-vars step asks for SUBSTRATE_OUTBOX_SECRET and RAG_COLLECTION](/img/templates/support-clone-env-step.png)
 
 ### CLI
 
@@ -107,35 +111,48 @@ A mismatched `RAG_COLLECTION` across those three functions is the most common wa
 
 ### 2. Re-set the Durable Object environment
 
-Durable Object env values are **never** carried across a clone. Six of the seven keys must be set by hand:
+The clone arrives with **four of the seven** Durable Object env keys already set. Three are missing and you must add them:
 
-| Key | Status | What to set it to |
+| Key | After the clone | What to set it to |
 |---|---|---|
-| `BUTTERBASE_API_KEY` | Auto-filled | — |
-| `BUTTERBASE_API_URL` | **You set** | Your control API URL, e.g. `https://api.butterbase.ai` |
-| `BUTTERBASE_APP_ID` | **You set** | Your new app id |
-| `DEFAULT_MODEL` | **You set** | A catalog model id, e.g. `anthropic/claude-sonnet-4.5` |
-| `HAIKU_MODEL` | **You set** | The cheaper model for high-volume calls, e.g. `anthropic/claude-haiku-4.5` |
-| `RAG_COLLECTION` | **You set** | The same collection name as step 1 |
-| `SUBSTRATE_OUTBOX_SECRET` | **You set** | The same secret as step 1 |
+| `BUTTERBASE_API_KEY` | ✅ Present | — |
+| `DEFAULT_MODEL` | ✅ Present | — (verify the value suits you) |
+| `HAIKU_MODEL` | ✅ Present | — (verify the value suits you) |
+| `SUBSTRATE_OUTBOX_SECRET` | ✅ Present | — |
+| `BUTTERBASE_API_URL` | ❌ **Missing** | Your control API URL, e.g. `https://api.butterbase.ai` |
+| `BUTTERBASE_APP_ID` | ❌ **Missing** | Your new app id |
+| `RAG_COLLECTION` | ❌ **Missing** | The same collection name as step 1 |
 
-One key per call:
+The three that go missing are exactly the ones that would be *wrong* if copied — two point at the source app, and the third names a RAG collection that doesn't exist in your clone yet.
+
+:::caution
+Filling `RAG_COLLECTION` in the clone modal sets it on the **functions**, not on the Durable Objects. You must set the DO copy separately, and it must match. Verified on a real clone: the value supplied at clone time appeared in function env but not in `list_env` for the DOs.
+
+Preflight over-reports here — `preview_clone_env_vars` marks `DEFAULT_MODEL`, `HAIKU_MODEL` and `SUBSTRATE_OUTBOX_SECRET` as `user_required` for Durable Objects, but all three carry across in practice. Trust `list_env` on the finished clone over the preflight.
+:::
+
+Check what you actually have before setting anything:
+
+```
+manage_durable_objects action: "list_env", app_id: "<your_app_id>"
+```
+
+One key per call — DO env vars are app-wide, not per-class, so no `name` is needed:
 
 ```
 manage_durable_objects action: "set_env"
   app_id: "<your_app_id>"
-  name: "<do_class_name>"
-  key: "DEFAULT_MODEL"
-  value: "anthropic/claude-sonnet-4.5"
+  key: "BUTTERBASE_APP_ID"
+  value: "<your_app_id>"
 ```
 
-Confirm with `action: "list_env"`.
+Changing an env var auto-redeploys the active classes. Confirm with `action: "list_env"`.
 
 :::caution
 Model ids must be catalog-verified and prefixed. A bare `claude-sonnet-4-5` is not routable — list what's available with `manage_ai action: "list_models"` and copy an id exactly.
 :::
 
-<!-- SCREENSHOT: support-do-env.png -->
+![Durable Object env vars on a fresh Butter Support clone: four of the seven keys are already set](/img/templates/support-do-env.png)
 
 ### 3. Create the RAG collection and ingest your docs
 
@@ -161,7 +178,21 @@ manage_auth_config action: "configure_auth_hook"
 
 ### 5. Set the autonomy level deliberately
 
-`admin-autonomy` controls how much the agent may do without a human. Start conservative and raise it once you've watched the proposal queue for a while. Everything in this template is built around approval-before-action — don't undo that on day one.
+**Console → Autonomy.** This is the most consequential setting in the template and it does not ship conservative.
+
+| | What the clone arrives with |
+|---|---|
+| **Default mode** | `AUTO-RESOLVE` — the agent replies and closes tickets when it judges the issue resolved. Highest autonomy, no human in the loop. |
+| **Per-issue overrides** | `account_deletion`, `billing`, `cancellation` → `ALWAYS ESCALATE`. These never get an agent reply; they go straight to your escalation target. |
+
+Other modes available per issue type include **Draft for approval**, which is the approval-gated behaviour most people assume is the default. It isn't.
+
+Decide deliberately before any real traffic arrives:
+
+- Set the default to **Draft for approval** while you watch the queue, then raise it once you trust the replies; or
+- Keep `AUTO-RESOLVE` and add overrides for every issue type where a wrong answer is expensive.
+
+The override list is driven by the classifier's `issue_type`, so it only protects categories you have actually enumerated. Anything the classifier labels with a type you have not overridden falls through to the default mode.
 
 ### 6. Rotate the widget secret
 
@@ -197,7 +228,7 @@ Redeploy per [Frontend Deployment](/core-concepts/frontend-deployment/).
 1. `manage_durable_objects action: "list_env"` — all seven keys present.
 2. `manage_rag_content action: "list_collections"` — your collection exists and has documents.
 3. `invoke_function` on `ai-rag-query` with a question your docs answer — check the response cites your content, not generic knowledge.
-4. Submit a question through the widget and confirm a proposal appears in the queue.
+4. Submit a question through the widget and confirm a ticket appears in the Inbox. **A fresh clone's inbox is empty** — no seed tickets come across, so the widget is the only way to put something in it.
 5. Approve it and confirm the reply actually sends.
 
 ## Cost note

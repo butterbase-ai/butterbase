@@ -13,8 +13,6 @@ Cloning has three moves: **find** a template, **preflight** it so you know what 
 2. Search by name, or sort by **Recent** / **Popular** (popularity is the clone count).
 3. Each card shows the app name, its owner, and its region. The card's only action is **Clone** — the dashboard has no template detail view, so use `GET /v1/templates/{app_id}` (or `find_templates`) if you want the table and function inventory before committing.
 
-<!-- SCREENSHOT: templates-browser-search.png -->
-
 ### CLI
 
 ```bash
@@ -98,9 +96,7 @@ Click **Clone** on the template. The modal asks for a name, runs the preflight, 
 The dashboard pins the clone to the **template's own region** and disables the field. To place a clone in a different region, use the CLI, MCP, or REST paths below — they accept `dest_region`.
 :::
 
-<!-- SCREENSHOT: clone-modal-name-region.png -->
-
-<!-- SCREENSHOT: clone-progress.png -->
+![A clone in progress, showing the replaying_rls stage](/img/templates/clone-progress.png)
 
 ### CLI
 
@@ -195,9 +191,17 @@ A `completed` job can still carry `warnings[]`. These are soft failures the pipe
 - A config value referenced a secret that belongs to the source owner and wasn't copied.
 - A meetings webhook secret was minted — the warning contains the `wsec_*` **once**, so capture it.
 
-The dashboard, CLI, and MCP all surface these. Read them before you assume the clone is correct.
+**The dashboard does not show warnings.** Its clone flow drops you on the new app's overview with no warnings panel, even with `?cloneJob=` in the URL — so a dashboard-only clone can silently lose a one-time secret. Read them over the API or MCP instead:
 
-<!-- SCREENSHOT: clone-warnings.png -->
+```
+manage_app action: "get_clone_job", job_id: "<job_id>"
+```
+
+```
+GET /v1/clone-jobs/{job_id}
+```
+
+Do this after every dashboard clone, not just failed ones.
 
 ## Errors
 

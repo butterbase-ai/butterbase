@@ -5,7 +5,7 @@ description: The Butterbase template catalog — what's clonable today.
 
 Two first-party templates are published and listed today. Both are complete, production-shaped applications, not demos: they're the apps Butterbase itself uses.
 
-<!-- SCREENSHOT: templates-browser.png -->
+![The Templates browser in the Butterbase dashboard, showing both first-party templates](/img/templates/templates-browser.png)
 
 ## The catalog
 

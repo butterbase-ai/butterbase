@@ -9,7 +9,7 @@ An AI-native CRM. Contacts and companies enrich themselves, Gmail and Calendar s
 
 This is the largest template in the catalog and the easiest to stand up: **every environment variable it needs is filled in automatically at clone time.** There is no third-party API key you must obtain before it will boot.
 
-<!-- SCREENSHOT: crm-overview.png -->
+![The Companies view of a freshly cloned Butterbase CRM, with seed data already in place](/img/templates/crm-overview.png)
 
 ## What's in it
 
@@ -66,7 +66,7 @@ Draft, schedule, and publish posts across platforms, plus a comment-campaign eng
 4. The env-vars step says **"Nothing to enter"** — every key this app needs is platform-provided. Click straight through.
 5. Click **Start clone** and wait. 56 functions take a few minutes to redeploy.
 
-<!-- SCREENSHOT: crm-clone-modal.png -->
+![Cloning Butterbase CRM: the env-vars step reads "Nothing to enter" because every key is platform-provided](/img/templates/crm-clone-modal.png)
 
 ### CLI
 
@@ -138,8 +138,6 @@ manage_oauth action: "configure"
 ```
 
 Enable the Gmail and Calendar scopes on the Google side. Until this is done, `ingest-gmail`, `ingest-calendar`, and `auto-sync-google` will run and find nothing.
-
-<!-- SCREENSHOT: crm-oauth-config.png -->
 
 ### 4. Connect the integrations you actually want
 
