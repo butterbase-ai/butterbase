@@ -17,6 +17,7 @@ A finished clone is a working backend, not a finished product. Everything the so
 | **Config** | Storage settings, CORS allowed origins, OAuth provider list and redirect URLs, AI model defaults |
 | **App env vars** | App-level environment variables, values included |
 | **Seed data** | Rows in tables the publisher marked `_seed: true` |
+| **Frontend** | The source's most recent published frontend, with the source app id rewritten to yours so it calls your backend |
 
 ## What did not transfer
 
@@ -29,7 +30,6 @@ A finished clone is a working backend, not a finished product. Everything the so
 | BYOK AI provider keys | The source owner's billing |
 | [Custom domains](/core-concepts/custom-domains/) | Tied to DNS you don't control |
 | Stripe Connect / plans / products | The source owner's Stripe account |
-| Frontend deployments | Deploy your own |
 | Invocation history, audit logs | Not yours |
 
 ## The checklist
@@ -114,9 +114,16 @@ manage_app action: "update_cors"
   allowed_origins: ["https://myapp.com", "http://localhost:5173"]
 ```
 
-### 8. Deploy a frontend
+### 8. Check the frontend
 
-Nothing is deployed on a fresh clone. Build and deploy — see [Frontend Deployment](/core-concepts/frontend-deployment/). Remember frontend build env vars (`VITE_*` / `NEXT_PUBLIC_*`) are separate from function env vars and must be set on your app.
+Clones usually come up with a **live frontend already serving**. Step 7 of the clone pipeline republishes the source's most recent frontend artifact and rewrites the source app id inside it to yours, so it talks to your backend rather than the template's. Your app overview shows the URL.
+
+Two cases need your attention:
+
+- **No frontend deployed.** The source never published one, or the replay failed — replay is best-effort and logs a warning rather than failing the clone. Build and deploy your own; see [Frontend Deployment](/core-concepts/frontend-deployment/).
+- **A warning says the artifact had no occurrences of the source app id.** The rewrite couldn't find anything to change, so the cloned frontend **may still be pointed at the source app**. Redeploy from your own build before putting any data in.
+
+Frontend build env vars (`VITE_*` / `NEXT_PUBLIC_*`) are separate from function env vars and are not inherited — set them on your app and redeploy if the frontend needs them.
 
 ### 9. Add a custom domain
 

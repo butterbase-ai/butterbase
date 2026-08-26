@@ -34,9 +34,10 @@ Two first-party templates are published today — a full AI-native CRM and an AI
 | Serverless function code | Function environment variable **values** |
 | Durable Object classes | BYOK AI provider keys |
 | Repo files (latest pushed snapshot) | [Custom domains](/core-concepts/custom-domains/) |
+| The published frontend, re-pointed at your app | — |
 | Non-secret config — storage settings, CORS, OAuth providers and redirect URLs, AI model defaults | Billing and Stripe Connect setup |
 | App-level environment variables | Invocation history and audit logs |
-| Rows in tables the publisher marked `_seed: true` | Frontend deployments |
+| Rows in tables the publisher marked `_seed: true` | Invocation history and audit logs |
 
 Full detail in [Configuring Your Clone](/templates/configure/).
 

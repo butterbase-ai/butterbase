@@ -11,8 +11,7 @@ Cloning has three moves: **find** a template, **preflight** it so you know what 
 
 1. Go to [dashboard.butterbase.ai](https://dashboard.butterbase.ai) and open **Templates**.
 2. Search by name, or sort by **Recent** / **Popular** (popularity is the clone count).
-3. Each card shows the app name, owner, region, and how many times it's been cloned.
-4. Click a card for detail — its functions and clone history.
+3. Each card shows the app name, its owner, and its region. The card's only action is **Clone** — the dashboard has no template detail view, so use `GET /v1/templates/{app_id}` (or `find_templates`) if you want the table and function inventory before committing.
 
 <!-- SCREENSHOT: templates-browser-search.png -->
 
@@ -93,7 +92,11 @@ manage_app action: "preview_clone_env_vars"
 
 ### Dashboard
 
-Click **Clone** on the template. The modal asks for a name and region, then runs the preflight and shows an env-vars step where you can fill in each `user_required` key before starting. Progress is shown live; you land on the new app's overview when it completes.
+Click **Clone** on the template. The modal asks for a name, runs the preflight, and shows an env-vars step where you can fill in each `user_required` key before starting. Progress is shown live; you land on the new app's overview when it completes.
+
+:::note
+The dashboard pins the clone to the **template's own region** and disables the field. To place a clone in a different region, use the CLI, MCP, or REST paths below — they accept `dest_region`.
+:::
 
 <!-- SCREENSHOT: clone-modal-name-region.png -->
 
@@ -120,6 +123,10 @@ manage_app action: "clone"
 
 Returns `{ job_id, status, pending_env_vars }`. `pending_env_vars` is the per-function map of keys still needing values — an empty object means you're fully configured.
 
+:::note
+If your requested region was closed and the clone got redirected, the **POST response** carries `dest_region`, `dest_region_redirected_from`, and a ready-made `notice` string. These are **not** on the clone job — `GET /v1/clone-jobs/{job_id}` returns no region fields at all, so capture them when you start the clone, not while polling.
+:::
+
 ### REST
 
 ```json
@@ -138,7 +145,7 @@ Authorization: Bearer {token}
 | Field | Notes |
 |---|---|
 | `name` | Optional. Globally unique across Butterbase — a collision returns `409`. Omit it and you get `Clone of {source}`. |
-| `region` | Optional. Defaults to the source's region. See [Regions](/core-concepts/regions/). |
+| `dest_region` | Optional (`region` is accepted as a legacy alias). Defaults to the source's region. If the region you ask for is temporarily closed to new apps, the clone is **redirected to an open one** rather than failing. See [Regions](/core-concepts/regions/). |
 | `organization_id` | Optional. Must be an org you belong to. Defaults to the org bound to your credentials, then your personal org. |
 | `env_var_values` | `{ fn_name: { KEY: "value" } }`. Values are stored encrypted against the new app. |
 | `auto_mint_api_key` | `[{ fn_name, key }]` — mint a scoped `bb_sk_*` for that key instead of supplying one. |

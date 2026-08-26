@@ -52,8 +52,8 @@ A good resolution can be promoted into a reusable policy. Commitments made to a 
 
 1. Open **Templates** in the [dashboard](https://dashboard.butterbase.ai).
 2. Click **butter-support**, then **Clone**.
-3. Name your app and pick a region.
-4. **The env-vars step will ask you for two values** — see the table below. You can fill them now or after the clone.
+3. Name your app. The region is fixed to the template's (`us-east-1`) in the dashboard.
+4. **The env-vars step asks you for two values** — `SUBSTRATE_OUTBOX_SECRET` and `RAG_COLLECTION`. Fill them now, or leave blank and set them in the function editor later.
 5. Click **Start clone**.
 
 <!-- SCREENSHOT: support-clone-env-step.png -->
@@ -181,14 +181,16 @@ manage_app action: "update_cors"
 
 The widget is cross-origin by design — if CORS is wrong, it silently fails to load.
 
-### 8. Deploy the frontend
+### 8. Check the frontend
+
+The clone should come up with the Support frontend **already live**, re-pointed at your app. Confirm it loads, then pull the source locally if you want to change it:
 
 ```bash
 butterbase repo init <your_app_id>
 butterbase repo pull
 ```
 
-Build and deploy per [Frontend Deployment](/core-concepts/frontend-deployment/).
+Redeploy per [Frontend Deployment](/core-concepts/frontend-deployment/).
 
 ## Verifying it works
 

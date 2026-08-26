@@ -271,6 +271,7 @@ When someone clones your app, the new app gets:
 - Your repo files (latest snapshot at the time of clone).
 - Your non-secret configuration (storage settings, allowed origins, OAuth provider and URLs, AI model defaults).
 - Rows in tables you marked with `_seed: true`.
+- Your most recently published frontend, with your app id rewritten to the clone's so it calls the clone's backend (best-effort — skipped if you never deployed one).
 
 ## What stays with you
 

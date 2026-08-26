@@ -62,8 +62,8 @@ Draft, schedule, and publish posts across platforms, plus a comment-campaign eng
 
 1. Open **Templates** in the [dashboard](https://dashboard.butterbase.ai).
 2. Click **butterbase-crm**, then **Clone**.
-3. Name your app and pick a region.
-4. The env-vars step will show **nothing to fill in** — click straight through.
+3. Name your app. The region is fixed to the template's (`us-east-1`) in the dashboard.
+4. The env-vars step says **"Nothing to enter"** — every key this app needs is platform-provided. Click straight through.
 5. Click **Start clone** and wait. 56 functions take a few minutes to redeploy.
 
 <!-- SCREENSHOT: crm-clone-modal.png -->
@@ -164,7 +164,11 @@ manage_app action: "update_cors"
   allowed_origins: ["https://mycrm.com", "http://localhost:5173"]
 ```
 
-### 7. Deploy the frontend
+### 7. Check the frontend
+
+The clone comes up with the CRM frontend **already live**, re-pointed at your app — the overview page shows the URL. Open it and confirm it loads before doing anything else.
+
+To edit it, pull the source locally:
 
 ```bash
 butterbase repo init <your_app_id>
@@ -172,7 +176,7 @@ butterbase repo pull
 cd <dir> && npm install && npm run build
 ```
 
-Then deploy — see [Frontend Deployment](/core-concepts/frontend-deployment/). Remember the frontend's `VITE_*` variables are separate from function env vars.
+Then redeploy — see [Frontend Deployment](/core-concepts/frontend-deployment/). The frontend's `VITE_*` variables are separate from function env vars and are not inherited.
 
 ### 8. Review the security posture
 
