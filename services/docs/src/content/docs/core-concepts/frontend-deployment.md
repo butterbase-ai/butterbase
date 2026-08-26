@@ -121,38 +121,18 @@ For single-page app frameworks, a `_redirects` file is automatically injected so
 
 ## Redeployment
 
-- **Free plan:** Deploying again automatically replaces your existing deployment.
-- **Pro and above:** Each deployment is kept independently. Delete old deployments manually.
+Each deployment is kept independently until you hit your plan's deployment limit. Delete old deployments you no longer need.
 
-## Custom Domains
+## Custom domains
 
-Connect your own domain to your deployed frontend. Requires **Pro plan or above**.
-
-### Setup
-
-1. Add your domain via the dashboard, CLI, or API
-2. Add a CNAME record at your DNS provider pointing to `butterbase.dev`
-   - **Cloudflare DNS users:** set the record to **DNS-only (grey cloud)**. Proxied (orange cloud) CNAMEs between different Cloudflare accounts produce Error 1014.
-3. SSL is automatically provisioned — check status in the dashboard or via API
-4. Once active, your site is live at your custom domain
-
-### CLI
+Point your own hostname at this deployment — `app.example.com` instead of `*.pages.dev` — with SSL issued and renewed automatically. Requires the **Launch plan or above**.
 
 ```bash
 butterbase domains add app.example.com
 butterbase domains status <domain-id>
 ```
 
-### REST API
-
-```
-POST /v1/{app_id}/custom-domains
-{ "hostname": "app.example.com" }
-```
-
-### Apex domains
-
-For bare domains like `example.com`, your DNS provider must support CNAME flattening. Otherwise use `www.example.com` with a redirect from the apex.
+Full setup, DNS records, validation methods, apex handling, and troubleshooting live on the [Custom Domains](/core-concepts/custom-domains/) page.
 
 ## Limits
 
@@ -160,5 +140,7 @@ For bare domains like `example.com`, your DNS provider must support CNAME flatte
 |-------|-------|
 | Maximum deployment size | 100 MB (compressed) |
 | Upload URL expiration | 15 minutes |
-| Free plan | 1 active deployment per app |
-| Pro plan | Unlimited deployments |
+| Deployments per app — Playground | 2 |
+| Deployments per app — Launch | 10 |
+| Deployments per app — Certified | 25 |
+| Deployments per app — Enterprise | Unlimited |

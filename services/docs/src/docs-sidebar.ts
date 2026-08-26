@@ -25,6 +25,7 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'Serverless Functions', slug: 'core-concepts/functions' },
       { label: 'Agents', slug: 'core-concepts/agents' },
       { label: 'Frontend Deployment', slug: 'core-concepts/frontend-deployment' },
+      { label: 'Custom Domains', slug: 'core-concepts/custom-domains' },
       { label: 'Durable Objects', slug: 'core-concepts/durable-objects' },
       { label: 'Edge SSR Deployment', slug: 'core-concepts/edge-ssr-deployment' },
       { label: 'AI Integration', slug: 'core-concepts/ai-integration' },
@@ -35,6 +36,18 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'Substrate', slug: 'core-concepts/substrate' },
       { label: 'Billing & Plans', slug: 'core-concepts/billing' },
       { label: 'Integrations', slug: 'core-concepts/integrations' },
+    ],
+  },
+  {
+    label: 'Templates',
+    items: [
+      { label: 'Overview', slug: 'templates' },
+      { label: 'Available Templates', slug: 'templates/available' },
+      { label: 'Butterbase CRM', slug: 'templates/butterbase-crm' },
+      { label: 'Butter Support', slug: 'templates/butter-support' },
+      { label: 'Cloning a Template', slug: 'templates/cloning' },
+      { label: 'Configuring Your Clone', slug: 'templates/configure' },
+      { label: 'Publishing a Template', slug: 'templates/publishing' },
     ],
   },
   {
@@ -55,7 +68,6 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'Next.js', slug: 'guides/nextjs' },
       { label: 'Monetization', slug: 'guides/monetization' },
       { label: 'KV Recipes', slug: 'guides/kv-recipes' },
-      { label: 'Clone from a template', slug: 'guides/clone-from-template' },
     ],
   },
   {

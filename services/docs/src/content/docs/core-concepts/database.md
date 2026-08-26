@@ -285,7 +285,7 @@ The cloned app does **not** inherit:
 - Function invocation history.
 - Audit logs.
 
-The clone owner must configure these themselves after the clone completes.
+The clone owner must configure these themselves after the clone completes — see [Configuring Your Clone](/templates/configure/).
 
 ## Clone regions
 

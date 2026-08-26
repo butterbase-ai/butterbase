@@ -261,7 +261,7 @@ Most subcommands accept `--app <app-id>` to target a specific app and `--user-id
 
 ## Custom domains
 
-Manage custom hostnames for frontend deployments. Requires Pro plan or above. See the [custom domains setup guide](/core-concepts/frontend-deployment#custom-domains).
+Manage custom hostnames for frontend deployments. Requires the Launch plan or above. See [Custom Domains](/core-concepts/custom-domains/).
 
 ```bash
 # List domains for the current app

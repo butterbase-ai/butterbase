@@ -5,6 +5,10 @@ description: Sell subscriptions and products to your end users using Stripe Conn
 
 Butterbase includes built-in Stripe Connect support so you can sell subscriptions and one-time products to your app's end users. This is separate from your own Butterbase subscription — it's for monetizing the product you build.
 
+:::note
+This guide is the condensed API tour. For the full step-by-step setup — Connect onboarding, webhook configuration, gating access, testing, going live, and troubleshooting — see [Billing & Plans → How to charge your own users](/core-concepts/billing/#part-2-how-to-charge-your-own-users).
+:::
+
 ## How it works
 
 1. Onboard a Stripe Connect account for your app
@@ -118,7 +122,7 @@ POST /v1/{app_id}/billing/products
 
 ## Webhooks
 
-Stripe sends Connect events to `POST /webhooks/stripe/connect`. Configure the endpoint and signing secret in your Stripe dashboard and set `STRIPE_CONNECT_WEBHOOK_SECRET` in the control API environment.
+Stripe sends Connect events to `POST /webhooks/stripe/connect`. On Butterbase Cloud this is already wired — you don't configure anything. Self-hosting, register the endpoint on your Stripe platform account with **"events on Connected accounts"** enabled and set `STRIPE_CONNECT_WEBHOOK_SECRET` in the control API environment.
 
 The platform handles:
 - `checkout.session.completed` (subscriptions and payments)
