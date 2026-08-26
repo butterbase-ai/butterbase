@@ -51,4 +51,4 @@ The catalog is anyone's to add to. Any public app with a pushed repo snapshot is
 
 Both are **large**. Cloning is not instant — the pipeline replays schema, RLS, Durable Objects, functions, config, repo, and seed data in sequence, and 56 functions take time to redeploy. Expect minutes, not seconds, and poll the job rather than watching a spinner.
 
-Both also count as one app against your plan's project limit. Playground allows one project total, so if you're on Playground you'll need to be starting fresh or [upgrade](/core-concepts/billing/) first.
+Both also count as one app against your plan's project limit. Playground allows one project total, so if you're on Playground you'll need to be starting fresh or [upgrade](/core-concepts/plans-and-usage/) first.

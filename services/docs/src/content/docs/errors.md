@@ -294,7 +294,7 @@ The caller exceeded the request-rate limit for this endpoint or app.
 
 The app has reached the maximum number of tables permitted by its plan.
 
-**Remediation:** Drop unused tables or upgrade the plan. Plan limits are listed on the [Billing & Plans](/core-concepts/billing/) page.
+**Remediation:** Drop unused tables or upgrade the plan. Plan limits are listed on the [Plans & Usage](/core-concepts/plans-and-usage/) page.
 
 ### Quota Deployment Limit
 

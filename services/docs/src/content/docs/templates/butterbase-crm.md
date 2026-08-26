@@ -192,4 +192,4 @@ Then deploy — see [Frontend Deployment](/core-concepts/frontend-deployment/). 
 
 ## Cost note
 
-This template is AI-heavy — enrichment, summarisation, chat, and search all draw AI credits, and several cron jobs run unattended. Set a [spending cap](/core-concepts/billing/#credits-top-ups-and-spending-caps) before you leave it running.
+This template is AI-heavy — enrichment, summarisation, chat, and search all draw AI credits, and several cron jobs run unattended. Set a [spending cap](/core-concepts/plans-and-usage/#credits-top-ups-and-spending-caps) before you leave it running.

@@ -260,8 +260,8 @@ export const changelog: RoadmapItem[] = [
     date: '2026-04-22',
     category: 'ops',
     title: 'Plan Quotas + Limit Notifications',
-    description: 'Free / Pro / Enterprise tiers with usage metering. Email alerts at 80% and at the hard limit.',
-    href: '/core-concepts/billing',
+    description: 'Tiered plans with usage metering. Email alerts at 80% and at the hard limit.',
+    href: '/core-concepts/plans-and-usage',
     icon: '📊',
   },
   {

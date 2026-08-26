@@ -200,4 +200,4 @@ Build and deploy per [Frontend Deployment](/core-concepts/frontend-deployment/).
 
 ## Cost note
 
-RAG ingestion embeds every chunk, `refresh-docs` re-crawls on a cron, and every widget question is a model call. Set a [spending cap](/core-concepts/billing/#credits-top-ups-and-spending-caps) and point `HAIKU_MODEL` at something cheap before you open the widget to real traffic.
+RAG ingestion embeds every chunk, `refresh-docs` re-crawls on a cron, and every widget question is a model call. Set a [spending cap](/core-concepts/plans-and-usage/#credits-top-ups-and-spending-caps) and point `HAIKU_MODEL` at something cheap before you open the widget to real traffic.

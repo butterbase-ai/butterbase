@@ -124,7 +124,7 @@ Optional, and only on Launch or above. See [Custom Domains](/core-concepts/custo
 
 ### 10. Set up charging, if you're selling
 
-Stripe Connect does not transfer. If the template ships a paywall, plans, or products, you need your own Connect account and your own plan/product rows. See [Billing & Plans → How to charge your own users](/core-concepts/billing/#part-2-how-to-charge-your-own-users).
+Stripe Connect does not transfer. If the template ships a paywall, plans, or products, you need your own Connect account and your own plan/product rows. See [Charging Your Users](/core-concepts/billing/).
 
 ### 11. Review the security posture before you go live
 

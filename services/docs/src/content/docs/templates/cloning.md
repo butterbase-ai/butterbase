@@ -201,7 +201,7 @@ The dashboard, CLI, and MCP all surface these. Read them before you assume the c
 | `VALIDATION_INVALID_SCHEMA` | 409 | App name already taken | Pick a different `name` |
 | `CLONE_LIMIT_INFLIGHT` | 429 | 3 clones already in progress | Wait for one to finish |
 | rate limited | 429 | More than 5 clones started this hour | Wait |
-| project limit | 403 | Destination org is at its app quota | Delete an app or upgrade — see [Billing & Plans](/core-concepts/billing/) |
+| project limit | 403 | Destination org is at its app quota | Delete an app or upgrade — see [Plans & Usage](/core-concepts/plans-and-usage/) |
 
 ## Next
 

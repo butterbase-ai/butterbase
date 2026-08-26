@@ -6,7 +6,7 @@ description: Sell subscriptions and products to your end users using Stripe Conn
 Butterbase includes built-in Stripe Connect support so you can sell subscriptions and one-time products to your app's end users. This is separate from your own Butterbase subscription — it's for monetizing the product you build.
 
 :::note
-This guide is the condensed API tour. For the full step-by-step setup — Connect onboarding, webhook configuration, gating access, testing, going live, and troubleshooting — see [Billing & Plans → How to charge your own users](/core-concepts/billing/#part-2-how-to-charge-your-own-users).
+This guide is the condensed API tour. For the full step-by-step setup — Connect onboarding, webhook configuration, gating access, testing, going live, and troubleshooting — see [Charging Your Users](/core-concepts/billing/).
 :::
 
 ## How it works

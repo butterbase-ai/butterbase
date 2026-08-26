@@ -198,7 +198,7 @@ Deleting a domain stops all traffic to that hostname immediately. Visitors get a
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `403` on add | App's org is on Playground | Upgrade to Launch or above — see [Billing & Plans](/core-concepts/billing/) |
+| `403` on add | App's org is on a tier without `custom_domain` | Upgrade — see [Plans & Usage](/core-concepts/plans-and-usage/) |
 | `409 already registered` | The hostname is claimed — by this app, or another one | If it's this app, just check status. Otherwise pick a different hostname. |
 | `400` about the deployment backend | App is on the legacy backend | Migrate the app to the WfP backend first |
 | `503 Cloudflare is not configured` | Self-hosted instance without Cloudflare credentials | Configure Cloudflare on the control API |
@@ -211,5 +211,5 @@ Deleting a domain stops all traffic to that hostname immediately. Visitors get a
 
 - [Frontend Deployment](/core-concepts/frontend-deployment/) — getting a site live in the first place
 - [Edge SSR Deployment](/core-concepts/edge-ssr-deployment/) — server-rendered apps
-- [Billing & Plans](/core-concepts/billing/) — which plans include custom domains
+- [Plans & Usage](/core-concepts/plans-and-usage/) — which plans include custom domains
 - Cloned an app? Custom domains do **not** transfer — see [Configuring Your Clone](/templates/configure/)
