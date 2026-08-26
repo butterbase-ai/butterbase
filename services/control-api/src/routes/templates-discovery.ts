@@ -45,6 +45,7 @@ import {
 import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { introspectSchema } from '../services/schema-introspector.js';
+import { getAppPoolForApp } from '../services/app-pool.js';
 
 interface TemplateRow {
   app_id: string;
@@ -267,9 +268,10 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
       repo_latest_snapshot: string | null;
       visibility: string;
       listed: boolean;
+      db_name: string;
     }>(
       `SELECT id, name, owner_id, created_at, fork_count, repo_latest_snapshot,
-              visibility, listed
+              visibility, listed, db_name
        FROM apps WHERE id = $1`,
       [app_id],
     );
@@ -279,11 +281,19 @@ export function templatesDiscoveryRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: { code: 'TEMPLATE_NOT_FOUND' } });
     }
 
-    // Introspect user tables; degrade gracefully on failure.
-    const schema = await introspectSchema(pool).catch((err) => {
-      app.log.error({ err, app_id }, 'templates-discovery: introspectSchema failed, returning empty tables');
-      return null;
-    });
+    // Introspect the app's OWN database — its user tables live in a per-app
+    // Neon DB, not in `pool` (the regional runtime DB, which holds platform
+    // tables like apps/app_plans/usage_meters plus per-app function metadata).
+    // Introspecting `pool` here returned the platform's own schema, identical
+    // for every template in the region, and exposed it to anonymous callers.
+    // Degrade gracefully on failure: an un-provisioned or unreachable app DB
+    // yields an empty table list rather than a 500.
+    const schema = await getAppPoolForApp(app.controlDb, r.id, r.db_name)
+      .then((appPool) => introspectSchema(appPool))
+      .catch((err) => {
+        app.log.error({ err, app_id }, 'templates-discovery: introspectSchema failed, returning empty tables');
+        return null;
+      });
     const tables = schema
       ? Object.entries(schema.tables)
           .filter(([name]) => !isInternalTable(name))
