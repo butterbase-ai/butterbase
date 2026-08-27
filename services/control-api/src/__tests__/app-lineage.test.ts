@@ -272,6 +272,23 @@ describe('computeDivergence', () => {
     expect(d.schema).toBeNull();
     expect(d.repo).toBeNull();
   });
+
+  it('reports repo as unknown (null), not modified, when the fork apps row is missing', async () => {
+    // A fork has a real base_snapshot_id, but its `apps` row is gone (deleted
+    // app, cross-region lag). `appRow.rows[0]` is undefined in this case.
+    // `repo` must come out `null` (UNKNOWN), matching forkBuckets' handling
+    // of the same situation — never `true` (MODIFIED), which would be a lie.
+    const controlDb = controlDbReturning(() => ({ rows: [lineageRow] }));
+    const runtimePool = controlDbReturning((sql) => {
+      if (sql.includes('repo_latest_snapshot')) return { rows: [] };
+      if (sql.includes('app_deployments')) return { rows: [{ count: '0' }] };
+      return { rows: [] };
+    });
+    const { computeDivergence } = await import('../services/app-lineage.js');
+    const d = await computeDivergence(controlDb, runtimePool, runtimePool, 'app_fork');
+    expect(d.repo).toBeNull();
+    expect(d.repo).not.toBe(true);
+  });
 });
 
 describe('forkBuckets', () => {

@@ -161,9 +161,9 @@ export async function computeDivergence(
   const appRow = await runtimePool.query<{ repo_latest_snapshot: string | null }>(
     `SELECT repo_latest_snapshot FROM apps WHERE id = $1`, [destAppId],
   );
-  const repo = lineage.base_snapshot_id === null
+  const repo = lineage.base_snapshot_id === null || appRow.rows.length === 0
     ? null
-    : (appRow.rows[0]?.repo_latest_snapshot ?? null) !== lineage.base_snapshot_id;
+    : appRow.rows[0].repo_latest_snapshot !== lineage.base_snapshot_id;
 
   const deployRow = await runtimePool.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM app_deployments
