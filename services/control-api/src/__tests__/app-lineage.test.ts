@@ -285,6 +285,10 @@ describe('forkBuckets', () => {
     }) as any;
   }
 
+  function expectSumsToTotal(buckets: { total: number; current: number; behind_unmodified: number; behind_modified: number; unknown: number }) {
+    expect(buckets.current + buckets.behind_unmodified + buckets.behind_modified + buckets.unknown).toBe(buckets.total);
+  }
+
   it('buckets a live-cloned, up-to-date fork into current — the case that was broken', async () => {
     // base_release_id NULL + base_fingerprint set is exactly the live-clone
     // shape documented in db/control-plane/109_template_releases.sql. Cloned
@@ -310,6 +314,8 @@ describe('forkBuckets', () => {
     expect(buckets.current).toBe(1);
     expect(buckets.behind_unmodified).toBe(0);
     expect(buckets.behind_modified).toBe(0);
+    expect(buckets.unknown).toBe(0);
+    expectSumsToTotal(buckets);
   });
 
   it('buckets a mix of current / unmodified-behind / modified-behind forks, summing to total', async () => {
@@ -355,15 +361,20 @@ describe('forkBuckets', () => {
     expect(buckets.current).toBe(1);
     expect(buckets.behind_unmodified).toBe(1);
     expect(buckets.behind_modified).toBe(1);
-    expect(buckets.current + buckets.behind_unmodified + buckets.behind_modified).toBe(buckets.total);
+    expect(buckets.unknown).toBe(0);
+    expectSumsToTotal(buckets);
     expect(buckets.degraded_regions).toEqual([]);
   });
 
-  it('degrades a region whose runtime DB is unreachable instead of crashing, and reports it', async () => {
+  it('reports a behind fork with no trustworthy base_snapshot_id as unknown, never as modified', async () => {
+    // base_snapshot_id NULL is the pre-capture-fork shape: no trustworthy base
+    // at all. Its region is perfectly reachable, so if this landed in
+    // behind_modified it would mean the code guessed rather than reported
+    // "cannot tell" — exactly what the coordinator ruled against.
     const lineageRows = [{
-      dest_app_id: 'app_behind_a', dest_region: 'us-east-1',
-      base_release_id: 'rel_1', base_snapshot_id: 'snap_1',
-      cloned_at: new Date('2026-01-01T00:00:00Z'), base_release_number: 1,
+      dest_app_id: 'app_precapture', dest_region: 'us-east-1',
+      base_release_id: null, base_snapshot_id: null,
+      cloned_at: new Date('2026-01-01T00:00:00Z'), base_release_number: null,
     }];
     const controlDb = controlDbReturning((sql) => {
       if (sql.includes('FROM app_lineage')) return { rows: lineageRows };
@@ -372,26 +383,71 @@ describe('forkBuckets', () => {
       }
       return { rows: [] };
     });
-    const getRuntimePool = () => ({
-      query: vi.fn(async () => { throw new Error('connection refused'); }),
-    }) as any;
+    // Region is reachable and would happily answer, proving the fork lands in
+    // `unknown` because of base_snapshot_id, not because of the region.
+    const getRuntimePool = makeRuntimeStub({
+      'us-east-1': [{ id: 'app_precapture', repo_latest_snapshot: 'snap_whatever' }],
+    });
 
     const { forkBuckets } = await import('../services/app-lineage.js');
     const buckets = await forkBuckets(controlDb, 'app_src', getRuntimePool);
 
     expect(buckets.total).toBe(1);
-    expect(buckets.degraded_regions).toEqual(['us-east-1']);
-    // Conservative fallback: unreachable region's behind fork counts as modified,
-    // not silently reported as clean.
+    expect(buckets.current).toBe(0);
     expect(buckets.behind_unmodified).toBe(0);
-    expect(buckets.behind_modified).toBe(1);
-    expect(buckets.current + buckets.behind_unmodified + buckets.behind_modified).toBe(buckets.total);
+    expect(buckets.behind_modified).toBe(0);
+    expect(buckets.unknown).toBe(1);
+    expectSumsToTotal(buckets);
+  });
+
+  it('degrades a region whose runtime DB is unreachable instead of crashing, counting its forks as unknown — while other regions still classify correctly', async () => {
+    const lineageRows = [
+      // in the region that will throw: must land in unknown, not behind_modified.
+      {
+        dest_app_id: 'app_behind_a', dest_region: 'us-east-1',
+        base_release_id: 'rel_1', base_snapshot_id: 'snap_1',
+        cloned_at: new Date('2026-01-01T00:00:00Z'), base_release_number: 1,
+      },
+      // in a healthy region: must still classify normally (unmodified here).
+      {
+        dest_app_id: 'app_behind_b', dest_region: 'us-west-2',
+        base_release_id: 'rel_1', base_snapshot_id: 'snap_1',
+        cloned_at: new Date('2026-01-01T00:00:00Z'), base_release_number: 1,
+      },
+    ];
+    const controlDb = controlDbReturning((sql) => {
+      if (sql.includes('FROM app_lineage')) return { rows: lineageRows };
+      if (sql.includes('FROM template_releases')) {
+        return { rows: [{ release_number: 2, published_at: new Date('2026-02-01T00:00:00Z') }] };
+      }
+      return { rows: [] };
+    });
+    const getRuntimePool = (region: string) => {
+      if (region === 'us-east-1') {
+        return { query: vi.fn(async () => { throw new Error('connection refused'); }) } as any;
+      }
+      return makeRuntimeStub({
+        'us-west-2': [{ id: 'app_behind_b', repo_latest_snapshot: 'snap_1' }],
+      })(region);
+    };
+
+    const { forkBuckets } = await import('../services/app-lineage.js');
+    const buckets = await forkBuckets(controlDb, 'app_src', getRuntimePool);
+
+    expect(buckets.total).toBe(2);
+    expect(buckets.degraded_regions).toEqual(['us-east-1']);
+    expect(buckets.unknown).toBe(1);
+    expect(buckets.behind_unmodified).toBe(1);
+    expect(buckets.behind_modified).toBe(0);
+    expectSumsToTotal(buckets);
   });
 
   it('returns all zeros for a template with no forks', async () => {
     const controlDb = controlDbReturning((sql) => (sql.includes('FROM app_lineage') ? { rows: [] } : { rows: [] }));
     const { forkBuckets } = await import('../services/app-lineage.js');
     const buckets = await forkBuckets(controlDb, 'app_src', () => ({ query: vi.fn() }) as any);
-    expect(buckets).toEqual({ total: 0, current: 0, behind_unmodified: 0, behind_modified: 0, degraded_regions: [] });
+    expect(buckets).toEqual({
+      total: 0, current: 0, behind_unmodified: 0, behind_modified: 0, unknown: 0, degraded_regions: [],
+    });
   });
 });

@@ -39,12 +39,19 @@ export interface ForkBuckets {
   behind_unmodified: number;
   behind_modified: number;
   /**
+   * Behind forks whose repo state could not be determined — either the fork
+   * has no trustworthy base_snapshot_id at all, or its region's runtime DB
+   * was unreachable (see `degraded_regions`). Never guessed into modified or
+   * unmodified: these counts drive a build/don't-build decision on a merge
+   * engine, and folding "we don't know" into "modified" would bias that
+   * decision without evidence.
+   */
+  unknown: number;
+  /**
    * Regions whose runtime DB could not be reached while computing repo state
-   * for this call. Forks belonging to a degraded region are still counted in
-   * `total`/`current`/... — they are conservatively folded into
-   * `behind_modified` when behind (see forkBuckets doc) rather than silently
-   * misreported as unmodified. Callers should surface a non-empty list to the
-   * template owner as "counts may be stale".
+   * for this call. Every behind fork in a degraded region is counted in
+   * `unknown`, not guessed. Callers should surface a non-empty list to the
+   * template owner as "counts may be incomplete".
    */
   degraded_regions: string[];
 }
@@ -211,8 +218,18 @@ type ForkLineageForBucketing = {
 };
 
 /**
- * Template-owner view. Three count buckets, not two — this is the instrument
- * that tells us whether a merge engine has an audience before we build one.
+ * Template-owner view. Four count buckets — this is the instrument that tells
+ * us whether a merge engine has an audience before we build one, so a "we
+ * cannot tell" fork is reported as its own number rather than guessed into
+ * modified or unmodified: silently assuming the worst here would bias that
+ * build/don't-build decision without evidence, the same distortion a broken
+ * proxy caused before (see below).
+ *
+ * `current` is decided purely from control-plane data — a fork that is NOT
+ * behind lands in `current` regardless of repo state, because drift doesn't
+ * require the runtime lookup at all. Only forks that ARE behind get
+ * subdivided into unmodified / modified / unknown; a current-but-unreachable
+ * fork is still `current`, never `unknown`.
  *
  * "Behind" is the same two-tier rule as computeDrift, evaluated per fork against
  * one shared release list for the template (bounded by release count, not fork
@@ -221,31 +238,28 @@ type ForkLineageForBucketing = {
  * clone, whose base lives in base_fingerprint rather than a release row) is
  * behind when a release was published after its cloned_at.
  *
- * "Modified" is the real repo signal — apps.repo_latest_snapshot compared
- * against app_lineage.base_snapshot_id, the same comparison computeDivergence
- * makes for a single fork — NOT a proxy like "does this fork have a
- * base_release_id". That proxy is what silently misclassified every live-cloned,
- * up-to-date fork as the worst bucket in the previous version of this function:
- * live clones have base_fingerprint set and base_release_id NULL by design (see
- * db/control-plane/109_template_releases.sql), so keying "has a comparison
- * anchor" off base_release_id alone was backwards.
+ * "Modified" (for a behind fork) is the real repo signal — apps.repo_latest_snapshot
+ * compared against app_lineage.base_snapshot_id, the same comparison
+ * computeDivergence makes for a single fork — NOT a proxy like "does this fork
+ * have a base_release_id". That proxy is what silently misclassified every
+ * live-cloned, up-to-date fork as the worst bucket in an earlier version of
+ * this function: live clones have base_fingerprint set and base_release_id
+ * NULL by design (see db/control-plane/109_template_releases.sql), so keying
+ * "has a comparison anchor" off base_release_id alone was backwards.
  *
  * repo_latest_snapshot is runtime-tier and per-region, so it cannot be joined
  * from this control-plane query. Only forks that are actually behind need the
- * repo check (a current fork lands in `current` regardless of repo state), and
- * those are batched into ONE query per region — bounded by region count
- * (~4), never by fork count. If a region's runtime DB is unreachable, that
- * region is recorded in `degraded_regions` and its behind forks are
- * conservatively counted as `behind_modified` rather than silently reported as
- * unmodified.
+ * repo check, and those are batched into ONE query per region — bounded by
+ * region count (~4), never by fork count. If a region's runtime DB is
+ * unreachable, that region is recorded in `degraded_regions` and every behind
+ * fork in it is counted in `unknown`, not guessed.
  *
- * A fork whose base_snapshot_id is NULL (pre-capture fork, no trustworthy base
- * at all — see the invariant above) has unknowable repo state for the same
- * reason; it is folded into `behind_modified` under the same "don't
- * under-report drift" rule, not left to fall there by accident.
+ * A behind fork whose base_snapshot_id is NULL (pre-capture fork, no
+ * trustworthy base at all — see the invariant above) has unknowable repo
+ * state for the same reason and is also counted in `unknown`.
  *
  * Every fork lands in exactly one of current / behind_unmodified /
- * behind_modified, so the three always sum to `total`.
+ * behind_modified / unknown, so the four always sum to `total`.
  */
 export async function forkBuckets(
   controlDb: pg.Pool,
@@ -263,7 +277,7 @@ export async function forkBuckets(
   const forks = lineageRes.rows;
   const total = forks.length;
   if (total === 0) {
-    return { total: 0, current: 0, behind_unmodified: 0, behind_modified: 0, degraded_regions: [] };
+    return { total: 0, current: 0, behind_unmodified: 0, behind_modified: 0, unknown: 0, degraded_regions: [] };
   }
 
   const releasesRes = await controlDb.query<{ release_number: number; published_at: Date }>(
@@ -317,10 +331,22 @@ export async function forkBuckets(
 
   let behindUnmodified = 0;
   let behindModified = 0;
+  let unknown = 0;
   for (const fork of behindForks) {
     const regionDegraded = degradedRegions.includes(fork.dest_region);
+    // Unreachable region, or no trustworthy base_snapshot_id at all (pre-capture
+    // fork): repo state cannot be determined. Report that as its own number
+    // rather than guessing which of the other two buckets it belongs in.
     if (regionDegraded || fork.base_snapshot_id === null) {
-      behindModified++;
+      unknown++;
+      continue;
+    }
+    // A missing `apps` row for this id (deleted app, replication lag) is the
+    // same "cannot determine" case as an unreachable region — repoByAppId has
+    // no entry for it, which the `?? null` below would otherwise treat as "no
+    // snapshot" and silently compare unequal against a real base_snapshot_id.
+    if (!repoByAppId.has(fork.dest_app_id)) {
+      unknown++;
       continue;
     }
     const repoSnapshot = repoByAppId.get(fork.dest_app_id) ?? null;
@@ -335,6 +361,7 @@ export async function forkBuckets(
     total, current,
     behind_unmodified: behindUnmodified,
     behind_modified: behindModified,
+    unknown,
     degraded_regions: degradedRegions,
   };
 }
