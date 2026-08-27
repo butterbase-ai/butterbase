@@ -132,13 +132,42 @@ export async function captureAppState(
     a.table === b.table ? a.name.localeCompare(b.name) : a.table.localeCompare(b.table),
   );
 
+  // trigger_type/trigger_config moved off app_functions and onto function_triggers
+  // in runtime migration 018_function_triggers_cutover.sql, and a function can now
+  // have more than one trigger row (one per type — see function_triggers'
+  // (function_id, trigger_type) unique index and normalizeTriggers in
+  // routes/functions.ts). CapturedFunction still models a single trigger per
+  // function, matching the pre-cutover column shape and what the manifest
+  // consumers (release publish/clone-replay) expect, so this query folds
+  // whatever rows exist down to one, deterministically, per function:
+  //   - no trigger row at all: default to ('http', {}), mirroring
+  //     normalizeTriggers' "a missing trigger meant http" convention used at
+  //     deploy time.
+  //   - one or more trigger rows: take the one that sorts first by
+  //     trigger_type (LATERAL ... ORDER BY trigger_type LIMIT 1), the same
+  //     tie-break the functions list/detail routes already use for ordering
+  //     a function's triggers. This is a known simplification — a function
+  //     with e.g. both an http and a cron trigger only has its
+  //     alphabetically-first trigger captured in the manifest; callers that
+  //     need full multi-trigger fidelity should read function_triggers
+  //     directly rather than rely on this manifest.
+  // Either way the choice is a pure function of the row data, so two
+  // captures of an identical app still hash identically.
   const fnRows = await runtimePool.query<CapturedFunction>(
-    `SELECT name, code, description, timeout_ms, memory_limit_mb,
-            agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
-            trigger_type, trigger_config
-       FROM app_functions
-      WHERE app_id = $1 AND deleted_at IS NULL
-      ORDER BY name`,
+    `SELECT f.name, f.code, f.description, f.timeout_ms, f.memory_limit_mb,
+            f.agent_tool, f.agent_tool_description, f.agent_tool_mode, f.agent_tool_exposed_to,
+            COALESCE(t.trigger_type, 'http') AS trigger_type,
+            COALESCE(t.trigger_config, '{}'::jsonb) AS trigger_config
+       FROM app_functions f
+       LEFT JOIN LATERAL (
+         SELECT trigger_type, trigger_config
+           FROM function_triggers
+          WHERE function_id = f.id
+          ORDER BY trigger_type
+          LIMIT 1
+       ) t ON true
+      WHERE f.app_id = $1 AND f.deleted_at IS NULL
+      ORDER BY f.name`,
     [appId],
   );
   const functions = fnRows.rows;
