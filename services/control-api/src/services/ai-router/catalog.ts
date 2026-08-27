@@ -123,6 +123,57 @@ export interface RefreshResult {
  * Caller is responsible for lock acquisition (tryAcquireRefreshLock) when
  * coordinating with the cron refresher.
  */
+/**
+ * Fill in per-Mtok prices for chat routes whose upstream publishes none.
+ *
+ * Some routers settle from an authoritative post-call cost (OpenRouter's
+ * `usage.cost`, provider-secondary's and provider-tertiary's billing ledgers)
+ * and therefore have no reason to publish a rate card. Their catalog rows
+ * legitimately carry 0/0. That is fine right up until the cost lookup fails —
+ * `router.ts` then falls back to `estimateWorstCaseUsd`, which multiplies by
+ * those zeros and settles the call at $0. The customer is billed nothing and
+ * we still pay the upstream, with nothing logged.
+ *
+ * So an unpriced chat route borrows a priced sibling's rates as a
+ * last-resort estimate. It is never the billing basis when the real cost is
+ * available — only the floor under a failed lookup.
+ *
+ * Donor preference:
+ *   1. `openrouter`, when it offers the same model. It is the closest thing to
+ *      a public reference rate for a canonical id.
+ *   2. otherwise the CHEAPEST priced sibling, by the same prompt + 3x
+ *      completion weighting the ranker uses. Cheapest rather than dearest so a
+ *      failed lookup cannot silently overcharge; it can only under-recover,
+ *      which is the direction we already tolerate.
+ *
+ * Non-chat rows are left strictly alone. Video rows carry 0/0 by design and
+ * price per second via `rawPricing`; copying token rates onto them would
+ * invent a charge that does not exist. Rows carrying `rawPricing` are skipped
+ * for the same reason.
+ */
+export function inheritMissingChatPrices(routers: CatalogRouter[]): CatalogRouter[] {
+  const isChat = (r: CatalogRouter) => (r.modality ?? 'chat') === 'chat' && r.rawPricing === undefined;
+  const isPriced = (r: CatalogRouter) => r.promptPricePerMtok > 0 || r.completionPricePerMtok > 0;
+  const weight = (r: CatalogRouter) => r.promptPricePerMtok + 3 * r.completionPricePerMtok;
+
+  const donors = routers.filter(r => isChat(r) && isPriced(r));
+  if (donors.length === 0) return routers;
+
+  const donor =
+    donors.find(d => d.name === 'openrouter')
+    ?? [...donors].sort((a, b) => weight(a) - weight(b) || a.name.localeCompare(b.name))[0];
+
+  return routers.map(r => {
+    if (!isChat(r) || isPriced(r) || r.name === donor.name) return r;
+    return {
+      ...r,
+      promptPricePerMtok: donor.promptPricePerMtok,
+      completionPricePerMtok: donor.completionPricePerMtok,
+      priceInheritedFrom: donor.name,
+    };
+  });
+}
+
 export async function refreshCatalog(
   redis: Redis,
   adapters: RouterAdapter[],
@@ -164,7 +215,7 @@ export async function refreshCatalog(
     canonicalId,
     displayName: v.displayName,
     updatedAt: now,
-    routers: v.routers,
+    routers: inheritMissingChatPrices(v.routers),
   }));
 
   await writeCatalog(redis, entries, statuses);
