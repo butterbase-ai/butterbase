@@ -23,9 +23,24 @@ describe('captureAppState — secret exclusion', () => {
     'composio_SHOULD_NEVER_APPEAR',
   ];
 
+  // Guards against a SELECT ever widening to pull a secret-bearing column.
+  // Fixture rows alone only prove "secret-free input produces secret-free
+  // output" — they say nothing about whether the SELECT text itself stays
+  // secret-free, since captureConfig's oauth/integrations/realtime rows (and
+  // the functions rows) are returned wholesale (`oauth.rows`, `.rows`, etc.)
+  // with no per-field JS narrowing. Asserting on the query text closes that
+  // gap: if a future SELECT ever names one of these columns, the stub throws
+  // before fixture data gets a chance to mask it.
+  const FORBIDDEN_SQL_COLUMNS = /client_secret_encrypted|composio_auth_config_id|\bclient_id\b/i;
+
   function poolReturning(rowsByTable: Record<string, unknown[]>) {
     return {
       query: async (sql: string) => {
+        if (FORBIDDEN_SQL_COLUMNS.test(sql)) {
+          throw new Error(
+            `poolReturning: query text references a forbidden secret-bearing column:\n${sql}`,
+          );
+        }
         const table = Object.keys(rowsByTable).find((t) => sql.includes(t));
         return { rows: table ? rowsByTable[table] : [] };
       },

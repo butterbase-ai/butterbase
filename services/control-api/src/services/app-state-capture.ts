@@ -112,11 +112,21 @@ export async function captureAppState(
   appPool: pg.Pool,
   appId: string,
 ): Promise<AppStateManifest> {
-  const [schema, rls, config] = await Promise.all([
+  const [schema, rlsRaw, config] = await Promise.all([
     introspectSchema(appPool),
     introspectRls(appPool),
     captureConfig(runtimePool, appId),
   ]);
+
+  // introspectRls's underlying `pg_policies` query (rls-introspector.ts) has no
+  // ORDER BY — deliberately not changed there, since that file is shared with
+  // the clone worker's replayRls path and reordering its output has blast
+  // radius beyond this task. canonicalJson preserves array order, so without
+  // sorting here two captures of an identical app could hash differently
+  // depending on how Postgres happens to return the policy rows.
+  const rls = [...rlsRaw].sort((a, b) =>
+    a.table === b.table ? a.name.localeCompare(b.name) : a.table.localeCompare(b.table),
+  );
 
   const fnRows = await runtimePool.query<CapturedFunction>(
     `SELECT name, code, description, timeout_ms, memory_limit_mb,
