@@ -34,6 +34,33 @@ function parseReleaseNumber(n: string): number | null {
   return parsed;
 }
 
+/**
+ * Gate for the two anonymous release routes below. Mirrors the equivalent
+ * check on the anonymous template detail route (templates-discovery.ts:279):
+ * same lookup, same 404-rather-than-403 behaviour, since a 403 would confirm
+ * the app exists to an unauthenticated caller.
+ *
+ * Deliberately gates on `visibility = 'public'` only, NOT `listed`. `listed`
+ * controls browse/discovery surfacing ("clonable by direct id but hidden
+ * from the catalog"), not access control — an unlisted-but-public template
+ * is already fully public (anyone with the id can clone the whole app), so
+ * serving its changelog leaks nothing beyond what cloning already exposes.
+ * `visibility = 'private'` is the actual access boundary this route must
+ * respect.
+ */
+async function isPublicTemplate(controlDb: import('pg').Pool, appId: string): Promise<boolean> {
+  try {
+    const runtimePool = await getRuntimeDbForApp(controlDb, appId);
+    const row = await runtimePool.query<{ visibility: string }>(
+      `SELECT visibility FROM apps WHERE id = $1`,
+      [appId],
+    );
+    return row.rows[0]?.visibility === 'public';
+  } catch {
+    return false;
+  }
+}
+
 export function templateReleaseRoutes(app: FastifyInstance): void {
   // POST /v1/:app_id/template/releases — publish
   app.post('/v1/:app_id/template/releases', {
@@ -153,6 +180,14 @@ export function templateReleaseRoutes(app: FastifyInstance): void {
     },
   }, async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
+    if (!(await isPublicTemplate(app.controlDb, app_id))) {
+      return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: 'Template not found.',
+        remediation: 'Check the app id.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
+    }
     const releases = await listReleases(app.controlDb, app_id);
     return reply.send({ items: releases.map(summarizeRelease) });
   });
@@ -181,8 +216,18 @@ export function templateReleaseRoutes(app: FastifyInstance): void {
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     }
-    const release = await getRelease(app.controlDb, app_id, releaseNumber);
-    if (!release) {
+    let full = false;
+    const userId = request.auth?.userId;
+    if (userId) {
+      full = await AppResolver.resolveApp(app.controlDb, app_id, userId, request.auth?.organizationId ?? null)
+        .then(() => true)
+        .catch(() => false);
+    }
+
+    // Authenticated callers with org access to the app bypass the public-visibility
+    // gate (they're allowed to see their own private app's release detail); anonymous
+    // callers must clear it, same as the changelog list route above.
+    if (!full && !(await isPublicTemplate(app.controlDb, app_id))) {
       return reply.code(404).send(createAgentError({
         code: RESOURCE_NOT_FOUND,
         message: 'Release not found.',
@@ -191,12 +236,14 @@ export function templateReleaseRoutes(app: FastifyInstance): void {
       }));
     }
 
-    let full = false;
-    const userId = request.auth?.userId;
-    if (userId) {
-      full = await AppResolver.resolveApp(app.controlDb, app_id, userId, request.auth?.organizationId ?? null)
-        .then(() => true)
-        .catch(() => false);
+    const release = await getRelease(app.controlDb, app_id, releaseNumber);
+    if (!release) {
+      return reply.code(404).send(createAgentError({
+        code: RESOURCE_NOT_FOUND,
+        message: 'Release not found.',
+        remediation: 'Check the app id and release number.',
+        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+      }));
     }
 
     const summary = summarizeRelease(release);

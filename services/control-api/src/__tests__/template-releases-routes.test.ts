@@ -3,6 +3,13 @@ import Fastify from 'fastify';
 
 describe('GET /v1/templates/:app_id/releases/:n — anonymous projection', () => {
   it('returns a summary and never a function body', async () => {
+    // The anonymous route now gates on the app being visibility='public'
+    // (FIX 3) — stub the region lookup it uses to check that.
+    vi.doMock('../services/region-resolver.js', async () => ({
+      getRuntimeDbForApp: async () => ({
+        query: async () => ({ rows: [{ visibility: 'public' }] }),
+      }),
+    }));
     vi.doMock('../services/template-releases.js', async () => ({
       getRelease: async () => ({
         id: 'rel_1', source_app_id: 'app_src', release_number: 1,
@@ -36,6 +43,33 @@ describe('GET /v1/templates/:app_id/releases/:n — anonymous projection', () =>
     await app.close();
   });
 
+  it('404s a private app instead of leaking its release detail (FIX 3)', async () => {
+    vi.resetModules();
+    vi.doMock('../services/region-resolver.js', async () => ({
+      getRuntimeDbForApp: async () => ({
+        query: async () => ({ rows: [{ visibility: 'private' }] }),
+      }),
+    }));
+    vi.doMock('../services/template-releases.js', async () => ({
+      getRelease: async () => { throw new Error('getRelease must not be called for a private app'); },
+      summarizeRelease: (await vi.importActual<typeof import('../services/template-releases.js')>(
+        '../services/template-releases.js')).summarizeRelease,
+      listReleases: async () => [],
+      publishRelease: async () => { throw new Error('unused'); },
+      updateReleaseText: async () => null,
+      NoRepoSnapshotError: class extends Error {},
+    }));
+
+    const { templateReleaseRoutes } = await import('../routes/template-releases.js');
+    const app = Fastify();
+    app.decorate('controlDb', { query: async () => ({ rows: [] }) } as any);
+    templateReleaseRoutes(app);
+
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_src/releases/1' });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
   it.each([
     ['non-numeric', 'abc'],
     ['negative', '-1'],
@@ -62,6 +96,59 @@ describe('GET /v1/templates/:app_id/releases/:n — anonymous projection', () =>
     const res = await app.inject({ method: 'GET', url: `/v1/templates/app_src/releases/${badN}` });
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body).error.code).toBe('VALIDATION_INVALID_SCHEMA');
+    await app.close();
+  });
+});
+
+describe('GET /v1/templates/:app_id/releases — anonymous changelog (FIX 3)', () => {
+  function mockDeps(visibility: string | null) {
+    vi.resetModules();
+    vi.doMock('../services/region-resolver.js', async () => ({
+      getRuntimeDbForApp: async () => ({
+        query: async () => ({ rows: visibility === null ? [] : [{ visibility }] }),
+      }),
+    }));
+    vi.doMock('../services/template-releases.js', async () => ({
+      getRelease: async () => { throw new Error('unused'); },
+      summarizeRelease: (v: unknown) => v,
+      listReleases: async () => [{ release_number: 1, label: 'v1' }],
+      publishRelease: async () => { throw new Error('unused'); },
+      updateReleaseText: async () => null,
+      NoRepoSnapshotError: class extends Error {},
+    }));
+  }
+
+  it('serves the changelog for a public template', async () => {
+    mockDeps('public');
+    const { templateReleaseRoutes } = await import('../routes/template-releases.js');
+    const app = Fastify();
+    app.decorate('controlDb', { query: async () => ({ rows: [] }) } as any);
+    templateReleaseRoutes(app);
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_src/releases' });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).items).toHaveLength(1);
+    await app.close();
+  });
+
+  it('404s the changelog for a private app instead of leaking release notes / function names / env keys', async () => {
+    mockDeps('private');
+    const { templateReleaseRoutes } = await import('../routes/template-releases.js');
+    const app = Fastify();
+    app.decorate('controlDb', { query: async () => ({ rows: [] }) } as any);
+    templateReleaseRoutes(app);
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_src/releases' });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('404s the changelog for an unknown app id (not a leaked 403/500)', async () => {
+    mockDeps(null);
+    const { templateReleaseRoutes } = await import('../routes/template-releases.js');
+    const app = Fastify();
+    app.decorate('controlDb', { query: async () => ({ rows: [] }) } as any);
+    templateReleaseRoutes(app);
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_ghost/releases' });
+    expect(res.statusCode).toBe(404);
     await app.close();
   });
 });
