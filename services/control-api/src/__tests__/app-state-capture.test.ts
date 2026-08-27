@@ -1,5 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { canonicalJson, captureAppState } from '../services/app-state-capture.js';
+import { encrypt } from '../services/crypto.js';
+
+const TEST_AUTH_ENCRYPTION_KEY = '0'.repeat(63) + '1'; // 64 hex chars = 32 bytes
+
+beforeAll(() => {
+  process.env.AUTH_ENCRYPTION_KEY = TEST_AUTH_ENCRYPTION_KEY;
+});
 
 describe('canonicalJson', () => {
   it('is stable under key reordering', () => {
@@ -53,7 +60,7 @@ describe('captureAppState — secret exclusion', () => {
         storage_config: { total_size_limit: 1000 },
         jwt_config: { ttl: 3600 },
         allowed_origins: ['https://example.com'],
-        ai_config: { model: 'anthropic/claude-sonnet-4.5' },
+        ai_config: { model: 'anthropic/claude-sonnet-4.5', byokKey: 'sk_live_SHOULD_NEVER_APPEAR' },
         repo_latest_snapshot: 'snap_abc',
       }],
       app_realtime_config: [{ table_name: 'todos', events: ['INSERT'], enabled: true }],
@@ -92,5 +99,26 @@ describe('captureAppState — secret exclusion', () => {
     const manifest = await captureAppState(runtimePool, poolReturning({}), 'app_x');
     expect(manifest.required_env.durable_objects).toEqual(['STRIPE_KEY']);
     expect(canonicalJson(manifest)).not.toContain('sk_live');
+  });
+
+  it('captures FUNCTION env var KEY NAMES but never decrypted values', async () => {
+    const plaintextSecretValue = 'sk_live_SHOULD_NEVER_APPEAR';
+    const encryptedBlob = encrypt(
+      JSON.stringify({ STRIPE_KEY: plaintextSecretValue }),
+      TEST_AUTH_ENCRYPTION_KEY,
+    );
+    const runtimePool = poolReturning({
+      apps: [{ repo_latest_snapshot: null }],
+      app_functions: [{
+        name: 'webhook', code: 'export default () => {}', description: null,
+        timeout_ms: 30000, memory_limit_mb: 128, agent_tool: false,
+        agent_tool_description: null, agent_tool_mode: null,
+        agent_tool_exposed_to: null, trigger_type: 'http', trigger_config: {},
+        encrypted_env_vars: encryptedBlob,
+      }],
+    });
+    const manifest = await captureAppState(runtimePool, poolReturning({}), 'app_x');
+    expect(manifest.required_env.functions).toEqual({ webhook: ['STRIPE_KEY'] });
+    expect(canonicalJson(manifest)).not.toContain(plaintextSecretValue);
   });
 });

@@ -87,11 +87,15 @@ async function captureConfig(runtimePool: pg.Pool, appId: string): Promise<Captu
     [appId],
   );
   const a = appRow.rows[0] ?? {};
+  // Strip the BYOK key, mirroring replayAiConfig in clone-replay.ts:744 — a
+  // release is readable by anyone who can see the public template, so a
+  // manifest carrying this credential would leak it across tenants.
+  const { byokKey: _drop, ...aiConfig } = (a.ai_config ?? {}) as Record<string, unknown>;
   return {
     storage_config: a.storage_config ?? null,
     jwt_config: a.jwt_config ?? null,
     allowed_origins: a.allowed_origins ?? null,
-    ai_config: a.ai_config ?? null,
+    ai_config: aiConfig,
     realtime: realtime.rows,
     oauth: oauth.rows,
     integrations: integrations.rows,
