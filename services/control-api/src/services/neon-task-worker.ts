@@ -29,6 +29,9 @@ import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
 import { getCloneAppOverrides, resolveOverridesForClone } from './clone-app-overrides.js';
+import { recordLineage } from './app-lineage.js';
+import { captureAppState } from './app-state-capture.js';
+import { listReleases } from './template-releases.js';
 
 interface NeonTask {
   id: number;
@@ -1115,6 +1118,41 @@ async function executeClone(
         logger.error(
           { err, source: job.source_app_id },
           '[clone] fork_count increment failed; deferring to sweeper',
+        );
+      }
+
+      // Record template lineage in the control plane. Additive and best-effort:
+      // this must never fail a clone that has otherwise succeeded. The base is
+      // captured HERE because it can only be captured at clone time — a fork
+      // created without it can never be safely merged later, since by the time we
+      // want a base it has already diverged.
+      try {
+        const releases = await listReleases(controlDb, job.source_app_id, 1);
+        const baseRelease = releases[0] ?? null;
+        // Point at the release when one exists; materialize inline only when the
+        // fork was cloned from live. Never both.
+        const baseFingerprint = baseRelease
+          ? null
+          : await captureAppState(sourceRuntimePool, sourceAppPool, job.source_app_id);
+        const baseSnapshotId = baseRelease?.snapshot_id ?? job.source_snapshot_id;
+
+        await recordLineage(controlDb, {
+          destAppId: resolvedDestAppId,
+          destRegion: job.dest_region,
+          sourceAppId: job.source_app_id,
+          sourceRegion: job.source_region,
+          baseReleaseId: baseRelease?.id ?? null,
+          baseFingerprint,
+          baseSnapshotId,
+        });
+        logger.info(
+          { destAppId: resolvedDestAppId, baseReleaseId: baseRelease?.id ?? null },
+          '[clone] lineage recorded',
+        );
+      } catch (err) {
+        logger.warn(
+          { err, destAppId: resolvedDestAppId },
+          '[clone] lineage record failed; backfill will repair',
         );
       }
 
