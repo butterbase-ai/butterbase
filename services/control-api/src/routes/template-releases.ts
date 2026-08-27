@@ -56,7 +56,11 @@ async function isPublicTemplate(controlDb: import('pg').Pool, appId: string): Pr
       [appId],
     );
     return row.rows[0]?.visibility === 'public';
-  } catch {
+  } catch (err) {
+    // Fail closed (never 500 an anonymous caller here — see parseReleaseNumber's
+    // comment above for why), but log so a transient region-resolver or runtime-DB
+    // outage is diagnosable instead of silently masquerading as "app not found".
+    console.error('isPublicTemplate: visibility lookup failed', { appId, err });
     return false;
   }
 }
@@ -180,7 +184,18 @@ export function templateReleaseRoutes(app: FastifyInstance): void {
     },
   }, async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
-    if (!(await isPublicTemplate(app.controlDb, app_id))) {
+    let full = false;
+    const userId = request.auth?.userId;
+    if (userId) {
+      full = await AppResolver.resolveApp(app.controlDb, app_id, userId, request.auth?.organizationId ?? null)
+        .then(() => true)
+        .catch(() => false);
+    }
+
+    // Authenticated callers with org access to the app bypass the public-visibility
+    // gate (they're allowed to list their own private app's releases); anonymous
+    // callers must clear it, same as the release-detail route below.
+    if (!full && !(await isPublicTemplate(app.controlDb, app_id))) {
       return reply.code(404).send(createAgentError({
         code: RESOURCE_NOT_FOUND,
         message: 'Template not found.',

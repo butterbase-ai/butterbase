@@ -151,4 +151,49 @@ describe('GET /v1/templates/:app_id/releases — anonymous changelog (FIX 3)', (
     expect(res.statusCode).toBe(404);
     await app.close();
   });
+
+  it('lets an authenticated org member list releases for their own non-public app (regression)', async () => {
+    // The regression this guards: the LIST route gated on visibility unconditionally
+    // and never checked org membership, so an owner publishing releases on their own
+    // private app (POST gates on AppResolver.resolveApp only, not visibility) could
+    // not then list them. The DETAIL route already had this bypass; LIST didn't.
+    mockDeps('private');
+    vi.doMock('../services/app-resolver.js', async () => ({
+      AppResolver: { resolveApp: async () => ({ id: 'app_src', db_name: 'db_src' }) },
+    }));
+
+    const { templateReleaseRoutes } = await import('../routes/template-releases.js');
+    const app = Fastify();
+    app.decorate('controlDb', { query: async () => ({ rows: [] }) } as any);
+    app.decorateRequest('auth', null as any);
+    app.addHook('onRequest', async (request: any) => {
+      request.auth = { userId: 'user_member', organizationId: 'org_1', authMethod: 'session', scopes: ['*'] };
+    });
+    templateReleaseRoutes(app);
+
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_src/releases' });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).items).toHaveLength(1);
+    await app.close();
+  });
+
+  it('still 404s a private app for an authenticated caller who is NOT a member (resolveApp rejects)', async () => {
+    mockDeps('private');
+    vi.doMock('../services/app-resolver.js', async () => ({
+      AppResolver: { resolveApp: async () => { throw new Error('not a member'); } },
+    }));
+
+    const { templateReleaseRoutes } = await import('../routes/template-releases.js');
+    const app = Fastify();
+    app.decorate('controlDb', { query: async () => ({ rows: [] }) } as any);
+    app.decorateRequest('auth', null as any);
+    app.addHook('onRequest', async (request: any) => {
+      request.auth = { userId: 'user_stranger', organizationId: 'org_2', authMethod: 'session', scopes: ['*'] };
+    });
+    templateReleaseRoutes(app);
+
+    const res = await app.inject({ method: 'GET', url: '/v1/templates/app_src/releases' });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
 });
