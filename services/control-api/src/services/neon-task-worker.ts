@@ -421,6 +421,44 @@ async function waitForDestReady(
   throw new Error('Dest app provisioning timed out');
 }
 
+/** A just-published-or-not release row, narrowed to the two fields this decision needs. */
+export interface LatestReleaseForLineage {
+  id: string;
+  snapshot_id: string | null;
+}
+
+export interface LineageBaseDecision {
+  /** Non-null only when the clone actually replayed this release's snapshot. */
+  baseRelease: LatestReleaseForLineage | null;
+  /** Always the snapshot the fork's repo HEAD was actually set to (see setLatest below). */
+  baseSnapshotId: string;
+}
+
+/**
+ * Pure decision for the FIX-1 bug: a fork's lineage base is the latest
+ * published release ONLY when that release's snapshot matches the snapshot
+ * the clone actually replayed (job.source_snapshot_id — the same value passed
+ * to setLatest(resolvedDestAppId, job.source_snapshot_id) elsewhere in
+ * executeClone, so the fork's repo HEAD literally *is* this value). If the
+ * template owner has pushed further repo commits since the latest release,
+ * the release is stale and must NOT be adopted as the base — the fork was
+ * built from live state that has moved past it, and recording the release
+ * pointer would make computeDivergence report an untouched fork as MODIFIED.
+ *
+ * Exported and tested in isolation because executeClone itself is a large,
+ * heavily-effectful function (provisioning, S3, multiple DB pools) that is
+ * impractical to exercise end to end in a unit test — this is the one
+ * three-line expression inside it that actually needs coverage.
+ */
+export function decideLineageBase(
+  latestRelease: LatestReleaseForLineage | null,
+  sourceSnapshotId: string,
+): LineageBaseDecision {
+  const baseRelease =
+    latestRelease?.snapshot_id === sourceSnapshotId ? latestRelease : null;
+  return { baseRelease, baseSnapshotId: sourceSnapshotId };
+}
+
 /**
  * Phase 4a / Phase 5 B1 app-template clone: read job, provision fresh dest
  * app, copy blobs + manifest, set dest's latest pointer, mark job completed.
@@ -1128,13 +1166,15 @@ async function executeClone(
       // want a base it has already diverged.
       try {
         const releases = await listReleases(controlDb, job.source_app_id, 1);
-        const baseRelease = releases[0] ?? null;
+        const { baseRelease, baseSnapshotId } = decideLineageBase(
+          releases[0] ?? null,
+          job.source_snapshot_id,
+        );
         // Point at the release when one exists; materialize inline only when the
         // fork was cloned from live. Never both.
         const baseFingerprint = baseRelease
           ? null
           : await captureAppState(sourceRuntimePool, sourceAppPool, job.source_app_id);
-        const baseSnapshotId = baseRelease?.snapshot_id ?? job.source_snapshot_id;
 
         await recordLineage(controlDb, {
           destAppId: resolvedDestAppId,
