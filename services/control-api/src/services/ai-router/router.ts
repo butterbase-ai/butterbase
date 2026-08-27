@@ -17,6 +17,7 @@ import { applyMarkup } from './markup.js';
 import type { MarkupSource } from './special-pricing.js';
 import { acquireForEstimatedCost, acquireNominal, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
+import { classifyCostSource, type CostSource } from './cost-source.js';
 import { pickProviderCost } from './adapters/openrouter.js';
 import { logAuditEvent } from '../audit/audit-events-service.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
@@ -292,6 +293,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   if (result.stream) {
     const wrapped = wrapStreamForSettlement(result.stream, async (usage, providerCost) => {
       const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cacheReadInputTokens ?? 0, usage.cacheCreationInputTokens ?? 0);
+      const costSource = classifyCostSource(providerCost, ranked[0]);
       const chargedCredits = applyMarkup(cost, ctx.markupPct);
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill(
@@ -304,7 +306,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         totalTokens: usage.promptTokens + usage.completionTokens,
         providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain, leaseId: lease.leaseId,
+        markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
         keyType: 'platform', chargedToUser: true,
         cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
         cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
@@ -333,6 +335,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
     ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cache_read_input_tokens ?? 0, usage.cache_creation_input_tokens ?? 0);
+  const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
@@ -346,7 +349,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
     totalTokens: usage.promptTokens + usage.completionTokens,
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain, leaseId: lease.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
     keyType: 'platform', chargedToUser: true,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
@@ -509,6 +512,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
     ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, 0, usage.cache_read_input_tokens ?? 0, usage.cache_creation_input_tokens ?? 0);
+  const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
@@ -522,7 +526,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     promptTokens: usage.promptTokens, completionTokens: 0,
     totalTokens: usage.promptTokens,
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain, leaseId: lease.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
     keyType: 'platform', chargedToUser: true,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
@@ -1033,6 +1037,8 @@ export async function settleVideoJob(
     chosenRouter: RouterName;
     canonicalModel: string;
     providerCostUsd: number;
+    /** Whether providerCostUsd came from the upstream or from our own rate card. */
+    costSource: CostSource;
     fallbackChain?: string[];
   },
 ): Promise<{ chargedCreditsUsd: number; providerCostUsd: number }> {
@@ -1055,7 +1061,7 @@ export async function settleVideoJob(
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource: args.costSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
     keyType: 'platform', chargedToUser: true,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   console.log(JSON.stringify({
@@ -1216,6 +1222,8 @@ export async function settleImageJob(
     chosenRouter: RouterName;
     canonicalModel: string;
     providerCostUsd: number;
+    /** Whether providerCostUsd came from the upstream or from our own rate card. */
+    costSource: CostSource;
     fallbackChain?: string[];
   },
 ): Promise<{ chargedCreditsUsd: number; providerCostUsd: number }> {
@@ -1238,7 +1246,7 @@ export async function settleImageJob(
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource: args.costSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
     keyType: 'platform', chargedToUser: true,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   console.log(JSON.stringify({

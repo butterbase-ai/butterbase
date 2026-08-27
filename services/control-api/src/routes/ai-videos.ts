@@ -14,6 +14,7 @@ import {
   RouterError, InsufficientCreditsError,
   type RouteContext,
 } from '../services/ai-router/router.js';
+import type { CostSource } from '../services/ai-router/cost-source.js';
 import { readCatalogEntry } from '../services/ai-router/catalog.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
@@ -344,6 +345,9 @@ export async function pollAndSettleVideoJob(
   //   3) $0 as final guard — only `failed`/`cancelled` paths, where
   //      charging would be wrong anyway.
   let providerCost = poll.providerCostUsd ?? 0;
+  // Provenance for migration 049. Starts as whatever the branch above produced:
+  // an upstream-reported cost, or $0 pending the catalog fallback below.
+  let costSource: CostSource = poll.providerCostUsd !== undefined ? 'upstream' : 'catalog_unpriced';
   if (poll.providerCostUsd === undefined && poll.status === 'completed') {
     const entry = await readCatalogEntry(ctx.redis, job.model);
     if (entry) {
@@ -352,7 +356,7 @@ export async function pollAndSettleVideoJob(
         job.request_json as unknown as import('../services/ai-router/adapters/types.js').VideoGenerationRequest,
         job.upstream_router as RouterName,
       );
-      if (billed !== null) providerCost = billed;
+      if (billed !== null) { providerCost = billed; costSource = 'catalog'; }
     }
   }
 
@@ -370,6 +374,7 @@ export async function pollAndSettleVideoJob(
       chosenRouter: job.upstream_router as RouterName,
       canonicalModel: job.model,
       providerCostUsd: providerCost,
+      costSource,
     });
   }
   return { status: poll.status, terminal: true };

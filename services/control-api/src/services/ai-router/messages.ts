@@ -16,6 +16,7 @@ import { estimatePromptTokens } from './tokenizer.js';
 import { settleAfterCall, leaseTtlSeconds } from './billing-gate.js';
 import type { LeaseHandle } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
+import { classifyCostSource } from './cost-source.js';
 import { applyMarkup } from './markup.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 
@@ -67,7 +68,10 @@ function wrapNativeAnthropicStreamForSettlement(
     if (settled) return;
     settled = true;
     try {
+      // This path has no upstream-reported cost at all, so it is always an
+      // estimate against `pricing`.
       const providerCost = estimateWorstCaseUsd(pricing, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens);
+      const costSource = classifyCostSource(null, pricing);
       const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
@@ -83,7 +87,7 @@ function wrapNativeAnthropicStreamForSettlement(
         promptTokens: inputTokens, completionTokens: outputTokens,
         totalTokens: inputTokens + outputTokens,
         providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: [], leaseId: lease.leaseId,
+        markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain: [], leaseId: lease.leaseId,
         keyType: 'platform', chargedToUser: true,
         cacheReadInputTokens: cacheReadTokens,
         cacheCreationInputTokens: cacheCreateTokens,
@@ -222,6 +226,7 @@ export async function routeMessages(
       };
     })();
 
+    const costSource = classifyCostSource(result.providerCostUsd, native.router);
     const providerCost = result.providerCostUsd
       ?? estimateWorstCaseUsd(
         native.router,
@@ -243,7 +248,7 @@ export async function routeMessages(
       promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
       totalTokens: usage.promptTokens + usage.completionTokens,
       providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-      markupPct: ctx.markupPct, markupSource: ctx.markupSource, fallbackChain: [], leaseId: lease.leaseId,
+      markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain: [], leaseId: lease.leaseId,
       keyType: 'platform', chargedToUser: true,
       cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
       cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
