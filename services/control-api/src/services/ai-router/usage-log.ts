@@ -21,7 +21,7 @@ export interface AiUsageRow {
   /**
    * Provenance of providerCostUsd. Required, not optional: a wrong value here
    * is invisible, so every writer must state which case it is in rather than
-   * inheriting a default. See migration 049 for the vocabulary.
+   * inheriting a default. See migration 051 for the vocabulary.
    */
   costSource: CostSource;
   fallbackChain: string[];   // router_name:reason entries from upstream fallbacks

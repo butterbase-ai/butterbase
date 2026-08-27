@@ -1,5 +1,5 @@
 -- @scope: runtime
--- 049: Record WHERE provider_cost_usd came from on each charge:
+-- 051: Record WHERE provider_cost_usd came from on each charge:
 --   'upstream'          — the provider reported the real cost for this call
 --                         (OpenRouter usage.cost, provider-secondary's and
 --                         provider-tertiary's billing ledgers)
