@@ -1,0 +1,81 @@
+import { describe, it, expect } from 'vitest';
+import { canonicalJson, captureAppState } from '../services/app-state-capture.js';
+
+describe('canonicalJson', () => {
+  it('is stable under key reordering', () => {
+    expect(canonicalJson({ b: 1, a: 2 })).toBe(canonicalJson({ a: 2, b: 1 }));
+  });
+
+  it('sorts nested object keys too', () => {
+    expect(canonicalJson({ x: { z: 1, y: 2 } })).toBe('{"x":{"y":2,"z":1}}');
+  });
+
+  it('preserves array order', () => {
+    expect(canonicalJson([2, 1])).toBe('[2,1]');
+  });
+});
+
+describe('captureAppState — secret exclusion', () => {
+  const SECRETS = [
+    'sk_live_SHOULD_NEVER_APPEAR',
+    'wsec_SHOULD_NEVER_APPEAR',
+    'client_secret_SHOULD_NEVER_APPEAR',
+    'composio_SHOULD_NEVER_APPEAR',
+  ];
+
+  function poolReturning(rowsByTable: Record<string, unknown[]>) {
+    return {
+      query: async (sql: string) => {
+        const table = Object.keys(rowsByTable).find((t) => sql.includes(t));
+        return { rows: table ? rowsByTable[table] : [] };
+      },
+    } as unknown as import('pg').Pool;
+  }
+
+  it('emits no secret value anywhere in the manifest', async () => {
+    const runtimePool = poolReturning({
+      apps: [{
+        storage_config: { total_size_limit: 1000 },
+        jwt_config: { ttl: 3600 },
+        allowed_origins: ['https://example.com'],
+        ai_config: { model: 'anthropic/claude-sonnet-4.5' },
+        repo_latest_snapshot: 'snap_abc',
+      }],
+      app_realtime_config: [{ table_name: 'todos', events: ['INSERT'], enabled: true }],
+      app_oauth_configs: [{
+        provider: 'google', scopes: ['email'], authorization_url: 'https://a',
+        token_url: 'https://t', userinfo_url: 'https://u', enabled: true,
+        redirect_uris: [], provider_metadata: {},
+      }],
+      app_integration_configs: [{
+        toolkit_slug: 'slack', display_name: 'Slack', enabled: true, scopes: [],
+      }],
+      app_functions: [{
+        name: 'webhook', code: 'export default () => {}', description: null,
+        timeout_ms: 30000, memory_limit_mb: 128, agent_tool: false,
+        agent_tool_description: null, agent_tool_mode: null,
+        agent_tool_exposed_to: null, trigger_type: 'http', trigger_config: {},
+      }],
+      app_durable_objects: [{ class_name: 'ChatRoom' }],
+    });
+    const appPool = poolReturning({});
+
+    const manifest = await captureAppState(runtimePool, appPool, 'app_x');
+    const serialized = canonicalJson(manifest);
+    for (const secret of SECRETS) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(serialized).not.toContain('client_secret_encrypted');
+    expect(serialized).not.toContain('composio_auth_config_id');
+  });
+
+  it('captures env var KEY NAMES but never values', async () => {
+    const runtimePool = poolReturning({
+      apps: [{ repo_latest_snapshot: null }],
+      app_do_env_vars: [{ key: 'STRIPE_KEY' }],
+    });
+    const manifest = await captureAppState(runtimePool, poolReturning({}), 'app_x');
+    expect(manifest.required_env.durable_objects).toEqual(['STRIPE_KEY']);
+    expect(canonicalJson(manifest)).not.toContain('sk_live');
+  });
+});

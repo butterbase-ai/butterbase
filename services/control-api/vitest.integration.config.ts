@@ -15,6 +15,7 @@ export default defineConfig({
     testTimeout: 30000,
     hookTimeout: 30000,
     include: [
+      'src/__tests__/app-state-capture.integration.test.ts',
       'src/__tests__/auto-api.test.ts',
       'src/__tests__/fn-gateway.test.ts',
       'src/__tests__/health.test.ts',
