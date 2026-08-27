@@ -104,6 +104,18 @@ describe('weekly_digest body (text)', () => {
     expect(body).toContain('Nothing failed');
     expect(body).toMatchSnapshot();
   });
+  it('renders a template-updates section without alert framing', () => {
+    const body = buildBillingEmailBody('weekly_digest', {
+      itemsJson: '[]',
+      deployItemsJson: '[]',
+      templateUpdatesJson: JSON.stringify([
+        { dest_app_id: 'app_fork1', source_app_id: 'app_src', behind_by: 2, latest_label: 'v1.4' },
+      ]),
+    });
+    expect(body).toContain('Template updates available (1)');
+    expect(body).toContain('app_fork1 is 2 releases behind its template (latest: v1.4)');
+    expect(body).not.toContain('Nothing failed');
+  });
 });
 
 describe('weekly_digest body (HTML)', () => {
@@ -140,6 +152,28 @@ describe('weekly_digest body (HTML)', () => {
     expect(html).not.toContain('</pre><img');
     expect(html).toContain('&lt;script&gt;');
     expect(html).toContain('fn&quot;&amp;&lt;&gt;');
+  });
+  it('renders the template-updates section in a quiet week', () => {
+    const html = buildBillingEmailHtml('weekly_digest', {
+      itemsJson: '[]',
+      deployItemsJson: '[]',
+      templateUpdatesJson: JSON.stringify([
+        { dest_app_id: 'app_fork1', source_app_id: 'app_src', behind_by: 2, latest_label: 'v1.4' },
+      ]),
+    })!;
+    expect(html).toContain('Quiet week');
+    expect(html).toContain('Template updates available');
+    expect(html).toContain('href="https://dashboard.butterbase.ai/apps/app_fork1"');
+  });
+  it('does not count template updates toward the "things need attention" total', () => {
+    const html = buildBillingEmailHtml('weekly_digest', {
+      itemsJson: JSON.stringify(items3),
+      templateUpdatesJson: JSON.stringify([
+        { dest_app_id: 'app_fork1', source_app_id: 'app_src', behind_by: 2, latest_label: 'v1.4' },
+      ]),
+    })!;
+    expect(html).toContain('3 things need attention');
+    expect(html).toContain('Template updates available');
   });
 });
 

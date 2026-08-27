@@ -20,6 +20,7 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { sendBillingEmail } from './auth/email-service.js';
 import type { DigestItem, DigestDeployItem } from './auth/email-service.js';
 import { resolveOrganizationId } from './org-resolver.js';
+import { getRuntimeDbForApp } from './region-resolver.js';
 
 const TICK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const DIGEST_DOW = 0;   // 0 = Sunday
@@ -194,6 +195,87 @@ async function collectDeployFailures(
   return items.slice(0, MAX_ITEMS_PER_DIGEST);
 }
 
+export interface TemplateUpdateItem {
+  dest_app_id: string;
+  source_app_id: string;
+  behind_by: number;
+  latest_label: string | null;
+}
+
+/**
+ * Forks in this org that are behind their template AND have not modified their
+ * repo.
+ *
+ * Modified forks are deliberately excluded. Telling someone they are "2 releases
+ * behind" when there is no Update button creates an obligation they cannot
+ * discharge, and for a heavily customized app re-cloning is absurd. That is
+ * notification noise, and noise trains people to unsubscribe from a digest that
+ * also carries failing-function and failed-deploy alerts they genuinely need.
+ * The badge and changelog remain available to them on the page — pull, not push.
+ *
+ * "Unmodified" uses the repo signal only: a single column compare, safe to run
+ * across every fork. A per-fork backend introspect would make this unbounded.
+ */
+export async function collectTemplateUpdates(
+  controlPool: Pool,
+  organizationId: string,
+): Promise<TemplateUpdateItem[]> {
+  const res = await controlPool.query<{
+    dest_app_id: string; source_app_id: string;
+    behind_by: string; latest_label: string | null;
+  }>(
+    `WITH forks AS (
+       SELECT l.dest_app_id, l.source_app_id, l.cloned_at, l.base_snapshot_id,
+              COALESCE(br.release_number, 0) AS base_number
+         FROM app_lineage l
+         LEFT JOIN template_releases br ON br.id = l.base_release_id
+         JOIN org_app_index oai ON oai.app_id = l.dest_app_id
+        WHERE oai.organization_id = $1
+          AND l.severed_at IS NULL
+          AND l.base_snapshot_id IS NOT NULL
+     )
+     SELECT f.dest_app_id, f.source_app_id,
+            count(r.id)::text AS behind_by,
+            (array_agg(r.label ORDER BY r.release_number DESC))[1] AS latest_label
+       FROM forks f
+       JOIN template_releases r
+         ON r.source_app_id = f.source_app_id
+        AND (CASE WHEN f.base_number > 0
+                  THEN r.release_number > f.base_number
+                  ELSE r.published_at > f.cloned_at END)
+      GROUP BY f.dest_app_id, f.source_app_id
+      HAVING count(r.id) > 0
+      ORDER BY count(r.id) DESC
+      LIMIT ${MAX_ITEMS_PER_DIGEST}`,
+    [organizationId],
+  );
+
+  // apps.repo_latest_snapshot lives in the fork's home region, so this is a
+  // per-region lookup rather than a join. Bounded by MAX_ITEMS_PER_DIGEST.
+  const unmodified: TemplateUpdateItem[] = [];
+  for (const r of res.rows) {
+    const item = {
+      dest_app_id: r.dest_app_id, source_app_id: r.source_app_id,
+      behind_by: Number(r.behind_by), latest_label: r.latest_label,
+    };
+    try {
+      const pool = await getRuntimeDbForApp(controlPool, r.dest_app_id);
+      const head = await pool.query<{ repo_latest_snapshot: string | null }>(
+        `SELECT repo_latest_snapshot FROM apps WHERE id = $1`, [r.dest_app_id],
+      );
+      const base = await controlPool.query<{ base_snapshot_id: string | null }>(
+        `SELECT base_snapshot_id FROM app_lineage WHERE dest_app_id = $1`, [r.dest_app_id],
+      );
+      if (head.rows[0]?.repo_latest_snapshot === base.rows[0]?.base_snapshot_id) {
+        unmodified.push(item);
+      }
+    } catch {
+      // Region unreachable — omit rather than risk emailing a modified fork.
+    }
+  }
+  return unmodified;
+}
+
 /**
  * Send one user's digest. Exported for test + manual-trigger use. The
  * scanner loop wraps this with dedup + opt-in checks.
@@ -204,13 +286,17 @@ export async function sendDigestForUser(
   log?: Log,
 ): Promise<{ sent: boolean; itemCount: number; deployCount: number }> {
   const organizationId = await resolveOrganizationId(controlPool, user.user_id);
-  const [items, deploys] = await Promise.all([
+  const [items, deploys, templateUpdates] = await Promise.all([
     collectDigestItems(organizationId),
     collectDeployFailures(controlPool, organizationId),
+    // Soft-fail: a broken template-updates section must never take down the
+    // failing-function / failed-deploy alerts the rest of the digest carries.
+    collectTemplateUpdates(controlPool, organizationId).catch(() => [] as TemplateUpdateItem[]),
   ]);
   await sendBillingEmail(user.email, 'weekly_digest', {
     itemsJson: JSON.stringify(items),
     deployItemsJson: JSON.stringify(deploys),
+    templateUpdatesJson: JSON.stringify(templateUpdates),
   }, {
     controlPool,
     userId: user.user_id,

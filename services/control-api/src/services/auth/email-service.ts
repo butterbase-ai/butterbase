@@ -332,7 +332,8 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
     case 'weekly_digest': {
       const items = parseDigestItems(data.itemsJson);
       const deploys = parseDeployItems(data.deployItemsJson);
-      if (items.length === 0 && deploys.length === 0) {
+      const templateUpdates = parseTemplateUpdateItems(data.templateUpdatesJson);
+      if (items.length === 0 && deploys.length === 0 && templateUpdates.length === 0) {
         return [
           'Nothing failed across your apps this week. Quiet weeks count.',
           '',
@@ -357,6 +358,19 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
           lines.push(`• [${d.appName}] ${d.kind} — ${d.failureCount} failed deploy${d.failureCount === 1 ? '' : 's'}`);
           if (d.lastError) lines.push(`    ${truncateError(d.lastError).split('\n')[0]}`);
           lines.push(`    ${dashboardUrl}/apps/${d.appId}`);
+          lines.push('');
+        }
+      }
+      if (templateUpdates.length > 0) {
+        // Informational only — no "action needed" framing. These forks are
+        // unmodified, so there's nothing broken and nothing to fix; this is
+        // just letting the owner know a newer template release exists.
+        lines.push(`Template updates available (${templateUpdates.length}):`);
+        lines.push('');
+        for (const t of templateUpdates) {
+          const label = t.latest_label ? ` (latest: ${t.latest_label})` : '';
+          lines.push(`• App ${t.dest_app_id} is ${t.behind_by} release${t.behind_by === 1 ? '' : 's'} behind its template${label}`);
+          lines.push(`    ${dashboardUrl}/apps/${t.dest_app_id}`);
           lines.push('');
         }
       }
@@ -533,10 +547,35 @@ export function buildBillingEmailHtml(
   if (template === 'weekly_digest') {
     const items = parseDigestItems(data.itemsJson);
     const deploys = parseDeployItems(data.deployItemsJson);
+    const templateUpdates = parseTemplateUpdateItems(data.templateUpdatesJson);
     const total = items.length + deploys.length;
 
+    const templateUpdateRows = templateUpdates.map((t) => {
+      const url = `${dashboardUrl}/apps/${escapeHtml(t.dest_app_id)}`;
+      const labelLine = t.latest_label ? ` &middot; latest ${escapeHtml(t.latest_label)}` : '';
+      return `<tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
+<div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
+<a href="${url}" style="color:#0a0a0a;text-decoration:none;">${escapeHtml(t.dest_app_id)}</a>
+</div>
+<div style="font-size:13px;color:#737373;">
+${escapeHtml(String(t.behind_by))} release${t.behind_by === 1 ? '' : 's'} behind its template${labelLine}
+</div>
+</td></tr>`;
+    }).join('');
+    // Informational only, not an alert — these forks are unmodified so there
+    // is nothing broken to fix, just a newer release available to look at.
+    const templateUpdateSection = templateUpdateRows ? `
+<h2 style="margin:24px 0 0 0;font-size:13px;font-weight:600;color:#737373;text-transform:uppercase;letter-spacing:0.05em;">Template updates available</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">${templateUpdateRows}</table>` : '';
+
     if (total === 0) {
-      const content = `
+      const content = templateUpdateSection
+        ? `
+<h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">Quiet week 🌱</h1>
+<p style="margin:0 0 24px 0;font-size:14px;color:#525252;line-height:1.5;">Nothing failed across your apps in the last 7 days.</p>
+${templateUpdateSection}
+<p style="margin:32px 0 0 0;">${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}</p>`
+        : `
 <h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">Quiet week 🌱</h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#525252;line-height:1.5;">Nothing failed across your apps in the last 7 days.</p>
 ${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}`;
@@ -594,7 +633,7 @@ ${errLine ? `<div style="font-size:12px;color:#737373;font-family:ui-monospace,S
 <h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;color:#0a0a0a;">${escapeHtml(heading)}</h1>
 <p style="margin:0 0 8px 0;font-size:14px;color:#737373;">From the last 7 days, ranked by failure count.</p>
 ${section('Functions', fnRows)}
-${section('Deployments', deployRows)}
+${section('Deployments', deployRows)}${templateUpdateSection}
 <p style="margin:32px 0 0 0;">${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}</p>`;
     return renderEmailLayout({
       preheader: `${total} thing${total === 1 ? '' : 's'} need attention. ${top}`,
@@ -756,6 +795,13 @@ export interface DigestDeployItem {
   kind: 'frontend' | 'edge-ssr';
 }
 
+export interface DigestTemplateUpdateItem {
+  dest_app_id: string;
+  source_app_id: string;
+  behind_by: number;
+  latest_label: string | null;
+}
+
 function parseDigestItems(json: string | undefined): DigestItem[] {
   if (!json) return [];
   try {
@@ -767,6 +813,16 @@ function parseDigestItems(json: string | undefined): DigestItem[] {
 }
 
 function parseDeployItems(json: string | undefined): DigestDeployItem[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseTemplateUpdateItems(json: string | undefined): DigestTemplateUpdateItem[] {
   if (!json) return [];
   try {
     const parsed = JSON.parse(json);

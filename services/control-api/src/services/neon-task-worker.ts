@@ -29,6 +29,9 @@ import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
 import { getCloneAppOverrides, resolveOverridesForClone } from './clone-app-overrides.js';
+import { recordLineage } from './app-lineage.js';
+import { captureAppState } from './app-state-capture.js';
+import { listReleases } from './template-releases.js';
 
 interface NeonTask {
   id: number;
@@ -416,6 +419,44 @@ async function waitForDestReady(
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   throw new Error('Dest app provisioning timed out');
+}
+
+/** A just-published-or-not release row, narrowed to the two fields this decision needs. */
+export interface LatestReleaseForLineage {
+  id: string;
+  snapshot_id: string | null;
+}
+
+export interface LineageBaseDecision {
+  /** Non-null only when the clone actually replayed this release's snapshot. */
+  baseRelease: LatestReleaseForLineage | null;
+  /** Always the snapshot the fork's repo HEAD was actually set to (see setLatest below). */
+  baseSnapshotId: string;
+}
+
+/**
+ * Pure decision for the FIX-1 bug: a fork's lineage base is the latest
+ * published release ONLY when that release's snapshot matches the snapshot
+ * the clone actually replayed (job.source_snapshot_id — the same value passed
+ * to setLatest(resolvedDestAppId, job.source_snapshot_id) elsewhere in
+ * executeClone, so the fork's repo HEAD literally *is* this value). If the
+ * template owner has pushed further repo commits since the latest release,
+ * the release is stale and must NOT be adopted as the base — the fork was
+ * built from live state that has moved past it, and recording the release
+ * pointer would make computeDivergence report an untouched fork as MODIFIED.
+ *
+ * Exported and tested in isolation because executeClone itself is a large,
+ * heavily-effectful function (provisioning, S3, multiple DB pools) that is
+ * impractical to exercise end to end in a unit test — this is the one
+ * three-line expression inside it that actually needs coverage.
+ */
+export function decideLineageBase(
+  latestRelease: LatestReleaseForLineage | null,
+  sourceSnapshotId: string,
+): LineageBaseDecision {
+  const baseRelease =
+    latestRelease?.snapshot_id === sourceSnapshotId ? latestRelease : null;
+  return { baseRelease, baseSnapshotId: sourceSnapshotId };
 }
 
 /**
@@ -1115,6 +1156,43 @@ async function executeClone(
         logger.error(
           { err, source: job.source_app_id },
           '[clone] fork_count increment failed; deferring to sweeper',
+        );
+      }
+
+      // Record template lineage in the control plane. Additive and best-effort:
+      // this must never fail a clone that has otherwise succeeded. The base is
+      // captured HERE because it can only be captured at clone time — a fork
+      // created without it can never be safely merged later, since by the time we
+      // want a base it has already diverged.
+      try {
+        const releases = await listReleases(controlDb, job.source_app_id, 1);
+        const { baseRelease, baseSnapshotId } = decideLineageBase(
+          releases[0] ?? null,
+          job.source_snapshot_id,
+        );
+        // Point at the release when one exists; materialize inline only when the
+        // fork was cloned from live. Never both.
+        const baseFingerprint = baseRelease
+          ? null
+          : await captureAppState(sourceRuntimePool, sourceAppPool, job.source_app_id);
+
+        await recordLineage(controlDb, {
+          destAppId: resolvedDestAppId,
+          destRegion: job.dest_region,
+          sourceAppId: job.source_app_id,
+          sourceRegion: job.source_region,
+          baseReleaseId: baseRelease?.id ?? null,
+          baseFingerprint,
+          baseSnapshotId,
+        });
+        logger.info(
+          { destAppId: resolvedDestAppId, baseReleaseId: baseRelease?.id ?? null },
+          '[clone] lineage recorded',
+        );
+      } catch (err) {
+        logger.warn(
+          { err, destAppId: resolvedDestAppId },
+          '[clone] lineage record failed; backfill will repair',
         );
       }
 

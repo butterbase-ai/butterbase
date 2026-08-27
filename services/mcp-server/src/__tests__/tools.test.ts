@@ -37,13 +37,13 @@ describe('MCP Server Tools', () => {
       'manage_billing',
       'manage_durable_objects',
       'manage_edge_ssr',
-      'manage_people',
       'manage_frontend',
       'manage_function',
       'manage_integrations',
       'manage_kv',
       'manage_migrations',
       'manage_oauth',
+      'manage_people',
       'manage_rag_content',
       'manage_realtime',
       'manage_repo',
@@ -107,7 +107,7 @@ describe('MCP Server Tools', () => {
     const actions = (tool!.inputSchema as unknown as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'link_substrate', 'list', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'secure', 'set_clone_webhook', 'set_substrate_autopropagate', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors',
+      'check_template_updates', 'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'get_env', 'get_template_release', 'link_substrate', 'list', 'list_template_releases', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'publish_template_release', 'secure', 'set_clone_webhook', 'set_substrate_autopropagate', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors', 'update_env',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [

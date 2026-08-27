@@ -57,7 +57,7 @@ Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica', 'get_env', 'update_env'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica', 'get_env', 'update_env', 'publish_template_release', 'list_template_releases', 'get_template_release', 'check_template_updates'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -98,6 +98,10 @@ Common errors:
       sort: z.enum(['recent', 'popular']).optional().describe('Optional for "find_templates". Sort order: "recent" or "popular". Defaults to "recent".'),
       limit: z.number().int().optional().describe('Optional for "find_templates". Max results per page (default 20).'),
       offset: z.number().int().optional().describe('Optional for "find_templates". Pagination offset (default 0).'),
+      // template release params
+      label: z.string().optional().describe('Display label for a published release, e.g. "v1.2.0".'),
+      notes: z.string().optional().describe('Release notes. For forks that have customized their app, these notes are the main way they benefit from an update — be specific about what changed.'),
+      release_number: z.number().int().positive().optional().describe('Which release to fetch.'),
       // set_substrate_autopropagate params
       users: z.boolean().optional().describe('Optional for "set_substrate_autopropagate". true to mirror user signup / email-verified / user-deleted events into the substrate; false to disable. At least one toggle key must be provided.'),
       // move / move_status / teardown_source_replica params
@@ -344,6 +348,38 @@ Common errors:
           }
           const r = await apiPatch<{ updatedKeys: string[]; invalidated: { functions: string[]; failed?: string[]; count: number } }>(`/v1/${args.app_id}/env`, { envVars: args.env });
           return { content: [{ type: 'text' as const, text: JSON.stringify({ updated_keys: r.updatedKeys, invalidated: r.invalidated }, null, 2) }] };
+        }
+        case 'publish_template_release': {
+          const err = need(args.app_id !== undefined, '"app_id" is required for the "publish_template_release" action.');
+          if (err) return err;
+          const body: { label?: string; notes?: string } = {};
+          if (args.label) body.label = args.label;
+          if (args.notes) body.notes = args.notes;
+          const res = await apiPost(`/v1/${args.app_id}/template/releases`, body);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'list_template_releases': {
+          const err = need(args.source_app_id !== undefined || args.app_id !== undefined,
+            '"source_app_id" (or "app_id") is required for the "list_template_releases" action.');
+          if (err) return err;
+          const target = args.source_app_id ?? args.app_id;
+          const res = await apiGet(`/v1/templates/${target}/releases`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'get_template_release': {
+          const err = need(
+            (args.source_app_id !== undefined || args.app_id !== undefined) && args.release_number !== undefined,
+            '"source_app_id" (or "app_id") and "release_number" are required for the "get_template_release" action.');
+          if (err) return err;
+          const target = args.source_app_id ?? args.app_id;
+          const res = await apiGet(`/v1/templates/${target}/releases/${args.release_number}`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'check_template_updates': {
+          const err = need(args.app_id !== undefined, '"app_id" is required for the "check_template_updates" action.');
+          if (err) return err;
+          const res = await apiGet(`/v1/${args.app_id}/template/status?divergence=true`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
         }
       }
     }
