@@ -21,6 +21,19 @@ const PublishSchema = z.object({
   notes: z.string().trim().max(10_000).nullish(),
 });
 
+/**
+ * Parse a release-number path param. Rejects non-integers and values < 1 with
+ * a 400 VALIDATION_INVALID_SCHEMA agent-error instead of letting a value like
+ * "abc" reach the DB as NaN, where the driver-level cast error would fall
+ * through to the global handler as a generic 500 — unacceptable on the
+ * anonymous changelog route, which must never 500 an unauthenticated caller.
+ */
+function parseReleaseNumber(n: string): number | null {
+  const parsed = Number.parseInt(n, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) return null;
+  return parsed;
+}
+
 export function templateReleaseRoutes(app: FastifyInstance): void {
   // POST /v1/:app_id/template/releases — publish
   app.post('/v1/:app_id/template/releases', {
@@ -106,10 +119,19 @@ export function templateReleaseRoutes(app: FastifyInstance): void {
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     }
+    const releaseNumber = parseReleaseNumber(n);
+    if (releaseNumber === null) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Release number must be a positive integer.',
+        remediation: 'Use the release_number from GET /v1/templates/:app_id/releases.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
     const resolved = await AppResolver.resolveApp(
       app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null,
     );
-    const updated = await updateReleaseText(app.controlDb, resolved.id, parseInt(n, 10), parsed.data);
+    const updated = await updateReleaseText(app.controlDb, resolved.id, releaseNumber, parsed.data);
     if (!updated) {
       return reply.code(404).send(createAgentError({
         code: RESOURCE_NOT_FOUND,
@@ -150,7 +172,16 @@ export function templateReleaseRoutes(app: FastifyInstance): void {
     },
   }, async (request, reply) => {
     const { app_id, n } = request.params as { app_id: string; n: string };
-    const release = await getRelease(app.controlDb, app_id, parseInt(n, 10));
+    const releaseNumber = parseReleaseNumber(n);
+    if (releaseNumber === null) {
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: 'Release number must be a positive integer.',
+        remediation: 'Use the release_number from GET /v1/templates/:app_id/releases.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    const release = await getRelease(app.controlDb, app_id, releaseNumber);
     if (!release) {
       return reply.code(404).send(createAgentError({
         code: RESOURCE_NOT_FOUND,
