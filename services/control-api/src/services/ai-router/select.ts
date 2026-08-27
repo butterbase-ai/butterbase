@@ -11,6 +11,11 @@ export interface CatalogRouter {
   modality?: Modality;
   // Router-native pricing for non-chat modalities. See UpstreamModel.rawPricing.
   rawPricing?: unknown;
+  // Set when this row's per-Mtok prices were copied from a sibling router
+  // during refreshCatalog because the upstream publishes no rates of its own.
+  // Purely informational — nothing routes on it — but it makes an inherited
+  // estimate distinguishable from a real published price when debugging a bill.
+  priceInheritedFrom?: RouterName;
 }
 
 export interface CatalogEntry {
@@ -52,6 +57,19 @@ const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
   // routes/dashboard-agent.ts) and is at price parity with OpenRouter, so this
   // pin costs nothing.
   'qwen/qwen3.8-max': 'provider-quaternary',
+  // qwen3.8-flash is the hosted build of the open-weight Qwen3.8-Flash-Next.
+  // On release it was single-homed on OpenRouter, whose Alibaba upstream was
+  // rate-limiting it — measured 3/6 successful calls against 6/6 direct, so the
+  // gateway returned MODEL_UNAVAILABLE about half the time. Published rate is
+  // 0.16/0.47 against OpenRouter's 0.15/0.47, i.e. parity, so the same
+  // "pin costs nothing" reasoning as qwen3.8-max applies.
+  //
+  // Tradeoff worth knowing: provider-tertiary also serves this model and
+  // settles from a real billing ledger, whereas the direct slot reports no
+  // per-call cost and settles from the static table above. Pinning direct
+  // trades a slightly less precise cost for the better availability that was
+  // the actual outage. Tertiary stays on the entry as the next hop.
+  'qwen/qwen3.8-flash': 'provider-quaternary',
   'qwen/qwen3.7-max': 'provider-quaternary',
   'qwen/qwen3.7-plus': 'provider-quaternary',
   'qwen/qwen3.6-flash': 'provider-quaternary',
