@@ -345,7 +345,7 @@ export async function pollAndSettleVideoJob(
   //   3) $0 as final guard — only `failed`/`cancelled` paths, where
   //      charging would be wrong anyway.
   let providerCost = poll.providerCostUsd ?? 0;
-  // Provenance for migration 049. Starts as whatever the branch above produced:
+  // Provenance for migration 051. Starts as whatever the branch above produced:
   // an upstream-reported cost, or $0 pending the catalog fallback below.
   let costSource: CostSource = poll.providerCostUsd !== undefined ? 'upstream' : 'catalog_unpriced';
   if (poll.providerCostUsd === undefined && poll.status === 'completed') {

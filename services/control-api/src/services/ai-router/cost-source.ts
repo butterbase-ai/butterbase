@@ -7,7 +7,7 @@
  * parked there would vanish behind the mock.
  */
 /**
- * Where a row's `provider_cost_usd` came from. Mirrors migration 049.
+ * Where a row's `provider_cost_usd` came from. Mirrors migration 051.
  *
  *   upstream          the provider reported the real cost for this call
  *   catalog           estimated from the chosen router's own published rates
