@@ -24,6 +24,7 @@ const H = vi.hoisted(() => ({
   divergenceThrows: false,
   lineageThrows: false,
   manifestFiles: [] as { path: string; sha256: string; size: number }[],
+  preLineage: null as unknown,
 }));
 
 vi.mock('../services/runtime-db.js', async (orig) => ({
@@ -44,6 +45,11 @@ vi.mock('../services/runtime-db.js', async (orig) => ({
   }),
 }));
 
+vi.mock('../services/region-resolver.js', async (orig) => ({
+  ...(await orig<typeof import('../services/region-resolver.js')>()),
+  getRuntimeDbForApp: async () => ({ query: async () => ({ rows: [] }) }),
+}));
+
 vi.mock('../services/app-pool.js', async (orig) => ({
   ...(await orig<typeof import('../services/app-pool.js')>()),
   getAppPoolForApp: async () => ({ query: async () => ({ rows: [] }) }),
@@ -56,7 +62,14 @@ vi.mock('../services/repo-storage.js', async (orig) => ({
   getBlobBuffer: async (_appId: string, sha: string) => Buffer.from(`blob-${sha}`),
   putBlobBuffer: async () => { H.calls.push({ tag: 'putBlob' }); },
   putManifest: async () => { H.calls.push({ tag: 'publish:manifest' }); },
-  setLatest: async () => { H.calls.push({ tag: 'publish:latest' }); },
+  setLatest: async (_appId: string, snapshotId: string) => {
+    H.calls.push({ tag: 'publish:latest', params: [snapshotId] });
+  },
+}));
+
+vi.mock('../services/failure-notifications.service.js', async (orig) => ({
+  ...(await orig<typeof import('../services/failure-notifications.service.js')>()),
+  notifyCloneFailed: async (...args: unknown[]) => { H.calls.push({ tag: 'notify', params: args }); },
 }));
 
 vi.mock('../services/app-lineage.js', async (orig) => ({
@@ -344,6 +357,7 @@ const baseJob = () => ({
   requested_by_user_id: 'user_1',
   target_release_id: 'rel_7',
   pre_sync_snapshot_id: null as string | null,
+  pre_sync_lineage: null as unknown,
 });
 
 let job: ReturnType<typeof baseJob>;
@@ -354,6 +368,17 @@ const controlDb = {
     if (sql.includes('SELECT * FROM template_clone_jobs')) return { rows: [job] };
     if (sql.includes('pre_sync_snapshot_id = $1')) {
       H.calls.push({ tag: 'preSync', params });
+      return { rows: [] };
+    }
+    if (sql.includes('SELECT * FROM app_lineage')) {
+      return { rows: [H.preLineage] };
+    }
+    if (sql.includes('INSERT INTO auth_audit_logs')) {
+      H.calls.push({ tag: 'audit', params });
+      return { rows: [] };
+    }
+    if (sql.includes('unfilled_env_vars = $1')) {
+      H.calls.push({ tag: 'unfilledEnvVars', params });
       return { rows: [] };
     }
     if (sql.includes('UPDATE app_lineage')) {
@@ -390,6 +415,12 @@ beforeEach(() => {
   H.manifestFiles = FILES;
   H.divergenceThrows = false;
   H.lineageThrows = false;
+  H.preLineage = {
+    dest_app_id: 'app_fork', dest_region: 'us-east-1',
+    source_app_id: 'app_src', source_region: 'us-east-1',
+    base_release_id: 'rel_6', base_fingerprint: { hashes: { schema: 'p' } },
+    base_snapshot_id: 'snap_pre', severed_at: null, cloned_at: new Date(),
+  };
   H.drift = { is_fork: true, severed: false, source_app_id: 'app_src', behind_by: 1, releases: [] };
   H.divergence = {
     repo: false, frontend: false, schema: false, rls: false,
@@ -674,5 +705,171 @@ describe('executeUpdate preconditions', () => {
     expect(tags()).not.toContain('publish:manifest');
     expect(tags()).not.toContain('replaySchema');
     expect(tags()).not.toContain('copyBlob');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The failure and rollback paths. These were the least-considered part of this
+// feature: two data-loss paths (function env vars, OAuth/integration config)
+// were already found in the happy path's shadow, and undo — the thing meant to
+// be the safety net — was itself a one-way trap. These tests pin the escape.
+// ---------------------------------------------------------------------------
+
+describe('executeUpdate pre-sync capture (undo has something to restore)', () => {
+  it('captures the FULL pre-update lineage, not just the repo pointer', async () => {
+    await executeUpdate(controlDb, task(), silentLogger);
+    const preSync = H.calls.find((c) => c.tag === 'preSync')!;
+    expect(preSync.params![0]).toBe('snap_pre');
+    const captured = JSON.parse(preSync.params![1] as string);
+    // All three lineage fields, because undo restoring only the repo pointer is
+    // exactly what made the fork read as permanently 'modified'.
+    expect(captured.base_release_id).toBe('rel_6');
+    expect(captured.base_snapshot_id).toBe('snap_pre');
+    expect(captured.base_fingerprint).toBeTruthy();
+    // ...plus the manifest, which is what lets undo restore function bodies.
+    expect(captured.manifest).toBeTruthy();
+  });
+
+  it('captures it BEFORE the first write the fork can observe', async () => {
+    await executeUpdate(controlDb, task(), silentLogger);
+    const order = tags();
+    expect(order.indexOf('preSync')).toBeLessThan(order.indexOf('publish:manifest'));
+    expect(order.indexOf('preSync')).toBeLessThan(order.indexOf('publish:apps.head'));
+  });
+
+  it('does not re-capture on a resumed attempt, even when the fork had no HEAD', async () => {
+    // pre_sync_snapshot_id stays NULL for a fork with no repo HEAD, so a guard
+    // keyed on that column would re-fire and overwrite the captured state with
+    // post-mutation values. The guard keys on pre_sync_lineage instead.
+    job.pre_sync_snapshot_id = null;
+    job.pre_sync_lineage = { base_release_id: 'rel_6', base_fingerprint: null,
+                             base_snapshot_id: 'snap_pre', manifest: null };
+    await executeUpdate(controlDb, task(), silentLogger);
+    expect(tags()).not.toContain('preSync');
+  });
+});
+
+describe('executeUpdate persists the unfilled env var summary', () => {
+  it('records which new functions still need secrets, as executeClone does', async () => {
+    await executeUpdate(controlDb, task(), silentLogger);
+    const write = H.calls.find((c) => c.tag === 'unfilledEnvVars');
+    expect(write).toBeDefined();
+    expect(() => JSON.parse(write!.params![0] as string)).not.toThrow();
+  });
+});
+
+describe('executeUpdate failure path', () => {
+  const failLate = () => {
+    vi.mocked(replayNonSecretConfig).mockImplementationOnce(async () => {
+      throw new Error('CREATE UNIQUE INDEX failed: duplicate key value');
+    });
+  };
+
+  it('rolls the fork repo pointer back when it fails after publishing', async () => {
+    failLate();
+    // attempts >= max_attempts: the queue is done retrying, so this is the
+    // moment the fork would otherwise be left on the new code with old lineage.
+    await expect(executeUpdate(controlDb, task({ attempts: 3, max_attempts: 3 }), silentLogger))
+      .rejects.toThrow(/duplicate key/);
+    const heads = H.calls.filter((c) => c.tag === 'publish:apps.head');
+    expect(heads.at(-1)!.params![0]).toBe('snap_pre');
+    const latest = H.calls.filter((c) => c.tag === 'publish:latest');
+    expect(latest.at(-1)!.params![0]).toBe('snap_pre');
+  });
+
+  it('does NOT roll back while the queue still has retries left', async () => {
+    failLate();
+    await expect(executeUpdate(controlDb, task({ attempts: 1, max_attempts: 3 }), silentLogger))
+      .rejects.toThrow();
+    const heads = H.calls.filter((c) => c.tag === 'publish:apps.head');
+    expect(heads.at(-1)!.params![0]).toBe(TARGET_SNAPSHOT);
+  });
+
+  it('emits an audit trail and notifies the fork owner instead of failing silently', async () => {
+    failLate();
+    await expect(executeUpdate(controlDb, task({ attempts: 3, max_attempts: 3 }), silentLogger))
+      .rejects.toThrow();
+    const auditTypes = H.calls
+      .filter((c) => c.tag === 'audit')
+      .map((c) => (c.params as unknown[])[2]);
+    expect(auditTypes).toContain('template_update_started');
+    expect(auditTypes).toContain('template_update_failed');
+    // ...and never mislabels an update as a clone in the owner-visible record.
+    expect(auditTypes).not.toContain('template_clone_failed');
+
+    const notify = H.calls.find((c) => c.tag === 'notify');
+    expect(notify).toBeDefined();
+    expect((notify!.params as unknown[])[2]).toMatchObject({ mode: 'update' });
+  });
+
+  it('emits a completed audit event on the happy path', async () => {
+    await executeUpdate(controlDb, task(), silentLogger);
+    const auditTypes = H.calls
+      .filter((c) => c.tag === 'audit')
+      .map((c) => (c.params as unknown[])[2]);
+    expect(auditTypes).toContain('template_update_completed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The in-flight mutex, and who may undo.
+// ---------------------------------------------------------------------------
+
+import { getActiveUpdateJob } from '../services/clone-jobs.js';
+import { canUndoUpdateJob } from '../services/template-update-undo.js';
+
+describe('getActiveUpdateJob', () => {
+  it('counts every non-terminal status as in flight, not just pending/processing', async () => {
+    // executeUpdate moves the job to 'copying_repo' before any gate and before a
+    // long S3 copy. A predicate of IN ('pending','processing') left that window
+    // open: a second POST /update passed this check, passed eligibility, and the
+    // partial unique index did not fire either — two workers on one fork, and
+    // the second one's pre_sync_snapshot_id captured the first's POST-update
+    // HEAD, quietly turning its undo into a no-op.
+    let captured: { sql: string; params: unknown[] } | null = null;
+    const pool = {
+      query: async (sql: string, params: unknown[]) => {
+        captured = { sql, params };
+        return { rows: [] };
+      },
+    } as never;
+    await getActiveUpdateJob(pool, 'app_fork');
+    expect(captured!.sql).toMatch(/NOT \(status = ANY/);
+    expect(captured!.sql).not.toMatch(/status IN \('pending', 'processing'\)/);
+    // Exactly the terminal set, so a mid-flight status can never slip through.
+    expect(captured!.params[1]).toEqual(['completed', 'failed']);
+  });
+});
+
+describe('canUndoUpdateJob', () => {
+  const pre = { base_release_id: null, base_fingerprint: null, base_snapshot_id: 's', manifest: null };
+
+  it('allows undo of a completed update', () => {
+    expect(canUndoUpdateJob({ status: 'completed', pre_sync_snapshot_id: 's', pre_sync_lineage: pre }).allowed)
+      .toBe(true);
+  });
+
+  it('allows undo of a FAILED update that got far enough to record pre-sync state', () => {
+    expect(canUndoUpdateJob({ status: 'failed', pre_sync_snapshot_id: 's', pre_sync_lineage: pre }).allowed)
+      .toBe(true);
+  });
+
+  it('refuses while a worker may still be writing', () => {
+    for (const status of ['pending', 'processing', 'copying_repo', 'replaying_functions']) {
+      expect(canUndoUpdateJob({ status, pre_sync_snapshot_id: 's', pre_sync_lineage: pre }))
+        .toEqual({ allowed: false, reason: 'not_terminal' });
+    }
+  });
+
+  it('refuses when nothing was recorded to restore', () => {
+    expect(canUndoUpdateJob({ status: 'failed', pre_sync_snapshot_id: null, pre_sync_lineage: null }))
+      .toEqual({ allowed: false, reason: 'no_pre_sync_state' });
+  });
+
+  it('treats an empty-string snapshot as recorded, not as absent', () => {
+    // `=== null` rather than falsiness: '' is a recorded (if odd) value, and
+    // guessing it means "nothing to restore" would close the escape hatch.
+    expect(canUndoUpdateJob({ status: 'failed', pre_sync_snapshot_id: '', pre_sync_lineage: null }).allowed)
+      .toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { randomBytes } from 'crypto';
 import { encrypt } from './crypto.js';
+import type { AppStateManifest } from './app-state-capture.js';
 
 export type CloneJobStatus =
   | 'pending'
@@ -51,6 +52,24 @@ export interface CloneJob {
   mode: 'clone' | 'update';
   target_release_id: string | null;
   pre_sync_snapshot_id: string | null;
+  pre_sync_lineage: PreSyncLineage | null;
+}
+
+/**
+ * Everything about the fork that an update overwrites and undo must put back.
+ *
+ * The repo pointer alone is not enough: executeUpdate's final step advances
+ * app_lineage to the new release, and computeDivergence compares
+ * apps.repo_latest_snapshot against app_lineage.base_snapshot_id. Restoring one
+ * without the other leaves the fork reading as user-modified forever. The
+ * manifest is the fork's pre-update captureAppState output, which carries
+ * function bodies, so undo can restore those too.
+ */
+export interface PreSyncLineage {
+  base_release_id: string | null;
+  base_fingerprint: AppStateManifest | null;
+  base_snapshot_id: string | null;
+  manifest: AppStateManifest | null;
 }
 
 function generateJobId(): string {
@@ -261,15 +280,26 @@ export async function hasNewerCompletedUpdate(
   return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * The in-flight update for this fork, if any.
+ *
+ * "In flight" is everything that is NOT terminal, not just pending/processing.
+ * executeUpdate moves the job to 'copying_repo' before any gate and before a
+ * long S3 copy; a narrower predicate let a second POST /update slip through
+ * that window and run a second worker against the same fork, whose
+ * pre_sync_snapshot_id then captured the first one's POST-update HEAD and made
+ * its undo a no-op. Kept in lockstep with idx_template_clone_jobs_one_update
+ * (migration 111), which uses the same set.
+ */
 export async function getActiveUpdateJob(
   controlDb: pg.Pool, forkAppId: string,
 ): Promise<CloneJob | null> {
   const res = await controlDb.query<CloneJob>(
     `SELECT * FROM template_clone_jobs
       WHERE dest_app_id = $1 AND mode = 'update'
-        AND status IN ('pending', 'processing')
+        AND NOT (status = ANY($2::text[]))
       LIMIT 1`,
-    [forkAppId],
+    [forkAppId, TERMINAL_CLONE_STATUSES],
   );
   return res.rows[0] ?? null;
 }
@@ -285,4 +315,14 @@ export async function listActiveCloneSnapshotIdsForApp(
     [sourceAppId],
   );
   return new Set(res.rows.map(r => r.source_snapshot_id));
+}
+
+/**
+ * Delete a job row outright. Compensation only, for a job that failed to
+ * enqueue and therefore has never been observed by a worker — an un-enqueued
+ * 'pending' update row is worse than no row, because getActiveUpdateJob reads
+ * it as in flight and 409s every future update of that fork forever.
+ */
+export async function deleteCloneJob(controlDb: pg.Pool, jobId: string): Promise<void> {
+  await controlDb.query(`DELETE FROM template_clone_jobs WHERE id = $1`, [jobId]);
 }

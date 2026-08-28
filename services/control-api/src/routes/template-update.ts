@@ -13,9 +13,14 @@ import {
   computeDrift, computeDivergence, getLineage, type DriftResult, type Divergence,
 } from '../services/app-lineage.js';
 import { decideEligibility, type EligibilityReason, type EligibilityResult } from '../services/template-update-eligibility.js';
-import { createUpdateJob, getActiveUpdateJob, getCloneJob } from '../services/clone-jobs.js';
+import { createUpdateJob, deleteCloneJob, getActiveUpdateJob, getCloneJob } from '../services/clone-jobs.js';
 import { getRelease } from '../services/template-releases.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
+import {
+  canUndoUpdateJob, restoreFunctionsFromManifest, restoreLineage,
+  templateFunctionNamesForRelease,
+} from '../services/template-update-undo.js';
+import { setLatest } from '../services/repo-storage.js';
 
 const ELIGIBILITY_MESSAGES: Record<EligibilityReason, string> = {
   ok: 'Eligible for update.',
@@ -165,11 +170,32 @@ export function templateUpdateRoutes(app: FastifyInstance): void {
     // neon_tasks is a per-region queue; the update task is enqueued in the
     // SOURCE app's region, same as clone.ts's enqueueCloneTask, and dispatched
     // to executeUpdate by the worker reading job.mode === 'update'.
+    //
+    // The job row and its task live on different planes, so they cannot share a
+    // transaction — compensate instead. An enqueued-less 'pending' job is not a
+    // harmless orphan: getActiveUpdateJob counts it as in flight, so it would
+    // 409 EVERY future update of this fork, forever, with no worker ever coming
+    // to move it out of 'pending'. Deleting it is safe precisely because nothing
+    // has run: the row is untouched since creation and no other write references it.
     const sourcePool = getRuntimeDbPool(config.runtimeDb, lineage.source_region);
-    await sourcePool.query(
-      `INSERT INTO neon_tasks (app_id, task_type, task_meta) VALUES ($1, 'clone', $2)`,
-      [lineage.source_app_id, JSON.stringify({ job_id: job.id })],
-    );
+    try {
+      await sourcePool.query(
+        `INSERT INTO neon_tasks (app_id, task_type, task_meta) VALUES ($1, 'clone', $2)`,
+        [lineage.source_app_id, JSON.stringify({ job_id: job.id })],
+      );
+    } catch (err) {
+      await deleteCloneJob(app.controlDb, job.id).catch((delErr) => {
+        request.log.error(
+          { delErr, jobId: job.id, appId: resolved.id },
+          '[update] enqueue failed AND job cleanup failed; fork will be stuck on a phantom pending job',
+        );
+      });
+      request.log.error({ err, jobId: job.id, appId: resolved.id }, '[update] enqueue failed; job rolled back');
+      return reply.code(503).send(conflict(
+        'The update could not be queued.',
+        'Retry in a moment. Nothing was changed.',
+      ));
+    }
 
     logFromRequest(request, {
       appId: resolved.id,
@@ -215,37 +241,99 @@ export function templateUpdateRoutes(app: FastifyInstance): void {
 
   // POST /v1/:app_id/template/update/:job_id/undo
   //
-  // Restores code only — sets repo_latest_snapshot back to the pre-sync
-  // snapshot the worker recorded before its first write. Issues no DDL:
-  // schema is forward-only by design, so a rolled-back fork keeps whatever
-  // columns/tables the update (additively) introduced.
+  // Restores CODE and LINEAGE; issues no DDL. Schema is forward-only by
+  // design, so a rolled-back fork keeps whatever columns/tables the update
+  // (additively) introduced.
+  //
+  // The lineage half is not cosmetic. executeUpdate's last step advances
+  // app_lineage.base_snapshot_id to the new snapshot, and computeDivergence is
+  // exactly `apps.repo_latest_snapshot !== app_lineage.base_snapshot_id`. An
+  // undo that moved only the repo pointer therefore left the fork reading
+  // repo: true -> decideEligibility 'modified' -> permanently ineligible for
+  // any future update and displayed to its owner as "You have changed this
+  // app", recoverable only by hand-editing app_lineage. Undo was a one-way
+  // trap; restoring lineage is what makes it an actual escape.
+  //
+  // Order matters: functions, then repo, then lineage. Lineage is the write
+  // that declares "this fork is unmodified again", so it lands last, only
+  // after the state it describes has actually been put back. Two planes are
+  // involved (runtime + control), so this cannot be one transaction; ordering
+  // is the guarantee instead, and every intermediate state is one the eligibility
+  // gate reads as ineligible rather than as falsely-clean.
   app.post('/v1/:app_id/template/update/:job_id/undo', async (request, reply) => {
     const { app_id, job_id } = request.params as { app_id: string; job_id: string };
+    const userId = requireUserId(request);
     const resolved = await AppResolver.resolveApp(
-      app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null,
+      app.controlDb, app_id, userId, request.auth?.organizationId ?? null,
     );
     const job = await getCloneJob(app.controlDb, job_id);
     if (!job || job.mode !== 'update' || job.dest_app_id !== resolved.id) {
       return reply.code(404).send(notFound('Update job not found.'));
     }
-    if (job.status !== 'completed') {
-      return reply.code(409).send(conflict(
-        'Only a completed update can be undone.',
-        'Wait for the update to finish, or check its status first.',
-      ));
-    }
-    if (!job.pre_sync_snapshot_id) {
+
+    const gate = canUndoUpdateJob(job);
+    if (!gate.allowed) {
+      if (gate.reason === 'not_terminal') {
+        return reply.code(409).send(conflict(
+          'Only a finished update can be undone.',
+          'Wait for the update to finish or fail, then try again.',
+        ));
+      }
       return reply.code(422).send(invalid(
-        'This update recorded no pre-sync snapshot, so it cannot be undone.',
-        'This job predates pre-sync capture, or is a clone-mode job; there is nothing to restore.',
+        'This update recorded no pre-sync state, so it cannot be undone.',
+        'The update was refused before it wrote anything, or the job predates pre-sync capture; ' +
+          'there is nothing to restore.',
       ));
     }
 
+    const pre = job.pre_sync_lineage;
+    const restoredSnapshotId = job.pre_sync_snapshot_id ?? pre?.base_snapshot_id ?? null;
     const runtimePool = await getRuntimeDbForApp(app.controlDb, resolved.id);
-    await runtimePool.query(
-      `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
-      [job.pre_sync_snapshot_id, resolved.id],
-    );
+    const warnings: string[] = [];
+    let functionsRestored = 0;
+    let functionsRemoved = 0;
+
+    // 1. Function bodies. Spec §8 promises undo restores code, and the update
+    //    overwrites function bodies as well as the repo — a repo-only undo left
+    //    the template's function bodies running against the fork's old repo,
+    //    which is worse than no undo at all.
+    if (pre?.manifest) {
+      const templateFns = await templateFunctionNamesForRelease(app.controlDb, job.target_release_id);
+      const fnResult = await restoreFunctionsFromManifest(
+        runtimePool, resolved.id, pre.manifest, templateFns, userId, request.log,
+      );
+      functionsRestored = fnResult.restored;
+      functionsRemoved = fnResult.removed;
+      warnings.push(...fnResult.warnings);
+    } else {
+      warnings.push(
+        'No pre-update manifest was recorded for this job, so function bodies were not restored — ' +
+          'only the repo pointer and lineage.',
+      );
+    }
+
+    // 2. Repo pointer, both places the update wrote it: the S3 "latest" object
+    //    and the runtime apps row. Leaving the S3 pointer on the new snapshot
+    //    would make the two disagree about what HEAD is.
+    if (restoredSnapshotId) {
+      await setLatest(resolved.id, restoredSnapshotId);
+      await runtimePool.query(
+        `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+        [restoredSnapshotId, resolved.id],
+      );
+    }
+
+    // 3. Lineage last. See the ordering note above.
+    let lineageRestored = false;
+    if (pre) {
+      await restoreLineage(app.controlDb, resolved.id, pre);
+      lineageRestored = true;
+    } else {
+      warnings.push(
+        'No pre-update lineage was recorded for this job, so this app may still report as modified. ' +
+          'Contact support to have its lineage repaired.',
+      );
+    }
 
     logFromRequest(request, {
       appId: resolved.id,
@@ -254,10 +342,23 @@ export function templateUpdateRoutes(app: FastifyInstance): void {
       action: 'update',
       resourceType: 'app_config',
       resourceId: job.id,
-      eventData: { restored_snapshot_id: job.pre_sync_snapshot_id },
+      eventData: {
+        restored_snapshot_id: restoredSnapshotId,
+        lineage_restored: lineageRestored,
+        functions_restored: functionsRestored,
+        functions_removed: functionsRemoved,
+        undone_from_status: job.status,
+      },
       success: true,
     });
 
-    return reply.send({ restored_snapshot_id: job.pre_sync_snapshot_id, schema_unchanged: true });
+    return reply.send({
+      restored_snapshot_id: restoredSnapshotId,
+      lineage_restored: lineageRestored,
+      functions_restored: functionsRestored,
+      functions_removed: functionsRemoved,
+      schema_unchanged: true,
+      warnings,
+    });
   });
 }

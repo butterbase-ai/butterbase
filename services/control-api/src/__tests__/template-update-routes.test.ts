@@ -58,6 +58,8 @@ async function buildApp(opts: {
     created_at?: Date; completed_at?: Date | null;
   } | null;
   release?: { id: string; snapshot_id: string; release_number: number } | null;
+  releaseManifest?: { functions: { name: string }[] } | null;
+  enqueueThrows?: boolean;
 }) {
   vi.resetModules();
 
@@ -102,12 +104,23 @@ async function buildApp(opts: {
     getRuntimeDbPool: () => ({
       query: async (sql: string, params: unknown[] = []) => {
         recordedQueries.push({ sql, params });
+        if (opts.enqueueThrows && /INSERT INTO neon_tasks/i.test(sql)) {
+          throw new Error('queue unreachable');
+        }
         return { rows: [] };
       },
     }),
   }));
 
-  vi.doMock('../config.js', async () => ({ config: { runtimeDb: {} } }));
+  vi.doMock('../config.js', async () => ({ config: { runtimeDb: {}, s3: {} } }));
+
+  // The undo route writes the repo "latest" pointer in S3 as well as the runtime
+  // apps row — the update wrote both, so undo must put both back. Stubbed here so
+  // the suite never reaches a real S3 client.
+  const setLatestCalls: unknown[][] = [];
+  vi.doMock('../services/repo-storage.js', async () => ({
+    setLatest: async (...args: unknown[]) => { setLatestCalls.push(args); },
+  }));
 
   const activeJob = opts.activeJob ?? null;
   const job = opts.job
@@ -117,6 +130,8 @@ async function buildApp(opts: {
         status: opts.job.status,
         dest_app_id: opts.job.dest_app_id ?? 'app_fork',
         pre_sync_snapshot_id: opts.job.pre_sync_snapshot_id ?? null,
+        pre_sync_lineage:
+          opts.job.pre_sync_lineage === undefined ? null : opts.job.pre_sync_lineage,
         target_release_id: opts.job.target_release_id ?? 'rel_1',
         warnings: opts.job.warnings ?? [],
         error_message: opts.job.error_message ?? null,
@@ -126,6 +141,7 @@ async function buildApp(opts: {
     : null;
 
   const createUpdateJobCalls: Record<string, unknown>[] = [];
+  const deletedJobIds: string[] = [];
   vi.doMock('../services/clone-jobs.js', async () => ({
     getActiveUpdateJob: async () => activeJob,
     createUpdateJob: async (_db: unknown, args: Record<string, unknown>) => {
@@ -133,6 +149,7 @@ async function buildApp(opts: {
       return { id: 'cj_new', mode: 'update', status: 'pending', ...args };
     },
     getCloneJob: async (_db: unknown, jobId: string) => (job && job.id === jobId ? job : null),
+    deleteCloneJob: async (_db: unknown, jobId: string) => { deletedJobIds.push(jobId); },
   }));
 
   const release = opts.release ?? { id: 'rel_1', snapshot_id: 'snap_target', release_number: drift.releases[0]?.release_number ?? 1 };
@@ -146,14 +163,23 @@ async function buildApp(opts: {
 
   const { templateUpdateRoutes } = await import('../routes/template-update.js');
   const app = Fastify();
-  app.decorate('controlDb', { query: async () => ({ rows: [] }) } as any);
+  const controlWrites: { sql: string; params: unknown[] }[] = [];
+  app.decorate('controlDb', {
+    query: async (sql: string, params: unknown[] = []) => {
+      controlWrites.push({ sql, params });
+      if (/SELECT manifest FROM template_releases/i.test(sql)) {
+        return { rows: [{ manifest: opts.releaseManifest ?? { functions: [] } }] };
+      }
+      return { rows: [] };
+    },
+  } as any);
   app.decorateRequest('auth', null as any);
   app.addHook('onRequest', async (request: any) => {
     request.auth = { userId: 'usr_1', organizationId: 'org_1', authMethod: 'session', scopes: ['*'] };
   });
   templateUpdateRoutes(app);
 
-  return { app, recordedQueries, createUpdateJobCalls };
+  return { app, recordedQueries, createUpdateJobCalls, deletedJobIds, setLatestCalls, controlWrites };
 }
 
 describe('POST /v1/:app_id/template/update', () => {
@@ -299,6 +325,200 @@ describe('POST /v1/:app_id/template/update/:job_id/undo', () => {
     });
     const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
     expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The escape hatch. Undo used to move the repo pointer and nothing else, while
+// the worker had already advanced app_lineage.base_snapshot_id — and
+// computeDivergence is exactly `repo_latest_snapshot !== base_snapshot_id`. So
+// undoing an update was what made a fork permanently ineligible and told its
+// owner "You have changed this app." These tests pin the round trip.
+// ---------------------------------------------------------------------------
+
+import { decideEligibility } from '../services/template-update-eligibility.js';
+
+const PRE_LINEAGE = {
+  base_release_id: 'rel_6',
+  base_snapshot_id: 'snap_prev',
+  base_fingerprint: { hashes: { schema: 'a', rls: 'b', functions: 'c', config: 'd' } },
+  manifest: {
+    functions: [
+      {
+        name: 'fork_fn', code: 'export default () => 1', description: null,
+        timeout_ms: 1000, memory_limit_mb: 128, agent_tool: false,
+        agent_tool_description: null, agent_tool_mode: null, agent_tool_exposed_to: null,
+        trigger_type: 'http', trigger_config: {},
+      },
+    ],
+  },
+};
+
+/** The exact comparison computeDivergence makes, applied to what undo wrote. */
+function repoDivergenceAfter(
+  recordedQueries: { sql: string; params: unknown[] }[],
+  controlWrites: { sql: string; params: unknown[] }[],
+): boolean | null {
+  const head = recordedQueries.find((q) => /UPDATE apps SET repo_latest_snapshot/i.test(q.sql));
+  const lineage = controlWrites.find((q) => /UPDATE app_lineage/i.test(q.sql));
+  if (!head || !lineage) return null;
+  const repoHead = head.params[0];
+  const baseSnapshot = lineage.params[1];
+  return repoHead !== baseSnapshot;
+}
+
+describe('undo restores lineage, not just the repo pointer', () => {
+  it('leaves the fork reading as UNMODIFIED, so it stays updatable', async () => {
+    const { app, recordedQueries, controlWrites } = await buildApp({
+      job: {
+        id: 'cj_1', status: 'completed', mode: 'update',
+        pre_sync_snapshot_id: 'snap_prev', pre_sync_lineage: PRE_LINEAGE,
+      },
+    });
+    const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().lineage_restored).toBe(true);
+
+    const repo = repoDivergenceAfter(recordedQueries, controlWrites);
+    expect(repo).toBe(false);
+
+    // The whole point: the very next eligibility decision must not say 'modified'.
+    const decision = decideEligibility(
+      { is_fork: true, severed: false, source_app_id: 'app_src', behind_by: 1, releases: [] },
+      { repo, frontend: false, schema: false, rls: false, functions: false,
+        config: false, has_backend_base: true },
+    );
+    expect(decision.reason).not.toBe('modified');
+    expect(decision).toEqual({ eligible: true, reason: 'ok' });
+    await app.close();
+  });
+
+  it('restores all three lineage fields, NULLs included', async () => {
+    // A live-cloned fork legitimately has base_release_id NULL; writing only
+    // non-null fields would invent a lineage it never had.
+    const { app, controlWrites } = await buildApp({
+      job: {
+        id: 'cj_1', status: 'completed', mode: 'update',
+        pre_sync_snapshot_id: 'snap_prev',
+        pre_sync_lineage: { ...PRE_LINEAGE, base_release_id: null },
+      },
+    });
+    await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+    const lineage = controlWrites.find((q) => /UPDATE app_lineage/i.test(q.sql))!;
+    expect(lineage.params[0]).toBe(null);
+    expect(lineage.params[1]).toBe('snap_prev');
+    expect(lineage.params[2]).toContain('hashes');
+    await app.close();
+  });
+
+  it('puts the S3 latest pointer back too, not only the apps row', async () => {
+    const { app, setLatestCalls } = await buildApp({
+      job: {
+        id: 'cj_1', status: 'completed', mode: 'update',
+        pre_sync_snapshot_id: 'snap_prev', pre_sync_lineage: PRE_LINEAGE,
+      },
+    });
+    await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+    expect(setLatestCalls).toEqual([['app_fork', 'snap_prev']]);
+    await app.close();
+  });
+
+  it('writes lineage LAST, after the state it describes is actually back', async () => {
+    const { app, recordedQueries, controlWrites } = await buildApp({
+      job: {
+        id: 'cj_1', status: 'completed', mode: 'update',
+        pre_sync_snapshot_id: 'snap_prev', pre_sync_lineage: PRE_LINEAGE,
+      },
+    });
+    await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+    // The runtime writes (functions, repo head) all happen before the control
+    // plane declares the fork clean.
+    expect(recordedQueries.some((q) => /INSERT INTO app_functions/i.test(q.sql))).toBe(true);
+    const lineageIdx = controlWrites.findIndex((q) => /UPDATE app_lineage/i.test(q.sql));
+    expect(lineageIdx).toBeGreaterThanOrEqual(0);
+    expect(controlWrites.slice(lineageIdx + 1).some((q) => /UPDATE apps/i.test(q.sql))).toBe(false);
+    await app.close();
+  });
+
+  it('restores function bodies and withdraws the ones the release added', async () => {
+    const { app, recordedQueries } = await buildApp({
+      job: {
+        id: 'cj_1', status: 'completed', mode: 'update',
+        pre_sync_snapshot_id: 'snap_prev', pre_sync_lineage: PRE_LINEAGE,
+        target_release_id: 'rel_7',
+      },
+      releaseManifest: { functions: [{ name: 'fork_fn' }, { name: 'new_template_fn' }] },
+    });
+    const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+    expect(res.statusCode).toBe(200);
+
+    const restore = recordedQueries.find((q) => /INSERT INTO app_functions/i.test(q.sql))!;
+    expect(restore.params).toContain('export default () => 1');
+    expect(restore.sql).toMatch(/deleted_at = NULL/);
+
+    // Only the function the release ADDED is withdrawn — never one the owner wrote.
+    const remove = recordedQueries.find((q) => /UPDATE app_functions SET deleted_at/i.test(q.sql))!;
+    expect(remove.params[1]).toEqual(['new_template_fn']);
+    await app.close();
+  });
+});
+
+describe('undo on a FAILED update — the only exit left when one bricks a fork', () => {
+  // executeUpdate publishes the repo before schema/functions/config/lineage, so
+  // a throw in any later step leaves the fork on the template's code with its
+  // own old lineage. POST /update then 422s ('modified'), retry 400s after an
+  // hour, and undo used to 409 because the job was not 'completed'. All three
+  // exits closed, on a live app.
+  it('is permitted when the failed job carries pre-sync state', async () => {
+    const { app, recordedQueries, controlWrites } = await buildApp({
+      job: {
+        id: 'cj_1', status: 'failed', mode: 'update',
+        pre_sync_snapshot_id: 'snap_prev', pre_sync_lineage: PRE_LINEAGE,
+      },
+    });
+    const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+    expect(res.statusCode).toBe(200);
+    expect(repoDivergenceAfter(recordedQueries, controlWrites)).toBe(false);
+    await app.close();
+  });
+
+  it('is still refused on a failed job that never wrote anything', async () => {
+    const { app } = await buildApp({
+      job: { id: 'cj_1', status: 'failed', mode: 'update', pre_sync_snapshot_id: null },
+    });
+    const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+    expect(res.statusCode).toBe(422);
+    await app.close();
+  });
+
+  it('is still refused while a worker may be mid-write', async () => {
+    for (const status of ['pending', 'processing', 'replaying_functions']) {
+      const { app } = await buildApp({
+        job: {
+          id: 'cj_1', status, mode: 'update',
+          pre_sync_snapshot_id: 'snap_prev', pre_sync_lineage: PRE_LINEAGE,
+        },
+      });
+      const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update/cj_1/undo' });
+      expect(res.statusCode).toBe(409);
+      await app.close();
+    }
+  });
+});
+
+describe('POST /update compensates a failed enqueue', () => {
+  // An un-enqueued 'pending' job is not a harmless orphan: getActiveUpdateJob
+  // reads it as in flight, so it would 409 every future update of this fork
+  // forever, with no worker ever coming to move it out of 'pending'.
+  it('deletes the job row rather than stranding the fork on a phantom job', async () => {
+    const { app, deletedJobIds } = await buildApp({
+      drift: { behind_by: 1 },
+      enqueueThrows: true,
+    });
+    const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update' });
+    expect(res.statusCode).toBe(503);
+    expect(deletedJobIds).toEqual(['cj_new']);
     await app.close();
   });
 });

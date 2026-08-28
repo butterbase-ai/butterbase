@@ -45,6 +45,8 @@ interface Candidate {
   status: CloneJobStatus;
   requested_by_user_id: string;
   updated_at: Date;
+  /** Update-mode jobs ride this same table; the failure email must not call them clones. */
+  mode: 'clone' | 'update';
   ageMinutes: number;
 }
 
@@ -58,8 +60,9 @@ async function fetchCandidates(controlDb: Pick<pg.Pool, 'query'>): Promise<Candi
     requested_by_user_id: string;
     updated_at: Date;
     age_minutes: string;
+    mode: 'clone' | 'update';
   }>(
-    `SELECT id, source_app_id, dest_app_id, dest_region, status, requested_by_user_id, updated_at,
+    `SELECT id, source_app_id, dest_app_id, dest_region, status, requested_by_user_id, updated_at, mode,
             EXTRACT(EPOCH FROM (now() - updated_at)) / 60 AS age_minutes
        FROM template_clone_jobs
       WHERE status NOT IN ('completed', 'failed', 'pending', 'processing')
@@ -76,6 +79,7 @@ async function fetchCandidates(controlDb: Pick<pg.Pool, 'query'>): Promise<Candi
     status: r.status,
     requested_by_user_id: r.requested_by_user_id,
     updated_at: r.updated_at,
+    mode: r.mode ?? 'clone',
     ageMinutes: Math.round(Number(r.age_minutes)),
   }));
 }
@@ -144,7 +148,7 @@ export async function runOnce(
     insertCloneAuditLog(controlDb, {
       appId: c.source_app_id,
       userId: c.requested_by_user_id,
-      eventType: 'template_clone_failed',
+      eventType: c.mode === 'update' ? 'template_update_failed' : 'template_clone_failed',
       metadata: {
         job_id: c.id,
         dest_app_id: c.dest_app_id,
@@ -169,6 +173,9 @@ export async function runOnce(
           sourceAppId: c.source_app_id,
           errorMessage,
           stalledStage: c.status,
+          // Without this the owner of a stalled UPDATE got an email telling them
+          // their clone failed and offering to delete their live app.
+          mode: c.mode,
         },
         logger,
       ).catch((notifyErr) => logger.error({ notifyErr, jobId: c.id }, '[clone-jobs-reaper] notifyCloneFailed failed'));

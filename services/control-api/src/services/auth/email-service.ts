@@ -294,6 +294,20 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       const stageLine = data.stalledStage
         ? `Stalled at stage: ${data.stalledStage}`
         : '';
+      if (data.mode === 'update') {
+        return [
+          `We couldn't finish updating "${data.appName || data.appId}" to the latest release of template ${data.sourceAppId}.`,
+          '',
+          `Job ID: ${data.jobId}`,
+          stageLine,
+          `Error: ${data.errorMessage || '(no message captured)'}`,
+          '',
+          'Your data was not touched — an update never drops or rewrites your rows. The app may be',
+          'part-way between its old code and the new release. You can:',
+          `  • Review the app and undo the update: ${dashboardUrl}/apps/${data.appId}`,
+          `  • Contact support if this keeps happening.`,
+        ].filter(Boolean).join('\n');
+      }
       return [
         `We couldn't finish cloning "${data.appName || data.appId}" from template ${data.sourceAppId}.`,
         '',
@@ -644,28 +658,38 @@ ${section('Deployments', deployRows)}${templateUpdateSection}
   if (template === 'clone_failed') {
     const appName = data.appName || data.appId;
     const errorMsg = truncateError(data.errorMessage || '(no message captured)');
-    const retryUrl = `${dashboardUrl}/templates`;
+    const isUpdate = data.mode === 'update';
+    // An update failure is about an app that already exists and is live. The
+    // clone copy ("the destination app was created", "try cloning again",
+    // "delete the partial app") is actively wrong for it.
+    const retryUrl = isUpdate ? `${dashboardUrl}/apps/${escapeHtml(data.appId)}` : `${dashboardUrl}/templates`;
+    const heading = isUpdate ? 'Update didn&rsquo;t finish' : 'Clone didn&rsquo;t finish';
+    const buttonLabel = isUpdate ? 'Open the app' : 'Try cloning again';
     const appUrl = `${dashboardUrl}/apps/${escapeHtml(data.appId)}`;
     const stageLine = data.stalledStage
       ? `<p style="margin:0 0 4px 0;font-size:13px;color:#737373;">Stalled at stage <span style="color:#0a0a0a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.stalledStage)}</span></p>`
       : '';
     const content = `
-<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">Clone didn&rsquo;t finish</h1>
+<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">${heading}</h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#737373;">
-We couldn&rsquo;t finish cloning &ldquo;${escapeHtml(appName)}&rdquo; from template <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.sourceAppId || '')}</span>.
+We couldn&rsquo;t finish ${isUpdate ? 'updating' : 'cloning'} &ldquo;${escapeHtml(appName)}&rdquo; ${isUpdate ? 'to the latest release of template' : 'from template'} <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.sourceAppId || '')}</span>.
 </p>
-${renderButton({ href: retryUrl, label: 'Try cloning again' })}
+${renderButton({ href: retryUrl, label: buttonLabel })}
 <p style="margin:32px 0 8px 0;font-size:13px;font-weight:600;color:#0a0a0a;">What happened</p>
 ${stageLine}
 <pre style="margin:0;padding:16px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:#0a0a0a;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;">${escapeHtml(errorMsg)}</pre>
 <p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.6;">
-The destination app was created but the code (frontend + functions) may not be fully in place. You can retry the clone from the template gallery, or delete the partial app and start fresh — <a href="${appUrl}" style="color:#525252;text-decoration:underline;">manage the partial app</a>.
+${isUpdate
+  ? `Your data was not touched &mdash; an update never drops or rewrites your rows. The app may be part-way between its old code and the new release; you can undo the update from <a href="${appUrl}" style="color:#525252;text-decoration:underline;">the app page</a>.`
+  : `The destination app was created but the code (frontend + functions) may not be fully in place. You can retry the clone from the template gallery, or delete the partial app and start fresh &mdash; <a href="${appUrl}" style="color:#525252;text-decoration:underline;">manage the partial app</a>.`}
 </p>
 <p style="margin:16px 0 0 0;font-size:12px;color:#a3a3a3;line-height:1.5;">
 Job ID <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.jobId || '')}</span>
 </p>`;
     return renderEmailLayout({
-      preheader: `We couldn't finish cloning "${appName}". Retry from the template gallery.`,
+      preheader: isUpdate
+        ? `We couldn't finish updating "${appName}". Your data is untouched.`
+        : `We couldn't finish cloning "${appName}". Retry from the template gallery.`,
       content,
     });
   }
@@ -764,6 +788,8 @@ export function buildBillingEmailSubject(
   }
   if (template === 'clone_failed') {
     const app = data.appName || data.appId || 'your app';
+    // Same template, two very different events — see notifyCloneFailed's `mode`.
+    if (data.mode === 'update') return `Update failed: "${app}"`;
     return `Clone failed: "${app}"`;
   }
   if (template === 'clone_reaper_digest') {
