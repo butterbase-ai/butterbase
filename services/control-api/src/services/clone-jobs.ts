@@ -48,6 +48,9 @@ export interface CloneJob {
   pending_env_vars: string | null;       // encrypted JSON blob (AUTH_ENCRYPTION_KEY)
   auto_mint_requests: { fn_name: string; key: string }[] | null;
   unfilled_env_vars: Record<string, string[]> | null;
+  mode: 'clone' | 'update';
+  target_release_id: string | null;
+  pre_sync_snapshot_id: string | null;
 }
 
 function generateJobId(): string {
@@ -151,6 +154,52 @@ export async function appendCloneJobWarnings(
      WHERE id = $2`,
     [JSON.stringify(warnings), jobId],
   );
+}
+
+export async function createUpdateJob(
+  controlDb: pg.Pool,
+  args: {
+    forkAppId: string; forkRegion: string;
+    sourceAppId: string; sourceRegion: string;
+    targetReleaseId: string; sourceSnapshotId: string;
+    requestedByUserId: string; preSyncSnapshotId: string | null;
+  },
+): Promise<CloneJob> {
+  // dest_app_id must always be set on an update row: the partial unique index
+  // idx_template_clone_jobs_one_update (dest_app_id, mode='update', status IN
+  // ('pending','processing')) cannot enforce "at most one in-flight update per
+  // fork" if dest_app_id is NULL — Postgres treats NULLs as distinct for
+  // uniqueness. Reject here rather than let a NULL silently escape that guard.
+  if (!args.forkAppId) {
+    throw new Error('createUpdateJob requires a non-empty forkAppId (written to dest_app_id)');
+  }
+
+  const id = generateJobId();
+  const res = await controlDb.query<CloneJob>(
+    `INSERT INTO template_clone_jobs (
+       id, mode, source_app_id, source_snapshot_id, source_region,
+       dest_app_id, dest_region, requested_by_user_id,
+       target_release_id, pre_sync_snapshot_id, status
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+     RETURNING *`,
+    [id, 'update', args.sourceAppId, args.sourceSnapshotId, args.sourceRegion,
+     args.forkAppId, args.forkRegion, args.requestedByUserId,
+     args.targetReleaseId, args.preSyncSnapshotId],
+  );
+  return res.rows[0];
+}
+
+export async function getActiveUpdateJob(
+  controlDb: pg.Pool, forkAppId: string,
+): Promise<CloneJob | null> {
+  const res = await controlDb.query<CloneJob>(
+    `SELECT * FROM template_clone_jobs
+      WHERE dest_app_id = $1 AND mode = 'update'
+        AND status IN ('pending', 'processing')
+      LIMIT 1`,
+    [forkAppId],
+  );
+  return res.rows[0] ?? null;
 }
 
 /** Snapshot ids that an in-flight clone is reading from — caller adds them to planRetention's pinned set. */
