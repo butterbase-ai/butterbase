@@ -560,3 +560,119 @@ describe('executeUpdate', () => {
     expect(statusWrites()).not.toContain('completed');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Generated SQL for the insert-only config replays.
+//
+// These three conflict clauses are interpolated and, until now, neither executed
+// nor asserted anywhere: the DB-backed replay suites are gated behind
+// RUN_DB_TESTS=1, and tsconfig excludes *.test.ts from tsc. A stray brace or a
+// missing space would first surface as `syntax error at or near` during a real
+// customer's update. String assertions are the cheap guard.
+// ---------------------------------------------------------------------------
+
+import {
+  buildRealtimeConfigInsertSql,
+  buildOauthConfigInsertSql,
+  buildIntegrationConfigInsertSql,
+} from '../services/clone-replay.js';
+
+describe('config replay conflict clauses', () => {
+  const builders = [
+    ['realtime', buildRealtimeConfigInsertSql, '(app_id, table_name)'],
+    ['oauth', buildOauthConfigInsertSql, '(app_id, provider)'],
+    ['integration', buildIntegrationConfigInsertSql, '(app_id, toolkit_slug)'],
+  ] as const;
+
+  for (const [name, build, target] of builders) {
+    it(`${name}: leaves the fork's row alone under insertOnly`, () => {
+      const sql = build(true);
+      expect(sql).toContain(`ON CONFLICT ${target} DO NOTHING`);
+      expect(sql).not.toMatch(/DO UPDATE/);
+    });
+
+    it(`${name}: keeps clone's overwrite behaviour when not insertOnly`, () => {
+      const sql = build(false);
+      expect(sql).toContain(`ON CONFLICT ${target} DO UPDATE`);
+      expect(sql).not.toMatch(/DO NOTHING/);
+    });
+
+    it(`${name}: emits one well-formed statement in both modes`, () => {
+      for (const sql of [build(true), build(false)]) {
+        // No unbalanced parens, no leftover interpolation, no glued-together
+        // keywords from a missing space or newline.
+        expect(sql).not.toMatch(/[$`]\{/);
+        expect(sql).not.toMatch(/undefined|\[object/);
+        expect(sql.split('(').length).toBe(sql.split(')').length);
+        expect(sql).toMatch(/^\s*INSERT INTO \w+/);
+        expect(sql).toMatch(/\)\s+ON CONFLICT/);
+        expect(sql.trim().endsWith(',')).toBe(false);
+      }
+    });
+  }
+
+  it('never NULLs a fork OAuth secret under insertOnly', () => {
+    expect(buildOauthConfigInsertSql(true)).not.toMatch(/client_secret_encrypted\s*=\s*NULL/);
+    // ...while clone still blanks it on the INSERT itself, as it always did.
+    expect(buildOauthConfigInsertSql(false)).toMatch(/client_secret_encrypted\s*=\s*NULL/);
+  });
+
+  it('never replaces stored integration credentials under insertOnly', () => {
+    expect(buildIntegrationConfigInsertSql(true))
+      .not.toMatch(/credentials_encrypted\s*=\s*EXCLUDED/);
+    expect(buildIntegrationConfigInsertSql(false))
+      .toMatch(/credentials_encrypted\s*=\s*EXCLUDED/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retry policy for update-mode jobs.
+// ---------------------------------------------------------------------------
+
+import { canRetryUpdateJob, UPDATE_RETRY_MAX_AGE_MS } from '../services/clone-jobs.js';
+
+describe('canRetryUpdateJob', () => {
+  const now = new Date('2026-08-28T12:00:00Z');
+  const minutesAgo = (m: number) => new Date(now.getTime() - m * 60_000);
+
+  it('allows a prompt retry of a freshly failed update', () => {
+    expect(canRetryUpdateJob({
+      lastUpdatedAt: minutesAgo(2), now, hasNewerCompletedUpdate: false,
+    })).toEqual({ allowed: true, reason: 'ok' });
+  });
+
+  it('refuses when another update has since completed on the fork', () => {
+    expect(canRetryUpdateJob({
+      lastUpdatedAt: minutesAgo(2), now, hasNewerCompletedUpdate: true,
+    })).toEqual({ allowed: false, reason: 'superseded' });
+  });
+
+  it('refuses a stale retry even with no newer job', () => {
+    // The case with no job B at all: the owner edits functions in the weeks after
+    // a failed update. The repo HEAD never moves, so the worker would classify
+    // the retry as a republish and skip the divergence gate.
+    expect(canRetryUpdateJob({
+      lastUpdatedAt: minutesAgo(60 * 24 * 14), now, hasNewerCompletedUpdate: false,
+    })).toEqual({ allowed: false, reason: 'stale' });
+  });
+
+  it('treats the bound as inclusive of the last moment inside it', () => {
+    const edge = new Date(now.getTime() - UPDATE_RETRY_MAX_AGE_MS);
+    expect(canRetryUpdateJob({ lastUpdatedAt: edge, now, hasNewerCompletedUpdate: false }).allowed)
+      .toBe(true);
+    expect(canRetryUpdateJob({
+      lastUpdatedAt: new Date(edge.getTime() - 1), now, hasNewerCompletedUpdate: false,
+    }).allowed).toBe(false);
+  });
+});
+
+describe('executeUpdate preconditions', () => {
+  it('refuses a job with no target release BEFORE mutating the fork', async () => {
+    job.target_release_id = null as never;
+    await expect(executeUpdate(controlDb, task(), silentLogger)).rejects.toThrow(/target_release_id/);
+    // Nothing was published, replayed, or even prepared.
+    expect(tags()).not.toContain('publish:manifest');
+    expect(tags()).not.toContain('replaySchema');
+    expect(tags()).not.toContain('copyBlob');
+  });
+});

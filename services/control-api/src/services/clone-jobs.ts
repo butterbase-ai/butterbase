@@ -202,6 +202,65 @@ export async function createUpdateJob(
   return res.rows[0];
 }
 
+/**
+ * How long after an update job fails a retry still means "try that again".
+ *
+ * Retry is only safe while the fork is still in the state the job left it in.
+ * There is no upper bound on how long an owner may keep working on a fork after
+ * an update fails, and the execution-time gate cannot always tell their edits
+ * from a prior attempt's writes (see classifyUpdateResume's 'republish' branch,
+ * which by design skips divergence checks). A time bound is the cheap way to
+ * keep the retry path inside the window where that assumption holds.
+ */
+export const UPDATE_RETRY_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+export type UpdateRetryRefusal = 'superseded' | 'stale';
+
+/**
+ * May this failed update job be retried?
+ *
+ * Snapshot ids are content hashes, so two jobs targeting the same release on the
+ * same fork compute the SAME target snapshot. That makes a stale retry
+ * dangerous: job A fails after publishing the repo, job B completes the update,
+ * the owner then edits a function body — which leaves the repo HEAD untouched,
+ * still equal to the target — and a retry of job A classifies as 'republish',
+ * skips the divergence gate, and overwrites the edited function.
+ *
+ * Two independent guards, because either alone leaves a hole:
+ *   - `superseded`: another update job for this fork has since completed, so
+ *     this job is not the fork's current state and cannot be resumed into it.
+ *   - `stale`: too much time has passed since the job last moved. Covers the
+ *     case with no job B at all — an owner who edits functions in the weeks
+ *     after a failed update, where nothing but the clock reveals the risk.
+ *
+ * Pure so both conditions are testable without a queue or a fork.
+ */
+export function canRetryUpdateJob(args: {
+  lastUpdatedAt: Date;
+  now: Date;
+  hasNewerCompletedUpdate: boolean;
+}): { allowed: boolean; reason: UpdateRetryRefusal | 'ok' } {
+  if (args.hasNewerCompletedUpdate) return { allowed: false, reason: 'superseded' };
+  if (args.now.getTime() - args.lastUpdatedAt.getTime() > UPDATE_RETRY_MAX_AGE_MS) {
+    return { allowed: false, reason: 'stale' };
+  }
+  return { allowed: true, reason: 'ok' };
+}
+
+/** Has another update job for this fork completed since the given one was created? */
+export async function hasNewerCompletedUpdate(
+  controlDb: pg.Pool, forkAppId: string, jobId: string, createdAt: Date,
+): Promise<boolean> {
+  const res = await controlDb.query(
+    `SELECT 1 FROM template_clone_jobs
+      WHERE dest_app_id = $1 AND mode = 'update' AND id <> $2
+        AND status = 'completed' AND created_at > $3
+      LIMIT 1`,
+    [forkAppId, jobId, createdAt],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
 export async function getActiveUpdateJob(
   controlDb: pg.Pool, forkAppId: string,
 ): Promise<CloneJob | null> {

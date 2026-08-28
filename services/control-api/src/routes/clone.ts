@@ -12,7 +12,10 @@ import { requireUserId } from '../utils/require-auth.js';
 import { rateLimitAllowList } from '../plugins/rate-limit.js';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
-import { createCloneJob, getCloneJob, incrementRetry } from '../services/clone-jobs.js';
+import {
+  createCloneJob, getCloneJob, incrementRetry,
+  canRetryUpdateJob, hasNewerCompletedUpdate, UPDATE_RETRY_MAX_AGE_MS,
+} from '../services/clone-jobs.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { AppNotFoundError } from '../services/app-resolver.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
@@ -339,6 +342,36 @@ export function cloneRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     }
+    // Retrying an update is only safe while the fork is still in the state this
+    // job left it in. A stale retry re-enters the worker's 'republish' path,
+    // which by design skips the divergence gate, so it would overwrite whatever
+    // the owner has done to the fork since. Clone-mode jobs are unaffected:
+    // their destination is an app nobody else can have touched.
+    if (job.mode === 'update' && job.dest_app_id) {
+      const superseded = await hasNewerCompletedUpdate(
+        app.controlDb, job.dest_app_id, job.id, job.created_at,
+      );
+      const { allowed, reason } = canRetryUpdateJob({
+        lastUpdatedAt: job.updated_at,
+        now: new Date(),
+        hasNewerCompletedUpdate: superseded,
+      });
+      if (!allowed) {
+        const detail = reason === 'superseded'
+          ? 'This app has been updated by a newer job since this one failed.'
+          : `This update failed more than ${Math.round(UPDATE_RETRY_MAX_AGE_MS / 60000)} minutes ago.`;
+        return reply.code(400).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: `Cannot retry this template update. ${detail}`,
+          remediation:
+            'Start a fresh update instead: POST /v1/:app_id/template/update. A new job ' +
+            're-checks the app against the template, so nothing you have changed since ' +
+            'gets overwritten.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+    }
+
     await incrementRetry(app.controlDb, job_id);
     await enqueueCloneTask(job.source_app_id, job.source_region, job.id);
     return reply.send({ job_id: job.id, status: 'pending' });

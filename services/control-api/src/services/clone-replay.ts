@@ -783,6 +783,72 @@ export async function replayFunctions(
 //                                      redirect_uris, provider_metadata
 //                                      unique: (app_id, provider)
 
+/**
+ * The three config-replay upserts whose ON CONFLICT clause varies with
+ * `insertOnly` are built here rather than inline, for the same reason
+ * buildFunctionInsertSql is: an interpolated conflict clause that no test ever
+ * looks at would first announce a stray brace or a missing space as a runtime
+ * `syntax error at or near` on a real customer's first update. Extracted, they
+ * can be string-asserted for free.
+ *
+ * Column lists and placeholders are copied verbatim from the original inline
+ * queries; only the conflict clause differs between modes.
+ */
+export function buildRealtimeConfigInsertSql(insertOnly: boolean): string {
+  const conflict = insertOnly
+    ? 'ON CONFLICT (app_id, table_name) DO NOTHING'
+    : `ON CONFLICT (app_id, table_name) DO UPDATE
+         SET events = EXCLUDED.events, enabled = EXCLUDED.enabled, updated_at = now()`;
+  return `INSERT INTO app_realtime_config (id, app_id, table_name, events, enabled)
+          VALUES (gen_random_uuid(), $1, $2, $3, $4)
+          ${conflict}`;
+}
+
+export function buildOauthConfigInsertSql(insertOnly: boolean): string {
+  const conflict = insertOnly
+    ? 'ON CONFLICT (app_id, provider) DO NOTHING'
+    : `ON CONFLICT (app_id, provider) DO UPDATE
+         SET client_id               = NULL,
+             client_secret_encrypted = NULL,
+             scopes                  = EXCLUDED.scopes,
+             authorization_url       = EXCLUDED.authorization_url,
+             token_url               = EXCLUDED.token_url,
+             userinfo_url            = EXCLUDED.userinfo_url,
+             enabled                 = EXCLUDED.enabled,
+             redirect_uris           = EXCLUDED.redirect_uris,
+             provider_metadata       = EXCLUDED.provider_metadata`;
+  return `INSERT INTO app_oauth_configs (
+            id, app_id, provider,
+            client_id, client_secret_encrypted,
+            scopes, authorization_url, token_url, userinfo_url,
+            enabled, redirect_uris, provider_metadata
+          ) VALUES (
+            gen_random_uuid(), $1, $2,
+            NULL, NULL,
+            $3, $4, $5, $6,
+            $7, $8, $9
+          )
+          ${conflict}`;
+}
+
+export function buildIntegrationConfigInsertSql(insertOnly: boolean): string {
+  const conflict = insertOnly
+    ? 'ON CONFLICT (app_id, toolkit_slug) DO NOTHING'
+    : `ON CONFLICT (app_id, toolkit_slug) DO UPDATE
+         SET composio_auth_config_id = EXCLUDED.composio_auth_config_id,
+             display_name            = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
+             scopes                  = EXCLUDED.scopes,
+             credentials_encrypted   = EXCLUDED.credentials_encrypted,
+             auth_scheme             = EXCLUDED.auth_scheme,
+             enabled                 = true,
+             updated_at              = now()`;
+  return `INSERT INTO app_integration_configs
+            (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes,
+             credentials_encrypted, auth_scheme)
+          VALUES ($1, $2, $3, $4, true, $5::jsonb, $6, $7)
+          ${conflict}`;
+}
+
 async function replayStorageConfig(
   sourceRuntimePool: pg.Pool,
   destRuntimePool: pg.Pool,
@@ -960,12 +1026,7 @@ async function replayRealtimeConfig(
     for (const row of src.rows) {
       try {
         await destRuntimePool.query(
-          `INSERT INTO app_realtime_config (id, app_id, table_name, events, enabled)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4)
-           ${insertOnly
-             ? 'ON CONFLICT (app_id, table_name) DO NOTHING'
-             : `ON CONFLICT (app_id, table_name) DO UPDATE
-                  SET events = EXCLUDED.events, enabled = EXCLUDED.enabled, updated_at = now()`}`,
+          buildRealtimeConfigInsertSql(insertOnly),
           [destAppId, row.table_name, row.events, row.enabled],
         );
       } catch (err) {
@@ -1016,29 +1077,7 @@ async function replayOauthConfigs(
     for (const row of src.rows) {
       try {
         await destRuntimePool.query(
-          `INSERT INTO app_oauth_configs (
-             id, app_id, provider,
-             client_id, client_secret_encrypted,
-             scopes, authorization_url, token_url, userinfo_url,
-             enabled, redirect_uris, provider_metadata
-           ) VALUES (
-             gen_random_uuid(), $1, $2,
-             NULL, NULL,
-             $3, $4, $5, $6,
-             $7, $8, $9
-           )
-           ${insertOnly
-             ? 'ON CONFLICT (app_id, provider) DO NOTHING'
-             : `ON CONFLICT (app_id, provider) DO UPDATE
-                  SET client_id              = NULL,
-                      client_secret_encrypted = NULL,
-                      scopes                 = EXCLUDED.scopes,
-                      authorization_url      = EXCLUDED.authorization_url,
-                      token_url              = EXCLUDED.token_url,
-                      userinfo_url           = EXCLUDED.userinfo_url,
-                      enabled                = EXCLUDED.enabled,
-                      redirect_uris          = EXCLUDED.redirect_uris,
-                      provider_metadata      = EXCLUDED.provider_metadata`}`,
+          buildOauthConfigInsertSql(insertOnly),
           [
             destAppId, row.provider,
             row.scopes, row.authorization_url, row.token_url, row.userinfo_url,
@@ -1093,7 +1132,11 @@ export async function replayIntegrations(
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
-  insertOnly: boolean,
+  // Defaulted so a caller that omits it inherits CLONE semantics rather than
+  // silently picking up `undefined` and landing in whichever branch that
+  // happens to be. tsconfig excludes *.test.ts, so tsc will not catch an
+  // out-of-date call site here.
+  insertOnly = false,
 ): Promise<void> {
   let src: {
     rows: Array<{
@@ -1196,20 +1239,7 @@ export async function replayIntegrations(
       const scopesJson = JSON.stringify(row.scopes ?? []);
 
       await destRuntimePool.query(
-        `INSERT INTO app_integration_configs
-           (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes,
-            credentials_encrypted, auth_scheme)
-         VALUES ($1, $2, $3, $4, true, $5::jsonb, $6, $7)
-         ${insertOnly
-           ? 'ON CONFLICT (app_id, toolkit_slug) DO NOTHING'
-           : `ON CONFLICT (app_id, toolkit_slug) DO UPDATE
-                SET composio_auth_config_id = EXCLUDED.composio_auth_config_id,
-                    display_name            = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
-                    scopes                  = EXCLUDED.scopes,
-                    credentials_encrypted   = EXCLUDED.credentials_encrypted,
-                    auth_scheme             = EXCLUDED.auth_scheme,
-                    enabled                 = true,
-                    updated_at              = now()`}`,
+        buildIntegrationConfigInsertSql(insertOnly),
         [
           destAppId, row.toolkit_slug, newAuthConfigId, row.display_name, scopesJson,
           row.credentials_encrypted, row.auth_scheme,

@@ -1421,6 +1421,20 @@ export async function executeUpdate(
   const forkAppId = job.dest_app_id;
   if (!forkAppId) throw new Error(`Update job ${jobId} has no dest_app_id (fork app)`);
 
+  // Precondition, not an epilogue. The lineage advance at the end of this
+  // function needs a release to point the fork's new base at; discovering it is
+  // missing after the repo, schema, functions and config have all been replaced
+  // leaves the fork mutated with a base_snapshot_id still on the old HEAD —
+  // permanently ineligible for any further update and displaying as
+  // user-modified. createUpdateJob types it as a string, but the column is
+  // nullable, so check before touching anything.
+  if (!job.target_release_id) {
+    throw new Error(
+      `Update job ${jobId} has no target_release_id; refusing to start an update ` +
+        'whose lineage base could not be recorded',
+    );
+  }
+
   await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
 
   await Sentry.withScope(async (scope) => {
@@ -1697,12 +1711,6 @@ export async function executeUpdate(
       //       manifest, because the additive-only schema filter means the fork is
       //       allowed to differ from the release in ways that are not user edits.
       scope.setTag('step', 'advancing_lineage');
-      if (!job.target_release_id) {
-        throw new Error(
-          `[update] job ${jobId} has no target_release_id; refusing to advance lineage ` +
-            'to an unnamed base (the fork would keep reporting itself as behind)',
-        );
-      }
       const fingerprint = await captureAppState(forkRuntimePool, forkAppPool, forkAppId);
       await controlDb.query(
         `UPDATE app_lineage
