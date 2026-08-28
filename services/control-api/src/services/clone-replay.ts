@@ -41,6 +41,64 @@ export interface ReplayFunctionsEnvVarOpts {
    *  the value is layered into `merged` AFTER user-supplied pendingEnvVarValues
    *  and CONVENTIONS auto-mint (both win), BEFORE static fills. */
   appOverrides?: Record<string, string>;
+  /** When true, replay upserts into pre-existing functions/triggers (template
+   *  update) instead of leaving them untouched (clone). Defaults to false —
+   *  clone behaviour is unaffected. */
+  overwriteExisting?: boolean;
+}
+
+/**
+ * Builds the INSERT INTO app_functions statement used by replayFunctions.
+ * Column list, placeholders, and literal id/deployed_at handling are copied
+ * verbatim from the original inline query; only the ON CONFLICT clause
+ * varies with `overwriteExisting`.
+ */
+export function buildFunctionInsertSql(overwriteExisting: boolean): string {
+  const conflict = overwriteExisting
+    ? `ON CONFLICT (app_id, name) DO UPDATE SET
+         code = EXCLUDED.code,
+         description = EXCLUDED.description,
+         timeout_ms = EXCLUDED.timeout_ms,
+         memory_limit_mb = EXCLUDED.memory_limit_mb,
+         agent_tool = EXCLUDED.agent_tool,
+         agent_tool_description = EXCLUDED.agent_tool_description,
+         agent_tool_mode = EXCLUDED.agent_tool_mode,
+         agent_tool_exposed_to = EXCLUDED.agent_tool_exposed_to,
+         deployed_at = now()`
+    : `ON CONFLICT (app_id, name) DO NOTHING`;
+  return `INSERT INTO app_functions (
+           id, app_id,
+           name, code, description,
+           timeout_ms, memory_limit_mb,
+           agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
+           encrypted_env_vars,
+           deployed_by, deployed_at
+         ) VALUES (
+           gen_random_uuid(), $1,
+           $2, $3, $4,
+           $5, $6,
+           $7, $8, $9, $10,
+           NULL,
+           $11, now()
+         )
+         ${conflict}
+         RETURNING id`;
+}
+
+/**
+ * Builds the INSERT INTO function_triggers statement used by replayFunctions.
+ * Column list and placeholders are copied verbatim from the original inline
+ * query; only the ON CONFLICT clause varies with `overwriteExisting`.
+ */
+export function buildTriggerInsertSql(overwriteExisting: boolean): string {
+  const conflict = overwriteExisting
+    ? `ON CONFLICT (function_id, trigger_type) DO UPDATE SET
+         trigger_config = EXCLUDED.trigger_config,
+         enabled = EXCLUDED.enabled`
+    : `ON CONFLICT (function_id, trigger_type) DO NOTHING`;
+  return `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
+             VALUES ($1, $2, $3, $4, $5)
+             ${conflict}`;
 }
 
 /**
@@ -457,26 +515,12 @@ export async function replayFunctions(
     }
   }
 
+  const overwriteExisting = opts?.overwriteExisting ?? false;
+
   for (const f of src.rows) {
     try {
       const ins = await destRuntimePool.query<{ id: string }>(
-        `INSERT INTO app_functions (
-           id, app_id,
-           name, code, description,
-           timeout_ms, memory_limit_mb,
-           agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
-           encrypted_env_vars,
-           deployed_by, deployed_at
-         ) VALUES (
-           gen_random_uuid(), $1,
-           $2, $3, $4,
-           $5, $6,
-           $7, $8, $9, $10,
-           NULL,
-           $11, now()
-         )
-         ON CONFLICT (app_id, name) DO NOTHING
-         RETURNING id`,
+        buildFunctionInsertSql(overwriteExisting),
         [
           destAppId,
           f.name, f.code, f.description,
@@ -503,9 +547,7 @@ export async function replayFunctions(
         );
         for (const t of trigSrc.rows) {
           await destRuntimePool.query(
-            `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (function_id, trigger_type) DO NOTHING`,
+            buildTriggerInsertSql(overwriteExisting),
             [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
           );
         }
