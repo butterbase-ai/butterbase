@@ -39,4 +39,28 @@ describe('filterAdditive', () => {
     const input = [stmt('ALTER TABLE "posts" ALTER COLUMN "n" TYPE integer', true, false)];
     expect(filterAdditive(input).kept).toHaveLength(0);
   });
+
+  it('rejects compound statement with DROP hidden after additive prefix', () => {
+    const input = [
+      stmt(
+        'ALTER TABLE "posts" ALTER COLUMN "n" SET DEFAULT 0; DROP TABLE users; --',
+        true,
+        false,
+      ),
+    ];
+    expect(filterAdditive(input).kept).toHaveLength(0);
+    expect(filterAdditive(input).rejected).toHaveLength(1);
+  });
+
+  it('rejects lowercase drop table', () => {
+    const input = [stmt('drop table "x"', true, false)];
+    expect(filterAdditive(input).kept).toHaveLength(0);
+    expect(filterAdditive(input).rejected).toHaveLength(1);
+  });
+
+  it('keeps plain additive ALTER COLUMN SET DEFAULT', () => {
+    const input = [stmt('ALTER TABLE "posts" ALTER COLUMN "n" SET DEFAULT 0', false, true)];
+    expect(filterAdditive(input).kept).toHaveLength(1);
+    expect(filterAdditive(input).rejected).toHaveLength(0);
+  });
 });
