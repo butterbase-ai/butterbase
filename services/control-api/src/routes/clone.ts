@@ -166,10 +166,13 @@ export function cloneRoutes(app: FastifyInstance) {
     }
 
     // Cap simultaneous non-terminal clone jobs per user at 3.
+    // template_clone_jobs also holds template-update rows (mode = 'update');
+    // scope to mode = 'clone' so in-flight updates don't eat into this quota.
     const inflightResult = await app.controlDb.query<{ c: number }>(
       `SELECT count(*)::int AS c
          FROM template_clone_jobs
         WHERE requested_by_user_id = $1
+          AND mode = 'clone'
           AND status NOT IN ('completed', 'failed')`,
       [userId],
     );

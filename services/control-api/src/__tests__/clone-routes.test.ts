@@ -349,3 +349,114 @@ describe('POST /v1/templates/:source_app_id/clone — region placement', () => {
     await app.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /v1/templates/:source_app_id/clone — per-user inflight cap must not
+// count update-mode rows
+// ---------------------------------------------------------------------------
+//
+// `template_clone_jobs` now holds both clone rows and template-update rows,
+// discriminated by a `mode` column (migration 110). The inflight-cap query at
+// clone.ts:171 counts non-terminal rows for the requesting user and 429s at 3.
+// It must scope to `mode = 'clone'` — otherwise a user's in-flight template
+// *updates* would consume their *clone* quota. This test simulates a real
+// filtered dataset (3 non-terminal update-mode rows, 0 clone-mode rows) behind
+// the mocked controlDb and asserts on the resulting HTTP status, not on SQL
+// text, so it fails/passes based on actual scoping behaviour.
+describe('POST /v1/templates/:source_app_id/clone — inflight cap mode scoping', () => {
+  it('does not count in-flight update-mode jobs toward the clone concurrency cap', async () => {
+    const app = Fastify({ logger: false });
+
+    // Simulated rows for this user: 3 non-terminal *update* jobs, 0 clone jobs.
+    // A correctly scoped query (mode = 'clone') must see count 0 here and let
+    // the clone through; an unscoped query sees count 3 and wrongly 429s.
+    const simulatedRows = [
+      { mode: 'update', status: 'running' },
+      { mode: 'update', status: 'pending' },
+      { mode: 'update', status: 'running' },
+    ];
+
+    const controlDbStub = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('template_clone_jobs') && sql.toLowerCase().includes('count')) {
+          const scopedToClone = /mode\s*=\s*'clone'/.test(sql);
+          const c = simulatedRows.filter((r) => !scopedToClone || r.mode === 'clone').length;
+          return { rows: [{ c }] };
+        }
+        if (sql.includes('org_app_index')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.auth = { userId: 'usr_requester', authMethod: 'api_key', scopes: ['*'] } as any;
+      done();
+    });
+    app.register(cloneRoutes);
+    await app.ready();
+
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+    mockCreateCloneJob.mockResolvedValueOnce({ id: 'cj_scoped', status: 'pending' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: {},
+    });
+
+    // With 3 update-mode rows in flight but 0 clone-mode rows, this clone
+    // request must succeed — the update rows must not count toward the cap.
+    expect(res.statusCode).toBe(200);
+    expect(res.json().job_id).toBe('cj_scoped');
+
+    await app.close();
+  });
+
+  it('still 429s at 3 in-flight clone-mode jobs (existing contract preserved)', async () => {
+    const app = Fastify({ logger: false });
+
+    const simulatedRows = [
+      { mode: 'clone', status: 'running' },
+      { mode: 'clone', status: 'pending' },
+      { mode: 'clone', status: 'running' },
+    ];
+
+    const controlDbStub = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('template_clone_jobs') && sql.toLowerCase().includes('count')) {
+          const scopedToClone = /mode\s*=\s*'clone'/.test(sql);
+          const c = simulatedRows.filter((r) => !scopedToClone || r.mode === 'clone').length;
+          return { rows: [{ c }] };
+        }
+        if (sql.includes('org_app_index')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.auth = { userId: 'usr_requester', authMethod: 'api_key', scopes: ['*'] } as any;
+      done();
+    });
+    app.register(cloneRoutes);
+    await app.ready();
+
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(429);
+    expect(res.json().error.code).toBe('CLONE_LIMIT_INFLIGHT');
+
+    await app.close();
+  });
+});
