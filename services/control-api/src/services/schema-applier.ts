@@ -71,6 +71,11 @@ export async function applyMigration(
     const newTables: string[] = [];
 
     for (const stmt of statements) {
+      if (stmt.destructive && !stmt.authorized) {
+        throw new Error(
+          `Refusing unauthorized destructive statement: ${stmt.description} (${stmt.sql})`,
+        );
+      }
       await client.query(stmt.sql);
       executedStatements.push({
         sql: stmt.sql,
