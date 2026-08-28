@@ -118,12 +118,24 @@ export async function restoreFunctionsFromManifest(
   const removable = [...templateFunctionNames].filter((n) => !keep.includes(n));
   let removed = 0;
   if (removable.length > 0) {
-    const res = await runtimePool.query(
-      `UPDATE app_functions SET deleted_at = now()
-        WHERE app_id = $1 AND deleted_at IS NULL AND name = ANY($2::text[])`,
-      [appId, removable],
-    );
-    removed = res.rowCount ?? 0;
+    // Same error handling as the per-function restores above, and for the same
+    // reason: this call sits inside the route's function-restore step, which
+    // runs BEFORE the repo and lineage restores. A throw here would abort
+    // those and leave functions old but repo and lineage new — which reads
+    // 'modified'. Degrading to a warning instead lets the deliberate
+    // functions -> repo -> lineage ordering finish even when this one write
+    // fails; every intermediate state must read ineligible, never falsely-clean.
+    try {
+      const res = await runtimePool.query(
+        `UPDATE app_functions SET deleted_at = now()
+          WHERE app_id = $1 AND deleted_at IS NULL AND name = ANY($2::text[])`,
+        [appId, removable],
+      );
+      removed = res.rowCount ?? 0;
+    } catch (err) {
+      warnings.push(`function removal: ${(err as Error).message}`);
+      logger.warn({ err, appId, removable }, '[update-undo] function removal failed');
+    }
   }
 
   logger.info({ appId, restored, removed, warnings: warnings.length }, '[update-undo] functions restored');

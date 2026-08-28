@@ -1456,6 +1456,12 @@ export async function executeUpdate(
   // reading job.pre_sync_snapshot_id in the catch would silently skip the rollback
   // on exactly the runs that need it (the first attempt of a fresh job).
   let preSyncSnapshotId: string | null = job.pre_sync_snapshot_id;
+  // Set the moment the lineage UPDATE below succeeds. Once true, the repo
+  // pointer and base_snapshot_id must not be allowed to disagree — a rollback
+  // that fires after lineage has already advanced would revert the repo to
+  // pre-sync while base_snapshot_id still names the new snapshot, which is
+  // exactly the "modified"-forever trap this whole rollback exists to avoid.
+  let lineageAdvanced = false;
 
   await Sentry.withScope(async (scope) => {
     scope.setTag('clone_job_id', jobId);
@@ -1786,6 +1792,7 @@ export async function executeUpdate(
           WHERE dest_app_id = $4`,
         [job.target_release_id, newSnapshot.snapshotId, JSON.stringify(fingerprint), forkAppId],
       );
+      lineageAdvanced = true;
       logger.info(
         { jobId, forkAppId, baseReleaseId: job.target_release_id },
         '[update] lineage base advanced',
@@ -1818,7 +1825,14 @@ export async function executeUpdate(
         // pointer back restores an eligible fork without anyone having to reach
         // for undo. Best-effort: if it fails, undo is still open (a failed job
         // with pre-sync state is undoable), so this never masks the real error.
-        if (publishedSnapshotId && preSyncSnapshotId) {
+        //
+        // Gated on !lineageAdvanced: if the lineage UPDATE already landed (e.g.
+        // the status write right after it is what threw), base_snapshot_id
+        // already names the new snapshot. Rolling the repo pointer back here
+        // would leave repo and lineage disagreeing — the exact "modified"-
+        // forever trap this rollback exists to prevent, reintroduced from the
+        // other direction.
+        if (publishedSnapshotId && preSyncSnapshotId && !lineageAdvanced) {
           try {
             await setLatest(forkAppId, preSyncSnapshotId);
             await getRuntimeDbPool(config.runtimeDb, job.dest_region).query(
@@ -1844,7 +1858,7 @@ export async function executeUpdate(
           metadata: {
             job_id: jobId, fork_app_id: forkAppId,
             target_release_id: job.target_release_id, error: msg,
-            repo_rolled_back: Boolean(publishedSnapshotId && preSyncSnapshotId),
+            repo_rolled_back: Boolean(publishedSnapshotId && preSyncSnapshotId && !lineageAdvanced),
           },
         }).catch((auditErr) => logger.error({ auditErr }, '[update] audit log failed event insert failed'));
 

@@ -23,6 +23,7 @@ const H = vi.hoisted(() => ({
   divergence: null as unknown,
   divergenceThrows: false,
   lineageThrows: false,
+  completedStatusThrows: false,
   manifestFiles: [] as { path: string; sha256: string; size: number }[],
   preLineage: null as unknown,
 }));
@@ -387,6 +388,9 @@ const controlDb = {
       return { rows: [] };
     }
     if (sql.includes('UPDATE template_clone_jobs')) {
+      if (H.completedStatusThrows && params?.[0] === 'completed') {
+        throw new Error('job status write failed');
+      }
       H.calls.push({ tag: 'jobStatus', sql, params });
       return { rows: [] };
     }
@@ -415,6 +419,7 @@ beforeEach(() => {
   H.manifestFiles = FILES;
   H.divergenceThrows = false;
   H.lineageThrows = false;
+  H.completedStatusThrows = false;
   H.preLineage = {
     dest_app_id: 'app_fork', dest_region: 'us-east-1',
     source_app_id: 'app_src', source_region: 'us-east-1',
@@ -775,6 +780,26 @@ describe('executeUpdate failure path', () => {
     expect(heads.at(-1)!.params![0]).toBe('snap_pre');
     const latest = H.calls.filter((c) => c.tag === 'publish:latest');
     expect(latest.at(-1)!.params![0]).toBe('snap_pre');
+  });
+
+  it('does NOT roll the repo pointer back once lineage has already advanced', async () => {
+    // The status write immediately after the lineage UPDATE throws — the
+    // lineage advance itself succeeded. Rolling the repo pointer back here
+    // would leave base_snapshot_id naming the new snapshot while the repo
+    // points at pre_sync, exactly the "modified"-forever trap this whole
+    // rollback exists to prevent, reintroduced from the other direction.
+    H.completedStatusThrows = true;
+    await expect(executeUpdate(controlDb, task({ attempts: 3, max_attempts: 3 }), silentLogger))
+      .rejects.toThrow(/job status write failed/);
+    const lineageWrites = H.calls.filter((c) => c.tag === 'lineage');
+    expect(lineageWrites.length).toBe(1);
+    const heads = H.calls.filter((c) => c.tag === 'publish:apps.head');
+    // Only the original publish landed; no rollback write followed it.
+    expect(heads.length).toBe(1);
+    expect(heads[0]!.params![0]).toBe(TARGET_SNAPSHOT);
+    const latest = H.calls.filter((c) => c.tag === 'publish:latest');
+    expect(latest.length).toBe(1);
+    expect(latest[0]!.params![0]).toBe(TARGET_SNAPSHOT);
   });
 
   it('does NOT roll back while the queue still has retries left', async () => {

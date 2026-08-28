@@ -7,7 +7,7 @@ import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { config } from '../config.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import {
-  RESOURCE_NOT_FOUND, VALIDATION_INVALID_SCHEMA, RESOURCE_CONFLICT,
+  RESOURCE_NOT_FOUND, VALIDATION_INVALID_SCHEMA, RESOURCE_CONFLICT, EXTERNAL_DB_ERROR,
 } from '@butterbase/shared/error-types';
 import {
   computeDrift, computeDivergence, getLineage, type DriftResult, type Divergence,
@@ -81,6 +81,15 @@ function conflict(message: string, remediation: string) {
     message,
     remediation,
     documentation_url: getDocUrl(RESOURCE_CONFLICT),
+  });
+}
+
+function unavailable(message: string, remediation: string) {
+  return createAgentError({
+    code: EXTERNAL_DB_ERROR,
+    message,
+    remediation,
+    documentation_url: getDocUrl(EXTERNAL_DB_ERROR),
   });
 }
 
@@ -191,7 +200,7 @@ export function templateUpdateRoutes(app: FastifyInstance): void {
         );
       });
       request.log.error({ err, jobId: job.id, appId: resolved.id }, '[update] enqueue failed; job rolled back');
-      return reply.code(503).send(conflict(
+      return reply.code(503).send(unavailable(
         'The update could not be queued.',
         'Retry in a moment. Nothing was changed.',
       ));
