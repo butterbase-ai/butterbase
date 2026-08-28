@@ -125,11 +125,13 @@ async function buildApp(opts: {
       }
     : null;
 
+  const createUpdateJobCalls: Record<string, unknown>[] = [];
   vi.doMock('../services/clone-jobs.js', async () => ({
     getActiveUpdateJob: async () => activeJob,
-    createUpdateJob: async (_db: unknown, args: Record<string, unknown>) => ({
-      id: 'cj_new', mode: 'update', status: 'pending', ...args,
-    }),
+    createUpdateJob: async (_db: unknown, args: Record<string, unknown>) => {
+      createUpdateJobCalls.push(args);
+      return { id: 'cj_new', mode: 'update', status: 'pending', ...args };
+    },
     getCloneJob: async (_db: unknown, jobId: string) => (job && job.id === jobId ? job : null),
   }));
 
@@ -151,7 +153,7 @@ async function buildApp(opts: {
   });
   templateUpdateRoutes(app);
 
-  return { app, recordedQueries };
+  return { app, recordedQueries, createUpdateJobCalls };
 }
 
 describe('POST /v1/:app_id/template/update', () => {
@@ -193,6 +195,22 @@ describe('POST /v1/:app_id/template/update', () => {
     const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update' });
     expect(res.statusCode).toBe(202);
     expect(res.json().job_id).toBeDefined();
+    await app.close();
+  });
+
+  // Guards the invariant documented on createUpdateJob: preSyncSnapshotId MUST
+  // be null at creation time, or the worker's execution-time eligibility gate
+  // (which treats a non-null pre_sync_snapshot_id as "this job already
+  // started") never runs for any job. The obvious, tempting regression is
+  // pre-filling it with the fork's current snapshot — asserted with `=== null`
+  // rather than a falsiness check so a route that passed e.g. '' or 0 by
+  // mistake still fails this test, same as the modified-vs-unknown split above.
+  it('creates the job with preSyncSnapshotId strictly null, never pre-filled', async () => {
+    const { app, createUpdateJobCalls } = await buildApp({ drift: { behind_by: 2 } });
+    const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update' });
+    expect(res.statusCode).toBe(202);
+    expect(createUpdateJobCalls).toHaveLength(1);
+    expect(createUpdateJobCalls[0].preSyncSnapshotId).toBe(null);
     await app.close();
   });
 });
