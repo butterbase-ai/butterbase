@@ -10,7 +10,7 @@
 import type pg from 'pg';
 import { randomBytes } from 'node:crypto';
 import { introspectSchema } from './schema-introspector.js';
-import { diffSchema } from './schema-differ.js';
+import { diffSchema, type DDLStatement } from './schema-differ.js';
 import { applyMigration } from './schema-applier.js';
 import type { SchemaDSL } from './schema-validator.js';
 import { introspectRls } from './rls-introspector.js';
@@ -82,7 +82,7 @@ export function buildFunctionInsertSql(overwriteExisting: boolean): string {
            $11, now()
          )
          ${conflict}
-         RETURNING id`;
+         RETURNING id, (xmax = 0) AS inserted`;
 }
 
 /**
@@ -172,6 +172,16 @@ export interface ReplayLogger {
   warn(obj: unknown, msg?: string): void;
 }
 
+export interface ReplaySchemaOpts {
+  /**
+   * Optional gate applied to the computed diff before it is executed. Returns
+   * the statements to run plus the ones withheld. Used by the template-update
+   * path to admit additive DDL only; clone passes nothing and applies the diff
+   * verbatim.
+   */
+  filter?: (s: DDLStatement[]) => { kept: DDLStatement[]; rejected: DDLStatement[] };
+}
+
 /**
  * Replay the source app's schema onto the dest app's database.
  *
@@ -185,6 +195,7 @@ export async function replaySchema(
   destAppPool: pg.Pool,
   destAppId: string,
   logger: ReplayLogger,
+  opts: ReplaySchemaOpts = {},
 ): Promise<void> {
   // 1. Introspect the source app's current schema.
   const sourceDsl = await introspectSchema(sourceAppPool);
@@ -207,11 +218,20 @@ export async function replaySchema(
     return;
   }
 
-  // 3. Apply the statements to the dest DB.
-  await applyMigration(destAppPool, statements, 'clone-replay-schema');
+  // 3. Apply the statements to the dest DB. A template update passes an
+  //    additive-only filter here so no statement can drop or narrow a column
+  //    the fork's rows depend on. Every rejection is logged individually — an
+  //    attempted drop is exactly the thing an operator needs to see.
+  const { kept, rejected } = opts.filter
+    ? opts.filter(statements)
+    : { kept: statements, rejected: [] as DDLStatement[] };
+  for (const r of rejected) {
+    logger.info({ destAppId, sql: r.sql }, '[update] rejected non-additive statement');
+  }
+  await applyMigration(destAppPool, kept, 'clone-replay-schema');
 
   logger.info(
-    { destAppId, tableCount, statementCount: statements.length },
+    { destAppId, tableCount, statementCount: kept.length, rejectedCount: rejected.length },
     '[clone] schema replayed',
   );
 }
@@ -489,154 +509,173 @@ export async function replayFunctions(
       sharedMintedKey = opts.preMintedSharedKey;
       logger.info({ destAppId }, '[clone] reusing pre-minted shared API key');
     } else {
-      // Preconditions that make the mint IMPOSSIBLE rather than just failed:
-      // hard-fail so the caller sees the problem instead of silently continuing
-      // with an app whose intra-fn calls will 401. The mint call itself can
-      // still fail transiently (network, Neon hiccup) — that stays a warning
-      // so the rest of the clone (schema, RLS, storage, etc.) still lands.
-      if (!opts?.controlPool || !opts?.destAppOwnerId) {
-        throw new Error(
-          `auto-mint precondition missing (controlPool=${!!opts?.controlPool}, destAppOwnerId=${!!opts?.destAppOwnerId}). ` +
-            `Cloned functions require BUTTERBASE_API_KEY / BB_SUBSTRATE_KEY; refusing to complete clone with 401 baked in.`,
-        );
-      }
-      try {
-        const minted = await mintApiKeyForClone(opts.controlPool, {
-          ownerId: opts.destAppOwnerId,
-          destAppId,
-        });
-        sharedMintedKey = minted.key;
-        logger.info({ destAppId, keyId: minted.keyId }, '[clone] shared API key minted for clone');
-      } catch (mintErr) {
-        sharedMintError = `shared key mint failed: ${(mintErr as Error).message}`;
-        warnings.push(sharedMintError);
-        logger.warn({ err: mintErr, destAppId }, '[clone] shared key mint failed; per-function keys will remain unfilled');
-      }
-    }
-  }
-
-  const overwriteExisting = opts?.overwriteExisting ?? false;
-
-  for (const f of src.rows) {
-    try {
-      const ins = await destRuntimePool.query<{ id: string }>(
-        buildFunctionInsertSql(overwriteExisting),
-        [
-          destAppId,
-          f.name, f.code, f.description,
-          f.timeout_ms, f.memory_limit_mb,
-          f.agent_tool, f.agent_tool_description, f.agent_tool_mode, f.agent_tool_exposed_to,
-          requestedByUserId,
-        ],
-      );
-
-      // ON CONFLICT DO NOTHING returns no rows when a row already existed —
-      // leave its triggers alone in that case.
-      const destFnId = ins.rows[0]?.id;
-      if (destFnId) {
-        // Copy function_triggers from source to dest.  Source rows reference
-        // the source function id; rewrite to the dest function + dest app id.
-        const trigSrc = await sourceRuntimePool.query<{
-          trigger_type: string;
-          trigger_config: unknown;
-          enabled: boolean;
-        }>(
-          `SELECT trigger_type, trigger_config, enabled
-             FROM function_triggers WHERE function_id = $1`,
-          [f.id],
-        );
-        for (const t of trigSrc.rows) {
-          await destRuntimePool.query(
-            buildTriggerInsertSql(overwriteExisting),
-            [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
+        // Preconditions that make the mint IMPOSSIBLE rather than just failed:
+        // hard-fail so the caller sees the problem instead of silently continuing
+        // with an app whose intra-fn calls will 401. The mint call itself can
+        // still fail transiently (network, Neon hiccup) — that stays a warning
+        // so the rest of the clone (schema, RLS, storage, etc.) still lands.
+        if (!opts?.controlPool || !opts?.destAppOwnerId) {
+          throw new Error(
+            `auto-mint precondition missing (controlPool=${!!opts?.controlPool}, destAppOwnerId=${!!opts?.destAppOwnerId}). ` +
+              `Cloned functions require BUTTERBASE_API_KEY / BB_SUBSTRATE_KEY; refusing to complete clone with 401 baked in.`,
           );
         }
+        try {
+          const minted = await mintApiKeyForClone(opts.controlPool, {
+            ownerId: opts.destAppOwnerId,
+            destAppId,
+          });
+          sharedMintedKey = minted.key;
+          logger.info({ destAppId, keyId: minted.keyId }, '[clone] shared API key minted for clone');
+        } catch (mintErr) {
+          sharedMintError = `shared key mint failed: ${(mintErr as Error).message}`;
+          warnings.push(sharedMintError);
+          logger.warn({ err: mintErr, destAppId }, '[clone] shared key mint failed; per-function keys will remain unfilled');
+        }
+      }
+    }
 
-        // --- new: apply env vars ---
-        const provided = opts?.pendingEnvVarValues?.[f.name] ?? {};
-        const merged: Record<string, string> = { ...provided };
+    const overwriteExisting = opts?.overwriteExisting ?? false;
 
-        // Explicit per-function mint requests + implicit convention mints.
-        // Skip any key the caller already supplied via pendingEnvVarValues.
-        // All target keys for all functions receive the SAME app-wide minted
-        // bb_sk_* (sharedMintedKey, minted once above the loop).
-        const explicit = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
-        const conventionMintTargets = (sourceKeysMap.get(f.name) ? [...sourceKeysMap.get(f.name)!] : [])
-          .filter(k => AUTO_MINT_CONVENTION_KEYS.includes(k) && !(k in merged));
-        const explicitKeys = explicit.map(r => r.key);
-        const mintTargets = Array.from(new Set([...explicitKeys, ...conventionMintTargets]));
+    for (const f of src.rows) {
+      try {
+        const ins = await destRuntimePool.query<{ id: string; inserted: boolean }>(
+          buildFunctionInsertSql(overwriteExisting),
+          [
+            destAppId,
+            f.name, f.code, f.description,
+            f.timeout_ms, f.memory_limit_mb,
+            f.agent_tool, f.agent_tool_description, f.agent_tool_mode, f.agent_tool_exposed_to,
+            requestedByUserId,
+          ],
+        );
 
-        if (mintTargets.length > 0) {
-          if (sharedMintedKey) {
-            for (const k of mintTargets) merged[k] = sharedMintedKey;
-          } else {
-            // Shared mint either wasn't attempted (no credentials) or failed —
-            // surface per-fn so the dashboard banner shows what's unfilled.
-            // `sharedMintError` is already warned + (when it failed at mint
-            // time) pushed to top-level warnings, so don't double-record.
-            logger.warn(
-              { fn: f.name, keys: mintTargets, sharedMintError },
-              '[clone] shared key unavailable; mint targets will remain unfilled',
+        // ON CONFLICT DO NOTHING returns no rows when a row already existed —
+        // leave its triggers alone in that case.
+        const destFnId = ins.rows[0]?.id;
+        // `(xmax = 0)` is the standard Postgres idiom for "this RETURNING row came
+        // from the INSERT, not from the DO UPDATE branch". Under DO NOTHING (clone)
+        // every returned row is an insert, so this is always true there; under
+        // DO UPDATE (template update) it distinguishes a function the template is
+        // adding from one the fork already had. See the env-var guard below.
+        const wasInserted = ins.rows[0]?.inserted !== false;
+        if (destFnId) {
+          // Copy function_triggers from source to dest.  Source rows reference
+          // the source function id; rewrite to the dest function + dest app id.
+          const trigSrc = await sourceRuntimePool.query<{
+            trigger_type: string;
+            trigger_config: unknown;
+            enabled: boolean;
+          }>(
+            `SELECT trigger_type, trigger_config, enabled
+               FROM function_triggers WHERE function_id = $1`,
+            [f.id],
+          );
+          for (const t of trigSrc.rows) {
+            await destRuntimePool.query(
+              buildTriggerInsertSql(overwriteExisting),
+              [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
             );
           }
-        }
 
-        const srcKeysForFn = sourceKeysMap.get(f.name);
-
-        // appOverrides layer (below user-supplied + convention mint, above static fills).
-        if (opts?.appOverrides && srcKeysForFn) {
-          for (const [k, v] of Object.entries(opts.appOverrides)) {
-            if (!srcKeysForFn.has(k)) continue;
-            if (k in merged) continue; // user or convention already covered it
-            merged[k] = v;
-            (overrideFilledFunctions[f.name] ??= []).push(k);
-          }
-        }
-
-        // Static fills: deterministic values the platform already knows. Only
-        // applied when the source function actually used the key and the
-        // caller didn't supply one explicitly.
-        const staticFills = resolveStaticFills({ destAppId, apiBaseUrl: config.apiBaseUrl });
-        if (srcKeysForFn) {
-          for (const [k, v] of Object.entries(staticFills)) {
-            if (srcKeysForFn.has(k) && !(k in merged)) merged[k] = v;
-          }
-        }
-
-        // `filled` tracks keys that actually made it into the dest function row.
-        // Default empty — only populated after a successful UPDATE so a failed
-        // write (missing AUTH_ENCRYPTION_KEY, DB error, failed auto-mint) leaves
-        // its keys in `unfilledEnvVars` for the dashboard banner.
-        let filled = new Set<string>();
-        if (Object.keys(merged).length > 0) {
-          const encKey = process.env.AUTH_ENCRYPTION_KEY;
-          if (!encKey) {
-            warnings.push(`Cannot write env vars for ${f.name}: AUTH_ENCRYPTION_KEY not configured`);
-            logger.warn({ fn: f.name }, '[clone] AUTH_ENCRYPTION_KEY missing; skipping env var write');
+          // --- apply env vars ---
+          //
+          // Only for rows this replay actually INSERTED. The write below replaces
+          // `encrypted_env_vars` wholesale, so running it against a fork's
+          // pre-existing function would destroy that fork's own secrets — the one
+          // thing a template update is specified never to touch. Clone mode is
+          // unaffected: DO NOTHING means every row reaching here is an insert.
+          if (!wasInserted) {
+            logger.info(
+              { fn: f.name, destAppId },
+              '[update] existing function updated; leaving its env vars untouched',
+            );
           } else {
-            try {
-              const enc = encrypt(JSON.stringify(merged), encKey);
-              await destRuntimePool.query(
-                `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
-                [enc, destFnId],
+          const provided = opts?.pendingEnvVarValues?.[f.name] ?? {};
+          const merged: Record<string, string> = { ...provided };
+
+          // Explicit per-function mint requests + implicit convention mints.
+          // Skip any key the caller already supplied via pendingEnvVarValues.
+          // All target keys for all functions receive the SAME app-wide minted
+          // bb_sk_* (sharedMintedKey, minted once above the loop).
+          const explicit = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
+          const conventionMintTargets = (sourceKeysMap.get(f.name) ? [...sourceKeysMap.get(f.name)!] : [])
+            .filter(k => AUTO_MINT_CONVENTION_KEYS.includes(k) && !(k in merged));
+          const explicitKeys = explicit.map(r => r.key);
+          const mintTargets = Array.from(new Set([...explicitKeys, ...conventionMintTargets]));
+
+          if (mintTargets.length > 0) {
+            if (sharedMintedKey) {
+              for (const k of mintTargets) merged[k] = sharedMintedKey;
+            } else {
+              // Shared mint either wasn't attempted (no credentials) or failed —
+              // surface per-fn so the dashboard banner shows what's unfilled.
+              // `sharedMintError` is already warned + (when it failed at mint
+              // time) pushed to top-level warnings, so don't double-record.
+              logger.warn(
+                { fn: f.name, keys: mintTargets, sharedMintError },
+                '[clone] shared key unavailable; mint targets will remain unfilled',
               );
-              filled = new Set(Object.keys(merged));
-            } catch (writeErr) {
-              warnings.push(`Failed to write env vars for ${f.name}: ${(writeErr as Error).message}`);
-              logger.warn({ err: writeErr, fn: f.name }, '[clone] env var write failed; keys will remain unfilled');
             }
           }
-        }
 
-        // --- new: track unfilled ---
-        // Derive filled from what we actually wrote, NOT from `merged` or
-        // `autoFor` — a failed auto-mint, missing encryption key, or DB write
-        // failure must leave the key in the unfilled set.
-        const srcKeys = sourceKeysMap.get(f.name);
-        if (srcKeys) {
-          const unfilled = [...srcKeys].filter(k => !filled.has(k));
-          if (unfilled.length > 0) unfilledEnvVars[f.name] = unfilled;
-        }
+          const srcKeysForFn = sourceKeysMap.get(f.name);
+
+          // appOverrides layer (below user-supplied + convention mint, above static fills).
+          if (opts?.appOverrides && srcKeysForFn) {
+            for (const [k, v] of Object.entries(opts.appOverrides)) {
+              if (!srcKeysForFn.has(k)) continue;
+              if (k in merged) continue; // user or convention already covered it
+              merged[k] = v;
+              (overrideFilledFunctions[f.name] ??= []).push(k);
+            }
+          }
+
+          // Static fills: deterministic values the platform already knows. Only
+          // applied when the source function actually used the key and the
+          // caller didn't supply one explicitly.
+          const staticFills = resolveStaticFills({ destAppId, apiBaseUrl: config.apiBaseUrl });
+          if (srcKeysForFn) {
+            for (const [k, v] of Object.entries(staticFills)) {
+              if (srcKeysForFn.has(k) && !(k in merged)) merged[k] = v;
+            }
+          }
+
+          // `filled` tracks keys that actually made it into the dest function row.
+          // Default empty — only populated after a successful UPDATE so a failed
+          // write (missing AUTH_ENCRYPTION_KEY, DB error, failed auto-mint) leaves
+          // its keys in `unfilledEnvVars` for the dashboard banner.
+          let filled = new Set<string>();
+          if (Object.keys(merged).length > 0) {
+            const encKey = process.env.AUTH_ENCRYPTION_KEY;
+            if (!encKey) {
+              warnings.push(`Cannot write env vars for ${f.name}: AUTH_ENCRYPTION_KEY not configured`);
+              logger.warn({ fn: f.name }, '[clone] AUTH_ENCRYPTION_KEY missing; skipping env var write');
+            } else {
+              try {
+                const enc = encrypt(JSON.stringify(merged), encKey);
+                await destRuntimePool.query(
+                  `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
+                  [enc, destFnId],
+                );
+                filled = new Set(Object.keys(merged));
+              } catch (writeErr) {
+                warnings.push(`Failed to write env vars for ${f.name}: ${(writeErr as Error).message}`);
+                logger.warn({ err: writeErr, fn: f.name }, '[clone] env var write failed; keys will remain unfilled');
+              }
+            }
+          }
+
+          // --- new: track unfilled ---
+          // Derive filled from what we actually wrote, NOT from `merged` or
+          // `autoFor` — a failed auto-mint, missing encryption key, or DB write
+          // failure must leave the key in the unfilled set.
+          const srcKeys = sourceKeysMap.get(f.name);
+          if (srcKeys) {
+            const unfilled = [...srcKeys].filter(k => !filled.has(k));
+            if (unfilled.length > 0) unfilledEnvVars[f.name] = unfilled;
+          }
+        } // end: env vars applied only for newly inserted rows
       }
 
       inserted++;

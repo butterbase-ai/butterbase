@@ -97,6 +97,34 @@ export async function presignBlobGet(appId: string, sha256: string): Promise<str
   return await getSignedUrl(presignClient, cmd, { expiresIn: REPO_PRESIGN_GET_SECONDS });
 }
 
+/**
+ * Read a repo blob into memory. Used by the template-update path, which must
+ * rewrite app-id tokens inside a blob's bytes rather than server-side-copy it.
+ * Blobs are capped at REPO_FILE_BYTES_LIMIT (10 MB) by the manifest validator,
+ * so buffering one is bounded.
+ */
+export async function getBlobBuffer(appId: string, sha256: string): Promise<Buffer> {
+  try {
+    const out = await internalClient.send(new GetObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: blobKey(appId, sha256),
+    }));
+    return await streamToBuffer(out.Body as NodeJS.ReadableStream);
+  } catch (e: any) {
+    throw new S3Error(`getBlobBuffer failed: ${e?.message ?? e}`, 'S3_GET_BLOB_ERROR');
+  }
+}
+
+/** Write a repo blob from memory under its content hash. */
+export async function putBlobBuffer(appId: string, sha256: string, content: Buffer): Promise<void> {
+  await internalClient.send(new PutObjectCommand({
+    Bucket: config.s3.bucket,
+    Key: blobKey(appId, sha256),
+    Body: content,
+    ContentType: 'application/octet-stream',
+  }));
+}
+
 export async function putManifest(appId: string, snapshotId: string, canonicalJson: string): Promise<void> {
   await internalClient.send(new PutObjectCommand({
     Bucket: config.s3.bucket,
