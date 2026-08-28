@@ -77,6 +77,33 @@ export async function runMigrationsWithRetry(connectionString: string, maxAttemp
  * Returns immediately. If an app with the same name+owner already exists,
  * returns it (idempotency).
  */
+export interface InsertAppRowOptions {
+  /**
+   * Skip the name+owner idempotency lookup. Clones are allowed to share a
+   * name — executeClone differentiates them by subdomain — so the clone path
+   * must always insert its own generated appId. Leaving this off there made
+   * insertAppRow return early without inserting while executeClone carried on
+   * with an appId that had no row: provisioning then failed the
+   * app_db_connections -> apps foreign key and waitForDestReady blocked for
+   * its full 5-minute timeout.
+   */
+  allowDuplicateName?: boolean;
+}
+
+/**
+ * Whether a same-name+owner match should be reused instead of inserting.
+ * Exported and unit-tested in isolation because insertAppRow itself is
+ * effectful (two pools, KV credential writes) and impractical to exercise
+ * end to end — this is the one branch that actually needed coverage.
+ */
+export function shouldReuseExistingApp(
+  existing: unknown[],
+  opts: InsertAppRowOptions | undefined,
+): boolean {
+  if (opts?.allowDuplicateName) return false;
+  return existing.length > 0;
+}
+
 export async function insertAppRow(
   region: string,
   controlDb: pg.Pool,
@@ -84,6 +111,7 @@ export async function insertAppRow(
   ownerId: string,
   appId: string,
   targetOrganizationId?: string,
+  opts?: InsertAppRowOptions,
 ): Promise<{ app: App; isExisting: boolean }> {
   // Write the apps row into the TARGET region's runtime DB (where the app
   // is homed), not the local machine's runtime DB. Previously this used
@@ -97,7 +125,7 @@ export async function insertAppRow(
     [name, ownerId]
   );
 
-  if (existing.rows.length > 0) {
+  if (shouldReuseExistingApp(existing.rows, opts)) {
     return { app: existing.rows[0], isExisting: true };
   }
 

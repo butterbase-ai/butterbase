@@ -603,7 +603,16 @@ async function executeClone(
         const destOrgId = job.dest_organization_id
           ?? await resolveOrganizationId(controlDb, job.requested_by_user_id);
 
-        await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId, destOrgId);
+        // allowDuplicateName: two clones of the same template legitimately share
+        // a name — the subdomain below is what differentiates them. Without this
+        // the second clone's insertAppRow matched the first by name+owner and
+        // returned early WITHOUT inserting, while we carried on with the appId
+        // generated above; provisioning then failed the app_db_connections FK
+        // and waitForDestReady blocked for its full 5-minute timeout.
+        await insertAppRow(
+          job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId, destOrgId,
+          { allowDuplicateName: true },
+        );
         await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
         // Reserve a subdomain for the dest. Mirrors routes/init.ts: derive
