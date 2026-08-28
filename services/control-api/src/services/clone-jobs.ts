@@ -156,6 +156,19 @@ export async function appendCloneJobWarnings(
   );
 }
 
+/**
+ * `preSyncSnapshotId` MUST be null at creation time.
+ *
+ * The worker writes it after the execution-time eligibility gate passes and
+ * immediately before the first write the fork can observe, and then reads its
+ * presence as "a prior attempt of this job already got past the gate"
+ * (classifyUpdateResume in neon-task-worker.ts). A route that pre-fills it with
+ * the fork's current snapshot would make every job look resumed on its very
+ * first attempt, and the execution-time gate would never run for any job.
+ *
+ * The parameter exists only so a caller reconstructing a job row (a backfill,
+ * a test) can supply the marker deliberately.
+ */
 export async function createUpdateJob(
   controlDb: pg.Pool,
   args: {

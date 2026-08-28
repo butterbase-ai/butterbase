@@ -197,7 +197,7 @@ async function processNextTask(
       // the precise error for that case.
       const cloneJobId = task.task_meta?.job_id;
       const queuedJob = cloneJobId ? await getCloneJob(controlDb, cloneJobId) : null;
-      if (queuedJob?.mode === 'update') {
+      if (resolveCloneDispatch(queuedJob) === 'update') {
         await executeUpdate(controlDb, task, logger);
       } else {
         await executeClone(controlDb, dataPlaneDb, task, logger);
@@ -1339,17 +1339,69 @@ export function shouldAbortUpdate(
 }
 
 /**
+ * Which execution path a `clone` task belongs to. One task_type carries both
+ * directions of the template pipeline; the job row's `mode` is the only thing
+ * that distinguishes "make me a new fork" from "reset this existing fork's code
+ * to the latest release". A missing job resolves to 'clone' so executeClone can
+ * raise the precise error for that case.
+ *
+ * Exported for the same reason decideLineageBase is: it is a one-line decision
+ * inside an untestable effectful caller, and getting it wrong points a
+ * destructive update at a fresh-provision path (or vice versa).
+ */
+export function resolveCloneDispatch(job: { mode?: string } | null): 'clone' | 'update' {
+  return job?.mode === 'update' ? 'update' : 'clone';
+}
+
+/** How a resumed update should treat the fork's current repo HEAD. */
+export type UpdateResumeState = 'fresh' | 'republish' | 'ambiguous';
+
+/**
+ * Repo snapshots are content-addressed, so the snapshot this job WILL publish is
+ * computable before anything is written. That makes the fork's current HEAD
+ * legible on a resumed attempt:
+ *
+ *   - HEAD is the pre-update snapshot, or no attempt has begun → 'fresh'. Nothing
+ *     of ours has landed, so the full eligibility gate applies exactly as it does
+ *     on a first attempt. This is the case that protects an owner who worked on
+ *     the fork for two weeks and then hit Retry: their edits are still measured.
+ *   - HEAD is the snapshot THIS job publishes → 'republish'. A prior attempt of
+ *     this same job already wrote it, so the repo divergence is ours, not a user
+ *     edit, and the fork is mid-update. Finishing is the way out.
+ *   - HEAD is neither → 'ambiguous'. Something moved the fork's repo that is not
+ *     this job. Never reset on a guess.
+ *
+ * 'republish' requires a recorded pre-sync marker: without one no attempt has
+ * ever passed the gate, so a HEAD that merely happens to match cannot be
+ * evidence of our own prior write.
+ */
+export function classifyUpdateResume(args: {
+  preSyncSnapshotId: string | null;
+  currentHead: string | null;
+  targetSnapshotId: string;
+}): UpdateResumeState {
+  if (args.preSyncSnapshotId === null) return 'fresh';
+  if (args.currentHead === args.preSyncSnapshotId) return 'fresh';
+  if (args.currentHead === args.targetSnapshotId) return 'republish';
+  return 'ambiguous';
+}
+
+/**
  * In-place template update. Unlike executeClone, nothing is provisioned: the
- * destination app already exists and keeps its database, its rows, its env
- * vars, its secrets, and its deployed frontend. Only code-shaped surfaces are
- * replaced — repo blobs, function bodies, non-secret config — plus additive-only
- * schema DDL.
+ * destination app already exists and keeps its database, its rows, its env vars,
+ * its secrets, its OAuth and integration credentials, and its deployed frontend.
+ * Only code-shaped surfaces are replaced — repo blobs, function bodies,
+ * additive-only schema DDL, additive RLS policies, and config rows the fork does
+ * not already have.
  *
  * Resumability matches executeClone: any non-terminal status is resumable and
- * every stage below is idempotent, so a requeued task redoes stages rather than
+ * every stage is idempotent, so a requeued task redoes stages rather than
  * skipping them.
+ *
+ * Exported for testing. Nothing else should call it — dispatch goes through
+ * processNextTask.
  */
-async function executeUpdate(
+export async function executeUpdate(
   controlDb: pg.Pool,
   task: NeonTask,
   logger: Logger,
@@ -1365,7 +1417,7 @@ async function executeUpdate(
   }
 
   // createUpdateJob guarantees dest_app_id is the fork; the partial unique index
-  // that enforces "one in-flight update per fork" depends on it being non-null.
+  // enforcing "one in-flight update per fork" depends on it being non-null.
   const forkAppId = job.dest_app_id;
   if (!forkAppId) throw new Error(`Update job ${jobId} has no dest_app_id (fork app)`);
 
@@ -1392,6 +1444,7 @@ async function executeUpdate(
         throw new Error(`[update] fork app ${forkAppId} not found in ${job.dest_region} runtime DB`);
       }
       const { db_name: forkDbName, owner_id: forkOwnerId } = forkRow.rows[0];
+      const currentHead = forkRow.rows[0].repo_latest_snapshot;
 
       const sourceRow = await sourceRuntimePool.query<{ db_name: string }>(
         `SELECT db_name FROM apps WHERE id = $1`,
@@ -1404,60 +1457,11 @@ async function executeUpdate(
       const forkAppPool = await getAppPoolForApp(controlDb, forkAppId, forkDbName);
       const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceRow.rows[0].db_name);
 
-      // 1. Re-check eligibility against the fork as it is RIGHT NOW.
-      //
-      //    Skipped only once the update has already begun mutating the fork:
-      //    pre_sync_snapshot_id is written immediately before the first write,
-      //    so its presence means a prior attempt got past this gate and the
-      //    fork's repo HEAD may already have moved. Re-running the check then
-      //    would read our own half-finished work as "the user edited it" and
-      //    fail a job that is merely resuming.
-      const alreadyStarted = job.pre_sync_snapshot_id !== null;
-      if (!alreadyStarted) {
-        scope.setTag('step', 'eligibility_recheck');
-        const drift = await computeDrift(controlDb, forkAppId);
-        let divergenceNow: Divergence | null = null;
-        try {
-          divergenceNow = await computeDivergence(controlDb, forkRuntimePool, forkAppPool, forkAppId);
-        } catch (err) {
-          // Leave it null: decideEligibility reads null as 'unknown' and aborts.
-          // Resetting a fork whose current state we could not read is the one
-          // outcome that destroys data.
-          logger.warn({ err, forkAppId }, '[update] divergence check failed; treating as unknown');
-        }
-
-        const { abort, reason } = shouldAbortUpdate(divergenceNow, drift);
-        if (abort) {
-          logger.warn({ jobId, forkAppId, reason }, '[update] aborting; fork no longer eligible');
-          await setCloneJobStatus(controlDb, jobId, {
-            status: 'failed',
-            error_message: `Update aborted at execution time: ${reason}`,
-            completed_at: new Date(),
-          });
-          // Deliberately NOT thrown: this is a terminal business decision, not a
-          // transient fault, and must not be retried by the neon-task queue.
-          return;
-        }
-      }
-
-      // 2. Record the pre-update repo HEAD so the undo route can restore it.
-      //    Written before the first mutation, and only once — a resumed attempt
-      //    must not overwrite it with the half-updated HEAD.
-      if (!alreadyStarted) {
-        const preSync = forkRow.rows[0].repo_latest_snapshot;
-        if (!preSync) {
-          logger.warn({ jobId, forkAppId }, '[update] fork has no repo HEAD; undo will be unavailable');
-        }
-        await controlDb.query(
-          `UPDATE template_clone_jobs
-              SET pre_sync_snapshot_id = $1, updated_at = now()
-            WHERE id = $2 AND pre_sync_snapshot_id IS NULL`,
-          [preSync, jobId],
-        );
-      }
-
-      // 3. Repo blobs. The fork's repo HEAD becomes the template's snapshot with
-      //    every embedded source app id rewritten to the fork's own id.
+      // -- 1. PREPARE the repo. Nothing here is visible to the fork: blobs are
+      //       content-addressed and unreferenced until a manifest names them, and
+      //       the fork's HEAD is untouched. Deliberately done BEFORE the gate,
+      //       because the snapshot id it yields is what makes a resumed attempt's
+      //       HEAD legible (see classifyUpdateResume).
       scope.setTag('step', 'copying_repo');
       await setCloneJobStatus(controlDb, jobId, { status: 'copying_repo' });
 
@@ -1466,8 +1470,8 @@ async function executeUpdate(
       const manifest = JSON.parse(manifestJson) as { files: RepoManifestEntry[]; message?: string };
 
       // Land the source blobs under the fork's own prefix first, so the rewrite
-      // pass below can read every blob from one region-local bucket regardless
-      // of where the template lives.
+      // pass reads every blob from one region-local bucket regardless of where
+      // the template lives.
       const sameRegion = job.source_region === job.dest_region;
       const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
       if (sameRegion) {
@@ -1500,10 +1504,97 @@ async function executeUpdate(
         forkAppId,
       );
 
-      // Re-derive the snapshot id from the rewritten file list. validateManifest
-      // canonicalises exactly the way the repo push path does, so the fork's new
-      // HEAD is a legitimate content-addressed snapshot, not a synthetic id.
+      // validateManifest canonicalises exactly the way the repo push path does,
+      // so the fork's new HEAD is a legitimate content-addressed snapshot rather
+      // than a synthetic id — and the same inputs always yield the same id, which
+      // is what the resume classification relies on.
       const newSnapshot = validateManifest({ files: rewritten, message: manifest.message });
+
+      // -- 2. Gate, re-evaluated against the fork as it is RIGHT NOW.
+      scope.setTag('step', 'eligibility_recheck');
+      const resume = classifyUpdateResume({
+        preSyncSnapshotId: job.pre_sync_snapshot_id,
+        currentHead,
+        targetSnapshotId: newSnapshot.snapshotId,
+      });
+      scope.setTag('resume_state', resume);
+
+      const drift = await computeDrift(controlDb, forkAppId);
+
+      const failWithoutRetry = async (reason: string) => {
+        logger.warn({ jobId, forkAppId, reason, resume }, '[update] aborting; fork not eligible');
+        await setCloneJobStatus(controlDb, jobId, {
+          status: 'failed',
+          error_message: `Update aborted at execution time: ${reason}`,
+          completed_at: new Date(),
+        });
+      };
+
+      if (resume === 'ambiguous') {
+        // The fork's repo moved to something that is neither where we found it
+        // nor what we are about to publish. That is an edit we cannot attribute,
+        // and resetting on a guess is the one outcome that destroys work.
+        await failWithoutRetry(
+          `fork repo changed since the update was queued (HEAD ${currentHead ?? 'none'} ` +
+            `matches neither the pre-update snapshot nor the target)`,
+        );
+        return;
+      }
+
+      if (resume === 'fresh') {
+        let divergenceNow: Divergence | null = null;
+        try {
+          divergenceNow = await computeDivergence(controlDb, forkRuntimePool, forkAppPool, forkAppId);
+        } catch (err) {
+          // Leave it null: decideEligibility reads null as 'unknown' and aborts.
+          // Resetting a fork whose current state we could not read is the one
+          // outcome that destroys data.
+          logger.warn({ err, forkAppId }, '[update] divergence check failed; treating as unknown');
+        }
+        const { abort, reason } = shouldAbortUpdate(divergenceNow, drift);
+        if (abort) {
+          // Deliberately NOT thrown: a terminal business decision, not a
+          // transient fault, and must not be retried by the neon-task queue.
+          await failWithoutRetry(reason);
+          return;
+        }
+      } else {
+        // 'republish': a prior attempt of this job already published the target
+        // snapshot, so every divergence signal now reflects OUR half-finished
+        // work — measuring it would fail the job forever and strand the fork
+        // mid-update. Only the facts a partial update cannot have caused still
+        // gate: lineage being severed, or the row no longer being a fork at all.
+        if (!drift.is_fork || drift.severed) {
+          await failWithoutRetry(drift.is_fork ? 'severed' : 'not_a_fork');
+          return;
+        }
+        logger.info(
+          { jobId, forkAppId, snapshotId: newSnapshot.snapshotId },
+          '[update] resuming a partially applied update; finishing it',
+        );
+      }
+
+      // -- 3. Record the pre-update repo HEAD for the undo route. Written after
+      //       the gate and before the first visible write, and only once — a
+      //       resumed attempt must not overwrite it with the half-updated HEAD.
+      //
+      //       This marker is also what classifyUpdateResume keys on, so
+      //       createUpdateJob MUST leave pre_sync_snapshot_id NULL at creation
+      //       time. A route that pre-fills it would make every job look resumed
+      //       on its very first attempt.
+      if (job.pre_sync_snapshot_id === null) {
+        if (!currentHead) {
+          logger.warn({ jobId, forkAppId }, '[update] fork has no repo HEAD; undo will be unavailable');
+        }
+        await controlDb.query(
+          `UPDATE template_clone_jobs
+              SET pre_sync_snapshot_id = $1, updated_at = now()
+            WHERE id = $2 AND pre_sync_snapshot_id IS NULL`,
+          [currentHead, jobId],
+        );
+      }
+
+      // -- 4. PUBLISH the prepared repo. First write the fork can observe.
       await putManifest(forkAppId, newSnapshot.snapshotId, newSnapshot.canonicalJson);
       await setLatest(forkAppId, newSnapshot.snapshotId);
       await forkRuntimePool.query(
@@ -1518,17 +1609,45 @@ async function executeUpdate(
       // NOTE: the fork's deployed frontend artifact is deliberately NOT touched.
       // The new code is in the repo; publishing it is the fork owner's call.
 
-      // 4. Schema — additive statements only. filterAdditive withholds anything
-      //    that drops or narrows, because the fork's rows are the whole point of
-      //    an in-place update; every rejection is logged by replaySchema.
+      // -- 5. Schema — additive statements only. filterAdditive withholds anything
+      //       that drops or narrows, because the fork's rows are the whole point
+      //       of an in-place update; every rejection is logged by replaySchema.
       scope.setTag('step', 'replaying_schema');
       await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
       await replaySchema(sourceAppPool, forkAppPool, forkAppId, logger, { filter: filterAdditive });
 
-      // 5. Functions — overwrite bodies and triggers of functions the fork already
-      //    has, insert the ones the template added. replayFunctions leaves the env
-      //    vars of pre-existing functions untouched (see the wasInserted guard in
-      //    clone-replay.ts): a fork's secrets are not ours to replace.
+      // -- 6. RLS. replayRls only issues CREATE POLICY and drops nothing, so it is
+      //       safe on a live fork — and necessary: a table the release adds is
+      //       created here with SELECT/INSERT/UPDATE/DELETE granted to
+      //       butterbase_anon by the schema applier, so skipping policy replay
+      //       would publish that table wide open on every fork.
+      //
+      //       Policies the fork already has make CREATE POLICY fail with
+      //       "already exists"; replayRls catches per policy, so those are
+      //       expected no-ops and are filtered out of the job warnings rather
+      //       than shown to the owner as problems.
+      scope.setTag('step', 'replaying_rls');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
+      const rlsResult = await replayRls(sourceAppPool, forkAppPool, logger);
+      const rlsWarnings = rlsResult.warnings.filter((w) => !/already exists/i.test(w));
+      if (rlsWarnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, rlsWarnings);
+      }
+      logger.info(
+        {
+          jobId, forkAppId,
+          replayed: rlsResult.replayed,
+          preExisting: rlsResult.warnings.length - rlsWarnings.length,
+          warnings: rlsWarnings.length,
+        },
+        '[update] RLS policies replayed',
+      );
+
+      // -- 7. Functions — overwrite bodies and triggers of functions the fork
+      //       already has, insert the ones the template added. replayFunctions
+      //       leaves the env vars of pre-existing functions untouched (see the
+      //       wasInserted guard in clone-replay.ts): a fork's secrets are not
+      //       ours to replace.
       scope.setTag('step', 'replaying_functions');
       await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
       const fnResult = await replayFunctions(
@@ -1548,46 +1667,55 @@ async function executeUpdate(
         '[update] functions replayed',
       );
 
-      // 6. Non-secret config. Secret-bearing fields are blanked by this helper
-      //    rather than copied, which is also what we want here.
+      // -- 8. Config, insert-only. Config replay was written for an empty clone
+      //       target; pointed at a live fork its overwrite branches NULL the
+      //       fork's OAuth client secret, re-mint its Composio credentials, and
+      //       replace its allowed origins. insertOnly adds what the fork lacks
+      //       and touches nothing it already has.
       scope.setTag('step', 'replaying_config');
       await setCloneJobStatus(controlDb, jobId, { status: 'replaying_config' });
       const cfgResult = await replayNonSecretConfig(
         sourceRuntimePool, forkRuntimePool, job.source_app_id, forkAppId, logger,
+        { insertOnly: true },
       );
       if (cfgResult.warnings.length > 0) {
         await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);
       }
 
-      // 7. Advance the fork's lineage base to what it now actually is.
+      // -- 9. Advance the fork's lineage base to what it now actually is.
       //
-      //    Without this the fork stays pinned to the release it was cloned from:
-      //    computeDrift would keep reporting it as behind, and computeDivergence
-      //    would read the repo HEAD we just wrote as a user edit — so a
-      //    successfully updated fork would show as "modified" and could never be
-      //    updated again. base_release_id drives behind_by; the fingerprint is
-      //    captured from the fork's post-update state rather than inherited from
-      //    the release manifest, because the additive-only schema filter means
-      //    the fork is allowed to differ from the release in ways that are not
-      //    user edits. Best-effort: an update that otherwise succeeded must not
-      //    be failed by a bookkeeping write.
-      try {
-        const fingerprint = await captureAppState(forkRuntimePool, forkAppPool, forkAppId);
-        await controlDb.query(
-          `UPDATE app_lineage
-              SET base_release_id  = COALESCE($1, base_release_id),
-                  base_snapshot_id = $2,
-                  base_fingerprint = $3::jsonb
-            WHERE dest_app_id = $4`,
-          [job.target_release_id, newSnapshot.snapshotId, JSON.stringify(fingerprint), forkAppId],
+      //       NOT best-effort. If this write is skipped, base_snapshot_id still
+      //       points at the old HEAD while apps.repo_latest_snapshot holds the new
+      //       one, so computeDivergence reports repo: true — the fork displays as
+      //       user-modified and is permanently ineligible for any future update,
+      //       recoverable only by hand-editing app_lineage. The write is
+      //       idempotent and cheap, so throwing and letting the queue retry is
+      //       strictly better than logging and moving on.
+      //
+      //       base_release_id drives behind_by. The fingerprint is captured from
+      //       the fork's post-update state rather than inherited from the release
+      //       manifest, because the additive-only schema filter means the fork is
+      //       allowed to differ from the release in ways that are not user edits.
+      scope.setTag('step', 'advancing_lineage');
+      if (!job.target_release_id) {
+        throw new Error(
+          `[update] job ${jobId} has no target_release_id; refusing to advance lineage ` +
+            'to an unnamed base (the fork would keep reporting itself as behind)',
         );
-        logger.info(
-          { jobId, forkAppId, baseReleaseId: job.target_release_id },
-          '[update] lineage base advanced',
-        );
-      } catch (err) {
-        logger.warn({ err, forkAppId }, '[update] lineage base advance failed; fork will read as behind');
       }
+      const fingerprint = await captureAppState(forkRuntimePool, forkAppPool, forkAppId);
+      await controlDb.query(
+        `UPDATE app_lineage
+            SET base_release_id  = $1,
+                base_snapshot_id = $2,
+                base_fingerprint = $3::jsonb
+          WHERE dest_app_id = $4`,
+        [job.target_release_id, newSnapshot.snapshotId, JSON.stringify(fingerprint), forkAppId],
+      );
+      logger.info(
+        { jobId, forkAppId, baseReleaseId: job.target_release_id },
+        '[update] lineage base advanced',
+      );
 
       await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
       logger.info({ jobId, forkAppId }, '[update] completed');
