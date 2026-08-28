@@ -107,7 +107,7 @@ export function buildTriggerInsertSql(overwriteExisting: boolean): string {
  * in HTML (<meta>), JSON config, source maps, etc. Everything else (images,
  * fonts, wasm, .br/.gz precompressed assets) is copied through untouched.
  */
-const REWRITEABLE_EXTENSIONS = new Set([
+export const REWRITEABLE_EXTENSIONS = new Set([
   '.js', '.mjs', '.cjs', '.jsx',
   '.ts', '.tsx',
   '.html', '.htm',
