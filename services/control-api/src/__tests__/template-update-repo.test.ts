@@ -22,6 +22,59 @@ describe('rewriteBlob', () => {
     const out = rewriteBlob(Buffer.from('hello'), 'a.ts', 'app_src', 'app_dst');
     expect(out.changed).toBe(false);
   });
+
+  it('preserves invalid UTF-8 bytes outside the match span', () => {
+    // 0xFF and a lone 0x80 continuation byte are not valid UTF-8 on their own;
+    // a toString('utf8') round trip would replace them with U+FFFD and corrupt
+    // the buffer on the way back out. Byte-level replacement must leave them
+    // exactly as they are.
+    const before = Buffer.from([0xff, 0x80, 0x41]); // 0xFF, 0x80, 'A'
+    const needle = Buffer.from('app_src', 'utf8');
+    const after = Buffer.from([0x42, 0x43]); // 'B', 'C'
+    const content = Buffer.concat([before, needle, after]);
+
+    const out = rewriteBlob(content, 'weird.map', 'app_src', 'app_dst');
+
+    expect(out.changed).toBe(true);
+    const expected = Buffer.concat([before, Buffer.from('app_dst', 'utf8'), after]);
+    expect(out.content).toEqual(expected);
+    // The untouched prefix/suffix bytes are byte-identical, not just equal length.
+    expect(out.content.subarray(0, before.length)).toEqual(before);
+    expect(out.content.subarray(out.content.length - after.length)).toEqual(after);
+  });
+
+  it('replaces multiple occurrences in one buffer', () => {
+    const content = Buffer.from('app_src, app_src, and app_src again');
+    const out = rewriteBlob(content, 'a.ts', 'app_src', 'app_dst');
+    expect(out.changed).toBe(true);
+    expect(out.content.toString()).toBe('app_dst, app_dst, and app_dst again');
+  });
+
+  it('replaces back-to-back occurrences without dropping or duplicating bytes', () => {
+    const content = Buffer.from('app_srcapp_src');
+    const out = rewriteBlob(content, 'a.ts', 'app_src', 'app_dst');
+    expect(out.changed).toBe(true);
+    expect(out.content.toString()).toBe('app_dstapp_dst');
+  });
+
+  it('replaces a match at offset 0', () => {
+    const content = Buffer.from('app_src tail');
+    const out = rewriteBlob(content, 'a.ts', 'app_src', 'app_dst');
+    expect(out.content.toString()).toBe('app_dst tail');
+  });
+
+  it('replaces a match at the very end of the buffer', () => {
+    const content = Buffer.from('head app_src');
+    const out = rewriteBlob(content, 'a.ts', 'app_src', 'app_dst');
+    expect(out.content.toString()).toBe('head app_dst');
+  });
+
+  it('does not recurse when the replacement contains the search term', () => {
+    const content = Buffer.from('id=app_src;id=app_src;');
+    const out = rewriteBlob(content, 'a.ts', 'app_src', 'app_src_v2');
+    expect(out.changed).toBe(true);
+    expect(out.content.toString()).toBe('id=app_src_v2;id=app_src_v2;');
+  });
 });
 
 describe('rewriteManifestEntries', () => {
