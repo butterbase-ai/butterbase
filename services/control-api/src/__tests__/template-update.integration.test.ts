@@ -70,7 +70,14 @@ describe('in-place update preserves fork data', () => {
       )
     `);
 
-    // Fork: same base table WITHOUT subtitle, plus its own table, column, index and rows.
+    // Fork: a DIFFERENT table name from the template's tmpl_posts (fork_posts,
+    // not tmpl_posts), plus its own table, column, index and rows. Because
+    // the names differ, diffSchema's per-table ALTER path is never reached
+    // for these — only the whole-table "current has it, desired doesn't"
+    // DROP TABLE path (schema-differ.ts step 4) fires, and everything here
+    // survives *because the whole table is spared*, not because a column-
+    // or index-level statement was filtered. The 'shared table name' test
+    // below exercises the ALTER path (DROP COLUMN / DROP INDEX) instead.
     await fork.query(`CREATE TABLE fork_posts (id text primary key, title text, fork_col text)`);
     await fork.query(`CREATE TABLE fork_only (id text primary key, payload text)`);
     await fork.query(`CREATE INDEX idx_fork_only_payload ON fork_only (payload)`);
@@ -117,5 +124,62 @@ describe('in-place update preserves fork data', () => {
 
     const rows = await fork.query(`SELECT count(*)::int AS n FROM fork_only`);
     expect(rows.rows[0].n).toBe(2);
+  });
+
+  it('never drops a fork-only column or index on a table the fork shares by name with the template', async () => {
+    // Both databases have a table named `posts` — this is what exercises
+    // diffSchema's per-table ALTER path (DROP COLUMN / DROP INDEX), which
+    // the whole-table scenario above never reaches.
+    await source.query(`DROP TABLE IF EXISTS posts CASCADE`);
+    await source.query(`CREATE TABLE posts (id text primary key, title text, tmpl_col text)`);
+
+    await fork.query(`DROP TABLE IF EXISTS posts CASCADE`);
+    await fork.query(`CREATE TABLE posts (id text primary key, title text, fork_col text)`);
+    await fork.query(`CREATE INDEX idx_posts_fork_col ON posts (fork_col)`);
+    await fork.query(`INSERT INTO posts VALUES ('p1','hello','mine'), ('p2','world','also mine')`);
+
+    const desired = await introspectSchema(source);
+    const current = await introspectSchema(fork);
+    const raw = diffSchema(current as never, desired as never);
+
+    // Guard the guard: the unfiltered diff must genuinely want to remove the
+    // fork's column and/or index on this shared-name table via the ALTER
+    // path (schema-differ.ts's per-table alter loop), not the whole-table
+    // DROP TABLE path the first scenario exercises. `DROP INDEX IF EXISTS
+    // "idx_posts_fork_col"` does not repeat the table name in its SQL text
+    // (unlike DROP TABLE), so this checks the whole raw diff rather than
+    // filtering by table name first — a name-based filter here previously
+    // missed the very statement it was meant to catch. If this assertion
+    // ever fails, say so — don't loosen it to pass.
+    expect(
+      raw.some((s) => /DROP\s+COLUMN/i.test(s.sql) || /DROP\s+INDEX/i.test(s.sql))
+    ).toBe(true);
+
+    const { kept, rejected } = filterAdditive(raw);
+    expect(rejected.length).toBeGreaterThan(0);
+    expect(kept.every((s) => !/DROP|TRUNCATE/i.test(s.sql))).toBe(true);
+
+    await applyMigration(fork, kept, 'test-update-shared-name');
+
+    // Fork's own column survives.
+    const forkCol = await fork.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_name='posts' AND column_name='fork_col'`);
+    expect(forkCol.rows).toHaveLength(1);
+
+    // Fork's own index survives.
+    const forkIdx = await fork.query(
+      `SELECT 1 FROM pg_indexes WHERE indexname='idx_posts_fork_col'`);
+    expect(forkIdx.rows).toHaveLength(1);
+
+    // Fork's rows survive.
+    const rows = await fork.query(`SELECT count(*)::int AS n FROM posts`);
+    expect(rows.rows[0].n).toBe(2);
+
+    // The template's new column landed.
+    const tmplCol = await fork.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_name='posts' AND column_name='tmpl_col'`);
+    expect(tmplCol.rows).toHaveLength(1);
   });
 });
