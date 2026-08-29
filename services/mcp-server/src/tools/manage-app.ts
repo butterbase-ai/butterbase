@@ -29,6 +29,11 @@ Actions:
   - "teardown_source_replica": After a completed move, decommission the retained source-region replica.
   - "get_env":              Get app-level environment variables. Returns { keys, updated_at }.
   - "update_env":           Update app-level environment variables. Values null delete a key. Returns { updated_keys, invalidated }.
+  - "publish_template_release": Publish a new release of this app as a template. Returns release number, timestamp, and metadata.
+  - "list_template_releases": List all releases of a template. Returns array of release metadata.
+  - "get_template_release": Get detailed info about a template release (commit hash, timestamp, notes, divergence summary).
+  - "check_template_updates": Check if this fork has updates available from its template (returns divergence status and available release details).
+  - "update_from_template": Reset this fork's code to match the template. Only allowed for unmodified forks; returns job_id on success.
 
 Parameters by action:
   list:                    { action: "list" }
@@ -52,12 +57,17 @@ Parameters by action:
   teardown_source_replica: { action: "teardown_source_replica", migration_id }
   get_env:                 { action: "get_env", app_id }
   update_env:              { action: "update_env", app_id, env }
+  publish_template_release: { action: "publish_template_release", app_id, label?, notes? }
+  list_template_releases: { action: "list_template_releases", app_id or source_app_id }
+  get_template_release: { action: "get_template_release", app_id or source_app_id, release_number }
+  check_template_updates: { action: "check_template_updates", app_id }
+  update_from_template: { action: "update_from_template", app_id }
 
 Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica', 'get_env', 'update_env', 'publish_template_release', 'list_template_releases', 'get_template_release', 'check_template_updates'])
+      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica', 'get_env', 'update_env', 'publish_template_release', 'list_template_releases', 'get_template_release', 'check_template_updates', 'update_from_template'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -379,6 +389,12 @@ Common errors:
           const err = need(args.app_id !== undefined, '"app_id" is required for the "check_template_updates" action.');
           if (err) return err;
           const res = await apiGet(`/v1/${args.app_id}/template/status?divergence=true`);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
+        }
+        case 'update_from_template': {
+          const err = need(args.app_id !== undefined, '"app_id" is required for the "update_from_template" action.');
+          if (err) return err;
+          const res = await apiPost(`/v1/${args.app_id}/template/update`, {});
           return { content: [{ type: 'text' as const, text: JSON.stringify(res, null, 2) }] };
         }
       }

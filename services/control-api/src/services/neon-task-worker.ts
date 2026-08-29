@@ -18,7 +18,13 @@ import {
   copyBlobSameRegion,
   copyBlobCrossRegion,
   copyManifestSameRegion,
+  getBlobBuffer,
+  putBlobBuffer,
 } from './repo-storage.js';
+import { validateManifest } from './repo-manifest.js';
+import { filterAdditive } from './schema-additive-filter.js';
+import { decideEligibility } from './template-update-eligibility.js';
+import { rewriteManifestEntries, type RepoManifestEntry } from './template-update-repo.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayMeetingsWebhook, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
@@ -29,7 +35,14 @@ import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
 import { getCloneAppOverrides, resolveOverridesForClone } from './clone-app-overrides.js';
-import { recordLineage } from './app-lineage.js';
+import {
+  recordLineage,
+  computeDrift,
+  computeDivergence,
+  getLineage,
+  type Divergence,
+  type DriftResult,
+} from './app-lineage.js';
 import { captureAppState } from './app-state-capture.js';
 import { listReleases } from './template-releases.js';
 
@@ -178,7 +191,18 @@ async function processNextTask(
     } else if (task.task_type === 'deprovision') {
       await executeDeprovision(controlDb, dataPlaneDb, task, logger);
     } else if (task.task_type === 'clone') {
-      await executeClone(controlDb, dataPlaneDb, task, logger);
+      // One task_type covers both directions of the template pipeline. The job
+      // row's `mode` is what distinguishes "make me a new fork" from "reset this
+      // existing fork's code to the latest release"; they share nothing but the
+      // queue. A missing/absent job falls through to executeClone, which raises
+      // the precise error for that case.
+      const cloneJobId = task.task_meta?.job_id;
+      const queuedJob = cloneJobId ? await getCloneJob(controlDb, cloneJobId) : null;
+      if (resolveCloneDispatch(queuedJob) === 'update') {
+        await executeUpdate(controlDb, task, logger);
+      } else {
+        await executeClone(controlDb, dataPlaneDb, task, logger);
+      }
     } else {
       throw new Error(`Unknown task_type: ${task.task_type}`);
     }
@@ -579,7 +603,16 @@ async function executeClone(
         const destOrgId = job.dest_organization_id
           ?? await resolveOrganizationId(controlDb, job.requested_by_user_id);
 
-        await insertAppRow(job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId, destOrgId);
+        // allowDuplicateName: two clones of the same template legitimately share
+        // a name — the subdomain below is what differentiates them. Without this
+        // the second clone's insertAppRow matched the first by name+owner and
+        // returned early WITHOUT inserting, while we carried on with the appId
+        // generated above; provisioning then failed the app_db_connections FK
+        // and waitForDestReady blocked for its full 5-minute timeout.
+        await insertAppRow(
+          job.dest_region, controlDb, destName, job.requested_by_user_id, destAppId, destOrgId,
+          { allowDuplicateName: true },
+        );
         await setCloneJobStatus(controlDb, jobId, { dest_app_id: destAppId });
 
         // Reserve a subdomain for the dest. Mirrors routes/init.ts: derive
@@ -1280,6 +1313,592 @@ async function executeClone(
       }
 
       throw err; // re-throw so the neon-task queue applies its retry/fail logic
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Template update (mode='update'): reset a fork's CODE to the latest release
+// while every row in its database survives.
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-checked at execution time, not just at request time. A fork edited between
+ * the click and the worker picking the job up must abort, not reset — the
+ * request-time gate proves nothing about the state of the fork now, and by the
+ * time this runs we are about to overwrite its code.
+ *
+ * Delegates to decideEligibility so the request-time and execution-time gates
+ * cannot drift apart: a rule added to one is automatically enforced by the
+ * other. A null divergence (unreadable fork DB) is treated as ineligible by
+ * decideEligibility, so an unreachable fork aborts rather than being reset
+ * blind.
+ *
+ * Exported and unit-tested in isolation for the same reason decideLineageBase
+ * is: executeUpdate itself touches S3 and three pools, so the one decision that
+ * actually protects customer data would otherwise have no direct coverage.
+ */
+export function shouldAbortUpdate(
+  divergenceNow: Divergence | null,
+  drift: DriftResult,
+): { abort: boolean; reason: string } {
+  const decision = decideEligibility(drift, divergenceNow);
+  return decision.eligible
+    ? { abort: false, reason: 'ok' }
+    : { abort: true, reason: decision.reason };
+}
+
+/**
+ * Which execution path a `clone` task belongs to. One task_type carries both
+ * directions of the template pipeline; the job row's `mode` is the only thing
+ * that distinguishes "make me a new fork" from "reset this existing fork's code
+ * to the latest release". A missing job resolves to 'clone' so executeClone can
+ * raise the precise error for that case.
+ *
+ * Exported for the same reason decideLineageBase is: it is a one-line decision
+ * inside an untestable effectful caller, and getting it wrong points a
+ * destructive update at a fresh-provision path (or vice versa).
+ */
+export function resolveCloneDispatch(job: { mode?: string } | null): 'clone' | 'update' {
+  return job?.mode === 'update' ? 'update' : 'clone';
+}
+
+/** How a resumed update should treat the fork's current repo HEAD. */
+export type UpdateResumeState = 'fresh' | 'republish' | 'ambiguous';
+
+/**
+ * Repo snapshots are content-addressed, so the snapshot this job WILL publish is
+ * computable before anything is written. That makes the fork's current HEAD
+ * legible on a resumed attempt:
+ *
+ *   - HEAD is the pre-update snapshot, or no attempt has begun → 'fresh'. Nothing
+ *     of ours has landed, so the full eligibility gate applies exactly as it does
+ *     on a first attempt. This is the case that protects an owner who worked on
+ *     the fork for two weeks and then hit Retry: their edits are still measured.
+ *   - HEAD is the snapshot THIS job publishes → 'republish'. A prior attempt of
+ *     this same job already wrote it, so the repo divergence is ours, not a user
+ *     edit, and the fork is mid-update. Finishing is the way out.
+ *   - HEAD is neither → 'ambiguous'. Something moved the fork's repo that is not
+ *     this job. Never reset on a guess.
+ *
+ * 'republish' requires a recorded pre-sync marker: without one no attempt has
+ * ever passed the gate, so a HEAD that merely happens to match cannot be
+ * evidence of our own prior write.
+ */
+export function classifyUpdateResume(args: {
+  preSyncSnapshotId: string | null;
+  currentHead: string | null;
+  targetSnapshotId: string;
+}): UpdateResumeState {
+  if (args.preSyncSnapshotId === null) return 'fresh';
+  if (args.currentHead === args.preSyncSnapshotId) return 'fresh';
+  if (args.currentHead === args.targetSnapshotId) return 'republish';
+  return 'ambiguous';
+}
+
+/**
+ * In-place template update. Unlike executeClone, nothing is provisioned: the
+ * destination app already exists and keeps its database, its rows, its env vars,
+ * its secrets, its OAuth and integration credentials, and its deployed frontend.
+ * Only code-shaped surfaces are replaced — repo blobs, function bodies,
+ * additive-only schema DDL, additive RLS policies, and config rows the fork does
+ * not already have.
+ *
+ * Resumability matches executeClone: any non-terminal status is resumable and
+ * every stage is idempotent, so a requeued task redoes stages rather than
+ * skipping them.
+ *
+ * Exported for testing. Nothing else should call it — dispatch goes through
+ * processNextTask.
+ */
+export async function executeUpdate(
+  controlDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Update task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Update job ${jobId} not found`);
+  if (isTerminalCloneStatus(job.status)) {
+    logger.info({ jobId, status: job.status }, '[update] job in terminal status; skipping');
+    return;
+  }
+
+  // createUpdateJob guarantees dest_app_id is the fork; the partial unique index
+  // enforcing "one in-flight update per fork" depends on it being non-null.
+  const forkAppId = job.dest_app_id;
+  if (!forkAppId) throw new Error(`Update job ${jobId} has no dest_app_id (fork app)`);
+
+  // Precondition, not an epilogue. The lineage advance at the end of this
+  // function needs a release to point the fork's new base at; discovering it is
+  // missing after the repo, schema, functions and config have all been replaced
+  // leaves the fork mutated with a base_snapshot_id still on the old HEAD —
+  // permanently ineligible for any further update and displaying as
+  // user-modified. createUpdateJob types it as a string, but the column is
+  // nullable, so check before touching anything.
+  if (!job.target_release_id) {
+    throw new Error(
+      `Update job ${jobId} has no target_release_id; refusing to start an update ` +
+        'whose lineage base could not be recorded',
+    );
+  }
+
+  await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
+
+  // Update mode emitted no audit trail at all, unlike clone. A reset that lands
+  // on a live app is at least as consequential as a clone; its owner and the
+  // template owner both deserve the record.
+  await insertCloneAuditLog(controlDb, {
+    appId: job.source_app_id,
+    userId: job.requested_by_user_id,
+    eventType: 'template_update_started',
+    metadata: { job_id: jobId, fork_app_id: forkAppId, target_release_id: job.target_release_id },
+  }).catch((err) => logger.error({ err }, '[update] audit log started event insert failed'));
+
+  // Hoisted so the catch block can tell "we replaced the repo" from "we never
+  // got that far", which decides whether it has anything to roll back.
+  let publishedSnapshotId: string | null = null;
+  // ...and where to roll it back TO. `job` is a snapshot read before the run, so
+  // it still holds the pre-capture NULL even after step 3 has written the marker;
+  // reading job.pre_sync_snapshot_id in the catch would silently skip the rollback
+  // on exactly the runs that need it (the first attempt of a fresh job).
+  let preSyncSnapshotId: string | null = job.pre_sync_snapshot_id;
+  // Set the moment the lineage UPDATE below succeeds. Once true, the repo
+  // pointer and base_snapshot_id must not be allowed to disagree — a rollback
+  // that fires after lineage has already advanced would revert the repo to
+  // pre-sync while base_snapshot_id still names the new snapshot, which is
+  // exactly the "modified"-forever trap this whole rollback exists to avoid.
+  let lineageAdvanced = false;
+
+  await Sentry.withScope(async (scope) => {
+    scope.setTag('clone_job_id', jobId);
+    scope.setTag('clone_mode', 'update');
+    scope.setTag('source_app_id', job.source_app_id);
+    scope.setTag('target_app_id', forkAppId);
+    scope.setTag('attempt', String(task.attempts));
+
+    try {
+      const forkRuntimePool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+      const sourceRuntimePool = getRuntimeDbPool(config.runtimeDb, job.source_region);
+
+      const forkRow = await forkRuntimePool.query<{
+        db_name: string; owner_id: string; repo_latest_snapshot: string | null;
+      }>(
+        `SELECT db_name, owner_id, repo_latest_snapshot FROM apps WHERE id = $1`,
+        [forkAppId],
+      );
+      if (forkRow.rows.length === 0) {
+        throw new Error(`[update] fork app ${forkAppId} not found in ${job.dest_region} runtime DB`);
+      }
+      const { db_name: forkDbName, owner_id: forkOwnerId } = forkRow.rows[0];
+      const currentHead = forkRow.rows[0].repo_latest_snapshot;
+
+      const sourceRow = await sourceRuntimePool.query<{ db_name: string }>(
+        `SELECT db_name FROM apps WHERE id = $1`,
+        [job.source_app_id],
+      );
+      if (sourceRow.rows.length === 0) {
+        throw new Error(`[update] source app ${job.source_app_id} not found in ${job.source_region} runtime DB`);
+      }
+
+      const forkAppPool = await getAppPoolForApp(controlDb, forkAppId, forkDbName);
+      const sourceAppPool = await getAppPoolForApp(controlDb, job.source_app_id, sourceRow.rows[0].db_name);
+
+      // -- 1. PREPARE the repo. Nothing here is visible to the fork: blobs are
+      //       content-addressed and unreferenced until a manifest names them, and
+      //       the fork's HEAD is untouched. Deliberately done BEFORE the gate,
+      //       because the snapshot id it yields is what makes a resumed attempt's
+      //       HEAD legible (see classifyUpdateResume).
+      scope.setTag('step', 'copying_repo');
+      await setCloneJobStatus(controlDb, jobId, { status: 'copying_repo' });
+
+      const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
+      if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
+      const manifest = JSON.parse(manifestJson) as { files: RepoManifestEntry[]; message?: string };
+
+      // Land the source blobs under the fork's own prefix first, so the rewrite
+      // pass reads every blob from one region-local bucket regardless of where
+      // the template lives.
+      const sameRegion = job.source_region === job.dest_region;
+      const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
+      if (sameRegion) {
+        for (const sha of distinctShas) {
+          await copyBlobSameRegion(job.source_app_id, forkAppId, sha);
+        }
+      } else {
+        const s3Opts = {
+          region: config.s3.region,
+          endpoint: config.s3.endpoint,
+          forcePathStyle: config.s3.forcePathStyle,
+          requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+          responseChecksumValidation: 'WHEN_REQUIRED' as const,
+          credentials: config.s3.accessKeyId && config.s3.secretAccessKey
+            ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+            : undefined,
+        };
+        const srcS3 = new S3Client(s3Opts);
+        const dstS3 = new S3Client(s3Opts);
+        for (const sha of distinctShas) {
+          await copyBlobCrossRegion(job.source_app_id, forkAppId, sha, srcS3, config.s3.bucket, dstS3, config.s3.bucket);
+        }
+      }
+
+      const rewritten = await rewriteManifestEntries(
+        manifest.files,
+        (sha) => getBlobBuffer(forkAppId, sha),
+        (sha, content) => putBlobBuffer(forkAppId, sha, content),
+        job.source_app_id,
+        forkAppId,
+      );
+
+      // validateManifest canonicalises exactly the way the repo push path does,
+      // so the fork's new HEAD is a legitimate content-addressed snapshot rather
+      // than a synthetic id — and the same inputs always yield the same id, which
+      // is what the resume classification relies on.
+      const newSnapshot = validateManifest({ files: rewritten, message: manifest.message });
+
+      // -- 2. Gate, re-evaluated against the fork as it is RIGHT NOW.
+      scope.setTag('step', 'eligibility_recheck');
+      const resume = classifyUpdateResume({
+        preSyncSnapshotId: job.pre_sync_snapshot_id,
+        currentHead,
+        targetSnapshotId: newSnapshot.snapshotId,
+      });
+      scope.setTag('resume_state', resume);
+
+      const drift = await computeDrift(controlDb, forkAppId);
+
+      const failWithoutRetry = async (reason: string) => {
+        logger.warn({ jobId, forkAppId, reason, resume }, '[update] aborting; fork not eligible');
+        await setCloneJobStatus(controlDb, jobId, {
+          status: 'failed',
+          error_message: `Update aborted at execution time: ${reason}`,
+          completed_at: new Date(),
+        });
+      };
+
+      if (resume === 'ambiguous') {
+        // The fork's repo moved to something that is neither where we found it
+        // nor what we are about to publish. That is an edit we cannot attribute,
+        // and resetting on a guess is the one outcome that destroys work.
+        await failWithoutRetry(
+          `fork repo changed since the update was queued (HEAD ${currentHead ?? 'none'} ` +
+            `matches neither the pre-update snapshot nor the target)`,
+        );
+        return;
+      }
+
+      if (resume === 'fresh') {
+        let divergenceNow: Divergence | null = null;
+        try {
+          divergenceNow = await computeDivergence(controlDb, forkRuntimePool, forkAppPool, forkAppId);
+        } catch (err) {
+          // Leave it null: decideEligibility reads null as 'unknown' and aborts.
+          // Resetting a fork whose current state we could not read is the one
+          // outcome that destroys data.
+          logger.warn({ err, forkAppId }, '[update] divergence check failed; treating as unknown');
+        }
+        const { abort, reason } = shouldAbortUpdate(divergenceNow, drift);
+        if (abort) {
+          // Deliberately NOT thrown: a terminal business decision, not a
+          // transient fault, and must not be retried by the neon-task queue.
+          await failWithoutRetry(reason);
+          return;
+        }
+      } else {
+        // 'republish': a prior attempt of this job already published the target
+        // snapshot, so every divergence signal now reflects OUR half-finished
+        // work — measuring it would fail the job forever and strand the fork
+        // mid-update. Only the facts a partial update cannot have caused still
+        // gate: lineage being severed, or the row no longer being a fork at all.
+        if (!drift.is_fork || drift.severed) {
+          await failWithoutRetry(drift.is_fork ? 'severed' : 'not_a_fork');
+          return;
+        }
+        logger.info(
+          { jobId, forkAppId, snapshotId: newSnapshot.snapshotId },
+          '[update] resuming a partially applied update; finishing it',
+        );
+      }
+
+      // -- 3. Record the pre-update repo HEAD for the undo route. Written after
+      //       the gate and before the first visible write, and only once — a
+      //       resumed attempt must not overwrite it with the half-updated HEAD.
+      //
+      //       This marker is also what classifyUpdateResume keys on, so
+      //       createUpdateJob MUST leave pre_sync_snapshot_id NULL at creation
+      //       time. A route that pre-fills it would make every job look resumed
+      //       on its very first attempt.
+      //
+      //       The repo pointer alone is NOT enough to undo an update. Step 9
+      //       below advances app_lineage.base_snapshot_id, and computeDivergence
+      //       is exactly `apps.repo_latest_snapshot !== base_snapshot_id`, so an
+      //       undo that restored only the pointer left the fork reading
+      //       repo: true -> 'modified' -> permanently ineligible. The full
+      //       pre-update lineage row plus a fingerprint manifest (which carries
+      //       function bodies) is captured here so undo can put all of it back.
+      //
+      //       The guard keys on pre_sync_lineage, not pre_sync_snapshot_id: a
+      //       fork with no repo HEAD leaves pre_sync_snapshot_id NULL, and a
+      //       guard on that column would re-fire on every retry and overwrite
+      //       the captured state with post-mutation values.
+      if (job.pre_sync_snapshot_id === null && job.pre_sync_lineage === null) {
+        if (!currentHead) {
+          logger.warn({ jobId, forkAppId }, '[update] fork has no repo HEAD; undo will be unavailable');
+        }
+        const preLineage = await getLineage(controlDb, forkAppId);
+        // Best-effort: a fork whose state cannot be read still gets its repo
+        // pointer recorded, and undo degrades to repo + lineage only (it says
+        // so in its response) rather than being refused outright.
+        const preManifest = await captureAppState(forkRuntimePool, forkAppPool, forkAppId)
+          .catch((err) => {
+            logger.warn({ err, forkAppId }, '[update] pre-sync capture failed; undo will not restore functions');
+            return null;
+          });
+        const preSyncLineage = {
+          base_release_id: preLineage?.base_release_id ?? null,
+          base_fingerprint: preLineage?.base_fingerprint ?? null,
+          base_snapshot_id: preLineage?.base_snapshot_id ?? null,
+          manifest: preManifest,
+        };
+        await controlDb.query(
+          `UPDATE template_clone_jobs
+              SET pre_sync_snapshot_id = $1, pre_sync_lineage = $2::jsonb, updated_at = now()
+            WHERE id = $3 AND pre_sync_lineage IS NULL`,
+          [currentHead, JSON.stringify(preSyncLineage), jobId],
+        );
+        preSyncSnapshotId = currentHead;
+      }
+
+      // -- 4. PUBLISH the prepared repo. First write the fork can observe.
+      await putManifest(forkAppId, newSnapshot.snapshotId, newSnapshot.canonicalJson);
+      await setLatest(forkAppId, newSnapshot.snapshotId);
+      await forkRuntimePool.query(
+        `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+        [newSnapshot.snapshotId, forkAppId],
+      );
+      publishedSnapshotId = newSnapshot.snapshotId;
+      logger.info(
+        { jobId, forkAppId, snapshotId: newSnapshot.snapshotId, fileCount: rewritten.length },
+        '[update] repo replaced',
+      );
+
+      // NOTE: the fork's deployed frontend artifact is deliberately NOT touched.
+      // The new code is in the repo; publishing it is the fork owner's call.
+
+      // -- 5. Schema — additive statements only. filterAdditive withholds anything
+      //       that drops or narrows, because the fork's rows are the whole point
+      //       of an in-place update; every rejection is logged by replaySchema.
+      scope.setTag('step', 'replaying_schema');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
+      await replaySchema(sourceAppPool, forkAppPool, forkAppId, logger, { filter: filterAdditive });
+
+      // -- 6. RLS. replayRls only issues CREATE POLICY and drops nothing, so it is
+      //       safe on a live fork — and necessary: a table the release adds is
+      //       created here with SELECT/INSERT/UPDATE/DELETE granted to
+      //       butterbase_anon by the schema applier, so skipping policy replay
+      //       would publish that table wide open on every fork.
+      //
+      //       Policies the fork already has make CREATE POLICY fail with
+      //       "already exists"; replayRls catches per policy, so those are
+      //       expected no-ops and are filtered out of the job warnings rather
+      //       than shown to the owner as problems.
+      scope.setTag('step', 'replaying_rls');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_rls' });
+      const rlsResult = await replayRls(sourceAppPool, forkAppPool, logger);
+      const rlsWarnings = rlsResult.warnings.filter((w) => !/already exists/i.test(w));
+      if (rlsWarnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, rlsWarnings);
+      }
+      logger.info(
+        {
+          jobId, forkAppId,
+          replayed: rlsResult.replayed,
+          preExisting: rlsResult.warnings.length - rlsWarnings.length,
+          warnings: rlsWarnings.length,
+        },
+        '[update] RLS policies replayed',
+      );
+
+      // -- 7. Functions — overwrite bodies and triggers of functions the fork
+      //       already has, insert the ones the template added. replayFunctions
+      //       leaves the env vars of pre-existing functions untouched (see the
+      //       wasInserted guard in clone-replay.ts): a fork's secrets are not
+      //       ours to replace.
+      scope.setTag('step', 'replaying_functions');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_functions' });
+      const fnResult = await replayFunctions(
+        sourceRuntimePool,
+        forkRuntimePool,
+        job.source_app_id,
+        forkAppId,
+        job.requested_by_user_id,
+        logger,
+        { overwriteExisting: true, controlPool: controlDb, destAppOwnerId: forkOwnerId },
+      );
+      if (fnResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, fnResult.warnings);
+      }
+      // Same persistence executeClone does. A release that ADDS a function
+      // needing an API key deploys that function onto every eligible fork with
+      // no value in it; unfilled_env_vars is what drives the dashboard's "this
+      // function needs a secret" banner, and discarding it here shipped a
+      // silently-broken function to every fork with no signal at all.
+      await controlDb.query(
+        `UPDATE template_clone_jobs
+            SET unfilled_env_vars = $1::jsonb, updated_at = now()
+          WHERE id = $2`,
+        [JSON.stringify(fnResult.unfilledEnvVars), jobId],
+      ).catch((err) => {
+        logger.warn({ err, jobId }, '[update] failed to persist unfilled_env_vars summary');
+      });
+      logger.info(
+        {
+          jobId, forkAppId, count: fnResult.count, warnings: fnResult.warnings.length,
+          unfilledFunctions: Object.keys(fnResult.unfilledEnvVars).length,
+        },
+        '[update] functions replayed',
+      );
+
+      // -- 8. Config, insert-only. Config replay was written for an empty clone
+      //       target; pointed at a live fork its overwrite branches NULL the
+      //       fork's OAuth client secret, re-mint its Composio credentials, and
+      //       replace its allowed origins. insertOnly adds what the fork lacks
+      //       and touches nothing it already has.
+      scope.setTag('step', 'replaying_config');
+      await setCloneJobStatus(controlDb, jobId, { status: 'replaying_config' });
+      const cfgResult = await replayNonSecretConfig(
+        sourceRuntimePool, forkRuntimePool, job.source_app_id, forkAppId, logger,
+        { insertOnly: true },
+      );
+      if (cfgResult.warnings.length > 0) {
+        await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);
+      }
+
+      // -- 9. Advance the fork's lineage base to what it now actually is.
+      //
+      //       NOT best-effort. If this write is skipped, base_snapshot_id still
+      //       points at the old HEAD while apps.repo_latest_snapshot holds the new
+      //       one, so computeDivergence reports repo: true — the fork displays as
+      //       user-modified and is permanently ineligible for any future update,
+      //       recoverable only by hand-editing app_lineage. The write is
+      //       idempotent and cheap, so throwing and letting the queue retry is
+      //       strictly better than logging and moving on.
+      //
+      //       base_release_id drives behind_by. The fingerprint is captured from
+      //       the fork's post-update state rather than inherited from the release
+      //       manifest, because the additive-only schema filter means the fork is
+      //       allowed to differ from the release in ways that are not user edits.
+      scope.setTag('step', 'advancing_lineage');
+      const fingerprint = await captureAppState(forkRuntimePool, forkAppPool, forkAppId);
+      await controlDb.query(
+        `UPDATE app_lineage
+            SET base_release_id  = $1,
+                base_snapshot_id = $2,
+                base_fingerprint = $3::jsonb
+          WHERE dest_app_id = $4`,
+        [job.target_release_id, newSnapshot.snapshotId, JSON.stringify(fingerprint), forkAppId],
+      );
+      lineageAdvanced = true;
+      logger.info(
+        { jobId, forkAppId, baseReleaseId: job.target_release_id },
+        '[update] lineage base advanced',
+      );
+
+      await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: new Date() });
+      await insertCloneAuditLog(controlDb, {
+        appId: job.source_app_id,
+        userId: job.requested_by_user_id,
+        eventType: 'template_update_completed',
+        metadata: { job_id: jobId, fork_app_id: forkAppId, target_release_id: job.target_release_id },
+      }).catch((err) => logger.error({ err }, '[update] audit log completed event insert failed'));
+      logger.info({ jobId, forkAppId }, '[update] completed');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Same retry contract as executeClone: only mark the job failed once the
+      // task queue has exhausted its attempts, otherwise the terminal-status
+      // guard above would short-circuit every retry.
+      const isPermanent = task.attempts >= task.max_attempts;
+      if (isPermanent) {
+        await setCloneJobStatus(controlDb, jobId, {
+          status: 'failed', error_message: msg, completed_at: new Date(),
+        }).catch(() => {});
+
+        // Self-heal the common case. The repo is published BEFORE schema,
+        // functions, config and lineage, so a throw in any of those leaves the
+        // fork carrying the template's code with its own old lineage — which
+        // computeDivergence reads as repo: true, i.e. 'modified', which closes
+        // POST /update (422) and, after an hour, retry (400) too. Putting the
+        // pointer back restores an eligible fork without anyone having to reach
+        // for undo. Best-effort: if it fails, undo is still open (a failed job
+        // with pre-sync state is undoable), so this never masks the real error.
+        //
+        // Gated on !lineageAdvanced: if the lineage UPDATE already landed (e.g.
+        // the status write right after it is what threw), base_snapshot_id
+        // already names the new snapshot. Rolling the repo pointer back here
+        // would leave repo and lineage disagreeing — the exact "modified"-
+        // forever trap this rollback exists to prevent, reintroduced from the
+        // other direction.
+        if (publishedSnapshotId && preSyncSnapshotId && !lineageAdvanced) {
+          try {
+            await setLatest(forkAppId, preSyncSnapshotId);
+            await getRuntimeDbPool(config.runtimeDb, job.dest_region).query(
+              `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+              [preSyncSnapshotId, forkAppId],
+            );
+            logger.warn(
+              { jobId, forkAppId, restored: preSyncSnapshotId },
+              '[update] failed after publish; rolled the fork repo pointer back',
+            );
+          } catch (rollbackErr) {
+            logger.error(
+              { rollbackErr, jobId, forkAppId },
+              '[update] repo rollback failed; fork is on the new code with old lineage — undo is the escape',
+            );
+          }
+        }
+
+        await insertCloneAuditLog(controlDb, {
+          appId: job.source_app_id,
+          userId: job.requested_by_user_id,
+          eventType: 'template_update_failed',
+          metadata: {
+            job_id: jobId, fork_app_id: forkAppId,
+            target_release_id: job.target_release_id, error: msg,
+            repo_rolled_back: Boolean(publishedSnapshotId && preSyncSnapshotId && !lineageAdvanced),
+          },
+        }).catch((auditErr) => logger.error({ auditErr }, '[update] audit log failed event insert failed'));
+
+        // Tell the FORK owner. Nothing else does: the dashboard fires the
+        // mutation and never looks again, so without this a half-reset live app
+        // told its owner nothing at all. mode: 'update' keeps the email from
+        // describing their app as a failed clone of something.
+        const forkRuntimePoolForNotify =
+          await getRuntimeDbForApp(controlDb, forkAppId).catch(() => null);
+        if (forkRuntimePoolForNotify) {
+          notifyCloneFailed(
+            controlDb,
+            forkRuntimePoolForNotify,
+            {
+              appId: forkAppId,
+              jobId,
+              sourceAppId: job.source_app_id,
+              errorMessage: msg,
+              mode: 'update',
+            },
+            logger,
+          ).catch((notifyErr) => logger.error({ notifyErr, jobId }, '[update] notifyCloneFailed failed'));
+        }
+      } else {
+        await setCloneJobStatus(controlDb, jobId, { error_message: msg }).catch(() => {});
+        logger.warn(
+          { jobId, attempt: task.attempts, maxAttempts: task.max_attempts, error: msg },
+          '[update] transient failure, will retry',
+        );
+      }
+      throw err;
     }
   });
 }

@@ -99,3 +99,20 @@ describe('manage_app: env actions', () => {
     expect(apiClient.apiPatch).not.toHaveBeenCalled();
   });
 });
+
+describe('manage_app: template update actions', () => {
+  let server: McpServer;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    server = new McpServer({ name: 'test', version: '0.0.0' });
+    registerManageApp(server);
+  });
+
+  it('exposes update_from_template and posts to the update route', async () => {
+    vi.mocked(apiClient.apiPost).mockResolvedValue({ job_id: 'cj_1' });
+    const handler = getHandler(server, 'manage_app');
+    const result = await handler({ action: 'update_from_template', app_id: 'app_fork' });
+    expect(apiClient.apiPost).toHaveBeenCalledWith('/v1/app_fork/template/update', {});
+    expect(JSON.parse(result.content[0].text).job_id).toBe('cj_1');
+  });
+});

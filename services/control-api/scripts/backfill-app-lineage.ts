@@ -41,6 +41,7 @@ async function main() {
         `SELECT source_snapshot_id, created_at
            FROM template_clone_jobs
           WHERE dest_app_id = $1
+            AND mode = 'clone'
           ORDER BY created_at ASC LIMIT 1`,
         [fork.id],
       );

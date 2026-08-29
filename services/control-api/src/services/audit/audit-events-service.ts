@@ -11,12 +11,22 @@ import { getRuntimeDbForApp } from '../region-resolver.js';
  * Returns a promise that resolves on success; callers in the clone worker
  * should .catch() secondary failures so they don't compound the original error.
  */
+/**
+ * Clone- and update-mode job lifecycle events. Update mode gets its OWN event
+ * types rather than reusing the clone ones: an owner reading their audit log
+ * needs to be able to tell "someone cloned my template" from "my app was reset
+ * to the template's latest release", and the two have different blast radii.
+ */
+export type CloneAuditEventType =
+  | 'template_clone_started' | 'template_clone_completed' | 'template_clone_failed'
+  | 'template_update_started' | 'template_update_completed' | 'template_update_failed';
+
 export async function insertCloneAuditLog(
   controlDb: Pool,
   opts: {
     appId: string;
     userId: string | null;
-    eventType: 'template_clone_started' | 'template_clone_completed' | 'template_clone_failed';
+    eventType: CloneAuditEventType;
     metadata: Record<string, unknown>;
   },
 ): Promise<void> {
@@ -28,8 +38,8 @@ export async function insertCloneAuditLog(
       opts.userId ?? null,
       opts.eventType,
       JSON.stringify(opts.metadata),
-      opts.eventType !== 'template_clone_failed',
-      opts.eventType === 'template_clone_failed' ? (opts.metadata.error as string | undefined) ?? null : null,
+      !opts.eventType.endsWith('_failed'),
+      opts.eventType.endsWith('_failed') ? (opts.metadata.error as string | undefined) ?? null : null,
     ],
   );
 }
