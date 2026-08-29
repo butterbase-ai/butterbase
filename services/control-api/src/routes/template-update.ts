@@ -13,7 +13,7 @@ import {
   computeDrift, computeDivergence, getLineage, type DriftResult, type Divergence,
 } from '../services/app-lineage.js';
 import { decideEligibility, type EligibilityReason, type EligibilityResult } from '../services/template-update-eligibility.js';
-import { createUpdateJob, deleteCloneJob, getActiveUpdateJob, getCloneJob } from '../services/clone-jobs.js';
+import { createUpdateJob, deleteCloneJob, getActiveUpdateJob, getCloneJob, UpdateJobConflictError} from '../services/clone-jobs.js';
 import { getRelease } from '../services/template-releases.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import {
@@ -163,18 +163,33 @@ export function templateUpdateRoutes(app: FastifyInstance): void {
       ));
     }
 
-    const job = await createUpdateJob(app.controlDb, {
-      forkAppId: resolved.id,
-      forkRegion: lineage.dest_region,
-      sourceAppId: lineage.source_app_id,
-      sourceRegion: lineage.source_region,
-      targetReleaseId: release.id,
-      sourceSnapshotId: release.snapshot_id,
-      requestedByUserId: userId,
-      // MUST stay null here — see createUpdateJob's doc comment. The worker
-      // records the pre-sync snapshot itself, right before its first write.
-      preSyncSnapshotId: null,
-    });
+    let job;
+    try {
+      job = await createUpdateJob(app.controlDb, {
+        forkAppId: resolved.id,
+        forkRegion: lineage.dest_region,
+        sourceAppId: lineage.source_app_id,
+        sourceRegion: lineage.source_region,
+        targetReleaseId: release.id,
+        sourceSnapshotId: release.snapshot_id,
+        requestedByUserId: userId,
+        // MUST stay null here — see createUpdateJob's doc comment. The worker
+        // records the pre-sync snapshot itself, right before its first write.
+        preSyncSnapshotId: null,
+      });
+    } catch (err) {
+      // The getActiveUpdateJob pre-check above is a read-then-write; two
+      // concurrent requests can both clear it. The partial unique index is what
+      // actually holds the line, and losing that race is the SAME condition the
+      // pre-check reports — so answer it identically instead of leaking a 500.
+      if (err instanceof UpdateJobConflictError) {
+        return reply.code(409).send(conflict(
+          'An update is already in progress for this app.',
+          `Check its status at GET /v1/${resolved.id}/template/update before starting another.`,
+        ));
+      }
+      throw err;
+    }
 
     // neon_tasks is a per-region queue; the update task is enqueued in the
     // SOURCE app's region, same as clone.ts's enqueueCloneTask, and dispatched

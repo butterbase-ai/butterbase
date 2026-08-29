@@ -176,6 +176,25 @@ export async function appendCloneJobWarnings(
 }
 
 /**
+ * Raised when the partial unique index idx_template_clone_jobs_one_update
+ * rejects an insert because this fork already has an update in flight.
+ *
+ * The route's getActiveUpdateJob pre-check is a read-then-write, so two
+ * concurrent requests can both clear it and race to the INSERT. The index is
+ * what actually enforces "at most one in-flight update per fork" — but a raw
+ * 23505 propagating out of here reaches the owner as a 500 INTERNAL_ERROR,
+ * which reads as "Butterbase is broken" rather than "you clicked twice".
+ * Translating it here lets the route answer with the same 409 the pre-check
+ * would have given.
+ */
+export class UpdateJobConflictError extends Error {
+  constructor(public readonly forkAppId: string) {
+    super(`An update is already in progress for ${forkAppId}`);
+    this.name = 'UpdateJobConflictError';
+  }
+}
+
+/**
  * `preSyncSnapshotId` MUST be null at creation time.
  *
  * The worker writes it after the execution-time eligibility gate passes and
@@ -207,17 +226,30 @@ export async function createUpdateJob(
   }
 
   const id = generateJobId();
-  const res = await controlDb.query<CloneJob>(
-    `INSERT INTO template_clone_jobs (
-       id, mode, source_app_id, source_snapshot_id, source_region,
-       dest_app_id, dest_region, requested_by_user_id,
-       target_release_id, pre_sync_snapshot_id, status
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
-     RETURNING *`,
-    [id, 'update', args.sourceAppId, args.sourceSnapshotId, args.sourceRegion,
-     args.forkAppId, args.forkRegion, args.requestedByUserId,
-     args.targetReleaseId, args.preSyncSnapshotId],
-  );
+  let res;
+  try {
+    res = await controlDb.query<CloneJob>(
+      `INSERT INTO template_clone_jobs (
+         id, mode, source_app_id, source_snapshot_id, source_region,
+         dest_app_id, dest_region, requested_by_user_id,
+         target_release_id, pre_sync_snapshot_id, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+       RETURNING *`,
+      [id, 'update', args.sourceAppId, args.sourceSnapshotId, args.sourceRegion,
+       args.forkAppId, args.forkRegion, args.requestedByUserId,
+       args.targetReleaseId, args.preSyncSnapshotId],
+    );
+  } catch (err) {
+    // 23505 on this specific index means a concurrent request won the race.
+    // Any other unique violation is a real bug and must keep propagating.
+    if (
+      (err as { code?: string })?.code === '23505' &&
+      (err as { constraint?: string })?.constraint === 'idx_template_clone_jobs_one_update'
+    ) {
+      throw new UpdateJobConflictError(args.forkAppId);
+    }
+    throw err;
+  }
   return res.rows[0];
 }
 

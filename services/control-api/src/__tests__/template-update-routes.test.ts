@@ -60,6 +60,7 @@ async function buildApp(opts: {
   release?: { id: string; snapshot_id: string; release_number: number } | null;
   releaseManifest?: { functions: { name: string }[] } | null;
   enqueueThrows?: boolean;
+  createUpdateJobConflicts?: boolean;
 }) {
   vi.resetModules();
 
@@ -142,12 +143,18 @@ async function buildApp(opts: {
 
   const createUpdateJobCalls: Record<string, unknown>[] = [];
   const deletedJobIds: string[] = [];
+  const actualCloneJobs = await vi.importActual<typeof import('../services/clone-jobs.js')>('../services/clone-jobs.js');
   vi.doMock('../services/clone-jobs.js', async () => ({
     getActiveUpdateJob: async () => activeJob,
     createUpdateJob: async (_db: unknown, args: Record<string, unknown>) => {
       createUpdateJobCalls.push(args);
+      if (opts.createUpdateJobConflicts) {
+        const { UpdateJobConflictError } = await import('../services/clone-jobs.js');
+        throw new UpdateJobConflictError('app_fork');
+      }
       return { id: 'cj_new', mode: 'update', status: 'pending', ...args };
     },
+    UpdateJobConflictError: actualCloneJobs.UpdateJobConflictError,
     getCloneJob: async (_db: unknown, jobId: string) => (job && job.id === jobId ? job : null),
     deleteCloneJob: async (_db: unknown, jobId: string) => { deletedJobIds.push(jobId); },
   }));
@@ -214,6 +221,20 @@ describe('POST /v1/:app_id/template/update', () => {
     const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update' });
     expect(res.statusCode).toBe(409);
     await app.close();
+  });
+
+
+  // The pre-check (getActiveUpdateJob) is a read-then-write, so two concurrent
+  // requests can both pass it. The partial unique index
+  // idx_template_clone_jobs_one_update is what actually holds the line — but a
+  // raw 23505 escaping the route surfaced to the owner as a 500
+  // INTERNAL_ERROR. Double-clicking Update must read as "already in progress",
+  // not as a server fault.
+  it('returns 409, not 500, when the unique index rejects a racing insert', async () => {
+    const { app } = await buildApp({ drift: { behind_by: 1 }, createUpdateJobConflicts: true });
+    const res = await app.inject({ method: 'POST', url: '/v1/app_fork/template/update' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).toMatch(/already in progress/i);
   });
 
   it('returns 202 and a job for an eligible fork', async () => {
