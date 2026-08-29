@@ -1695,11 +1695,16 @@ export async function executeUpdate(
       await setCloneJobStatus(controlDb, jobId, { status: 'replaying_schema' });
       await replaySchema(sourceAppPool, forkAppPool, forkAppId, logger, { filter: filterAdditive });
 
-      // -- 6. RLS. replayRls only issues CREATE POLICY and drops nothing, so it is
-      //       safe on a live fork — and necessary: a table the release adds is
-      //       created here with SELECT/INSERT/UPDATE/DELETE granted to
-      //       butterbase_anon by the schema applier, so skipping policy replay
+      // -- 6. RLS. replayRls only ADDS -- CREATE POLICY plus ENABLE/FORCE ROW
+      //       LEVEL SECURITY -- and never drops a policy or issues DISABLE/NO
+      //       FORCE, so it is safe on a live fork. It is also necessary: a table
+      //       the release adds is created here with SELECT/INSERT/UPDATE/DELETE
+      //       granted to butterbase_anon by the schema applier, so skipping this
       //       would publish that table wide open on every fork.
+      //
+      //       The ENABLE half is what makes the policies binding. Replaying
+      //       policies without it -- which is what this did until 2026-08-30 --
+      //       left every protected table readable in full.
       //
       //       Policies the fork already has make CREATE POLICY fail with
       //       "already exists"; replayRls catches per policy, so those are
