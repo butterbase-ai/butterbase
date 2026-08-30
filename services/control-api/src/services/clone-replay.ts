@@ -13,7 +13,12 @@ import { introspectSchema } from './schema-introspector.js';
 import { diffSchema, type DDLStatement } from './schema-differ.js';
 import { applyMigration } from './schema-applier.js';
 import type { SchemaDSL } from './schema-validator.js';
-import { introspectRls } from './rls-introspector.js';
+import {
+  introspectRls,
+  introspectRlsTables,
+  mapPolicyCommand,
+  type RlsTableState,
+} from './rls-introspector.js';
 import AdmZip from 'adm-zip';
 import * as R2 from './r2.js';
 import * as DeploymentService from './deployment.service.js';
@@ -342,20 +347,34 @@ export async function replaySeedData(
 // replayRls helpers
 // ---------------------------------------------------------------------------
 
-const CMD_MAP: Record<string, string> = {
-  r: 'SELECT',
-  a: 'INSERT',
-  w: 'UPDATE',
-  d: 'DELETE',
-  '*': 'ALL',
-};
-
 /**
- * Replay RLS policies from the source app's database onto the dest app's database.
+ * Replay RLS from the source app's database onto the dest app's database.
  *
- * Soft-fails per-policy: if a policy fails to apply (e.g. due to a missing
- * column or function reference), the error is recorded as a warning and the
- * clone continues. The caller is responsible for persisting the warnings.
+ * Two halves, and BOTH are load-bearing:
+ *
+ *  1. the policies themselves, and
+ *  2. the per-table `relrowsecurity` / `relforcerowsecurity` toggles.
+ *
+ * Only (1) used to happen. Postgres does not enforce a policy until RLS is
+ * enabled on its table, so every clone and every template update produced a
+ * destination whose policies were decorative: a table the source protected
+ * came out fully readable, with `GRANT ... TO butterbase_anon` already applied
+ * by the schema applier. Replaying (2) is what makes the policies mean
+ * anything.
+ *
+ * Order is policies first, then enable. An update runs against a LIVE fork, and
+ * flipping RLS on before its policies exist opens a window where every
+ * non-owner read returns zero rows.
+ *
+ * Enabling is one-way: this never issues DISABLE or NO FORCE. A template that
+ * has RLS off must not be able to switch it off on a fork that turned it on —
+ * that is the only direction that loosens security, and update is additive by
+ * contract.
+ *
+ * Soft-fails per statement: a policy or toggle that fails is recorded as a
+ * warning and the replay continues. The caller persists the warnings. A failed
+ * ENABLE is reported in the same channel but is a security failure, not a
+ * cosmetic one — the table stays readable.
  *
  * @param sourceAppPool - Connected pool for the source app's per-app DB.
  * @param destAppPool   - Connected pool for the dest app's per-app DB.
@@ -373,7 +392,7 @@ export async function replayRls(
   let replayed = 0;
 
   for (const p of policies) {
-    const cmd = CMD_MAP[p.command] ?? 'ALL';
+    const cmd = mapPolicyCommand(p.command);
     const roles =
       p.roles.length === 0 || p.roles.includes('public')
         ? 'PUBLIC'
@@ -402,6 +421,70 @@ export async function replayRls(
         { table: p.table, policy: p.name, err },
         '[clone] RLS policy replay failed; continuing',
       );
+    }
+  }
+
+  // Toggles last — see the ordering note above.
+  let tableStates: RlsTableState[] = [];
+  try {
+    tableStates = await introspectRlsTables(sourceAppPool);
+  } catch (err) {
+    const msg = `RLS table state introspection failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] could not read source RLS table state; policies may be inert');
+  }
+
+  for (const t of tableStates) {
+    try {
+      await destAppPool.query(`ALTER TABLE "${t.table}" ENABLE ROW LEVEL SECURITY`);
+    } catch (err) {
+      const msg =
+        `RLS enable for ${t.table} failed: ${(err as Error).message} — ` +
+        `its policies will NOT be enforced on this app`;
+      warnings.push(msg);
+      logger.warn({ table: t.table, err }, '[clone] ENABLE ROW LEVEL SECURITY failed; table left unprotected');
+      continue;
+    }
+    if (t.forced) {
+      try {
+        await destAppPool.query(`ALTER TABLE "${t.table}" FORCE ROW LEVEL SECURITY`);
+      } catch (err) {
+        const msg = `RLS force for ${t.table} failed: ${(err as Error).message}`;
+        warnings.push(msg);
+        logger.warn({ table: t.table, err }, '[clone] FORCE ROW LEVEL SECURITY failed; continuing');
+      }
+    }
+
+    // Enabling RLS is not the same as being protected. Permissive policies OR
+    // together, so a single `TO PUBLIC USING (true)` policy makes the table
+    // readable by everyone no matter what else is on it. Forks cloned before
+    // the roles bug was fixed can carry exactly that: the old replay turned
+    // every `TO butterbase_service USING (true)` bypass policy public. Leaving
+    // such a table looking protected is worse than leaving it obviously open,
+    // so say so. Detection only -- dropping a policy the owner may have written
+    // deliberately is not this function's call to make.
+    try {
+      const neutered = await destAppPool.query<{ policyname: string }>(
+        `SELECT policyname FROM pg_policies
+          WHERE schemaname = 'public' AND tablename = $1
+            AND permissive = 'PERMISSIVE'
+            AND (roles::text[] @> ARRAY['public'] OR roles::text = '{0}')
+            AND coalesce(btrim(qual), 'true') = 'true'`,
+        [t.table],
+      );
+      for (const row of neutered.rows) {
+        const msg =
+          `RLS is enabled on ${t.table} but policy "${row.policyname}" is PERMISSIVE ` +
+          `TO PUBLIC USING (true), so row filtering is NOT enforced on that table. ` +
+          `Review and scope or drop that policy.`;
+        warnings.push(msg);
+        logger.warn(
+          { table: t.table, policy: row.policyname },
+          '[clone] RLS enabled but a public allow-all policy neutralises it',
+        );
+      }
+    } catch (err) {
+      logger.warn({ table: t.table, err }, '[clone] could not audit policies for public allow-all');
     }
   }
 
