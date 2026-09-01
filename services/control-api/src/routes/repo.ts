@@ -24,6 +24,7 @@ import {
 } from '../services/repo-storage.js';
 import { presignBuildCacheGet, presignBuildCachePut } from '../services/r2.js';
 import { planRetention } from '../services/repo-retention.js';
+import { listReleaseSnapshotIdsForApp } from '../services/template-releases.js';
 import { listActiveCloneSnapshotIdsForApp } from '../services/clone-jobs.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { config } from '../config.js';
@@ -194,8 +195,16 @@ export async function repoRoutes(app: FastifyInstance) {
           blobs: new Set(m.files.map(f => f.sha256)),
         };
       }));
-      const cloneActivePins = await listActiveCloneSnapshotIdsForApp(app.controlDb, ctx.appId);
-      const pinned = new Set<string>([manifest.snapshotId, ...cloneActivePins]);
+      // Pin: the snapshot just pushed, anything an in-flight clone is mid-copy on,
+      // and every snapshot a PUBLISHED RELEASE points at. Releases outlive the
+      // retention window by design — a fork may resolve one months later — so
+      // without this, publishing a release and then pushing REPO_RETAIN_SNAPSHOTS
+      // more commits silently deleted the bytes that release promised.
+      const [cloneActivePins, releasePins] = await Promise.all([
+        listActiveCloneSnapshotIdsForApp(app.controlDb, ctx.appId),
+        listReleaseSnapshotIdsForApp(app.controlDb, ctx.appId),
+      ]);
+      const pinned = new Set<string>([manifest.snapshotId, ...cloneActivePins, ...releasePins]);
       const plan = planRetention(summaries, pinned);
       for (const snap of plan.dropSnapshots) {
         await deleteSnapshot(ctx.appId, snap);

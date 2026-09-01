@@ -336,15 +336,26 @@ export async function getActiveUpdateJob(
   return res.rows[0] ?? null;
 }
 
-/** Snapshot ids that an in-flight clone is reading from — caller adds them to planRetention's pinned set. */
+/**
+ * Snapshot ids that an in-flight clone is reading from — caller adds them to
+ * planRetention's pinned set.
+ *
+ * "In flight" is everything NOT terminal, not just pending/processing. A clone
+ * moves through copying_repo, replaying_schema, replaying_rls, seeding_data,
+ * replaying_functions, replaying_config and replaying_durable_objects, and the
+ * repo copy happens in the middle of that. Keying the pin on the two earliest
+ * statuses left the source snapshot unpinned for most of the clone's life, so a
+ * repo push on the template mid-clone could delete the very snapshot being
+ * copied. Same predicate mistake migration 111 fixed for the update mutex.
+ */
 export async function listActiveCloneSnapshotIdsForApp(
   controlDb: pg.Pool,
   sourceAppId: string,
 ): Promise<Set<string>> {
   const res = await controlDb.query<{ source_snapshot_id: string }>(
     `SELECT source_snapshot_id FROM template_clone_jobs
-     WHERE source_app_id = $1 AND status IN ('pending', 'processing')`,
-    [sourceAppId],
+      WHERE source_app_id = $1 AND NOT (status = ANY($2::text[]))`,
+    [sourceAppId, TERMINAL_CLONE_STATUSES],
   );
   return new Set(res.rows.map(r => r.source_snapshot_id));
 }
