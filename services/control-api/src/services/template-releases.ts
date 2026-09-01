@@ -149,3 +149,27 @@ export async function updateReleaseText(
   );
   return res.rows[0] ?? null;
 }
+
+/**
+ * Snapshot ids pinned by this app's published releases — the caller adds them to
+ * planRetention's pinned set.
+ *
+ * A release is a promise that a specific snapshot stays fetchable: forks resolve
+ * it at update time, potentially months later. Retention keeps only the newest
+ * REPO_RETAIN_SNAPSHOTS, and the pinned set previously held just the incoming
+ * snapshot plus in-flight clones — so publishing a release and then pushing five
+ * more commits deleted the snapshot that release pointed at, together with any
+ * blobs nothing else referenced. Nothing failed at push time. The release row
+ * survived, referencing bytes that no longer existed, and every fork updating
+ * from it died on "Source manifest not found".
+ */
+export async function listReleaseSnapshotIdsForApp(
+  controlDb: pg.Pool,
+  sourceAppId: string,
+): Promise<Set<string>> {
+  const res = await controlDb.query<{ snapshot_id: string }>(
+    `SELECT snapshot_id FROM template_releases WHERE source_app_id = $1`,
+    [sourceAppId],
+  );
+  return new Set(res.rows.map(r => r.snapshot_id));
+}
