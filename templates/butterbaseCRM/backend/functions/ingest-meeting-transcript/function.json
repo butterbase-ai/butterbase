@@ -1,0 +1,20 @@
+{
+  "name": "ingest-meeting-transcript",
+  "description": "Persist transcript as substrate source_artifact + trigger institutional-memory extraction. Denorms decisions/commitments/learnings + transcript text onto meeting.attrs so get-meeting-notes can render without ledger HTTP access.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "optional"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 60000,
+  "memoryLimitMb": 256,
+  "deployedAt": "2026-07-13T14:11:30.564Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

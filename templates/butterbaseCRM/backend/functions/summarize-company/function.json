@@ -1,0 +1,20 @@
+{
+  "name": "summarize-company",
+  "description": "Generate a 2-sentence AI overview for a company using its notes + recent deals + activity. RLS-scoped: caller's JWT must have visibility on the company.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 25000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:27.886Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": null,
+  "agent_tool_exposed_to": null
+}

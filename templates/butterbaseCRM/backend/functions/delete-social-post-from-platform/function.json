@@ -1,0 +1,22 @@
+{
+  "name": "delete-social-post-from-platform",
+  "description": "Deletes a sent social post from its origin platform via Composio. Leaves the local row intact but clears external_post_id/url. User-authenticated, membership-checked.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "path": "/delete-social-post-from-platform",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:28.098Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

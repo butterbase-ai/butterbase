@@ -1,0 +1,253 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..800,0..100;1,9..144,300..800,0..100&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Geist:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { color-scheme: light only; background-color: hsl(38 38% 96%); }
+  :root {
+    color-scheme: light only;
+    /* Mirrors butterbase CRM reference exactly */
+    --background: 38 38% 96%;
+    --foreground: 240 10% 10%;
+    --card: 36 33% 98%;
+    --card-foreground: 240 10% 10%;
+    --popover: 36 33% 98%;
+    --popover-foreground: 240 10% 10%;
+    --primary: 240 10% 10%;
+    --primary-foreground: 38 38% 96%;
+    --secondary: 36 25% 90%;
+    --secondary-foreground: 240 10% 18%;
+    --muted: 36 22% 92%;
+    --muted-foreground: 240 4% 42%;
+    --accent: 38 78% 56%;
+    --accent-foreground: 240 10% 10%;
+    --destructive: 6 76% 52%;
+    --destructive-foreground: 38 38% 96%;
+    --border: 36 18% 84%;
+    --input: 36 18% 84%;
+    --ring: 38 78% 56%;
+    --radius: 0.5rem;
+
+    --butter: 38 78% 56%;
+    --butter-soft: 38 88% 88%;
+    --coral: 6 76% 52%;
+    --sage: 145 22% 42%;
+    --ink: 240 10% 10%;
+    --paper: 38 38% 96%;
+    --rule: 36 14% 78%;
+
+    --font-display: 'Fraunces', 'Instrument Serif', ui-serif, Georgia, serif;
+    --font-editorial: 'Instrument Serif', 'Fraunces', ui-serif, Georgia, serif;
+    --font-sans: 'Geist', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  * { @apply border-border; }
+
+  html, body, #root { height: 100%; }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    letter-spacing: -0.005em;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: hsl(var(--muted));
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  .font-display {
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
+    font-variation-settings: 'opsz' 144, 'SOFT' 30;
+    letter-spacing: -0.02em;
+  }
+  .font-editorial {
+    font-family: var(--font-editorial);
+    font-style: italic;
+    letter-spacing: -0.01em;
+  }
+  .font-mono { font-family: var(--font-mono); }
+
+  .eyebrow {
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+
+  /* Dotted hairline — dots, not dashes */
+  .rule-dotted {
+    background-image: radial-gradient(circle, hsl(var(--rule)) 1px, transparent 1.2px);
+    background-size: 8px 1px;
+    background-repeat: repeat-x;
+    background-position: left center;
+    height: 1px;
+  }
+  .rule-dotted-v {
+    background-image: radial-gradient(circle, hsl(var(--rule)) 1px, transparent 1.2px);
+    background-size: 1px 8px;
+    background-repeat: repeat-y;
+    background-position: center top;
+    width: 1px;
+  }
+
+  /* Paper grain — subtle warm dotted texture on the shell */
+  .paper-grain { position: relative; isolation: isolate; }
+  .paper-grain::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    opacity: 0.5;
+    background-image: radial-gradient(hsl(var(--ink) / 0.025) 1px, transparent 1px);
+    background-size: 3px 3px;
+    mix-blend-mode: multiply;
+  }
+  .butter-mark {
+    background-image: linear-gradient(to right, hsl(var(--butter)) 0%, hsl(var(--butter)) 100%);
+    background-position: 0 100%;
+    background-size: 100% 2px;
+    background-repeat: no-repeat;
+  }
+
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* Flat bordered card (no shadow) */
+  .card-flat {
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+  }
+
+  /* Stage pill — dot + uppercase label */
+  .stage-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px 3px 7px; border-radius: 999px;
+    background: hsl(var(--secondary)); color: hsl(var(--secondary-foreground));
+    font-family: var(--font-sans);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  }
+  .stage-pill::before {
+    content: ''; width: 6px; height: 6px; border-radius: 999px;
+    background: currentColor; opacity: 0.55;
+  }
+
+  /* Asymmetric page header */
+  .page-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 1.5rem;
+    padding: 28px 32px 18px;
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  .page-title {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: clamp(34px, 4.2vw, 52px);
+    line-height: 0.95;
+    letter-spacing: -0.035em;
+    color: hsl(var(--foreground));
+  }
+  .page-title em {
+    font-family: var(--font-editorial);
+    font-style: italic;
+    font-weight: 400;
+    color: hsl(var(--butter));
+  }
+
+  /* Compatibility shim — old section-label name */
+  .section-label { @apply eyebrow; }
+}
+
+/* Selection */
+::selection { background: hsl(var(--butter) / 0.45); color: hsl(var(--ink)); }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 999px;
+  border: 2px solid hsl(var(--background));
+}
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); }
+
+/* Markdown — paper warm */
+.prose-msg p { margin: 0.35rem 0; line-height: 1.6; color: hsl(var(--foreground) / 0.85); }
+.prose-msg pre {
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+  color: hsl(var(--foreground));
+  padding: 0.75rem 0.875rem;
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+.prose-msg code {
+  background: hsl(var(--muted));
+  color: hsl(var(--butter));
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+}
+.prose-msg pre code { background: transparent; padding: 0; color: inherit; }
+.prose-msg strong { font-weight: 600; color: hsl(var(--foreground)); }
+.prose-msg em { font-style: italic; color: hsl(var(--butter)); font-family: var(--font-editorial); }
+.prose-msg h1, .prose-msg h2, .prose-msg h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  margin: 0.9rem 0 0.3rem;
+  line-height: 1.2;
+  color: hsl(var(--foreground));
+  letter-spacing: -0.015em;
+}
+.prose-msg h1 { font-size: 1.2rem; }
+.prose-msg h2 { font-size: 1.05rem; }
+.prose-msg h3 { font-size: 0.92rem; color: hsl(var(--foreground) / 0.75); }
+.prose-msg ul, .prose-msg ol { margin: 0.35rem 0; padding-left: 1.25rem; }
+.prose-msg ul { list-style: '–  '; }
+.prose-msg ol { list-style: decimal; }
+.prose-msg li { margin: 0.15rem 0; color: hsl(var(--foreground) / 0.85); }
+.prose-msg li::marker { color: hsl(var(--butter)); }
+.prose-msg a {
+  color: hsl(var(--foreground));
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+.prose-msg a:hover { color: hsl(var(--butter)); }
+.prose-msg hr {
+  border: 0;
+  height: 1px;
+  background-image: radial-gradient(circle, hsl(var(--rule)) 1px, transparent 1.2px);
+  background-size: 8px 1px;
+  margin: 0.85rem 0;
+}
+.prose-msg blockquote {
+  border-left: 2px solid hsl(var(--butter));
+  padding: 0.15rem 0 0.15rem 0.75rem;
+  color: hsl(var(--foreground) / 0.75);
+  font-style: italic;
+  margin: 0.5rem 0;
+}

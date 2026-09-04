@@ -1,0 +1,21 @@
+{
+  "name": "process-campaign-sends",
+  "description": "Cron-driven worker that walks active campaigns and pushes due queued sends through Gmail. Caps per-tick total + per-campaign rolling 24h.",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "*/5 * * * *",
+        "timezone": "UTC"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:30.134Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

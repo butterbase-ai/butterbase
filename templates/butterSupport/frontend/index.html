@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en" style="color-scheme: light only;">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="color-scheme" content="light only" />
+    <meta name="theme-color" content="#F6F2EA" />
+    <!-- Butterbase app id. Rewritten at zip time by zip-dist.js so a single
+         built artifact serves every clone. Runtime code prefers this tag over
+         the build-time VITE_BUTTERBASE_APP_ID env, so the same dist/ folder
+         can be deployed to LIVE and any clone without a rebuild. -->
+    <meta name="butterbase-app-id" content="__BB_APP_ID__" />
+    <title>Butter Support — Console</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/console/main.tsx"></script>
+  </body>
+</html>

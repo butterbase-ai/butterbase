@@ -1,0 +1,23 @@
+{
+  "name": "reject-proposal",
+  "description": "Founder UI rejects an agent_proposals row. Updates local mirror to 'rejected' and calls ctx.substrate.reject(substrate_action_id).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T16:24:29.837Z",
+  "envKeys": [
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -1,0 +1,25 @@
+{
+  "name": "fetch-ai-usage",
+  "description": "Admin-only. Proxies GET /v1/{app_id}/ai/usage so the browser doesn't need the platform JWT. Accepts optional startDate / endDate query params.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T12:48:35.253Z",
+  "envKeys": [
+    "BUTTERBASE_APP_ID",
+    "BUTTERBASE_API_URL",
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

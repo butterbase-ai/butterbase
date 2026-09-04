@@ -1,0 +1,14 @@
+[
+  {
+    "id": "92f181a9-63d6-4ddd-a524-39322ac0c2bf",
+    "name": "support-docs",
+    "description": "Customer-supplied documentation (URLs + uploaded files). The commodity-tier knowledge layer for the support agent. Shared access so all team members + the DO's agent loop can query.",
+    "access_mode": "shared",
+    "embedding_model": "text-embedding-3-small",
+    "embedding_dimensions": 1536,
+    "chunk_size": 512,
+    "chunk_overlap": 50,
+    "created_by": "249d87fa-a4a9-4456-b647-f05221472bc8",
+    "created_at": "2026-06-18T13:19:59.725Z"
+  }
+]

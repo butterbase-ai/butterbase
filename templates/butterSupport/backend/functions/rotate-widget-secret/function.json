@@ -1,0 +1,21 @@
+{
+  "name": "rotate-widget-secret",
+  "description": "Admin only. Generates a fresh widget HMAC secret, upserts into widget_secrets (singleton), and returns the raw value ONCE. Customer pastes into their app server.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T12:34:11.429Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

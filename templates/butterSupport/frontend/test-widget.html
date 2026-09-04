@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Widget bundle test</title>
+  </head>
+  <body>
+    <h1>Widget test page</h1>
+    <p>
+      The launcher should appear in the bottom-right corner.
+      API calls will fail without a valid HMAC, but the bundle itself
+      should load and the UI should render.
+    </p>
+    <script
+      src="./dist/widget.js"
+      data-recipe-base="https://butter-support.butterbase.dev"
+      data-user-payload="ZGVtbw=="
+      data-user-signature="00000000000000000000000000000000"
+      data-user-ts="1718726400000"
+    ></script>
+    <div id="butter-support-widget"></div>
+  </body>
+</html>

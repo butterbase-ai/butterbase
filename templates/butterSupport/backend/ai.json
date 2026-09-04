@@ -1,0 +1,11 @@
+{
+  "config": {
+    "defaultModel": "anthropic/claude-sonnet-4.6",
+    "allowedModels": [
+      "anthropic/claude-sonnet-4.6",
+      "anthropic/claude-haiku-4.5",
+      "openai/text-embedding-3-small"
+    ],
+    "maxTokensPerRequest": 8192
+  }
+}

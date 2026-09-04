@@ -1,0 +1,40 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Geist:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+#butter-support-widget {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2147483646;
+  font-family: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+.bs-shadow {
+  box-shadow:
+    0 24px 60px -16px rgba(20, 16, 12, 0.28),
+    0 8px 24px -8px rgba(245, 200, 66, 0.30),
+    0 0 0 1px rgba(20, 16, 12, 0.04);
+}
+
+.bs-display { font-family: 'Fraunces', ui-serif, Georgia, serif; }
+
+/* Subtle grain texture for the widget panel */
+.bs-grain { position: relative; }
+@keyframes bs-typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+.bs-grain::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/></svg>");
+  opacity: 0.04;
+  mix-blend-mode: multiply;
+  border-radius: inherit;
+}

@@ -1,0 +1,20 @@
+{
+  "name": "accept-invite",
+  "description": "Redeem a pending_invite token: create the membership for the calling user and delete the invite. Runs as service (RLS bypassed) so the new user can join without already being an admin. Identifies caller from x-user-id header.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:27.743Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": null,
+  "agent_tool_exposed_to": null
+}

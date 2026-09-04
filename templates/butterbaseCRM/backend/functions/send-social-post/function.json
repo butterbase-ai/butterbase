@@ -1,0 +1,22 @@
+{
+  "name": "send-social-post",
+  "description": "Internal: fans a social_posts row out to its selected channels (twitter/linkedin/reddit/instagram/tiktok) via ctx.integrations. Idempotent on post status. Media attachment for Twitter (TWITTER_MEDIA_UPLOAD) and LinkedIn (LINKEDIN_REGISTER_UPLOAD + PUT). Defensive id/url extraction + Reddit rejection detection + response logging.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "optional",
+        "path": "/send-social-post",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:33.629Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

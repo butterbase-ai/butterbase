@@ -1,0 +1,20 @@
+{
+  "name": "ingest-calendar",
+  "description": "Calendar ingest — per-workspace KV lock; pickMeetingUrl from hangoutLink/conferenceData; dispatch only inside [-5m,+10m]; pre-loop stale-bot sweep cancels queued bots when calendar drifts (event missing / starts_at or meeting_url changed / pre-fix leftover).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "optional"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 900000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:29.766Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

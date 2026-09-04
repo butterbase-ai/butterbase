@@ -1,0 +1,21 @@
+{
+  "name": "substrate-proxy",
+  "description": "Read-only substrate access for browser clients. Whitelisted to findEntities, getEntity, searchMemory, listSourceArtifacts, getSourceArtifact, listActions, getAction. All other actions rejected.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T12:48:53.474Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

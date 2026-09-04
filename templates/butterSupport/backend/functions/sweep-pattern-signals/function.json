@@ -1,0 +1,29 @@
+{
+  "name": "sweep-pattern-signals",
+  "description": "Cron daily 04:00 UTC + manual HTTP (internal-token gated). Surfaces patterns over the last 24h. Groups tickets by LLM-assigned topic_tag (recurring_topic kind) — skips singletons. Groups low-quality diagnoses by topic_tag (docs_gap kind). Only marks pattern_signals.surfaced=true AFTER substrate.propose('record_learning', ...) succeeds, so 5xx errors retry on the next cron tick instead of being permanently lost.",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "0 4 * * *"
+      },
+      "enabled": true
+    },
+    {
+      "type": "http",
+      "config": {
+        "auth": "none",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T17:02:06.268Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "get-meeting-notes",
+  "description": "Bundle transcript + decisions/commitments/learnings for the meeting modal. Reads denorm attrs (notetaker_decisions/commitments/learnings/transcript_text) written by ingest-meeting-transcript; falls back to substrate HTTP ledger (needs bb_sk_* w/ substrate_access). Emits flat items with text/title/description/etc — UI's TakeawaySection reads {item.text}.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:31.270Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

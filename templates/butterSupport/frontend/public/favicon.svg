@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="butter" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFE7A8"/>
+      <stop offset="100%" stop-color="#F5C24C"/>
+    </linearGradient>
+    <linearGradient id="butterDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#E8AE2C"/>
+      <stop offset="100%" stop-color="#C58B0C"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background (the butter stick) -->
+  <rect x="4" y="6" width="56" height="52" rx="12" fill="url(#butter)"/>
+  <rect x="4" y="6" width="56" height="52" rx="12" fill="none" stroke="url(#butterDark)" stroke-width="2"/>
+
+  <!-- Soft highlight, top-left, to read like a soft pat of butter -->
+  <ellipse cx="22" cy="20" rx="14" ry="6" fill="#FFFFFF" opacity="0.35"/>
+
+  <!-- Speech bubble (the "support" half) -->
+  <path d="M16 26
+           q0 -6 6 -6
+           h20
+           q6 0 6 6
+           v10
+           q0 6 -6 6
+           h-14
+           l-7 6
+           v-6
+           h0
+           q-5 0 -5 -6
+           z"
+        fill="#FFFFFF"
+        stroke="#7A4C00"
+        stroke-width="2"
+        stroke-linejoin="round"/>
+
+  <!-- Three dots, the "thinking" cue -->
+  <circle cx="24" cy="33" r="2" fill="#7A4C00"/>
+  <circle cx="32" cy="33" r="2" fill="#7A4C00"/>
+  <circle cx="40" cy="33" r="2" fill="#7A4C00"/>
+</svg>

@@ -1,0 +1,22 @@
+{
+  "name": "publish-social-post",
+  "description": "Publish a draft/scheduled/canceled social post: validates connectivity + per-channel rules, (re)creates pending send rows, then schedules or dispatches send-social-post immediately. User-auth + membership checked.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "path": "/publish-social-post",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:33.412Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -1,0 +1,25 @@
+{
+  "name": "request-doc-upload-url",
+  "description": "Admin-only. Validates content-type against the docs allowlist (PDF/MD/TXT/HTML/CSV/JSON) and returns a presigned PUT URL for the file. UI uploads directly to storage, then calls ingest-docs with source_kind=uploaded_file + object_id.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T12:46:48.137Z",
+  "envKeys": [
+    "BUTTERBASE_APP_ID",
+    "BUTTERBASE_API_URL",
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

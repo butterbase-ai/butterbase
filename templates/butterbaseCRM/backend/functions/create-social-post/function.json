@@ -1,0 +1,22 @@
+{
+  "name": "create-social-post",
+  "description": "Validates a compose payload, writes social_posts + social_post_sends rows, and either invokes send-social-post (immediate) or leaves for cron (scheduled). save_as_draft=true saves an incomplete draft with no sends/dispatch. User-auth required.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "path": "/create-social-post",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 15000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:34.072Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

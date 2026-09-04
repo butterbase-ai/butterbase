@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Acme Co · Widget Sandbox</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: #1c1917;
+      background: #faf7f0;
+      line-height: 1.55;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 32px 24px 120px; }
+    header {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 48px; padding-bottom: 20px;
+      border-bottom: 1px solid #ede4cf;
+    }
+    .logo {
+      width: 36px; height: 36px; border-radius: 8px;
+      background: #facc15; display: grid; place-items: center;
+      font-weight: 700; color: #422006;
+    }
+    .brand { font-weight: 600; }
+    .pill {
+      display: inline-block; padding: 2px 10px; border-radius: 999px;
+      background: #fef3c7; color: #78350f; font-size: 12px; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .spacer { flex: 1; }
+    h1 { font-size: 36px; letter-spacing: -0.02em; margin: 0 0 12px; }
+    h2 { font-size: 22px; letter-spacing: -0.01em; margin: 40px 0 12px; }
+    p  { margin: 0 0 12px; color: #44403c; }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #f5efe0; border: 1px solid #e7decb; border-radius: 6px;
+      padding: 2px 6px; font-size: 13px;
+    }
+    pre { padding: 12px 14px; overflow-x: auto; }
+    .hint {
+      margin-top: 56px; padding: 16px 18px; border: 1px dashed #d6caaa;
+      border-radius: 10px; background: #fffbf0; color: #57534e; font-size: 14px;
+    }
+
+    /* Auth controls */
+    .auth { display: flex; align-items: center; gap: 8px; }
+    .btn {
+      appearance: none; border: 1px solid #d6caaa; background: #fffbf0;
+      color: #1c1917; font: inherit; font-size: 13px; font-weight: 600;
+      padding: 7px 14px; border-radius: 8px; cursor: pointer;
+      transition: background 0.12s ease;
+    }
+    .btn:hover { background: #fef3c7; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn-primary {
+      background: #facc15; border-color: #eab308; color: #422006;
+    }
+    .btn-primary:hover { background: #fde047; }
+    .who { font-size: 13px; color: #57534e; }
+    .who strong { color: #1c1917; }
+
+    /* Modal */
+    .scrim {
+      position: fixed; inset: 0; background: rgba(28, 25, 23, 0.45);
+      display: none; align-items: center; justify-content: center;
+      z-index: 2147483600;
+    }
+    .scrim.open { display: flex; }
+    .modal {
+      width: min(420px, calc(100vw - 32px));
+      background: #faf7f0; border: 1px solid #e7decb;
+      border-radius: 14px; padding: 24px 24px 20px;
+      box-shadow: 0 20px 60px rgba(28, 25, 23, 0.25);
+    }
+    .modal h3 { margin: 0 0 6px; font-size: 18px; letter-spacing: -0.01em; }
+    .modal p.sub { font-size: 13px; color: #78716c; margin: 0 0 18px; }
+    .field { display: block; margin-bottom: 12px; }
+    .field label {
+      display: block; font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: #78716c;
+      margin-bottom: 6px;
+    }
+    .field input {
+      width: 100%; padding: 9px 12px; font: inherit; font-size: 14px;
+      border: 1px solid #d6caaa; background: #fffbf0; border-radius: 8px;
+      color: #1c1917;
+    }
+    .field input:focus { outline: 2px solid #facc15; outline-offset: -1px; }
+    .field input.code {
+      text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 22px; letter-spacing: 0.4em; padding: 14px 12px;
+    }
+    .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .err {
+      margin-top: 10px; padding: 8px 10px; font-size: 12px;
+      background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">A</div>
+      <strong class="brand">Acme Co</strong>
+      <span class="pill">staging</span>
+      <span class="spacer"></span>
+      <div class="auth" id="auth-controls">
+        <!-- populated by JS -->
+      </div>
+    </header>
+
+    <h1>Build payments your customers actually finish.</h1>
+    <p>Acme is the fastest way to add Stripe-grade checkout to your app. One snippet, every payment method, zero infra.</p>
+
+    <h2>What you get</h2>
+    <p>Drop-in checkout, hosted invoices, programmable refunds, and a webhook firehose you can subscribe to. Built on top of the rails you already know.</p>
+
+    <h2>Try the support widget</h2>
+    <p>Click the chat launcher in the bottom-right. Sign in with the button up top to send tickets as an identified user — leave it signed-out to test the anonymous visitor flow.</p>
+
+    <h2>Install</h2>
+    <pre>&lt;script async src="https://butter-support.butterbase.dev/widget.js" data-app-id="app_0ycj4ad7odud"&gt;&lt;/script&gt;</pre>
+
+    <div class="hint">
+      Sandbox for engineering review. Anything you type into the widget is a real ticket against
+      <code>app_0ycj4ad7odud</code>. When signed in, tickets carry your email + name via
+      <code>ButterSupport.identify()</code>; signed out, they're anonymous.
+    </div>
+  </div>
+
+  <!-- Sign-in modal -->
+  <div class="scrim" id="auth-scrim" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="modal">
+      <h3 id="auth-title">Sign in</h3>
+      <p class="sub">We'll email you a 6-digit code. No password.</p>
+
+      <div id="step-email">
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" type="email" placeholder="you@company.com" autocomplete="email" />
+        </div>
+        <div class="row">
+          <button class="btn" data-act="cancel">Cancel</button>
+          <button class="btn btn-primary" id="send-link">Send code</button>
+        </div>
+      </div>
+
+      <div id="step-code" style="display:none">
+        <div class="field">
+          <label for="code">6-digit code sent to <span id="who-email"></span></label>
+          <input id="code" class="code" inputmode="numeric" maxlength="6" placeholder="000000" />
+        </div>
+        <div class="row">
+          <button class="btn" id="back-to-email">Back</button>
+          <button class="btn btn-primary" id="verify-code">Verify</button>
+        </div>
+      </div>
+
+      <div class="err" id="auth-err" style="display:none"></div>
+    </div>
+  </div>
+
+  <!-- Support widget — same snippet a customer would paste -->
+  <script async src="https://butter-support.butterbase.dev/widget.js" data-app-id="app_0ycj4ad7odud"></script>
+
+  <!-- Identity bridge: pushes identify() onto the widget queue so it works
+       whether the bundle has loaded yet or not. -->
+  <script>
+    window.ButterSupport = window.ButterSupport || { q: [] };
+    window.__setWidgetIdentity = function (identity) {
+      const ws = window.ButterSupport;
+      if (ws && typeof ws.identify === 'function' && !Array.isArray(ws.q)) {
+        ws.identify(identity);
+      } else {
+        (ws.q = ws.q || []).push(['identify', identity]);
+      }
+    };
+  </script>
+
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@butterbase/sdk@2.6.0';
+
+    const bb = createClient({
+      appId: 'app_9uym9waaxxkn',
+      apiUrl: 'https://api.butterbase.ai',
+    });
+
+    const $ = (sel) => document.querySelector(sel);
+    const controls = $('#auth-controls');
+    const scrim = $('#auth-scrim');
+    const stepEmail = $('#step-email');
+    const stepCode = $('#step-code');
+    const emailInput = $('#email');
+    const codeInput = $('#code');
+    const whoEmail = $('#who-email');
+    const errBox = $('#auth-err');
+    const sendBtn = $('#send-link');
+    const verifyBtn = $('#verify-code');
+    const backBtn = $('#back-to-email');
+
+    let pendingEmail = '';
+
+    function showError(msg) {
+      errBox.textContent = msg;
+      errBox.style.display = 'block';
+    }
+    function clearError() { errBox.style.display = 'none'; errBox.textContent = ''; }
+
+    function openModal() {
+      clearError();
+      emailInput.value = '';
+      codeInput.value = '';
+      stepEmail.style.display = '';
+      stepCode.style.display = 'none';
+      scrim.classList.add('open');
+      setTimeout(() => emailInput.focus(), 50);
+    }
+    function closeModal() { scrim.classList.remove('open'); }
+
+    scrim.addEventListener('click', (e) => {
+      if (e.target === scrim) closeModal();
+      const act = e.target.closest('[data-act]')?.dataset.act;
+      if (act === 'cancel') closeModal();
+    });
+
+    sendBtn.addEventListener('click', async () => {
+      const email = emailInput.value.trim();
+      if (!email) return;
+      clearError();
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Sending…';
+      try {
+        const { error } = await bb.auth.sendMagicLink(email);
+        if (error) throw error;
+        pendingEmail = email;
+        whoEmail.textContent = email;
+        stepEmail.style.display = 'none';
+        stepCode.style.display = '';
+        setTimeout(() => codeInput.focus(), 50);
+      } catch (e) {
+        showError(e?.message || 'Failed to send code');
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send code';
+      }
+    });
+
+    emailInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && emailInput.value.trim()) sendBtn.click();
+    });
+
+    backBtn.addEventListener('click', () => {
+      stepCode.style.display = 'none';
+      stepEmail.style.display = '';
+      clearError();
+    });
+
+    verifyBtn.addEventListener('click', async () => {
+      const code = codeInput.value.trim();
+      if (code.length !== 6) return;
+      clearError();
+      verifyBtn.disabled = true;
+      verifyBtn.textContent = 'Verifying…';
+      try {
+        const { error } = await bb.auth.verifyMagicLink(pendingEmail, code);
+        if (error) throw error;
+        closeModal();
+        await renderAuth();
+      } catch (e) {
+        showError(e?.message || 'Invalid or expired code');
+      } finally {
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'Verify';
+      }
+    });
+
+    codeInput.addEventListener('input', () => {
+      codeInput.value = codeInput.value.replace(/\D/g, '').slice(0, 6);
+    });
+    codeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && codeInput.value.length === 6) verifyBtn.click();
+    });
+
+    async function getUser() {
+      try {
+        const { data } = await bb.auth.getUser();
+        return data || null;
+      } catch { return null; }
+    }
+
+    async function renderAuth() {
+      const user = await getUser();
+      controls.innerHTML = '';
+      if (user) {
+        const name = user.display_name || user.email || 'Signed in';
+        const who = document.createElement('span');
+        who.className = 'who';
+        who.innerHTML = `Signed in as <strong>${escapeHtml(user.email || name)}</strong>`;
+        const signOut = document.createElement('button');
+        signOut.className = 'btn';
+        signOut.textContent = 'Sign out';
+        signOut.addEventListener('click', async () => {
+          try { await bb.auth.signOut(); } catch {}
+          window.__setWidgetIdentity(null);
+          await renderAuth();
+        });
+        controls.append(who, signOut);
+        window.__setWidgetIdentity({
+          user_id: user.id,
+          email: user.email,
+          name: user.display_name || user.email,
+        });
+      } else {
+        const signIn = document.createElement('button');
+        signIn.className = 'btn btn-primary';
+        signIn.textContent = 'Sign in';
+        signIn.addEventListener('click', openModal);
+        const hint = document.createElement('span');
+        hint.className = 'who';
+        hint.textContent = 'or chat anonymously';
+        controls.append(hint, signIn);
+        window.__setWidgetIdentity(null);
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    renderAuth();
+  </script>
+</body>
+</html>

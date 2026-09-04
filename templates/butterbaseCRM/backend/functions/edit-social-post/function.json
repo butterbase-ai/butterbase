@@ -1,0 +1,22 @@
+{
+  "name": "edit-social-post",
+  "description": "Edit a social post. Drafts/scheduled/failed: updates fields freely + resyncs pending sends. Already-published (sent/partial): updates the CRM copy and, when push_to_platform=true, pushes the new body to the live post (Reddit self-post body only; LinkedIn/X not editable). User-auth + membership checked.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "path": "/edit-social-post",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:33.267Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

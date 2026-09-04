@@ -1,0 +1,26 @@
+{
+  "name": "substrate-read-internal",
+  "description": "Internal-only substrate read gateway for SupportTicketDO. Wraps ctx.substrate (findEntities, getEntity, searchMemory) and the HTTP /v1/me/substrate/source-artifacts route. Sanitises agent-provided q strings before hitting substrate FTS (rewrites email addresses to their local part, strips '#' and punctuation that substrate's index does not handle as standalones).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T17:43:01.230Z",
+  "envKeys": [
+    "BUTTERBASE_API_KEY",
+    "BUTTERBASE_API_URL",
+    "BUTTERBASE_APP_ID"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

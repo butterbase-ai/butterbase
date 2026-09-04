@@ -1,0 +1,24 @@
+{
+  "name": "do-substrate-propose",
+  "description": null,
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T17:13:42.080Z",
+  "envKeys": [
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

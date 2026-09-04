@@ -1,0 +1,25 @@
+{
+  "name": "execute-escalation",
+  "description": "Substrate outbox handler for capability support.escalate_to_human. Verifies HMAC, dedupes via idempotency.claim, fans out to every active escalation_target (or one if target_config_id provided), sends each via Composio Slack/Gmail. Writes one escalations row per target (idempotency_key = action_id:target_id) and one activity per outcome. ok=true if any target succeeded.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T17:07:03.239Z",
+  "envKeys": [
+    "SUBSTRATE_OUTBOX_SECRET",
+    "INTERNAL_TOKEN",
+    "SYNC_ARTIFACT_URL"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "widget-fetch-history",
+  "description": "Public widget endpoint. Returns visitor's prior tickets or one ticket's messages (with status). Auth v2: scoped to visitor_token in body.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T01:02:07.984Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

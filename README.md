@@ -226,6 +226,7 @@ Full setup (auth, MCP clients, troubleshooting, production notes): **[`SETUP.md`
 - `infra/` — `pgbouncer` and `traefik` configs for self-host.
 - `db/` — SQL migrations for the three Postgres planes.
 - `Examples/` — `todo-2026-04-02`, `grocery-list-2026-04-03`.
+- `templates/` — full production-shaped apps: `butterSupport`, `butterbaseCRM`.
 
 ## What's *not* in this repo
 
@@ -247,7 +248,8 @@ If you need these for self-host, implement against the interfaces in `packages/s
 - [`SUBDOMAIN_IMPLEMENTATION.md`](./SUBDOMAIN_IMPLEMENTATION.md) — tenant subdomain routing
 - [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md) — multi-region E2E stack
 - [`docs/runbooks`](./docs/runbooks) — operational runbooks
-- [`Examples/`](./Examples) — example apps (todo, grocery list)
+- [`Examples/`](./Examples) — small example apps (todo, grocery list)
+- [`templates/`](./templates) — full apps you can clone and run (butterSupport, butterbaseCRM)
 - Docs site (local): `http://localhost:4321` after `docker compose up`
 
 ## Project status

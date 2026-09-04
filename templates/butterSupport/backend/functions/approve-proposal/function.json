@@ -1,0 +1,23 @@
+{
+  "name": "approve-proposal",
+  "description": "Founder UI approves an agent_proposals row. Updates local mirror to 'approved' and calls ctx.substrate.approve(substrate_action_id) so substrate fires the outbox webhook for the capability.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T16:24:12.502Z",
+  "envKeys": [
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "widget-followup",
+  "description": "Public widget endpoint. Adds a customer follow-up message and kicks the SupportTicketDO agent loop (tool-using) for the next turn via ctx.invokeDO (no shared secret).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "envKeys": []
+}

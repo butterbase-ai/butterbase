@@ -1,0 +1,20 @@
+{
+  "name": "invite-member",
+  "description": "Create a pending_invite for an email + send via inviter's Gmail (Composio). Auto-adds invitee to app_allowlist so they can pass the login gate.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:36.066Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}
