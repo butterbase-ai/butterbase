@@ -622,6 +622,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
         return {
           id: e.canonicalId,
           name: e.displayName,
+          // Defaults to 'chat' for rows written before the field existed, the
+          // same fallback readCatalogEntry consumers use elsewhere. Browsing
+          // UIs filter on this — the dashboard assistant's picker lists only
+          // `chat` so users cannot point a text thread at a video model.
+          modality: best?.modality ?? 'chat',
           inputPricePerMTokens: best ? applyMarkup(best.promptPricePerMtok, markupPct) : undefined,
           outputPricePerMTokens: best ? applyMarkup(best.completionPricePerMtok, markupPct) : undefined,
           contextWindow: best?.contextLength ?? null,
