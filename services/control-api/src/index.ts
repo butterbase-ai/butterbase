@@ -696,6 +696,25 @@ try {
   // admin billing remediation console in production.
   console.warn('[control-api] admin-remediation overlay not registered:', err);
 }
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/app-copy/routes.js');
+  await app.register(overlay.default ?? overlay.appCopyRoutes);
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a genuine
+  // registration error would otherwise silently 404 the app-copy console.
+  console.warn('[control-api] app-copy overlay not registered:', err);
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const worker = await import('../../../cloud-overlays/dist/cloud-overlays/app-copy/worker.js');
+  // @ts-expect-error — overlay path resolved at runtime
+  const deps = await import('../../../cloud-overlays/dist/cloud-overlays/app-copy/deps.js');
+  worker.startAppCopyWorker(app.controlDb, deps.makeExecuteDeps(app.controlDb));
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw.
+  console.warn('[control-api] app-copy worker not started:', err);
+}
 app.register(apiKeyRoutes);
 app.register(realtimeRoutes);
 app.register(ragRoutes);
