@@ -78,6 +78,7 @@ import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
 import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
+import { startCloneIntentsPruner } from './services/clone-intents-pruner.js';
 import { startCloneJobsReaper } from './services/clone-jobs-reaper.js';
 import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
 import { gatewayRoutes } from './routes/gateway.js';
@@ -1082,6 +1083,15 @@ Promise.resolve(app.ready())
       const cloneJobsPrunerHandle = startCloneJobsPruner(app.controlDb, app.log);
       (app as any).cloneJobsPrunerHandle = cloneJobsPrunerHandle;
       app.log.info('Clone-jobs pruner started (24h interval)');
+    }
+
+    // Clone-intents pruner: deletes expired-unredeemed template_clone_intents
+    // rows (which still hold encrypted_env_values secrets) promptly, plus
+    // redeemed audit rows older than 30 days (runs every 24 h).
+    if (process.env.SKIP_CLONE_INTENTS_PRUNER !== '1') {
+      const cloneIntentsPrunerHandle = startCloneIntentsPruner(app.controlDb, app.log);
+      (app as any).cloneIntentsPrunerHandle = cloneIntentsPrunerHandle;
+      app.log.info('Clone-intents pruner started (24h interval)');
     }
 
     // Clone-jobs reaper: flips template_clone_jobs stuck in a mid-stage
