@@ -162,4 +162,45 @@ describe('startClone source-not-found remediation', () => {
       .toBe('Only public apps are clonable.');
     expect(unknown.body.error.remediation).not.toBe(notPublic.body.error.remediation);
   });
+
+  it('keeps the non-string-VALUE env var remediation distinct from the shape hint', async () => {
+    const { startClone, sendStartCloneFailure } = await import('../services/start-clone.js');
+    const controlDb = controlDbWith(() => [{ c: 0 }]);
+
+    // A non-string VALUE — the sub-case whose own hint the extraction lost.
+    const badValue = await startClone({
+      controlDb,
+      sourceAppId: 'app_src',
+      userId: 'u1',
+      destOrgId: 'org1',
+      envVarValues: { fn: { KEY: 42 } } as any,
+      logger: logger as any,
+    });
+    expect(badValue.ok).toBe(false);
+    const valueReply = fakeReply();
+    if (!badValue.ok) sendStartCloneFailure(valueReply, badValue);
+    expect(valueReply.statusCode).toBe(400);
+    expect(valueReply.body.error.message).toBe('env_var_values["fn"]["KEY"] must be a string.');
+    expect(valueReply.body.error.remediation).toBe('Env var values must be strings.');
+
+    // A shape error still gets the generic hint — the other sub-cases are
+    // undisturbed.
+    const badShape = await startClone({
+      controlDb,
+      sourceAppId: 'app_src',
+      userId: 'u1',
+      destOrgId: 'org1',
+      envVarValues: { fn: 'nope' } as any,
+      logger: logger as any,
+    });
+    expect(badShape.ok).toBe(false);
+    const shapeReply = fakeReply();
+    if (!badShape.ok) sendStartCloneFailure(shapeReply, badShape);
+    expect(shapeReply.body.error.message)
+      .toBe('env_var_values["fn"] must be an object of {key: value} strings.');
+    expect(shapeReply.body.error.remediation)
+      .toBe('Send env_var_values as { fn_name: { KEY: "value" } }.');
+
+    expect(valueReply.body.error.remediation).not.toBe(shapeReply.body.error.remediation);
+  });
 });

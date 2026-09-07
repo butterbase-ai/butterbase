@@ -43,7 +43,10 @@ export type StartCloneFailure =
   | { code: 'NO_SNAPSHOT' }
   | { code: 'NAME_TAKEN'; name: string }
   | { code: 'INFLIGHT_LIMIT' }
-  | { code: 'INVALID_ENV_SHAPE'; message: string }
+  // `remediation` carries the per-sub-case hint the pre-extraction handler
+  // had: a non-string VALUE got "Env var values must be strings.", the shape
+  // errors got the generic "send it like this". Undefined means generic.
+  | { code: 'INVALID_ENV_SHAPE'; message: string; remediation?: string }
   | { code: 'INVALID_AUTO_MINT'; message: string }
   | { code: 'QUOTA_EXCEEDED'; current: number; limit: number };
 
@@ -152,7 +155,12 @@ export async function startClone(args: {
   // have.
   const envShape = validateEnvVarValues(args.envVarValues);
   if (!envShape.ok) {
-    return { ok: false, code: 'INVALID_ENV_SHAPE', message: envShape.message };
+    return {
+      ok: false,
+      code: 'INVALID_ENV_SHAPE',
+      message: envShape.message,
+      ...(envShape.remediation ? { remediation: envShape.remediation } : {}),
+    };
   }
 
   const autoMintShape = validateAutoMintRequests(args.autoMintRequests);
@@ -255,7 +263,7 @@ export function sendStartCloneFailure(
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
         message: failure.message,
-        remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
+        remediation: failure.remediation ?? 'Send env_var_values as { fn_name: { KEY: "value" } }.',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     case 'INVALID_AUTO_MINT':

@@ -249,15 +249,32 @@ export function cloneIntentRoutes(app: FastifyInstance): void {
       // and holding their env var secrets in pending_env_vars indefinitely.
       // abandonDuplicateCloneJob marks it failed and NULLs those secrets in one
       // statement.
-      await abandonDuplicateCloneJob(
-        app.controlDb,
-        result.jobId,
-        `Abandoned: a concurrent redemption of this clone session won the claim and started job ${winnerJobId ?? 'unknown'}. This duplicate was never queued.`,
-      );
+      //
+      // The warn is emitted FIRST and the disposal is wrapped: if
+      // abandonDuplicateCloneJob throws, losing the diagnostic as well as the
+      // disposal would leave an undiagnosable orphan holding secrets. Log the
+      // race, attempt the disposal, and log its failure separately — the
+      // response to the user is the winner's job id either way.
       request.log.warn(
         { intentId: id, orphanedJobId: result.jobId, winnerJobId },
-        '[clone-intent] lost redemption race; duplicate clone job marked failed and its pending env vars cleared',
+        '[clone-intent] lost redemption race; disposing of the duplicate clone job',
       );
+      try {
+        await abandonDuplicateCloneJob(
+          app.controlDb,
+          result.jobId,
+          `Abandoned: a concurrent redemption of this clone session won the claim and started job ${winnerJobId ?? 'unknown'}. This duplicate was never queued.`,
+        );
+        request.log.warn(
+          { intentId: id, orphanedJobId: result.jobId, winnerJobId },
+          '[clone-intent] duplicate clone job marked failed and its pending env vars cleared',
+        );
+      } catch (err) {
+        request.log.error(
+          { err, intentId: id, orphanedJobId: result.jobId, winnerJobId },
+          '[clone-intent] failed to dispose of the duplicate clone job; it still holds pending env vars',
+        );
+      }
       return reply.send({
         job_id: winnerJobId,
         status: 'pending',

@@ -15,9 +15,15 @@
  * identical rule and message text without one duplicating the other.
  */
 
+/**
+ * `remediation` is present only on the sub-case that had its OWN hint before
+ * the extraction (a non-string VALUE). The other two sub-cases are shape
+ * errors and share the caller's generic "send it like this" hint, so they
+ * deliberately leave it undefined rather than restating it here.
+ */
 export function validateEnvVarValues(
   v: unknown,
-): { ok: true } | { ok: false; message: string } {
+): { ok: true } | { ok: false; message: string; remediation?: string } {
   if (v === undefined) return { ok: true };
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
     return {
@@ -37,6 +43,7 @@ export function validateEnvVarValues(
         return {
           ok: false,
           message: `env_var_values["${fn}"]["${k}"] must be a string.`,
+          remediation: 'Env var values must be strings.',
         };
       }
     }
