@@ -58,6 +58,7 @@ function defaultCorsOptions(fastify: FastifyInstance): FastifyCorsOptions {
         || origin === config.adminDashboardUrl
         || origin === config.submissionsDashboardUrl
         || origin === config.officeUrl
+        || origin === config.templatesUrl
       ) {
         callback(null, true);
         return;

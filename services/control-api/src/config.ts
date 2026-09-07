@@ -259,6 +259,7 @@ export const config = {
   adminDashboardUrl: process.env.ADMIN_DASHBOARD_URL ?? 'http://localhost:3001',
   submissionsDashboardUrl: process.env.SUBMISSIONS_DASHBOARD_URL ?? 'http://localhost:5173',
   officeUrl: process.env.OFFICE_URL ?? 'http://localhost:3100',
+  templatesUrl: process.env.TEMPLATES_URL ?? 'http://localhost:5174',
 
   subdomain: {
     baseDomain: process.env.BASE_DOMAIN ?? 'butterbase.dev',
