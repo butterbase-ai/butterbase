@@ -27,6 +27,7 @@ import { checkProjectQuota } from './project-quota.js';
 import { getProvisionAllowedRegions, resolveProvisionRegion } from './provision-region.js';
 import { createAgentError, getDocUrl } from './error-handler.js';
 import { quotaErrors } from '../utils/quota-errors.js';
+import { validateEnvVarValues, validateAutoMintRequests } from './clone-validation.js';
 import {
   VALIDATION_INVALID_SCHEMA,
   RESOURCE_NOT_FOUND,
@@ -144,54 +145,19 @@ export async function startClone(args: {
     return { ok: false, code: 'INFLIGHT_LIMIT' };
   }
 
-  // Validate env_var_values shape: must be plain object whose values are plain
-  // objects with string values. Reject anything else with a 400 — the caller
-  // likely sent a malformed payload and silent acceptance would persist garbage.
-  if (args.envVarValues !== undefined) {
-    if (typeof args.envVarValues !== 'object' || args.envVarValues === null || Array.isArray(args.envVarValues)) {
-      return {
-        ok: false,
-        code: 'INVALID_ENV_SHAPE',
-        message: 'env_var_values must be an object mapping function names to {key: value} objects.',
-      };
-    }
-    for (const [fn, vars] of Object.entries(args.envVarValues)) {
-      if (typeof vars !== 'object' || vars === null || Array.isArray(vars)) {
-        return {
-          ok: false,
-          code: 'INVALID_ENV_SHAPE',
-          message: `env_var_values["${fn}"] must be an object of {key: value} strings.`,
-        };
-      }
-      for (const [k, v] of Object.entries(vars)) {
-        if (typeof v !== 'string') {
-          return {
-            ok: false,
-            code: 'INVALID_ENV_SHAPE',
-            message: `env_var_values["${fn}"]["${k}"] must be a string.`,
-          };
-        }
-      }
-    }
+  // Validate env_var_values / auto_mint_api_key shape. Extracted into pure
+  // validators below so the anonymous clone-intent route can apply the exact
+  // same rules without going through the authenticated-only work above
+  // (quota check, in-flight cap) that requires a userId/destOrgId it doesn't
+  // have.
+  const envShape = validateEnvVarValues(args.envVarValues);
+  if (!envShape.ok) {
+    return { ok: false, code: 'INVALID_ENV_SHAPE', message: envShape.message };
   }
 
-  if (args.autoMintRequests !== undefined) {
-    if (!Array.isArray(args.autoMintRequests)) {
-      return {
-        ok: false,
-        code: 'INVALID_AUTO_MINT',
-        message: 'auto_mint_api_key must be an array of {fn_name, key} objects.',
-      };
-    }
-    for (const r of args.autoMintRequests) {
-      if (typeof r?.fn_name !== 'string' || typeof r?.key !== 'string') {
-        return {
-          ok: false,
-          code: 'INVALID_AUTO_MINT',
-          message: 'auto_mint_api_key entries must have string fn_name and key.',
-        };
-      }
-    }
+  const autoMintShape = validateAutoMintRequests(args.autoMintRequests);
+  if (!autoMintShape.ok) {
+    return { ok: false, code: 'INVALID_AUTO_MINT', message: autoMintShape.message };
   }
 
   // Accept dest_region (preferred) or the legacy region alias — the caller has

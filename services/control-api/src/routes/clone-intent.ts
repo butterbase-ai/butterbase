@@ -17,6 +17,7 @@ import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { createCloneIntent } from '../services/clone-intents.js';
+import { validateEnvVarValues } from '../services/clone-validation.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { AppNotFoundError } from '../services/app-resolver.js';
 import {
@@ -33,31 +34,6 @@ function sourceNotFound(reply: any) {
     remediation: 'Verify the app id and that the source app has visibility=public.',
     documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
   }));
-}
-
-/**
- * Validate env_var_values with the same rules startClone applies: a plain
- * object whose values are plain objects whose values are strings.
- * Duplicated (not imported) because startClone's validator is buried inside
- * a larger function that also does authenticated-only work (quota checks,
- * inflight caps) this anonymous route must not perform.
- */
-function validateEnvVarValues(value: unknown): string | null {
-  if (value === undefined) return null;
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return 'env_var_values must be an object mapping function names to {key: value} objects.';
-  }
-  for (const [fn, vars] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof vars !== 'object' || vars === null || Array.isArray(vars)) {
-      return `env_var_values["${fn}"] must be an object of {key: value} strings.`;
-    }
-    for (const [k, v] of Object.entries(vars as Record<string, unknown>)) {
-      if (typeof v !== 'string') {
-        return `env_var_values["${fn}"]["${k}"] must be a string.`;
-      }
-    }
-  }
-  return null;
 }
 
 export function cloneIntentRoutes(app: FastifyInstance): void {
@@ -112,12 +88,13 @@ export function cloneIntentRoutes(app: FastifyInstance): void {
       }));
     }
 
-    // 3. Validate env_var_values shape (same rules as startClone).
-    const envShapeError = validateEnvVarValues(body.env_var_values);
-    if (envShapeError) {
+    // 3. Validate env_var_values shape (same rules as startClone — same
+    // validator function, in fact).
+    const envShape = validateEnvVarValues(body.env_var_values);
+    if (!envShape.ok) {
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
-        message: envShapeError,
+        message: envShape.message,
         remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
