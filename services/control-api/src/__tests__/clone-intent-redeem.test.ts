@@ -5,10 +5,13 @@ import fp from 'fastify-plugin';
 process.env.AUTH_ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 const {
-  mockLoad, mockMark, mockStartClone, mockEnqueue, mockResolveOrg,
+  mockLoad, mockMark, mockStartClone, mockEnqueue, mockResolveOrg, mockControlQuery,
 } = vi.hoisted(() => ({
   mockLoad: vi.fn(), mockMark: vi.fn(), mockStartClone: vi.fn(),
   mockEnqueue: vi.fn(), mockResolveOrg: vi.fn(),
+  // The control-plane pool is left REAL for clone-jobs.ts so the lost-race test
+  // can inspect the disposal statement the route actually issues.
+  mockControlQuery: vi.fn(async () => ({ rows: [], rowCount: 0 })),
 }));
 
 vi.mock('../services/clone-intents.js', () => ({
@@ -37,7 +40,7 @@ async function buildApp() {
   const { cloneIntentRoutes } = await import('../routes/clone-intent.js');
   const app = Fastify();
   await app.register(fp(async (f) => {
-    f.decorate('controlDb', { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } as any);
+    f.decorate('controlDb', { query: mockControlQuery } as any);
     f.addHook('onRequest', async (req) => { (req as any).auth = { userId: 'usr_1' }; });
   }));
   await app.register(cloneIntentRoutes);
@@ -163,6 +166,21 @@ describe('POST /v1/clone-intents/:id/redeem', () => {
     expect(res.json().job_id).not.toBe('cj_1');
     expect(mockEnqueue).not.toHaveBeenCalled();
     expect(res.body).not.toContain('hunter2');
+
+    // The duplicate must be disposed of HERE. Nothing in the background covers
+    // it: clone-jobs-reaper skips rows still in 'pending' and clone-jobs-pruner
+    // only deletes terminal rows, so an un-enqueued job would sit in 'pending'
+    // forever — eating one of the user's 3 in-flight clone slots and holding
+    // their env var secrets in pending_env_vars indefinitely.
+    const disposal = mockControlQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('UPDATE template_clone_jobs'),
+    ) as unknown as [string, unknown[]] | undefined;
+    expect(disposal, 'the duplicate job was never disposed of').toBeDefined();
+    expect(disposal![0]).toMatch(/status = 'failed'/);
+    expect(disposal![0]).toMatch(/pending_env_vars = NULL/);
+    expect(disposal![1][0]).toBe('cj_1');
+    expect(String(disposal![1][1])).toContain('cj_winner');
+    expect(String(disposal![1][1])).not.toContain('hunter2');
     await app.close();
   });
 });

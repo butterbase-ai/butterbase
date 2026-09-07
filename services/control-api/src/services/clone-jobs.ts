@@ -152,6 +152,42 @@ export async function setCloneJobStatus(
   );
 }
 
+/**
+ * Dispose of a clone job row that will never be worked on.
+ *
+ * The clone-intent redeem route can create a job and then lose the atomic claim
+ * on the intent to a concurrent redemption. Its job row is a duplicate: it is
+ * never enqueued, so no worker ever picks it up. Nothing in the background
+ * retires it either — clone-jobs-reaper.ts skips rows still in 'pending', and
+ * clone-jobs-pruner.ts only deletes rows already 'completed'/'failed'. Left
+ * alone the row leaks permanently: it counts against startClone's per-user cap
+ * of 3 non-terminal clone jobs, and its pending_env_vars blob keeps the
+ * caller's SECRETS indefinitely — exactly what markIntentRedeemed NULLs the
+ * intent's copy to prevent.
+ *
+ * So the loser of the race disposes of its own duplicate, explicitly, rather
+ * than relying on a background process that does not cover this case. One
+ * statement, not a status update followed by a separate scrub: a crash between
+ * two statements would leave the secrets behind, which is the failure this
+ * exists to avoid.
+ */
+export async function abandonDuplicateCloneJob(
+  controlDb: pg.Pool,
+  jobId: string,
+  errorMessage: string,
+): Promise<void> {
+  await controlDb.query(
+    `UPDATE template_clone_jobs
+        SET status = 'failed',
+            error_message = $2,
+            pending_env_vars = NULL,
+            completed_at = now(),
+            updated_at = now()
+      WHERE id = $1`,
+    [jobId, errorMessage],
+  );
+}
+
 export async function incrementRetry(controlDb: pg.Pool, jobId: string): Promise<void> {
   await controlDb.query(
     `UPDATE template_clone_jobs

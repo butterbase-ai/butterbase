@@ -25,6 +25,7 @@ import {
   markIntentRedeemed,
 } from '../services/clone-intents.js';
 import { startClone, sendStartCloneFailure } from '../services/start-clone.js';
+import { abandonDuplicateCloneJob } from '../services/clone-jobs.js';
 import { enqueueCloneTask } from '../services/clone-task-queue.js';
 import { resolveOrganizationId } from '../services/org-resolver.js';
 import { requireUserId } from '../utils/require-auth.js';
@@ -163,8 +164,10 @@ export function cloneIntentRoutes(app: FastifyInstance): void {
   //     second would silently overwrite the first's job id.
   //
   // So: startClone first, claim second, and only enqueue if the claim was won.
-  // The loser of a race reports the WINNER's job id and never enqueues its own
-  // duplicate — that orphan is logged at warn level for the clone-jobs reaper.
+  // The loser of a race reports the WINNER's job id, never enqueues its own
+  // duplicate, and disposes of that duplicate itself — marking it failed and
+  // clearing its pending env vars. No background process would: the reaper
+  // skips 'pending' rows and the pruner only deletes terminal ones.
   //
   // enqueueCloneTask writes to a regional runtime DB, so it runs last, on the
   // Pool, after the control-plane claim has committed.
@@ -239,9 +242,21 @@ export function cloneIntentRoutes(app: FastifyInstance): void {
       if (!winner.ok && winner.reason === 'already_redeemed') {
         winnerJobId = winner.jobId;
       }
+      // Dispose of the duplicate here rather than leaving it for a background
+      // job — no background job covers it. The reaper skips 'pending' rows and
+      // the pruner only deletes terminal ones, so an un-enqueued job would sit
+      // in 'pending' forever: burning a third of the user's in-flight clone cap
+      // and holding their env var secrets in pending_env_vars indefinitely.
+      // abandonDuplicateCloneJob marks it failed and NULLs those secrets in one
+      // statement.
+      await abandonDuplicateCloneJob(
+        app.controlDb,
+        result.jobId,
+        `Abandoned: a concurrent redemption of this clone session won the claim and started job ${winnerJobId ?? 'unknown'}. This duplicate was never queued.`,
+      );
       request.log.warn(
         { intentId: id, orphanedJobId: result.jobId, winnerJobId },
-        '[clone-intent] lost redemption race; orphaned duplicate clone job left for the reaper',
+        '[clone-intent] lost redemption race; duplicate clone job marked failed and its pending env vars cleared',
       );
       return reply.send({
         job_id: winnerJobId,
