@@ -13,16 +13,12 @@ import { rateLimitAllowList } from '../plugins/rate-limit.js';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import {
-  createCloneJob, getCloneJob, incrementRetry,
+  getCloneJob, incrementRetry,
   canRetryUpdateJob, hasNewerCompletedUpdate, UPDATE_RETRY_MAX_AGE_MS,
 } from '../services/clone-jobs.js';
-import { getRuntimeDbForApp } from '../services/region-resolver.js';
-import { AppNotFoundError } from '../services/app-resolver.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
-import { checkProjectQuota } from '../services/project-quota.js';
-import { getProvisionAllowedRegions, resolveProvisionRegion } from '../services/provision-region.js';
-import { quotaErrors } from '../utils/quota-errors.js';
+import { startClone, sendStartCloneFailure } from '../services/start-clone.js';
 import {
   VALIDATION_INVALID_SCHEMA,
   RESOURCE_NOT_FOUND,
@@ -90,205 +86,33 @@ export function cloneRoutes(app: FastifyInstance) {
         ?? await resolveOrganizationId(app.controlDb, userId);
     }
 
-    // Enforce project limit against the destination org's plan. Blocks up-front
-    // so a queued clone can't silently push the org over max_projects.
-    const quota = await checkProjectQuota(app.controlDb, destOrgId);
-    if (!quota.ok) {
-      return reply.code(403).send(quotaErrors.projectLimitReached(quota.current, quota.limit));
-    }
-
-    // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
-    // org_app_index. We translate to the same generic 404 we use for the
-    // non-public case below, to avoid leaking existence information.
-    let sourcePool;
-    try {
-      sourcePool = await getRuntimeDbForApp(app.controlDb, source_app_id);
-    } catch (err) {
-      if (err instanceof AppNotFoundError) {
-        return reply.code(404).send(createAgentError({
-          code: RESOURCE_NOT_FOUND,
-          message: 'Source app not found or not public.',
-          remediation: 'Verify the app id and that the source app has visibility=public.',
-          documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
-        }));
-      }
-      throw err;
-    }
-
-    const srcRow = await sourcePool.query<{
-      id: string;
-      visibility: string;
-      region: string;
-      repo_latest_snapshot: string | null;
-    }>(
-      `SELECT id, visibility, region, repo_latest_snapshot FROM apps WHERE id = $1`,
-      [source_app_id],
-    );
-    const src = srcRow.rows[0];
-    if (!src || src.visibility !== 'public') {
-      return reply.code(404).send(createAgentError({
-        code: RESOURCE_NOT_FOUND,
-        message: 'Source app not found or not public.',
-        remediation: 'Only public apps are clonable.',
-        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
-      }));
-    }
-    if (!src.repo_latest_snapshot) {
-      return reply.code(400).send(createAgentError({
-        code: VALIDATION_INVALID_SCHEMA,
-        message: 'Source app has no repo snapshot yet.',
-        remediation: 'The source must run `butterbase repo push` at least once before it can be cloned.',
-        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-      }));
-    }
-
-    // Reject if ANY user in ANY region already owns an app with the
-    // requested name. org_app_index is the cross-region platform-tier
-    // projection of (organization_id, region, app_name), so a single lookup against
-    // it catches global collisions without fanning out to every regional
-    // runtime DB. We need global uniqueness because the CF Pages project
-    // name is derived from the app name and CF Pages projects share one
-    // account-wide namespace; two apps with the same slug would collide
-    // at frontend-deploy time. Skipped when name is omitted — the worker
-    // will fall back to `Clone of {source}`, which is allowed to repeat
-    // (the source id makes that string globally unique).
-    if (typeof body.name === 'string' && body.name.trim().length > 0) {
-      const requestedName = body.name.trim();
-      const collision = await app.controlDb.query<{ app_id: string }>(
-        `SELECT app_id FROM org_app_index WHERE app_name = $1 LIMIT 1`,
-        [requestedName],
-      );
-      if (collision.rows.length > 0) {
-        return reply.code(409).send(createAgentError({
-          code: VALIDATION_INVALID_SCHEMA,
-          message: `The app name "${requestedName}" is already taken.`,
-          remediation: 'Pick a different name.',
-          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-        }));
-      }
-    }
-
-    // Cap simultaneous non-terminal clone jobs per user at 3.
-    // template_clone_jobs also holds template-update rows (mode = 'update');
-    // scope to mode = 'clone' so in-flight updates don't eat into this quota.
-    const inflightResult = await app.controlDb.query<{ c: number }>(
-      `SELECT count(*)::int AS c
-         FROM template_clone_jobs
-        WHERE requested_by_user_id = $1
-          AND mode = 'clone'
-          AND status NOT IN ('completed', 'failed')`,
-      [userId],
-    );
-    if (inflightResult.rows[0].c >= 3) {
-      return reply.code(429).send({
-        error: {
-          code: 'CLONE_LIMIT_INFLIGHT',
-          message: 'You already have 3 clones in progress. Wait for one to complete or fail.',
-        },
-      });
-    }
-
-    // Validate env_var_values shape: must be plain object whose values are plain
-    // objects with string values. Reject anything else with a 400 — the caller
-    // likely sent a malformed payload and silent acceptance would persist garbage.
-    if (body.env_var_values !== undefined) {
-      if (typeof body.env_var_values !== 'object' || body.env_var_values === null || Array.isArray(body.env_var_values)) {
-        return reply.code(400).send(createAgentError({
-          code: VALIDATION_INVALID_SCHEMA,
-          message: 'env_var_values must be an object mapping function names to {key: value} objects.',
-          remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
-          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-        }));
-      }
-      for (const [fn, vars] of Object.entries(body.env_var_values)) {
-        if (typeof vars !== 'object' || vars === null || Array.isArray(vars)) {
-          return reply.code(400).send(createAgentError({
-            code: VALIDATION_INVALID_SCHEMA,
-            message: `env_var_values["${fn}"] must be an object of {key: value} strings.`,
-            remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
-            documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-          }));
-        }
-        for (const [k, v] of Object.entries(vars)) {
-          if (typeof v !== 'string') {
-            return reply.code(400).send(createAgentError({
-              code: VALIDATION_INVALID_SCHEMA,
-              message: `env_var_values["${fn}"]["${k}"] must be a string.`,
-              remediation: 'Env var values must be strings.',
-              documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-            }));
-          }
-        }
-      }
-    }
-
-    if (body.auto_mint_api_key !== undefined) {
-      if (!Array.isArray(body.auto_mint_api_key)) {
-        return reply.code(400).send(createAgentError({
-          code: VALIDATION_INVALID_SCHEMA,
-          message: 'auto_mint_api_key must be an array of {fn_name, key} objects.',
-          remediation: 'Send auto_mint_api_key as [{ fn_name: "fn", key: "BUTTERBASE_API_KEY" }].',
-          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-        }));
-      }
-      for (const r of body.auto_mint_api_key) {
-        if (typeof r?.fn_name !== 'string' || typeof r?.key !== 'string') {
-          return reply.code(400).send(createAgentError({
-            code: VALIDATION_INVALID_SCHEMA,
-            message: 'auto_mint_api_key entries must have string fn_name and key.',
-            remediation: 'Send auto_mint_api_key as [{ fn_name: "fn", key: "BUTTERBASE_API_KEY" }].',
-            documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-          }));
-        }
-      }
-    }
-
-    // Accept dest_region (preferred) or the legacy region alias. When neither
-    // is provided, fall back to the operator-configured default before the
-    // source region — the source may be at capacity while the default has
-    // headroom (Neon's 500-databases-per-branch limit).
-    const requestedDestRegion =
-      body.dest_region ??
-      body.region ??
-      process.env.BUTTERBASE_DEFAULT_REGION ??
-      src.region;
-
-    // If the caller pinned a region temporarily closed to new apps (e.g. the
-    // dashboard clone form defaulting to source.region), redirect to the first
-    // open region rather than 400ing — see services/provision-region.ts. The
-    // redirect is reported on the job response so the clone never lands in a
-    // different region without the caller being told.
-    const provisionAllowed = getProvisionAllowedRegions();
-    const placement = resolveProvisionRegion(requestedDestRegion, provisionAllowed);
-    const destRegion = placement.region;
-    if (placement.redirected) {
-      request.log.warn(
-        { requestedDestRegion, destRegion, sourceRegion: src.region, allowed: provisionAllowed },
-        '[clone] redirecting new clone to open region',
-      );
-    }
-    const job = await createCloneJob(app.controlDb, {
+    // All clone admission rules live in startClone so the anonymous-redemption
+    // route can reuse them verbatim rather than fork them.
+    const result = await startClone({
+      controlDb: app.controlDb,
       sourceAppId: source_app_id,
-      sourceSnapshotId: src.repo_latest_snapshot,
-      sourceRegion: src.region,
-      destRegion,
-      requestedByUserId: userId,
-      destOrganizationId: destOrgId,
-      destAppName: body.name,
-      pendingEnvVarValues: body.env_var_values,
+      userId,
+      destOrgId,
+      name: body.name,
+      destRegion: body.dest_region ?? body.region,
+      envVarValues: body.env_var_values,
       autoMintRequests: body.auto_mint_api_key,
+      logger: request.log,
     });
+    if (!result.ok) return sendStartCloneFailure(reply, result);
 
-    await enqueueCloneTask(source_app_id, src.region, job.id);
+    // Enqueued only after the control-plane write succeeded: this INSERT lands
+    // in a regional runtime DB, not the control DB.
+    await enqueueCloneTask(source_app_id, result.sourceRegion, result.jobId);
 
     return reply.send({
-      job_id: job.id,
+      job_id: result.jobId,
       status: 'pending',
-      dest_region: destRegion,
-      ...(placement.redirected
+      dest_region: result.destRegion,
+      ...(result.redirectedFromRegion
         ? {
-            dest_region_redirected_from: placement.requestedRegion,
-            notice: `Region "${placement.requestedRegion}" is temporarily closed to new apps; this clone will be created in "${destRegion}" instead.`,
+            dest_region_redirected_from: result.redirectedFromRegion,
+            notice: `Region "${result.redirectedFromRegion}" is temporarily closed to new apps; this clone will be created in "${result.destRegion}" instead.`,
           }
         : {}),
     });
