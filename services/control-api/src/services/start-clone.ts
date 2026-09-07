@@ -33,7 +33,12 @@ import {
 } from '@butterbase/shared/error-types';
 
 export type StartCloneFailure =
-  | { code: 'SOURCE_NOT_FOUND' }
+  // Both reasons produce the identical 404 status, error code and message —
+  // the response deliberately does not reveal whether a non-public app exists.
+  // `reason` only selects the remediation hint, which differed before the
+  // extraction and must keep differing: pointing an unknown-app caller at
+  // "only public apps are clonable" sends them after the wrong problem.
+  | { code: 'SOURCE_NOT_FOUND'; reason: 'unknown_app' | 'not_public' }
   | { code: 'NO_SNAPSHOT' }
   | { code: 'NAME_TAKEN'; name: string }
   | { code: 'INFLIGHT_LIMIT' }
@@ -81,7 +86,7 @@ export async function startClone(args: {
     sourcePool = await getRuntimeDbForApp(controlDb, sourceAppId);
   } catch (err) {
     if (err instanceof AppNotFoundError) {
-      return { ok: false, code: 'SOURCE_NOT_FOUND' };
+      return { ok: false, code: 'SOURCE_NOT_FOUND', reason: 'unknown_app' };
     }
     throw err;
   }
@@ -97,7 +102,7 @@ export async function startClone(args: {
   );
   const src = srcRow.rows[0];
   if (!src || src.visibility !== 'public') {
-    return { ok: false, code: 'SOURCE_NOT_FOUND' };
+    return { ok: false, code: 'SOURCE_NOT_FOUND', reason: 'not_public' };
   }
   if (!src.repo_latest_snapshot) {
     return { ok: false, code: 'NO_SNAPSHOT' };
@@ -249,10 +254,14 @@ export function sendStartCloneFailure(
 ) {
   switch (failure.code) {
     case 'SOURCE_NOT_FOUND':
+      // Same status/code/message either way — only the hint differs, exactly as
+      // it did in the pre-extraction handler.
       return reply.code(404).send(createAgentError({
         code: RESOURCE_NOT_FOUND,
         message: 'Source app not found or not public.',
-        remediation: 'Only public apps are clonable.',
+        remediation: failure.reason === 'unknown_app'
+          ? 'Verify the app id and that the source app has visibility=public.'
+          : 'Only public apps are clonable.',
         documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
       }));
     case 'NO_SNAPSHOT':
