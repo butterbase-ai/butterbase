@@ -251,7 +251,7 @@ export async function startClone(args: {
 export function sendStartCloneFailure(
   reply: FastifyReply,
   failure: { ok: false } & StartCloneFailure,
-) {
+): FastifyReply {
   switch (failure.code) {
     case 'SOURCE_NOT_FOUND':
       // Same status/code/message either way — only the hint differs, exactly as
@@ -301,5 +301,14 @@ export function sendStartCloneFailure(
       }));
     case 'QUOTA_EXCEEDED':
       return reply.code(403).send(quotaErrors.projectLimitReached(failure.current, failure.limit));
+    default: {
+      // Adding a StartCloneFailure code without a case above fails to compile
+      // here, and the error names the unmapped code. Without this the switch
+      // would infer `FastifyReply | undefined` (tsconfig sets `strict` but not
+      // `noImplicitReturns`), and a route returning that would resolve its
+      // handler without ever calling send — a hung request, not a wrong status.
+      const _exhaustive: never = failure;
+      return _exhaustive;
+    }
   }
 }
