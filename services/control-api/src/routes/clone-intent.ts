@@ -112,9 +112,26 @@ export function cloneIntentRoutes(app: FastifyInstance): void {
       }));
     }
 
-    // 4. Advisory name-collision check. Task 5's redeem handler re-checks
-    // authoritatively via startClone once an authenticated user redeems.
-    if (typeof body.name === 'string' && body.name.trim().length > 0) {
+    // 4. Advisory name-collision check — LEGACY `pages` backend only.
+    // App names are not a global namespace; subdomains are (migration 080's
+    // `user_app_index_subdomain_uniq` is the only DB-level guarantee, and there
+    // is no unique index on app_name). The clone worker deliberately inserts
+    // the dest with `allowDuplicateName: true` and de-duplicates the SUBDOMAIN
+    // instead, so duplicate names are expected, not exceptional.
+    //
+    // This mattered only for deployTemplatePageViaPages, which derives the CF
+    // Pages project name from the app name and so needs account-wide
+    // uniqueness. `deployViaWfp` keys off app.subdomain and does not.
+    //
+    // Mirrors the identical gate in startClone. It matters most HERE: the
+    // templates site pre-fills `clone-of-<template>`, so every visitor cloning
+    // the same template proposes the same name — rejecting that turned the
+    // public funnel's happy path into a 409 for everyone after the first.
+    if (
+      config.deployment.defaultBackend === 'pages'
+      && typeof body.name === 'string'
+      && body.name.trim().length > 0
+    ) {
       const requestedName = body.name.trim();
       const collision = await app.controlDb.query<{ app_id: string }>(
         `SELECT app_id FROM org_app_index WHERE app_name = $1 LIMIT 1`,

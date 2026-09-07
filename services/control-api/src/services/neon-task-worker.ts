@@ -623,13 +623,32 @@ async function executeClone(
         // provision time rather than letting downstream steps re-discover
         // the gap. Underscores become hyphens to keep the host label DNS-safe.
         const baseSlug = destName.toLowerCase().replace(/_/g, '-').replace(/[^a-z0-9-]/g, '-');
+        // Retry rather than a single attempt. Duplicate dest NAMES are expected
+        // (allowDuplicateName above), and the dashboard/templates site both
+        // pre-fill `clone-of-<template>`, so every clone of a popular template
+        // derives the SAME baseSlug. A one-shot suffix left a real chance of
+        // two collisions in a row, which surfaces as a
+        // `user_app_index_subdomain_uniq` violation deep inside the worker —
+        // after provisioning has already started, which is the worst place to
+        // discover it. Bounded so a pathological slug cannot spin forever; the
+        // loop widens the suffix as it goes so later attempts collide less.
         let destSubdomain = baseSlug;
-        const taken = await controlDb.query<{ app_id: string }>(
-          `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
-          [destSubdomain],
-        );
-        if (taken.rows.length > 0) {
-          destSubdomain = `${baseSlug}-${Math.floor(Math.random() * 9000 + 1000)}`;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const taken = await controlDb.query<{ app_id: string }>(
+            `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
+            [destSubdomain],
+          );
+          if (taken.rows.length === 0) break;
+          // 4 digits for the first few retries, 8 for the last ones.
+          const span = attempt < 3 ? 9000 : 90_000_000;
+          const floor = attempt < 3 ? 1000 : 10_000_000;
+          destSubdomain = `${baseSlug}-${Math.floor(Math.random() * span + floor)}`;
+          if (attempt === 5) {
+            logger.warn(
+              { destAppId, baseSlug },
+              '[clone] subdomain still colliding after 6 attempts; inserting anyway — the UNIQUE index is the backstop',
+            );
+          }
         }
 
         // Cross-region index so authorizeRepoRead/Write and other lookups can

@@ -24,6 +24,7 @@ import { createCloneJob } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { AppNotFoundError } from './app-resolver.js';
 import { checkProjectQuota } from './project-quota.js';
+import { config } from '../config.js';
 import { getProvisionAllowedRegions, resolveProvisionRegion } from './provision-region.js';
 import { createAgentError, getDocUrl } from './error-handler.js';
 import { quotaErrors } from '../utils/quota-errors.js';
@@ -112,17 +113,29 @@ export async function startClone(args: {
     return { ok: false, code: 'NO_SNAPSHOT' };
   }
 
-  // Reject if ANY user in ANY region already owns an app with the
-  // requested name. org_app_index is the cross-region platform-tier
-  // projection of (organization_id, region, app_name), so a single lookup against
-  // it catches global collisions without fanning out to every regional
-  // runtime DB. We need global uniqueness because the CF Pages project
-  // name is derived from the app name and CF Pages projects share one
-  // account-wide namespace; two apps with the same slug would collide
-  // at frontend-deploy time. Skipped when name is omitted — the worker
-  // will fall back to `Clone of {source}`, which is allowed to repeat
-  // (the source id makes that string globally unique).
-  if (typeof args.name === 'string' && args.name.trim().length > 0) {
+  // App names are NOT a global namespace — subdomains are. The only DB-level
+  // uniqueness guarantee is `user_app_index_subdomain_uniq` (migration 080,
+  // "Subdomains are a global namespace"); there is no unique index on app_name
+  // anywhere. The clone worker relies on that: it inserts the dest row with
+  // `allowDuplicateName: true` and comments "two clones of the same template
+  // legitimately share a name — the subdomain below is what differentiates
+  // them", then de-duplicates the subdomain instead.
+  //
+  // So this check is only meaningful for the LEGACY `pages` backend, where
+  // deployTemplatePageViaPages derives the CF Pages project name from the app
+  // name (`bb-${appSlug}`) and CF projects share one account-wide namespace.
+  // `deployViaWfp` — the path every app takes when defaultBackend is 'wfp' —
+  // keys off app.subdomain and never touches the name.
+  //
+  // Gate on the backend the DEST app will actually be created with
+  // (provisioner.ts passes config.deployment.defaultBackend on insert), not on
+  // the source's. With defaultBackend='wfp' this is skipped entirely and two
+  // people can both clone butter-support as "clone-of-butter-support".
+  if (
+    config.deployment.defaultBackend === 'pages'
+    && typeof args.name === 'string'
+    && args.name.trim().length > 0
+  ) {
     const requestedName = args.name.trim();
     const collision = await controlDb.query<{ app_id: string }>(
       `SELECT app_id FROM org_app_index WHERE app_name = $1 LIMIT 1`,

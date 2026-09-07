@@ -33,17 +33,59 @@ beforeEach(() => {
 });
 
 describe('startClone', () => {
-  it('rejects a name already present in org_app_index', async () => {
-    const { startClone } = await import('../services/start-clone.js');
-    const controlDb = controlDbWith((sql) =>
-      sql.includes('org_app_index') ? [{ app_id: 'app_other' }] : [{ c: 0 }],
-    );
-    const res = await startClone({
-      controlDb, sourceAppId: 'app_src', userId: 'usr_1', destOrgId: 'org_1',
-      name: 'taken-name', logger,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.code).toBe('NAME_TAKEN');
+  // App names are not a global namespace — subdomains are (migration 080's
+  // user_app_index_subdomain_uniq; there is no unique index on app_name). The
+  // clone worker inserts the dest with allowDuplicateName:true and
+  // de-duplicates the subdomain instead, so a duplicate name must NOT be
+  // rejected on the backend every production app actually uses.
+  it('allows a duplicate name when the dest backend is wfp', async () => {
+    const prev = process.env.DEPLOYMENT_DEFAULT_BACKEND;
+    process.env.DEPLOYMENT_DEFAULT_BACKEND = 'wfp';
+    vi.resetModules();
+    try {
+      const { startClone } = await import('../services/start-clone.js');
+      // org_app_index deliberately reports a collision: it must be ignored.
+      const controlDb = controlDbWith((sql) =>
+        sql.includes('org_app_index') ? [{ app_id: 'app_other' }] : [{ c: 0 }],
+      );
+      const res = await startClone({
+        controlDb, sourceAppId: 'app_src', userId: 'usr_1', destOrgId: 'org_1',
+        name: 'clone-of-butter-support', logger,
+      });
+      expect(res.ok).toBe(true);
+    } finally {
+      // `process.env.X = undefined` stores the STRING "undefined", which would
+      // leak 'pages' behaviour into every later file sharing this worker.
+      if (prev === undefined) delete process.env.DEPLOYMENT_DEFAULT_BACKEND;
+      else process.env.DEPLOYMENT_DEFAULT_BACKEND = prev;
+      vi.resetModules();
+    }
+  });
+
+  // The legacy path still needs it: deployTemplatePageViaPages derives the CF
+  // Pages project name from the app name, and CF projects are account-global.
+  it('still rejects a duplicate name on the legacy pages backend', async () => {
+    const prev = process.env.DEPLOYMENT_DEFAULT_BACKEND;
+    process.env.DEPLOYMENT_DEFAULT_BACKEND = 'pages';
+    vi.resetModules();
+    try {
+      const { startClone } = await import('../services/start-clone.js');
+      const controlDb = controlDbWith((sql) =>
+        sql.includes('org_app_index') ? [{ app_id: 'app_other' }] : [{ c: 0 }],
+      );
+      const res = await startClone({
+        controlDb, sourceAppId: 'app_src', userId: 'usr_1', destOrgId: 'org_1',
+        name: 'taken-name', logger,
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe('NAME_TAKEN');
+    } finally {
+      // `process.env.X = undefined` stores the STRING "undefined", which would
+      // leak 'pages' behaviour into every later file sharing this worker.
+      if (prev === undefined) delete process.env.DEPLOYMENT_DEFAULT_BACKEND;
+      else process.env.DEPLOYMENT_DEFAULT_BACKEND = prev;
+      vi.resetModules();
+    }
   });
 
   it('rejects when the user already has 3 in-flight clones', async () => {

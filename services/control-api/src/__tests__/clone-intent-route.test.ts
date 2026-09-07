@@ -96,15 +96,56 @@ describe('POST /v1/templates/:source_app_id/clone-intent', () => {
     await app.close();
   });
 
-  it('409s when the requested name is already taken', async () => {
-    mockControlQuery.mockResolvedValue({ rows: [{ app_id: 'app_other' }], rowCount: 1 });
-    const app = await buildApp();
-    const res = await app.inject({
-      method: 'POST',
-      url: '/v1/templates/app_src/clone-intent',
-      payload: { name: 'taken-name' },
-    });
-    expect(res.statusCode).toBe(409);
-    await app.close();
+  // The templates site pre-fills `clone-of-<template>`, so every visitor
+  // cloning the same template proposes the SAME name. Rejecting that turned
+  // the public funnel's happy path into a 409 for everyone after the first.
+  // Names are not a global namespace; subdomains are, and the clone worker
+  // de-duplicates those itself.
+  it('accepts a duplicate name when the dest backend is wfp', async () => {
+    const prev = process.env.DEPLOYMENT_DEFAULT_BACKEND;
+    process.env.DEPLOYMENT_DEFAULT_BACKEND = 'wfp';
+    vi.resetModules();
+    try {
+      // org_app_index deliberately reports a collision: it must be ignored.
+      mockControlQuery.mockResolvedValue({ rows: [{ app_id: 'app_other' }], rowCount: 1 });
+      const app = await buildApp();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/templates/app_src/clone-intent',
+        payload: { name: 'clone-of-butter-support' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ intent_id: 'ci_1' });
+      await app.close();
+    } finally {
+      // `process.env.X = undefined` stores the STRING "undefined", which would
+      // leak 'pages' behaviour into every later file sharing this worker.
+      if (prev === undefined) delete process.env.DEPLOYMENT_DEFAULT_BACKEND;
+      else process.env.DEPLOYMENT_DEFAULT_BACKEND = prev;
+      vi.resetModules();
+    }
+  });
+
+  it('still 409s on a duplicate name on the legacy pages backend', async () => {
+    const prev = process.env.DEPLOYMENT_DEFAULT_BACKEND;
+    process.env.DEPLOYMENT_DEFAULT_BACKEND = 'pages';
+    vi.resetModules();
+    try {
+      mockControlQuery.mockResolvedValue({ rows: [{ app_id: 'app_other' }], rowCount: 1 });
+      const app = await buildApp();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/templates/app_src/clone-intent',
+        payload: { name: 'taken-name' },
+      });
+      expect(res.statusCode).toBe(409);
+      await app.close();
+    } finally {
+      // `process.env.X = undefined` stores the STRING "undefined", which would
+      // leak 'pages' behaviour into every later file sharing this worker.
+      if (prev === undefined) delete process.env.DEPLOYMENT_DEFAULT_BACKEND;
+      else process.env.DEPLOYMENT_DEFAULT_BACKEND = prev;
+      vi.resetModules();
+    }
   });
 });

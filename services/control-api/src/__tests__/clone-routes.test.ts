@@ -83,6 +83,12 @@ vi.mock('../config.js', () => ({
     devOwnerId: 'usr_dev',
     cognito: {},
     ses: { region: 'us-east-1' },
+    // Mirrors production (DEPLOYMENT_DEFAULT_BACKEND=wfp). startClone reads
+    // this to decide whether app-name uniqueness matters: it only does on the
+    // legacy 'pages' backend, where the CF Pages project name is derived from
+    // the app name. On 'wfp' the subdomain is the namespace and duplicate
+    // names are expected. Omitting the key throws on the property read.
+    deployment: { defaultBackend: 'wfp' as const },
   },
   assertRegionConfig: vi.fn(),
 }));
