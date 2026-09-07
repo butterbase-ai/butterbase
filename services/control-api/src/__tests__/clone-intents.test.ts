@@ -77,4 +77,20 @@ describe('clone-intents', () => {
     const sql = pool.query.mock.calls[0][0] as string;
     expect(sql).toMatch(/encrypted_env_values\s*=\s*NULL/i);
   });
+
+  it('returns true when claiming an unredeemed intent', async () => {
+    const { markIntentRedeemed } = await import('../services/clone-intents.js');
+    const pool = { query: vi.fn(async () => ({ rowCount: 1 })) } as any;
+    const result = await markIntentRedeemed(pool, { id: 'ci_1', userId: 'usr_1', jobId: 'cj_1' });
+    expect(result).toBe(true);
+    const sql = pool.query.mock.calls[0][0] as string;
+    expect(sql).toMatch(/redeemed_at\s+IS\s+NULL/i);
+  });
+
+  it('returns false when losing race to redeem already-claimed intent', async () => {
+    const { markIntentRedeemed } = await import('../services/clone-intents.js');
+    const pool = { query: vi.fn(async () => ({ rowCount: 0 })) } as any;
+    const result = await markIntentRedeemed(pool, { id: 'ci_1', userId: 'usr_1', jobId: 'cj_1' });
+    expect(result).toBe(false);
+  });
 });

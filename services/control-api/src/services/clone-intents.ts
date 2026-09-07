@@ -95,14 +95,19 @@ export async function loadRedeemableIntent(
 export async function markIntentRedeemed(
   controlDb: pg.Pool,
   args: { id: string; userId: string; jobId: string },
-): Promise<void> {
-  await controlDb.query(
+): Promise<boolean> {
+  // Guard against concurrent redemption with AND redeemed_at IS NULL.
+  // The UPDATE is the single point of serialization since callers hold a Pool,
+  // not a locked row. Returns true if this call claimed the intent, false if
+  // a concurrent call won the race.
+  const r = await controlDb.query(
     `UPDATE template_clone_intents
         SET redeemed_at = now(),
             redeemed_by_user_id = $2,
             resulting_job_id = $3,
             encrypted_env_values = NULL
-      WHERE id = $1`,
+      WHERE id = $1 AND redeemed_at IS NULL`,
     [args.id, args.userId, args.jobId],
   );
+  return r.rowCount > 0;
 }
