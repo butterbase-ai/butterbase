@@ -76,7 +76,7 @@ function wrapNativeAnthropicStreamForSettlement(
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
         .catch(err => console.warn('[messages] auto-refill failed:', err));
-      maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
+      maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId)
         .catch(err => console.warn('[messages] credits-email failed:', err));
       const reasoningTokens = thinkingText.length > 0
         ? estimatePromptTokens([{ role: 'assistant', content: thinkingText }], canonicalId)
@@ -240,7 +240,7 @@ export async function routeMessages(
     await settleAfterCall(ctx.platformPool, lease, chargedCredits);
     maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
       .catch(err => console.error('[messages] auto-refill failed:', err));
-    maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
+    maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId)
       .catch(err => console.error('[messages] credits-email failed:', err));
     writeAiUsageRow(ctx.runtimePool, {
       appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: stripped,

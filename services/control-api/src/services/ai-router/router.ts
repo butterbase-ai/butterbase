@@ -57,12 +57,6 @@ function pickRanker() {
 }
 
 /**
- * Non-fatal post-settle hook: reads the user's current credits balance
- * (monthly allowance + topup) and lets credits-email decide whether to
- * fire credits_low / credits_exhausted. Dedup-guarded inside
- * maybeSendCreditsEmail via columns on platform_users.
- */
-/**
  * Wraps acquireForEstimatedCost so that an InsufficientCreditsError also
  * emits a billing/denied audit event. The audit_events.app_id column is
  * NOT NULL, so we only record when the router was invoked from an app
@@ -114,21 +108,31 @@ export async function acquireWithAudit(
   }
 }
 
-export async function maybeFireCreditsEmail(pool: pg.Pool, userId: string): Promise<void> {
+/**
+ * Non-fatal post-settle hook: reads the org's current credits balance
+ * (monthly allowance + topup) and lets credits-email decide whether to
+ * fire credits_low / credits_exhausted. Dedup-guarded inside
+ * maybeSendCreditsEmail via columns on organizations (migration 113).
+ *
+ * Takes the org that was billed, not the calling user. The balance read here
+ * must be the one the settle just drew down, and under per-org billing that is
+ * `ctx.organizationId` — for a team-org request the caller's personal org has
+ * a completely unrelated balance.
+ */
+export async function maybeFireCreditsEmail(pool: pg.Pool, organizationId: string): Promise<void> {
   try {
     const r = await pool.query<{ monthly_allowance_usd: string; credits_usd: string }>(
       `SELECT o.monthly_allowance_usd::text, o.credits_usd::text
-         FROM platform_users pu
-         JOIN organizations o ON o.id = pu.personal_organization_id
-        WHERE pu.id = $1`,
-      [userId],
+         FROM organizations o
+        WHERE o.id = $1`,
+      [organizationId],
     );
     if (r.rows.length === 0) return;
     const postBalance = parseFloat(r.rows[0].monthly_allowance_usd ?? '0')
       + parseFloat(r.rows[0].credits_usd ?? '0');
     await maybeSendCreditsEmail({
       db: pool,
-      userId,
+      organizationId,
       postBalance,
       sendBillingEmail: (to, template, data) =>
         sendBillingEmail(to, template as any, data),
@@ -300,7 +304,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         { pool: ctx.platformPool, redis: ctx.redis },
         ctx.organizationId,
       ).catch((err) => console.error('[router] auto-refill check failed:', err));
-      maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+      maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
       writeAiUsageRow(ctx.runtimePool, {
         appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
@@ -343,7 +347,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
@@ -520,7 +524,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: 0,
@@ -1054,7 +1058,7 @@ export async function settleVideoJob(
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch(
     (err) => console.error('[router] credits-email failed:', err),
   );
   writeAiUsageRow(ctx.runtimePool, {
@@ -1239,7 +1243,7 @@ export async function settleImageJob(
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch(
     (err) => console.error('[router] credits-email failed:', err),
   );
   writeAiUsageRow(ctx.runtimePool, {

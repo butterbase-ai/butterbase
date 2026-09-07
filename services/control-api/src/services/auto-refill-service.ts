@@ -18,6 +18,18 @@ import { sendBillingEmail } from './auth/email-service.js';
 const LOCK_KEY_PREFIX = 'auto_refill:lock:';
 const LOCK_TTL_SEC = 60;
 
+/**
+ * Trigger point used when `organizations.auto_refill_threshold_usd` is NULL,
+ * i.e. the org has never configured one. This is the value the rule was
+ * hardcoded to before it became configurable, so an unconfigured org behaves
+ * exactly as it did.
+ */
+export const DEFAULT_AUTO_REFILL_THRESHOLD_USD = 5;
+
+/** Bounds enforced by the API routes; exported so they cannot drift apart. */
+export const MIN_AUTO_REFILL_THRESHOLD_USD = 1;
+export const MAX_AUTO_REFILL_THRESHOLD_USD = 100;
+
 export interface MaybeTriggerResult {
   attempted: boolean;
   status?: 'succeeded' | 'failed';
@@ -66,11 +78,13 @@ export async function maybeTriggerAutoRefill(deps: Deps, organizationId: string)
     credits_usd: string;
     auto_refill_enabled: boolean;
     auto_refill_amount_usd: string | null;
+    auto_refill_threshold_usd: string | null;
   }>(
     `SELECT o.monthly_allowance_usd::text AS monthly_allowance_usd,
             o.credits_usd,
             o.auto_refill_enabled,
-            o.auto_refill_amount_usd
+            o.auto_refill_amount_usd,
+            o.auto_refill_threshold_usd
        FROM organizations o
       WHERE o.id = $1`,
     [organizationId]
@@ -81,22 +95,36 @@ export async function maybeTriggerAutoRefill(deps: Deps, organizationId: string)
   const monthly = parseFloat(u.monthly_allowance_usd);
   const topup = parseFloat(u.credits_usd);
   const amount = u.auto_refill_amount_usd ? parseFloat(u.auto_refill_amount_usd) : 0;
+  // NULL column -> the default. Parsed defensively: a NaN here would make the
+  // `topup < threshold` comparison false for every balance and silently
+  // disable refill for that org, which is the failure mode hardest to notice.
+  const parsedThreshold = u.auto_refill_threshold_usd != null
+    ? parseFloat(u.auto_refill_threshold_usd)
+    : NaN;
+  const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0
+    ? parsedThreshold
+    : DEFAULT_AUTO_REFILL_THRESHOLD_USD;
 
   // Two independent triggers, neither subsumes the other:
-  //   - lowLegacy: the original proactive-buffer rule. Requests still succeed
-  //     in the $0-$5 band, so this is the only path that can ever invoke
-  //     maybeTriggerAutoRefill for it (it's fire-and-forget from post-settle
-  //     hooks — if the org gets 402'd before a lease ever settles, e.g. by
-  //     falling straight to ~$0 with no floor to extend credit, refill is
-  //     never reached again). Keep firing early here or legacy-path orgs can
-  //     wedge into a permanent 402 despite auto-refill being enabled.
+  //   - lowBalance: the proactive-buffer rule, and the one the org configures.
+  //     Requests still succeed in the $0-threshold band, so this is the only
+  //     path that can ever invoke maybeTriggerAutoRefill for it (it's
+  //     fire-and-forget from post-settle hooks — if the org gets 402'd before
+  //     a lease ever settles, e.g. by falling straight to ~$0 with no floor to
+  //     extend credit, refill is never reached again). Keep firing early here
+  //     or an org can wedge into a permanent 402 despite auto-refill being on.
   //   - crossedZero: fire before the negative floor (credit_floor_usd) is
   //     consumed, so a positive monthly_allowance_usd can no longer mask a
   //     deeply negative credits_usd and block refill entirely.
-  const LOW_LEGACY_TOPUP_USD = 5;
-  const lowLegacy = monthly <= 0 && topup < LOW_LEGACY_TOPUP_USD;
+  //
+  // crossedZero is deliberately NOT configurable. It is the backstop for the
+  // case the threshold cannot catch: a single charge large enough to jump the
+  // whole band in one settle (threshold $1, balance $30, one $40 call) never
+  // observes a balance inside $0-threshold, so without this it would never
+  // refill at all.
+  const lowBalance = monthly <= 0 && topup < threshold;
   const crossedZero = monthly + topup <= 0;
-  if (!(lowLegacy || crossedZero)) return { attempted: false, reason: 'not_low' };
+  if (!(lowBalance || crossedZero)) return { attempted: false, reason: 'not_low' };
   if (!u.auto_refill_enabled || amount <= 0) return { attempted: false, reason: 'disabled' };
 
   const lockKey = LOCK_KEY_PREFIX + organizationId;
