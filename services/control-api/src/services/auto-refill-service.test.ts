@@ -98,6 +98,74 @@ describe('maybeTriggerAutoRefill — gating', () => {
     expect(r.reason).toBe('disabled');
   });
 
+  it('uses the org threshold instead of the default when one is configured', async () => {
+    // $12 sits above the $5 default but below this org's configured $20, so
+    // the configured value is what decides.
+    const deps = makeDeps({
+      pool: { query: makePoolQuery({
+        monthly_allowance_usd: '0',
+        credits_usd: '12', auto_refill_enabled: true,
+        auto_refill_amount_usd: '20',
+        auto_refill_threshold_usd: '20.00',
+      }) },
+      stripeCharge: vi.fn(async () => ({ status: 'succeeded', paymentIntentId: 'pi_t' })),
+      grantAutoRefill: vi.fn(async () => ({ granted: 20 })),
+    });
+    const r = await maybeTriggerAutoRefill(deps as any, ORG);
+    expect(r.attempted).toBe(true);
+    expect(r.status).toBe('succeeded');
+  });
+
+  it('holds off above a configured threshold that is lower than the default', async () => {
+    // $3 would trip the $5 default, but this org asked to wait until $2.
+    const deps = makeDeps({
+      pool: { query: makePoolQuery({
+        monthly_allowance_usd: '0',
+        credits_usd: '3', auto_refill_enabled: true,
+        auto_refill_amount_usd: '20',
+        auto_refill_threshold_usd: '2.00',
+      }) },
+    });
+    const r = await maybeTriggerAutoRefill(deps as any, ORG);
+    expect(r.attempted).toBe(false);
+    expect(r.reason).toBe('not_low');
+    expect(deps.stripeCharge).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the default when the threshold column is NULL', async () => {
+    const deps = makeDeps({
+      pool: { query: makePoolQuery({
+        monthly_allowance_usd: '0',
+        credits_usd: '4', auto_refill_enabled: true,
+        auto_refill_amount_usd: '20',
+        auto_refill_threshold_usd: null,
+      }) },
+      stripeCharge: vi.fn(async () => ({ status: 'succeeded', paymentIntentId: 'pi_d' })),
+      grantAutoRefill: vi.fn(async () => ({ granted: 20 })),
+    });
+    const r = await maybeTriggerAutoRefill(deps as any, ORG);
+    expect(r.attempted).toBe(true);
+    expect(r.status).toBe('succeeded');
+  });
+
+  it('still refills at a zero balance that jumped past a low threshold', async () => {
+    // The crossedZero backstop: threshold is $1, but the balance went straight
+    // to -$10 without ever being observed inside the $0-$1 band.
+    const deps = makeDeps({
+      pool: { query: makePoolQuery({
+        monthly_allowance_usd: '0',
+        credits_usd: '-10', auto_refill_enabled: true,
+        auto_refill_amount_usd: '20',
+        auto_refill_threshold_usd: '1.00',
+      }) },
+      stripeCharge: vi.fn(async () => ({ status: 'succeeded', paymentIntentId: 'pi_z' })),
+      grantAutoRefill: vi.fn(async () => ({ granted: 20 })),
+    });
+    const r = await maybeTriggerAutoRefill(deps as any, ORG);
+    expect(r.attempted).toBe(true);
+    expect(r.status).toBe('succeeded');
+  });
+
   it('no-op when Redis lock is already held', async () => {
     const deps = makeDeps({
       pool: { query: makePoolQuery({
