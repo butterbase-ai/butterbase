@@ -109,5 +109,5 @@ export async function markIntentRedeemed(
       WHERE id = $1 AND redeemed_at IS NULL`,
     [args.id, args.userId, args.jobId],
   );
-  return r.rowCount > 0;
+  return (r.rowCount ?? 0) > 0;
 }

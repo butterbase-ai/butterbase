@@ -10,8 +10,7 @@
 import type { FastifyInstance } from 'fastify';
 import { requireUserId } from '../utils/require-auth.js';
 import { rateLimitAllowList } from '../plugins/rate-limit.js';
-import { config } from '../config.js';
-import { getRuntimeDbPool } from '../services/runtime-db.js';
+import { enqueueCloneTask } from '../services/clone-task-queue.js';
 import {
   getCloneJob, incrementRetry,
   canRetryUpdateJob, hasNewerCompletedUpdate, UPDATE_RETRY_MAX_AGE_MS,
@@ -23,27 +22,6 @@ import {
   VALIDATION_INVALID_SCHEMA,
   RESOURCE_NOT_FOUND,
 } from '@butterbase/shared/error-types';
-
-/**
- * Insert a 'clone' row into the source app's region neon_tasks queue.
- *
- * Each clone job gets its own neon_tasks row.  The unique constraint
- * (idx_neon_tasks_active_unique_non_clone) applies only to non-clone task
- * types, so concurrent clone tasks for the same source app coexist safely.
- * The worker claims tasks with FOR UPDATE SKIP LOCKED and processes them
- * sequentially without interfering with sibling clone tasks.
- */
-async function enqueueCloneTask(
-  sourceAppId: string,
-  sourceRegion: string,
-  jobId: string,
-): Promise<void> {
-  const runtimePool = getRuntimeDbPool(config.runtimeDb, sourceRegion);
-  await runtimePool.query(
-    `INSERT INTO neon_tasks (app_id, task_type, task_meta) VALUES ($1, 'clone', $2)`,
-    [sourceAppId, JSON.stringify({ job_id: jobId })],
-  );
-}
 
 export function cloneRoutes(app: FastifyInstance) {
   // POST /v1/templates/:source_app_id/clone

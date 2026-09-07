@@ -1,22 +1,33 @@
-// POST /v1/templates/:source_app_id/clone-intent
+// POST /v1/templates/:source_app_id/clone-intent   (anonymous)
+// POST /v1/clone-intents/:id/redeem                 (authenticated)
 //
-// Anonymous counterpart to POST /v1/templates/:source_app_id/clone. A visitor
-// browsing the public templates site configures a clone before they have an
-// account. This route parks that configuration server-side (encrypted) and
-// hands back an opaque intent id; a later task adds the redeem handler that
-// turns a parked intent into a real clone job once the visitor registers.
+// The two halves of the signup-surviving clone flow. A visitor browsing the
+// public templates site configures a clone before they have an account; the
+// first route parks that configuration server-side (encrypted) and hands back
+// an opaque intent id. After the visitor registers and lands back in the
+// dashboard, the second route redeems that id and starts the clone as the
+// now-authenticated user.
 //
-// Deliberately does NOT call requireUserId — there is no Authorization header
-// to require. Env var VALUES are secrets and must never appear in the
-// response, an error message, or a log line; they are handed to
-// createCloneIntent, which encrypts them before they touch the database.
+// The anonymous route deliberately does NOT call requireUserId — there is no
+// Authorization header to require. Env var VALUES are secrets and must never
+// appear in a response, an error message, or a log line: createCloneIntent
+// encrypts them before they touch the database, and on redeem they go straight
+// from loadRedeemableIntent into startClone without being echoed anywhere.
 
 import type { FastifyInstance } from 'fastify';
 import { rateLimitAllowList } from '../plugins/rate-limit.js';
 import { config } from '../config.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
-import { createCloneIntent } from '../services/clone-intents.js';
+import {
+  createCloneIntent,
+  loadRedeemableIntent,
+  markIntentRedeemed,
+} from '../services/clone-intents.js';
+import { startClone, sendStartCloneFailure } from '../services/start-clone.js';
+import { enqueueCloneTask } from '../services/clone-task-queue.js';
+import { resolveOrganizationId } from '../services/org-resolver.js';
+import { requireUserId } from '../utils/require-auth.js';
 import { validateEnvVarValues } from '../services/clone-validation.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { AppNotFoundError } from '../services/app-resolver.js';
@@ -132,6 +143,127 @@ export function cloneIntentRoutes(app: FastifyInstance): void {
     return reply.send({
       intent_id: intent.id,
       expires_at: intent.expires_at.toISOString(),
+    });
+  });
+
+  // POST /v1/clone-intents/:id/redeem
+  //
+  // The authenticated other half of the flow above: the visitor has now
+  // registered, is back in the dashboard, and this turns their parked
+  // configuration into a real clone job owned by their account.
+  //
+  // Ordering here is deliberate and two constraints pull against each other:
+  //
+  //   * A QUOTA_EXCEEDED or NAME_TAKEN failure must NOT consume the intent —
+  //     the user upgrades their plan or picks a different name and retries the
+  //     SAME intent id. So the claim cannot happen before startClone.
+  //   * markIntentRedeemed is an atomic conditional claim (UPDATE ... WHERE
+  //     redeemed_at IS NULL) returning a boolean, because two concurrent
+  //     redemptions would otherwise both decrypt the same secrets and the
+  //     second would silently overwrite the first's job id.
+  //
+  // So: startClone first, claim second, and only enqueue if the claim was won.
+  // The loser of a race reports the WINNER's job id and never enqueues its own
+  // duplicate — that orphan is logged at warn level for the clone-jobs reaper.
+  //
+  // enqueueCloneTask writes to a regional runtime DB, so it runs last, on the
+  // Pool, after the control-plane claim has committed.
+  app.post('/v1/clone-intents/:id/redeem', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { name?: string };
+    const userId = requireUserId(request);
+
+    const loaded = await loadRedeemableIntent(app.controlDb, id);
+    if (!loaded.ok) {
+      // Tested positively so TypeScript narrows to the member that carries
+      // jobId — the other member's `reason` is itself a union, so a pair of
+      // negative checks would not exclude it.
+      if (loaded.reason === 'already_redeemed') {
+        // Idempotent: hand back the job that the first redemption started.
+        return reply.send({
+          job_id: loaded.jobId,
+          status: 'pending',
+          already_redeemed: true,
+        });
+      }
+      if (loaded.reason === 'not_found') {
+        return reply.code(404).send(createAgentError({
+          code: RESOURCE_NOT_FOUND,
+          message: 'Clone session not found.',
+          remediation: 'Start again from the template page.',
+          documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
+        }));
+      }
+      return reply.code(410).send({
+        error: {
+          code: 'CLONE_INTENT_EXPIRED',
+          message: 'This clone session expired. Start again from the template.',
+        },
+      });
+    }
+
+    const { intent, envVarValues } = loaded;
+
+    const destOrgId = request.auth?.organizationId
+      ?? await resolveOrganizationId(app.controlDb, userId);
+
+    // startClone owns every admission rule, including validating the
+    // auto_mint_requests that the anonymous endpoint parked unvalidated.
+    const result = await startClone({
+      controlDb: app.controlDb,
+      sourceAppId: intent.source_app_id,
+      userId,
+      destOrgId,
+      name: body.name ?? intent.dest_app_name ?? undefined,
+      destRegion: intent.dest_region ?? undefined,
+      envVarValues,
+      autoMintRequests: intent.auto_mint_requests ?? undefined,
+      logger: request.log,
+    });
+
+    // Failure leaves the intent redeemable on purpose: the user fixes the
+    // problem (upgrade, rename) and retries this same id.
+    if (!result.ok) return sendStartCloneFailure(reply, result);
+
+    const claimed = await markIntentRedeemed(app.controlDb, {
+      id,
+      userId,
+      jobId: result.jobId,
+    });
+
+    if (!claimed) {
+      // A concurrent redemption claimed the intent first. Our job row is a
+      // duplicate: do not enqueue it, and do not report it as the result.
+      const winner = await loadRedeemableIntent(app.controlDb, id);
+      let winnerJobId: string | null = null;
+      if (!winner.ok && winner.reason === 'already_redeemed') {
+        winnerJobId = winner.jobId;
+      }
+      request.log.warn(
+        { intentId: id, orphanedJobId: result.jobId, winnerJobId },
+        '[clone-intent] lost redemption race; orphaned duplicate clone job left for the reaper',
+      );
+      return reply.send({
+        job_id: winnerJobId,
+        status: 'pending',
+        already_redeemed: true,
+      });
+    }
+
+    // Regional runtime DB write — after the control-plane claim, never before.
+    await enqueueCloneTask(result.sourceAppId, result.sourceRegion, result.jobId);
+
+    return reply.send({
+      job_id: result.jobId,
+      status: 'pending',
+      dest_region: result.destRegion,
+      dest_app_id: result.destAppId,
+      ...(result.redirectedFromRegion
+        ? {
+            dest_region_redirected_from: result.redirectedFromRegion,
+            notice: `Region "${result.redirectedFromRegion}" is temporarily closed to new apps; this clone will be created in "${result.destRegion}" instead.`,
+          }
+        : {}),
     });
   });
 }
