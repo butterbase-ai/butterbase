@@ -13,11 +13,25 @@ export async function linkEnvironments(
   runtimeDb: pg.Pool,
   args: { prodAppId: string; stagingAppId: string; createdBy: string },
 ): Promise<AppEnvironmentLink> {
+  // Idempotent for the IDENTICAL pair, because executeClone is resumable: a
+  // retry after this insert already succeeded must not fail the job. A conflict
+  // on prod_app_id where the staging app DIFFERS is a real error and must still
+  // throw — silently keeping the old link would complete the job pointing at the
+  // wrong staging app. The WHERE makes that case return zero rows.
   const res = await runtimeDb.query<AppEnvironmentLink>(
     `INSERT INTO app_environments (prod_app_id, staging_app_id, created_by)
-     VALUES ($1, $2, $3) RETURNING *`,
+     VALUES ($1, $2, $3)
+     ON CONFLICT (prod_app_id) DO UPDATE
+       SET staging_app_id = EXCLUDED.staging_app_id
+     WHERE app_environments.staging_app_id = EXCLUDED.staging_app_id
+     RETURNING *`,
     [args.prodAppId, args.stagingAppId, args.createdBy],
   );
+  if (res.rows.length === 0) {
+    throw new Error(
+      `app_environments already links ${args.prodAppId} to a different staging app`,
+    );
+  }
   return res.rows[0];
 }
 

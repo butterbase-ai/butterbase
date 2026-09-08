@@ -69,6 +69,22 @@ describe('app-environments', () => {
     ).rejects.toThrow();
   });
 
+  it('is idempotent for the identical pair (resumed clone job retry)', async () => {
+    const first = await linkEnvironments(runtimeDb, {
+      prodAppId: PROD, stagingAppId: STAGING, createdBy: USER,
+    });
+    const second = await linkEnvironments(runtimeDb, {
+      prodAppId: PROD, stagingAppId: STAGING, createdBy: USER,
+    });
+    expect(second.prod_app_id).toBe(first.prod_app_id);
+    expect(second.staging_app_id).toBe(STAGING);
+
+    const rows = await runtimeDb.query(
+      `SELECT count(*)::int AS n FROM app_environments WHERE prod_app_id = $1`, [PROD],
+    );
+    expect(rows.rows[0].n).toBe(1);
+  });
+
   it('refuses linking a staging app that already serves a different production app', async () => {
     await linkEnvironments(runtimeDb, { prodAppId: PROD, stagingAppId: STAGING, createdBy: USER });
     await expect(

@@ -1252,6 +1252,10 @@ async function executeClone(
       // Staging pairs are linked only after every replay stage has succeeded, so
       // a half-provisioned app never appears in the dashboard as a usable
       // staging environment. finalizeStagingClone is a no-op for other modes.
+      // linkEnvironments is idempotent for a retry of this same job, but a
+      // permanent failure here (attempts exhausted) leaves a fully-provisioned,
+      // correctly-replayed staging app with no app_environments row — the job
+      // is marked 'failed' even though the app itself is fine; backfill will repair.
       await finalizeStagingClone(destRuntimePool, job);
 
       // 6. Mark job completed.
