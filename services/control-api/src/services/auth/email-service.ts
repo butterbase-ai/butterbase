@@ -308,6 +308,43 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
           `  • Contact support if this keeps happening.`,
         ].filter(Boolean).join('\n');
       }
+      // A stranded promote writes onto a LIVE production app, not a fresh
+      // destination — the clone/update copy below is wrong on every count
+      // (there's no "partial app" to delete, and "try again" undersells that
+      // production may be mid-write).
+      if (data.mode === 'promote') {
+        return [
+          `We couldn't finish promoting your staging environment onto "${data.appName || data.appId}", your live production app.`,
+          '',
+          `Job ID: ${data.jobId}`,
+          stageLine,
+          `Error: ${data.errorMessage || '(no message captured)'}`,
+          '',
+          'This app may be part-way between its old state and the promoted staging state. Please review it now:',
+          `  • Review the app: ${dashboardUrl}/apps/${data.appId}`,
+          `  • Contact support if this keeps happening.`,
+        ].filter(Boolean).join('\n');
+      }
+      // A stranded staging_reset touches an existing staging app's code AND
+      // data (it re-seeds from production) — different enough from a fresh
+      // clone that "delete the partial app" and "try cloning again" don't fit.
+      if (data.mode === 'staging_reset') {
+        return [
+          `We couldn't finish resetting your staging environment "${data.appName || data.appId}" from production app ${data.sourceAppId}.`,
+          '',
+          `Job ID: ${data.jobId}`,
+          stageLine,
+          `Error: ${data.errorMessage || '(no message captured)'}`,
+          '',
+          "Your staging app's code and data may be part-way through being replaced from production. You can:",
+          `  • Open the staging app and try the reset again: ${dashboardUrl}/apps/${data.appId}`,
+          `  • Contact support if this keeps happening.`,
+        ].filter(Boolean).join('\n');
+      }
+      // 'clone' and 'staging_create' share this copy: a staging_create job is,
+      // mechanically, a clone onto a fresh app (see executeClone dispatch in
+      // neon-task-worker.ts), so the same "destination was created, code may
+      // be incomplete" framing is accurate for both.
       return [
         `We couldn't finish cloning "${data.appName || data.appId}" from template ${data.sourceAppId}.`,
         '',
@@ -546,6 +583,67 @@ function truncateError(msg: string): string {
 }
 
 /**
+ * Per-mode copy for the 'clone_failed' template's HTML body. template_clone_jobs
+ * now carries five modes (migration 116); each means something different to the
+ * recipient, so each gets its own heading/verb/CTA. 'staging_create' shares
+ * clone's copy on purpose — it is, mechanically, a clone onto a fresh app (see
+ * executeClone's dispatch fallthrough in neon-task-worker.ts).
+ */
+function cloneFailedHtmlCopy(mode: string | undefined, data: Record<string, string>, dashboardUrl: string): {
+  heading: string;
+  buttonLabel: string;
+  retryUrl: string;
+  intro: string;
+  dataNote: string;
+  preheaderVerb: string;
+} {
+  const appId = escapeHtml(data.appId || '');
+  const appName = escapeHtml(data.appName || data.appId || '');
+  const sourceAppId = escapeHtml(data.sourceAppId || '');
+  const appUrl = `${dashboardUrl}/apps/${appId}`;
+
+  if (mode === 'update') {
+    return {
+      heading: 'Update didn&rsquo;t finish',
+      buttonLabel: 'Open the app',
+      retryUrl: appUrl,
+      intro: `We couldn&rsquo;t finish updating &ldquo;${appName}&rdquo; to the latest release of template <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${sourceAppId}</span>.`,
+      dataNote: `Your data was not touched &mdash; an update never drops or rewrites your rows. The app may be part-way between its old code and the new release; you can undo the update from <a href="${appUrl}" style="color:#525252;text-decoration:underline;">the app page</a>.`,
+      preheaderVerb: 'updating',
+    };
+  }
+  if (mode === 'promote') {
+    return {
+      heading: 'Promote to production didn&rsquo;t finish',
+      buttonLabel: 'Review the app',
+      retryUrl: appUrl,
+      intro: `We couldn&rsquo;t finish promoting your staging environment onto &ldquo;${appName}&rdquo;, your <strong>live production app</strong>.`,
+      dataNote: `This app may be part-way between its old state and the promoted staging state &mdash; please <a href="${appUrl}" style="color:#525252;text-decoration:underline;">review it now</a>.`,
+      preheaderVerb: 'promoting to production',
+    };
+  }
+  if (mode === 'staging_reset') {
+    return {
+      heading: 'Staging reset didn&rsquo;t finish',
+      buttonLabel: 'Open the staging app',
+      retryUrl: appUrl,
+      intro: `We couldn&rsquo;t finish resetting your staging environment &ldquo;${appName}&rdquo; from production app <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${sourceAppId}</span>.`,
+      dataNote: `Your staging app&rsquo;s code and data may be part-way through being replaced from production. It is safe to <a href="${appUrl}" style="color:#525252;text-decoration:underline;">open the staging app and try the reset again</a>.`,
+      preheaderVerb: 'resetting your staging environment',
+    };
+  }
+  // 'clone' and 'staging_create'
+  return {
+    heading: 'Clone didn&rsquo;t finish',
+    buttonLabel: 'Try cloning again',
+    retryUrl: `${dashboardUrl}/templates`,
+    intro: `We couldn&rsquo;t finish cloning &ldquo;${appName}&rdquo; from template <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${sourceAppId}</span>.`,
+    dataNote: `The destination app was created but the code (frontend + functions) may not be fully in place. You can retry the clone from the template gallery, or delete the partial app and start fresh &mdash; <a href="${appUrl}" style="color:#525252;text-decoration:underline;">manage the partial app</a>.`,
+    preheaderVerb: 'cloning',
+  };
+}
+
+/**
  * Optional HTML body for a billing email. Returns null for templates that
  * have not been promoted to HTML yet — SES will send text-only in that case.
  * Add a new template by adding a case here and a matching text case in
@@ -656,40 +754,28 @@ ${section('Deployments', deployRows)}${templateUpdateSection}
   }
 
   if (template === 'clone_failed') {
-    const appName = data.appName || data.appId;
     const errorMsg = truncateError(data.errorMessage || '(no message captured)');
-    const isUpdate = data.mode === 'update';
-    // An update failure is about an app that already exists and is live. The
-    // clone copy ("the destination app was created", "try cloning again",
-    // "delete the partial app") is actively wrong for it.
-    const retryUrl = isUpdate ? `${dashboardUrl}/apps/${escapeHtml(data.appId)}` : `${dashboardUrl}/templates`;
-    const heading = isUpdate ? 'Update didn&rsquo;t finish' : 'Clone didn&rsquo;t finish';
-    const buttonLabel = isUpdate ? 'Open the app' : 'Try cloning again';
-    const appUrl = `${dashboardUrl}/apps/${escapeHtml(data.appId)}`;
+    const copy = cloneFailedHtmlCopy(data.mode, data, dashboardUrl);
     const stageLine = data.stalledStage
       ? `<p style="margin:0 0 4px 0;font-size:13px;color:#737373;">Stalled at stage <span style="color:#0a0a0a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.stalledStage)}</span></p>`
       : '';
     const content = `
-<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">${heading}</h1>
+<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">${copy.heading}</h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#737373;">
-We couldn&rsquo;t finish ${isUpdate ? 'updating' : 'cloning'} &ldquo;${escapeHtml(appName)}&rdquo; ${isUpdate ? 'to the latest release of template' : 'from template'} <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.sourceAppId || '')}</span>.
+${copy.intro}
 </p>
-${renderButton({ href: retryUrl, label: buttonLabel })}
+${renderButton({ href: copy.retryUrl, label: copy.buttonLabel })}
 <p style="margin:32px 0 8px 0;font-size:13px;font-weight:600;color:#0a0a0a;">What happened</p>
 ${stageLine}
 <pre style="margin:0;padding:16px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:#0a0a0a;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;">${escapeHtml(errorMsg)}</pre>
 <p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.6;">
-${isUpdate
-  ? `Your data was not touched &mdash; an update never drops or rewrites your rows. The app may be part-way between its old code and the new release; you can undo the update from <a href="${appUrl}" style="color:#525252;text-decoration:underline;">the app page</a>.`
-  : `The destination app was created but the code (frontend + functions) may not be fully in place. You can retry the clone from the template gallery, or delete the partial app and start fresh &mdash; <a href="${appUrl}" style="color:#525252;text-decoration:underline;">manage the partial app</a>.`}
+${copy.dataNote}
 </p>
 <p style="margin:16px 0 0 0;font-size:12px;color:#a3a3a3;line-height:1.5;">
 Job ID <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.jobId || '')}</span>
 </p>`;
     return renderEmailLayout({
-      preheader: isUpdate
-        ? `We couldn't finish updating "${appName}". Your data is untouched.`
-        : `We couldn't finish cloning "${appName}". Retry from the template gallery.`,
+      preheader: `We couldn't finish ${copy.preheaderVerb} "${data.appName || data.appId || ''}".`,
       content,
     });
   }
@@ -788,8 +874,10 @@ export function buildBillingEmailSubject(
   }
   if (template === 'clone_failed') {
     const app = data.appName || data.appId || 'your app';
-    // Same template, two very different events — see notifyCloneFailed's `mode`.
+    // Same template, five very different events — see notifyCloneFailed's `mode`.
     if (data.mode === 'update') return `Update failed: "${app}"`;
+    if (data.mode === 'promote') return `Promote to production failed: "${app}"`;
+    if (data.mode === 'staging_reset') return `Staging reset failed: "${app}"`;
     return `Clone failed: "${app}"`;
   }
   if (template === 'clone_reaper_digest') {

@@ -82,6 +82,7 @@ import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
 import { startCloneIntentsPruner } from './services/clone-intents-pruner.js';
 import { startCloneJobsReaper } from './services/clone-jobs-reaper.js';
 import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
+import { startStagingReaper } from './services/staging-reaper.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { aiMeetingsRoutes } from './routes/ai-meetings.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
@@ -1112,6 +1113,15 @@ Promise.resolve(app.ready())
       const cloneWebhookSweeperHandle = startCloneWebhookSweeper(app.controlDb, app.log);
       (app as any).cloneWebhookSweeperHandle = cloneWebhookSweeperHandle;
       app.log.info('Clone-webhook sweeper started (30s interval)');
+    }
+
+    // Staging reaper: pauses (never deletes) staging apps idle beyond
+    // BUTTERBASE_STAGING_IDLE_DAYS (default 30 days; runs every 6h). Scoped
+    // to this instance's own region — app_environments is a regional
+    // runtime-plane table, same as the other per-region background jobs.
+    if (process.env.SKIP_STAGING_REAPER !== '1') {
+      const stagingReaperStop = startStagingReaper(app.runtimeDb(regionConfig.instanceRegion), app.log);
+      (app as any).stagingReaperStop = stagingReaperStop;
     }
   })
   .catch((err: unknown) => {

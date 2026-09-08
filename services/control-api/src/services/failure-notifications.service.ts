@@ -111,14 +111,18 @@ export async function notifyCloneFailed(
     errorMessage: string;
     stalledStage?: string;
     /**
-     * Which pipeline failed. Update-mode jobs ride on the same job table and
-     * the same reaper as clones, but the failure means something completely
-     * different to the recipient — "your new app wasn't created" versus "your
-     * existing, live app was being reset and the reset broke". Emailing an
-     * update failure worded as a clone failure told the owner about an app that
-     * doesn't exist and offered them a "try cloning again" button.
+     * Which pipeline failed. template_clone_jobs now carries five modes
+     * (migration 116: clone, update, staging_create, promote, staging_reset) —
+     * all ride the same job table and the same reaper, but the failure means
+     * something completely different to the recipient depending on mode:
+     * "your new app wasn't created" vs. "your existing, live app was being
+     * reset and the reset broke" vs. "your production app may be mid-write".
+     * Emailing an update failure worded as a clone failure told the owner
+     * about an app that doesn't exist and offered them a "try cloning again"
+     * button; the same mismatch applies to every other mode. See
+     * buildBillingEmailBody / buildBillingEmailHtml's 'clone_failed' case.
      */
-    mode?: 'clone' | 'update';
+    mode?: 'clone' | 'update' | 'staging_create' | 'promote' | 'staging_reset';
   },
   log?: { warn: (payload: Record<string, unknown>, message: string) => void }
 ): Promise<void> {

@@ -24,7 +24,13 @@ export type CloneAuditEventType =
   // owner deserves the same record an update leaves. event_type is free text
   // in auth_audit_logs (db/control-plane/006_audit_logs.sql), so no migration
   // is needed to widen this union.
-  | 'staging_promote_started' | 'staging_promote_completed' | 'staging_promote_failed';
+  | 'staging_promote_started' | 'staging_promote_completed' | 'staging_promote_failed'
+  // staging_reset re-seeds an existing staging app's code AND data from
+  // production — as consequential to that app's owner as an update is to a
+  // fork's. Added for clone-jobs-reaper.ts (Task 17), which can now reap a
+  // stranded staging_reset job and needs an event type that isn't a lie.
+  // Same free-text column, same no-migration-needed story as staging_promote.
+  | 'staging_reset_started' | 'staging_reset_completed' | 'staging_reset_failed';
 
 export async function insertCloneAuditLog(
   controlDb: Pool,
