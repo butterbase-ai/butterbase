@@ -16,6 +16,8 @@ import { addOrgAppIndex, removeOrgAppIndex, listAppsForUserAcrossOrgs } from '..
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { checkProjectQuota } from '../services/project-quota.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
+import { teardownAppStorage } from '../services/app-storage-teardown.js';
+import { deleteObject as deleteStorageObject } from '../services/s3.js';
 
 const initSchema = {
   body: {
@@ -484,6 +486,24 @@ export async function initRoutes(app: FastifyInstance) {
     // Local dev: delete inline (fast, no contention)
     const dbName = appData.db_name;
     await app.dataPlaneDb.query(`DROP DATABASE IF EXISTS "${dbName}"`).catch(() => {});
+
+    // The same object-byte teardown `executeDeprovision` runs on the Neon
+    // path, because this branch is a SECOND, complete deletion path — not a
+    // shortcut into the first. Without it, deleting an app here removes every
+    // `storage_objects` row by cascade and leaves the files themselves in the
+    // bucket forever; for a staging app those files are a second copy of a
+    // customer's uploads. Runs BEFORE the row delete, which is what destroys
+    // the only record of which keys belonged to this app.
+    const storageTeardown = await teardownAppStorage({
+      runtimeDb: app.runtimeDb(region), appId: app_id, deleteObject: deleteStorageObject,
+    });
+    if (storageTeardown.failed > 0) {
+      app.log.warn(
+        { app_id, failed: storageTeardown.failed, total: storageTeardown.total },
+        'some storage objects could not be deleted; bytes remain in the bucket',
+      );
+    }
+
     await app.runtimeDb(region).query('DELETE FROM apps WHERE id = $1', [app_id]);
 
     logFromRequest(request, {

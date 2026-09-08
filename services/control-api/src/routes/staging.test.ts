@@ -119,13 +119,31 @@ describe('GET /v1/apps/:app_id/staging', () => {
 });
 
 describe('DELETE /v1/apps/:app_id/staging', () => {
-  it('unlinks without deleting the staging app', async () => {
+  it('unlinks without deleting the staging app, and names what it left behind', async () => {
     mocks.unlinkEnvironment.mockResolvedValue(undefined);
     const app = build();
     const res = await app.inject({ method: 'DELETE', url: '/v1/apps/app_prod/staging' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ deleted: true });
+    const body = res.json();
+    expect(body.deleted).toBe(true);
     expect(mocks.unlinkEnvironment).toHaveBeenCalledWith({}, 'app_prod');
+
+    // The staging app survives an unlink and still holds a copy of
+    // production's rows, auth users and files. That retention must be stated,
+    // not implied — and it must name the app id and the call that removes it,
+    // because after this response nothing else points at the orphaned app.
+    expect(body.retained_staging_app_id).toBe('app_staging');
+    expect(body.retention_notice).toContain('app_staging');
+    expect(body.retention_notice).toContain('DELETE /apps/app_staging');
+  });
+
+  it('reports no retained app when there was no link to remove', async () => {
+    mocks.getEnvironmentLink.mockResolvedValue(null);
+    mocks.unlinkEnvironment.mockResolvedValue(undefined);
+    const app = build();
+    const res = await app.inject({ method: 'DELETE', url: '/v1/apps/app_prod/staging' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ deleted: true, retained_staging_app_id: null });
   });
 
   it('returns 404 and never unlinks when the caller does not own the app', async () => {

@@ -5,6 +5,8 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { provisionNeonDbForApp } from './app-db-provision.js';
 import { teardownAppDb } from './app-db-teardown.js';
+import { teardownAppStorage } from './app-storage-teardown.js';
+import { deleteObject as deleteStorageObject } from './s3.js';
 import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notifications.service.js';
@@ -430,6 +432,30 @@ async function executeDeprovision(
     if (appRow.rows.length > 0) {
       await dataPlaneDb.query(`DROP DATABASE IF EXISTS "${appRow.rows[0].db_name}"`);
     }
+  }
+
+  // Delete the app's uploaded object BYTES *before* the row delete below,
+  // because `storage_objects.app_id` cascades: once the app row is gone, the
+  // only record of which keys belonged to this app is gone with it and the
+  // bytes are unreachable forever. This matters most for a STAGING app, whose
+  // objects are a second physical copy of a customer's files written by the
+  // app-copy engine — see app-storage-teardown.ts for the shared-key guard
+  // that stops this deleting production's bytes. Best-effort by contract
+  // (never throws); counts only, never a key, since a key embeds a filename.
+  const storageTeardown = await teardownAppStorage({
+    runtimeDb: runtimePool, appId, deleteObject: deleteStorageObject,
+  });
+  if (storageTeardown.total > 0) {
+    logger.info(
+      { appId, ...storageTeardown },
+      '[neon-task-worker] storage objects deleted for app',
+    );
+  }
+  if (storageTeardown.failed > 0) {
+    logger.warn(
+      { appId, failed: storageTeardown.failed, total: storageTeardown.total },
+      '[neon-task-worker] some storage objects could not be deleted; bytes remain in the bucket',
+    );
   }
 
   // Delete the app row (cascade handles app_db_connections, app_users, etc.) — apps is runtime-tier
@@ -1725,6 +1751,35 @@ export async function executeStagingCopyWaitTask(
   }
 
   if (verdict.kind === 'failed') {
+    // WHAT SURVIVES A FAILED COPY. The staging app is already fully
+    // provisioned at this point, and the copy failed PART WAY THROUGH - the
+    // engine's phases run in order (app data, then users, then storage), so
+    // whatever landed before the failure is still sitting in the staging app.
+    // For a staging_create that app never gets an `app_environments` row, so
+    // it is invisible to the idle reaper (scoped through that table) forever.
+    // Deleting it from here is not this task's call - it may hold the only
+    // evidence of why the copy failed - but leaving it SILENTLY is not an
+    // option either, because what it holds is a partial copy of a customer's
+    // personal data. Name it on the job the caller is already polling; the
+    // dashboard surfaces job warnings on failure.
+    //
+    // Only for staging_create. A failed staging_RESET leaves an app that is
+    // still linked, so the reaper can still see it and `POST .../staging/reset`
+    // can be retried — a different, lesser situation that this warning would
+    // describe wrongly.
+    const retentionWarnings = job.mode === 'staging_create'
+      ? [
+        `Staging app ${stagingAppId} was provisioned before the data copy failed, and still exists. `
+        + 'It may hold a PARTIAL copy of production data (rows, auth users and/or uploaded files) '
+        + 'from the phases that completed. It is not linked as a staging environment, so idle '
+        + `pausing will never reach it. Delete it with: DELETE /apps/${stagingAppId}`,
+      ]
+      : [];
+    await appendCloneJobWarnings(controlDb, jobId, retentionWarnings).catch((err) => logger.error(
+      { err, jobId, stagingAppId },
+      '[staging-copy-wait] could not record the retained-staging-app warning',
+    ));
+
     // Terminal for the STAGING job, and NOT rethrown: this task did exactly
     // what it was queued to do - observe the copy - and throwing would burn a
     // queue attempt and re-run the same observation to the same conclusion.

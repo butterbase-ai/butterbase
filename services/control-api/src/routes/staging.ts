@@ -134,6 +134,19 @@ export function stagingRoutes(app: FastifyInstance) {
   // app. Deleting the staging app itself must go through the normal
   // app-deletion path so Neon project teardown and the orphan reconciler stay
   // in charge of it; this route only removes the app_environments row.
+  //
+  // WHAT IS LEFT BEHIND, AND WHY IT IS NAMED. Since the app-copy engine was
+  // wired into staging creation, a staging app holds a real copy of
+  // production's rows, `app_users` and uploaded files — a second copy of the
+  // customer's personal data. Unlinking deletes the `app_environments` row and
+  // nothing else, so that copy survives; and because the idle reaper scopes
+  // every one of its statements through `app_environments`
+  // (staging-reaper.ts), the app also drops out of automatic lifecycle
+  // management for good. Keeping the app is the right conservative default —
+  // this route must not destroy an environment the caller only asked to
+  // unpair — but the retention must not be SILENT. The response names the
+  // retained app id, says what it still holds, and gives the exact call that
+  // removes it; the audit event records the same fact.
   app.delete('/v1/apps/:app_id/staging', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     const userId = requireUserId(request);
@@ -143,8 +156,43 @@ export function stagingRoutes(app: FastifyInstance) {
     }
 
     const runtimeDb = await getRuntimeDbForApp(app.controlDb, app_id);
+    // Read the link BEFORE removing it — afterwards there is nothing left that
+    // names which app was just orphaned.
+    const link = await getEnvironmentLink(runtimeDb, app_id);
     await unlinkEnvironment(runtimeDb, app_id);
-    return reply.send({ deleted: true });
+
+    const retainedAppId = link?.staging_app_id ?? null;
+
+    logFromRequest(request, {
+      appId: app_id,
+      category: 'admin',
+      eventType: 'staging.unlink',
+      action: 'delete',
+      resourceType: 'app',
+      resourceId: retainedAppId ?? app_id,
+      // Ids and booleans only — never a row, a user or a filename.
+      eventData: {
+        retained_staging_app_id: retainedAppId,
+        retains_production_data_copy: retainedAppId != null,
+      },
+      success: true,
+    });
+
+    return reply.send({
+      deleted: true,
+      // Null when there was no link to begin with (the call is idempotent), so
+      // clients can branch on presence alone.
+      retained_staging_app_id: retainedAppId,
+      ...(retainedAppId
+        ? {
+            retention_notice:
+              `Unlinked only. Staging app ${retainedAppId} still exists and still holds its copy of `
+              + 'this app\'s production data — rows, auth users and uploaded files. It is no longer '
+              + 'covered by staging idle-pausing, because that is scoped through the link you just '
+              + `removed. Delete it with: DELETE /apps/${retainedAppId}`,
+          }
+        : {}),
+    });
   });
 
   // GET /v1/apps/:app_id/staging/promote/preview — read-only dry run of a
