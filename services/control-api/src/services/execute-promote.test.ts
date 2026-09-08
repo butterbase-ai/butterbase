@@ -14,10 +14,15 @@ const mocks = vi.hoisted(() => ({
   replayFunctions: vi.fn(),
   replayNonSecretConfig: vi.fn(),
   replaySeedData: vi.fn(),
+  replayFrontend: vi.fn(),
   replayDurableObjectsForClone: vi.fn(),
   setCloneJobStatus: vi.fn(),
   appendCloneJobWarnings: vi.fn(),
   touchEnvironmentTimestamp: vi.fn(),
+  getManifestJson: vi.fn(),
+  copyBlobSameRegion: vi.fn(),
+  copyManifestSameRegion: vi.fn(),
+  setLatest: vi.fn(),
   extraStep: null as ReplayStep | null,
 }));
 
@@ -27,6 +32,7 @@ vi.mock('./clone-replay.js', () => ({
   replayFunctions: mocks.replayFunctions,
   replayNonSecretConfig: mocks.replayNonSecretConfig,
   replaySeedData: mocks.replaySeedData,
+  replayFrontend: mocks.replayFrontend,
 }));
 vi.mock('./durable-objects.service.js', () => ({
   replayDurableObjectsForClone: mocks.replayDurableObjectsForClone,
@@ -37,6 +43,12 @@ vi.mock('./clone-jobs.js', () => ({
 }));
 vi.mock('./app-environments.js', () => ({
   touchEnvironmentTimestamp: mocks.touchEnvironmentTimestamp,
+}));
+vi.mock('./repo-storage.js', () => ({
+  getManifestJson: mocks.getManifestJson,
+  copyBlobSameRegion: mocks.copyBlobSameRegion,
+  copyManifestSameRegion: mocks.copyManifestSameRegion,
+  setLatest: mocks.setLatest,
 }));
 // The real registry drives the loop — that is the point of the registry — but a
 // test can append a bogus row to prove the default arm throws.
@@ -63,10 +75,14 @@ const job = {
 } as unknown as CloneJob;
 
 const controlQuery = vi.fn().mockResolvedValue({ rows: [] });
+// Doubles as the "apps" lookup pool for the repo step's staging-HEAD read and
+// production repo_latest_snapshot write; default has no repo snapshot so the
+// repo case no-ops for every test that doesn't care about it.
+const runtimeQuery = vi.fn().mockResolvedValue({ rows: [{ repo_latest_snapshot: null }] });
 
 const deps: PromoteDeps = {
   controlDb: { tag: 'control', query: controlQuery } as never,
-  runtimeDb: { tag: 'runtime' } as never,
+  runtimeDb: { tag: 'runtime', query: runtimeQuery } as never,
   stagingPool: { tag: 'staging' } as never,
   prodPool: { tag: 'prod' } as never,
   prodOwnerId: 'owner_prod',
@@ -81,6 +97,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.extraStep = null;
   controlQuery.mockResolvedValue({ rows: [] });
+  runtimeQuery.mockResolvedValue({ rows: [{ repo_latest_snapshot: null }] });
   mocks.setCloneJobStatus.mockResolvedValue(undefined);
   mocks.appendCloneJobWarnings.mockResolvedValue(undefined);
   mocks.touchEnvironmentTimestamp.mockResolvedValue(undefined);
@@ -94,6 +111,7 @@ beforeEach(() => {
   mocks.replayDurableObjectsForClone.mockResolvedValue({
     cloned: [], do_env_keys: [], auto_minted_keys: [], override_filled_keys: [],
   });
+  mocks.replayFrontend.mockResolvedValue({ warnings: [] });
 });
 
 describe('executePromote', () => {

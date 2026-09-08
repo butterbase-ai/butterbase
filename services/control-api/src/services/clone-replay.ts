@@ -1781,10 +1781,21 @@ export async function replayMeetingsWebhook(
  * provisioned lazily inside deployViaPages on first publish, so no separate
  * project-create step is needed here.
  *
- * Soft-fails: errors are recorded as warnings and the broader clone job
- * is allowed to complete (the schema/RLS/functions/etc. are already done;
- * the user can re-publish their frontend manually).
+ * Soft-fails BY DEFAULT: errors are recorded as warnings and the broader
+ * clone/update job is allowed to complete (the schema/RLS/functions/etc. are
+ * already done; the user can re-publish their frontend manually).
+ *
+ * `opts.throwOnFailure` is the opt-in override promote (Task 14) needs: a
+ * promote's deploy step is not best-effort, it IS the job, so a failure here
+ * must fail the whole promote rather than complete with a stale production
+ * bundle and a buried warning. Same pattern Task 13 used for
+ * `preserveDestinationTriggerEnabled` / `skipIntegrations` — additive, opt-in,
+ * default (clone, update) callers are byte-for-byte unaffected.
  */
+export interface ReplayFrontendOpts {
+  throwOnFailure?: boolean;
+}
+
 export async function replayFrontend(
   controlDb: pg.Pool,
   destRuntimePool: pg.Pool,
@@ -1792,6 +1803,7 @@ export async function replayFrontend(
   destAppId: string,
   userId: string,
   logger: ReplayLogger,
+  opts?: ReplayFrontendOpts,
 ): Promise<{ warnings: string[] }> {
   const warnings: string[] = [];
 
@@ -1852,6 +1864,14 @@ export async function replayFrontend(
   } catch (err) {
     const msg = `frontend replay failed: ${(err as Error).message}`;
     warnings.push(msg);
+    if (opts?.throwOnFailure) {
+      // Promote path: do not swallow. Log the same as the default path (so
+      // the failure is still visible in the warnings this function would
+      // otherwise have returned) and then rethrow so the caller's job fails
+      // instead of reporting a completed promote with a stale bundle live.
+      logger.warn({ err }, '[clone] frontend replay failed; rethrowing (throwOnFailure)');
+      throw err instanceof Error ? err : new Error(msg);
+    }
     logger.warn({ err }, '[clone] frontend replay failed; continuing');
   }
 

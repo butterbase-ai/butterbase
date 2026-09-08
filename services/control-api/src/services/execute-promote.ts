@@ -38,6 +38,15 @@
  *     the default arm THROWS. If a future registry row lands without an arm
  *     here, the promote fails loudly rather than quietly skipping a primitive
  *     the user was told would be promoted.
+ *
+ * DIVERGENCE FROM executeUpdate (Task 14): executeUpdate publishes the repo
+ * and deliberately leaves the deployed artifact alone (neon-task-worker.ts,
+ * around the "the fork's deployed frontend artifact is deliberately NOT
+ * touched" comment) — deployment is left to the fork owner. Promote is
+ * different by explicit product decision: "promote takes staging live" means
+ * the deploy IS part of the job, so the 'frontend' case below throws on
+ * failure instead of the soft-fail replayFrontend normally does for clone and
+ * update. See that case for what a deploy failure leaves behind.
  */
 import type pg from 'pg';
 import {
@@ -45,12 +54,19 @@ import {
   replayRls,
   replayFunctions,
   replayNonSecretConfig,
+  replayFrontend,
 } from './clone-replay.js';
 import { replayDurableObjectsForClone } from './durable-objects.service.js';
 import { filterAdditive } from './schema-additive-filter.js';
 import { setCloneJobStatus, appendCloneJobWarnings, type CloneJob } from './clone-jobs.js';
 import { touchEnvironmentTimestamp } from './app-environments.js';
 import { promotableSteps } from './replay-registry.js';
+import {
+  getManifestJson,
+  copyBlobSameRegion,
+  copyManifestSameRegion,
+  setLatest,
+} from './repo-storage.js';
 
 export interface PromoteLogger {
   info(obj: unknown, msg?: string): void;
@@ -300,19 +316,119 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
           break;
         }
 
-        case 'repo':
-        case 'frontend':
-          // Deliberate, explicit no-op. Task 14 owns publishing the staging
-          // repo snapshot onto production and redeploying the frontend; both
-          // need S3 blob copying and the deploy pipeline, neither of which
-          // belongs in this module. Named here rather than left to the default
-          // arm so that "not yet implemented" and "nobody wired this" are
-          // different states in the code.
+        case 'repo': {
+          // Publishes the staging app's repo snapshot onto production. Uses
+          // the SAME primitives executeClone/executeUpdate use for this
+          // (repo-storage.ts blob/manifest copy + setLatest) — there is no
+          // single "publish repo" helper to call.
+          //
+          // Deliberately NOT job.source_snapshot_id: startPromote seeds that
+          // column with a synthetic `promote:<app>:<timestamp>` placeholder
+          // (promote-jobs.ts), not a real content-addressed snapshot id —
+          // there is nothing to hash at request time the way a clone/update's
+          // source manifest already exists. The real snapshot id is read here,
+          // at EXECUTION time, from the staging app's own repo pointer. That
+          // also makes a resumed/retried promote pick up whatever staging's
+          // HEAD is on re-entry rather than a value pinned when the job was
+          // first requested — consistent with "every step re-walks and
+          // finishes the job" in the header above.
+          const stagingHead = await runtimeDb.query<{ repo_latest_snapshot: string | null }>(
+            `SELECT repo_latest_snapshot FROM apps WHERE id = $1`,
+            [stagingAppId],
+          );
+          const snapshotId = stagingHead.rows[0]?.repo_latest_snapshot ?? null;
+          if (!snapshotId) {
+            // Staging has never had a repo push (e.g. an app whose owner only
+            // edits schema/functions through the dashboard). Nothing to
+            // publish — same "no persisted artifact, skip" shape replayFrontend
+            // uses below for a frontend that was never deployed.
+            logger.info(
+              { jobId, stagingAppId },
+              '[promote] staging has no repo snapshot; skipping repo publish',
+            );
+            break;
+          }
+
+          const manifestJson = await getManifestJson(stagingAppId, snapshotId);
+          if (!manifestJson) {
+            // apps.repo_latest_snapshot points at a manifest that isn't in
+            // storage — a real inconsistency, not a "nothing to do" case.
+            // Fail loudly rather than silently publish nothing while telling
+            // the user their repo was promoted.
+            throw new Error(
+              `[promote] staging repo_latest_snapshot ${snapshotId} has no manifest in storage`,
+            );
+          }
+          const manifest = JSON.parse(manifestJson) as { files: { sha256: string }[] };
+          const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
+
+          // Staging is pinned to production's region (start-staging.ts /
+          // PromoteDeps doc comment above), so this is ALWAYS a same-region
+          // copy — no cross-region S3 client branch is needed the way
+          // executeUpdate's repo step needs one.
+          for (const sha of distinctShas) {
+            await copyBlobSameRegion(stagingAppId, prodAppId, sha);
+          }
+          await copyManifestSameRegion(stagingAppId, prodAppId, snapshotId);
+          await setLatest(prodAppId, snapshotId);
+          await runtimeDb.query(
+            `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+            [snapshotId, prodAppId],
+          );
           logger.info(
-            { jobId, prodAppId, step: step.name },
-            '[promote] repo/frontend promotion is implemented by Task 14; skipping here',
+            { jobId, prodAppId, snapshotId, files: distinctShas.length },
+            '[promote] repo snapshot published to production',
           );
           break;
+        }
+
+        case 'frontend': {
+          // The actual divergence from executeUpdate (see header). Promote
+          // deploys, so this is where new code goes live in production — kept
+          // LAST in the registry order (with 'repo' immediately above) so
+          // everything that can fail (schema, RLS, functions, DOs, config,
+          // the repo snapshot) has already landed before production starts
+          // serving a new bundle.
+          //
+          // Shares the 'copying_repo' status with the 'repo' case above (see
+          // replay-registry.ts) — setCloneJobStatus is called twice with the
+          // same value. Accepted, not a bug: a distinct 'deploying' status
+          // would mean widening CloneJobStatus and touching the status column
+          // for a purely cosmetic polling gain.
+          //
+          // replayFrontend (clone-replay.ts) is shared with clone/update and
+          // SOFT-FAILS by default there — the backend is already fully
+          // replayed on those paths, so a frontend hiccup is a warning, not a
+          // failed job. Promote cannot make that trade: the user was told
+          // "promote takes staging live", so a deploy failure must fail the
+          // whole promote. throwOnFailure is the opt-in escape hatch (same
+          // shape as Task 13's preserveDestinationTriggerEnabled /
+          // skipIntegrations) — clone and update are byte-for-byte unaffected.
+          //
+          // WHAT A FAILURE HERE LEAVES BEHIND, BY DESIGN: every step above —
+          // schema, RLS, durable objects, functions, config, and now the repo
+          // snapshot — has ALREADY been applied to production by the time this
+          // runs. A failed deploy therefore leaves production with the NEW
+          // backend and repo but the OLD frontend bundle still being served.
+          // That is not corruption: the old frontend still talks to a backend
+          // that is additive-only (schema) and insert-only (config), so it
+          // keeps working. It is surfaced to the user as a failed promote —
+          // never as success — and, per the catch block below, this step is
+          // itself idempotent (replayFrontend re-copies the same artifact and
+          // redeploys), so a retry that reaches this case again simply
+          // finishes the job. We do NOT roll back schema/RLS/functions/config
+          // on a deploy failure — that would mean destructive DDL against a
+          // live production app, which this feature refuses on principle.
+          const frontendResult = await replayFrontend(
+            controlDb, runtimeDb, stagingAppId, prodAppId, job.requested_by_user_id, logger,
+            { throwOnFailure: true },
+          );
+          if (frontendResult.warnings.length > 0) {
+            await appendCloneJobWarnings(controlDb, jobId, frontendResult.warnings);
+          }
+          logger.info({ jobId, prodAppId }, '[promote] frontend deployed to production');
+          break;
+        }
 
         default:
           // A registry row declared promotable with no arm here. Throwing is
@@ -349,11 +465,25 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
     // landed and functions did not. That is not corruption and not a bug to
     // hunt at 3am. Every step above is idempotent (replaySchema diffs against
     // the destination's CURRENT schema, replayRls tolerates "already exists",
-    // functions and durable objects upsert, config is insert-only), so simply
-    // re-running the promote re-walks the whole list and finishes the job. A
-    // retry from the queue does exactly that; so does the owner starting a
-    // fresh promote after a permanent failure, because a terminal job frees
-    // the idx_template_clone_jobs_one_promote slot.
+    // functions and durable objects upsert, config is insert-only, the repo
+    // publish re-copies the same content-addressed blobs/manifest and
+    // re-points 'latest', replayFrontend re-copies the same artifact and
+    // redeploys), so simply re-running the promote re-walks the whole list and
+    // finishes the job. A retry from the queue does exactly that; so does the
+    // owner starting a fresh promote after a permanent failure, because a
+    // terminal job frees the idx_template_clone_jobs_one_promote slot.
+    //
+    // Task 14 extends this same reasoning to the deploy: a promote that fails
+    // in the 'frontend' step has already applied schema/RLS/DOs/functions/
+    // config/repo to production — a REAL live app, not a fork — and only the
+    // deployed bundle is stale. That is deliberately reported as a FAILED
+    // promote (see the 'frontend' case above), never as success, so the user
+    // is never told production is live when it is still serving the old
+    // frontend. We do not attempt to roll schema back to compensate — that
+    // would be destructive DDL against a live app, which this feature refuses
+    // on principle — and we do not need to: the old frontend keeps working
+    // against the new backend (additive schema, insert-only config), and a
+    // retry finishes the job the same way every other partial promote does.
     const isPermanent = attempt >= maxAttempts;
     if (isPermanent) {
       await setCloneJobStatus(controlDb, jobId, {
