@@ -455,6 +455,14 @@ describe('resolveCloneDispatch', () => {
   it('routes a promote job to the promote path, NEVER to clone', () => {
     expect(resolveCloneDispatch({ mode: 'promote' })).toBe('promote');
   });
+  // Task 16's landmine: staging_reset was inert only because nothing enqueued
+  // it. A reset job routed to 'clone' would run executeClone — a
+  // fresh-provision pipeline — against a reset job's existing staging app,
+  // and worse, could reach the pool-order hazard staging-reset.ts's header
+  // warns about if any future refactor tried to satisfy it as a clone.
+  it('routes a staging_reset job to the reset path, NEVER to clone', () => {
+    expect(resolveCloneDispatch({ mode: 'staging_reset' })).toBe('staging_reset');
+  });
 });
 
 describe('classifyUpdateResume', () => {

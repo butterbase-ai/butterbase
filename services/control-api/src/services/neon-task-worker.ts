@@ -13,6 +13,7 @@ import { resolveOrganizationId } from './org-resolver.js';
 import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus } from './clone-jobs.js';
 import { finalizeStagingClone } from './staging-completion.js';
 import { executePromote } from './execute-promote.js';
+import { executeStagingReset } from './staging-reset.js';
 import { getEnvironmentLink } from './app-environments.js';
 import {
   getManifestJson,
@@ -208,6 +209,13 @@ async function processNextTask(
         // NOT the clone branch. A promote writes onto an existing production
         // app; executeClone provisions a new one. See resolveCloneDispatch.
         await executePromoteTask(controlDb, task, logger);
+      } else if (dispatch === 'staging_reset') {
+        // NOT the clone branch. A reset writes onto an existing staging app
+        // and reads from production; executeClone provisions a brand-new
+        // app. See resolveCloneDispatch and staging-reset.ts's direction
+        // warning — getting this dispatch wrong would run the fresh-provision
+        // pipeline against a reset job's dest_app_id.
+        await executeResetTask(controlDb, task, logger);
       } else {
         await executeClone(controlDb, dataPlaneDb, task, logger);
       }
@@ -1419,17 +1427,25 @@ export function shouldAbortUpdate(
  * promote/reset operates on an existing linked pair, not a fresh provision.
  * Each needs its own dispatch branch and executor when implemented.
  *
- * 'promote' is now routed explicitly (Task 13) to executePromoteTask. Because
- * the switch is not exhaustive, that route is pinned by a unit test rather
- * than by the compiler: deleting the line below would silently point a
- * customer's LIVE production app at the fresh-provision clone pipeline.
- * 'staging_reset' still falls through and remains Task 16's to add.
+ * 'promote' is routed explicitly (Task 13) to executePromoteTask, and
+ * 'staging_reset' is routed explicitly (Task 16) to executeResetTask. Because
+ * the switch is not exhaustive, both routes are pinned by a unit test rather
+ * than by the compiler: deleting either line below would silently point a
+ * reset/promote job at the fresh-provision clone pipeline instead.
+ *
+ * 'staging_reset' in particular must NEVER fall through to 'clone':
+ * executeClone provisions a brand-new app, which is not what a reset job's
+ * dest_app_id (an existing staging app) needs, and is not what executeClone
+ * even validates against. Its own direction hazard lives in staging-reset.ts,
+ * not here — this function only decides WHICH executor a `clone` task_type
+ * row reaches.
  */
 export function resolveCloneDispatch(
   job: { mode?: string } | null,
-): 'clone' | 'update' | 'promote' {
+): 'clone' | 'update' | 'promote' | 'staging_reset' {
   if (job?.mode === 'update') return 'update';
   if (job?.mode === 'promote') return 'promote';
+  if (job?.mode === 'staging_reset') return 'staging_reset';
   if (job?.mode === 'staging_create') return 'clone'; // deliberate: see comment above
   return 'clone';
 }
@@ -1569,6 +1585,107 @@ async function executePromoteTask(
       }
       throw err;
     }
+  });
+}
+
+/**
+ * Task-level wrapper for a staging reset: resolve the job, open the pools
+ * executeStagingReset needs, and hand off.
+ *
+ * DIRECTION IS REVERSED FROM executePromoteTask. A promote's job.source_app_id
+ * is the staging app and job.dest_app_id is production; a reset's
+ * job.source_app_id is PRODUCTION and job.dest_app_id is STAGING (see
+ * staging-reset.ts's startStagingReset, which writes the job row that way).
+ * prodAppId/stagingAppId below are read from the CloneJob fields by name —
+ * never repurpose executePromoteTask's variable names or copy its pool
+ * assignment by pattern-matching the code shape, since here they point at the
+ * opposite fields.
+ *
+ * Resumability matches executePromoteTask: any non-terminal status is
+ * re-entered, because replaySeedData and isolateStagingApp/
+ * isolateStagingMeetingsWebhook are all idempotent (INSERT ... ON CONFLICT DO
+ * NOTHING, DELETE of an already-empty set, UPDATE of already-disabled rows).
+ */
+async function executeResetTask(
+  controlDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Reset task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Reset job ${jobId} not found`);
+  if (isTerminalCloneStatus(job.status)) {
+    logger.info({ jobId, status: job.status }, '[staging-reset] job in terminal status; skipping');
+    return;
+  }
+
+  // job.source_app_id is PRODUCTION for a reset job — see the header comment.
+  const prodAppId = job.source_app_id;
+  const stagingAppId = job.dest_app_id;
+  if (!stagingAppId) throw new Error(`Reset job ${jobId} has no dest_app_id (staging app)`);
+
+  await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
+
+  await Sentry.withScope(async (scope) => {
+    scope.setTag('clone_job_id', jobId);
+    scope.setTag('clone_mode', 'staging_reset');
+    scope.setTag('source_app_id', prodAppId);
+    scope.setTag('target_app_id', stagingAppId);
+    scope.setTag('attempt', String(task.attempts));
+
+    // startStagingReset pins source_region and dest_region to the production
+    // app's region (region-resolver.ts's getRuntimeDbForApp result), and
+    // staging is always pinned to production's region (start-staging.ts), so
+    // both apps live in one regional runtime DB.
+    const runtimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+
+    // Re-checked at execution time, not just at request time — the same
+    // reason executePromoteTask re-checks the link. If the pair was unlinked
+    // between queueing and now, resetting would re-seed the wrong (or a
+    // deleted) staging app.
+    const link = await getEnvironmentLink(runtimeDb, prodAppId);
+    if (!link || link.staging_app_id !== stagingAppId) {
+      const msg = `[staging-reset] ${prodAppId} is no longer linked to staging app ${stagingAppId}; refusing to reset`;
+      const isPermanent = task.attempts >= task.max_attempts;
+      await setCloneJobStatus(controlDb, jobId, isPermanent
+        ? { status: 'failed', error_message: msg, completed_at: new Date() }
+        : { error_message: msg }).catch(() => {});
+      throw new Error(msg);
+    }
+
+    const prodRow = await runtimeDb.query<{ db_name: string }>(
+      `SELECT db_name FROM apps WHERE id = $1`, [prodAppId],
+    );
+    if (prodRow.rows.length === 0) {
+      throw new Error(`[staging-reset] production app ${prodAppId} not found in ${job.dest_region} runtime DB`);
+    }
+    const stagingRow = await runtimeDb.query<{ db_name: string }>(
+      `SELECT db_name FROM apps WHERE id = $1`, [stagingAppId],
+    );
+    if (stagingRow.rows.length === 0) {
+      throw new Error(`[staging-reset] staging app ${stagingAppId} not found in ${job.dest_region} runtime DB`);
+    }
+
+    // prodPool/stagingPool are named — and assigned — for exactly what they
+    // are. Do not shorten these to match executePromoteTask's stagingPool/
+    // prodPool assignment order; the source/dest roles are swapped here.
+    const prodPool = await getAppPoolForApp(controlDb, prodAppId, prodRow.rows[0].db_name);
+    const stagingPool = await getAppPoolForApp(controlDb, stagingAppId, stagingRow.rows[0].db_name);
+
+    await executeStagingReset(
+      {
+        controlDb,
+        runtimeDb,
+        prodPool,
+        stagingPool,
+        attempt: task.attempts,
+        maxAttempts: task.max_attempts,
+        logger,
+      },
+      job,
+    );
   });
 }
 

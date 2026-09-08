@@ -17,6 +17,7 @@ import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { startPromote } from '../services/promote-jobs.js';
 import { buildPromotePreview } from '../services/promote-preview.js';
+import { startStagingReset } from '../services/staging-reset.js';
 import { getAppPoolForApp } from '../services/app-pool.js';
 import {
   RESOURCE_NOT_FOUND,
@@ -258,6 +259,44 @@ export function stagingRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl(EXTERNAL_DB_ERROR),
       }));
     }
+
+    return reply.send({ job_id: result.jobId, status: 'pending' });
+  });
+
+  // POST /v1/apps/:app_id/staging/reset — discards the staging app's data
+  // and re-seeds it from production. DIRECTION IS REVERSED FROM PROMOTE:
+  // production is the source, staging is the destination — see
+  // staging-reset.ts's header comment. Never writes to production.
+  app.post('/v1/apps/:app_id/staging/reset', async (request, reply) => {
+    const { app_id } = request.params as { app_id: string };
+    const userId = requireUserId(request);
+
+    if (!(await assertCallerOwnsApp(app, app_id, userId, request.auth?.organizationId))) {
+      return reply.code(404).send(notFound(app_id));
+    }
+
+    const orgId = request.auth?.organizationId
+      ?? await resolveOrganizationId(app.controlDb, userId);
+
+    const result = await startStagingReset({
+      controlDb: app.controlDb, prodAppId: app_id, userId, orgId,
+    });
+    if (!result.ok) {
+      return reply.code(404).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: result.message,
+        remediation: 'Create a staging environment first.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+
+    // Enqueued only after the control-plane job row committed, matching
+    // every other route here. enqueueCloneTask's first argument is the
+    // SOURCE app id — for a reset that is the PRODUCTION app (app_id), not
+    // staging. neon_tasks is a per-region queue and the worker claims from
+    // its own instanceRegion, so this must land in production's region.
+    const region = await resolveAppHomeRegion(app.controlDb, app_id);
+    await enqueueCloneTask(app_id, region, result.jobId);
 
     return reply.send({ job_id: result.jobId, status: 'pending' });
   });
