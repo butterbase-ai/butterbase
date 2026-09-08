@@ -4,11 +4,13 @@ import Fastify from 'fastify';
 const mocks = vi.hoisted(() => ({
   startStaging: vi.fn(),
   getEnvironmentLink: vi.fn(),
+  getEnvironmentLinkWithPauseState: vi.fn(),
   unlinkEnvironment: vi.fn(),
   enqueueCloneTask: vi.fn(),
   getRuntimeDbForApp: vi.fn(),
   resolveOrganizationId: vi.fn(),
   resolveApp: vi.fn(),
+  getLatestStagingJob: vi.fn(),
 }));
 
 vi.mock('../services/start-staging.js', async () => {
@@ -19,7 +21,11 @@ vi.mock('../services/start-staging.js', async () => {
 });
 vi.mock('../services/app-environments.js', () => ({
   getEnvironmentLink: mocks.getEnvironmentLink,
+  getEnvironmentLinkWithPauseState: mocks.getEnvironmentLinkWithPauseState,
   unlinkEnvironment: mocks.unlinkEnvironment,
+}));
+vi.mock('../services/clone-jobs.js', () => ({
+  getLatestStagingJob: mocks.getLatestStagingJob,
 }));
 vi.mock('../services/clone-task-queue.js', () => ({ enqueueCloneTask: mocks.enqueueCloneTask }));
 vi.mock('../services/region-resolver.js', () => ({ getRuntimeDbForApp: mocks.getRuntimeDbForApp }));
@@ -55,6 +61,7 @@ beforeEach(() => {
   mocks.resolveOrganizationId.mockResolvedValue('org_1');
   mocks.getRuntimeDbForApp.mockResolvedValue({});
   mocks.resolveApp.mockResolvedValue({ id: 'app_prod', owner_id: 'u1' });
+  mocks.getLatestStagingJob.mockResolvedValue(null);
 });
 
 describe('POST /v1/apps/:app_id/staging', () => {
@@ -91,22 +98,94 @@ describe('POST /v1/apps/:app_id/staging', () => {
 
 describe('GET /v1/apps/:app_id/staging', () => {
   it('reports null when there is no staging environment', async () => {
-    mocks.getEnvironmentLink.mockResolvedValue(null);
+    mocks.getEnvironmentLinkWithPauseState.mockResolvedValue(null);
     const app = build();
     const res = await app.inject({ method: 'GET', url: '/v1/apps/app_prod/staging' });
     expect(res.json()).toEqual({ staging_app_id: null });
   });
 
-  it('returns the link when one exists', async () => {
-    mocks.getEnvironmentLink.mockResolvedValue({
+  it('returns the link, unpaused, when one exists and the staging app is not paused', async () => {
+    mocks.getEnvironmentLinkWithPauseState.mockResolvedValue({
       staging_app_id: 'app_staging',
       created_at: new Date('2026-09-08T00:00:00Z'),
       last_promoted_at: null,
       last_reset_at: null,
+      staging_paused: false,
+      staging_paused_at: null,
+      staging_paused_reason: null,
     });
     const app = build();
     const res = await app.inject({ method: 'GET', url: '/v1/apps/app_prod/staging' });
-    expect(res.json()).toMatchObject({ staging_app_id: 'app_staging', last_promoted_at: null });
+    const body = res.json();
+    expect(body).toMatchObject({
+      staging_app_id: 'app_staging',
+      last_promoted_at: null,
+      paused: false,
+      paused_at: null,
+      paused_reason: null,
+    });
+  });
+
+  it('reports paused fields and why, when the staging app has been paused', async () => {
+    mocks.getEnvironmentLinkWithPauseState.mockResolvedValue({
+      staging_app_id: 'app_staging',
+      created_at: new Date('2026-09-08T00:00:00Z'),
+      last_promoted_at: null,
+      last_reset_at: null,
+      staging_paused: true,
+      staging_paused_at: new Date('2026-09-09T00:00:00Z'),
+      staging_paused_reason: 'Automatically paused after 30 days of inactivity.',
+    });
+    const app = build();
+    const res = await app.inject({ method: 'GET', url: '/v1/apps/app_prod/staging' });
+    const body = res.json();
+    expect(body.paused).toBe(true);
+    expect(body.paused_at).toBe('2026-09-09T00:00:00.000Z');
+    expect(body.paused_reason).toBe('Automatically paused after 30 days of inactivity.');
+  });
+
+  it('points at the most recent staging job, not an unrelated clone job for the same app', async () => {
+    mocks.getEnvironmentLinkWithPauseState.mockResolvedValue({
+      staging_app_id: 'app_staging',
+      created_at: new Date('2026-09-08T00:00:00Z'),
+      last_promoted_at: null,
+      last_reset_at: null,
+      staging_paused: false,
+      staging_paused_at: null,
+      staging_paused_reason: null,
+    });
+    mocks.getLatestStagingJob.mockResolvedValue({
+      job_id: 'job_reset_2',
+      mode: 'staging_reset',
+      status: 'completed',
+      created_at: new Date('2026-09-09T01:00:00Z'),
+    });
+    const app = build();
+    const res = await app.inject({ method: 'GET', url: '/v1/apps/app_prod/staging' });
+    const body = res.json();
+    expect(body.last_job).toEqual({
+      job_id: 'job_reset_2',
+      mode: 'staging_reset',
+      status: 'completed',
+      created_at: '2026-09-09T01:00:00.000Z',
+    });
+    expect(mocks.getLatestStagingJob).toHaveBeenCalledWith({}, 'app_prod');
+  });
+
+  it('reports last_job: null when there is no staging job yet', async () => {
+    mocks.getEnvironmentLinkWithPauseState.mockResolvedValue({
+      staging_app_id: 'app_staging',
+      created_at: new Date('2026-09-08T00:00:00Z'),
+      last_promoted_at: null,
+      last_reset_at: null,
+      staging_paused: false,
+      staging_paused_at: null,
+      staging_paused_reason: null,
+    });
+    mocks.getLatestStagingJob.mockResolvedValue(null);
+    const app = build();
+    const res = await app.inject({ method: 'GET', url: '/v1/apps/app_prod/staging' });
+    expect(res.json().last_job).toBeNull();
   });
 
   it('returns 404 and never reads the link when the caller does not own the app', async () => {
@@ -114,12 +193,18 @@ describe('GET /v1/apps/:app_id/staging', () => {
     const app = build();
     const res = await app.inject({ method: 'GET', url: '/v1/apps/app_prod/staging' });
     expect(res.statusCode).toBe(404);
-    expect(mocks.getEnvironmentLink).not.toHaveBeenCalled();
+    expect(mocks.getEnvironmentLinkWithPauseState).not.toHaveBeenCalled();
   });
 });
 
 describe('DELETE /v1/apps/:app_id/staging', () => {
   it('unlinks without deleting the staging app, and names what it left behind', async () => {
+    mocks.getEnvironmentLink.mockResolvedValue({
+      staging_app_id: 'app_staging',
+      created_at: new Date('2026-09-08T00:00:00Z'),
+      last_promoted_at: null,
+      last_reset_at: null,
+    });
     mocks.unlinkEnvironment.mockResolvedValue(undefined);
     const app = build();
     const res = await app.inject({ method: 'DELETE', url: '/v1/apps/app_prod/staging' });

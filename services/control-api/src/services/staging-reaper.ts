@@ -82,10 +82,11 @@ export async function runOnce(
   if (ids.length === 0) return { paused: 0 };
 
   const res = await runtimeDb.query(
-    `UPDATE apps SET paused = true, updated_at = now()
+    `UPDATE apps SET paused = true, paused_at = now(),
+            paused_reason = $2, updated_at = now()
       WHERE id = ANY($1)
         AND id IN (SELECT staging_app_id FROM app_environments)`,
-    [ids],
+    [ids, `Automatically paused after ${idleDays} days of inactivity.`],
   );
   logger.info({ paused: res.rowCount, ids }, '[staging-reaper] paused idle staging apps');
   return { paused: res.rowCount ?? 0 };

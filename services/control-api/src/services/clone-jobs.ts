@@ -160,6 +160,44 @@ export async function getCloneJob(controlDb: pg.Pool, jobId: string): Promise<Cl
   return res.rows[0] ?? null;
 }
 
+export interface LatestStagingJobPointer {
+  job_id: string;
+  mode: 'staging_create' | 'promote' | 'staging_reset';
+  status: CloneJobStatus;
+  created_at: Date;
+}
+
+/**
+ * The most recent staging-related job for a PRODUCTION app id — i.e. the job
+ * the staging dashboard should poll (via GET /v1/clone-jobs/:job_id) to
+ * recover warnings from an operation nobody's tab is still open for.
+ *
+ * The three staging modes do not key the same way (see 116_staging_job_modes.sql
+ * and start-staging.ts / promote-jobs.ts / staging-reset.ts):
+ *   - staging_create, staging_reset: source_app_id = production, dest_app_id = staging
+ *   - promote:                       source_app_id = staging,     dest_app_id = production
+ * So "for this production app" means source_app_id = prodAppId for the first
+ * two modes, OR dest_app_id = prodAppId for promote — never the same column
+ * for all three. The mode filter also excludes ordinary 'clone'/'update' jobs
+ * that happen to share an app id (e.g. this app was itself cloned from a
+ * template, or updated from a release) — those are not staging operations on
+ * this prod/staging pair and must not be surfaced here.
+ */
+export async function getLatestStagingJob(
+  controlDb: pg.Pool, prodAppId: string,
+): Promise<LatestStagingJobPointer | null> {
+  const res = await controlDb.query<LatestStagingJobPointer>(
+    `SELECT id AS job_id, mode, status, created_at
+       FROM template_clone_jobs
+      WHERE (mode IN ('staging_create', 'staging_reset') AND source_app_id = $1)
+         OR (mode = 'promote' AND dest_app_id = $1)
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [prodAppId],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function setCloneJobStatus(
   controlDb: pg.Pool,
   jobId: string,

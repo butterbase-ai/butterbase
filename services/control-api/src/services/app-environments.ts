@@ -44,6 +44,36 @@ export async function getEnvironmentLink(
   return res.rows[0] ?? null;
 }
 
+export interface AppEnvironmentLinkWithPauseState extends AppEnvironmentLink {
+  staging_paused: boolean;
+  staging_paused_at: Date | null;
+  staging_paused_reason: string | null;
+}
+
+/**
+ * Same lookup as getEnvironmentLink, plus the staging app's kill-switch
+ * state (043_app_paused.sql) via a join to `apps`. Used only by the
+ * prod-facing GET /v1/apps/:app_id/staging route, which needs to tell the
+ * dashboard a staging app is paused (and why) rather than showing it as
+ * "Linked" with working Promote/Reset buttons that will 503. Every other
+ * caller of getEnvironmentLink doesn't need this join, so it stays a
+ * separate function rather than growing AppEnvironmentLink's shape for
+ * everyone.
+ */
+export async function getEnvironmentLinkWithPauseState(
+  runtimeDb: pg.Pool, prodAppId: string,
+): Promise<AppEnvironmentLinkWithPauseState | null> {
+  const res = await runtimeDb.query<AppEnvironmentLinkWithPauseState>(
+    `SELECT e.*, a.paused AS staging_paused, a.paused_at AS staging_paused_at,
+            a.paused_reason AS staging_paused_reason
+       FROM app_environments e
+       JOIN apps a ON a.id = e.staging_app_id
+      WHERE e.prod_app_id = $1`,
+    [prodAppId],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function getLinkByStagingApp(
   runtimeDb: pg.Pool, stagingAppId: string,
 ): Promise<AppEnvironmentLink | null> {

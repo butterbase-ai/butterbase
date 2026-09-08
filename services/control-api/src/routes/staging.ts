@@ -12,7 +12,10 @@ import { requireUserId } from '../utils/require-auth.js';
 import { rateLimitAllowList } from '../plugins/rate-limit.js';
 import { enqueueCloneTask } from '../services/clone-task-queue.js';
 import { startStaging, sendStartStagingFailure } from '../services/start-staging.js';
-import { getEnvironmentLink, unlinkEnvironment } from '../services/app-environments.js';
+import {
+  getEnvironmentLink, getEnvironmentLinkWithPauseState, unlinkEnvironment,
+} from '../services/app-environments.js';
+import { getLatestStagingJob } from '../services/clone-jobs.js';
 import { getRuntimeDbForApp, resolveAppHomeRegion } from '../services/region-resolver.js';
 import { resolveOrganizationId } from '../services/org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
@@ -120,13 +123,34 @@ export function stagingRoutes(app: FastifyInstance) {
     }
 
     const runtimeDb = await getRuntimeDbForApp(app.controlDb, app_id);
-    const link = await getEnvironmentLink(runtimeDb, app_id);
+    const link = await getEnvironmentLinkWithPauseState(runtimeDb, app_id);
     if (!link) return reply.send({ staging_app_id: null });
+
+    // Job pointer is best-effort scoping only: ownership of app_id was
+    // already confirmed above, and getLatestStagingJob only ever selects
+    // staging_create/staging_reset rows keyed off app_id or promote rows
+    // keyed off app_id as dest — never a row belonging to some other app,
+    // so this cannot leak another app's job.
+    const lastJob = await getLatestStagingJob(app.controlDb, app_id);
+
     return reply.send({
       staging_app_id: link.staging_app_id,
       created_at: link.created_at.toISOString(),
       last_promoted_at: link.last_promoted_at?.toISOString() ?? null,
       last_reset_at: link.last_reset_at?.toISOString() ?? null,
+      paused: link.staging_paused,
+      paused_at: link.staging_paused_at?.toISOString() ?? null,
+      paused_reason: link.staging_paused_reason,
+      ...(lastJob
+        ? {
+            last_job: {
+              job_id: lastJob.job_id,
+              mode: lastJob.mode,
+              status: lastJob.status,
+              created_at: lastJob.created_at.toISOString(),
+            },
+          }
+        : { last_job: null }),
     });
   });
 
