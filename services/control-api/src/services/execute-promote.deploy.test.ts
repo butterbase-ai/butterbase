@@ -22,6 +22,16 @@
  * legitimate value (staging had no repo at request time): the step skips
  * with a job warning rather than refusing the whole promote, since a
  * backend-only promote is legitimate.
+ *
+ * Fix round 2:
+ *   - throwOnFailure itself is unit-tested directly against replayFrontend in
+ *     clone-replay.replay-frontend.test.ts, not just through this file's
+ *     mocked replayFrontend (a mutation test showed the tests here alone
+ *     don't prove the flag does anything).
+ *   - For the default 'pages' backend, a 'completed' promote means the
+ *     deploy was SUBMITTED and is still building — not live. The 'frontend'
+ *     step now reads apps.deployment_backend and attaches a warning saying
+ *     so, unless the backend is 'wfp' (synchronous, terminal).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -113,8 +123,9 @@ beforeEach(() => {
   });
   mocks.replayFrontend.mockResolvedValue({ warnings: [] });
 
-  // Default: the manifest for job.source_snapshot_id has one file.
-  runtimeQuery.mockResolvedValue({ rows: [] });
+  // Default: the manifest for job.source_snapshot_id has one file, and
+  // production is on the default 'pages' deployment_backend.
+  runtimeQuery.mockResolvedValue({ rows: [{ deployment_backend: 'pages' }] });
   mocks.getManifestJson.mockResolvedValue(
     JSON.stringify({ files: [{ path: 'index.html', sha256: 'abc', size: 1 }] }),
   );
@@ -127,12 +138,20 @@ describe('promote publishes the repo snapshot', () => {
   it('uses job.source_snapshot_id (pinned at request time), not a live re-read of staging', async () => {
     await executePromote(deps, job);
     expect(mocks.getManifestJson).toHaveBeenCalledWith('app_staging', 'snap_123');
-    // No SELECT against apps.repo_latest_snapshot for staging — the value
-    // came from the job row, fixed by startPromote at request time.
-    expect(runtimeQuery).not.toHaveBeenCalledWith(
-      expect.stringContaining('SELECT'),
-      expect.anything(),
+    // No SELECT against apps.repo_latest_snapshot for the STAGING app — the
+    // value came from the job row, fixed by startPromote at request time.
+    // (A separate SELECT against apps.deployment_backend for PRODUCTION now
+    // happens in the frontend step — see the 'promote deploys the frontend'
+    // describe block below — which is unrelated to this assertion.)
+    const stagingRepoRead = runtimeQuery.mock.calls.find(
+      (c) =>
+        typeof c[0] === 'string' &&
+        /SELECT/i.test(c[0]) &&
+        /repo_latest_snapshot/.test(c[0]) &&
+        Array.isArray(c[1]) &&
+        c[1][0] === 'app_staging',
     );
+    expect(stagingRepoRead).toBeUndefined();
   });
 
   it('copies every distinct blob and the manifest onto production, then advances latest', async () => {
@@ -199,6 +218,12 @@ describe('promote deploys the frontend', () => {
     expect(mocks.setCloneJobStatus).toHaveBeenLastCalledWith(
       deps.controlDb, 'job_p1', expect.objectContaining({ status: 'failed' }),
     );
+    // toHaveBeenLastCalledWith alone would still pass a buggy implementation
+    // that wrote 'completed' and THEN 'failed' — assert 'completed' was never
+    // written at all, not just that it isn't the last call.
+    expect(mocks.setCloneJobStatus).not.toHaveBeenCalledWith(
+      expect.anything(), 'job_p1', expect.objectContaining({ status: 'completed' }),
+    );
   });
 
   it('does not mark the promote complete before the deploy resolves', async () => {
@@ -212,5 +237,43 @@ describe('promote deploys the frontend', () => {
     });
     await executePromote(deps, job);
     expect(order).toEqual(['deploy', 'completed']);
+  });
+
+  it('passes warnOnZeroRewrite so a stale-app-id bundle surfaces on the job, not just in logs', async () => {
+    await executePromote(deps, job);
+    expect(mocks.replayFrontend).toHaveBeenCalledWith(
+      deps.controlDb, deps.runtimeDb, 'app_staging', 'app_prod', 'user_1',
+      expect.anything(),
+      expect.objectContaining({ warnOnZeroRewrite: true }),
+    );
+  });
+
+  // Fix round 2 (I2): 'completed' does not mean live for the default backend
+  // — deployViaPages returns BUILDING and the actual build happens
+  // asynchronously on Cloudflare's side. Read deployment_backend and disclose
+  // that rather than overstating what the job guarantees.
+  describe('deployment_backend disclosure', () => {
+    it('warns that the deploy is still building for the default pages backend', async () => {
+      runtimeQuery.mockResolvedValue({ rows: [{ deployment_backend: 'pages' }] });
+      await executePromote(deps, job);
+      const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+      const notice = surfaced.find((w: string) => /still building/i.test(w));
+      expect(notice).toBeDefined();
+      expect(notice).toMatch(/does NOT yet mean the new bundle is live/);
+    });
+
+    it('also warns when deployment_backend is missing/unrecognized (defaults to pages)', async () => {
+      runtimeQuery.mockResolvedValue({ rows: [{ deployment_backend: null }] });
+      await executePromote(deps, job);
+      const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+      expect(surfaced.some((w: string) => /still building/i.test(w))).toBe(true);
+    });
+
+    it('does not warn for the wfp backend, which deploys synchronously to a terminal state', async () => {
+      runtimeQuery.mockResolvedValue({ rows: [{ deployment_backend: 'wfp' }] });
+      await executePromote(deps, job);
+      const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+      expect(surfaced.some((w: string) => /still building/i.test(w))).toBe(false);
+    });
   });
 });

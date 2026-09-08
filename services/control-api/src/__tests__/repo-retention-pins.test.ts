@@ -69,4 +69,17 @@ describe('listActiveCloneSnapshotIdsForApp', () => {
     expect(await listActiveCloneSnapshotIdsForApp(pool, 'app_tmpl'))
       .toEqual(new Set(['snap_a', 'snap_b']));
   });
+
+  // Task 14 fix round 1: a promote whose staging app had no repo snapshot at
+  // request time records source_snapshot_id as NULL (migration 117). Nothing
+  // to protect means nothing to pin — filtered out rather than pinning
+  // "null" as if it were a real snapshot id.
+  it('filters out in-flight jobs with a null source_snapshot_id (promote, no repo yet)', async () => {
+    const { pool } = fakeDb([
+      { source_snapshot_id: 'snap_a' },
+      { source_snapshot_id: null },
+    ]);
+    expect(await listActiveCloneSnapshotIdsForApp(pool, 'app_tmpl'))
+      .toEqual(new Set(['snap_a']));
+  });
 });

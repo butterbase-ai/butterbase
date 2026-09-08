@@ -43,10 +43,17 @@
  * and deliberately leaves the deployed artifact alone (neon-task-worker.ts,
  * around the "the fork's deployed frontend artifact is deliberately NOT
  * touched" comment) — deployment is left to the fork owner. Promote is
- * different by explicit product decision: "promote takes staging live" means
- * the deploy IS part of the job, so the 'frontend' case below throws on
- * failure instead of the soft-fail replayFrontend normally does for clone and
- * update. See that case for what a deploy failure leaves behind.
+ * different by explicit product decision: the deploy IS part of the job, so
+ * the 'frontend' case below throws on a deploy-submission failure instead of
+ * the soft-fail replayFrontend normally does for clone and update.
+ *
+ * CAUTION (fix round 2): "promote takes staging live" is the product intent,
+ * not a guarantee this code makes for every backend. For the default 'pages'
+ * deployment_backend, a 'completed' promote means the deploy was SUBMITTED
+ * and is building on Cloudflare's side, not that the new bundle is already
+ * serving traffic — see the 'frontend' case for exactly what is and is not
+ * caught, and what a deploy failure (submission-time or build-time) leaves
+ * behind in each case.
  */
 import type pg from 'pg';
 import {
@@ -415,28 +422,78 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
           // shape as Task 13's preserveDestinationTriggerEnabled /
           // skipIntegrations) — clone and update are byte-for-byte unaffected.
           //
-          // WHAT A FAILURE HERE LEAVES BEHIND, BY DESIGN: every step above —
-          // schema, RLS, durable objects, functions, config, and now the repo
-          // snapshot — has ALREADY been applied to production by the time this
-          // runs. A failed deploy therefore leaves production with the NEW
-          // backend and repo but the OLD frontend bundle still being served.
-          // That is not corruption: the old frontend still talks to a backend
-          // that is additive-only (schema) and insert-only (config), so it
-          // keeps working. It is surfaced to the user as a failed promote —
-          // never as success — and, per the catch block below, this step is
-          // itself idempotent (replayFrontend re-copies the same artifact and
-          // redeploys), so a retry that reaches this case again simply
-          // finishes the job. We do NOT roll back schema/RLS/functions/config
-          // on a deploy failure — that would mean destructive DDL against a
-          // live production app, which this feature refuses on principle.
+          // WHAT throwOnFailure ACTUALLY CATCHES — narrowed per fix round 2,
+          // because the original claim here overstated it: R2 copy/read/write
+          // errors, the app_deployments INSERT, and deployArtifact's own
+          // synchronous errors (project lookup, wrangler upload, WfP upload).
+          // It does NOT catch a Cloudflare Pages BUILD failure. deployViaPages
+          // (deployment.service.ts) returns status: 'BUILDING' and
+          // deployArtifact persists that and returns normally — the actual
+          // build happens asynchronously on Cloudflare's side and only
+          // transitions to READY/ERROR later, via syncDeploymentStatus. Only
+          // the 'wfp' backend deploys synchronously to a terminal READY. Since
+          // 'pages' is apps.deployment_backend's default, a 'completed'
+          // promote for a Pages-backed prod app means "the deploy was
+          // accepted and is building", not "the new bundle is live" — see the
+          // deployment_backend check and warning below, which is how that gap
+          // is disclosed rather than silently overstated. We do NOT poll the
+          // Cloudflare build to a terminal state here: that would hold this
+          // worker for minutes against an unbounded external build with its
+          // own timeout/cancellation semantics, and the build could still
+          // fail after we gave up waiting.
+          //
+          // WHAT A THROWN FAILURE HERE LEAVES BEHIND, BY DESIGN: every step
+          // above — schema, RLS, durable objects, functions, config, and now
+          // the repo snapshot — has ALREADY been applied to production by the
+          // time this runs. A failed deploy therefore leaves production with
+          // the NEW backend and repo but the OLD frontend bundle still being
+          // served. That is not corruption: the old frontend still talks to a
+          // backend that is additive-only (schema) and insert-only (config),
+          // so it keeps working. It is surfaced to the user as a failed
+          // promote — never as success — and, per the catch block below, this
+          // step is itself idempotent (replayFrontend re-copies the same
+          // artifact and redeploys), so a retry that reaches this case again
+          // simply finishes the job. We do NOT roll back schema/RLS/functions/
+          // config on a deploy failure — that would mean destructive DDL
+          // against a live production app, which this feature refuses on
+          // principle.
           const frontendResult = await replayFrontend(
             controlDb, runtimeDb, stagingAppId, prodAppId, job.requested_by_user_id, logger,
-            { throwOnFailure: true },
+            // warnOnZeroRewrite: on clone/update a zero-rewrite bundle only
+            // ever gets a logger.warn (see clone-replay.ts). On promote a
+            // silent zero-rewrite means production is served a bundle whose
+            // baked-in VITE_APP_ID still points at STAGING — reported as a
+            // successful promote. Surface it as a job warning instead;
+            // ambiguous (a bundle can legitimately have no baked-in app id),
+            // so it is a warning, never a thrown failure — see clone-replay.ts.
+            { throwOnFailure: true, warnOnZeroRewrite: true },
           );
           if (frontendResult.warnings.length > 0) {
             await appendCloneJobWarnings(controlDb, jobId, frontendResult.warnings);
           }
-          logger.info({ jobId, prodAppId }, '[promote] frontend deployed to production');
+
+          // Read deployment_backend to decide whether the "still building"
+          // disclosure applies, rather than emitting it unconditionally —
+          // 'wfp' really does deploy synchronously to a terminal state and
+          // does not need it.
+          const backendRow = await runtimeDb.query<{ deployment_backend: 'pages' | 'wfp' | null }>(
+            `SELECT deployment_backend FROM apps WHERE id = $1`,
+            [prodAppId],
+          );
+          const deploymentBackend = backendRow.rows[0]?.deployment_backend ?? 'pages';
+          if (deploymentBackend !== 'wfp') {
+            await appendCloneJobWarnings(controlDb, jobId, [
+              'The frontend deploy was submitted to Cloudflare Pages and is still building — this '
+                + "promote completing does NOT yet mean the new bundle is live. Check the app's "
+                + 'Deployments tab in the dashboard for build status before relying on it; a build '
+                + 'failure at this point does not reopen or fail this promote job.',
+            ]);
+          }
+
+          logger.info(
+            { jobId, prodAppId, deploymentBackend },
+            '[promote] frontend deploy submitted for production',
+          );
           break;
         }
 
@@ -494,6 +551,12 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
     // on principle — and we do not need to: the old frontend keeps working
     // against the new backend (additive schema, insert-only config), and a
     // retry finishes the job the same way every other partial promote does.
+    // NOTE this catch only ever sees a deploy-SUBMISSION failure (R2, the
+    // API, the upload) — a Cloudflare Pages BUILD failure after a successful
+    // submission is invisible here; it surfaces later, out of band, via
+    // syncDeploymentStatus, on a job this catch block already reported
+    // 'completed'. See the 'frontend' case's "WHAT throwOnFailure ACTUALLY
+    // CATCHES" comment.
     const isPermanent = attempt >= maxAttempts;
     if (isPermanent) {
       await setCloneJobStatus(controlDb, jobId, {

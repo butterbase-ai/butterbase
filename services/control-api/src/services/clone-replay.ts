@@ -1791,9 +1791,24 @@ export async function replayMeetingsWebhook(
  * bundle and a buried warning. Same pattern Task 13 used for
  * `preserveDestinationTriggerEnabled` / `skipIntegrations` — additive, opt-in,
  * default (clone, update) callers are byte-for-byte unaffected.
+ *
+ * `opts.warnOnZeroRewrite` is the same additive-opt-in shape for a second
+ * gap (Task 14 fix round 2): by default, a bundle with zero occurrences of
+ * `sourceAppId` only ever gets a `logger.warn` — it never reaches the
+ * `warnings` this function returns, so it never reaches the job via
+ * `appendCloneJobWarnings`. On promote that is dangerous, not cosmetic: it
+ * means production is silently serving a bundle whose baked-in
+ * `VITE_APP_ID` still points at the STAGING app, reported as a successful
+ * promote. Left off by default because filesRewritten === 0 is genuinely
+ * ambiguous (it also happens for a legitimate bundle with no baked-in app id
+ * at all — runtime-injected config, a static site with no API calls) and
+ * clone/update must stay byte-identical; promote opts in because it is the
+ * one caller where "might be nothing, might be a live app pointed at the
+ * wrong backend" is worth surfacing every time.
  */
 export interface ReplayFrontendOpts {
   throwOnFailure?: boolean;
+  warnOnZeroRewrite?: boolean;
 }
 
 export async function replayFrontend(
@@ -1847,6 +1862,15 @@ export async function replayFrontend(
         { sourceAppId, destAppId },
         '[clone] frontend artifact had no occurrences of source app id; cloned frontend may still target the source app',
       );
+      if (opts?.warnOnZeroRewrite) {
+        warnings.push(
+          `The deployed frontend bundle had no occurrences of the source app id (${sourceAppId}) to `
+            + `rewrite. This is expected for a bundle with no baked-in app id (runtime-injected config, `
+            + `a static site with no API calls) — but if this bundle DOES call the Butterbase API, the `
+            + `deployed bundle may still point at app ${sourceAppId} instead of ${destAppId}. Verify the `
+            + 'deployed site before relying on it.',
+        );
+      }
     }
 
     // Persist the rewritten artifact back to the dest's R2 slot so future
