@@ -69,6 +69,10 @@ const deps: PromoteDeps = {
   stagingPool: { tag: 'staging' } as never,
   prodPool: { tag: 'prod' } as never,
   prodOwnerId: 'owner_prod',
+  // Default to the FINAL attempt so the ordinary tests below see terminal
+  // behaviour; the retry-contract tests override these two explicitly.
+  attempt: 3,
+  maxAttempts: 3,
   logger: { info: () => {}, warn: () => {}, error: () => {} },
 };
 
@@ -165,11 +169,28 @@ describe('executePromote', () => {
     );
   });
 
-  it('fails the job and rethrows when a step throws', async () => {
+  it('fails the job and rethrows when a step throws on the FINAL attempt', async () => {
     mocks.replaySchema.mockRejectedValueOnce(new Error('boom'));
-    await expect(executePromote(deps, job)).rejects.toThrow('boom');
+    await expect(executePromote({ ...deps, attempt: 3, maxAttempts: 3 }, job)).rejects.toThrow('boom');
     expect(mocks.setCloneJobStatus).toHaveBeenLastCalledWith(
       deps.controlDb, 'job_p1', expect.objectContaining({ status: 'failed', error_message: 'boom' }),
+    );
+    expect(mocks.touchEnvironmentTimestamp).not.toHaveBeenCalled();
+  });
+
+  // The test that proves the gate exists. 'failed' is terminal, and the
+  // re-entry guard short-circuits on terminal statuses — so marking it here
+  // would turn attempts 2 and 3 into silent no-ops and permanently fail a
+  // promote that a connection blip would otherwise have let succeed.
+  it('does NOT mark the job failed on a non-final attempt, so the retry can re-enter', async () => {
+    mocks.replaySchema.mockRejectedValueOnce(new Error('blip'));
+    await expect(executePromote({ ...deps, attempt: 1, maxAttempts: 3 }, job)).rejects.toThrow('blip');
+
+    const statuses = mocks.setCloneJobStatus.mock.calls.map((c) => c[2].status);
+    expect(statuses).not.toContain('failed');
+    // The error is still recorded, just without going terminal.
+    expect(mocks.setCloneJobStatus).toHaveBeenLastCalledWith(
+      deps.controlDb, 'job_p1', { error_message: 'blip' },
     );
     expect(mocks.touchEnvironmentTimestamp).not.toHaveBeenCalled();
   });

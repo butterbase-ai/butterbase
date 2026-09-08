@@ -75,11 +75,20 @@ export interface PromoteDeps {
   prodPool: pg.Pool;
   /** apps.owner_id of the production app — replayFunctions mints under it. */
   prodOwnerId: string;
+  /**
+   * The neon_tasks attempt counters for this run (`task.attempts` /
+   * `task.max_attempts`). They decide whether a failure is permanent — see the
+   * catch block, which mirrors executeUpdate's retry contract.
+   */
+  attempt: number;
+  maxAttempts: number;
   logger: PromoteLogger;
 }
 
 export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<void> {
-  const { controlDb, runtimeDb, stagingPool, prodPool, prodOwnerId, logger } = deps;
+  const {
+    controlDb, runtimeDb, stagingPool, prodPool, prodOwnerId, attempt, maxAttempts, logger,
+  } = deps;
   const jobId = job.id;
   const stagingAppId = job.source_app_id;
   // startPromote always writes dest_app_id (it is what
@@ -228,10 +237,42 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
     logger.info({ jobId, stagingAppId, prodAppId }, '[promote] completed');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await setCloneJobStatus(controlDb, jobId, {
-      status: 'failed', error_message: msg, completed_at: new Date(),
-    }).catch(() => {});
-    logger.error({ err, jobId, stagingAppId, prodAppId }, '[promote] failed');
+
+    // Same retry contract as executeClone and executeUpdate: only mark the job
+    // 'failed' once the neon_tasks queue has exhausted its attempts.
+    // 'completed' and 'failed' are the two TERMINAL statuses, and the re-entry
+    // guard in executePromoteTask short-circuits on them — so writing 'failed'
+    // on attempt 1 of 3 would turn every remaining attempt into a silent no-op
+    // and permanently fail a promote that a connection blip would otherwise
+    // have let succeed on retry. This is the one mode that writes to a
+    // customer's production database; it has more reason to want the retries
+    // than any other, not less.
+    //
+    // WHAT A MID-FLIGHT FAILURE LEAVES BEHIND, BY DESIGN: production can be
+    // left with SOME promote steps applied and others not — say schema and RLS
+    // landed and functions did not. That is not corruption and not a bug to
+    // hunt at 3am. Every step above is idempotent (replaySchema diffs against
+    // the destination's CURRENT schema, replayRls tolerates "already exists",
+    // functions and durable objects upsert, config is insert-only), so simply
+    // re-running the promote re-walks the whole list and finishes the job. A
+    // retry from the queue does exactly that; so does the owner starting a
+    // fresh promote after a permanent failure, because a terminal job frees
+    // the idx_template_clone_jobs_one_promote slot.
+    const isPermanent = attempt >= maxAttempts;
+    if (isPermanent) {
+      await setCloneJobStatus(controlDb, jobId, {
+        status: 'failed', error_message: msg, completed_at: new Date(),
+      }).catch(() => {});
+      logger.error({ err, jobId, stagingAppId, prodAppId }, '[promote] failed');
+    } else {
+      // Record the error but leave the status non-terminal so the next attempt
+      // is allowed to re-enter and finish.
+      await setCloneJobStatus(controlDb, jobId, { error_message: msg }).catch(() => {});
+      logger.warn(
+        { jobId, stagingAppId, prodAppId, attempt, maxAttempts, error: msg },
+        '[promote] transient failure, will retry',
+      );
+    }
     throw err;
   }
 }

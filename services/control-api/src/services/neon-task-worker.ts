@@ -1515,6 +1515,8 @@ async function executePromoteTask(
           stagingPool,
           prodPool,
           prodOwnerId: prodRow.rows[0].owner_id,
+          attempt: task.attempts,
+          maxAttempts: task.max_attempts,
           logger,
         },
         job,
@@ -1528,21 +1530,34 @@ async function executePromoteTask(
       }).catch((err) => logger.error({ err }, '[promote] audit log completed event insert failed'));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // executePromote has already written status='failed' for anything that
-      // threw inside it. This block covers the pre-flight throws above (pool
-      // resolution, link re-check), which must also leave the job terminal
-      // rather than 'processing' forever — the one-in-flight index keys on a
-      // non-terminal status, so a stuck row blocks every future promote.
-      await setCloneJobStatus(controlDb, jobId, {
-        status: 'failed', error_message: msg, completed_at: new Date(),
-      }).catch(() => {});
-      await insertCloneAuditLog(controlDb, {
-        appId: prodAppId,
-        userId: job.requested_by_user_id,
-        eventType: 'staging_promote_failed',
-        metadata: { job_id: jobId, staging_app_id: job.source_app_id, error: msg },
-      }).catch((auditErr) => logger.error({ auditErr }, '[promote] audit log failed event insert failed'));
-      logger.error({ err, jobId, prodAppId }, '[promote] task failed');
+      // Same retry contract as executeUpdate, and the same one executePromote
+      // applies internally: only go terminal once the queue is out of attempts.
+      // This block covers BOTH the pre-flight throws above (pool resolution,
+      // link re-check) and anything executePromote rethrew — the write below is
+      // idempotent with the one it already made, so a double-write is harmless
+      // while a missing one would leave the job stuck in 'processing' forever.
+      // That matters here specifically: idx_template_clone_jobs_one_promote
+      // keys on a NON-terminal status, so a stuck row blocks every future
+      // promote for this app.
+      const isPermanent = task.attempts >= task.max_attempts;
+      if (isPermanent) {
+        await setCloneJobStatus(controlDb, jobId, {
+          status: 'failed', error_message: msg, completed_at: new Date(),
+        }).catch(() => {});
+        await insertCloneAuditLog(controlDb, {
+          appId: prodAppId,
+          userId: job.requested_by_user_id,
+          eventType: 'staging_promote_failed',
+          metadata: { job_id: jobId, staging_app_id: job.source_app_id, error: msg },
+        }).catch((auditErr) => logger.error({ auditErr }, '[promote] audit log failed event insert failed'));
+        logger.error({ err, jobId, prodAppId }, '[promote] task permanently failed');
+      } else {
+        await setCloneJobStatus(controlDb, jobId, { error_message: msg }).catch(() => {});
+        logger.warn(
+          { jobId, prodAppId, attempt: task.attempts, maxAttempts: task.max_attempts, error: msg },
+          '[promote] transient failure, will retry',
+        );
+      }
       throw err;
     }
   });
