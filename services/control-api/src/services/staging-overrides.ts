@@ -54,3 +54,54 @@ export function mergeStagingOverrides(
 ): Record<string, string> {
   return { ...inherited, ...overrides };
 }
+
+/**
+ * Materialise the owner's overrides into the staging app's LIVE
+ * `app_env_vars` blob, so they take effect without waiting for the next
+ * clone-time replay.
+ *
+ * Why this exists as well as the `replayAppEnvVars` hook: the runtime reads
+ * `app_env_vars` directly (services/deno-runtime/function-loader.ts joins it
+ * onto `app_functions`), and `staging_env_overrides.staging_app_id` REFERENCES
+ * `apps(id)` — so an override cannot exist before the staging app does, and
+ * the clone-time hook can therefore never be the only application point.
+ * Setting an override has to write through to the blob at set time.
+ *
+ * MERGE, not replace: overrides are layered over whatever the staging app
+ * currently holds (values the owner set directly via `PATCH /v1/:appId/env`
+ * are preserved unless an override names the same key). Overrides win.
+ * Returns key NAMES only — never a value.
+ */
+export async function applyStagingOverridesToAppEnv(
+  runtimeDb: pg.Pool,
+  stagingAppId: string,
+  overrides: Record<string, string>,
+  updatedBy: string,
+): Promise<{ appliedKeys: string[] }> {
+  const encKey = key();
+  const existing = await runtimeDb.query<{ encrypted_env_vars: string }>(
+    `SELECT encrypted_env_vars FROM app_env_vars WHERE app_id = $1`,
+    [stagingAppId],
+  );
+  let current: Record<string, string> = {};
+  if (existing.rows[0]?.encrypted_env_vars) {
+    try {
+      current = JSON.parse(decrypt(existing.rows[0].encrypted_env_vars, encKey));
+    } catch {
+      // Mirrors routes/app-env.ts's PATCH handler: an undecryptable blob is
+      // rebuilt rather than treated as fatal.
+      current = {};
+    }
+  }
+  const merged = mergeStagingOverrides(current, overrides);
+  await runtimeDb.query(
+    `INSERT INTO app_env_vars (app_id, encrypted_env_vars, updated_by)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (app_id) DO UPDATE
+       SET encrypted_env_vars = EXCLUDED.encrypted_env_vars,
+           updated_at         = now(),
+           updated_by         = EXCLUDED.updated_by`,
+    [stagingAppId, encrypt(JSON.stringify(merged), encKey), updatedBy],
+  );
+  return { appliedKeys: Object.keys(overrides) };
+}

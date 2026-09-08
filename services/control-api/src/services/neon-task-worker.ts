@@ -34,7 +34,8 @@ import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayMeetingsWebhook, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
 import { replayDurableObjectsForClone, listDoEnvVarKeys } from './durable-objects.service.js';
 import { AUTO_MINT_CONVENTION_KEYS, mintApiKeyForClone } from './clone-env-vars.js';
-import { replayAppEnvVars } from './clone-app-env.js';
+import { replayAppEnvVars, appEnvReplayOptsForCloneMode } from './clone-app-env.js';
+import { getStagingOverrides } from './staging-overrides.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
@@ -841,20 +842,72 @@ async function executeClone(
 
       // Replay app-level env vars BEFORE DO + function replay so both
       // downstream surfaces see the merged blob at first deploy/insert.
+      //
+      // STAGING ONLY (mode === 'staging_create'): production's app-level env
+      // vars are the one place a source app's secret VALUES reach the
+      // destination — replayFunctions blanks per-function env vars and DO
+      // replay copies key names only. Copying them verbatim hands a staging
+      // app production's live Stripe/SendGrid credentials, so an
+      // HTTP-triggered function in staging charges real cards. Task 9's
+      // isolateStagingApp neutralises connected accounts, integration configs
+      // and cron triggers but never touched raw secrets.
+      //
+      // So for staging we withhold every inherited VALUE (key names survive as
+      // empty strings, so the owner can see what to fill) and layer the
+      // owner's `staging_env_overrides` on top. Both are opt-in via `opts`;
+      // clone / update / public-template behaviour is byte-identical.
+      const isStagingCreate = job.mode === 'staging_create';
       try {
+        const stagingOverrides = isStagingCreate
+          ? await getStagingOverrides(destRuntimePool, resolvedDestAppId)
+          : undefined;
         const appEnvResult = await replayAppEnvVars(
           sourceRuntimePool, destRuntimePool,
           job.source_app_id, resolvedDestAppId, job.requested_by_user_id,
+          appEnvReplayOptsForCloneMode(job.mode, stagingOverrides),
         );
         if (appEnvResult.copied) {
           logger.info(
-            { destAppId: resolvedDestAppId, keyCount: appEnvResult.keyCount },
+            {
+              destAppId: resolvedDestAppId,
+              keyCount: appEnvResult.keyCount,
+              // Key NAMES only — a value is never logged.
+              withheldKeys: appEnvResult.withheldKeys,
+              overriddenKeys: appEnvResult.overriddenKeys,
+            },
             '[clone] copied app_env_vars from source',
+          );
+        }
+        // Standing rule for this phase: do the conservative thing, then NAME
+        // it. A staging app whose functions fail with a missing key is only
+        // recoverable if the owner is told which keys to set.
+        const withheld = appEnvResult.withheldKeys ?? [];
+        if (withheld.length > 0) {
+          await appendCloneJobWarnings(controlDb, jobId, [
+            `Production's app-level env var VALUES were deliberately not copied into staging: `
+              + `${withheld.join(', ')}. Each key exists on the staging app with an empty value, so `
+              + `functions that need it will fail with a missing-key error rather than silently `
+              + `running against production's live credentials. Set staging values with `
+              + `PUT /v1/apps/${job.source_app_id}/staging/env-overrides (or manage_staging `
+              + `action="set_env_overrides").`,
+          ]);
+        }
+        if ((appEnvResult.overriddenKeys?.length ?? 0) > 0) {
+          logger.info(
+            { destAppId: resolvedDestAppId, overriddenKeys: appEnvResult.overriddenKeys },
+            '[clone] staging env overrides applied over inherited keys',
           );
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        await appendCloneJobWarnings(controlDb, jobId, [`app_env_vars replay failed: ${msg}`]);
+        await appendCloneJobWarnings(controlDb, jobId, [
+          `app_env_vars replay failed: ${msg}`
+          + (isStagingCreate
+            ? ' — the staging app has NO app-level env vars as a result. This is the safe '
+              + 'direction (it cannot have inherited production values), but functions that '
+              + 'need them will fail until you set them.'
+            : ''),
+        ]);
         logger.warn({ err, destAppId: resolvedDestAppId }, '[clone] app_env_vars replay failed; continuing');
       }
 
