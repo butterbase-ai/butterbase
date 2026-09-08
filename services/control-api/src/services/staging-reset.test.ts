@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   isolateStagingMeetingsWebhook: vi.fn(),
   setCloneJobStatus: vi.fn(),
   createCloneJob: vi.fn(),
+  appendCloneJobWarnings: vi.fn(),
   getRuntimeDbForApp: vi.fn(),
 }));
 
@@ -41,6 +42,7 @@ vi.mock('./staging-isolation.js', () => ({
 vi.mock('./clone-jobs.js', () => ({
   setCloneJobStatus: mocks.setCloneJobStatus,
   createCloneJob: mocks.createCloneJob,
+  appendCloneJobWarnings: mocks.appendCloneJobWarnings,
 }));
 vi.mock('./region-resolver.js', () => ({ getRuntimeDbForApp: mocks.getRuntimeDbForApp }));
 
@@ -88,6 +90,7 @@ beforeEach(() => {
   mocks.getEnvironmentLink.mockResolvedValue({ staging_app_id: 'app_staging' });
   mocks.createCloneJob.mockResolvedValue({ id: 'job_r1' });
   mocks.setCloneJobStatus.mockResolvedValue(undefined);
+  mocks.appendCloneJobWarnings.mockResolvedValue(undefined);
   mocks.replaySeedData.mockResolvedValue(undefined);
   mocks.getSeedTableNames.mockResolvedValue(['widgets', 'orders']);
   mocks.isolateStagingApp.mockResolvedValue(undefined);
@@ -177,6 +180,57 @@ describe('executeStagingReset', () => {
       (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
     );
     expect(truncateCalls[0][0]).toContain('"custom_seed_table"');
+  });
+
+  it('appends a job warning naming any non-seed table the cascade swept', async () => {
+    // Simulate the real recursive CTE: the base seed names come back plus a
+    // staging-only table ('audit_log') that has an FK into a seed table.
+    stagingPool.query.mockImplementation(async (sql: unknown) => {
+      if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
+        return {
+          rows: [
+            { table_name: 'widgets' }, { table_name: 'orders' }, { table_name: 'audit_log' },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    await executeStagingReset(deps as never, job);
+    expect(mocks.appendCloneJobWarnings).toHaveBeenCalledTimes(1);
+    const [, , warnings] = mocks.appendCloneJobWarnings.mock.calls[0];
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('audit_log');
+  });
+
+  // Anti-vacuity check: the warning must not fire when the cascade closure
+  // never leaves the seed set — otherwise every reset would carry a
+  // permanent, meaningless warning.
+  it('does NOT append a warning when nothing outside the seed set was touched', async () => {
+    stagingPool.query.mockImplementation(async (sql: unknown) => {
+      if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
+        return { rows: [{ table_name: 'widgets' }, { table_name: 'orders' }] };
+      }
+      return { rows: [] };
+    });
+    await executeStagingReset(deps as never, job);
+    expect(mocks.appendCloneJobWarnings).not.toHaveBeenCalled();
+  });
+
+  it('does not fail the reset when the cascade-closure introspection query throws', async () => {
+    stagingPool.query.mockImplementation(async (sql: unknown) => {
+      if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
+        throw new Error('introspection boom');
+      }
+      return { rows: [] };
+    });
+    await executeStagingReset(deps as never, job);
+    // The truncate and the rest of the reset still ran.
+    const truncateCalls = stagingPool.query.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
+    );
+    expect(truncateCalls).toHaveLength(1);
+    expect(mocks.replaySeedData).toHaveBeenCalled();
+    expect(mocks.appendCloneJobWarnings).not.toHaveBeenCalled();
   });
 
   it('skips the truncate entirely when there are no seed-flagged tables', async () => {

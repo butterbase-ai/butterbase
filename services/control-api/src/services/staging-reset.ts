@@ -2,7 +2,9 @@ import type pg from 'pg';
 import { getEnvironmentLink, touchEnvironmentTimestamp } from './app-environments.js';
 import { replaySeedData, getSeedTableNames } from './clone-replay.js';
 import { isolateStagingApp, isolateStagingMeetingsWebhook } from './staging-isolation.js';
-import { setCloneJobStatus, createCloneJob, type CloneJob } from './clone-jobs.js';
+import {
+  setCloneJobStatus, createCloneJob, appendCloneJobWarnings, type CloneJob,
+} from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 
 export interface ResetLogger {
@@ -138,26 +140,45 @@ export async function startStagingReset(args: {
  * removed) is still cleared.
  *
  * Runs `TRUNCATE ... CASCADE` rather than a table-by-table DELETE, so
- * Postgres resolves foreign-key ordering itself. Before running it, this
+ * Postgres resolves foreign-key ordering itself. CASCADE is a deliberate
+ * choice over a strict, closure-only TRUNCATE (which would refuse to run at
+ * all if staging has a non-seed table with a foreign key into a seed table —
+ * e.g. a scratch table someone created only in staging while experimenting).
+ * Reset's contract is "discard the staging app's data"; a staging-only table
+ * IS staging data, so sweeping it is within that contract, and refusing to
+ * run at all would be strictly worse for that legitimate case. See the Task
+ * 16 fix-round-1 write-up for the schema audit establishing that
+ * Butterbase's own data-plane infrastructure tables (`_rag_*`,
+ * `_idempotency_keys`, `_data_plane_migrations`, `_ai_migrations`,
+ * `_seed_tables`) never carry a foreign key into an app-defined seed table,
+ * so CASCADE cannot reach them in practice.
+ *
+ * STANDING RULE (fifth time this feature has needed it — see Task 11's
+ * ignoredRemovals, Task 13's surfaced RLS policies and disabled-trigger
+ * disclosure, Task 14's zero-rewrite and Pages-still-building warnings): do
+ * the conservative thing, then name it. CASCADE reaching a table outside the
+ * seed set is exactly that shape — sweeping it is the right call, but the
+ * user must be able to reconstruct what happened from the job record alone,
+ * not from server logs they cannot see. Before running the TRUNCATE, this
  * makes a best-effort (non-blocking) attempt to discover which OTHER tables
  * a cascade would reach — via the same foreign-key graph Postgres itself
- * would follow — purely so that reach is logged and visible, never to gate
- * the truncate: a failure to introspect must not turn a real reset into a
- * silent no-op. See the executeStagingReset report / Task 16 fix-round-1
- * write-up for the schema audit establishing that Butterbase's own
- * data-plane infrastructure tables (`_rag_*`, `_idempotency_keys`,
- * `_data_plane_migrations`, `_ai_migrations`, `_seed_tables`) never carry a
- * foreign key into an app-defined seed table, so CASCADE cannot reach them
- * in practice — nothing here special-cases them further.
+ * would follow — and appends a job warning naming them if any are found.
+ * The discovery query itself must NEVER gate or fail the truncate: a missing
+ * warning is not worth failing a reset that otherwise succeeded, so a
+ * discovery failure is caught, logged, and the truncate proceeds anyway. Do
+ * not "fix" that into a hard failure — a failed introspection query says
+ * nothing about whether the TRUNCATE itself would have been safe.
  */
 async function truncateStagingSeedTables(args: {
   prodAppId: string;
   stagingAppId: string;
   prodPool: pg.Pool;
   stagingPool: pg.Pool;
+  controlDb: pg.Pool;
+  jobId: string;
   logger: ResetLogger;
 }): Promise<{ tables: string[] }> {
-  const { prodAppId, stagingAppId, prodPool, stagingPool, logger } = args;
+  const { prodAppId, stagingAppId, prodPool, stagingPool, controlDb, jobId, logger } = args;
 
   // Guard 1: id-level. See doc comment above.
   if (stagingAppId === prodAppId) {
@@ -186,7 +207,9 @@ async function truncateStagingSeedTables(args: {
   // Best-effort visibility into what CASCADE will touch. Never allowed to
   // block or fail the truncate itself — an introspection query failing (odd
   // permissions, an exotic Postgres version) must not turn a reset into a
-  // silent no-op.
+  // silent no-op. See the function doc comment: do the conservative thing
+  // (sweep it), then name it (job warning), but never gate on being able to
+  // name it.
   try {
     const closure = await stagingPool.query<{ table_name: string }>(
       `WITH RECURSIVE seed(name) AS (
@@ -209,8 +232,20 @@ async function truncateStagingSeedTables(args: {
         { stagingAppId, seedTables, cascadeReaches: extra },
         '[staging-reset] TRUNCATE ... CASCADE will also reach these non-seed tables via foreign key',
       );
+      // Job-level, not just a log line: the user cannot see server logs, and
+      // has to be able to learn from the job record alone that their reset
+      // also cleared these tables.
+      await appendCloneJobWarnings(controlDb, jobId, [
+        `Reset also cleared ${extra.length} non-seed ${extra.length === 1 ? 'table' : 'tables'} `
+          + `on staging via foreign-key cascade: ${extra.join(', ')}. These tables exist on `
+          + 'staging but are not flagged _seed:true, so TRUNCATE ... CASCADE swept them along '
+          + 'with the seed tables it truncated deliberately.',
+      ]);
     }
   } catch (err) {
+    // Deliberately non-blocking — see the function doc comment. A failed
+    // introspection query says nothing about whether the TRUNCATE itself is
+    // safe, so the truncate below still proceeds; only the warning is lost.
     logger.warn(
       { err, stagingAppId },
       '[staging-reset] could not introspect cascade closure before truncating (non-blocking)',
@@ -282,7 +317,9 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
     // Truncate BEFORE re-seeding: replaySeedData is INSERT ... ON CONFLICT DO
     // NOTHING, so without this step a reset would leave every row staging
     // already had untouched — see truncateStagingSeedTables's doc comment.
-    await truncateStagingSeedTables({ prodAppId, stagingAppId, prodPool, stagingPool, logger });
+    await truncateStagingSeedTables({
+      prodAppId, stagingAppId, prodPool, stagingPool, controlDb, jobId, logger,
+    });
 
     // Direction is PRODUCTION -> STAGING. prodPool is always the first
     // argument, stagingPool always the second — matches replaySeedData's
