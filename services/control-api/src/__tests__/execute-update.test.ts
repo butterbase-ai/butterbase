@@ -445,6 +445,16 @@ describe('resolveCloneDispatch', () => {
   it('routes a missing job to the clone path so it raises its own error', () => {
     expect(resolveCloneDispatch(null)).toBe('clone');
   });
+  it('routes a staging_create job to the clone path (same provision pipeline)', () => {
+    expect(resolveCloneDispatch({ mode: 'staging_create' })).toBe('clone');
+  });
+  // The one that matters: nothing in this codebase switches exhaustively on
+  // mode, so before Task 13 a promote job fell through to 'clone' and would
+  // have run executeClone — a fresh-provision pipeline — against a customer's
+  // live production app.
+  it('routes a promote job to the promote path, NEVER to clone', () => {
+    expect(resolveCloneDispatch({ mode: 'promote' })).toBe('promote');
+  });
 });
 
 describe('classifyUpdateResume', () => {

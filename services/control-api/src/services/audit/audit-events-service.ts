@@ -19,7 +19,12 @@ import { getRuntimeDbForApp } from '../region-resolver.js';
  */
 export type CloneAuditEventType =
   | 'template_clone_started' | 'template_clone_completed' | 'template_clone_failed'
-  | 'template_update_started' | 'template_update_completed' | 'template_update_failed';
+  | 'template_update_started' | 'template_update_completed' | 'template_update_failed'
+  // Promote writes a staging app's state onto a LIVE production app; the
+  // owner deserves the same record an update leaves. event_type is free text
+  // in auth_audit_logs (db/control-plane/006_audit_logs.sql), so no migration
+  // is needed to widen this union.
+  | 'staging_promote_started' | 'staging_promote_completed' | 'staging_promote_failed';
 
 export async function insertCloneAuditLog(
   controlDb: Pool,

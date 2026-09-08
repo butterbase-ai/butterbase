@@ -12,6 +12,8 @@ import { addOrgAppIndex, removeOrgAppIndex } from './org-app-index.js';
 import { resolveOrganizationId } from './org-resolver.js';
 import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus } from './clone-jobs.js';
 import { finalizeStagingClone } from './staging-completion.js';
+import { executePromote } from './execute-promote.js';
+import { getEnvironmentLink } from './app-environments.js';
 import {
   getManifestJson,
   putManifest,
@@ -199,8 +201,13 @@ async function processNextTask(
       // the precise error for that case.
       const cloneJobId = task.task_meta?.job_id;
       const queuedJob = cloneJobId ? await getCloneJob(controlDb, cloneJobId) : null;
-      if (resolveCloneDispatch(queuedJob) === 'update') {
+      const dispatch = resolveCloneDispatch(queuedJob);
+      if (dispatch === 'update') {
         await executeUpdate(controlDb, task, logger);
+      } else if (dispatch === 'promote') {
+        // NOT the clone branch. A promote writes onto an existing production
+        // app; executeClone provisions a new one. See resolveCloneDispatch.
+        await executePromoteTask(controlDb, task, logger);
       } else {
         await executeClone(controlDb, dataPlaneDb, task, logger);
       }
@@ -1402,11 +1409,143 @@ export function shouldAbortUpdate(
  * 'clone' case below — running executeClone for either would be wrong: a
  * promote/reset operates on an existing linked pair, not a fresh provision.
  * Each needs its own dispatch branch and executor when implemented.
+ *
+ * 'promote' is now routed explicitly (Task 13) to executePromoteTask. Because
+ * the switch is not exhaustive, that route is pinned by a unit test rather
+ * than by the compiler: deleting the line below would silently point a
+ * customer's LIVE production app at the fresh-provision clone pipeline.
+ * 'staging_reset' still falls through and remains Task 16's to add.
  */
-export function resolveCloneDispatch(job: { mode?: string } | null): 'clone' | 'update' {
+export function resolveCloneDispatch(
+  job: { mode?: string } | null,
+): 'clone' | 'update' | 'promote' {
   if (job?.mode === 'update') return 'update';
+  if (job?.mode === 'promote') return 'promote';
   if (job?.mode === 'staging_create') return 'clone'; // deliberate: see comment above
   return 'clone';
+}
+
+/**
+ * Task-level wrapper for a promote: resolve the job, re-check the link, open
+ * the four pools executePromote needs, and hand off.
+ *
+ * The replay itself lives in execute-promote.ts with its dependencies injected,
+ * so the one function that writes to a customer's production database is unit
+ * testable without a live Postgres. Everything effectful and untestable —
+ * queue plumbing, pool resolution, Sentry scope, the audit trail — stays here,
+ * exactly as executeUpdate keeps its own.
+ *
+ * Resumability: the terminal-status guard matches executeUpdate's. Any
+ * mid-flight status ('replaying_schema' … 'copying_repo') is re-entered and
+ * finished, because every step executePromote runs is idempotent; only
+ * 'completed'/'failed' short-circuit.
+ */
+async function executePromoteTask(
+  controlDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Promote task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Promote job ${jobId} not found`);
+  if (isTerminalCloneStatus(job.status)) {
+    logger.info({ jobId, status: job.status }, '[promote] job in terminal status; skipping');
+    return;
+  }
+
+  const prodAppId = job.dest_app_id;
+  if (!prodAppId) throw new Error(`Promote job ${jobId} has no dest_app_id (production app)`);
+
+  await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
+
+  await Sentry.withScope(async (scope) => {
+    scope.setTag('clone_job_id', jobId);
+    scope.setTag('clone_mode', 'promote');
+    scope.setTag('source_app_id', job.source_app_id);
+    scope.setTag('target_app_id', prodAppId);
+    scope.setTag('attempt', String(task.attempts));
+
+    try {
+      // startPromote pins source_region and dest_region to the production
+      // app's region, and start-staging pins staging to production's region,
+      // so both apps live in one regional runtime DB.
+      const runtimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+
+      // Re-checked at execution time, not just at request time — the same
+      // reason executeUpdate re-runs its eligibility gate. If the pair was
+      // unlinked (or staging deleted) between queueing and now, promoting
+      // would push a stale or unrelated app's state onto production.
+      const link = await getEnvironmentLink(runtimeDb, prodAppId);
+      if (!link || link.staging_app_id !== job.source_app_id) {
+        throw new Error(
+          `[promote] ${prodAppId} is no longer linked to staging app ${job.source_app_id}; `
+            + 'refusing to promote',
+        );
+      }
+
+      const prodRow = await runtimeDb.query<{ db_name: string; owner_id: string }>(
+        `SELECT db_name, owner_id FROM apps WHERE id = $1`, [prodAppId],
+      );
+      if (prodRow.rows.length === 0) {
+        throw new Error(`[promote] production app ${prodAppId} not found in ${job.dest_region} runtime DB`);
+      }
+      const stagingRow = await runtimeDb.query<{ db_name: string }>(
+        `SELECT db_name FROM apps WHERE id = $1`, [job.source_app_id],
+      );
+      if (stagingRow.rows.length === 0) {
+        throw new Error(`[promote] staging app ${job.source_app_id} not found in ${job.dest_region} runtime DB`);
+      }
+
+      const stagingPool = await getAppPoolForApp(controlDb, job.source_app_id, stagingRow.rows[0].db_name);
+      const prodPool = await getAppPoolForApp(controlDb, prodAppId, prodRow.rows[0].db_name);
+
+      await insertCloneAuditLog(controlDb, {
+        appId: prodAppId,
+        userId: job.requested_by_user_id,
+        eventType: 'staging_promote_started',
+        metadata: { job_id: jobId, staging_app_id: job.source_app_id },
+      }).catch((err) => logger.error({ err }, '[promote] audit log started event insert failed'));
+
+      await executePromote(
+        {
+          controlDb,
+          runtimeDb,
+          stagingPool,
+          prodPool,
+          prodOwnerId: prodRow.rows[0].owner_id,
+          logger,
+        },
+        job,
+      );
+
+      await insertCloneAuditLog(controlDb, {
+        appId: prodAppId,
+        userId: job.requested_by_user_id,
+        eventType: 'staging_promote_completed',
+        metadata: { job_id: jobId, staging_app_id: job.source_app_id },
+      }).catch((err) => logger.error({ err }, '[promote] audit log completed event insert failed'));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // executePromote has already written status='failed' for anything that
+      // threw inside it. This block covers the pre-flight throws above (pool
+      // resolution, link re-check), which must also leave the job terminal
+      // rather than 'processing' forever — the one-in-flight index keys on a
+      // non-terminal status, so a stuck row blocks every future promote.
+      await setCloneJobStatus(controlDb, jobId, {
+        status: 'failed', error_message: msg, completed_at: new Date(),
+      }).catch(() => {});
+      await insertCloneAuditLog(controlDb, {
+        appId: prodAppId,
+        userId: job.requested_by_user_id,
+        eventType: 'staging_promote_failed',
+        metadata: { job_id: jobId, staging_app_id: job.source_app_id, error: msg },
+      }).catch((auditErr) => logger.error({ auditErr }, '[promote] audit log failed event insert failed'));
+      logger.error({ err, jobId, prodAppId }, '[promote] task failed');
+      throw err;
+    }
+  });
 }
 
 /** How a resumed update should treat the fork's current repo HEAD. */
