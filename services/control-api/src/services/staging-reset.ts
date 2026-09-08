@@ -6,6 +6,8 @@ import {
   setCloneJobStatus, createCloneJob, appendCloneJobWarnings, type CloneJob,
 } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
+import { getActivePromoteJob } from './promote-jobs.js';
+import { EXCLUDED_TABLES } from './schema-introspector.js';
 
 export interface ResetLogger {
   info(obj: unknown, msg?: string): void;
@@ -27,6 +29,17 @@ export interface ResetDeps {
   /** Per-app database of the STAGING app — the destination of the re-seed. */
   stagingPool: pg.Pool;
   /**
+   * The staging app's `apps.db_name`. Checked against `SELECT
+   * current_database()` on `stagingPool` immediately before the TRUNCATE —
+   * see truncateStagingSeedTables's Guard 3. Every other guard compares
+   * values chosen upstream of the pool-resolution call (ids, object
+   * identity); this one asks the one question that actually matters, which
+   * physical database the connection is pointed at, so it is the only guard
+   * that still catches a swapped `getAppPoolForApp` call at the wrapper in
+   * neon-task-worker.ts.
+   */
+  stagingDbName: string;
+  /**
    * The neon_tasks attempt counters for this run (`task.attempts` /
    * `task.max_attempts`). Decide whether a failure is permanent — see the
    * catch block, which mirrors executePromote's / executeUpdate's retry
@@ -45,8 +58,40 @@ export async function startStagingReset(args: {
 }): Promise<
   | { ok: true; jobId: string; stagingAppId: string }
   | { ok: false; code: 'NO_STAGING'; message: string }
+  | { ok: false; code: 'IN_FLIGHT'; message: string }
 > {
   const { controlDb, prodAppId, userId, orgId } = args;
+
+  // Cheap check first, before any runtime-tier round trip — mirrors
+  // startPromote's own IN_FLIGHT precheck (promote-jobs.ts), in the other
+  // direction. A reset that truncates staging's seed tables while a promote
+  // is reading them mid-flight would let that promote silently copy a
+  // partial (post-truncate) dataset onto production and still report
+  // 'completed' — production isn't corrupted (replaySeedData is
+  // insert-only, so no production row is ever destroyed), but the job's
+  // success status would be a lie about what actually landed. That
+  // silent-wrong-answer shape is exactly what this feature's other guards
+  // (Task 13's RLS/trigger disclosures, this task's own cascade warning)
+  // exist to eliminate, so refuse rather than let it happen.
+  //
+  // This is a precheck, not an atomic guarantee — like startPromote's own
+  // IN_FLIGHT check, it is a read-then-later-write with a gap a genuinely
+  // concurrent request could still slip through. No dedicated unique index
+  // guards reset-vs-promote the way idx_template_clone_jobs_one_promote
+  // guards promote-vs-promote: that would need an index keyed on the
+  // (prod_app_id, staging_app_id) PAIR rather than a single column, since a
+  // promote's dest_app_id is production while a reset's dest_app_id is
+  // staging — a materially bigger schema change than this fix round
+  // warrants for a narrow, already-mostly-closed race window. Recorded here
+  // rather than silently deferred.
+  if (await getActivePromoteJob(controlDb, prodAppId)) {
+    return {
+      ok: false,
+      code: 'IN_FLIGHT',
+      message: 'A promote is currently running for this app. Wait for it to finish before '
+        + 'resetting staging.',
+    };
+  }
 
   // getRuntimeDbForApp returns the regional pg.Pool directly (not
   // { pool, region }) — region-resolver.ts. The region string itself is
@@ -54,6 +99,13 @@ export async function startStagingReset(args: {
   // pattern in promote-jobs.ts.
   const runtimeDb = await getRuntimeDbForApp(controlDb, prodAppId);
 
+  // This also naturally refuses a reset against a half-provisioned
+  // staging_create: finalizeStagingClone (staging-completion.ts) only calls
+  // linkEnvironments — the write getEnvironmentLink reads here — AFTER
+  // isolation, at the very end of executeClone. Until a staging_create job
+  // finishes, there is no app_environments row for this prod app yet, so
+  // this NO_STAGING branch already catches it without a dedicated
+  // in-flight-staging_create precheck.
   const link = await getEnvironmentLink(runtimeDb, prodAppId);
   if (!link) {
     return {
@@ -113,7 +165,7 @@ export async function startStagingReset(args: {
  * promises callers reset "discards the staging app's data"; this is what
  * makes that true.
  *
- * TWO INDEPENDENT GUARDS before anything is touched, because a TRUNCATE aimed
+ * THREE INDEPENDENT GUARDS before the TRUNCATE runs, because a TRUNCATE aimed
  * at the wrong pool destroys a customer's PRODUCTION data, unrecoverably —
  * this is exactly as dangerous as the replaySeedData argument-order hazard
  * documented on executeStagingReset below, just on the truncate side instead
@@ -130,6 +182,17 @@ export async function startStagingReset(args: {
  *      wrong) that the id check above cannot see, since it is entirely
  *      possible for two different app ids to end up resolving to the same
  *      pool object if the caching key were ever wrong.
+ *   3. `SELECT current_database()` on stagingPool must equal the caller-
+ *      supplied `stagingDbName`, checked immediately before the TRUNCATE.
+ *      Guards 1 and 2 both compare values chosen UPSTREAM of the
+ *      getAppPoolForApp call in neon-task-worker.ts's executeResetTask — if
+ *      that call's two `pg.Pool` assignments were ever swapped (i.e.
+ *      `prodPool` gets the app id/db_name that actually belong to staging,
+ *      and vice versa), both ids would still differ and both pool objects
+ *      would still be distinct, so guards 1 and 2 would both pass while the
+ *      TRUNCATE runs against production. Guard 3 is the only one that asks
+ *      about the live connection instead of a value threaded through
+ *      arguments, so it is the only one that still catches that swap.
  *
  * Table set: derived via getSeedTableNames — the exact same `_seed_tables`
  * registry lookup replaySeedData itself uses — read from the STAGING
@@ -137,7 +200,16 @@ export async function startStagingReset(args: {
  * production because these are the tables that must physically exist on the
  * pool being truncated; reset is defined as "discard staging's own seed
  * data", so a seed table staging has (even one production has since
- * removed) is still cleared.
+ * removed) is still cleared. Filtered again against schema-introspector.ts's
+ * `EXCLUDED_TABLES` (Butterbase's own per-app bookkeeping: `_rag_*`,
+ * `_idempotency_keys`, the migration-tracking tables, `_seed_tables` itself)
+ * before use — belt-and-suspenders: today none of those tables can reach
+ * `_seed_tables` (schema-differ.ts's bare `CREATE TABLE`, without `IF NOT
+ * EXISTS`, errors before a user schema could ever register one under a
+ * reserved name), but that is an emergent property of two OTHER modules,
+ * not an invariant this file enforces itself. This filter makes "never
+ * truncate our own bookkeeping tables" true here even if that upstream
+ * behavior ever changes.
  *
  * Runs `TRUNCATE ... CASCADE` rather than a table-by-table DELETE, so
  * Postgres resolves foreign-key ordering itself. CASCADE is a deliberate
@@ -174,11 +246,14 @@ async function truncateStagingSeedTables(args: {
   stagingAppId: string;
   prodPool: pg.Pool;
   stagingPool: pg.Pool;
+  stagingDbName: string;
   controlDb: pg.Pool;
   jobId: string;
   logger: ResetLogger;
 }): Promise<{ tables: string[] }> {
-  const { prodAppId, stagingAppId, prodPool, stagingPool, controlDb, jobId, logger } = args;
+  const {
+    prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, controlDb, jobId, logger,
+  } = args;
 
   // Guard 1: id-level. See doc comment above.
   if (stagingAppId === prodAppId) {
@@ -195,7 +270,20 @@ async function truncateStagingSeedTables(args: {
     );
   }
 
-  const seedTables = await getSeedTableNames(stagingPool, logger);
+  const rawSeedTables = await getSeedTableNames(stagingPool, logger);
+  // See the function doc comment on why this filter exists even though
+  // nothing currently reaches it: structural, not emergent.
+  const seedTables = rawSeedTables.filter((t) => !EXCLUDED_TABLES.includes(t));
+  if (seedTables.length !== rawSeedTables.length) {
+    logger.warn(
+      {
+        stagingAppId,
+        excluded: rawSeedTables.filter((t) => EXCLUDED_TABLES.includes(t)),
+      },
+      '[staging-reset] _seed_tables named a Butterbase-internal bookkeeping table; excluded it '
+        + 'from truncation (this should never happen — see truncateStagingSeedTables doc comment)',
+    );
+  }
   if (seedTables.length === 0) {
     logger.info(
       { stagingAppId },
@@ -252,6 +340,24 @@ async function truncateStagingSeedTables(args: {
     );
   }
 
+  // Guard 3: connection-level. See doc comment above — this is the only
+  // guard that catches a swap of the getAppPoolForApp assignments upstream
+  // (neon-task-worker.ts's executeResetTask), because it asks the live
+  // connection which physical database it is pointed at instead of
+  // re-checking a value that was already threaded through the same
+  // (possibly swapped) call. Checked immediately before the TRUNCATE, as
+  // close to the hazard as possible.
+  const dbCheck = await stagingPool.query<{ current_database: string }>(
+    'SELECT current_database()',
+  );
+  const connectedDb = dbCheck.rows[0]?.current_database;
+  if (connectedDb !== stagingDbName) {
+    throw new Error(
+      `[staging-reset] refusing to truncate: staging pool for app ${stagingAppId} is connected `
+        + `to database "${connectedDb}", expected "${stagingDbName}"`,
+    );
+  }
+
   const tableList = seedTables.map((t) => `"${t}"`).join(', ');
   await stagingPool.query(`TRUNCATE TABLE ${tableList} CASCADE`);
   logger.info(
@@ -282,7 +388,9 @@ async function truncateStagingSeedTables(args: {
  * per-app database and the staging isolation tables are touched.
  */
 export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promise<void> {
-  const { controlDb, runtimeDb, prodPool, stagingPool, attempt, maxAttempts, logger } = deps;
+  const {
+    controlDb, runtimeDb, prodPool, stagingPool, stagingDbName, attempt, maxAttempts, logger,
+  } = deps;
   const jobId = job.id;
 
   // Direction assertion: production is the SOURCE, staging is the
@@ -318,7 +426,7 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
     // NOTHING, so without this step a reset would leave every row staging
     // already had untouched — see truncateStagingSeedTables's doc comment.
     await truncateStagingSeedTables({
-      prodAppId, stagingAppId, prodPool, stagingPool, controlDb, jobId, logger,
+      prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, controlDb, jobId, logger,
     });
 
     // Direction is PRODUCTION -> STAGING. prodPool is always the first

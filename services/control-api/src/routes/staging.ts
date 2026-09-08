@@ -267,7 +267,22 @@ export function stagingRoutes(app: FastifyInstance) {
   // and re-seeds it from production. DIRECTION IS REVERSED FROM PROMOTE:
   // production is the source, staging is the destination — see
   // staging-reset.ts's header comment. Never writes to production.
-  app.post('/v1/apps/:app_id/staging/reset', async (request, reply) => {
+  app.post('/v1/apps/:app_id/staging/reset', {
+    config: {
+      // Matches the staging-create route above: reset is at least as
+      // expensive (a full truncate + re-seed of every seed table) and more
+      // destructive (it discards staging's current data unconditionally).
+      rateLimit: {
+        allowList: rateLimitAllowList,
+        max: 5,
+        timeWindow: '1 hour',
+        keyGenerator: (req) => {
+          const userId = req.auth?.userId;
+          return userId ? `user:${userId}:staging-reset` : `ip:${req.ip}:staging-reset`;
+        },
+      },
+    },
+  }, async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     const userId = requireUserId(request);
 
@@ -282,6 +297,14 @@ export function stagingRoutes(app: FastifyInstance) {
       controlDb: app.controlDb, prodAppId: app_id, userId, orgId,
     });
     if (!result.ok) {
+      if (result.code === 'IN_FLIGHT') {
+        return reply.code(409).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: result.message,
+          remediation: 'Wait for the in-progress promote to finish, then retry the reset.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
       return reply.code(404).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
         message: result.message,

@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   createCloneJob: vi.fn(),
   appendCloneJobWarnings: vi.fn(),
   getRuntimeDbForApp: vi.fn(),
+  getActivePromoteJob: vi.fn(),
 }));
 
 vi.mock('./app-environments.js', () => ({
@@ -45,6 +46,11 @@ vi.mock('./clone-jobs.js', () => ({
   appendCloneJobWarnings: mocks.appendCloneJobWarnings,
 }));
 vi.mock('./region-resolver.js', () => ({ getRuntimeDbForApp: mocks.getRuntimeDbForApp }));
+vi.mock('./promote-jobs.js', () => ({ getActivePromoteJob: mocks.getActivePromoteJob }));
+vi.mock('./schema-introspector.js', () => ({
+  EXCLUDED_TABLES: ['_ai_migrations', '_data_plane_migrations', '_rag_collections',
+    '_rag_documents', '_rag_chunks', '_idempotency_keys', '_seed_tables'],
+}));
 
 import { startStagingReset, executeStagingReset } from './staging-reset.js';
 
@@ -56,8 +62,25 @@ const job = {
   id: 'job_r1', mode: 'staging_reset', source_app_id: 'app_prod', dest_app_id: 'app_staging',
 } as never;
 
+const STAGING_DB_NAME = 'db_staging';
+
+/**
+ * Fallback response for the staging pool's `SELECT current_database()`
+ * (truncateStagingSeedTables's Guard 3) — matches STAGING_DB_NAME so tests
+ * that don't care about Guard 3 aren't tripped by it. Every test below that
+ * replaces stagingPool.query wholesale with its own mockImplementation
+ * delegates to this for anything it doesn't itself recognize, so Guard 3
+ * keeps passing in tests exercising something else entirely.
+ */
+function defaultStagingQueryResponse(sql: unknown) {
+  if (typeof sql === 'string' && /current_database/.test(sql)) {
+    return { rows: [{ current_database: STAGING_DB_NAME }] };
+  }
+  return { rows: [] };
+}
+
 function makePool() {
-  return { query: vi.fn().mockResolvedValue({ rows: [] }) };
+  return { query: vi.fn().mockImplementation(async (sql: unknown) => defaultStagingQueryResponse(sql)) };
 }
 
 let prodPool: ReturnType<typeof makePool>;
@@ -65,6 +88,7 @@ let stagingPool: ReturnType<typeof makePool>;
 let deps: {
   controlDb: never; runtimeDb: never;
   prodPool: never; stagingPool: never;
+  stagingDbName: string;
   attempt: number; maxAttempts: number;
   logger: { info: () => void; warn: () => void; error: () => void };
 };
@@ -78,6 +102,7 @@ beforeEach(() => {
     runtimeDb: {} as never,
     prodPool: prodPool as never,
     stagingPool: stagingPool as never,
+    stagingDbName: STAGING_DB_NAME,
     // Single-attempt by default: most tests want a thrown error to go
     // terminal immediately. The attempt-gating tests below override these.
     attempt: 1,
@@ -87,6 +112,7 @@ beforeEach(() => {
   mocks.getRuntimeDbForApp.mockResolvedValue({
     query: vi.fn().mockResolvedValue({ rows: [{ region: 'us-east-1' }] }),
   });
+  mocks.getActivePromoteJob.mockResolvedValue(null);
   mocks.getEnvironmentLink.mockResolvedValue({ staging_app_id: 'app_staging' });
   mocks.createCloneJob.mockResolvedValue({ id: 'job_r1' });
   mocks.setCloneJobStatus.mockResolvedValue(undefined);
@@ -124,6 +150,30 @@ describe('startStagingReset', () => {
       controlDb,
       expect.objectContaining({ sourceAppId: 'app_prod' }),
     );
+  });
+
+  // Fix round 3, item 2: a reset that truncates staging's seed tables while a
+  // promote is reading them mid-flight lets that promote silently copy a
+  // partial dataset onto production while reporting success. Refuse before
+  // any side effect, the same shape as startPromote's own IN_FLIGHT check.
+  it('refuses when a promote is in flight for this app, before any write', async () => {
+    mocks.getActivePromoteJob.mockResolvedValue({ id: 'cj_promote_1' } as never);
+    const controlDb = { query: vi.fn().mockResolvedValue({ rows: [] }) } as never;
+    const res = await startStagingReset({
+      controlDb, prodAppId: 'app_prod', userId: 'u1', orgId: 'org_1',
+    });
+    expect(res).toMatchObject({ ok: false, code: 'IN_FLIGHT' });
+    expect(mocks.getEnvironmentLink).not.toHaveBeenCalled();
+    expect(mocks.createCloneJob).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when getActivePromoteJob reports nothing in flight', async () => {
+    mocks.getActivePromoteJob.mockResolvedValue(null);
+    const controlDb = { query: vi.fn().mockResolvedValue({ rows: [] }) } as never;
+    const res = await startStagingReset({
+      controlDb, prodAppId: 'app_prod', userId: 'u1', orgId: 'org_1',
+    });
+    expect(res).toMatchObject({ ok: true });
   });
 });
 
@@ -182,6 +232,23 @@ describe('executeStagingReset', () => {
     expect(truncateCalls[0][0]).toContain('"custom_seed_table"');
   });
 
+  // Fix round 3, item 3: filter is structural, not an emergent property of
+  // schema-differ.ts + schema-validator.ts staying out of each other's way.
+  // If _seed_tables ever named one of Butterbase's own bookkeeping tables
+  // (it shouldn't be able to today, but this must hold even if that changes),
+  // truncateStagingSeedTables must still refuse to include it.
+  it('excludes Butterbase-internal bookkeeping tables even if _seed_tables names one', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['widgets', '_rag_chunks', '_idempotency_keys']);
+    await executeStagingReset(deps as never, job);
+    const truncateCalls = stagingPool.query.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
+    );
+    expect(truncateCalls).toHaveLength(1);
+    expect(truncateCalls[0][0]).toContain('"widgets"');
+    expect(truncateCalls[0][0]).not.toContain('_rag_chunks');
+    expect(truncateCalls[0][0]).not.toContain('_idempotency_keys');
+  });
+
   it('appends a job warning naming any non-seed table the cascade swept', async () => {
     // Simulate the real recursive CTE: the base seed names come back plus a
     // staging-only table ('audit_log') that has an FK into a seed table.
@@ -193,7 +260,7 @@ describe('executeStagingReset', () => {
           ],
         };
       }
-      return { rows: [] };
+      return defaultStagingQueryResponse(sql);
     });
     await executeStagingReset(deps as never, job);
     expect(mocks.appendCloneJobWarnings).toHaveBeenCalledTimes(1);
@@ -210,7 +277,7 @@ describe('executeStagingReset', () => {
       if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
         return { rows: [{ table_name: 'widgets' }, { table_name: 'orders' }] };
       }
-      return { rows: [] };
+      return defaultStagingQueryResponse(sql);
     });
     await executeStagingReset(deps as never, job);
     expect(mocks.appendCloneJobWarnings).not.toHaveBeenCalled();
@@ -221,7 +288,7 @@ describe('executeStagingReset', () => {
       if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
         throw new Error('introspection boom');
       }
-      return { rows: [] };
+      return defaultStagingQueryResponse(sql);
     });
     await executeStagingReset(deps as never, job);
     // The truncate and the rest of the reset still ran.
@@ -258,6 +325,24 @@ describe('executeStagingReset', () => {
     );
   });
 
+  // Guard 3 (fix round 3): the only guard that checks the LIVE connection
+  // rather than a value threaded through arguments — see
+  // truncateStagingSeedTables's doc comment. This is what still catches a
+  // swap of the two getAppPoolForApp calls in neon-task-worker.ts's
+  // executeResetTask (covered end-to-end in
+  // services/__tests__/execute-reset-task.test.ts); at this layer it is
+  // exercised directly via a mismatched stagingDbName.
+  it('refuses to truncate when the staging pool is connected to the wrong database', async () => {
+    const mismatchedDeps = { ...deps, stagingDbName: 'db_someone_elses_app' };
+    await expect(executeStagingReset(mismatchedDeps as never, job)).rejects.toThrow(
+      /connected to database/i,
+    );
+    const truncateCalls = stagingPool.query.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
+    );
+    expect(truncateCalls).toHaveLength(0);
+  });
+
   it('refuses when the staging pool is reference-identical to the production pool', async () => {
     const samePool = makePool();
     const badDeps = { ...deps, prodPool: samePool as never, stagingPool: samePool as never };
@@ -271,7 +356,7 @@ describe('executeStagingReset', () => {
     const order: string[] = [];
     stagingPool.query.mockImplementation(async (sql: unknown) => {
       if (typeof sql === 'string' && /^TRUNCATE TABLE/i.test(sql)) order.push('truncate');
-      return { rows: [] };
+      return defaultStagingQueryResponse(sql);
     });
     mocks.replaySeedData.mockImplementation(async () => { order.push('seed'); });
     mocks.isolateStagingApp.mockImplementation(async () => { order.push('isolate'); });

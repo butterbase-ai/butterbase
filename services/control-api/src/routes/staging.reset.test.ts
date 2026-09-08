@@ -100,4 +100,19 @@ describe('POST /v1/apps/:app_id/staging/reset', () => {
     expect(mocks.startStagingReset).not.toHaveBeenCalled();
     expect(mocks.enqueueCloneTask).not.toHaveBeenCalled();
   });
+
+  // Fix round 3, item 2: startStagingReset's IN_FLIGHT refusal (a promote is
+  // running) must reach the caller as 409, distinct from NO_STAGING's 404 —
+  // and must never enqueue.
+  it('returns 409 with the IN_FLIGHT message and enqueues nothing', async () => {
+    mocks.startStagingReset.mockResolvedValue({
+      ok: false, code: 'IN_FLIGHT',
+      message: 'A promote is currently running for this app. Wait for it to finish before '
+        + 'resetting staging.',
+    });
+    const res = await build().inject({ method: 'POST', url: '/v1/apps/app_prod/staging/reset' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).toContain('promote is currently running');
+    expect(mocks.enqueueCloneTask).not.toHaveBeenCalled();
+  });
 });

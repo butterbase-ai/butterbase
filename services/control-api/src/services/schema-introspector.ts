@@ -28,7 +28,15 @@ export interface IntrospectedSchema {
   _fkConstraints?: Record<string, string>;
 }
 
-const EXCLUDED_TABLES = [
+/**
+ * Butterbase's own per-app bookkeeping tables — never a user's app data, so
+ * never eligible to be introspected as schema, replayed, or (staging-reset.ts)
+ * truncated. Exported so any code that needs "is this one of ours" (rather
+ * than re-running this exact introspection query) can filter against the
+ * same list instead of re-deriving or hardcoding a second copy that can
+ * drift from this one.
+ */
+export const EXCLUDED_TABLES = [
   '_ai_migrations',
   '_data_plane_migrations',
   '_rag_collections',

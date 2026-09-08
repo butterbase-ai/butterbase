@@ -1606,7 +1606,14 @@ async function executePromoteTask(
  * isolateStagingMeetingsWebhook are all idempotent (INSERT ... ON CONFLICT DO
  * NOTHING, DELETE of an already-empty set, UPDATE of already-disabled rows).
  */
-async function executeResetTask(
+// Exported for testing only — nothing else should call it, dispatch goes
+// through processNextTask. Same rationale as executeUpdate: this wrapper is
+// where the pool-assignment hazard lives (see the header comment above and
+// truncateStagingSeedTables's Guard 3 in staging-reset.ts), so it needs
+// direct coverage rather than relying on executeStagingReset's own unit
+// tests, which inject prodPool/stagingPool directly and cannot see a swap
+// made here.
+export async function executeResetTask(
   controlDb: pg.Pool,
   task: NeonTask,
   logger: Logger,
@@ -1680,6 +1687,13 @@ async function executeResetTask(
         runtimeDb,
         prodPool,
         stagingPool,
+        // Passed through so truncateStagingSeedTables can assert, right
+        // before the TRUNCATE, that stagingPool's live connection is
+        // actually pointed at this database — the guard that still catches
+        // a swap of the two getAppPoolForApp calls above, which no
+        // id-based or object-identity check can see. See ResetDeps's doc
+        // comment on stagingDbName.
+        stagingDbName: stagingRow.rows[0].db_name,
         attempt: task.attempts,
         maxAttempts: task.max_attempts,
         logger,
