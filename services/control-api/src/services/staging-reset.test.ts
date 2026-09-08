@@ -310,6 +310,45 @@ describe('executeStagingReset', () => {
     expect(mocks.replaySeedData).toHaveBeenCalled();
   });
 
+  // Fix round 4: the request-time IN_FLIGHT precheck (startStagingReset)
+  // cannot see a promote that starts AFTER the reset was queued but BEFORE
+  // its worker claimed the task — resets sit in the queue, so that ordering
+  // is the realistic race. executeStagingReset re-checks right before the
+  // truncate. The assertion that matters is that the truncate (and the
+  // re-seed) never ran — not the exact status write.
+  it('fails before any truncate or seed call when a promote is in flight at execution time', async () => {
+    mocks.getActivePromoteJob.mockResolvedValue({ id: 'cj_promote_1' } as never);
+    await expect(executeStagingReset(deps as never, job)).rejects.toThrow(
+      /promote is now in flight/i,
+    );
+    expect(prodPool.query).not.toHaveBeenCalled();
+    expect(stagingPool.query).not.toHaveBeenCalled();
+    expect(mocks.replaySeedData).not.toHaveBeenCalled();
+    expect(mocks.isolateStagingApp).not.toHaveBeenCalled();
+  });
+
+  it('is a permanent failure, not attempt-gated, when a promote is in flight at execution time', async () => {
+    mocks.getActivePromoteJob.mockResolvedValue({ id: 'cj_promote_1' } as never);
+    // Plenty of attempts remain — an attempt-gated failure would NOT mark
+    // 'failed' here, but this one always should, since retrying into the
+    // same conflict is pointless.
+    const retryDeps = { ...deps, attempt: 1, maxAttempts: 5 };
+    await expect(executeStagingReset(retryDeps as never, job)).rejects.toThrow(
+      /promote is now in flight/i,
+    );
+    expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
+      deps.controlDb, 'job_r1', expect.objectContaining({ status: 'failed' }),
+    );
+  });
+
+  it('checks the CURRENT state of the promote job, not the request-time snapshot', async () => {
+    // getActivePromoteJob is called once at execution time by
+    // executeStagingReset itself — independent of whatever startStagingReset
+    // saw (or didn't see) when the job was originally queued.
+    await executeStagingReset(deps as never, job);
+    expect(mocks.getActivePromoteJob).toHaveBeenCalledWith(deps.controlDb, 'app_prod');
+  });
+
   it('hard-refuses before touching anything when dest_app_id equals the production app id', async () => {
     const malformedJob = {
       ...job, source_app_id: 'app_x', dest_app_id: 'app_x',

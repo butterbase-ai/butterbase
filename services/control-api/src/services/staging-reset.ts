@@ -419,6 +419,30 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
     throw new Error(msg);
   }
 
+  // Execution-time re-check, distinct from startStagingReset's request-time
+  // IN_FLIGHT precheck. A reset does not run the moment it is requested — it
+  // sits in the neon_tasks queue — so the realistic race is not two
+  // simultaneous requests, it is: reset queued, THEN a promote starts, THEN
+  // this worker finally claims the reset task and is about to truncate the
+  // very tables the promote is reading. The request-time precheck cannot see
+  // a promote that did not exist yet when it ran. Re-checking here, right
+  // before the truncate, closes that window.
+  //
+  // Permanent failure, not attempt-gated: retrying into the same conflict on
+  // the next backoff is pointless (the promote will very likely still be
+  // running), and the right recovery is for the user to re-run the reset
+  // once the promote finishes — not for the queue to keep silently retrying
+  // into it. So this bypasses the attempt-gated catch below entirely, the
+  // same way the dest_app_id/source_app_id guard above does.
+  if (await getActivePromoteJob(controlDb, prodAppId)) {
+    const msg = `[staging-reset] refusing to truncate: a promote is now in flight for `
+      + `${prodAppId}; re-run the reset once the promote finishes`;
+    await setCloneJobStatus(controlDb, jobId, {
+      status: 'failed', error_message: msg, completed_at: new Date(),
+    }).catch(() => {});
+    throw new Error(msg);
+  }
+
   try {
     await setCloneJobStatus(controlDb, jobId, { status: 'seeding_data' });
 
