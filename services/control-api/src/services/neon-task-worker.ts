@@ -754,65 +754,81 @@ async function executeClone(
         '[clone] RLS replayed',
       );
 
-      // 2. Read source manifest. job.source_snapshot_id is guaranteed non-null
-      // here: start-clone.ts refuses with NO_SNAPSHOT before a clone job row
-      // is ever created if the source app has no repo (Task 14 fix round 1
-      // gave the column its one legitimate NULL case — a promote whose
-      // staging app has no repo yet — but executeClone never runs against a
-      // promote-mode job).
+      // 2. Read source manifest. job.source_snapshot_id is non-null for a
+      // normal template clone — start-clone.ts refuses with NO_SNAPSHOT
+      // before a clone job row is ever created if the source app has no
+      // repo — but a 'staging_create' job is the second legitimate NULL
+      // case (alongside promote's, Task 14 fix round 1): startStaging opts
+      // start-clone.ts out of that check (skipVisibilityAndSnapshotChecks)
+      // because a staging environment is a database concept and the
+      // production source may have no frontend/repo at all. Skip the whole
+      // repo-copy step in that case rather than throw — mirrors
+      // execute-promote.ts's 'repo' case for the same null.
       scope.setTag('step', 'copying_repo');
       const sourceSnapshotId = job.source_snapshot_id;
+      let manifestJson: string | null = null;
       if (!sourceSnapshotId) {
-        throw new Error(`[clone] job ${jobId} has no source_snapshot_id; expected the source app to have a repo snapshot`);
-      }
-      const manifestJson = await getManifestJson(job.source_app_id, sourceSnapshotId);
-      if (!manifestJson) throw new Error(`Source manifest ${sourceSnapshotId} not found`);
-      const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
-
-      // 3. Copy blobs.
-      const sameRegion = job.source_region === job.dest_region;
-      const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
-      if (sameRegion) {
-        for (const sha of distinctShas) {
-          await copyBlobSameRegion(job.source_app_id, resolvedDestAppId, sha);
+        if (job.mode !== 'staging_create') {
+          throw new Error(`[clone] job ${jobId} has no source_snapshot_id; expected the source app to have a repo snapshot`);
         }
+        await appendCloneJobWarnings(controlDb, jobId, [
+          'Source app has no repo snapshot to copy (nothing has been pushed to its repo yet). '
+            + 'Schema, RLS, durable objects, functions and config were still cloned.',
+        ]);
+        logger.info(
+          { jobId, sourceAppId: job.source_app_id },
+          '[clone] job.source_snapshot_id is null (staging_create); skipping repo copy',
+        );
       } else {
-        // Cross-region: stream GET from source S3 → PUT to dest S3.
-        // In local dev both regions share one LocalStack endpoint; in production
-        // each region has its own bucket/endpoint (injected via config).
-        const s3Opts = {
-          region: config.s3.region,
-          endpoint: config.s3.endpoint,
-          forcePathStyle: config.s3.forcePathStyle,
-          requestChecksumCalculation: 'WHEN_REQUIRED' as const,
-          responseChecksumValidation: 'WHEN_REQUIRED' as const,
-          credentials: config.s3.accessKeyId && config.s3.secretAccessKey
-            ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
-            : undefined,
-        };
-        const srcS3 = new S3Client(s3Opts);
-        const dstS3 = new S3Client(s3Opts);
-        const bucket = config.s3.bucket;
-        for (const sha of distinctShas) {
-          await copyBlobCrossRegion(job.source_app_id, resolvedDestAppId, sha, srcS3, bucket, dstS3, bucket);
+        manifestJson = await getManifestJson(job.source_app_id, sourceSnapshotId);
+        if (!manifestJson) throw new Error(`Source manifest ${sourceSnapshotId} not found`);
+        const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
+
+        // 3. Copy blobs.
+        const sameRegion = job.source_region === job.dest_region;
+        const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
+        if (sameRegion) {
+          for (const sha of distinctShas) {
+            await copyBlobSameRegion(job.source_app_id, resolvedDestAppId, sha);
+          }
+        } else {
+          // Cross-region: stream GET from source S3 → PUT to dest S3.
+          // In local dev both regions share one LocalStack endpoint; in production
+          // each region has its own bucket/endpoint (injected via config).
+          const s3Opts = {
+            region: config.s3.region,
+            endpoint: config.s3.endpoint,
+            forcePathStyle: config.s3.forcePathStyle,
+            requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+            responseChecksumValidation: 'WHEN_REQUIRED' as const,
+            credentials: config.s3.accessKeyId && config.s3.secretAccessKey
+              ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+              : undefined,
+          };
+          const srcS3 = new S3Client(s3Opts);
+          const dstS3 = new S3Client(s3Opts);
+          const bucket = config.s3.bucket;
+          for (const sha of distinctShas) {
+            await copyBlobCrossRegion(job.source_app_id, resolvedDestAppId, sha, srcS3, bucket, dstS3, bucket);
+          }
         }
-      }
 
-      // 4. Copy manifest.
-      if (sameRegion) {
-        await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, sourceSnapshotId);
-      } else {
-        await putManifest(resolvedDestAppId, sourceSnapshotId, manifestJson);
-      }
+        // 4. Copy manifest.
+        if (sameRegion) {
+          await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, sourceSnapshotId);
+        } else {
+          await putManifest(resolvedDestAppId, sourceSnapshotId, manifestJson);
+        }
 
-      // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
-      //    region-direct pool (we already know dest's region from the job).
-      await setLatest(resolvedDestAppId, sourceSnapshotId);
-      const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-      await destRuntimeAppPool.query(
-        `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
-        [sourceSnapshotId, resolvedDestAppId],
-      );
+        // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
+        //    region-direct pool (we already know dest's region from the job).
+        await setLatest(resolvedDestAppId, sourceSnapshotId);
+        const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+        await destRuntimeAppPool.query(
+          `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+          [sourceSnapshotId, resolvedDestAppId],
+        );
+      }
 
       // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
       scope.setTag('step', 'seeding_data');
@@ -1241,36 +1257,48 @@ async function executeClone(
       // captured HERE because it can only be captured at clone time — a fork
       // created without it can never be safely merged later, since by the time we
       // want a base it has already diverged.
-      try {
-        const releases = await listReleases(controlDb, job.source_app_id, 1);
-        const { baseRelease, baseSnapshotId } = decideLineageBase(
-          releases[0] ?? null,
-          sourceSnapshotId,
-        );
-        // Point at the release when one exists; materialize inline only when the
-        // fork was cloned from live. Never both.
-        const baseFingerprint = baseRelease
-          ? null
-          : await captureAppState(sourceRuntimePool, sourceAppPool, job.source_app_id);
-
-        await recordLineage(controlDb, {
-          destAppId: resolvedDestAppId,
-          destRegion: job.dest_region,
-          sourceAppId: job.source_app_id,
-          sourceRegion: job.source_region,
-          baseReleaseId: baseRelease?.id ?? null,
-          baseFingerprint,
-          baseSnapshotId,
-        });
+      if (!sourceSnapshotId) {
+        // staging_create with no source repo (see the copying_repo step
+        // above): nothing was replayed at any snapshot, so there is no
+        // lineage base to record. decideLineageBase requires a real
+        // snapshot id — leave the fork with no lineage row rather than
+        // fabricate one.
         logger.info(
-          { destAppId: resolvedDestAppId, baseReleaseId: baseRelease?.id ?? null },
-          '[clone] lineage recorded',
+          { destAppId: resolvedDestAppId },
+          '[clone] no source_snapshot_id; skipping lineage record',
         );
-      } catch (err) {
-        logger.warn(
-          { err, destAppId: resolvedDestAppId },
-          '[clone] lineage record failed; backfill will repair',
-        );
+      } else {
+        try {
+          const releases = await listReleases(controlDb, job.source_app_id, 1);
+          const { baseRelease, baseSnapshotId } = decideLineageBase(
+            releases[0] ?? null,
+            sourceSnapshotId,
+          );
+          // Point at the release when one exists; materialize inline only when the
+          // fork was cloned from live. Never both.
+          const baseFingerprint = baseRelease
+            ? null
+            : await captureAppState(sourceRuntimePool, sourceAppPool, job.source_app_id);
+
+          await recordLineage(controlDb, {
+            destAppId: resolvedDestAppId,
+            destRegion: job.dest_region,
+            sourceAppId: job.source_app_id,
+            sourceRegion: job.source_region,
+            baseReleaseId: baseRelease?.id ?? null,
+            baseFingerprint,
+            baseSnapshotId,
+          });
+          logger.info(
+            { destAppId: resolvedDestAppId, baseReleaseId: baseRelease?.id ?? null },
+            '[clone] lineage recorded',
+          );
+        } catch (err) {
+          logger.warn(
+            { err, destAppId: resolvedDestAppId },
+            '[clone] lineage record failed; backfill will repair',
+          );
+        }
       }
 
       // Staging pairs are linked only after every replay stage has succeeded, so

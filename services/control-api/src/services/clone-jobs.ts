@@ -147,10 +147,24 @@ export async function setCloneJobStatus(
   jobId: string,
   patch: Partial<Pick<CloneJob, 'status' | 'dest_app_id' | 'error_message' | 'completed_at'>>,
 ): Promise<void> {
+  // A completion patch that doesn't explicitly say otherwise clears
+  // error_message. Every 'failed' transition in this codebase sets
+  // error_message alongside status in the same patch (see execute-promote.ts,
+  // neon-task-worker.ts, staging-reset.ts), so this only fires for genuine
+  // completions. Without it, a job that hit an internal error on an earlier
+  // attempt and then succeeded on retry keeps carrying that stale message —
+  // a caller polling the job sees status: 'completed' with an error_message
+  // still attached, and a naive truthiness check on error_message reads a
+  // successful job as failed.
+  const effectivePatch =
+    patch.status === 'completed' && patch.error_message === undefined
+      ? { ...patch, error_message: null }
+      : patch;
+
   const fields: string[] = ['updated_at = now()'];
   const values: unknown[] = [];
   let i = 1;
-  for (const [k, v] of Object.entries(patch)) {
+  for (const [k, v] of Object.entries(effectivePatch)) {
     fields.push(`${k} = $${i++}`);
     values.push(v);
   }

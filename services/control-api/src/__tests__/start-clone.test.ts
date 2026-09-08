@@ -111,6 +111,72 @@ describe('startClone', () => {
     if (!res.ok) expect(res.code).toBe('INVALID_ENV_SHAPE');
   });
 
+  // Defect 1 (task-20 report): startStaging delegates to startClone, which
+  // enforces two admission rules that only make sense for the
+  // public-template-clone flow — visibility='public' and a repo snapshot.
+  // Every production app is private, so unmodified startClone made staging
+  // uncreatable for its actual purpose. This exercises the REAL admission
+  // rules (no mocking startClone away) against a private, snapshot-less
+  // source, which is exactly the boundary start-staging.test.ts's full mock
+  // of startClone hid.
+  describe('skipVisibilityAndSnapshotChecks (staging opt-in)', () => {
+    function privateNoSnapshotRuntimeDb() {
+      return {
+        query: vi.fn(async () => ({
+          rows: [{ id: 'app_src', visibility: 'private', region: 'iad', repo_latest_snapshot: null }],
+        })),
+      };
+    }
+
+    it('without the flag: refuses a private, snapshot-less source (default/public-clone behaviour unchanged)', async () => {
+      const { startClone } = await import('../services/start-clone.js');
+      const { getRuntimeDbForApp } = await import('../services/region-resolver.js');
+      vi.mocked(getRuntimeDbForApp).mockResolvedValueOnce(privateNoSnapshotRuntimeDb() as any);
+      const controlDb = controlDbWith(() => [{ c: 0 }]);
+
+      const res = await startClone({
+        controlDb, sourceAppId: 'app_src', userId: 'usr_1', destOrgId: 'org_1', logger,
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe('SOURCE_NOT_FOUND');
+      expect(mockCreateCloneJob).not.toHaveBeenCalled();
+    });
+
+    it('with the flag: admits a private, snapshot-less source (what staging needs)', async () => {
+      const { startClone } = await import('../services/start-clone.js');
+      const { getRuntimeDbForApp } = await import('../services/region-resolver.js');
+      vi.mocked(getRuntimeDbForApp).mockResolvedValueOnce(privateNoSnapshotRuntimeDb() as any);
+      const controlDb = controlDbWith(() => [{ c: 0 }]);
+
+      const res = await startClone({
+        controlDb, sourceAppId: 'app_src', userId: 'usr_1', destOrgId: 'org_1',
+        logger, skipVisibilityAndSnapshotChecks: true,
+      });
+      expect(res.ok).toBe(true);
+      // Downstream (createCloneJob) must receive a null source snapshot, not
+      // a fabricated one — this is what lets the no-repo case complete via
+      // executeClone's staging_create branch instead of failing later.
+      expect(mockCreateCloneJob).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sourceSnapshotId: null }),
+      );
+    });
+
+    it('with the flag: still enforces every other admission rule (in-flight cap)', async () => {
+      const { startClone } = await import('../services/start-clone.js');
+      const { getRuntimeDbForApp } = await import('../services/region-resolver.js');
+      vi.mocked(getRuntimeDbForApp).mockResolvedValueOnce(privateNoSnapshotRuntimeDb() as any);
+      const controlDb = controlDbWith((sql) => (sql.includes('org_app_index') ? [] : [{ c: 3 }]));
+
+      const res = await startClone({
+        controlDb, sourceAppId: 'app_src', userId: 'usr_1', destOrgId: 'org_1',
+        logger, skipVisibilityAndSnapshotChecks: true,
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe('INFLIGHT_LIMIT');
+    });
+  });
+
   it('creates a job and returns ok on the happy path', async () => {
     const { startClone } = await import('../services/start-clone.js');
     const controlDb = controlDbWith((sql) => (sql.includes('org_app_index') ? [] : [{ c: 0 }]));

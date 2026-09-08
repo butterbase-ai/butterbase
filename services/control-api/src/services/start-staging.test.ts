@@ -78,6 +78,20 @@ describe('startStaging', () => {
     expect(res).toMatchObject({ region: 'us-east-1' });
   });
 
+  // Defect 1 (task-20 report): startClone's visibility='public' and
+  // repo-snapshot admission rules only make sense for the public-template
+  // -clone flow. This test only proves the WIRING (that startStaging opts
+  // in); the real admission behaviour is exercised without mocking
+  // startClone away in start-clone.test.ts's
+  // "skipVisibilityAndSnapshotChecks (staging opt-in)" block, since a full
+  // mock here — as this file used before — is exactly what hid the defect.
+  it('opts startClone out of the public-visibility and repo-snapshot admission checks', async () => {
+    await startStaging(baseArgs);
+    expect(mocks.startClone).toHaveBeenCalledWith(
+      expect.objectContaining({ skipVisibilityAndSnapshotChecks: true }),
+    );
+  });
+
   it('refuses when the app already has a staging environment', async () => {
     mocks.getEnvironmentLink.mockResolvedValue({ staging_app_id: 'app_staging' });
     const res = await startStaging(baseArgs);

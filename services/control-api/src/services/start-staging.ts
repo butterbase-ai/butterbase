@@ -103,6 +103,11 @@ export async function startStaging(args: {
     name: stagingName,
     destRegion: region,
     logger,
+    // A staging environment's source is the caller's own production app,
+    // which is (correctly, normally) private and may have no repo/frontend
+    // snapshot at all. Those two checks exist for the public-template-clone
+    // flow, not this one — see start-clone.ts's doc comment on the option.
+    skipVisibilityAndSnapshotChecks: true,
   });
   if (!clone.ok) return { ok: false, code: 'CLONE_REFUSED', inner: clone };
 
