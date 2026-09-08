@@ -50,6 +50,25 @@ export interface ReplayFunctionsEnvVarOpts {
    *  update) instead of leaving them untouched (clone). Defaults to false —
    *  clone behaviour is unaffected. */
   overwriteExisting?: boolean;
+  /**
+   * When true, an upsert onto a trigger the destination ALREADY HAS updates
+   * `trigger_config` but leaves the destination's `enabled` flag alone.
+   * Only meaningful alongside `overwriteExisting`. Defaults to false, so
+   * clone / staging_create / template-update behaviour is byte-identical.
+   *
+   * Set by the PROMOTE path, and it is not a nicety there. Staging apps have
+   * their cron triggers deliberately switched off by isolateStagingApp
+   * (staging-isolation.ts) so a staging environment does not fire scheduled
+   * work against real integrations. Without this flag, promoting from staging
+   * copies that `enabled = false` straight onto the customer's LIVE production
+   * app and silently stops every nightly billing, cleanup and digest job —
+   * our own isolation mechanism transported into production as damage.
+   *
+   * The template-update path must NOT set this: its source is a template app
+   * whose triggers were never deliberately disabled, and a release that turns
+   * a trigger off is a real intent that should reach forks.
+   */
+  preserveDestinationTriggerEnabled?: boolean;
 }
 
 /**
@@ -94,12 +113,27 @@ export function buildFunctionInsertSql(overwriteExisting: boolean): string {
  * Builds the INSERT INTO function_triggers statement used by replayFunctions.
  * Column list and placeholders are copied verbatim from the original inline
  * query; only the ON CONFLICT clause varies with `overwriteExisting`.
+ *
+ * `preserveDestinationEnabled` drops `enabled` from the DO UPDATE SET list so
+ * the destination keeps its own on/off state while still picking up the new
+ * schedule. See ReplayFunctionsEnvVarOpts.preserveDestinationTriggerEnabled for
+ * why promote needs it and why nothing else may set it. Defaults to false, so
+ * every existing caller produces byte-identical SQL.
+ *
+ * NOTE: this governs the CONFLICT branch only. A trigger the destination does
+ * not have yet is INSERTed with the source's `enabled` value, because there is
+ * no destination state to preserve.
  */
-export function buildTriggerInsertSql(overwriteExisting: boolean): string {
+export function buildTriggerInsertSql(
+  overwriteExisting: boolean,
+  preserveDestinationEnabled = false,
+): string {
   const conflict = overwriteExisting
     ? `ON CONFLICT (function_id, trigger_type) DO UPDATE SET
-         trigger_config = EXCLUDED.trigger_config,
+         trigger_config = EXCLUDED.trigger_config${
+           preserveDestinationEnabled ? '' : `,
          enabled = EXCLUDED.enabled`
+         }`
     : `ON CONFLICT (function_id, trigger_type) DO NOTHING`;
   return `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
              VALUES ($1, $2, $3, $4, $5)
@@ -193,6 +227,24 @@ export interface ReplayConfigOpts {
    * destroyed credentials are not.
    */
   insertOnly?: boolean;
+  /**
+   * Skip the app_integration_configs subsystem entirely.
+   *
+   * Set by PROMOTE, where replay-registry.ts declares `integrations` as
+   * `promotable: false` — "staging integrations are deliberately disabled by
+   * isolateStagingApp, so promoting them would disable production
+   * integrations." replayNonSecretConfig calls replayIntegrations internally,
+   * so without this flag the registry's stated policy and the executed
+   * behaviour were only coincidentally aligned: the integrations replay reads
+   * `WHERE enabled = true`, and staging's rows are disabled, so nothing moved
+   * BY ACCIDENT. A user who re-enabled an integration on staging would, on
+   * promote, mint a fresh Composio auth config against PRODUCTION. Nobody
+   * decided that.
+   *
+   * Defaults to false, so clone / staging_create / template-update are
+   * unaffected.
+   */
+  skipIntegrations?: boolean;
 }
 
 export interface ReplaySchemaOpts {
@@ -664,6 +716,7 @@ export async function replayFunctions(
   }
 
   const overwriteExisting = opts?.overwriteExisting ?? false;
+  const preserveDestTriggerEnabled = opts?.preserveDestinationTriggerEnabled ?? false;
 
   for (const f of src.rows) {
     try {
@@ -712,7 +765,7 @@ export async function replayFunctions(
         );
         for (const t of trigSrc.rows) {
           await destRuntimePool.query(
-            buildTriggerInsertSql(overwriteExisting),
+            buildTriggerInsertSql(overwriteExisting, preserveDestTriggerEnabled),
             [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
           );
         }
@@ -1510,7 +1563,16 @@ export async function replayNonSecretConfig(
   await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
   await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
   await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
-  await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  // Opt-out, not opt-in: every existing caller keeps replaying integrations.
+  // Only promote skips them — see ReplayConfigOpts.skipIntegrations.
+  if (opts.skipIntegrations) {
+    logger.info(
+      { destAppId },
+      '[clone] integrations replay skipped by caller (non-promotable primitive)',
+    );
+  } else {
+    await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  }
   return { warnings };
 }
 

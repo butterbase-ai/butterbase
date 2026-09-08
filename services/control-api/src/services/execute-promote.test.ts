@@ -50,6 +50,7 @@ vi.mock('./replay-registry.js', async (importOriginal) => {
 });
 
 import { executePromote, type PromoteDeps } from './execute-promote.js';
+import { filterAdditive } from './schema-additive-filter.js';
 import { promotableSteps } from './replay-registry.js';
 import type { CloneJob } from './clone-jobs.js';
 
@@ -100,11 +101,13 @@ describe('executePromote', () => {
     expect(mocks.replaySeedData).not.toHaveBeenCalled();
   });
 
-  it('replays schema staging -> prod with the additive filter', async () => {
+  // Asserted by IDENTITY, not expect.any(Function): a no-op filter would
+  // satisfy a shape check while quietly letting DROP TABLE onto production.
+  it('replays schema staging -> prod with filterAdditive itself', async () => {
     await executePromote(deps, job);
     expect(mocks.replaySchema).toHaveBeenCalledWith(
       deps.stagingPool, deps.prodPool, 'app_prod',
-      expect.anything(), expect.objectContaining({ filter: expect.any(Function) }),
+      expect.anything(), { filter: filterAdditive },
     );
   });
 
@@ -113,14 +116,46 @@ describe('executePromote', () => {
     expect(mocks.replayRls).toHaveBeenCalledWith(deps.stagingPool, deps.prodPool, expect.anything());
   });
 
-  it('filters "already exists" out of the RLS warnings it surfaces', async () => {
+  it('surfaces genuine RLS failures separately from pre-existing policies', async () => {
     mocks.replayRls.mockResolvedValue({
-      replayed: 1, warnings: ['policy "p" already exists', 'real problem'],
+      replayed: 1,
+      warnings: ['RLS policy orders.owner_read failed: policy "owner_read" already exists', 'real problem'],
     });
     await executePromote(deps, job);
     expect(mocks.appendCloneJobWarnings).toHaveBeenCalledWith(
       deps.controlDb, 'job_p1', ['real problem'],
     );
+  });
+
+  // Fix round 2, item 3. replayRls only CREATEs, so a policy production
+  // already has is left at its old definition. Filtering that away — correct
+  // for a template update, where the fork's policies are the fork owner's —
+  // would tell a promoting user their tightened policy is live when it is not.
+  it('tells the user which RLS policies already existed and did not travel', async () => {
+    mocks.replayRls.mockResolvedValue({
+      replayed: 0,
+      warnings: [
+        'RLS policy orders.owner_read failed: policy "owner_read" for table "orders" already exists',
+        'RLS policy invoices.tenant_scope failed: policy "tenant_scope" for table "invoices" already exists',
+      ],
+    });
+    await executePromote(deps, job);
+
+    const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+    const notice = surfaced.find((w: string) => /already exist/i.test(w));
+    expect(notice).toBeDefined();
+    // Names each policy, so the user knows exactly what to reapply by hand.
+    expect(notice).toContain('orders.owner_read');
+    expect(notice).toContain('invoices.tenant_scope');
+    // And is explicit that the staging edit did not reach production.
+    expect(notice).toMatch(/did NOT reach production/);
+  });
+
+  it('says nothing about pre-existing policies when there are none', async () => {
+    mocks.replayRls.mockResolvedValue({ replayed: 3, warnings: [] });
+    await executePromote(deps, job);
+    const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+    expect(surfaced.some((w: string) => /already exist/i.test(w))).toBe(false);
   });
 
   it('replays functions on the RUNTIME pools, overwriting existing bodies', async () => {
@@ -132,6 +167,19 @@ describe('executePromote', () => {
     );
   });
 
+  // Fix round 2, item 1 — the critical one. isolateStagingApp disables every
+  // cron trigger on a staging app; without this flag the trigger upsert copies
+  // that `enabled = false` onto the customer's LIVE production app and
+  // silently stops every scheduled function.
+  it('preserves production trigger enabled state when promoting functions', async () => {
+    await executePromote(deps, job);
+    expect(mocks.replayFunctions).toHaveBeenCalledWith(
+      deps.runtimeDb, deps.runtimeDb, 'app_staging', 'app_prod', 'user_1',
+      expect.anything(),
+      expect.objectContaining({ preserveDestinationTriggerEnabled: true }),
+    );
+  });
+
   it('replays durable objects on the runtime pools without re-minting prod secrets', async () => {
     await executePromote(deps, job);
     expect(mocks.replayDurableObjectsForClone).toHaveBeenCalledWith(
@@ -140,11 +188,16 @@ describe('executePromote', () => {
     );
   });
 
-  it('replays config insert-only so prod OAuth/Composio secrets survive', async () => {
+  // Fix round 2, item 2: replayNonSecretConfig calls replayIntegrations
+  // internally, but the registry declares `integrations` non-promotable.
+  // Skipping it explicitly is what connects the stated policy to the executed
+  // behaviour — previously nothing moved only because staging's rows happen to
+  // be disabled and the source query filters on `enabled = true`.
+  it('replays config insert-only AND skips integrations, per the registry', async () => {
     await executePromote(deps, job);
     expect(mocks.replayNonSecretConfig).toHaveBeenCalledWith(
       deps.runtimeDb, deps.runtimeDb, 'app_staging', 'app_prod',
-      expect.anything(), { insertOnly: true },
+      expect.anything(), { insertOnly: true, skipIntegrations: true },
     );
   });
 

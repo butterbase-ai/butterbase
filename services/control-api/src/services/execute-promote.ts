@@ -113,14 +113,51 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
           // Add-only by construction. Necessary, not optional: a table the
           // staging schema added was just created on production with grants to
           // butterbase_anon, so skipping this would publish it wide open.
-          // Policies production already has make CREATE POLICY fail with
-          // "already exists"; those are expected no-ops on a live app and are
-          // filtered out rather than shown to the owner as problems.
           const rls = await replayRls(stagingPool, prodPool, logger);
+          const preExisting = rls.warnings.filter((w) => /already exists/i.test(w));
           const warnings = rls.warnings.filter((w) => !/already exists/i.test(w));
           if (warnings.length > 0) await appendCloneJobWarnings(controlDb, jobId, warnings);
+
+          // "already exists" is REPORTED here, not swallowed — the opposite of
+          // what executeUpdate does with the same string, and deliberately so.
+          //
+          // replayRls only ever issues CREATE POLICY, so a policy name the
+          // destination already has fails with "already exists" and the
+          // destination keeps its old definition. On a template update that is
+          // correct and uninteresting: a fork's own policies belong to the fork
+          // owner and must not be overwritten. On a PROMOTE the expectation is
+          // inverted — staging IS the user's edit. Someone who tightened an
+          // existing policy in staging and promoted would otherwise get a
+          // 'completed' job and an unchanged production policy, with the one
+          // piece of evidence filtered out of their warnings.
+          //
+          // Informational, not an error, and NOT accompanied by a DROP POLICY /
+          // replace: rewriting a live production app's access rules from a
+          // replay is genuinely dangerous and is out of scope here. Telling the
+          // user precisely which edits did not travel lets them apply those by
+          // hand; silence lets them believe a tightened policy is live when it
+          // is not.
+          if (preExisting.length > 0) {
+            // replayRls formats these as `RLS policy <table>.<name> failed: ...`
+            // — recover the identifier so the warning names each policy rather
+            // than restating the raw Postgres error.
+            const names = preExisting.map((w) => {
+              const m = /^RLS policy (\S+) failed:/.exec(w);
+              return m ? m[1] : w;
+            });
+            await appendCloneJobWarnings(controlDb, jobId, [
+              `${names.length} RLS ${names.length === 1 ? 'policy' : 'policies'} already exist on `
+                + `production and were left unchanged: ${names.join(', ')}. Promote only ADDS `
+                + 'policies — it never rewrites or drops one on a live app — so if you edited '
+                + 'any of these in staging, that edit did NOT reach production. Apply it there '
+                + 'directly.',
+            ]);
+          }
           logger.info(
-            { jobId, prodAppId, replayed: rls.replayed, warnings: warnings.length },
+            {
+              jobId, prodAppId, replayed: rls.replayed,
+              warnings: warnings.length, preExisting: preExisting.length,
+            },
             '[promote] RLS policies replayed',
           );
           break;
@@ -166,9 +203,26 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
           // of pre-existing functions are left untouched by replayFunctions
           // (the wasInserted guard in clone-replay.ts) — production's secrets
           // are not staging's to replace.
+          //
+          // preserveDestinationTriggerEnabled is a correctness requirement, not
+          // a preference. isolateStagingApp (staging-isolation.ts) deliberately
+          // sets every cron trigger on a staging app to enabled = false so a
+          // staging environment does not fire scheduled work at real
+          // integrations. The trigger upsert's DO UPDATE SET normally copies
+          // `enabled` from the source row, so without this flag a promote
+          // switches OFF every scheduled function on the customer's live
+          // production app — nightly billing, cleanup, digests — while telling
+          // them their functions were promoted. The schedule itself
+          // (trigger_config) still travels; only the on/off half is preserved
+          // from production.
           const fn = await replayFunctions(
             runtimeDb, runtimeDb, stagingAppId, prodAppId, job.requested_by_user_id, logger,
-            { overwriteExisting: true, controlPool: controlDb, destAppOwnerId: prodOwnerId },
+            {
+              overwriteExisting: true,
+              preserveDestinationTriggerEnabled: true,
+              controlPool: controlDb,
+              destAppOwnerId: prodOwnerId,
+            },
           );
           if (fn.warnings.length > 0) await appendCloneJobWarnings(controlDb, jobId, fn.warnings);
           // Same persistence executeClone and executeUpdate do: a promoted
@@ -197,8 +251,18 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
           // credentials_encrypted (orphaning every connected end-user account)
           // and replace allowed_origins (dropping the custom domain).
           // Insert-only adds what production lacks and touches nothing it has.
+          //
+          // skipIntegrations connects the registry's stated policy to the
+          // executed behaviour. replayNonSecretConfig calls replayIntegrations
+          // internally, but replay-registry declares `integrations` as
+          // promotable: false. Nothing moved before only by coincidence — the
+          // integrations query filters `WHERE enabled = true` and staging's
+          // rows are disabled by isolation. A user who re-enabled an
+          // integration on staging would have had a fresh Composio auth config
+          // minted against PRODUCTION on the next promote.
           const cfg = await replayNonSecretConfig(
-            runtimeDb, runtimeDb, stagingAppId, prodAppId, logger, { insertOnly: true },
+            runtimeDb, runtimeDb, stagingAppId, prodAppId, logger,
+            { insertOnly: true, skipIntegrations: true },
           );
           if (cfg.warnings.length > 0) await appendCloneJobWarnings(controlDb, jobId, cfg.warnings);
           break;
