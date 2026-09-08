@@ -58,6 +58,22 @@ describe('trigger replay: preserveDestinationEnabled (promote)', () => {
       .toMatch(/ON CONFLICT \(function_id, trigger_type\) DO NOTHING/);
   });
 
+  // Fix round 3: the insert branch takes the source's `enabled`, so a
+  // staging-only cron trigger lands on production switched off. That stays
+  // (force-enabling would start a recurring job against production data the
+  // user never enabled there) but it must be REPORTABLE, which is what the
+  // RETURNING clause is for. Without it replayFunctions cannot tell an insert
+  // from an upsert and executePromote has nothing to warn about.
+  it('reports whether each trigger row was inserted, and its enabled state', () => {
+    for (const sql of [
+      buildTriggerInsertSql(true, true),
+      buildTriggerInsertSql(true, false),
+      buildTriggerInsertSql(false),
+    ]) {
+      expect(sql).toMatch(/RETURNING \(xmax = 0\) AS inserted, enabled/);
+    }
+  });
+
   // clone-replay.ts is shared and shipped: clone, staging_create and the
   // template-update path must be byte-identical to before the flag existed.
   it('defaults off, producing byte-identical SQL for every existing caller', () => {

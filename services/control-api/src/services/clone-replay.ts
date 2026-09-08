@@ -121,8 +121,18 @@ export function buildFunctionInsertSql(overwriteExisting: boolean): string {
  * every existing caller produces byte-identical SQL.
  *
  * NOTE: this governs the CONFLICT branch only. A trigger the destination does
- * not have yet is INSERTed with the source's `enabled` value, because there is
- * no destination state to preserve.
+ * NOT have yet is INSERTed with the source's `enabled` value, because there is
+ * no destination state to preserve. For promote that means a cron trigger added
+ * in staging lands on production switched off, since isolation disabled it
+ * there. That is the deliberately conservative choice — force-enabling it would
+ * start a recurring job firing at real production data that the user never
+ * enabled in production — but it must not be silent, which is why the RETURNING
+ * clause below reports it. See replayFunctions' `disabledTriggersInserted`.
+ *
+ * `RETURNING (xmax = 0) AS inserted, enabled` is the standard Postgres idiom for
+ * "this row came from the INSERT, not the DO UPDATE branch" (the same one
+ * buildFunctionInsertSql uses). It is pure reporting: under DO NOTHING a
+ * conflicting row returns nothing at all, and no caller's writes change.
  */
 export function buildTriggerInsertSql(
   overwriteExisting: boolean,
@@ -137,7 +147,8 @@ export function buildTriggerInsertSql(
     : `ON CONFLICT (function_id, trigger_type) DO NOTHING`;
   return `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
              VALUES ($1, $2, $3, $4, $5)
-             ${conflict}`;
+             ${conflict}
+             RETURNING (xmax = 0) AS inserted, enabled`;
 }
 
 /**
@@ -625,6 +636,19 @@ export async function replayFunctions(
   warnings: string[];
   unfilledEnvVars: Record<string, string[]>;
   overrideFilledFunctions: Record<string, string[]>;
+  /**
+   * Triggers this replay CREATED on the destination in a disabled state, as
+   * `<function name>.<trigger type>`. Additive and purely informational — no
+   * existing caller has to read it.
+   *
+   * It exists for promote. A cron trigger added in staging has no counterpart
+   * on production, so it is INSERTed rather than upserted, and it carries the
+   * source's `enabled = false` that isolateStagingApp set. The trigger is
+   * created but never fires. Leaving that undisclosed is the silent-surprise
+   * failure mode this pipeline keeps closing, so executePromote turns this list
+   * into a job warning naming each one.
+   */
+  disabledTriggersInserted: string[];
 }> {
   const src = await sourceRuntimePool.query<{
     id: string;
@@ -650,6 +674,7 @@ export async function replayFunctions(
   let inserted = 0;
   const unfilledEnvVars: Record<string, string[]> = {};
   const overrideFilledFunctions: Record<string, string[]> = {};
+  const disabledTriggersInserted: string[] = [];
 
   // Pre-compute "what env vars does each source function need" — we use this
   // to subtract filled (provided + auto-minted) keys and surface the rest.
@@ -764,10 +789,18 @@ export async function replayFunctions(
           [f.id],
         );
         for (const t of trigSrc.rows) {
-          await destRuntimePool.query(
+          const trigRes = await destRuntimePool.query<{ inserted: boolean; enabled: boolean }>(
             buildTriggerInsertSql(overwriteExisting, preserveDestTriggerEnabled),
             [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
           );
+          // A trigger the destination did not have, created switched off. Under
+          // DO NOTHING a conflicting row returns nothing, so this is only ever
+          // true for a genuine insert. Recorded, never acted on here — the
+          // caller decides whether it is worth telling the user about.
+          const trigRow = trigRes.rows[0];
+          if (trigRow?.inserted === true && trigRow.enabled === false) {
+            disabledTriggersInserted.push(`${f.name}.${t.trigger_type}`);
+          }
         }
 
         // --- apply env vars ---
@@ -890,7 +923,10 @@ export async function replayFunctions(
     }
   }
 
-  return { count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions };
+  return {
+    count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions,
+    disabledTriggersInserted,
+  };
 }
 
 // ---------------------------------------------------------------------------

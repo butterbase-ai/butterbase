@@ -225,6 +225,38 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
             },
           );
           if (fn.warnings.length > 0) await appendCloneJobWarnings(controlDb, jobId, fn.warnings);
+
+          // The other half of the isolation-leak above, disclosed rather than
+          // fixed. preserveDestinationTriggerEnabled protects triggers
+          // production ALREADY has; a trigger added in staging has no
+          // production counterpart, so it is INSERTed carrying the
+          // `enabled = false` that isolateStagingApp set on staging. It is
+          // created on production and never fires.
+          //
+          // We keep it disabled deliberately: force-enabling would start a
+          // recurring job firing at real production data and live integrations
+          // that the user never enabled in production — worse than the
+          // omission, because it converts a silent gap into unrequested
+          // activity. But doing the safe thing silently is the exact failure
+          // mode this pipeline keeps closing, so name it. Same pattern as the
+          // pre-existing-RLS notice above and Task 11's ignoredRemovals: do the
+          // conservative thing, then tell the user you did.
+          if (fn.disabledTriggersInserted.length > 0) {
+            const list = fn.disabledTriggersInserted.join(', ');
+            await appendCloneJobWarnings(controlDb, jobId, [
+              `${fn.disabledTriggersInserted.length} new scheduled `
+                + `${fn.disabledTriggersInserted.length === 1 ? 'trigger was' : 'triggers were'} `
+                + `created on production but ${fn.disabledTriggersInserted.length === 1 ? 'is' : 'are'} `
+                + `NOT scheduled to run: ${list}. Staging environments have their cron triggers `
+                + 'switched off so they do not fire against real integrations, and promote does '
+                + 'not turn them on for you — starting a recurring job against production data is '
+                + 'your call, not ours. Enable each one on the production app when you are ready.',
+            ]);
+            logger.info(
+              { jobId, prodAppId, disabledTriggersInserted: fn.disabledTriggersInserted },
+              '[promote] new triggers created disabled on production; owner must enable them',
+            );
+          }
           // Same persistence executeClone and executeUpdate do: a promoted
           // function needing a key it has no value for is what drives the
           // dashboard's "this function needs a secret" banner. Best-effort.

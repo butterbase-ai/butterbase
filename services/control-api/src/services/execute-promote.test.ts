@@ -88,6 +88,7 @@ beforeEach(() => {
   mocks.replayRls.mockResolvedValue({ replayed: 0, warnings: [] });
   mocks.replayFunctions.mockResolvedValue({
     count: 0, warnings: [], unfilledEnvVars: {}, overrideFilledFunctions: {},
+    disabledTriggersInserted: [],
   });
   mocks.replayNonSecretConfig.mockResolvedValue({ warnings: [] });
   mocks.replayDurableObjectsForClone.mockResolvedValue({
@@ -178,6 +179,33 @@ describe('executePromote', () => {
       expect.anything(),
       expect.objectContaining({ preserveDestinationTriggerEnabled: true }),
     );
+  });
+
+  // Fix round 3. preserveDestinationTriggerEnabled protects triggers production
+  // ALREADY has. A cron trigger added in staging has no production counterpart,
+  // so it is INSERTed carrying isolation's `enabled = false` — created on
+  // production, never fires. Kept disabled deliberately; never kept quiet.
+  it('warns when a staging-only cron trigger lands on production disabled', async () => {
+    mocks.replayFunctions.mockResolvedValue({
+      count: 1, warnings: [], unfilledEnvVars: {}, overrideFilledFunctions: {},
+      disabledTriggersInserted: ['nightly-billing.cron'],
+    });
+    await executePromote(deps, job);
+
+    const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+    const notice = surfaced.find((w: string) => /NOT scheduled to run/.test(w));
+    expect(notice).toBeDefined();
+    expect(notice).toContain('nightly-billing.cron');
+    // Must say the trigger EXISTS on production but will not fire, and that
+    // enabling it is the owner's move — not merely that something was skipped.
+    expect(notice).toMatch(/created on production/);
+    expect(notice).toMatch(/Enable each one on the production app/);
+  });
+
+  it('says nothing about disabled triggers when none were inserted', async () => {
+    await executePromote(deps, job);
+    const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+    expect(surfaced.some((w: string) => /NOT scheduled to run/.test(w))).toBe(false);
   });
 
   it('replays durable objects on the runtime pools without re-minting prod secrets', async () => {
