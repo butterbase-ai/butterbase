@@ -4,14 +4,21 @@ const mocks = vi.hoisted(() => ({ introspectSchema: vi.fn(), diffSchema: vi.fn()
 vi.mock('./schema-introspector.js', () => ({ introspectSchema: mocks.introspectSchema }));
 vi.mock('./schema-differ.js', () => ({ diffSchema: mocks.diffSchema }));
 
-import { buildPromotePreview, formatBlockedStatements } from './promote-preview.js';
+import { buildPromotePreview, formatBlockedStatements, formatIgnoredRemovals } from './promote-preview.js';
 
 const additive = { kind: 'create_table', sql: 'CREATE TABLE "notes" ()', destructive: false };
 const dropCol = { kind: 'drop_column', sql: 'ALTER TABLE "notes" DROP COLUMN "old"', destructive: true };
 
+const notesTable = {
+  columns: {
+    id: { type: 'uuid', primaryKey: true },
+    title: { type: 'text' },
+  },
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.introspectSchema.mockResolvedValue({ tables: [] });
+  mocks.introspectSchema.mockResolvedValue({ tables: {} });
 });
 
 describe('buildPromotePreview', () => {
@@ -36,12 +43,44 @@ describe('buildPromotePreview', () => {
   });
 
   it('diffs staging against production, not the reverse', async () => {
+    const prodSchema = { tables: { prod: notesTable } };
+    const stagingSchema = { tables: { staging: notesTable } };
     mocks.introspectSchema
-      .mockResolvedValueOnce({ tables: ['prod'] })
-      .mockResolvedValueOnce({ tables: ['staging'] });
+      .mockResolvedValueOnce(prodSchema)
+      .mockResolvedValueOnce(stagingSchema);
     mocks.diffSchema.mockReturnValue([]);
     await buildPromotePreview({} as never, {} as never);
-    expect(mocks.diffSchema).toHaveBeenCalledWith({ tables: ['prod'] }, { tables: ['staging'] });
+    expect(mocks.diffSchema).toHaveBeenCalledWith(prodSchema, stagingSchema);
+  });
+
+  it('reports a column dropped in staging as an ignored removal, not a blocker', async () => {
+    mocks.introspectSchema
+      .mockResolvedValueOnce({ tables: { notes: notesTable } })
+      .mockResolvedValueOnce({
+        tables: { notes: { columns: { id: notesTable.columns.id } } },
+      });
+    mocks.diffSchema.mockReturnValue([]);
+    const preview = await buildPromotePreview({} as never, {} as never);
+    expect(preview.ignoredRemovals).toEqual(['column "notes"."title"']);
+    expect(preview.canPromote).toBe(true);
+  });
+
+  it('reports a table dropped in staging as an ignored removal', async () => {
+    mocks.introspectSchema
+      .mockResolvedValueOnce({ tables: { notes: notesTable } })
+      .mockResolvedValueOnce({ tables: {} });
+    mocks.diffSchema.mockReturnValue([]);
+    const preview = await buildPromotePreview({} as never, {} as never);
+    expect(preview.ignoredRemovals).toEqual(['table "notes"']);
+  });
+
+  it('reports no ignored removals for identical schemas', async () => {
+    mocks.introspectSchema
+      .mockResolvedValueOnce({ tables: { notes: notesTable } })
+      .mockResolvedValueOnce({ tables: { notes: notesTable } });
+    mocks.diffSchema.mockReturnValue([]);
+    const preview = await buildPromotePreview({} as never, {} as never);
+    expect(preview.ignoredRemovals).toEqual([]);
   });
 });
 
@@ -53,5 +92,13 @@ describe('formatBlockedStatements', () => {
 
   it('explains why, not just what', () => {
     expect(formatBlockedStatements([dropCol])).toMatch(/would destroy production data/i);
+  });
+});
+
+describe('formatIgnoredRemovals', () => {
+  it('names the ignored removal and says it will not be applied', () => {
+    const msg = formatIgnoredRemovals(['column "notes"."title"']);
+    expect(msg).toContain('column "notes"."title"');
+    expect(msg).toMatch(/will not be applied/i);
   });
 });
