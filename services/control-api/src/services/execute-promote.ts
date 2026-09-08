@@ -322,29 +322,39 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
           // (repo-storage.ts blob/manifest copy + setLatest) — there is no
           // single "publish repo" helper to call.
           //
-          // Deliberately NOT job.source_snapshot_id: startPromote seeds that
-          // column with a synthetic `promote:<app>:<timestamp>` placeholder
-          // (promote-jobs.ts), not a real content-addressed snapshot id —
-          // there is nothing to hash at request time the way a clone/update's
-          // source manifest already exists. The real snapshot id is read here,
-          // at EXECUTION time, from the staging app's own repo pointer. That
-          // also makes a resumed/retried promote pick up whatever staging's
-          // HEAD is on re-entry rather than a value pinned when the job was
-          // first requested — consistent with "every step re-walks and
-          // finishes the job" in the header above.
-          const stagingHead = await runtimeDb.query<{ repo_latest_snapshot: string | null }>(
-            `SELECT repo_latest_snapshot FROM apps WHERE id = $1`,
-            [stagingAppId],
-          );
-          const snapshotId = stagingHead.rows[0]?.repo_latest_snapshot ?? null;
+          // job.source_snapshot_id, PINNED AT REQUEST TIME by startPromote
+          // (promote-jobs.ts), reading the staging app's apps.repo_latest_snapshot
+          // when the promote was requested — not re-read here at execution
+          // time (fix round 1). Two reasons this matters, not just style:
+          //   1. listActiveCloneSnapshotIdsForApp (clone-jobs.ts) pins every
+          //      in-flight job's source_snapshot_id so routes/repo.ts's
+          //      retention sweep won't delete a snapshot a job still needs.
+          //      A synthetic placeholder pinned nothing — a repo push on
+          //      staging while a promote was in flight could delete the very
+          //      snapshot this step is about to copy. A real value here is
+          //      what makes the pin protect anything.
+          //   2. It matches clone/update (both fix the snapshot at request
+          //      time) and makes a promote reproducible: it publishes what
+          //      the user actually previewed, not whatever staging's HEAD
+          //      happens to be whenever the worker reaches this step.
+          const snapshotId = job.source_snapshot_id;
           if (!snapshotId) {
-            // Staging has never had a repo push (e.g. an app whose owner only
-            // edits schema/functions through the dashboard). Nothing to
-            // publish — same "no persisted artifact, skip" shape replayFrontend
-            // uses below for a frontend that was never deployed.
+            // Deliberate, not an oversight: staging had no repo snapshot at
+            // request time (cloned from a repo-less template, or nothing
+            // pushed yet). A backend-only promote — schema, RLS, functions,
+            // config — is a legitimate thing to want; refusing the whole
+            // promote because there is no frontend to publish would be
+            // surprising. Record it as a warning and move on. (The
+            // 'frontend' case below independently no-ops too — replayFrontend
+            // checks its own R2 deploy-artifact slot, which is unrelated to
+            // whether a repo snapshot exists.)
+            await appendCloneJobWarnings(controlDb, jobId, [
+              'Staging has no repo snapshot to publish (nothing has been pushed to its repo yet). '
+                + 'Schema, RLS, durable objects, functions and config were still promoted.',
+            ]);
             logger.info(
               { jobId, stagingAppId },
-              '[promote] staging has no repo snapshot; skipping repo publish',
+              '[promote] job.source_snapshot_id is null; skipping repo publish',
             );
             break;
           }

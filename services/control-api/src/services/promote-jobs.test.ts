@@ -37,9 +37,29 @@ const baseArgs = {
   orgId: 'org_1',
 };
 
+/**
+ * Distinguishes the prod-app row lookup from the staging-app row lookup by
+ * the id param, so tests can set the staging app's repo_latest_snapshot
+ * independently of the prod row's db_name/region — startPromote queries the
+ * same runtimeDb pool for both (staging is pinned to production's region).
+ */
+function makeRuntimeDb(opts: { stagingSnapshot?: string | null } = {}) {
+  const stagingSnapshot = opts.stagingSnapshot === undefined ? 'snap_stage_1' : opts.stagingSnapshot;
+  return {
+    query: vi.fn(async (_sql: string, params: unknown[] = []) => {
+      const id = params[0];
+      if (id === 'app_staging') {
+        return { rows: [{ db_name: 'db_staging', repo_latest_snapshot: stagingSnapshot }] };
+      }
+      // app_prod, or anything else.
+      return { rows: [{ db_name: 'db_prod', region: 'us-east-1' }] };
+    }),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.getRuntimeDbForApp.mockResolvedValue({ query: vi.fn().mockResolvedValue({ rows: [{ db_name: 'db_prod', region: 'us-east-1' }] }) });
+  mocks.getRuntimeDbForApp.mockResolvedValue(makeRuntimeDb());
   mocks.resolveAppHomeRegion.mockResolvedValue('us-east-1');
   mocks.getEnvironmentLink.mockResolvedValue({ staging_app_id: 'app_staging' });
   mocks.getAppPoolForApp.mockResolvedValue({});
@@ -79,5 +99,35 @@ describe('startPromote', () => {
     const res = await startPromote({ ...baseArgs, controlDb });
     expect(res).toMatchObject({ ok: false, code: 'IN_FLIGHT' });
     expect(mocks.createCloneJob).not.toHaveBeenCalled();
+  });
+
+  // Fix round 1: source_snapshot_id must be the staging app's REAL repo
+  // pointer, pinned at request time — not the old synthetic
+  // `promote:<app>:<ts>` placeholder, which pinned nothing in
+  // listActiveCloneSnapshotIdsForApp's retention guard.
+  it("pins the staging app's real repo_latest_snapshot as the job's source_snapshot_id", async () => {
+    mocks.getRuntimeDbForApp.mockResolvedValue(makeRuntimeDb({ stagingSnapshot: 'snap_stage_1' }));
+    const res = await startPromote({ ...baseArgs, controlDb: makeControlDb([]) });
+    expect(res).toMatchObject({ ok: true, jobId: 'job_p1' });
+    expect(mocks.createCloneJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sourceAppId: 'app_staging', sourceSnapshotId: 'snap_stage_1' }),
+    );
+  });
+
+  // Deliberate, not a refusal: a staging app that has never had a repo push
+  // (cloned from a repo-less template, or nothing pushed yet) can still be
+  // promoted — schema/RLS/functions/config travel, execute-promote.ts's
+  // 'repo' step just skips with a warning. Pinned end-to-end here so the
+  // chosen behaviour (record null, don't refuse) doesn't drift back into a
+  // hard failure.
+  it('creates the job with a null source_snapshot_id when staging has no repo yet, without refusing', async () => {
+    mocks.getRuntimeDbForApp.mockResolvedValue(makeRuntimeDb({ stagingSnapshot: null }));
+    const res = await startPromote({ ...baseArgs, controlDb: makeControlDb([]) });
+    expect(res).toMatchObject({ ok: true, jobId: 'job_p1' });
+    expect(mocks.createCloneJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sourceAppId: 'app_staging', sourceSnapshotId: null }),
+    );
   });
 });

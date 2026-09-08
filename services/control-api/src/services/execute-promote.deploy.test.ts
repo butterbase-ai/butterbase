@@ -13,6 +13,15 @@
  *     `deployFrontend` from deployment.service.js, which does not exist.
  *     replayFrontend normally SOFT-FAILS (warnings, job still completes);
  *     promote needs it to throw, so it gains an opt-in `throwOnFailure` flag.
+ *
+ * Fix round 1: the 'repo' step uses job.source_snapshot_id, PINNED AT REQUEST
+ * TIME by startPromote (promote-jobs.ts), not re-read from staging's live
+ * apps.repo_latest_snapshot at execution time. That fixed value is what makes
+ * listActiveCloneSnapshotIdsForApp's retention pin protect the snapshot this
+ * step is about to copy — a synthetic placeholder pinned nothing. NULL is a
+ * legitimate value (staging had no repo at request time): the step skips
+ * with a job warning rather than refusing the whole promote, since a
+ * backend-only promote is legitimate.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -67,10 +76,13 @@ const job = {
   source_app_id: 'app_staging',
   dest_app_id: 'app_prod',
   requested_by_user_id: 'user_1',
+  // Pinned at request time by startPromote — see fix round 1 comment above.
+  source_snapshot_id: 'snap_123',
 } as unknown as CloneJob;
 
-// runtimeDb doubles as the "apps" lookup pool for the repo step (staging is
-// pinned to production's region, so one pool serves both sides).
+// runtimeDb doubles as the "apps" lookup pool: only used by the 'repo' step
+// for the final UPDATE apps.repo_latest_snapshot on PRODUCTION now that the
+// staging-HEAD read moved to request time (startPromote).
 const runtimeQuery = vi.fn();
 
 const deps: PromoteDeps = {
@@ -101,8 +113,8 @@ beforeEach(() => {
   });
   mocks.replayFrontend.mockResolvedValue({ warnings: [] });
 
-  // Default: staging has a repo snapshot, and its manifest has one file.
-  runtimeQuery.mockResolvedValue({ rows: [{ repo_latest_snapshot: 'snap_123' }] });
+  // Default: the manifest for job.source_snapshot_id has one file.
+  runtimeQuery.mockResolvedValue({ rows: [] });
   mocks.getManifestJson.mockResolvedValue(
     JSON.stringify({ files: [{ path: 'index.html', sha256: 'abc', size: 1 }] }),
   );
@@ -112,17 +124,19 @@ beforeEach(() => {
 });
 
 describe('promote publishes the repo snapshot', () => {
-  it('reads the STAGING app repo_latest_snapshot at execution time, not job.source_snapshot_id', async () => {
+  it('uses job.source_snapshot_id (pinned at request time), not a live re-read of staging', async () => {
     await executePromote(deps, job);
-    expect(runtimeQuery).toHaveBeenCalledWith(
-      expect.stringContaining('repo_latest_snapshot'),
-      ['app_staging'],
+    expect(mocks.getManifestJson).toHaveBeenCalledWith('app_staging', 'snap_123');
+    // No SELECT against apps.repo_latest_snapshot for staging — the value
+    // came from the job row, fixed by startPromote at request time.
+    expect(runtimeQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining('SELECT'),
+      expect.anything(),
     );
   });
 
   it('copies every distinct blob and the manifest onto production, then advances latest', async () => {
     await executePromote(deps, job);
-    expect(mocks.getManifestJson).toHaveBeenCalledWith('app_staging', 'snap_123');
     expect(mocks.copyBlobSameRegion).toHaveBeenCalledWith('app_staging', 'app_prod', 'abc');
     expect(mocks.copyManifestSameRegion).toHaveBeenCalledWith('app_staging', 'app_prod', 'snap_123');
     expect(mocks.setLatest).toHaveBeenCalledWith('app_prod', 'snap_123');
@@ -137,11 +151,35 @@ describe('promote publishes the repo snapshot', () => {
     expect(updateCall![1]).toEqual(['snap_123', 'app_prod']);
   });
 
-  it('skips the repo publish (no throw) when staging has never pushed a repo snapshot', async () => {
-    runtimeQuery.mockResolvedValue({ rows: [{ repo_latest_snapshot: null }] });
-    await expect(executePromote(deps, job)).resolves.toBeUndefined();
-    expect(mocks.getManifestJson).not.toHaveBeenCalled();
-    expect(mocks.copyBlobSameRegion).not.toHaveBeenCalled();
+  // End-to-end coverage of the chosen NULL behaviour: a promote whose staging
+  // app had no repo at request time is a legitimate backend-only promote, not
+  // a refusal. Pinned here so nobody "fixes" it back into a hard failure.
+  describe('when staging had no repo snapshot at request time (job.source_snapshot_id is null)', () => {
+    const jobNoRepo = { ...job, source_snapshot_id: null } as unknown as CloneJob;
+
+    it('completes the promote without touching repo storage', async () => {
+      await expect(executePromote(deps, jobNoRepo)).resolves.toBeUndefined();
+      expect(mocks.getManifestJson).not.toHaveBeenCalled();
+      expect(mocks.copyBlobSameRegion).not.toHaveBeenCalled();
+      expect(mocks.copyManifestSameRegion).not.toHaveBeenCalled();
+      expect(mocks.setLatest).not.toHaveBeenCalled();
+      expect(mocks.setCloneJobStatus).toHaveBeenLastCalledWith(
+        deps.controlDb, 'job_p1', expect.objectContaining({ status: 'completed' }),
+      );
+    });
+
+    it('still redeploys the frontend independently (repo and frontend artifacts are unrelated)', async () => {
+      await executePromote(deps, jobNoRepo);
+      expect(mocks.replayFrontend).toHaveBeenCalled();
+    });
+
+    it('warns the user that nothing was published, without failing the job', async () => {
+      await executePromote(deps, jobNoRepo);
+      const surfaced = mocks.appendCloneJobWarnings.mock.calls.map((c) => c[2]).flat();
+      const notice = surfaced.find((w: string) => /no repo snapshot/i.test(w));
+      expect(notice).toBeDefined();
+      expect(notice).toMatch(/Schema, RLS.*functions and config were still promoted/);
+    });
   });
 });
 

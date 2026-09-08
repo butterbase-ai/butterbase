@@ -88,8 +88,8 @@ export async function startPromote(args: {
     return { ok: false, code: 'NO_STAGING', message: 'Production app not found.' };
   }
   const stagingRow = (
-    await runtimeDb.query<{ db_name: string }>(
-      `SELECT db_name FROM apps WHERE id = $1`,
+    await runtimeDb.query<{ db_name: string; repo_latest_snapshot: string | null }>(
+      `SELECT db_name, repo_latest_snapshot FROM apps WHERE id = $1`,
       [link.staging_app_id],
     )
   ).rows[0];
@@ -113,9 +113,25 @@ export async function startPromote(args: {
   // post-clone UPDATE. This is the one point in the sequence where every
   // refusal path has already been passed, so it is the earliest safe place
   // to write.
+  // Pin the staging app's REAL repo snapshot at request time, the same way
+  // startClone does (src.repo_latest_snapshot) — not a synthetic placeholder.
+  // This is what makes listActiveCloneSnapshotIdsForApp's retention pin
+  // (clone-jobs.ts, consumed by routes/repo.ts) actually protect the
+  // snapshot the 'repo' step in execute-promote.ts will copy: a repo push on
+  // the staging app while this promote is in flight must not delete it out
+  // from under the job. It also fixes the job at the state the user actually
+  // previewed, rather than whatever staging's HEAD happens to be when the
+  // worker later reaches the repo step.
+  //
+  // NULL is a legitimate value here (staging cloned from a repo-less
+  // template, or nothing pushed yet) — deliberately NOT refused. A
+  // backend-only promote (schema/RLS/functions/config, no frontend) is a
+  // reasonable thing to want; execute-promote.ts's 'repo' step skips with a
+  // job warning instead of copying anything when this is null, and the
+  // column allows NULL for exactly this case (migration 117).
   const job = await createCloneJob(controlDb, {
     sourceAppId: link.staging_app_id,
-    sourceSnapshotId: `promote:${link.staging_app_id}:${Date.now()}`,
+    sourceSnapshotId: stagingRow.repo_latest_snapshot,
     sourceRegion: prodRow.region,
     destRegion: prodRow.region,
     requestedByUserId: userId,

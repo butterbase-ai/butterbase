@@ -72,13 +72,18 @@ const job = {
   source_app_id: 'app_staging',
   dest_app_id: 'app_prod',
   requested_by_user_id: 'user_1',
+  // Null here (staging had no repo snapshot at request time, per startPromote
+  // — fix round 1) so the repo/frontend-agnostic tests below don't have to
+  // care about repo-storage mocks at all; execute-promote.deploy.test.ts
+  // covers the non-null path and the NULL path end-to-end in detail.
+  source_snapshot_id: null,
 } as unknown as CloneJob;
 
 const controlQuery = vi.fn().mockResolvedValue({ rows: [] });
-// Doubles as the "apps" lookup pool for the repo step's staging-HEAD read and
-// production repo_latest_snapshot write; default has no repo snapshot so the
-// repo case no-ops for every test that doesn't care about it.
-const runtimeQuery = vi.fn().mockResolvedValue({ rows: [{ repo_latest_snapshot: null }] });
+// Only used by the 'repo' case's final UPDATE apps.repo_latest_snapshot on
+// PRODUCTION, and only when job.source_snapshot_id is non-null — with the
+// default null job above it's never called by any test in this file.
+const runtimeQuery = vi.fn().mockResolvedValue({ rows: [] });
 
 const deps: PromoteDeps = {
   controlDb: { tag: 'control', query: controlQuery } as never,
@@ -97,7 +102,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.extraStep = null;
   controlQuery.mockResolvedValue({ rows: [] });
-  runtimeQuery.mockResolvedValue({ rows: [{ repo_latest_snapshot: null }] });
+  runtimeQuery.mockResolvedValue({ rows: [] });
   mocks.setCloneJobStatus.mockResolvedValue(undefined);
   mocks.appendCloneJobWarnings.mockResolvedValue(undefined);
   mocks.touchEnvironmentTimestamp.mockResolvedValue(undefined);

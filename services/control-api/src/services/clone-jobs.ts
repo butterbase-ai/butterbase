@@ -32,7 +32,15 @@ export function isTerminalCloneStatus(status: CloneJobStatus): boolean {
 export interface CloneJob {
   id: string;
   source_app_id: string;
-  source_snapshot_id: string;
+  /**
+   * NULL only for mode='promote' jobs whose staging app had no repo snapshot
+   * yet at request time (see startPromote in promote-jobs.ts). Every other
+   * mode requires a real, pinned-at-create-time snapshot id: start-clone.ts
+   * refuses with NO_SNAPSHOT before creating a clone job, and
+   * template-releases.ts's NoRepoSnapshotError makes the same guarantee for
+   * update jobs (created from a published release's snapshot_id).
+   */
+  source_snapshot_id: string | null;
   source_region: string;
   dest_app_id: string | null;
   dest_region: string;
@@ -81,7 +89,8 @@ export async function createCloneJob(
   controlDb: pg.Pool,
   args: {
     sourceAppId: string;
-    sourceSnapshotId: string;
+    /** See CloneJob.source_snapshot_id — null only for a promote whose staging app has no repo yet. */
+    sourceSnapshotId: string | null;
     sourceRegion: string;
     destRegion: string;
     requestedByUserId: string;
@@ -383,17 +392,24 @@ export async function getActiveUpdateJob(
  * statuses left the source snapshot unpinned for most of the clone's life, so a
  * repo push on the template mid-clone could delete the very snapshot being
  * copied. Same predicate mistake migration 111 fixed for the update mutex.
+ *
+ * A promote job's source_snapshot_id can be NULL (staging app had no repo at
+ * request time — see startPromote) — filtered out here rather than pinning
+ * the literal string "null" or similar. Nothing to protect means nothing to
+ * pin, not a bug.
  */
 export async function listActiveCloneSnapshotIdsForApp(
   controlDb: pg.Pool,
   sourceAppId: string,
 ): Promise<Set<string>> {
-  const res = await controlDb.query<{ source_snapshot_id: string }>(
+  const res = await controlDb.query<{ source_snapshot_id: string | null }>(
     `SELECT source_snapshot_id FROM template_clone_jobs
       WHERE source_app_id = $1 AND NOT (status = ANY($2::text[]))`,
     [sourceAppId, TERMINAL_CLONE_STATUSES],
   );
-  return new Set(res.rows.map(r => r.source_snapshot_id));
+  return new Set(
+    res.rows.map(r => r.source_snapshot_id).filter((id): id is string => id !== null),
+  );
 }
 
 /**

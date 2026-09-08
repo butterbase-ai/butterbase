@@ -746,10 +746,19 @@ async function executeClone(
         '[clone] RLS replayed',
       );
 
-      // 2. Read source manifest.
+      // 2. Read source manifest. job.source_snapshot_id is guaranteed non-null
+      // here: start-clone.ts refuses with NO_SNAPSHOT before a clone job row
+      // is ever created if the source app has no repo (Task 14 fix round 1
+      // gave the column its one legitimate NULL case — a promote whose
+      // staging app has no repo yet — but executeClone never runs against a
+      // promote-mode job).
       scope.setTag('step', 'copying_repo');
-      const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
-      if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
+      const sourceSnapshotId = job.source_snapshot_id;
+      if (!sourceSnapshotId) {
+        throw new Error(`[clone] job ${jobId} has no source_snapshot_id; expected the source app to have a repo snapshot`);
+      }
+      const manifestJson = await getManifestJson(job.source_app_id, sourceSnapshotId);
+      if (!manifestJson) throw new Error(`Source manifest ${sourceSnapshotId} not found`);
       const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
 
       // 3. Copy blobs.
@@ -783,18 +792,18 @@ async function executeClone(
 
       // 4. Copy manifest.
       if (sameRegion) {
-        await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, job.source_snapshot_id);
+        await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, sourceSnapshotId);
       } else {
-        await putManifest(resolvedDestAppId, job.source_snapshot_id, manifestJson);
+        await putManifest(resolvedDestAppId, sourceSnapshotId, manifestJson);
       }
 
       // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
       //    region-direct pool (we already know dest's region from the job).
-      await setLatest(resolvedDestAppId, job.source_snapshot_id);
+      await setLatest(resolvedDestAppId, sourceSnapshotId);
       const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
       await destRuntimeAppPool.query(
         `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
-        [job.source_snapshot_id, resolvedDestAppId],
+        [sourceSnapshotId, resolvedDestAppId],
       );
 
       // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
@@ -1228,7 +1237,7 @@ async function executeClone(
         const releases = await listReleases(controlDb, job.source_app_id, 1);
         const { baseRelease, baseSnapshotId } = decideLineageBase(
           releases[0] ?? null,
-          job.source_snapshot_id,
+          sourceSnapshotId,
         );
         // Point at the release when one exists; materialize inline only when the
         // fork was cloned from live. Never both.
@@ -1714,8 +1723,18 @@ export async function executeUpdate(
       scope.setTag('step', 'copying_repo');
       await setCloneJobStatus(controlDb, jobId, { status: 'copying_repo' });
 
-      const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
-      if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
+      // job.source_snapshot_id is guaranteed non-null for update jobs:
+      // createUpdateJob always fills it from a published release's
+      // snapshot_id, and template-releases.ts's NoRepoSnapshotError refuses
+      // to publish a release with none (Task 14 fix round 1 gave the column
+      // its one legitimate NULL case — a promote whose staging app has no
+      // repo yet — but executeUpdate never runs against a promote-mode job).
+      const sourceSnapshotId = job.source_snapshot_id;
+      if (!sourceSnapshotId) {
+        throw new Error(`[update] job ${jobId} has no source_snapshot_id; expected the release to have a repo snapshot`);
+      }
+      const manifestJson = await getManifestJson(job.source_app_id, sourceSnapshotId);
+      if (!manifestJson) throw new Error(`Source manifest ${sourceSnapshotId} not found`);
       const manifest = JSON.parse(manifestJson) as { files: RepoManifestEntry[]; message?: string };
 
       // Land the source blobs under the fork's own prefix first, so the rewrite
