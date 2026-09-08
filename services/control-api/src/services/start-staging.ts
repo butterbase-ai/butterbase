@@ -17,8 +17,10 @@ import type pg from 'pg';
 import type { FastifyReply } from 'fastify';
 import { getEnvironmentLink, getLinkByStagingApp } from './app-environments.js';
 import { startClone, type StartCloneFailure } from './start-clone.js';
+import { setCloneJobStatus } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { deriveStagingName, allocateStagingSubdomain } from './staging-naming.js';
+import { getProvisionAllowedRegions } from './provision-region.js';
 import { createAgentError, getDocUrl } from './error-handler.js';
 import { VALIDATION_INVALID_SCHEMA, RESOURCE_NOT_FOUND } from '@butterbase/shared/error-types';
 
@@ -27,6 +29,7 @@ export type StartStagingFailure =
   | { code: 'IS_STAGING' }
   | { code: 'PROD_NOT_FOUND' }
   | { code: 'NO_SUBDOMAIN'; name: string }
+  | { code: 'REGION_CLOSED'; region: string }
   | { code: 'CLONE_REFUSED'; inner: StartCloneFailure };
 
 export interface StartStagingSuccess {
@@ -78,6 +81,18 @@ export async function startStaging(args: {
     return { ok: false, code: 'NO_SUBDOMAIN', name: prod.name };
   }
 
+  // Pre-check, before any write: startClone unconditionally runs
+  // resolveProvisionRegion and will silently redirect to an open region if the
+  // production app's home region has been closed via
+  // BUTTERBASE_PROVISION_ALLOWED_REGIONS. app_environments lives in a regional
+  // runtime DB and both its foreign keys must resolve locally, so a redirect
+  // would produce a link row that can never be written. Reject up front — no
+  // job row, no side effects — rather than let startClone create one first.
+  const provisionAllowed = getProvisionAllowedRegions();
+  if (provisionAllowed.length > 0 && !provisionAllowed.includes(region)) {
+    return { ok: false, code: 'REGION_CLOSED', region };
+  }
+
   // destRegion is pinned, not defaulted: app_environments FKs are local to one
   // regional runtime DB, so a redirected region would make the link unwritable.
   const clone = await startClone({
@@ -91,11 +106,28 @@ export async function startStaging(args: {
   });
   if (!clone.ok) return { ok: false, code: 'CLONE_REFUSED', inner: clone };
 
+  // Defensive post-check: this should be unreachable given the pre-check
+  // above, since the same getProvisionAllowedRegions() list gates both. It
+  // exists as a guard against a future change to startClone's redirect
+  // behaviour (e.g. a second allow-list, a race where the env var changes
+  // between the two calls) silently reintroducing the cross-region link. If
+  // it ever fires, the job it guards against has already been INSERTed by
+  // startClone, so it must be marked failed here rather than left pending —
+  // otherwise the neon task worker would pick it up and actually provision
+  // the cross-region staging app.
+  if (clone.destRegion !== region || clone.redirectedFromRegion) {
+    await setCloneJobStatus(controlDb, clone.jobId, {
+      status: 'failed',
+      error_message: `Staging clone redirected from ${region} to ${clone.destRegion}; refusing a cross-region app_environments link.`,
+    });
+    return { ok: false, code: 'REGION_CLOSED', region };
+  }
+
   await controlDb.query(
     `UPDATE template_clone_jobs SET mode = 'staging_create' WHERE id = $1`, [clone.jobId],
   );
 
-  return { ok: true, jobId: clone.jobId, stagingName, stagingSubdomain, region };
+  return { ok: true, jobId: clone.jobId, stagingName, stagingSubdomain, region: clone.destRegion };
 }
 
 /**
@@ -134,6 +166,13 @@ export function sendStartStagingFailure(
         code: VALIDATION_INVALID_SCHEMA,
         message: `Could not allocate a staging subdomain for "${result.name}": the staging subdomain space is exhausted.`,
         remediation: 'Free up an existing "<name>-staging"-style subdomain, or rename the production app, then retry.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    case 'REGION_CLOSED':
+      return reply.code(409).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: `Region "${result.region}" is closed to new apps, so a staging environment cannot be created there.`,
+        remediation: 'Wait until the region reopens, or ask an operator to add it to BUTTERBASE_PROVISION_ALLOWED_REGIONS.',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     case 'CLONE_REFUSED':

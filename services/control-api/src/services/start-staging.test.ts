@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   startClone: vi.fn(),
   getRuntimeDbForApp: vi.fn(),
   allocateStagingSubdomain: vi.fn(),
+  getProvisionAllowedRegions: vi.fn(),
+  setCloneJobStatus: vi.fn(),
 }));
 
 vi.mock('./app-environments.js', () => ({
@@ -21,6 +23,10 @@ vi.mock('./staging-naming.js', async () => {
     allocateStagingSubdomain: mocks.allocateStagingSubdomain,
   };
 });
+vi.mock('./provision-region.js', () => ({
+  getProvisionAllowedRegions: mocks.getProvisionAllowedRegions,
+}));
+vi.mock('./clone-jobs.js', () => ({ setCloneJobStatus: mocks.setCloneJobStatus }));
 
 import { startStaging } from './start-staging.js';
 
@@ -51,6 +57,10 @@ beforeEach(() => {
     fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm' }]),
   );
   mocks.allocateStagingSubdomain.mockResolvedValue('my-crm-staging');
+  // Empty list = no restriction configured (see provision-region.ts), matching
+  // the default env-var-unset behaviour.
+  mocks.getProvisionAllowedRegions.mockReturnValue([]);
+  mocks.setCloneJobStatus.mockResolvedValue(undefined);
   mocks.startClone.mockResolvedValue({
     ok: true, jobId: 'job_1', destAppId: null, sourceAppId: 'app_prod',
     sourceRegion: 'us-east-1', destRegion: 'us-east-1',
@@ -64,6 +74,8 @@ describe('startStaging', () => {
     expect(mocks.startClone).toHaveBeenCalledWith(
       expect.objectContaining({ destRegion: 'us-east-1', name: 'my-crm-staging' }),
     );
+    // Sourced from the clone result, not the pre-clone local — see below.
+    expect(res).toMatchObject({ region: 'us-east-1' });
   });
 
   it('refuses when the app already has a staging environment', async () => {
@@ -122,5 +134,34 @@ describe('startStaging', () => {
     const res = await startStaging(baseArgs);
     expect(mocks.allocateStagingSubdomain).toHaveBeenCalledWith(expect.anything(), 'my-crm');
     expect(res.ok).toBe(true);
+  });
+
+  // --- Fix round 1: the production app's region must be honoured exactly,
+  // never silently redirected by startClone's closed-region logic —
+  // app_environments FKs are local to one regional runtime DB.
+
+  it('refuses up front when the production app region is closed to new apps, without calling startClone', async () => {
+    mocks.getProvisionAllowedRegions.mockReturnValue(['us-west-2']);
+    const res = await startStaging(baseArgs);
+    expect(res).toMatchObject({ ok: false, code: 'REGION_CLOSED', region: 'us-east-1' });
+    expect(mocks.startClone).not.toHaveBeenCalled();
+    expect(mocks.setCloneJobStatus).not.toHaveBeenCalled();
+  });
+
+  it('marks the job failed and refuses when startClone redirects to a different region despite the pre-check passing', async () => {
+    mocks.startClone.mockResolvedValue({
+      ok: true, jobId: 'job_redirected', destAppId: null, sourceAppId: 'app_prod',
+      sourceRegion: 'us-east-1', destRegion: 'us-west-2', redirectedFromRegion: 'us-east-1',
+    });
+    const res = await startStaging(baseArgs);
+    expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
+      expect.anything(), 'job_redirected',
+      expect.objectContaining({ status: 'failed' }),
+    );
+    expect(res).toMatchObject({ ok: false, code: 'REGION_CLOSED' });
+    // The success path (mode = 'staging_create' write) must not run.
+    expect(controlDbQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining('staging_create'), expect.anything(),
+    );
   });
 });
