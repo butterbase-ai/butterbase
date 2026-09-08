@@ -29,6 +29,13 @@ describe('deriveStagingName', () => {
     expect(out.length).toBeLessThanOrEqual(63);
     expect(out.endsWith('-staging')).toBe(true);
   });
+
+  it('truncates an overlong name that already ends in -staging, preserving the suffix', () => {
+    const long = 'a'.repeat(80) + '-staging';
+    const out = deriveStagingName(long);
+    expect(out.length).toBeLessThanOrEqual(63);
+    expect(out.endsWith('-staging')).toBe(true);
+  });
 });
 
 describe('allocateStagingSubdomain', () => {

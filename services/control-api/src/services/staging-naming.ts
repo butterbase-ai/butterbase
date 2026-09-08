@@ -10,9 +10,13 @@ const MAX_ATTEMPTS = 10;
  */
 export function deriveStagingName(prodName: string): string {
   const base = prodName.replace(/_/g, '-').toLowerCase();
-  if (base.endsWith(SUFFIX)) return base.slice(0, MAX_LABEL);
+  // Strip an existing suffix first so the function is idempotent, then re-apply
+  // it with room reserved — truncating the combined string instead would cut the
+  // suffix off an already-long "-staging" name and can leave a trailing hyphen,
+  // which is not a legal DNS label.
+  const stem = base.endsWith(SUFFIX) ? base.slice(0, -SUFFIX.length) : base;
   const room = MAX_LABEL - SUFFIX.length;
-  return `${base.slice(0, room)}${SUFFIX}`;
+  return `${stem.slice(0, room)}${SUFFIX}`;
 }
 
 async function isTaken(runtimeDb: pg.Pool, candidate: string): Promise<boolean> {
