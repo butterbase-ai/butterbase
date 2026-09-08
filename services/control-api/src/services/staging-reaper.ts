@@ -16,9 +16,11 @@
 // app_environments rather than trusting the id list alone.
 //
 // Shape follows fork-count-sweeper.ts: a recursive setTimeout tick (not
-// setInterval) so a slow sweep can't overlap the next one, an unref'd timer
-// so it never keeps the process alive on its own, and a stop handle for
-// graceful shutdown.
+// setInterval) so a slow sweep can't overlap the next one, and a stop handle
+// for graceful shutdown. The timer here is additionally unref'd so it never
+// keeps the process alive on its own — fork-count-sweeper.ts does not do
+// this (its timer is a plain setTimeout with no .unref()); this file is the
+// first to add it, not a continuation of an existing precedent.
 
 import type pg from 'pg';
 
