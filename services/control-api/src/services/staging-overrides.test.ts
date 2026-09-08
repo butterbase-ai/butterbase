@@ -54,6 +54,31 @@ describe('staging overrides', () => {
     await setStagingOverrides(runtimeDb, STAGING, { A: '2' }, USER);
     expect(await getStagingOverrides(runtimeDb, STAGING)).toEqual({ A: '2' });
   });
+
+  it('rejects instead of returning {} when AUTH_ENCRYPTION_KEY is missing', async () => {
+    // Insert the row while the key is still set, then unset it for the read.
+    await setStagingOverrides(runtimeDb, STAGING, { STRIPE_KEY: 'sk_test_123' }, USER);
+    const original = process.env.AUTH_ENCRYPTION_KEY;
+    delete process.env.AUTH_ENCRYPTION_KEY;
+    try {
+      await expect(getStagingOverrides(runtimeDb, STAGING)).rejects.toThrow(
+        'AUTH_ENCRYPTION_KEY not configured',
+      );
+    } finally {
+      process.env.AUTH_ENCRYPTION_KEY = original;
+    }
+  });
+
+  it('returns {} without throwing for a corrupt stored blob when the key is set', async () => {
+    await runtimeDb.query(
+      `INSERT INTO staging_env_overrides (staging_app_id, encrypted_overrides, updated_by)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (staging_app_id) DO UPDATE
+         SET encrypted_overrides = EXCLUDED.encrypted_overrides`,
+      [STAGING, 'not:a:validciphertext', USER],
+    );
+    expect(await getStagingOverrides(runtimeDb, STAGING)).toEqual({});
+  });
 });
 
 describe('mergeStagingOverrides', () => {

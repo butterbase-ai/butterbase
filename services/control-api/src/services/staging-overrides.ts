@@ -33,8 +33,15 @@ export async function getStagingOverrides(
     [stagingAppId],
   );
   if (res.rows.length === 0) return {};
+
+  // Read the key BEFORE the try. A missing or rotated AUTH_ENCRYPTION_KEY is a
+  // service misconfiguration and must halt; only an unreadable stored blob is
+  // tolerable. Catching both alike would make a broken deploy look exactly like
+  // "no overrides set", silently falling the staging app back to the production
+  // values these overrides exist to replace.
+  const encKey = key();
   try {
-    return JSON.parse(decrypt(res.rows[0].encrypted_overrides, key()));
+    return JSON.parse(decrypt(res.rows[0].encrypted_overrides, encKey));
   } catch {
     // Mirrors replayAppEnvVars: an undecryptable blob is treated as absent
     // rather than crashing the replay that reads it.
