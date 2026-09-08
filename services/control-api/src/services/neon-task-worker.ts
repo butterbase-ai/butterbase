@@ -1256,7 +1256,7 @@ async function executeClone(
       // permanent failure here (attempts exhausted) leaves a fully-provisioned,
       // correctly-replayed staging app with no app_environments row — the job
       // is marked 'failed' even though the app itself is fine; backfill will repair.
-      await finalizeStagingClone(destRuntimePool, job);
+      await finalizeStagingClone(destRuntimePool, controlDb, job);
 
       // 6. Mark job completed.
       const completedAt = new Date();
