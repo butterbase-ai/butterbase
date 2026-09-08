@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { getEnvironmentLink, touchEnvironmentTimestamp } from './app-environments.js';
-import { replaySeedData } from './clone-replay.js';
+import { replaySeedData, getSeedTableNames } from './clone-replay.js';
 import { isolateStagingApp, isolateStagingMeetingsWebhook } from './staging-isolation.js';
 import { setCloneJobStatus, createCloneJob, type CloneJob } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
@@ -101,6 +101,133 @@ export async function startStagingReset(args: {
 }
 
 /**
+ * Empties the staging app's seed-flagged tables before replaySeedData
+ * re-populates them from production.
+ *
+ * WITHOUT THIS, A RESET IS NEARLY A NO-OP: replaySeedData issues
+ * `INSERT ... ON CONFLICT DO NOTHING`, so any row already present in staging
+ * — which is the entire reason anyone runs a reset, staging has drifted —
+ * survives with its stale staging value. `manage_staging`'s tool text already
+ * promises callers reset "discards the staging app's data"; this is what
+ * makes that true.
+ *
+ * TWO INDEPENDENT GUARDS before anything is touched, because a TRUNCATE aimed
+ * at the wrong pool destroys a customer's PRODUCTION data, unrecoverably —
+ * this is exactly as dangerous as the replaySeedData argument-order hazard
+ * documented on executeStagingReset below, just on the truncate side instead
+ * of the insert side:
+ *
+ *   1. stagingAppId === prodAppId is refused — on a reset job these must
+ *      always differ (source_app_id is production, dest_app_id is staging).
+ *      If they were ever equal, something upstream (startStagingReset,
+ *      resolveCloneDispatch's routing, or the CloneJob row itself) is
+ *      broken, and the only safe response is to fail loudly before running
+ *      any SQL.
+ *   2. stagingPool === prodPool (reference equality) is refused — this
+ *      catches a pool-resolution bug (e.g. getAppPoolForApp's cache keyed
+ *      wrong) that the id check above cannot see, since it is entirely
+ *      possible for two different app ids to end up resolving to the same
+ *      pool object if the caching key were ever wrong.
+ *
+ * Table set: derived via getSeedTableNames — the exact same `_seed_tables`
+ * registry lookup replaySeedData itself uses — read from the STAGING
+ * (destination) pool, not hardcoded. Read from staging rather than
+ * production because these are the tables that must physically exist on the
+ * pool being truncated; reset is defined as "discard staging's own seed
+ * data", so a seed table staging has (even one production has since
+ * removed) is still cleared.
+ *
+ * Runs `TRUNCATE ... CASCADE` rather than a table-by-table DELETE, so
+ * Postgres resolves foreign-key ordering itself. Before running it, this
+ * makes a best-effort (non-blocking) attempt to discover which OTHER tables
+ * a cascade would reach — via the same foreign-key graph Postgres itself
+ * would follow — purely so that reach is logged and visible, never to gate
+ * the truncate: a failure to introspect must not turn a real reset into a
+ * silent no-op. See the executeStagingReset report / Task 16 fix-round-1
+ * write-up for the schema audit establishing that Butterbase's own
+ * data-plane infrastructure tables (`_rag_*`, `_idempotency_keys`,
+ * `_data_plane_migrations`, `_ai_migrations`, `_seed_tables`) never carry a
+ * foreign key into an app-defined seed table, so CASCADE cannot reach them
+ * in practice — nothing here special-cases them further.
+ */
+async function truncateStagingSeedTables(args: {
+  prodAppId: string;
+  stagingAppId: string;
+  prodPool: pg.Pool;
+  stagingPool: pg.Pool;
+  logger: ResetLogger;
+}): Promise<{ tables: string[] }> {
+  const { prodAppId, stagingAppId, prodPool, stagingPool, logger } = args;
+
+  // Guard 1: id-level. See doc comment above.
+  if (stagingAppId === prodAppId) {
+    throw new Error(
+      `[staging-reset] refusing to truncate: dest_app_id (staging, ${stagingAppId}) equals `
+        + `source_app_id (production, ${prodAppId})`,
+    );
+  }
+  // Guard 2: pool-identity level. See doc comment above.
+  if (stagingPool === prodPool) {
+    throw new Error(
+      '[staging-reset] refusing to truncate: the staging pool is reference-identical to the '
+        + 'production pool',
+    );
+  }
+
+  const seedTables = await getSeedTableNames(stagingPool, logger);
+  if (seedTables.length === 0) {
+    logger.info(
+      { stagingAppId },
+      '[staging-reset] no seed-flagged tables on staging; nothing to truncate',
+    );
+    return { tables: [] };
+  }
+
+  // Best-effort visibility into what CASCADE will touch. Never allowed to
+  // block or fail the truncate itself — an introspection query failing (odd
+  // permissions, an exotic Postgres version) must not turn a reset into a
+  // silent no-op.
+  try {
+    const closure = await stagingPool.query<{ table_name: string }>(
+      `WITH RECURSIVE seed(name) AS (
+         SELECT unnest($1::text[])
+       ), reached AS (
+         SELECT name FROM seed
+         UNION
+         SELECT c.conrelid::regclass::text AS name
+         FROM pg_constraint c
+         JOIN reached r ON c.confrelid::regclass::text = r.name
+         WHERE c.contype = 'f'
+       )
+       SELECT DISTINCT name AS table_name FROM reached`,
+      [seedTables],
+    );
+    const reached = closure.rows.map((r) => r.table_name.split('.').pop() ?? r.table_name);
+    const extra = reached.filter((t) => !seedTables.includes(t));
+    if (extra.length > 0) {
+      logger.warn(
+        { stagingAppId, seedTables, cascadeReaches: extra },
+        '[staging-reset] TRUNCATE ... CASCADE will also reach these non-seed tables via foreign key',
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      { err, stagingAppId },
+      '[staging-reset] could not introspect cascade closure before truncating (non-blocking)',
+    );
+  }
+
+  const tableList = seedTables.map((t) => `"${t}"`).join(', ');
+  await stagingPool.query(`TRUNCATE TABLE ${tableList} CASCADE`);
+  logger.info(
+    { stagingAppId, tables: seedTables },
+    '[staging-reset] truncated staging seed tables before re-seed',
+  );
+
+  return { tables: seedTables };
+}
+
+/**
  * Re-seeds the staging app from production.
  *
  * DIRECTION IS REVERSED FROM PROMOTE. Every other job in this feature flows
@@ -132,8 +259,30 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
     throw new Error(`Reset job ${jobId} has no dest_app_id (staging app)`);
   }
 
+  // Hard-refuse before touching anything: on a reset job these two ids must
+  // always differ. If they were ever equal, something upstream is broken and
+  // the correct response is to fail loudly rather than run any SQL — see
+  // truncateStagingSeedTables's doc comment for why this is checked again,
+  // defense-in-depth, right before the TRUNCATE itself. This one is checked
+  // even earlier — before the job status is even touched — and is NOT
+  // attempt-gated: it is a config invariant, not a transient failure, so
+  // retrying it would never succeed.
+  if (stagingAppId === prodAppId) {
+    const msg = `[staging-reset] refusing to reset: dest_app_id (${stagingAppId}) equals `
+      + `source_app_id (production). Job ${jobId} is malformed.`;
+    await setCloneJobStatus(controlDb, jobId, {
+      status: 'failed', error_message: msg, completed_at: new Date(),
+    }).catch(() => {});
+    throw new Error(msg);
+  }
+
   try {
     await setCloneJobStatus(controlDb, jobId, { status: 'seeding_data' });
+
+    // Truncate BEFORE re-seeding: replaySeedData is INSERT ... ON CONFLICT DO
+    // NOTHING, so without this step a reset would leave every row staging
+    // already had untouched — see truncateStagingSeedTables's doc comment.
+    await truncateStagingSeedTables({ prodAppId, stagingAppId, prodPool, stagingPool, logger });
 
     // Direction is PRODUCTION -> STAGING. prodPool is always the first
     // argument, stagingPool always the second — matches replaySeedData's

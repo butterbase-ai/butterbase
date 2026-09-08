@@ -329,13 +329,36 @@ export async function replaySchema(
 const SEED_BATCH_SIZE = 500;
 
 /**
+ * The `_seed_tables` registry names every table a schema author flagged
+ * `_seed: true` (see schema-applier.ts). This is the single place that reads
+ * it, so every caller that needs "which tables carry seed data" — a seed
+ * copy (below), or a reset's pre-copy truncation (staging-reset.ts) — agrees
+ * on the same list rather than each re-deriving (or hardcoding) it.
+ *
+ * Forward-compat: apps pre-dating the `_seed_tables` bootstrap (data-plane
+ * migration 012) don't have the table at all. That is not an error — it
+ * means the app was provisioned before seed-flagged tables existed — so this
+ * returns an empty list rather than throwing.
+ */
+export async function getSeedTableNames(pool: pg.Pool, logger: ReplayLogger): Promise<string[]> {
+  try {
+    const flagged = await pool.query<{ name: string }>(`SELECT name FROM _seed_tables`);
+    return flagged.rows.map((r) => r.name);
+  } catch (err) {
+    logger.warn({ err }, '[clone] _seed_tables missing; no seed tables to report');
+    return [];
+  }
+}
+
+/**
  * Copy rows from every seed-flagged table on the source DB into the matching
  * table on the dest DB.
  *
- * Seed-flagged tables are recorded in the source's `_seed_tables` registry
- * (populated by Phase 4d's schema-applier when `_seed: true` is set on a
- * table).  Apps that pre-date the bootstrap won't have `_seed_tables` at all;
- * in that case the function returns immediately with an empty result
+ * Seed-flagged tables come from getSeedTableNames (the source's
+ * `_seed_tables` registry, populated by Phase 4d's schema-applier when
+ * `_seed: true` is set on a table). Apps that pre-date the bootstrap won't
+ * have `_seed_tables` at all; in that case getSeedTableNames returns an empty
+ * list and this function returns immediately with an empty result
  * (forward-compat / soft-fail).
  *
  * Per-table soft-fail: a constraint / column-mismatch error on INSERT is
@@ -352,19 +375,14 @@ export async function replaySeedData(
   destAppPool: pg.Pool,
   logger: ReplayLogger,
 ): Promise<{ tables: string[]; rows: number; warnings: string[] }> {
-  let flagged;
-  try {
-    flagged = await sourceAppPool.query<{ name: string }>(`SELECT name FROM _seed_tables`);
-  } catch (err) {
-    // Forward-compat: apps pre-dating the _seed_tables bootstrap don't have it.
-    logger.warn({ err }, '[clone] _seed_tables missing on source; no seed copy');
+  const seedTableNames = await getSeedTableNames(sourceAppPool, logger);
+  if (seedTableNames.length === 0) {
     return { tables: [], rows: 0, warnings: [] };
   }
   const warnings: string[] = [];
   let totalRows = 0;
   const tablesCopied: string[] = [];
-  for (const row of flagged.rows) {
-    const table = row.name;
+  for (const table of seedTableNames) {
     const cols = await sourceAppPool.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`,
