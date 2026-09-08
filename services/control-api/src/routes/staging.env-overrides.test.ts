@@ -100,9 +100,12 @@ describe('PUT /v1/apps/:app_id/staging/env-overrides', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ staging_app_id: 'app_staging', keys: ['STRIPE_SECRET_KEY'] });
+    expect(res.json()).toMatchObject({
+      staging_app_id: 'app_staging', keys: ['STRIPE_SECRET_KEY'], applied_to_staging: true,
+    });
+    // Stored against the PRODUCTION app (migration 053), applied to staging.
     expect(mocks.setStagingOverrides).toHaveBeenCalledWith(
-      expect.anything(), 'app_staging', { STRIPE_SECRET_KEY: 'sk_test_x' }, 'u1',
+      expect.anything(), 'app_prod', { STRIPE_SECRET_KEY: 'sk_test_x' }, 'u1',
     );
     // The write-through is the whole point: a stored override that never
     // reaches app_env_vars is still dead code as far as the runtime is
@@ -133,15 +136,23 @@ describe('PUT /v1/apps/:app_id/staging/env-overrides', () => {
     expect(res.json().error.message).toBe('App not found.');
   });
 
-  it('404s when the app has no staging environment', async () => {
+  it('stores overrides with NO staging environment yet, and says so', async () => {
+    // The whole point of keying the store on the production app: an owner can
+    // stage sandbox values first, so staging comes up working on the very
+    // first create instead of coming up broken.
     mocks.getEnvironmentLink.mockResolvedValue(null);
 
     const res = await build().inject({
       method: 'PUT', url: URL, payload: { env_overrides: { A: '1' } },
     });
 
-    expect(res.statusCode).toBe(404);
-    expect(mocks.setStagingOverrides).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ staging_app_id: null, applied_to_staging: false, keys: ['A'] });
+    expect(mocks.setStagingOverrides).toHaveBeenCalledWith(
+      expect.anything(), 'app_prod', { A: '1' }, 'u1',
+    );
+    // Nothing to write through to — never a silent partial success.
+    expect(mocks.applyStagingOverridesToAppEnv).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -162,7 +173,7 @@ describe('PUT /v1/apps/:app_id/staging/env-overrides', () => {
     const res = await build().inject({ method: 'PUT', url: URL, payload: { env_overrides: {} } });
 
     expect(res.statusCode).toBe(200);
-    expect(mocks.setStagingOverrides).toHaveBeenCalledWith(expect.anything(), 'app_staging', {}, 'u1');
+    expect(mocks.setStagingOverrides).toHaveBeenCalledWith(expect.anything(), 'app_prod', {}, 'u1');
   });
 });
 
@@ -175,13 +186,13 @@ describe('GET /v1/apps/:app_id/staging/env-overrides', () => {
     expect(res.body).not.toContain('sk_test_x');
   });
 
-  it('returns an empty set when there is no staging environment', async () => {
+  it('still reports overrides staged before staging exists', async () => {
     mocks.getEnvironmentLink.mockResolvedValue(null);
 
     const res = await build().inject({ method: 'GET', url: URL });
 
-    expect(res.json()).toEqual({ staging_app_id: null, keys: [] });
-    expect(mocks.getStagingOverrides).not.toHaveBeenCalled();
+    expect(res.json()).toEqual({ staging_app_id: null, keys: ['STRIPE_SECRET_KEY'] });
+    expect(mocks.getStagingOverrides).toHaveBeenCalledWith(expect.anything(), 'app_prod');
   });
 
   it('404s for a non-owner', async () => {

@@ -858,8 +858,13 @@ async function executeClone(
       // clone / update / public-template behaviour is byte-identical.
       const isStagingCreate = job.mode === 'staging_create';
       try {
+        // Overrides are keyed on the PRODUCTION app (migration 053), which is
+        // this job's SOURCE — so they can be set before staging exists and are
+        // already in place on the very first create. Read from the source
+        // region's pool, which is where the route wrote them (staging is
+        // pinned to production's region, so the two pools are the same DB).
         const stagingOverrides = isStagingCreate
-          ? await getStagingOverrides(destRuntimePool, resolvedDestAppId)
+          ? await getStagingOverrides(sourceRuntimePool, job.source_app_id)
           : undefined;
         const appEnvResult = await replayAppEnvVars(
           sourceRuntimePool, destRuntimePool,

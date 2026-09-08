@@ -9,7 +9,9 @@ const RUNTIME_URL =
   'postgresql://butterbase:butterbase_dev@localhost:5437/butterbase_runtime_us';
 
 let runtimeDb: pg.Pool;
-const STAGING = 'app_test_ovr_staging';
+// Overrides are keyed on the PRODUCTION app (migration 053), not the staging
+// app — so they can be set before staging exists and survive a re-create.
+const PROD = 'app_test_ovr_prod';
 const USER = '00000000-0000-0000-0000-0000000000e2';
 
 beforeAll(async () => {
@@ -18,50 +20,50 @@ beforeAll(async () => {
   await runtimeDb.query(
     `INSERT INTO apps (id, name, owner_id, db_name, region)
      VALUES ($1, $1, $2, $1, 'us-east-1') ON CONFLICT (id) DO NOTHING`,
-    [STAGING, USER],
+    [PROD, USER],
   );
 });
 
 afterAll(async () => {
-  await runtimeDb.query(`DELETE FROM apps WHERE id = $1`, [STAGING]);
+  await runtimeDb.query(`DELETE FROM apps WHERE id = $1`, [PROD]);
   await runtimeDb.end();
 });
 
 beforeEach(async () => {
-  await runtimeDb.query(`DELETE FROM staging_env_overrides WHERE staging_app_id = $1`, [STAGING]);
+  await runtimeDb.query(`DELETE FROM staging_env_overrides WHERE prod_app_id = $1`, [PROD]);
 });
 
 describe('staging overrides', () => {
   it('round-trips values through encryption', async () => {
-    await setStagingOverrides(runtimeDb, STAGING, { STRIPE_KEY: 'sk_test_123' }, USER);
-    expect(await getStagingOverrides(runtimeDb, STAGING)).toEqual({ STRIPE_KEY: 'sk_test_123' });
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_KEY: 'sk_test_123' }, USER);
+    expect(await getStagingOverrides(runtimeDb, PROD)).toEqual({ STRIPE_KEY: 'sk_test_123' });
   });
 
   it('stores ciphertext, not the plaintext value', async () => {
-    await setStagingOverrides(runtimeDb, STAGING, { STRIPE_KEY: 'sk_test_123' }, USER);
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_KEY: 'sk_test_123' }, USER);
     const row = await runtimeDb.query(
-      `SELECT encrypted_overrides FROM staging_env_overrides WHERE staging_app_id = $1`, [STAGING],
+      `SELECT encrypted_overrides FROM staging_env_overrides WHERE prod_app_id = $1`, [PROD],
     );
     expect(row.rows[0].encrypted_overrides).not.toContain('sk_test_123');
   });
 
   it('returns an empty object when nothing is set', async () => {
-    expect(await getStagingOverrides(runtimeDb, STAGING)).toEqual({});
+    expect(await getStagingOverrides(runtimeDb, PROD)).toEqual({});
   });
 
   it('overwrites on repeat set', async () => {
-    await setStagingOverrides(runtimeDb, STAGING, { A: '1' }, USER);
-    await setStagingOverrides(runtimeDb, STAGING, { A: '2' }, USER);
-    expect(await getStagingOverrides(runtimeDb, STAGING)).toEqual({ A: '2' });
+    await setStagingOverrides(runtimeDb, PROD, { A: '1' }, USER);
+    await setStagingOverrides(runtimeDb, PROD, { A: '2' }, USER);
+    expect(await getStagingOverrides(runtimeDb, PROD)).toEqual({ A: '2' });
   });
 
   it('rejects instead of returning {} when AUTH_ENCRYPTION_KEY is missing', async () => {
     // Insert the row while the key is still set, then unset it for the read.
-    await setStagingOverrides(runtimeDb, STAGING, { STRIPE_KEY: 'sk_test_123' }, USER);
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_KEY: 'sk_test_123' }, USER);
     const original = process.env.AUTH_ENCRYPTION_KEY;
     delete process.env.AUTH_ENCRYPTION_KEY;
     try {
-      await expect(getStagingOverrides(runtimeDb, STAGING)).rejects.toThrow(
+      await expect(getStagingOverrides(runtimeDb, PROD)).rejects.toThrow(
         'AUTH_ENCRYPTION_KEY not configured',
       );
     } finally {
@@ -71,13 +73,13 @@ describe('staging overrides', () => {
 
   it('returns {} without throwing for a corrupt stored blob when the key is set', async () => {
     await runtimeDb.query(
-      `INSERT INTO staging_env_overrides (staging_app_id, encrypted_overrides, updated_by)
+      `INSERT INTO staging_env_overrides (prod_app_id, encrypted_overrides, updated_by)
        VALUES ($1, $2, $3)
-       ON CONFLICT (staging_app_id) DO UPDATE
+       ON CONFLICT (prod_app_id) DO UPDATE
          SET encrypted_overrides = EXCLUDED.encrypted_overrides`,
-      [STAGING, 'not:a:validciphertext', USER],
+      [PROD, 'not:a:validciphertext', USER],
     );
-    expect(await getStagingOverrides(runtimeDb, STAGING)).toEqual({});
+    expect(await getStagingOverrides(runtimeDb, PROD)).toEqual({});
   });
 });
 

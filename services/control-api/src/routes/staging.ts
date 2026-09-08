@@ -276,9 +276,9 @@ export function stagingRoutes(app: FastifyInstance) {
   // Scoped under the PRODUCTION app id, like every other route in this file:
   // `assertCallerOwnsApp` is written for the production app, the owner's
   // mental model is "my app's staging", and the staging app id is an
-  // implementation detail they never have to hold. The STORE is still keyed by
-  // staging_app_id (migration 053) — this route resolves prod -> staging via
-  // the app_environments link.
+  // implementation detail they never have to hold. The store is keyed on the
+  // production app too (migration 053), so `app_id` is the identity end to end
+  // and overrides exist independently of whether staging does.
   app.get('/v1/apps/:app_id/staging/env-overrides', async (request, reply) => {
     const { app_id } = request.params as { app_id: string };
     const userId = requireUserId(request);
@@ -288,11 +288,14 @@ export function stagingRoutes(app: FastifyInstance) {
     }
 
     const runtimeDb = await getRuntimeDbForApp(app.controlDb, app_id);
-    const link = await getEnvironmentLink(runtimeDb, app_id);
-    if (!link) return reply.send({ staging_app_id: null, keys: [] });
-
-    const overrides = await getStagingOverrides(runtimeDb, link.staging_app_id);
-    return reply.send({ staging_app_id: link.staging_app_id, keys: Object.keys(overrides) });
+    const [overrides, link] = await Promise.all([
+      getStagingOverrides(runtimeDb, app_id),
+      getEnvironmentLink(runtimeDb, app_id),
+    ]);
+    return reply.send({
+      staging_app_id: link?.staging_app_id ?? null,
+      keys: Object.keys(overrides),
+    });
   });
 
   // PUT /v1/apps/:app_id/staging/env-overrides — replace the staging app's
@@ -303,11 +306,17 @@ export function stagingRoutes(app: FastifyInstance) {
   // `withholdInheritedValues`), so without an override here a key exists on the
   // staging app with an empty value and functions needing it fail loudly.
   //
-  // Writes through twice, on purpose: to `staging_env_overrides` (durable, and
-  // re-applied by any future clone-time replay) and straight into the staging
-  // app's live `app_env_vars` blob (what the runtime actually reads). The
-  // second write MERGES — values the owner set directly via
+  // Writes through twice, on purpose: to `staging_env_overrides` (durable, keyed
+  // on the production app, and applied by the clone-time replay) and straight
+  // into the staging app's live `app_env_vars` blob (what the runtime actually
+  // reads). The second write MERGES — values the owner set directly via
   // `PATCH /v1/:appId/env` survive unless an override names the same key.
+  //
+  // Works with NO staging environment yet: the store is keyed on the production
+  // app, so an owner can stage sandbox values first and have staging come up
+  // working on the very first create instead of coming up broken. When there is
+  // no staging app the write-through is simply skipped — `applied_to_staging`
+  // in the response says which happened.
   app.put('/v1/apps/:app_id/staging/env-overrides', {
     config: {
       // Looser than create/reset (5/hour): this is a config write, not a
@@ -365,56 +374,59 @@ export function stagingRoutes(app: FastifyInstance) {
     const overrides = Object.fromEntries(entries) as Record<string, string>;
 
     const runtimeDb = await getRuntimeDbForApp(app.controlDb, app_id);
+
+    // The durable write, keyed on the production app. Happens whether or not a
+    // staging environment exists yet.
+    await setStagingOverrides(runtimeDb, app_id, overrides, userId);
+
     const link = await getEnvironmentLink(runtimeDb, app_id);
-    if (!link) {
-      return reply.code(404).send(createAgentError({
-        code: VALIDATION_INVALID_SCHEMA,
-        message: 'This app has no staging environment to set overrides on.',
-        remediation: 'Create a staging environment first, then set its env var overrides.',
-        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-      }));
-    }
+    let appliedKeys = Object.keys(overrides);
+    let invalidated: { count: number; failed?: number } | undefined;
+    if (link) {
+      ({ appliedKeys } = await applyStagingOverridesToAppEnv(
+        runtimeDb, link.staging_app_id, overrides, userId,
+      ));
 
-    await setStagingOverrides(runtimeDb, link.staging_app_id, overrides, userId);
-    const { appliedKeys } = await applyStagingOverridesToAppEnv(
-      runtimeDb, link.staging_app_id, overrides, userId,
-    );
-
-    // Fan out cache invalidation so already-warm staging functions pick the new
-    // values up. allSettled + a warn: the 5-min LRU TTL is the backstop, and a
-    // Redis blip must not fail a write that already committed. Mirrors
-    // routes/app-env.ts.
-    const fns = await runtimeDb.query<{ name: string }>(
-      `SELECT name FROM app_functions WHERE app_id = $1 AND deleted_at IS NULL`,
-      [link.staging_app_id],
-    );
-    const settled = await Promise.allSettled(
-      fns.rows.map((r) => invalidateFunctionCache(link.staging_app_id, r.name)),
-    );
-    const failed = settled.filter((s) => s.status === 'rejected').length;
-    if (failed > 0) {
-      request.log.warn(
-        { app_id, staging_app_id: link.staging_app_id, failed },
-        '[staging] some function cache invalidations failed after env override write',
+      // Fan out cache invalidation so already-warm staging functions pick the
+      // new values up. allSettled + a warn: the 5-min LRU TTL is the backstop,
+      // and a Redis blip must not fail a write that already committed. Mirrors
+      // routes/app-env.ts.
+      const fns = await runtimeDb.query<{ name: string }>(
+        `SELECT name FROM app_functions WHERE app_id = $1 AND deleted_at IS NULL`,
+        [link.staging_app_id],
       );
+      const settled = await Promise.allSettled(
+        fns.rows.map((r) => invalidateFunctionCache(link.staging_app_id, r.name)),
+      );
+      const failed = settled.filter((s) => s.status === 'rejected').length;
+      if (failed > 0) {
+        request.log.warn(
+          { app_id, staging_app_id: link.staging_app_id, failed },
+          '[staging] some function cache invalidations failed after env override write',
+        );
+      }
+      invalidated = { count: settled.length - failed, ...(failed > 0 ? { failed } : {}) };
     }
 
     // Key names only — an override VALUE is never echoed back or logged.
     logFromRequest(request, {
-      appId: link.staging_app_id,
+      appId: link?.staging_app_id ?? app_id,
       category: 'admin',
       eventType: 'staging.env_overrides.update',
       action: 'update',
       resourceType: 'app',
-      resourceId: link.staging_app_id,
-      eventData: { env_var_keys: appliedKeys },
+      resourceId: link?.staging_app_id ?? app_id,
+      eventData: { env_var_keys: appliedKeys, applied_to_staging: link != null },
       success: true,
     });
 
     return reply.send({
-      staging_app_id: link.staging_app_id,
+      staging_app_id: link?.staging_app_id ?? null,
       keys: appliedKeys,
-      invalidated: { count: settled.length - failed, ...(failed > 0 ? { failed } : {}) },
+      // False means "stored, and will be applied when staging is created" —
+      // never a silent partial success.
+      applied_to_staging: link != null,
+      ...(invalidated ? { invalidated } : {}),
     });
   });
 

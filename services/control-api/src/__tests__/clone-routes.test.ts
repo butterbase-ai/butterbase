@@ -490,7 +490,11 @@ describe('POST /v1/clone-jobs/:job_id/retry', () => {
     ...over,
   });
 
-  async function buildRetryApp(job: Record<string, unknown>, newerCompleted: boolean) {
+  async function buildRetryApp(
+    job: Record<string, unknown>,
+    newerCompleted: boolean,
+    incrementRetryError?: Error & { code?: string },
+  ) {
     const app = Fastify({ logger: false });
     const enqueued: unknown[] = [];
     mockRuntimePoolQuery.mockResolvedValue({ rows: [] });
@@ -503,6 +507,7 @@ describe('POST /v1/clone-jobs/:job_id/retry', () => {
         }
         if (sql.includes('retry_count = retry_count + 1')) {
           enqueued.push('incrementRetry');
+          if (incrementRetryError) throw incrementRetryError;
           return { rows: [] };
         }
         return { rows: [] };
@@ -554,5 +559,126 @@ describe('POST /v1/clone-jobs/:job_id/retry', () => {
     const res = await retry(app);
     expect(res.statusCode).toBe(200);
     expect(enqueued).toContain('incrementRetry');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/clone-jobs/:job_id/retry — the staging job modes
+//
+// This endpoint is mode-agnostic: it takes any job id the caller owns. The
+// modes added in Task 3 (staging_create / promote / staging_reset) therefore
+// inherited a retry path that skips every admission check their own start
+// route performs. For promote that meant a week-old failed job could be
+// re-enqueued into an unreviewed production deploy — a stale pinned
+// source_snapshot_id republished and an old staging bundle redeployed over a
+// live production frontend, with no preview, no destructive-DDL preflight and
+// no in-flight re-check.
+//
+// An earlier ledger note called this "harmless today (no retry endpoint for
+// the new modes)". There is one, and it takes any mode.
+// ---------------------------------------------------------------------------
+
+describe('POST /v1/clone-jobs/:job_id/retry — new job modes are refused', () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
+  const failedJob = (over: Record<string, unknown> = {}) => ({
+    id: 'cj_r1', mode: 'update', status: 'failed',
+    source_app_id: 'app_src', source_region: 'us-east-1',
+    dest_app_id: 'app_fork', dest_region: 'us-east-1',
+    requested_by_user_id: 'usr_requester',
+    retry_count: 0, error_message: 'boom', warnings: null,
+    created_at: minutesAgo(30), updated_at: minutesAgo(5), completed_at: null,
+    ...over,
+  });
+
+  async function build(job: Record<string, unknown>, incrementRetryError?: Error & { code?: string }) {
+    const app = Fastify({ logger: false });
+    const calls: string[] = [];
+    mockRuntimePoolQuery.mockResolvedValue({ rows: [] });
+    const controlDbStub = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('SELECT * FROM template_clone_jobs')) return { rows: [job] };
+        if (sql.includes('retry_count = retry_count + 1')) {
+          calls.push('incrementRetry');
+          if (incrementRetryError) throw incrementRetryError;
+          return { rows: [] };
+        }
+        return { rows: [], rowCount: 0 };
+      }),
+    };
+    app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.auth = { userId: 'usr_requester', authMethod: 'api_key', scopes: ['*'] } as any;
+      done();
+    });
+    app.register(cloneRoutes);
+    await app.ready();
+    return { app, calls };
+  }
+
+  const retry = (app: any) => app.inject({ method: 'POST', url: '/v1/clone-jobs/cj_r1/retry' });
+
+  it.each([
+    ['promote', /staging\/promote/],
+    ['staging_create', /apps\/\{prod_app_id\}\/staging/],
+    ['staging_reset', /staging\/reset/],
+  ])('refuses a failed %s and points at the fresh-start route', async (mode, routeHint) => {
+    // Deliberately "fresh" (updated 5 minutes ago) — the refusal is about the
+    // MODE, not staleness, so an age gate would not have caught this.
+    const { app, calls } = await build(failedJob({ mode }));
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toBe(`Cannot retry a '${mode}' job.`);
+    expect(res.json().error.remediation).toMatch(routeHint);
+    // Nothing was re-enqueued and the job stays 'failed'.
+    expect(calls).not.toContain('incrementRetry');
+  });
+
+  it('refuses a stale promote — the unreviewed-production-deploy case', async () => {
+    const { app, calls } = await build(failedJob({
+      mode: 'promote', updated_at: minutesAgo(60 * 24 * 7), created_at: minutesAgo(60 * 24 * 7),
+    }));
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(400);
+    expect(calls).not.toContain('incrementRetry');
+  });
+
+  it.each(['clone', 'update'])(
+    'still retries a failed %s — shipped behaviour is unchanged', async (mode) => {
+      const { app, calls } = await build(failedJob({ mode }));
+
+      const res = await retry(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ job_id: 'cj_r1', status: 'pending' });
+      expect(calls).toContain('incrementRetry');
+    },
+  );
+
+  it('turns a 23505 from incrementRetry into a 409 instead of leaking a 500', async () => {
+    // incrementRetry flips status back to 'pending', re-entering the partial
+    // unique index on (dest_app_id) WHERE status NOT IN ('completed','failed').
+    // The staleness gate only looks for a newer COMPLETED update, so an update
+    // already IN FLIGHT for the same dest app raised a raw 23505.
+    const dup = Object.assign(new Error('duplicate key value'), { code: '23505' });
+    const { app } = await build(failedJob({ mode: 'update' }), dup);
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('RESOURCE_CONFLICT');
+    expect(res.json().error.message).toMatch(/already in flight/i);
+  });
+
+  it('still propagates a non-23505 failure rather than masking it as a conflict', async () => {
+    const boom = Object.assign(new Error('connection terminated'), { code: '08006' });
+    const { app } = await build(failedJob({ mode: 'clone' }), boom);
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(500);
   });
 });

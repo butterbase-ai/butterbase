@@ -63,8 +63,10 @@ async function readEnv(appId: string): Promise<Record<string, string>> {
  * helper is the point: the bug was that the worker never varied by mode.
  */
 async function materializeForMode(mode: string, destAppId: string) {
+  // Keyed on the PRODUCTION app, so this read works on the very first create —
+  // before the staging app row exists at all.
   const overrides = mode === 'staging_create'
-    ? await getStagingOverrides(runtimeDb, destAppId)
+    ? await getStagingOverrides(runtimeDb, PROD)
     : undefined;
   return replayAppEnvVars(
     runtimeDb, runtimeDb, PROD, destAppId, USER,
@@ -87,14 +89,14 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runtimeDb.query(`DELETE FROM app_env_vars WHERE app_id = ANY($1::text[])`, [[PROD, STAGING, CLONE]]);
-  await runtimeDb.query(`DELETE FROM staging_env_overrides WHERE staging_app_id = $1`, [STAGING]);
+  await runtimeDb.query(`DELETE FROM staging_env_overrides WHERE prod_app_id = $1`, [PROD]);
   await runtimeDb.query(`DELETE FROM apps WHERE id = ANY($1::text[])`, [[PROD, STAGING, CLONE]]);
   await runtimeDb.end();
 });
 
 beforeEach(async () => {
   await runtimeDb.query(`DELETE FROM app_env_vars WHERE app_id = ANY($1::text[])`, [[PROD, STAGING, CLONE]]);
-  await runtimeDb.query(`DELETE FROM staging_env_overrides WHERE staging_app_id = $1`, [STAGING]);
+  await runtimeDb.query(`DELETE FROM staging_env_overrides WHERE prod_app_id = $1`, [PROD]);
   await runtimeDb.query(
     `INSERT INTO app_env_vars (app_id, encrypted_env_vars, updated_by) VALUES ($1, $2, $3)`,
     [PROD, encrypt(JSON.stringify(PROD_ENV), encKey), USER],
@@ -103,7 +105,7 @@ beforeEach(async () => {
 
 describe('staging_create env materialisation (the defect)', () => {
   it('never gives staging production\'s value for an OVERRIDDEN key', async () => {
-    await setStagingOverrides(runtimeDb, STAGING, { STRIPE_SECRET_KEY: 'sk_test_SANDBOX' }, USER);
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_SECRET_KEY: 'sk_test_SANDBOX' }, USER);
 
     await materializeForMode('staging_create', STAGING);
 
@@ -115,7 +117,7 @@ describe('staging_create env materialisation (the defect)', () => {
   });
 
   it('never gives staging production\'s value for a NON-overridden key either', async () => {
-    await setStagingOverrides(runtimeDb, STAGING, { STRIPE_SECRET_KEY: 'sk_test_SANDBOX' }, USER);
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_SECRET_KEY: 'sk_test_SANDBOX' }, USER);
 
     await materializeForMode('staging_create', STAGING);
 
@@ -138,7 +140,7 @@ describe('staging_create env materialisation (the defect)', () => {
   });
 
   it('names every withheld key so the create job can disclose it', async () => {
-    await setStagingOverrides(runtimeDb, STAGING, { STRIPE_SECRET_KEY: 'sk_test_SANDBOX' }, USER);
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_SECRET_KEY: 'sk_test_SANDBOX' }, USER);
 
     const res = await materializeForMode('staging_create', STAGING);
 
@@ -163,8 +165,45 @@ describe('staging_create env materialisation (the defect)', () => {
     );
   });
 
+  it('applies overrides set BEFORE staging existed (the point of keying on prod)', async () => {
+    // No staging app row is referenced by the write at all — this is the
+    // workflow the old staging_app_id FK made impossible, which forced every
+    // owner through "create staging, discover it is broken, then fix it".
+    await runtimeDb.query(`DELETE FROM apps WHERE id = $1`, [STAGING]);
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_SECRET_KEY: 'sk_test_PRESET' }, USER);
+
+    // Staging is created only now.
+    await runtimeDb.query(
+      `INSERT INTO apps (id, name, owner_id, db_name, region)
+       VALUES ($1, $1, $2, $1, 'us-east-1') ON CONFLICT (id) DO NOTHING`,
+      [STAGING, USER],
+    );
+    await materializeForMode('staging_create', STAGING);
+
+    // Staging comes up WORKING, not broken.
+    expect((await readEnv(STAGING)).STRIPE_SECRET_KEY).toBe('sk_test_PRESET');
+  });
+
+  it('overrides survive deleting and re-creating the staging app', async () => {
+    await setStagingOverrides(runtimeDb, PROD, { STRIPE_SECRET_KEY: 'sk_test_KEEP' }, USER);
+    await materializeForMode('staging_create', STAGING);
+
+    // Unlink-and-recreate. Under the old staging_app_id key this CASCADE
+    // silently deleted the owner's sandbox keys.
+    await runtimeDb.query(`DELETE FROM apps WHERE id = $1`, [STAGING]);
+    await runtimeDb.query(
+      `INSERT INTO apps (id, name, owner_id, db_name, region)
+       VALUES ($1, $1, $2, $1, 'us-east-1') ON CONFLICT (id) DO NOTHING`,
+      [STAGING, USER],
+    );
+
+    expect(await getStagingOverrides(runtimeDb, PROD)).toEqual({ STRIPE_SECRET_KEY: 'sk_test_KEEP' });
+    await materializeForMode('staging_create', STAGING);
+    expect((await readEnv(STAGING)).STRIPE_SECRET_KEY).toBe('sk_test_KEEP');
+  });
+
   it('an override for a key production does not define still lands', async () => {
-    await setStagingOverrides(runtimeDb, STAGING, { STAGING_ONLY_FLAG: 'yes' }, USER);
+    await setStagingOverrides(runtimeDb, PROD, { STAGING_ONLY_FLAG: 'yes' }, USER);
 
     await materializeForMode('staging_create', STAGING);
 

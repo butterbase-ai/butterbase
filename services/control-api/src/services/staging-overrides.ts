@@ -7,30 +7,43 @@ function key(): string {
   return k;
 }
 
+/**
+ * The staging env var overrides are KEYED ON THE PRODUCTION APP (migration
+ * 053), matching `app_environments`. `prodAppId` — never the staging app id —
+ * is the identity throughout this module.
+ *
+ * Keying on the staging app would FK the overrides to a row that does not
+ * exist until staging is created, so the only possible workflow would be
+ * "create staging, discover every function is broken, then set overrides", and
+ * an unlink-and-recreate would CASCADE the owner's sandbox keys away. Keyed on
+ * production, overrides can be staged BEFORE the first create — so staging
+ * comes up working — and they survive a re-create.
+ */
 export async function setStagingOverrides(
   runtimeDb: pg.Pool,
-  stagingAppId: string,
+  prodAppId: string,
   values: Record<string, string>,
   updatedBy: string,
 ): Promise<void> {
   const encrypted = encrypt(JSON.stringify(values), key());
   await runtimeDb.query(
-    `INSERT INTO staging_env_overrides (staging_app_id, encrypted_overrides, updated_by)
+    `INSERT INTO staging_env_overrides (prod_app_id, encrypted_overrides, updated_by)
      VALUES ($1, $2, $3)
-     ON CONFLICT (staging_app_id) DO UPDATE
+     ON CONFLICT (prod_app_id) DO UPDATE
        SET encrypted_overrides = EXCLUDED.encrypted_overrides,
            updated_by          = EXCLUDED.updated_by,
            updated_at          = now()`,
-    [stagingAppId, encrypted, updatedBy],
+    [prodAppId, encrypted, updatedBy],
   );
 }
 
+/** Reads by PRODUCTION app id — see setStagingOverrides' comment. */
 export async function getStagingOverrides(
-  runtimeDb: pg.Pool, stagingAppId: string,
+  runtimeDb: pg.Pool, prodAppId: string,
 ): Promise<Record<string, string>> {
   const res = await runtimeDb.query<{ encrypted_overrides: string }>(
-    `SELECT encrypted_overrides FROM staging_env_overrides WHERE staging_app_id = $1`,
-    [stagingAppId],
+    `SELECT encrypted_overrides FROM staging_env_overrides WHERE prod_app_id = $1`,
+    [prodAppId],
   );
   if (res.rows.length === 0) return {};
 
@@ -62,10 +75,11 @@ export function mergeStagingOverrides(
  *
  * Why this exists as well as the `replayAppEnvVars` hook: the runtime reads
  * `app_env_vars` directly (services/deno-runtime/function-loader.ts joins it
- * onto `app_functions`), and `staging_env_overrides.staging_app_id` REFERENCES
- * `apps(id)` — so an override cannot exist before the staging app does, and
- * the clone-time hook can therefore never be the only application point.
- * Setting an override has to write through to the blob at set time.
+ * onto `app_functions`), and the clone-time hook runs exactly once, at create.
+ * An override set or changed AFTER that — the common case, since the owner
+ * usually discovers the key they need from the create job's withheld-keys
+ * warning — would otherwise not take effect until the staging app was
+ * destroyed and rebuilt. So setting an override writes through to the blob.
  *
  * MERGE, not replace: overrides are layered over whatever the staging app
  * currently holds (values the owner set directly via `PATCH /v1/:appId/env`

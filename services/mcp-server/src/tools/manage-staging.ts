@@ -19,15 +19,19 @@ Actions:
              Destructive to staging only; production is never written.
   "get_env_overrides" — list the KEY NAMES of the staging app's env var
              overrides. Values are never returned.
-  "set_env_overrides" — replace the staging app's env var overrides with
-             \`env_overrides\`. Pass {} to clear them all.
+  "set_env_overrides" — replace this app's staging env var overrides with
+             \`env_overrides\`. Pass {} to clear them all. Can be called BEFORE
+             "create" — overrides are stored against the production app, so
+             setting them first makes staging come up working rather than with
+             every key empty. They also survive deleting and re-creating staging.
 
 ENV VARS IN STAGING: production's app-level env var VALUES are deliberately NOT
 copied into staging. Each key is created on the staging app with an EMPTY value,
 so a function that needs it fails with a missing-key error instead of silently
 running against production's live credentials (a staging app holding
 production's Stripe key charges real cards). The create job's warnings name
-every key that was withheld. Supply sandbox values with "set_env_overrides".
+every key that was withheld. Supply sandbox values with "set_env_overrides" —
+ideally BEFORE "create", so staging is usable the moment it finishes.
 
 To promote staging changes into production, use the separate promote_staging tool.
 
