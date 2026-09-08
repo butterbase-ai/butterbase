@@ -11,6 +11,7 @@ import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notificat
 import { addOrgAppIndex, removeOrgAppIndex } from './org-app-index.js';
 import { resolveOrganizationId } from './org-resolver.js';
 import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus } from './clone-jobs.js';
+import { finalizeStagingClone } from './staging-completion.js';
 import {
   getManifestJson,
   putManifest,
@@ -1248,6 +1249,11 @@ async function executeClone(
         );
       }
 
+      // Staging pairs are linked only after every replay stage has succeeded, so
+      // a half-provisioned app never appears in the dashboard as a usable
+      // staging environment. finalizeStagingClone is a no-op for other modes.
+      await finalizeStagingClone(destRuntimePool, job);
+
       // 6. Mark job completed.
       const completedAt = new Date();
       await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: completedAt });
@@ -1377,9 +1383,26 @@ export function shouldAbortUpdate(
  * Exported for the same reason decideLineageBase is: it is a one-line decision
  * inside an untestable effectful caller, and getting it wrong points a
  * destructive update at a fresh-provision path (or vice versa).
+ *
+ * This is NOT an exhaustive switch over CloneJob['mode'] — widening the mode
+ * union (Task 3) added 'staging_create', 'promote', and 'staging_reset'
+ * without the compiler flagging this function, so every new mode silently
+ * falls into the 'clone' branch unless named here explicitly.
+ *
+ * 'staging_create' is named below and dispatches to 'clone' ON PURPOSE: a
+ * staging create genuinely runs the same provision-and-replay pipeline as a
+ * template clone (see finalizeStagingClone, called at the end of
+ * executeClone, for the staging-specific step that runs after replay).
+ *
+ * 'promote' and 'staging_reset' (Tasks 13 and 16) must NOT be added to the
+ * 'clone' case below — running executeClone for either would be wrong: a
+ * promote/reset operates on an existing linked pair, not a fresh provision.
+ * Each needs its own dispatch branch and executor when implemented.
  */
 export function resolveCloneDispatch(job: { mode?: string } | null): 'clone' | 'update' {
-  return job?.mode === 'update' ? 'update' : 'clone';
+  if (job?.mode === 'update') return 'update';
+  if (job?.mode === 'staging_create') return 'clone'; // deliberate: see comment above
+  return 'clone';
 }
 
 /** How a resumed update should treat the fork's current repo HEAD. */
