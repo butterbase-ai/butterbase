@@ -103,9 +103,14 @@ export async function startStaging(args: {
   // subdomain is nullable; fall back to the name when unset.
   const prodSubdomain = prod.subdomain ?? prod.name;
 
+  // Allocated ONCE, here, and then carried onto the job row below so the clone
+  // worker applies this exact value instead of deriving a second one of its
+  // own. The response to this request is sent long before the worker runs, so
+  // an allocation that is not the one actually applied is not an answer — it is
+  // a guess the caller cannot tell from a fact.
   let stagingSubdomain: string;
   try {
-    stagingSubdomain = await allocateStagingSubdomain(runtimeDb, prodSubdomain);
+    stagingSubdomain = await allocateStagingSubdomain({ controlDb, runtimeDb }, prodSubdomain);
   } catch {
     return { ok: false, code: 'NO_SUBDOMAIN', name: prod.name };
   }
@@ -157,8 +162,13 @@ export async function startStaging(args: {
     return { ok: false, code: 'REGION_CLOSED', region };
   }
 
+  // mode and dest_subdomain in ONE statement, not two: createCloneJob's INSERT
+  // can set neither, and a crash between two separate UPDATEs would leave a job
+  // that is a staging_create with no pinned subdomain — which is exactly the
+  // state the worker's derive-your-own fallback used to be, silently.
   await controlDb.query(
-    `UPDATE template_clone_jobs SET mode = 'staging_create' WHERE id = $1`, [clone.jobId],
+    `UPDATE template_clone_jobs SET mode = 'staging_create', dest_subdomain = $2 WHERE id = $1`,
+    [clone.jobId, stagingSubdomain],
   );
 
   return { ok: true, jobId: clone.jobId, stagingName, stagingSubdomain, region: clone.destRegion };

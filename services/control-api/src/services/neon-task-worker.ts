@@ -13,6 +13,7 @@ import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notificat
 import { addOrgAppIndex, removeOrgAppIndex } from './org-app-index.js';
 import { resolveOrganizationId } from './org-resolver.js';
 import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus, type CloneJob } from './clone-jobs.js';
+import { allocateDestSubdomainForJob } from './staging-naming.js';
 import {
   finalizeStagingClone, isolateStagingEnvironment, linkStagingEnvironment,
 } from './staging-completion.js';
@@ -686,23 +687,49 @@ async function executeClone(
         // after provisioning has already started, which is the worst place to
         // discover it. Bounded so a pathological slug cannot spin forever; the
         // loop widens the suffix as it goes so later attempts collide less.
-        let destSubdomain = baseSlug;
-        for (let attempt = 0; attempt < 6; attempt++) {
-          const taken = await controlDb.query<{ app_id: string }>(
-            `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
-            [destSubdomain],
+        // ONE allocator decides this, for every mode — see
+        // allocateDestSubdomainForJob in staging-naming.ts.
+        //
+        // For a staging_create job that carries a pinned dest_subdomain, that
+        // pinned value is the one POST /v1/apps/:id/staging already promised
+        // the caller, so it is the one that must land. Before migration 119
+        // there was nothing to carry it and this code derived a SECOND
+        // subdomain of its own from the destination name with a random numeric
+        // suffix, checked against a different table from the one the
+        // request-time allocator checked — so the API's answer and the app's
+        // real subdomain agreed only by luck. Every other mode keeps exactly
+        // the previous derive-from-name behaviour.
+        const allocated = await allocateDestSubdomainForJob({
+          job,
+          pools: {
+            controlDb,
+            runtimeDb: getRuntimeDbPool(config.runtimeDb, job.dest_region),
+          },
+          baseSlug,
+          logger,
+        });
+        const destSubdomain = allocated.subdomain;
+        if (allocated.reallocatedFrom) {
+          // Standing rule on this feature: do the conservative thing (keep the
+          // create working), then NAME it. The user cannot see server logs, so
+          // the divergence goes on the job record, and dest_subdomain is
+          // updated to what actually landed so the column is never a stale
+          // promise.
+          logger.warn(
+            { destAppId, pinned: allocated.reallocatedFrom, applied: destSubdomain },
+            '[clone] pinned staging subdomain was taken between request and provision; re-allocated',
           );
-          if (taken.rows.length === 0) break;
-          // 4 digits for the first few retries, 8 for the last ones.
-          const span = attempt < 3 ? 9000 : 90_000_000;
-          const floor = attempt < 3 ? 1000 : 10_000_000;
-          destSubdomain = `${baseSlug}-${Math.floor(Math.random() * span + floor)}`;
-          if (attempt === 5) {
-            logger.warn(
-              { destAppId, baseSlug },
-              '[clone] subdomain still colliding after 6 attempts; inserting anyway — the UNIQUE index is the backstop',
-            );
-          }
+          await appendCloneJobWarnings(controlDb, jobId, [
+            `The staging subdomain "${allocated.reallocatedFrom}" reported when this environment `
+              + 'was requested had been taken by the time it was provisioned. The staging app was '
+              + `given "${destSubdomain}" instead.`,
+          ]).catch((err) => {
+            logger.warn({ err, jobId }, '[clone] could not append subdomain re-allocation warning');
+          });
+          await setCloneJobStatus(controlDb, jobId, { dest_subdomain: destSubdomain })
+            .catch((err) => {
+              logger.warn({ err, jobId }, '[clone] could not record applied staging subdomain');
+            });
         }
 
         // Cross-region index so authorizeRepoRead/Write and other lookups can

@@ -56,6 +56,16 @@ export interface CloneJob {
    * staging-data-copy.ts). Added by control-plane migration 118.
    */
   data_copy_job_id: string | null;
+  /**
+   * Staging only: the subdomain allocated at request time by
+   * `allocateStagingSubdomain` and reported to the caller in the
+   * `POST /v1/apps/:id/staging` response. The clone worker applies it verbatim
+   * for `mode = 'staging_create'` rather than deriving its own from the
+   * destination name, so the value the API promised is the value that lands.
+   * NULL for every other mode, which keeps the worker's pre-existing
+   * derive-from-name path byte-identical. Added by control-plane migration 119.
+   */
+  dest_subdomain: string | null;
   retry_count: number;
   error_message: string | null;
   warnings: string[] | null;
@@ -154,7 +164,9 @@ export async function setCloneJobStatus(
   controlDb: pg.Pool,
   jobId: string,
   patch: Partial<Pick<
-    CloneJob, 'status' | 'dest_app_id' | 'error_message' | 'completed_at' | 'data_copy_job_id'
+    CloneJob,
+    'status' | 'dest_app_id' | 'error_message' | 'completed_at' | 'data_copy_job_id'
+    | 'dest_subdomain'
   >>,
 ): Promise<void> {
   // A completion patch that doesn't explicitly say otherwise clears

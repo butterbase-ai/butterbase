@@ -124,7 +124,16 @@ beforeEach(() => {
   mocks.createCloneJob.mockResolvedValue({ id: 'job_r1' });
   mocks.setCloneJobStatus.mockResolvedValue(undefined);
   mocks.appendCloneJobWarnings.mockResolvedValue(undefined);
-  mocks.replaySeedData.mockResolvedValue(undefined);
+  // Real shape, not `undefined`: replaySeedData returns
+  // { tables, rows, warnings } and soft-fails PER TABLE onto `warnings` rather
+  // than throwing. The old `undefined` default is exactly what let the
+  // dropped-return-value defect sit here unnoticed — nothing in this file
+  // could observe a warning that was never modelled. Default matches the
+  // getSeedTableNames default below so the two lists agree unless a test
+  // deliberately diverges them.
+  mocks.replaySeedData.mockResolvedValue({
+    tables: ['widgets', 'orders'], rows: 12, warnings: [],
+  });
   mocks.getSeedTableNames.mockResolvedValue(['widgets', 'orders']);
   mocks.isolateStagingApp.mockResolvedValue(undefined);
   mocks.isolateStagingMeetingsWebhook.mockResolvedValue(undefined);
@@ -404,7 +413,10 @@ describe('executeStagingReset', () => {
       if (typeof sql === 'string' && /^TRUNCATE TABLE/i.test(sql)) order.push('truncate');
       return defaultStagingQueryResponse(sql);
     });
-    mocks.replaySeedData.mockImplementation(async () => { order.push('seed'); });
+    mocks.replaySeedData.mockImplementation(async () => {
+      order.push('seed');
+      return { tables: ['widgets', 'orders'], rows: 1, warnings: [] };
+    });
     mocks.isolateStagingApp.mockImplementation(async () => { order.push('isolate'); });
     mocks.isolateStagingMeetingsWebhook.mockImplementation(async () => { order.push('isolate-webhook'); });
     await executeStagingReset(deps as never, job);
@@ -552,5 +564,74 @@ describe('executeStagingReset — production data copy', () => {
       ok: false, reason: 'already_active', message: 'conflicted with a concurrent one',
     });
     await expect(executeStagingReset(withRegion(), job)).rejects.toThrow(/concurrent/);
+  });
+});
+
+/**
+ * REGRESSION for defect 2 (final whole-branch review).
+ *
+ * executeStagingReset called `await replaySeedData(prodPool, stagingPool,
+ * logger);` and dropped the return value on the floor. replaySeedData does not
+ * throw on a bad table — it soft-fails per table, pushes a string onto
+ * `warnings`, and carries on. executeClone has always appended those to the
+ * job; reset did not, so a reset that failed to repopulate a table finished
+ * with status 'completed' and no warning anywhere the user could see.
+ *
+ * This is compounded by the two lists coming from different databases: the
+ * TRUNCATE set is read from STAGING's `_seed_tables` while the re-seed reads
+ * PRODUCTION's. A table flagged _seed only on staging is emptied and then
+ * never repopulated, and replaySeedData emits no warning for it because from
+ * production's side it was never in scope at all.
+ */
+describe('executeStagingReset — seed warnings reach the job record', () => {
+  it('appends replaySeedData warnings to the job instead of discarding them', async () => {
+    mocks.replaySeedData.mockResolvedValue({
+      tables: ['widgets', 'orders'],
+      rows: 3,
+      warnings: [
+        'Seed insert into orders failed at offset 0: null value in column "sku"',
+      ],
+    });
+
+    await executeStagingReset(deps as never, job);
+
+    expect(mocks.appendCloneJobWarnings).toHaveBeenCalledWith(
+      deps.controlDb,
+      'job_r1',
+      ['Seed insert into orders failed at offset 0: null value in column "sku"'],
+    );
+  });
+
+  it('does not append an empty warning list when the re-seed was clean', async () => {
+    await executeStagingReset(deps as never, job);
+    // Only warning-free calls remain: nothing should have been appended at all
+    // for a reset where both lists agree and replaySeedData reported nothing.
+    expect(mocks.appendCloneJobWarnings).not.toHaveBeenCalled();
+  });
+
+  it('still reports the job completed — warnings inform, they do not fail the reset', async () => {
+    mocks.replaySeedData.mockResolvedValue({
+      tables: ['widgets', 'orders'], rows: 0, warnings: ['Seed table orders flagged but has no columns; skipping'],
+    });
+    await executeStagingReset(deps as never, job);
+    expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
+      deps.controlDb, 'job_r1', expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it('names a table truncated on staging that production never re-seeded', async () => {
+    // staging's _seed_tables (drives the TRUNCATE) carries a table production
+    // does not, so replaySeedData never touches it and reports nothing about
+    // it. Emptying it is correct; doing so silently is the defect.
+    mocks.getSeedTableNames.mockResolvedValue(['widgets', 'orders', 'staging_only_notes']);
+    mocks.replaySeedData.mockResolvedValue({
+      tables: ['widgets', 'orders'], rows: 9, warnings: [],
+    });
+
+    await executeStagingReset(deps as never, job);
+
+    const appended = mocks.appendCloneJobWarnings.mock.calls.flatMap((c) => c[2] as string[]);
+    expect(appended.some((w) => w.includes('staging_only_notes'))).toBe(true);
+    expect(appended.some((w) => w.includes('widgets'))).toBe(false);
   });
 });

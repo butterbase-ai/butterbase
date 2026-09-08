@@ -26,7 +26,15 @@ vi.mock('./staging-naming.js', async () => {
 vi.mock('./provision-region.js', () => ({
   getProvisionAllowedRegions: mocks.getProvisionAllowedRegions,
 }));
-vi.mock('./clone-jobs.js', () => ({ setCloneJobStatus: mocks.setCloneJobStatus }));
+// Partial mock: start-staging.ts also reads TERMINAL_CLONE_STATUSES (for its
+// CREATE_IN_FLIGHT precheck). A bare object mock omitted it, so every test in
+// this file threw "No TERMINAL_CLONE_STATUSES export is defined" — a stale
+// mock left behind when that import was added. Keep the real constant and mock
+// only the function.
+vi.mock('./clone-jobs.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./clone-jobs.js')>();
+  return { ...actual, setCloneJobStatus: mocks.setCloneJobStatus };
+});
 
 import { startStaging } from './start-staging.js';
 
@@ -173,9 +181,68 @@ describe('startStaging', () => {
       expect.objectContaining({ status: 'failed' }),
     );
     expect(res).toMatchObject({ ok: false, code: 'REGION_CLOSED' });
-    // The success path (mode = 'staging_create' write) must not run.
-    expect(controlDbQuery).not.toHaveBeenCalledWith(
-      expect.stringContaining('staging_create'), expect.anything(),
+    // The success path (the mode = 'staging_create' UPDATE) must not run.
+    // Narrowed to the UPDATE: the CREATE_IN_FLIGHT precheck SELECT legitimately
+    // mentions mode = 'staging_create' and runs before the refusal.
+    const successWrites = controlDbQuery.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('UPDATE template_clone_jobs'),
+    );
+    expect(successWrites).toHaveLength(0);
+  });
+
+  // --- REGRESSION for defect 1 (final whole-branch review).
+  //
+  // startStaging allocated a staging subdomain, returned it to the caller as
+  // `staging_subdomain`, and then THREW IT AWAY: nothing carried it to the
+  // clone worker, which independently derived its own from the destination
+  // name with a random numeric suffix. The API therefore told the user a
+  // subdomain the app did not have. The response is sent long before the
+  // worker runs, so the only way that response can be true is if the value it
+  // names is the value that is actually persisted for the worker to apply.
+  //
+  // Asserting the mode UPDATE alone would NOT have caught the defect — the
+  // pre-fix code issued exactly that UPDATE. What has to be pinned is that the
+  // allocated value reaches the job row, and that it is the SAME value the
+  // response reports.
+
+  it('persists the allocated subdomain onto the job so the worker applies it', async () => {
+    mocks.allocateStagingSubdomain.mockResolvedValue('my-crm-staging-4');
+    const res = await startStaging(baseArgs);
+    expect(res).toMatchObject({ ok: true, stagingSubdomain: 'my-crm-staging-4' });
+
+    const write = controlDbQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('dest_subdomain'),
+    );
+    expect(write, 'the allocated subdomain must be written to the clone job').toBeDefined();
+    expect(write![0]).toContain("mode = 'staging_create'");
+    expect(write![1]).toEqual(['job_1', 'my-crm-staging-4']);
+  });
+
+  it('writes mode and dest_subdomain in one statement, so a staging_create can never exist without its pinned subdomain', async () => {
+    await startStaging(baseArgs);
+    // Filtered to UPDATEs: the CREATE_IN_FLIGHT precheck SELECT also mentions
+    // mode = 'staging_create'.
+    const modeWrites = controlDbQuery.mock.calls.filter(
+      ([sql]) => typeof sql === 'string'
+        && sql.includes('UPDATE template_clone_jobs')
+        && sql.includes("mode = 'staging_create'"),
+    );
+    expect(modeWrites).toHaveLength(1);
+    expect(modeWrites[0][0]).toContain('dest_subdomain');
+  });
+
+  it('allocates against BOTH planes, not the regional runtime plane alone', async () => {
+    await startStaging(baseArgs);
+    // Subdomains are globally unique via the control-plane org_app_index; an
+    // allocator handed only the regional pool cannot see a name another region
+    // owns. Pinning the shape of the argument is what keeps the request-time
+    // allocator and the clone worker checking the same namespace.
+    expect(mocks.allocateStagingSubdomain).toHaveBeenCalledWith(
+      expect.objectContaining({
+        controlDb: baseArgs.controlDb,
+        runtimeDb: expect.anything(),
+      }),
+      'my-crm',
     );
   });
 });

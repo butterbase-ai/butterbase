@@ -467,7 +467,7 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
     // Truncate BEFORE re-seeding: replaySeedData is INSERT ... ON CONFLICT DO
     // NOTHING, so without this step a reset would leave every row staging
     // already had untouched — see truncateStagingSeedTables's doc comment.
-    await truncateStagingSeedTables({
+    const truncated = await truncateStagingSeedTables({
       prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, controlDb, jobId, logger,
     });
 
@@ -475,7 +475,50 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
     // argument, stagingPool always the second — matches replaySeedData's
     // (sourceAppPool, destAppPool, logger) signature exactly, with
     // "source" = production and "dest" = staging for a reset.
-    await replaySeedData(prodPool, stagingPool, logger);
+    const seedResult = await replaySeedData(prodPool, stagingPool, logger);
+
+    // THE RETURN VALUE IS NOT DECORATION. replaySeedData soft-fails PER TABLE:
+    // a column mismatch or a constraint violation makes it push a string onto
+    // `warnings`, log, and move to the next table — it never throws. Dropping
+    // that return value, which this function used to do, is the single place
+    // in this feature that breaks its own standing rule ("do the conservative
+    // thing, then NAME it"): a reset that failed to repopulate a table
+    // finished with status 'completed' and not one word anywhere the user
+    // could see. executeClone has appended these to the job since the seed
+    // step existed; reset now does the same.
+    if (seedResult.warnings.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
+    }
+
+    // THE TRUNCATE LIST AND THE RE-SEED LIST COME FROM DIFFERENT DATABASES.
+    // truncateStagingSeedTables reads `_seed_tables` from STAGING (correct —
+    // those are the tables that physically exist on the pool being emptied),
+    // while replaySeedData reads it from PRODUCTION. A table flagged _seed on
+    // staging but not on production is therefore TRUNCATED and then never
+    // repopulated: reset empties it and reports success. No warning came from
+    // replaySeedData for it, because from production's point of view the table
+    // was never in scope at all — so it has to be computed here, from the two
+    // lists, or it cannot be seen at all.
+    //
+    // Emptying it is still the right behaviour: reset is defined as "discard
+    // the staging app's data", and a staging-only seed table is staging data.
+    // What is not acceptable is doing it silently.
+    const reseeded = new Set(seedResult.tables);
+    const emptiedNotReseeded = truncated.tables.filter((t) => !reseeded.has(t));
+    if (emptiedNotReseeded.length > 0) {
+      logger.warn(
+        { stagingAppId, prodAppId, emptiedNotReseeded },
+        '[staging-reset] tables truncated on staging were not re-seeded from production',
+      );
+      await appendCloneJobWarnings(controlDb, jobId, [
+        `${emptiedNotReseeded.length} `
+          + `${emptiedNotReseeded.length === 1 ? 'table was' : 'tables were'} emptied on staging `
+          + `but not re-populated from production: ${emptiedNotReseeded.join(', ')}. `
+          + 'They are flagged _seed:true on staging but production does not carry them as seed '
+          + `${emptiedNotReseeded.length === 1 ? 'data' : 'data'}, so there was nothing to copy `
+          + 'back. They are now empty.',
+      ]);
+    }
 
     // Re-isolate: a fresh copy of production carries production's connected
     // accounts, enabled integrations and enabled cron triggers back into
