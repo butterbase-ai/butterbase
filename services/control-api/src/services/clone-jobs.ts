@@ -49,7 +49,7 @@ export interface CloneJob {
   pending_env_vars: string | null;       // encrypted JSON blob (AUTH_ENCRYPTION_KEY)
   auto_mint_requests: { fn_name: string; key: string }[] | null;
   unfilled_env_vars: Record<string, string[]> | null;
-  mode: 'clone' | 'update';
+  mode: 'clone' | 'update' | 'staging_create' | 'promote' | 'staging_reset';
   target_release_id: string | null;
   pre_sync_snapshot_id: string | null;
   pre_sync_lineage: PreSyncLineage | null;
