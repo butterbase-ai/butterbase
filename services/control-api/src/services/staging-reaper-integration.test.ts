@@ -87,15 +87,25 @@ afterAll(async () => {
 beforeEach(async () => {
   // Reset fixtures to a known state before every test, since tests mutate
   // `paused` via runOnce.
-  await insertApp(PROD, { updatedAt: RECENT() });
+  //
+  // Every *_PROD row below is deliberately OLD(), not RECENT(): a production
+  // app that hasn't been redeployed in months is realistic (arguably the
+  // norm), and it is exactly the app the date predicate alone would happily
+  // admit as a candidate. If any *_PROD row were RECENT(), the date filter
+  // would exclude it from candidacy on its own, and a test asserting "this
+  // prod app was not paused" would pass whether or not the staging_app_id
+  // scoping in the query was correct — the same false-green shape as
+  // Task 14's throwOnFailure review finding. Aging every anchor prod row
+  // makes app_environments scoping the ONLY thing keeping each of them safe.
+  await insertApp(PROD, { updatedAt: OLD() });
   await insertApp(STAGING_IDLE, { updatedAt: OLD() });
   await linkAppEnvironment(PROD, STAGING_IDLE, OLD());
 
-  await insertApp(STAGING_FRESH_PROD, { updatedAt: RECENT() });
+  await insertApp(STAGING_FRESH_PROD, { updatedAt: OLD() });
   await insertApp(STAGING_FRESH, { updatedAt: RECENT() });
   await linkAppEnvironment(STAGING_FRESH_PROD, STAGING_FRESH, RECENT());
 
-  await insertApp(STAGING_PAUSED_PROD, { updatedAt: RECENT() });
+  await insertApp(STAGING_PAUSED_PROD, { updatedAt: OLD() });
   await insertApp(STAGING_PAUSED, { updatedAt: OLD(), paused: true });
   await linkAppEnvironment(STAGING_PAUSED_PROD, STAGING_PAUSED, OLD());
 
@@ -138,7 +148,12 @@ describe('staging-reaper — real-DB safety property', () => {
   it('findIdleStagingApps returns exactly the idle staging app id, scoped through app_environments', async () => {
     const ids = await findIdleStagingApps(runtimeDb, IDLE_DAYS);
     expect(ids).toContain(STAGING_IDLE);
+    // PROD, STAGING_FRESH_PROD and STAGING_PAUSED_PROD are all old enough to
+    // pass the date predicate on their own — only staging_app_id scoping
+    // keeps them out.
     expect(ids).not.toContain(PROD);
+    expect(ids).not.toContain(STAGING_FRESH_PROD);
+    expect(ids).not.toContain(STAGING_PAUSED_PROD);
     expect(ids).not.toContain(ORPHAN_IDLE);
     expect(ids).not.toContain(STAGING_FRESH);
     expect(ids).not.toContain(STAGING_PAUSED);
