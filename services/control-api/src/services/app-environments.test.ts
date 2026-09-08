@@ -16,6 +16,7 @@ const RUNTIME_URL =
 let runtimeDb: pg.Pool;
 const PROD = 'app_test_env_prod';
 const STAGING = 'app_test_env_staging';
+const PROD_OTHER = 'app_test_env_prod_other';
 const USER = '00000000-0000-0000-0000-0000000000e1';
 
 async function insertApp(id: string) {
@@ -30,15 +31,18 @@ beforeAll(async () => {
   runtimeDb = new pg.Pool({ connectionString: RUNTIME_URL });
   await insertApp(PROD);
   await insertApp(STAGING);
+  await insertApp(PROD_OTHER);
 });
 
 afterAll(async () => {
-  await runtimeDb.query(`DELETE FROM apps WHERE id = ANY($1)`, [[PROD, STAGING]]);
+  await runtimeDb.query(`DELETE FROM apps WHERE id = ANY($1)`, [[PROD, STAGING, PROD_OTHER]]);
   await runtimeDb.end();
 });
 
 beforeEach(async () => {
-  await runtimeDb.query(`DELETE FROM app_environments WHERE prod_app_id = $1`, [PROD]);
+  await runtimeDb.query(
+    `DELETE FROM app_environments WHERE prod_app_id = ANY($1)`, [[PROD, PROD_OTHER]],
+  );
 });
 
 describe('app-environments', () => {
@@ -65,10 +69,27 @@ describe('app-environments', () => {
     ).rejects.toThrow();
   });
 
-  it('touches a timestamp column', async () => {
+  it('refuses linking a staging app that already serves a different production app', async () => {
+    await linkEnvironments(runtimeDb, { prodAppId: PROD, stagingAppId: STAGING, createdBy: USER });
+    await expect(
+      linkEnvironments(runtimeDb, { prodAppId: PROD_OTHER, stagingAppId: STAGING, createdBy: USER }),
+    ).rejects.toThrow();
+  });
+
+  it('touches the last_promoted_at timestamp column', async () => {
     await linkEnvironments(runtimeDb, { prodAppId: PROD, stagingAppId: STAGING, createdBy: USER });
     await touchEnvironmentTimestamp(runtimeDb, PROD, 'last_promoted_at');
-    expect((await getEnvironmentLink(runtimeDb, PROD))?.last_promoted_at).toBeInstanceOf(Date);
+    const link = await getEnvironmentLink(runtimeDb, PROD);
+    expect(link?.last_promoted_at).toBeInstanceOf(Date);
+    expect(link?.last_reset_at).toBeNull();
+  });
+
+  it('touches the last_reset_at timestamp column', async () => {
+    await linkEnvironments(runtimeDb, { prodAppId: PROD, stagingAppId: STAGING, createdBy: USER });
+    await touchEnvironmentTimestamp(runtimeDb, PROD, 'last_reset_at');
+    const link = await getEnvironmentLink(runtimeDb, PROD);
+    expect(link?.last_reset_at).toBeInstanceOf(Date);
+    expect(link?.last_promoted_at).toBeNull();
   });
 
   it('unlinks', async () => {
