@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ linkEnvironments: vi.fn() }));
+const mocks = vi.hoisted(() => ({ linkEnvironments: vi.fn(), isolateStagingApp: vi.fn() }));
 vi.mock('./app-environments.js', () => ({ linkEnvironments: mocks.linkEnvironments }));
+vi.mock('./staging-isolation.js', () => ({ isolateStagingApp: mocks.isolateStagingApp }));
 
 import { finalizeStagingClone } from './staging-completion.js';
 
@@ -29,5 +30,13 @@ describe('finalizeStagingClone', () => {
     await expect(
       finalizeStagingClone({} as never, { ...(job as object), dest_app_id: null } as never),
     ).rejects.toThrow(/dest_app_id/);
+  });
+
+  it('isolates the staging app before linking it', async () => {
+    const order: string[] = [];
+    mocks.isolateStagingApp.mockImplementation(async () => { order.push('isolate'); });
+    mocks.linkEnvironments.mockImplementation(async () => { order.push('link'); });
+    await finalizeStagingClone({} as never, job);
+    expect(order).toEqual(['isolate', 'link']);
   });
 });
