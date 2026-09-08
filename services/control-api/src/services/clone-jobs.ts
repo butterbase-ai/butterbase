@@ -13,6 +13,7 @@ export type CloneJobStatus =
   | 'replaying_config'
   | 'copying_repo'
   | 'seeding_data'
+  | 'copying_data'
   | 'completed'
   | 'failed';
 
@@ -48,6 +49,13 @@ export interface CloneJob {
   dest_organization_id: string | null;
   dest_app_name: string | null;
   status: CloneJobStatus;
+  /**
+   * The `app_copy_jobs` row a staging_create/staging_reset job is waiting on
+   * while `status = 'copying_data'`. NULL for every other mode, and for a
+   * staging job on a deployment with no app-copy engine (see
+   * staging-data-copy.ts). Added by control-plane migration 118.
+   */
+  data_copy_job_id: string | null;
   retry_count: number;
   error_message: string | null;
   warnings: string[] | null;
@@ -145,7 +153,9 @@ export async function getCloneJob(controlDb: pg.Pool, jobId: string): Promise<Cl
 export async function setCloneJobStatus(
   controlDb: pg.Pool,
   jobId: string,
-  patch: Partial<Pick<CloneJob, 'status' | 'dest_app_id' | 'error_message' | 'completed_at'>>,
+  patch: Partial<Pick<
+    CloneJob, 'status' | 'dest_app_id' | 'error_message' | 'completed_at' | 'data_copy_job_id'
+  >>,
 ): Promise<void> {
   // A completion patch that doesn't explicitly say otherwise clears
   // error_message. Every 'failed' transition in this codebase sets

@@ -17,7 +17,7 @@ import type pg from 'pg';
 import type { FastifyReply } from 'fastify';
 import { getEnvironmentLink, getLinkByStagingApp } from './app-environments.js';
 import { startClone, type StartCloneFailure } from './start-clone.js';
-import { setCloneJobStatus } from './clone-jobs.js';
+import { setCloneJobStatus, TERMINAL_CLONE_STATUSES } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { deriveStagingName, allocateStagingSubdomain } from './staging-naming.js';
 import { getProvisionAllowedRegions } from './provision-region.js';
@@ -26,6 +26,7 @@ import { VALIDATION_INVALID_SCHEMA, RESOURCE_NOT_FOUND } from '@butterbase/share
 
 export type StartStagingFailure =
   | { code: 'ALREADY_EXISTS'; stagingAppId: string }
+  | { code: 'CREATE_IN_FLIGHT'; jobId: string }
   | { code: 'IS_STAGING' }
   | { code: 'PROD_NOT_FOUND' }
   | { code: 'NO_SUBDOMAIN'; name: string }
@@ -66,6 +67,34 @@ export async function startStaging(args: {
   const existing = await getEnvironmentLink(runtimeDb, prodAppId);
   if (existing) {
     return { ok: false, code: 'ALREADY_EXISTS', stagingAppId: existing.staging_app_id };
+  }
+
+  // The link row is written at the very END of the pipeline, so "no link yet"
+  // does not mean "no staging environment being built". A second POST while the
+  // first is still running would provision a SECOND staging app, and only one
+  // of the two could ever be linked - the other would be an orphan the user
+  // pays for and cannot see.
+  //
+  // That window used to be the length of a provision-and-replay. It is now the
+  // length of that PLUS the production data copy (the job sits in
+  // 'copying_data' until the copy lands), which can be minutes for a large app.
+  // Widening the window is what makes this worth closing rather than leaving as
+  // the pre-existing narrow race.
+  //
+  // Read-then-write, like startPromote's and startStagingReset's own IN_FLIGHT
+  // prechecks: no unique index enforces it, because a staging_create's
+  // dest_app_id is NULL until the app is provisioned and Postgres treats NULLs
+  // as distinct. Keyed on source_app_id, which IS set from the moment the row
+  // exists.
+  const inFlight = await controlDb.query<{ id: string }>(
+    `SELECT id FROM template_clone_jobs
+      WHERE source_app_id = $1 AND mode = 'staging_create'
+        AND NOT (status = ANY($2::text[]))
+      LIMIT 1`,
+    [prodAppId, TERMINAL_CLONE_STATUSES],
+  );
+  if (inFlight.rows[0]) {
+    return { ok: false, code: 'CREATE_IN_FLIGHT', jobId: inFlight.rows[0].id };
   }
 
   const prod = appRow.rows[0];
@@ -150,6 +179,14 @@ export function sendStartStagingFailure(
         code: VALIDATION_INVALID_SCHEMA,
         message: `This app already has a staging environment (${result.stagingAppId}).`,
         remediation: 'Reset the existing staging environment instead of creating a second one.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    case 'CREATE_IN_FLIGHT':
+      return reply.code(409).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: `A staging environment is already being created for this app (job ${result.jobId}).`,
+        remediation: 'Poll GET /v1/clone-jobs/' + result.jobId + ' until it reports "completed". '
+          + 'It stays in "copying_data" while production\'s rows, users and files are copied.',
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     case 'IS_STAGING':

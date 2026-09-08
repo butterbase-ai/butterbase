@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => ({
   appendCloneJobWarnings: vi.fn(),
   getRuntimeDbForApp: vi.fn(),
   getActivePromoteJob: vi.fn(),
+  enqueueStagingDataCopy: vi.fn(),
+  enqueueCopyWaitTask: vi.fn(),
 }));
 
 vi.mock('./app-environments.js', () => ({
@@ -47,6 +49,11 @@ vi.mock('./clone-jobs.js', () => ({
 }));
 vi.mock('./region-resolver.js', () => ({ getRuntimeDbForApp: mocks.getRuntimeDbForApp }));
 vi.mock('./promote-jobs.js', () => ({ getActivePromoteJob: mocks.getActivePromoteJob }));
+vi.mock('./staging-data-copy.js', () => ({
+  enqueueStagingDataCopy: mocks.enqueueStagingDataCopy,
+  enqueueCopyWaitTask: mocks.enqueueCopyWaitTask,
+  COPY_POLL_INTERVAL_MS: 10_000,
+}));
 vi.mock('./schema-introspector.js', () => ({
   EXCLUDED_TABLES: ['_ai_migrations', '_data_plane_migrations', '_rag_collections',
     '_rag_documents', '_rag_chunks', '_idempotency_keys', '_seed_tables'],
@@ -443,5 +450,107 @@ describe('executeStagingReset', () => {
     expect(mocks.setCloneJobStatus).toHaveBeenLastCalledWith(
       deps.controlDb, 'job_r1', expect.objectContaining({ status: 'failed' }),
     );
+  });
+});
+
+/**
+ * The production data copy.
+ *
+ * Reset's own machinery only ever carried the _seed-flagged tables. Everything
+ * else — every other table's rows, the auth users, the uploaded files — comes
+ * from the app-copy engine, enqueued here and executed elsewhere. Two things
+ * have to hold for that to be honest:
+ *   - the reset job must NOT report completed while the copy is still running;
+ *   - `last_reset_at` must not move until the reset it dates has happened.
+ */
+describe('executeStagingReset — production data copy', () => {
+  function withRegion() {
+    return { ...deps, region: 'us-east-1' } as never;
+  }
+
+  it('does not enqueue anything, and behaves exactly as before, without a region', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    await executeStagingReset(deps as never, job);
+    expect(mocks.enqueueStagingDataCopy).not.toHaveBeenCalled();
+    expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
+      expect.anything(), 'job_r1', expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it('parks the job in copying_data and does NOT complete it while the copy runs', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
+
+    await executeStagingReset(withRegion(), job);
+
+    expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
+      expect.anything(), 'job_r1',
+      { status: 'copying_data', data_copy_job_id: 'ac_1' },
+    );
+    // The trap this whole design exists to avoid: a reset reporting done while
+    // staging holds schema and seed rows only.
+    const completed = mocks.setCloneJobStatus.mock.calls.filter(
+      (c) => (c[2] as { status?: string })?.status === 'completed',
+    );
+    expect(completed).toHaveLength(0);
+  });
+
+  it('does not move last_reset_at until the copy has finished', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
+    await executeStagingReset(withRegion(), job);
+    expect(mocks.touchEnvironmentTimestamp).not.toHaveBeenCalled();
+  });
+
+  it('arms a wait task on the STAGING app in the pair\'s region', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
+    await executeStagingReset(withRegion(), job);
+    expect(mocks.enqueueCopyWaitTask).toHaveBeenCalledWith({
+      appId: 'app_staging', region: 'us-east-1', jobId: 'job_r1', delayMs: 10_000,
+    });
+  });
+
+  it('re-isolates before enqueuing, closing the window while the copy runs', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
+    await executeStagingReset(withRegion(), job);
+    expect(mocks.isolateStagingApp).toHaveBeenCalledWith(expect.anything(), 'app_staging');
+    expect(mocks.isolateStagingMeetingsWebhook).toHaveBeenCalledWith(
+      expect.anything(), 'app_staging',
+    );
+  });
+
+  it('still re-seeds from _seed tables, so a later copy failure does not leave '
+    + 'staging empty after the TRUNCATE', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
+    await executeStagingReset(withRegion(), job);
+    expect(mocks.replaySeedData).toHaveBeenCalledWith(prodPool, stagingPool, expect.anything());
+  });
+
+  it('completes with a warning, not a failure, on a deployment with no copy engine',
+    async () => {
+      mocks.getSeedTableNames.mockResolvedValue(['orders']);
+      mocks.enqueueStagingDataCopy.mockResolvedValue({
+        ok: false, reason: 'unsupported', message: 'Production data was NOT copied into staging.',
+      });
+      await executeStagingReset(withRegion(), job);
+      expect(mocks.appendCloneJobWarnings).toHaveBeenCalledWith(
+        expect.anything(), 'job_r1',
+        ['Production data was NOT copied into staging.'],
+      );
+      expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
+        expect.anything(), 'job_r1', expect.objectContaining({ status: 'completed' }),
+      );
+      expect(mocks.touchEnvironmentTimestamp).toHaveBeenCalled();
+    });
+
+  it('throws — leaving the queue to retry — when the enqueue lost a race', async () => {
+    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    mocks.enqueueStagingDataCopy.mockResolvedValue({
+      ok: false, reason: 'already_active', message: 'conflicted with a concurrent one',
+    });
+    await expect(executeStagingReset(withRegion(), job)).rejects.toThrow(/concurrent/);
   });
 });

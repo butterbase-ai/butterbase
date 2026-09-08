@@ -3,6 +3,9 @@ import { getEnvironmentLink, touchEnvironmentTimestamp } from './app-environment
 import { replaySeedData, getSeedTableNames } from './clone-replay.js';
 import { isolateStagingApp, isolateStagingMeetingsWebhook } from './staging-isolation.js';
 import {
+  enqueueStagingDataCopy, enqueueCopyWaitTask, COPY_POLL_INTERVAL_MS,
+} from './staging-data-copy.js';
+import {
   setCloneJobStatus, createCloneJob, appendCloneJobWarnings, type CloneJob,
 } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
@@ -51,6 +54,20 @@ export interface ResetDeps {
   attempt: number;
   maxAttempts: number;
   logger: ResetLogger;
+  /**
+   * The region both apps live in. Staging is pinned to production's region at
+   * admission (start-staging.ts), so one value is correct for both sides - it
+   * is the queue the copy-wait task is armed on, and the region written onto
+   * the app_copy_jobs row.
+   *
+   * OPTIONAL, and the whole production-data-copy step is skipped when it is
+   * absent. The precedent on this branch (preserveDestinationTriggerEnabled,
+   * warnOnZeroRewrite, throwOnFailure, skipIntegrations) is that a change to
+   * shared clone machinery is additive and opt-in with byte-identical
+   * defaults; an existing caller or test that constructs ResetDeps without
+   * this field therefore gets exactly today's truncate-and-reseed behaviour.
+   */
+  region?: string;
 }
 
 export async function startStagingReset(args: {
@@ -390,6 +407,7 @@ async function truncateStagingSeedTables(args: {
 export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promise<void> {
   const {
     controlDb, runtimeDb, prodPool, stagingPool, stagingDbName, attempt, maxAttempts, logger,
+    region,
   } = deps;
   const jobId = job.id;
 
@@ -465,8 +483,67 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
     // would only be immediately undone by the rows replaySeedData just
     // copied in. Same two calls, same order, as finalizeStagingClone
     // (staging-completion.ts) uses after a staging_create clone.
+    //
+    // When a production data copy follows (below) this is NOT the last
+    // isolation: the copy re-imports the same three things all over again, and
+    // the wait task in neon-task-worker.ts isolates once more after it lands.
+    // Both calls are needed - this one closes the window while the copy runs,
+    // that one neutralises what the copy brought.
     await isolateStagingApp(runtimeDb, stagingAppId);
     await isolateStagingMeetingsWebhook(controlDb, stagingAppId);
+
+    // PRODUCTION DATA COPY.
+    //
+    // replaySeedData above carries the _seed-flagged tables only, which is a
+    // small fraction of what "reset from production" claims. The rest - every
+    // other table's rows, the auth users, the uploaded files and their bytes -
+    // is copied by the app-copy engine, enqueued here and executed on its own
+    // worker (see staging-data-copy.ts for why this repo enqueues rather than
+    // calls).
+    //
+    // replaySeedData is kept rather than replaced. It is idempotent with the
+    // copy (both are INSERT ... ON CONFLICT DO NOTHING on the same row ids),
+    // it costs one pass over a small table set, and it means a reset whose
+    // copy later fails leaves staging with its seed data rather than with the
+    // empty tables the TRUNCATE just made. Supplementing, not swapping.
+    //
+    // THE JOB DOES NOT COMPLETE HERE when a copy is enqueued. It parks in
+    // 'copying_data' and the wait task completes it - including
+    // touchEnvironmentTimestamp, which must not move until the reset it dates
+    // has actually happened.
+    if (region) {
+      const enqueued = await enqueueStagingDataCopy({
+        controlDb, prodAppId, stagingAppId, region,
+        requestedByUserId: job.requested_by_user_id,
+      });
+      if (enqueued.ok) {
+        await setCloneJobStatus(controlDb, jobId, {
+          status: 'copying_data', data_copy_job_id: enqueued.copyJobId,
+        });
+        await enqueueCopyWaitTask({
+          appId: stagingAppId, region, jobId, delayMs: COPY_POLL_INTERVAL_MS,
+        });
+        logger.info(
+          { jobId, prodAppId, stagingAppId, copyJobId: enqueued.copyJobId },
+          '[staging-reset] production data copy enqueued; job parked in copying_data',
+        );
+        return;
+      }
+      if (enqueued.reason === 'unsupported') {
+        // OSS-only deployment: no app_copy_jobs table, no overlay worker. Fall
+        // through to today's behaviour, but never silently - the job carries
+        // the reason the user can read.
+        await appendCloneJobWarnings(controlDb, jobId, [enqueued.message]);
+        logger.warn(
+          { jobId, prodAppId, stagingAppId },
+          '[staging-reset] no app-copy engine on this deployment; re-seeded from _seed tables only',
+        );
+      } else {
+        // A conflicting copy that went terminal mid-flight: transient, and the
+        // attempt-gated catch below gives the queue another go.
+        throw new Error(enqueued.message);
+      }
+    }
 
     // Keyed on the PRODUCTION app id: app_environments.prod_app_id is the
     // table's primary key (touchEnvironmentTimestamp / app_environments.ts).

@@ -10,11 +10,17 @@ import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notifications.service.js';
 import { addOrgAppIndex, removeOrgAppIndex } from './org-app-index.js';
 import { resolveOrganizationId } from './org-resolver.js';
-import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus } from './clone-jobs.js';
-import { finalizeStagingClone } from './staging-completion.js';
+import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus, type CloneJob } from './clone-jobs.js';
+import {
+  finalizeStagingClone, isolateStagingEnvironment, linkStagingEnvironment,
+} from './staging-completion.js';
+import {
+  enqueueStagingDataCopy, enqueueCopyWaitTask, getStagingDataCopy,
+  classifyStagingCopyWait, stagingCopyWarnings, COPY_POLL_INTERVAL_MS,
+} from './staging-data-copy.js';
 import { executePromote } from './execute-promote.js';
 import { executeStagingReset } from './staging-reset.js';
-import { getEnvironmentLink } from './app-environments.js';
+import { getEnvironmentLink, touchEnvironmentTimestamp } from './app-environments.js';
 import {
   getManifestJson,
   putManifest,
@@ -210,6 +216,11 @@ async function processNextTask(
         // NOT the clone branch. A promote writes onto an existing production
         // app; executeClone provisions a new one. See resolveCloneDispatch.
         await executePromoteTask(controlDb, task, logger);
+      } else if (dispatch === 'staging_copy_wait') {
+        // A staging_create/staging_reset job parked on the app-copy engine.
+        // NOT the clone or reset branch - both of those already ran for this
+        // job; see resolveCloneDispatch.
+        await executeStagingCopyWaitTask(controlDb, task, logger);
       } else if (dispatch === 'staging_reset') {
         // NOT the clone branch. A reset writes onto an existing staging app
         // and reads from production; executeClone provisions a brand-new
@@ -1366,6 +1377,26 @@ async function executeClone(
       // permanent failure here (attempts exhausted) leaves a fully-provisioned,
       // correctly-replayed staging app with no app_environments row — the job
       // is marked 'failed' even though the app itself is fine; backfill will repair.
+      //
+      // STAGING WITH A PRODUCTION DATA COPY takes a different exit. Everything
+      // above replays SCHEMA and the _seed-flagged tables only; production's
+      // rows, auth users and uploaded files are copied by the app-copy engine,
+      // which runs on its own worker and finishes LATER than this task. So a
+      // staging_create that successfully enqueues a copy does not link the pair
+      // and does not complete here: it isolates (closing the window while the
+      // copy runs), parks the job in 'copying_data', and arms a wait task.
+      // Completing here would put a staging app in the dashboard, described as
+      // ready, holding schema and no rows — the same untruth this whole change
+      // exists to remove.
+      if (job.mode === 'staging_create') {
+        const started = await beginStagingDataCopy({
+          controlDb, runtimeDb: destRuntimePool, job, jobId,
+          prodAppId: job.source_app_id, stagingAppId: resolvedDestAppId,
+          region: job.dest_region, logger,
+        });
+        if (started) return;
+      }
+
       await finalizeStagingClone(destRuntimePool, controlDb, job);
 
       // 6. Mark job completed.
@@ -1527,13 +1558,223 @@ export function shouldAbortUpdate(
  * row reaches.
  */
 export function resolveCloneDispatch(
-  job: { mode?: string } | null,
-): 'clone' | 'update' | 'promote' | 'staging_reset' {
+  job: { mode?: string; status?: string } | null,
+): 'clone' | 'update' | 'promote' | 'staging_reset' | 'staging_copy_wait' {
+  // STATUS BEFORE MODE, and deliberately so. A staging_create or staging_reset
+  // job in 'copying_data' has already run its own executor to completion and is
+  // now waiting on the app-copy engine. Routing it back to executeClone would
+  // re-provision a second staging app; routing it back to executeResetTask
+  // would re-truncate the staging database the copy is at that moment writing
+  // into. Neither executor is re-entrant with respect to this state, so the
+  // wait branch has to win over both.
+  if (job?.status === 'copying_data'
+      && (job?.mode === 'staging_create' || job?.mode === 'staging_reset')) {
+    return 'staging_copy_wait';
+  }
   if (job?.mode === 'update') return 'update';
   if (job?.mode === 'promote') return 'promote';
   if (job?.mode === 'staging_reset') return 'staging_reset';
   if (job?.mode === 'staging_create') return 'clone'; // deliberate: see comment above
   return 'clone';
+}
+
+/**
+ * Enqueue the production -> staging data copy and park the staging job on it.
+ *
+ * Returns true when the job has been PARKED - the caller must return without
+ * completing it. Returns false when this deployment has no app-copy engine, in
+ * which case the caller carries on with the pre-existing seed-only behaviour
+ * and the job now carries a warning saying exactly that.
+ *
+ * Isolation runs here as well as after the copy. This call closes the window
+ * between "the staging app exists, replayed from production's config" and "the
+ * copy has landed and been re-isolated": during that window the app is real,
+ * reachable, and would otherwise still hold whatever the clone replay brought
+ * across. The isolation after the copy is the one that matters for the copied
+ * rows, and it lives in the wait task.
+ */
+async function beginStagingDataCopy(args: {
+  controlDb: pg.Pool;
+  runtimeDb: pg.Pool;
+  job: CloneJob;
+  jobId: string;
+  prodAppId: string;
+  stagingAppId: string;
+  region: string;
+  logger: Logger;
+}): Promise<boolean> {
+  const { controlDb, runtimeDb, job, jobId, prodAppId, stagingAppId, region, logger } = args;
+
+  await isolateStagingEnvironment(runtimeDb, controlDb, stagingAppId);
+
+  const enqueued = await enqueueStagingDataCopy({
+    controlDb, prodAppId, stagingAppId, region,
+    requestedByUserId: job.requested_by_user_id,
+  });
+
+  if (!enqueued.ok) {
+    if (enqueued.reason === 'unsupported') {
+      // OSS-only deployment. Degrade to seed-only rather than fail the create,
+      // but say so on the job - a silent degrade is the exact failure mode this
+      // work exists to remove.
+      await appendCloneJobWarnings(controlDb, jobId, [enqueued.message]);
+      logger.warn(
+        { jobId, prodAppId, stagingAppId },
+        '[staging] no app-copy engine on this deployment; staging seeded from _seed tables only',
+      );
+      return false;
+    }
+    // A conflicting copy that went terminal mid-flight. Transient: let the
+    // queue's normal retry contract have another go.
+    throw new Error(enqueued.message);
+  }
+
+  await setCloneJobStatus(controlDb, jobId, {
+    status: 'copying_data',
+    data_copy_job_id: enqueued.copyJobId,
+  });
+  await enqueueCopyWaitTask({
+    appId: stagingAppId, region, jobId, delayMs: COPY_POLL_INTERVAL_MS,
+  });
+  logger.info(
+    { jobId, prodAppId, stagingAppId, copyJobId: enqueued.copyJobId },
+    '[staging] production data copy enqueued; job parked in copying_data',
+  );
+  return true;
+}
+
+/**
+ * Observe one poll of the production data copy a staging job is waiting on.
+ *
+ * This is the answer to "how does the create/reset job avoid reporting
+ * completed before the data is there". Three options were live:
+ *
+ *   - BLOCK inside the clone task until the copy finishes. Rejected outright.
+ *     The neon-task worker is a single serialised poll loop, so a copy of a
+ *     large app would stall every provision in the region behind it, and
+ *     `recoverStaleTasks` reclaims anything held for five minutes - the block
+ *     would be torn down and re-run concurrently with itself.
+ *   - Let the clone task FAIL-AND-RETRY until the copy lands. Rejected: the
+ *     queue's attempt budget exists to bound genuine failures and tops out
+ *     around a minute of backoff, so every staging app slower than that would
+ *     permanently fail.
+ *   - A CHAINED task, which is what this is. The staging job sits in the
+ *     non-terminal status 'copying_data'; each wait task reads the copy job and
+ *     either re-arms itself on a fresh queue row or reaches a terminal answer.
+ *     Nothing blocks, the wait is unbounded in the ordinary case and bounded by
+ *     an explicit timeout in the pathological one, and "not yet ready" is a
+ *     state the API and the dashboard can both read off the job.
+ *
+ * ISOLATION RUNS HERE, AFTER THE COPY. isolateStagingApp clears connected
+ * accounts, disables integration configs and disables cron triggers; the copy
+ * that just finished re-imported all three from production. Isolating only
+ * before the copy would re-arm exactly what staging isolation disarms - a
+ * staging app calling a third party with production's identity on a timer.
+ */
+export async function executeStagingCopyWaitTask(
+  controlDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Staging copy-wait task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Staging job ${jobId} not found`);
+  if (isTerminalCloneStatus(job.status)) {
+    logger.info({ jobId, status: job.status }, '[staging-copy-wait] job terminal; skipping');
+    return;
+  }
+  if (job.status !== 'copying_data') {
+    // Another attempt of this same wait already resolved it, or an operator
+    // moved the job by hand. Re-arming here would loop forever.
+    logger.info(
+      { jobId, status: job.status },
+      '[staging-copy-wait] job no longer waiting; skipping',
+    );
+    return;
+  }
+
+  const stagingAppId = job.dest_app_id;
+  if (!stagingAppId) throw new Error(`Staging job ${jobId} has no dest_app_id`);
+
+  const copy = job.data_copy_job_id
+    ? await getStagingDataCopy(controlDb, job.data_copy_job_id)
+    : null;
+  const verdict = classifyStagingCopyWait({ copy, now: new Date() });
+
+  if (verdict.kind === 'waiting') {
+    // HEARTBEAT. clone-jobs-reaper treats any mid-stage status older than 15
+    // minutes as a candidate for being flipped to 'failed'. A copy that runs
+    // longer than that is entirely normal, and while the reaper would skip it
+    // anyway (there is always a live neon_task for this job - the wait re-arms
+    // before the current task is marked done), that protection is a lookup that
+    // fails open on error. Moving updated_at on every poll means the job never
+    // becomes a candidate in the first place, rather than relying on a second
+    // check to rescue it. An empty patch writes updated_at = now() and nothing
+    // else - see setCloneJobStatus.
+    await setCloneJobStatus(controlDb, jobId, {});
+    await enqueueCopyWaitTask({
+      appId: stagingAppId, region: job.dest_region, jobId, delayMs: COPY_POLL_INTERVAL_MS,
+    });
+    logger.info(
+      { jobId, copyJobId: job.data_copy_job_id, copyStatus: copy?.status, phase: copy?.phase },
+      '[staging-copy-wait] copy still running; re-armed',
+    );
+    return;
+  }
+
+  if (verdict.kind === 'failed') {
+    // Terminal for the STAGING job, and NOT rethrown: this task did exactly
+    // what it was queued to do - observe the copy - and throwing would burn a
+    // queue attempt and re-run the same observation to the same conclusion.
+    await setCloneJobStatus(controlDb, jobId, {
+      status: 'failed', error_message: verdict.message, completed_at: new Date(),
+    });
+    logger.error(
+      { jobId, stagingAppId, copyJobId: job.data_copy_job_id, error: verdict.message },
+      '[staging-copy-wait] production data copy did not succeed; staging job failed',
+    );
+    return;
+  }
+
+  const runtimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+
+  // AFTER the copy, never before - see the function doc comment.
+  await isolateStagingEnvironment(runtimeDb, controlDb, stagingAppId);
+
+  await appendCloneJobWarnings(controlDb, jobId, stagingCopyWarnings(copy!));
+
+  if (job.mode === 'staging_create') {
+    // The pair becomes visible only now. Until this row exists the dashboard,
+    // reset and promote all see "no staging environment" - which is the honest
+    // answer for an app that was still being populated.
+    await linkStagingEnvironment(runtimeDb, job);
+  } else {
+    // staging_reset: the pair is already linked; what moves is the timestamp,
+    // keyed on the PRODUCTION app id (app_environments.prod_app_id is the PK).
+    await touchEnvironmentTimestamp(runtimeDb, job.source_app_id, 'last_reset_at');
+  }
+
+  const completedAt = new Date();
+  await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: completedAt });
+
+  await insertCloneAuditLog(controlDb, {
+    appId: job.source_app_id,
+    userId: job.requested_by_user_id,
+    eventType: job.mode === 'staging_create'
+      ? 'template_clone_completed'
+      : 'staging_reset_completed',
+    metadata: {
+      job_id: jobId, dest_app_id: stagingAppId, dest_region: job.dest_region,
+      data_copy_job_id: job.data_copy_job_id,
+    },
+  }).catch((err) => logger.error({ err }, '[staging-copy-wait] audit log insert failed'));
+
+  logger.info(
+    { jobId, stagingAppId, copyJobId: job.data_copy_job_id, mode: job.mode },
+    '[staging-copy-wait] production data copy complete; staging job completed',
+  );
 }
 
 /**
@@ -1783,6 +2024,11 @@ export async function executeResetTask(
         attempt: task.attempts,
         maxAttempts: task.max_attempts,
         logger,
+        // Both apps are in job.dest_region: startStagingReset pins
+        // source_region and dest_region to the production app row, and staging
+        // is pinned to production region at admission. This is the queue the
+        // copy-wait task is armed on and the region stamped on the copy job.
+        region: job.dest_region,
       },
       job,
     );

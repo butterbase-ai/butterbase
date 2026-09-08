@@ -8,15 +8,39 @@ export function registerManageStaging(server: McpServer) {
     `Create, inspect, or reset an app's staging environment.
 
 A staging environment is a linked sibling app with its own database, storage and
-auth users. It starts as a copy of production, including production data.
+auth users.
+
+WHAT IT CONTAINS. Staging starts as a copy of production: the schema, functions,
+access rules, and production's DATA — every table's rows, the auth user accounts
+(with their password hashes, so people sign in with the passwords they already
+have), and the uploaded files. That includes any personal data your production
+app holds. Tell the user this before creating one.
+
+What deliberately does NOT travel:
+  - App-level env var VALUES (see ENV VARS IN STAGING below).
+  - Connected third-party accounts. The records are copied and then cleared, and
+    integration configs and cron triggers are disabled, so staging cannot call a
+    third party with production's identity. Reconnect them on staging if needed.
+  - Billing and analytics history (subscriptions, orders, daily activity): those
+    belong to the production app.
+  - Storage object IDs change. If your app stores a storage object id inside its
+    own tables, that column still points at production's object.
+On a self-hosted deployment without the app-copy engine, staging is populated
+from tables marked _seed:true only; the create/reset job says so in its warnings.
 
 Actions:
   "create" — provision a staging environment for this app. Returns a job_id;
              poll GET /v1/clone-jobs/{job_id} for progress. One per app.
+             The job reaches status "copying_data" once the app exists and the
+             production data copy is running, and only reports "completed" once
+             that copy has finished — a job that is not "completed" is not a
+             usable staging environment, and the staging app is not linked or
+             listed by "status" until it is.
   "status" — return the linked staging app id and the last promote/reset times,
              or { staging_app_id: null } if there is none.
   "reset"  — discard the staging app's data and re-seed it from production.
-             Destructive to staging only; production is never written.
+             Destructive to staging only; production is never written. Same
+             "copying_data" then "completed" progression as create.
   "get_env_overrides" — list the KEY NAMES of the staging app's env var
              overrides. Values are never returned.
   "set_env_overrides" — replace this app's staging env var overrides with

@@ -463,6 +463,27 @@ describe('resolveCloneDispatch', () => {
   it('routes a staging_reset job to the reset path, NEVER to clone', () => {
     expect(resolveCloneDispatch({ mode: 'staging_reset' })).toBe('staging_reset');
   });
+  // The production-data-copy wait. A staging job in copying_data has already
+  // run its own executor; routing it back would re-provision a second staging
+  // app (create) or re-truncate the database the copy is writing into (reset).
+  // Status has to beat mode for both modes.
+  it('routes a staging_create job in copying_data to the wait path, NEVER to clone', () => {
+    expect(resolveCloneDispatch({ mode: 'staging_create', status: 'copying_data' }))
+      .toBe('staging_copy_wait');
+  });
+  it('routes a staging_reset job in copying_data to the wait path, NEVER to reset', () => {
+    expect(resolveCloneDispatch({ mode: 'staging_reset', status: 'copying_data' }))
+      .toBe('staging_copy_wait');
+  });
+  it('leaves every other mode alone even in an unexpected status', () => {
+    expect(resolveCloneDispatch({ mode: 'promote', status: 'copying_data' })).toBe('promote');
+    expect(resolveCloneDispatch({ mode: 'update', status: 'copying_data' })).toBe('update');
+  });
+  it('routes a staging job that is NOT copying_data by mode, unchanged', () => {
+    expect(resolveCloneDispatch({ mode: 'staging_create', status: 'seeding_data' })).toBe('clone');
+    expect(resolveCloneDispatch({ mode: 'staging_reset', status: 'processing' }))
+      .toBe('staging_reset');
+  });
 });
 
 describe('classifyUpdateResume', () => {
