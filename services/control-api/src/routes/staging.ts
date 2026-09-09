@@ -544,6 +544,14 @@ export function stagingRoutes(app: FastifyInstance) {
           documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
         }));
       }
+      if (result.code === 'RESET_IN_FLIGHT') {
+        return reply.code(409).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: result.message,
+          remediation: 'Wait for the in-progress reset to finish, then retry.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
       return reply.code(404).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
         message: result.message,

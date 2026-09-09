@@ -115,4 +115,18 @@ describe('POST /v1/apps/:app_id/staging/reset', () => {
     expect(res.json().error.message).toContain('promote is currently running');
     expect(mocks.enqueueCloneTask).not.toHaveBeenCalled();
   });
+
+  // Reset's own in-flight guard (this fix round): a second reset for the same
+  // app must reach the caller as 409, distinct from both NO_STAGING's 404 and
+  // the promote-blocks-reset IN_FLIGHT case above — and must never enqueue.
+  it('returns 409 with the RESET_IN_FLIGHT message and enqueues nothing', async () => {
+    mocks.startStagingReset.mockResolvedValue({
+      ok: false, code: 'RESET_IN_FLIGHT',
+      message: 'A reset is already running for this app. Wait for it to finish.',
+    });
+    const res = await build().inject({ method: 'POST', url: '/v1/apps/app_prod/staging/reset' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).toContain('reset is already running');
+    expect(mocks.enqueueCloneTask).not.toHaveBeenCalled();
+  });
 });

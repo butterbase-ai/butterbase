@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => ({
   isolateStagingMeetingsWebhook: vi.fn(),
   setCloneJobStatus: vi.fn(),
   createCloneJob: vi.fn(),
+  deleteCloneJob: vi.fn(),
   appendCloneJobWarnings: vi.fn(),
   getRuntimeDbForApp: vi.fn(),
   getActivePromoteJob: vi.fn(),
@@ -59,6 +60,7 @@ vi.mock('./staging-isolation.js', () => ({
 vi.mock('./clone-jobs.js', () => ({
   setCloneJobStatus: mocks.setCloneJobStatus,
   createCloneJob: mocks.createCloneJob,
+  deleteCloneJob: mocks.deleteCloneJob,
   appendCloneJobWarnings: mocks.appendCloneJobWarnings,
 }));
 vi.mock('./region-resolver.js', () => ({ getRuntimeDbForApp: mocks.getRuntimeDbForApp }));
@@ -242,6 +244,81 @@ describe('startStagingReset', () => {
       controlDb, prodAppId: 'app_prod', userId: 'u1', orgId: 'org_1',
     });
     expect(res).toMatchObject({ ok: true });
+  });
+
+  // THE TEST THAT FAILS WITHOUT THE FIX. Before this fix, startStagingReset
+  // had no notion of a second reset in flight at all — a second request for
+  // the same app sailed through to `ok: true` no matter what the first
+  // reset's job row looked like. This is the request-time precheck
+  // (getActiveResetJob), keyed on the STAGING app id since that is every
+  // reset job's dest_app_id.
+  it('refuses when another reset is already in flight for this app, before creating a job', async () => {
+    const controlDb = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (typeof sql === 'string' && /mode = 'staging_reset'/.test(sql)) {
+          return { rows: [{ id: 'job_reset_prev' }] };
+        }
+        return { rows: [] };
+      }),
+    } as never;
+    const res = await startStagingReset({
+      controlDb, prodAppId: 'app_prod', userId: 'u1', orgId: 'org_1',
+    });
+    expect(res).toMatchObject({ ok: false, code: 'RESET_IN_FLIGHT' });
+    expect(mocks.createCloneJob).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when getActiveResetJob reports nothing in flight', async () => {
+    const controlDb = { query: vi.fn().mockResolvedValue({ rows: [] }) } as never;
+    const res = await startStagingReset({
+      controlDb, prodAppId: 'app_prod', userId: 'u1', orgId: 'org_1',
+    });
+    expect(res).toMatchObject({ ok: true });
+  });
+
+  // The precheck above is a read-then-write, not an atomic guarantee — same
+  // caveat as startPromote's own IN_FLIGHT precheck. This is the 23505 path:
+  // idx_template_clone_jobs_one_reset (migration 120) is what actually
+  // enforces "at most one in-flight reset per staging app", and this is where
+  // a losing racer's UPDATE becomes visible to it as a unique violation.
+  it('compensates for a lost race at the unique index: deletes the job and returns RESET_IN_FLIGHT', async () => {
+    const dbError = Object.assign(new Error('duplicate key value violates unique constraint'), {
+      code: '23505', constraint: 'idx_template_clone_jobs_one_reset',
+    });
+    const controlDb = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (typeof sql === 'string' && /^\s*UPDATE template_clone_jobs/.test(sql)) {
+          throw dbError;
+        }
+        return { rows: [] };
+      }),
+    } as never;
+    const res = await startStagingReset({
+      controlDb, prodAppId: 'app_prod', userId: 'u1', orgId: 'org_1',
+    });
+    expect(res).toMatchObject({ ok: false, code: 'RESET_IN_FLIGHT' });
+    expect(mocks.deleteCloneJob).toHaveBeenCalledWith(controlDb, 'job_r1');
+  });
+
+  // Narrow catch, not blanket: an unrelated unique violation (or any other
+  // error) at the same UPDATE must surface, not be swallowed as a false
+  // RESET_IN_FLIGHT.
+  it('rethrows a unique violation that is NOT idx_template_clone_jobs_one_reset', async () => {
+    const otherError = Object.assign(new Error('some other constraint'), {
+      code: '23505', constraint: 'template_clone_jobs_pkey',
+    });
+    const controlDb = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (typeof sql === 'string' && /^\s*UPDATE template_clone_jobs/.test(sql)) {
+          throw otherError;
+        }
+        return { rows: [] };
+      }),
+    } as never;
+    await expect(startStagingReset({
+      controlDb, prodAppId: 'app_prod', userId: 'u1', orgId: 'org_1',
+    })).rejects.toThrow('some other constraint');
+    expect(mocks.deleteCloneJob).not.toHaveBeenCalled();
   });
 });
 

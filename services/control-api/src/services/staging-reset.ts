@@ -7,11 +7,38 @@ import {
   enqueueStagingDataCopy, enqueueCopyWaitTask, COPY_POLL_INTERVAL_MS,
 } from './staging-data-copy.js';
 import {
-  setCloneJobStatus, createCloneJob, appendCloneJobWarnings, type CloneJob,
+  setCloneJobStatus, createCloneJob, deleteCloneJob, appendCloneJobWarnings, type CloneJob,
 } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { getActivePromoteJob } from './promote-jobs.js';
 import { EXCLUDED_TABLES, introspectSchema } from './schema-introspector.js';
+
+/**
+ * The in-flight reset for this STAGING app, if any.
+ *
+ * Predicate must match idx_template_clone_jobs_one_reset (migration 120)
+ * exactly: `mode = 'staging_reset' AND status NOT IN ('completed','failed')`
+ * — same shape as getActivePromoteJob (promote-jobs.ts) / migration 116, one
+ * column over. Unlike promote-vs-reset (whose dest_app_id values live in two
+ * different domains — production for a promote, staging for a reset — so no
+ * single-column index can express that pair), reset-vs-reset targets the
+ * SAME column value every time: a reset's dest_app_id is always the staging
+ * app. That is what makes a dedicated unique index viable here where it was
+ * not for promote-vs-reset (see startStagingReset's comment on that).
+ */
+export async function getActiveResetJob(
+  controlDb: pg.Pool,
+  stagingAppId: string,
+): Promise<CloneJob | null> {
+  const res = await controlDb.query<CloneJob>(
+    `SELECT * FROM template_clone_jobs
+      WHERE dest_app_id = $1 AND mode = 'staging_reset'
+        AND status NOT IN ('completed', 'failed')
+      LIMIT 1`,
+    [stagingAppId],
+  );
+  return res.rows[0] ?? null;
+}
 
 export interface ResetLogger {
   info(obj: unknown, msg?: string): void;
@@ -77,6 +104,7 @@ export async function startStagingReset(args: {
   | { ok: true; jobId: string; stagingAppId: string }
   | { ok: false; code: 'NO_STAGING'; message: string }
   | { ok: false; code: 'IN_FLIGHT'; message: string }
+  | { ok: false; code: 'RESET_IN_FLIGHT'; message: string }
 > {
   const { controlDb, prodAppId, userId, orgId } = args;
 
@@ -133,6 +161,26 @@ export async function startStagingReset(args: {
     };
   }
 
+  // Cheap check, mirroring getActivePromoteJob's precheck above and
+  // startPromote's own IN_FLIGHT precheck (promote-jobs.ts) — but for a
+  // second RESET, not a promote. Nothing previously stopped a second reset
+  // from being admitted while the first was still truncate -> reconcile ->
+  // copy: a second TRUNCATE landing mid-copy of the first would leave the
+  // first reporting 'completed' over partially-copied data, exactly the
+  // silent-wrong-answer shape this feature's other guards exist to
+  // eliminate. Keyed on the STAGING app id (link.staging_app_id), which is
+  // every reset job's dest_app_id — unlike promote-vs-reset, this pair CAN
+  // share a single-column index (idx_template_clone_jobs_one_reset, migration
+  // 120), so this precheck is backed by an atomic compensating check at
+  // job-creation time below rather than being the only line of defense.
+  if (await getActiveResetJob(controlDb, link.staging_app_id)) {
+    return {
+      ok: false,
+      code: 'RESET_IN_FLIGHT',
+      message: 'A reset is already running for this app. Wait for it to finish.',
+    };
+  }
+
   const prodRow = (
     await runtimeDb.query<{ region: string }>(
       `SELECT region FROM apps WHERE id = $1`, [prodAppId],
@@ -164,10 +212,36 @@ export async function startStagingReset(args: {
   // startPromote (promote-jobs.ts) and start-staging.ts. dest_app_id is the
   // STAGING app: reset writes onto staging, never onto the production
   // source.
-  await controlDb.query(
-    `UPDATE template_clone_jobs SET mode = 'staging_reset', dest_app_id = $2 WHERE id = $1`,
-    [job.id, link.staging_app_id],
-  );
+  try {
+    await controlDb.query(
+      `UPDATE template_clone_jobs SET mode = 'staging_reset', dest_app_id = $2 WHERE id = $1`,
+      [job.id, link.staging_app_id],
+    );
+  } catch (err) {
+    // Same shape as startPromote's own compensating catch: a concurrent
+    // request can pass the getActiveResetJob precheck above before either has
+    // written mode='staging_reset' — the read-then-write is not atomic.
+    // idx_template_clone_jobs_one_reset (migration 120) is what actually
+    // enforces "at most one in-flight reset per staging app"; this UPDATE is
+    // where a losing racer's insert becomes visible to it as a 23505.
+    // Compensate by deleting the just-created row rather than leaving a
+    // stray mode='clone' job around for the worker to find. Narrow on
+    // purpose — both err.code and err.constraint, never a blanket catch — so
+    // an unrelated failure here still surfaces instead of being swallowed
+    // as a false RESET_IN_FLIGHT.
+    if (
+      (err as { code?: string })?.code === '23505' &&
+      (err as { constraint?: string })?.constraint === 'idx_template_clone_jobs_one_reset'
+    ) {
+      await deleteCloneJob(controlDb, job.id);
+      return {
+        ok: false,
+        code: 'RESET_IN_FLIGHT',
+        message: 'A reset is already running for this app. Wait for it to finish.',
+      };
+    }
+    throw err;
+  }
 
   return { ok: true, jobId: job.id, stagingAppId: link.staging_app_id };
 }
