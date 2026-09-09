@@ -18,8 +18,8 @@ const registeredParentNames = new Set<string>(MOVE_APP_RUNTIME_TABLES);
 
 /**
  * Scan one runtime pool for:
- *   (1) tables with an app_id column — must be in MOVE_APP_RUNTIME_TABLES or
- *       MOVE_APP_EXCLUDED, AND
+ *   (1) tables with an `app_id` or `%_app_id` column — must be in
+ *       MOVE_APP_RUNTIME_TABLES or MOVE_APP_EXCLUDED, AND
  *   (2) tables with a foreign key to a registered parent's PK — must be in
  *       MOVE_APP_RUNTIME_CHILD_TABLES or MOVE_APP_EXCLUDED_CHILD.
  *
@@ -32,9 +32,17 @@ export async function auditRuntimeTablesForPool(
   region: string,
 ): Promise<void> {
   // (1) Tables with app_id.
+  // `column_name = 'app_id'` alone was not enough: app_environments and
+  // staging_env_overrides key on `prod_app_id` / `staging_app_id`, so the audit
+  // built to catch unclassified per-app tables could not see the two most
+  // recent ones. Matching the `%_app_id` suffix too closes that. Checked
+  // against production before widening: `prod_app_id` and `staging_app_id` are
+  // the ONLY `%_app_id` columns anywhere in the runtime plane, so this catches
+  // exactly the tables it should and flags nothing else.
   const appIdTables = await pool.query(`
     SELECT table_name FROM information_schema.columns
-    WHERE table_schema = 'public' AND column_name = 'app_id'
+    WHERE table_schema = 'public'
+      AND (column_name = 'app_id' OR column_name LIKE '%\_app\_id')
     GROUP BY table_name
   `);
   const missingParents = appIdTables.rows
