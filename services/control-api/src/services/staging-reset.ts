@@ -14,6 +14,17 @@ import { getActivePromoteJob } from './promote-jobs.js';
 import { EXCLUDED_TABLES, introspectSchema } from './schema-introspector.js';
 
 /**
+ * Prefix Neon app databases are provisioned with. `apps.db_name` stores the
+ * name WITHOUT it (`app_XXX`), while the physical database is `db_app_XXX` —
+ * see `app-db-provision.ts` / `provisioner.ts`, which both build the database
+ * name as `db_${appId}`, and `neon-orphan-reconciler.ts`, which maps back by
+ * stripping this exact prefix. Anything comparing `apps.db_name` to
+ * `current_database()` must bridge the two.
+ */
+const APP_DB_NAME_PREFIX = 'db_';
+
+
+/**
  * The in-flight reset for this STAGING app, if any.
  *
  * Predicate must match idx_template_clone_jobs_one_reset (migration 120)
@@ -60,7 +71,9 @@ export interface ResetDeps {
   /** Per-app database of the STAGING app — the destination of the re-seed. */
   stagingPool: pg.Pool;
   /**
-   * The staging app's `apps.db_name`. Checked against `SELECT
+   * The staging app's `apps.db_name`, UNPREFIXED ('app_XXX'). Guard 3 prefixes
+   * it with `db_` before comparing, because that is what the physical Neon
+   * database is called. Checked against `SELECT
    * current_database()` on `stagingPool` immediately before the TRUNCATE —
    * see truncateStagingAppTables's Guard 3. Every other guard compares
    * values chosen upstream of the pool-resolution call (ids, object
@@ -313,10 +326,19 @@ async function assertStagingTarget(args: {
     'SELECT current_database()',
   );
   const connectedDb = dbCheck.rows[0]?.current_database;
-  if (connectedDb !== stagingDbName) {
+  // `apps.db_name` holds the UNPREFIXED, app-id-shaped name ('app_XXX'); the
+  // Neon database is provisioned as `db_${appId}` (app-db-provision.ts,
+  // provisioner.ts), and neon-orphan-reconciler maps back by stripping exactly
+  // this prefix. So current_database() returns the PREFIXED name and comparing
+  // it against a raw apps.db_name can never match — which made this guard
+  // refuse every reset that ever ran, rather than only the swapped-pool case it
+  // exists to catch. Verified against production: all 809 apps across both
+  // regions store db_name = id, none pre-prefixed.
+  const expectedDb = `${APP_DB_NAME_PREFIX}${stagingDbName}`;
+  if (connectedDb !== expectedDb) {
     throw new Error(
       `[staging-reset] refusing to ${action}: staging pool for app ${stagingAppId} is connected `
-        + `to database "${connectedDb}", expected "${stagingDbName}"`,
+        + `to database "${connectedDb}", expected "${expectedDb}"`,
     );
   }
 }
