@@ -18,7 +18,21 @@ const mocks = vi.hoisted(() => ({
   getEnvironmentLink: vi.fn(),
   touchEnvironmentTimestamp: vi.fn(),
   replaySeedData: vi.fn(),
+  /**
+   * KEPT DELIBERATELY, THOUGH staging-reset.ts NO LONGER CALLS IT.
+   *
+   * This is the seam the truncate used to derive its table set from, and the
+   * reason defect 1 shipped: `_seed_tables` is populated only from DSL tables
+   * flagged `_seed: true`, so it is EMPTY for a normal app — and every test in
+   * this file used to stub it with real table names, so the empty case (the
+   * only one that occurs in production) was never exercised. It now defaults
+   * to `[]`, the true production value. Any test below that passes while this
+   * returns `[]` is a test the OLD implementation would have failed, because
+   * the old implementation would have found nothing to truncate.
+   */
   getSeedTableNames: vi.fn(),
+  introspectSchema: vi.fn(),
+  reconcileStagingSchema: vi.fn(),
   isolateStagingApp: vi.fn(),
   isolateStagingMeetingsWebhook: vi.fn(),
   setCloneJobStatus: vi.fn(),
@@ -57,6 +71,10 @@ vi.mock('./staging-data-copy.js', () => ({
 vi.mock('./schema-introspector.js', () => ({
   EXCLUDED_TABLES: ['_ai_migrations', '_data_plane_migrations', '_rag_collections',
     '_rag_documents', '_rag_chunks', '_idempotency_keys', '_seed_tables'],
+  introspectSchema: mocks.introspectSchema,
+}));
+vi.mock('./staging-schema-reconcile.js', () => ({
+  reconcileStagingSchema: mocks.reconcileStagingSchema,
 }));
 
 import { startStagingReset, executeStagingReset } from './staging-reset.js';
@@ -72,8 +90,31 @@ const job = {
 const STAGING_DB_NAME = 'db_staging';
 
 /**
+ * Point the truncate's table set at `names`.
+ *
+ * The truncate is derived from `introspectSchema(stagingPool)` — the SAME
+ * function the app-copy engine's `buildCopyPlan` uses for its own table list
+ * (its `deps.introspect` is literally this import) — not from the
+ * `_seed_tables` registry. Only `tables`'s KEYS matter here; the column detail
+ * belongs to callers that diff schemas, which staging-reset.ts does not do
+ * itself (reconcileStagingSchema, mocked separately, owns that).
+ */
+function setStagingTables(names: string[]): void {
+  mocks.introspectSchema.mockResolvedValue({
+    tables: Object.fromEntries(names.map((n) => [n, { columns: {} }])),
+  });
+}
+
+/** Point `reconcileStagingSchema` at a production table set. */
+function setProductionTables(names: string[], unreconciled: string[] = []): void {
+  mocks.reconcileStagingSchema.mockResolvedValue({
+    applied: [], productionTables: names, unreconciled,
+  });
+}
+
+/**
  * Fallback response for the staging pool's `SELECT current_database()`
- * (truncateStagingSeedTables's Guard 3) — matches STAGING_DB_NAME so tests
+ * (truncateStagingAppTables's Guard 3) — matches STAGING_DB_NAME so tests
  * that don't care about Guard 3 aren't tripped by it. Every test below that
  * replaces stagingPool.query wholesale with its own mockImplementation
  * delegates to this for anything it doesn't itself recognize, so Guard 3
@@ -129,12 +170,17 @@ beforeEach(() => {
   // than throwing. The old `undefined` default is exactly what let the
   // dropped-return-value defect sit here unnoticed — nothing in this file
   // could observe a warning that was never modelled. Default matches the
-  // getSeedTableNames default below so the two lists agree unless a test
+  // introspectSchema default below so the two lists agree unless a test
   // deliberately diverges them.
   mocks.replaySeedData.mockResolvedValue({
     tables: ['widgets', 'orders'], rows: 12, warnings: [],
   });
-  mocks.getSeedTableNames.mockResolvedValue(['widgets', 'orders']);
+  // THE PRODUCTION-TRUTHFUL DEFAULT: no table carries `_seed: true`, so
+  // `_seed_tables` is empty. The old implementation derived the truncate set
+  // from here and therefore truncated NOTHING for an app shaped like this.
+  mocks.getSeedTableNames.mockResolvedValue([]);
+  setStagingTables(['widgets', 'orders']);
+  setProductionTables(['widgets', 'orders']);
   mocks.isolateStagingApp.mockResolvedValue(undefined);
   mocks.isolateStagingMeetingsWebhook.mockResolvedValue(undefined);
   mocks.touchEnvironmentTimestamp.mockResolvedValue(undefined);
@@ -238,23 +284,55 @@ describe('executeStagingReset', () => {
     expect(prodPool.query).not.toHaveBeenCalled();
   });
 
-  it('derives the truncated table set via getSeedTableNames, not a hardcoded list', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['custom_seed_table']);
+  it('derives the truncated table set by introspecting STAGING, not from a hardcoded list', async () => {
+    setStagingTables(['custom_table']);
     await executeStagingReset(deps as never, job);
-    expect(mocks.getSeedTableNames).toHaveBeenCalledWith(deps.stagingPool, expect.anything());
+    expect(mocks.introspectSchema).toHaveBeenCalledWith(deps.stagingPool);
     const truncateCalls = stagingPool.query.mock.calls.filter(
       (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
     );
-    expect(truncateCalls[0][0]).toContain('"custom_seed_table"');
+    expect(truncateCalls[0][0]).toContain('"custom_table"');
   });
 
-  // Fix round 3, item 3: filter is structural, not an emergent property of
-  // schema-differ.ts + schema-validator.ts staying out of each other's way.
-  // If _seed_tables ever named one of Butterbase's own bookkeeping tables
-  // (it shouldn't be able to today, but this must hold even if that changes),
-  // truncateStagingSeedTables must still refuse to include it.
-  it('excludes Butterbase-internal bookkeeping tables even if _seed_tables names one', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['widgets', '_rag_chunks', '_idempotency_keys']);
+  /**
+   * DEFECT 1 REGRESSION — the one that would have caught the live failure.
+   *
+   * `_seed_tables` is empty for every app whose DSL does not flag a table
+   * `_seed: true`, i.e. essentially all of them. The previous implementation
+   * derived the truncate set from that registry, logged "no seed-flagged
+   * tables on staging; nothing to truncate", and let the purely additive
+   * `INSERT ... ON CONFLICT DO NOTHING` copy that follows leave every drifted
+   * staging row exactly as it was — while the job reported `completed`.
+   *
+   * The old tests could not see this because they all stubbed
+   * `getSeedTableNames` with real table names. Here it returns `[]`, which is
+   * what a real app returns, AND the staging database genuinely has rows: the
+   * assertion is that a TRUNCATE still runs over the real tables. Against the
+   * pre-fix implementation this test fails — no TRUNCATE is issued at all.
+   */
+  it('still truncates staging\'s real tables when _seed_tables is empty (the normal app)', async () => {
+    mocks.getSeedTableNames.mockResolvedValue([]);
+    setStagingTables(['notes', 'app_settings']);
+
+    await executeStagingReset(deps as never, job);
+
+    const truncateCalls = stagingPool.query.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
+    );
+    expect(truncateCalls).toHaveLength(1);
+    expect(truncateCalls[0][0]).toContain('"notes"');
+    expect(truncateCalls[0][0]).toContain('"app_settings"');
+    // And it must not have consulted the registry that was empty: the whole
+    // point is that the derivation moved off it.
+    expect(mocks.getSeedTableNames).not.toHaveBeenCalled();
+  });
+
+  // Fix round 3, item 3: the filter is structural, not an emergent property of
+  // introspectSchema's own exclusion list staying where it is. If a
+  // Butterbase bookkeeping table ever reached this list, truncateStagingAppTables
+  // must still refuse to include it.
+  it('excludes Butterbase-internal bookkeeping tables even if introspection returns one', async () => {
+    setStagingTables(['widgets', '_rag_chunks', '_idempotency_keys']);
     await executeStagingReset(deps as never, job);
     const truncateCalls = stagingPool.query.mock.calls.filter(
       (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
@@ -265,11 +343,11 @@ describe('executeStagingReset', () => {
     expect(truncateCalls[0][0]).not.toContain('_idempotency_keys');
   });
 
-  it('appends a job warning naming any non-seed table the cascade swept', async () => {
-    // Simulate the real recursive CTE: the base seed names come back plus a
-    // staging-only table ('audit_log') that has an FK into a seed table.
+  it('appends a job warning naming any table outside the list the cascade swept', async () => {
+    // Simulate the real recursive CTE: the targeted names come back plus a
+    // table ('audit_log') outside the list that has an FK into one of them.
     stagingPool.query.mockImplementation(async (sql: unknown) => {
-      if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
+      if (typeof sql === 'string' && /WITH RECURSIVE targeted/.test(sql)) {
         return {
           rows: [
             { table_name: 'widgets' }, { table_name: 'orders' }, { table_name: 'audit_log' },
@@ -286,11 +364,11 @@ describe('executeStagingReset', () => {
   });
 
   // Anti-vacuity check: the warning must not fire when the cascade closure
-  // never leaves the seed set — otherwise every reset would carry a
+  // never leaves the truncate list — otherwise every reset would carry a
   // permanent, meaningless warning.
-  it('does NOT append a warning when nothing outside the seed set was touched', async () => {
+  it('does NOT append a warning when nothing outside the truncate list was touched', async () => {
     stagingPool.query.mockImplementation(async (sql: unknown) => {
-      if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
+      if (typeof sql === 'string' && /WITH RECURSIVE targeted/.test(sql)) {
         return { rows: [{ table_name: 'widgets' }, { table_name: 'orders' }] };
       }
       return defaultStagingQueryResponse(sql);
@@ -301,7 +379,7 @@ describe('executeStagingReset', () => {
 
   it('does not fail the reset when the cascade-closure introspection query throws', async () => {
     stagingPool.query.mockImplementation(async (sql: unknown) => {
-      if (typeof sql === 'string' && /WITH RECURSIVE seed/.test(sql)) {
+      if (typeof sql === 'string' && /WITH RECURSIVE targeted/.test(sql)) {
         throw new Error('introspection boom');
       }
       return defaultStagingQueryResponse(sql);
@@ -316,8 +394,8 @@ describe('executeStagingReset', () => {
     expect(mocks.appendCloneJobWarnings).not.toHaveBeenCalled();
   });
 
-  it('skips the truncate entirely when there are no seed-flagged tables', async () => {
-    mocks.getSeedTableNames.mockResolvedValue([]);
+  it('skips the truncate entirely when staging has no user tables at all', async () => {
+    setStagingTables([]);
     await executeStagingReset(deps as never, job);
     const truncateCalls = stagingPool.query.mock.calls.filter(
       (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
@@ -382,7 +460,7 @@ describe('executeStagingReset', () => {
 
   // Guard 3 (fix round 3): the only guard that checks the LIVE connection
   // rather than a value threaded through arguments — see
-  // truncateStagingSeedTables's doc comment. This is what still catches a
+  // truncateStagingAppTables's doc comment. This is what still catches a
   // swap of the two getAppPoolForApp calls in neon-task-worker.ts's
   // executeResetTask (covered end-to-end in
   // services/__tests__/execute-reset-task.test.ts); at this layer it is
@@ -481,7 +559,7 @@ describe('executeStagingReset — production data copy', () => {
   }
 
   it('does not enqueue anything, and behaves exactly as before, without a region', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    setStagingTables(['orders']);
     await executeStagingReset(deps as never, job);
     expect(mocks.enqueueStagingDataCopy).not.toHaveBeenCalled();
     expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
@@ -490,7 +568,7 @@ describe('executeStagingReset — production data copy', () => {
   });
 
   it('parks the job in copying_data and does NOT complete it while the copy runs', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    setStagingTables(['orders']);
     mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
 
     await executeStagingReset(withRegion(), job);
@@ -508,14 +586,14 @@ describe('executeStagingReset — production data copy', () => {
   });
 
   it('does not move last_reset_at until the copy has finished', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    setStagingTables(['orders']);
     mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
     await executeStagingReset(withRegion(), job);
     expect(mocks.touchEnvironmentTimestamp).not.toHaveBeenCalled();
   });
 
   it('arms a wait task on the STAGING app in the pair\'s region', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    setStagingTables(['orders']);
     mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
     await executeStagingReset(withRegion(), job);
     expect(mocks.enqueueCopyWaitTask).toHaveBeenCalledWith({
@@ -524,7 +602,7 @@ describe('executeStagingReset — production data copy', () => {
   });
 
   it('re-isolates before enqueuing, closing the window while the copy runs', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    setStagingTables(['orders']);
     mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
     await executeStagingReset(withRegion(), job);
     expect(mocks.isolateStagingApp).toHaveBeenCalledWith(expect.anything(), 'app_staging');
@@ -535,7 +613,7 @@ describe('executeStagingReset — production data copy', () => {
 
   it('still re-seeds from _seed tables, so a later copy failure does not leave '
     + 'staging empty after the TRUNCATE', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    setStagingTables(['orders']);
     mocks.enqueueStagingDataCopy.mockResolvedValue({ ok: true, copyJobId: 'ac_1' });
     await executeStagingReset(withRegion(), job);
     expect(mocks.replaySeedData).toHaveBeenCalledWith(prodPool, stagingPool, expect.anything());
@@ -543,7 +621,7 @@ describe('executeStagingReset — production data copy', () => {
 
   it('completes with a warning, not a failure, on a deployment with no copy engine',
     async () => {
-      mocks.getSeedTableNames.mockResolvedValue(['orders']);
+      setStagingTables(['orders']);
       mocks.enqueueStagingDataCopy.mockResolvedValue({
         ok: false, reason: 'unsupported', message: 'Production data was NOT copied into staging.',
       });
@@ -559,7 +637,7 @@ describe('executeStagingReset — production data copy', () => {
     });
 
   it('throws — leaving the queue to retry — when the enqueue lost a race', async () => {
-    mocks.getSeedTableNames.mockResolvedValue(['orders']);
+    setStagingTables(['orders']);
     mocks.enqueueStagingDataCopy.mockResolvedValue({
       ok: false, reason: 'already_active', message: 'conflicted with a concurrent one',
     });
@@ -578,10 +656,11 @@ describe('executeStagingReset — production data copy', () => {
  * with status 'completed' and no warning anywhere the user could see.
  *
  * This is compounded by the two lists coming from different databases: the
- * TRUNCATE set is read from STAGING's `_seed_tables` while the re-seed reads
- * PRODUCTION's. A table flagged _seed only on staging is emptied and then
- * never repopulated, and replaySeedData emits no warning for it because from
- * production's side it was never in scope at all.
+ * TRUNCATE set is introspected from STAGING while everything that refills it
+ * (replaySeedData and the app-copy plan) is introspected from PRODUCTION. A
+ * table that exists only on staging is emptied and then never repopulated,
+ * and nothing downstream emits a warning for it because from production's
+ * side it was never in scope at all.
  */
 describe('executeStagingReset — seed warnings reach the job record', () => {
   it('appends replaySeedData warnings to the job instead of discarding them', async () => {
@@ -619,11 +698,13 @@ describe('executeStagingReset — seed warnings reach the job record', () => {
     );
   });
 
-  it('names a table truncated on staging that production never re-seeded', async () => {
-    // staging's _seed_tables (drives the TRUNCATE) carries a table production
-    // does not, so replaySeedData never touches it and reports nothing about
-    // it. Emptying it is correct; doing so silently is the defect.
-    mocks.getSeedTableNames.mockResolvedValue(['widgets', 'orders', 'staging_only_notes']);
+  it('names a table truncated on staging that production cannot refill', async () => {
+    // Staging (which drives the TRUNCATE) carries a table production does
+    // not, so nothing ever repopulates it. Emptying it is correct — reset
+    // discards staging's data and a staging-only table is staging data —
+    // doing so silently is the defect.
+    setStagingTables(['widgets', 'orders', 'staging_only_notes']);
+    setProductionTables(['widgets', 'orders']);
     mocks.replaySeedData.mockResolvedValue({
       tables: ['widgets', 'orders'], rows: 9, warnings: [],
     });
@@ -633,5 +714,83 @@ describe('executeStagingReset — seed warnings reach the job record', () => {
     const appended = mocks.appendCloneJobWarnings.mock.calls.flatMap((c) => c[2] as string[]);
     expect(appended.some((w) => w.includes('staging_only_notes'))).toBe(true);
     expect(appended.some((w) => w.includes('widgets'))).toBe(false);
+  });
+});
+
+/**
+ * DEFECT 2 — a reset used to fail permanently once staging's schema diverged.
+ *
+ * Reached through the feature's own supported flow: drop a column in staging,
+ * promote (production correctly KEEPS it — promote never applies destructive
+ * DDL), then reset. The app-copy engine selects production's columns and
+ * INSERTs them into staging verbatim, so every row failed with `column
+ * "priority" of relation "notes" does not exist` and the job went to `failed`
+ * — permanently, because nothing in the pipeline ever reconciled schema.
+ *
+ * The fix is a production -> staging ADDITIVE schema replay before the data
+ * phase, and an honest warning for the divergence additive DDL cannot repair.
+ * These tests assert the wiring and the ordering; the reconcile's own
+ * direction and additive-only behaviour are covered in
+ * staging-schema-reconcile.test.ts.
+ */
+describe('executeStagingReset — schema reconcile before the data copy', () => {
+  it('replays production schema onto staging, in that direction, before truncating', async () => {
+    const order: string[] = [];
+    mocks.reconcileStagingSchema.mockImplementation(async () => {
+      order.push('reconcile');
+      return { applied: [], productionTables: ['widgets', 'orders'], unreconciled: [] };
+    });
+    stagingPool.query.mockImplementation(async (sql: unknown) => {
+      if (typeof sql === 'string' && /^TRUNCATE TABLE/i.test(sql)) order.push('truncate');
+      return defaultStagingQueryResponse(sql);
+    });
+
+    await executeStagingReset(deps as never, job);
+
+    expect(order).toEqual(['reconcile', 'truncate']);
+    // Direction: production is the SOURCE of the schema, staging the target.
+    // Reversed, this would replay staging's schema onto PRODUCTION.
+    expect(mocks.reconcileStagingSchema).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prodPool: deps.prodPool,
+        stagingPool: deps.stagingPool,
+        stagingAppId: 'app_staging',
+      }),
+    );
+    const [{ prodPool: p, stagingPool: s }] = mocks.reconcileStagingSchema.mock.calls[0];
+    expect(p).not.toBe(stagingPool);
+    expect(s).not.toBe(prodPool);
+  });
+
+  it('surfaces what the reconcile could NOT fix as job warnings, and still runs', async () => {
+    setProductionTables(['widgets', 'orders'], [
+      'Change column "notes"."body" type to integer — production and staging disagree here in a '
+      + 'way that only destructive DDL could reconcile.',
+    ]);
+
+    await executeStagingReset(deps as never, job);
+
+    const appended = mocks.appendCloneJobWarnings.mock.calls.flatMap((c) => c[2] as string[]);
+    expect(appended.some((w) => w.includes('"notes"."body"'))).toBe(true);
+    // A warning, not a failure: the reset still does everything else it can.
+    expect(mocks.replaySeedData).toHaveBeenCalled();
+    expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
+      deps.controlDb, 'job_r1', expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it('does not warn when staging and production schemas already agree', async () => {
+    await executeStagingReset(deps as never, job);
+    expect(mocks.appendCloneJobWarnings).not.toHaveBeenCalled();
+  });
+
+  it('never truncates or re-seeds when the schema replay itself fails', async () => {
+    mocks.reconcileStagingSchema.mockRejectedValue(new Error('ADD COLUMN boom'));
+    await expect(executeStagingReset(deps as never, job)).rejects.toThrow('ADD COLUMN boom');
+    const truncateCalls = stagingPool.query.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
+    );
+    expect(truncateCalls).toHaveLength(0);
+    expect(mocks.replaySeedData).not.toHaveBeenCalled();
   });
 });

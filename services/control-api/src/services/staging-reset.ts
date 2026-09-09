@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { getEnvironmentLink, touchEnvironmentTimestamp } from './app-environments.js';
-import { replaySeedData, getSeedTableNames } from './clone-replay.js';
+import { replaySeedData } from './clone-replay.js';
+import { reconcileStagingSchema } from './staging-schema-reconcile.js';
 import { isolateStagingApp, isolateStagingMeetingsWebhook } from './staging-isolation.js';
 import {
   enqueueStagingDataCopy, enqueueCopyWaitTask, COPY_POLL_INTERVAL_MS,
@@ -10,7 +11,7 @@ import {
 } from './clone-jobs.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { getActivePromoteJob } from './promote-jobs.js';
-import { EXCLUDED_TABLES } from './schema-introspector.js';
+import { EXCLUDED_TABLES, introspectSchema } from './schema-introspector.js';
 
 export interface ResetLogger {
   info(obj: unknown, msg?: string): void;
@@ -34,7 +35,7 @@ export interface ResetDeps {
   /**
    * The staging app's `apps.db_name`. Checked against `SELECT
    * current_database()` on `stagingPool` immediately before the TRUNCATE —
-   * see truncateStagingSeedTables's Guard 3. Every other guard compares
+   * see truncateStagingAppTables's Guard 3. Every other guard compares
    * values chosen upstream of the pool-resolution call (ids, object
    * identity); this one asks the one question that actually matters, which
    * physical database the connection is pointed at, so it is the only guard
@@ -172,15 +173,48 @@ export async function startStagingReset(args: {
 }
 
 /**
- * Empties the staging app's seed-flagged tables before replaySeedData
- * re-populates them from production.
+ * Empties the staging app's data tables before production's rows are copied
+ * back in.
  *
- * WITHOUT THIS, A RESET IS NEARLY A NO-OP: replaySeedData issues
- * `INSERT ... ON CONFLICT DO NOTHING`, so any row already present in staging
- * — which is the entire reason anyone runs a reset, staging has drifted —
- * survives with its stale staging value. `manage_staging`'s tool text already
- * promises callers reset "discards the staging app's data"; this is what
- * makes that true.
+ * WITHOUT THIS, A RESET IS A NO-OP FOR EVERY ROW STAGING ALREADY HAD. Both
+ * repopulating engines are purely additive — replaySeedData issues
+ * `INSERT ... ON CONFLICT DO NOTHING`, and so does the app-copy engine's data
+ * phase — so any row already present in staging (which is the entire reason
+ * anyone runs a reset: staging has drifted) survives with its stale staging
+ * value, and a row that exists only in staging survives outright.
+ * `manage_staging`'s tool text promises callers reset "discards the staging
+ * app's data"; this is what makes that true.
+ *
+ * WHICH TABLES. Every user table on the staging database, via
+ * `introspectSchema` — NOT the `_seed_tables` registry this used to read.
+ *
+ * The earlier derivation ("truncate the table set replaySeedData re-seeds,
+ * derived the same way") rested on a premise that is false for essentially
+ * every real app: `_seed_tables` is populated only from DSL tables carrying a
+ * `_seed: true` flag, so for a normal app it is EMPTY, this function logged
+ * "nothing to truncate", and reset silently degraded to an additive merge. It
+ * was never caught because every unit test stubbed `getSeedTableNames` to
+ * return names, so the empty case — the only case that occurs in production —
+ * had no coverage at all.
+ *
+ * The honest table set is the one the thing that repopulates staging will
+ * actually write to. That is the app-copy engine's plan (`buildCopyPlan` in
+ * the app-copy overlay), and its table list comes from
+ * `deps.introspect` — which IS this module's `introspectSchema`. Control-api
+ * cannot import `buildCopyPlan` (the dependency runs overlay -> control-api
+ * and never the reverse, see staging-data-copy.ts), but it can and does call
+ * the identical introspection, with the identical `EXCLUDED_TABLES` filter, so
+ * the two sets are derived from one function rather than from two that can
+ * drift. `topo-sort.ts`'s FK ordering, which the plan also carries, is not
+ * needed here: one multi-table `TRUNCATE ... CASCADE` makes Postgres resolve
+ * the ordering itself.
+ *
+ * Read from STAGING, not production, and therefore a SUPERSET of what the copy
+ * refills: a table that exists only on staging is emptied too. That is
+ * deliberate and inside the contract — reset is "discard the staging app's
+ * data", and a staging-only table is staging data — and it is named on the job
+ * (see executeStagingReset's not-repopulated warning) rather than left for the
+ * user to discover.
  *
  * THREE INDEPENDENT GUARDS before the TRUNCATE runs, because a TRUNCATE aimed
  * at the wrong pool destroys a customer's PRODUCTION data, unrecoverably —
@@ -211,54 +245,44 @@ export async function startStagingReset(args: {
  *      about the live connection instead of a value threaded through
  *      arguments, so it is the only one that still catches that swap.
  *
- * Table set: derived via getSeedTableNames — the exact same `_seed_tables`
- * registry lookup replaySeedData itself uses — read from the STAGING
- * (destination) pool, not hardcoded. Read from staging rather than
- * production because these are the tables that must physically exist on the
- * pool being truncated; reset is defined as "discard staging's own seed
- * data", so a seed table staging has (even one production has since
- * removed) is still cleared. Filtered again against schema-introspector.ts's
+ * `introspectSchema` already excludes schema-introspector.ts's
  * `EXCLUDED_TABLES` (Butterbase's own per-app bookkeeping: `_rag_*`,
- * `_idempotency_keys`, the migration-tracking tables, `_seed_tables` itself)
- * before use — belt-and-suspenders: today none of those tables can reach
- * `_seed_tables` (schema-differ.ts's bare `CREATE TABLE`, without `IF NOT
- * EXISTS`, errors before a user schema could ever register one under a
- * reserved name), but that is an emergent property of two OTHER modules,
- * not an invariant this file enforces itself. This filter makes "never
- * truncate our own bookkeeping tables" true here even if that upstream
- * behavior ever changes.
+ * `_idempotency_keys`, the migration-tracking tables, `_seed_tables` itself).
+ * The list is filtered against it a second time here — belt-and-suspenders,
+ * and structural rather than emergent: this file's own invariant is "never
+ * truncate our own bookkeeping tables", and it must stay true even if
+ * introspectSchema's own exclusion ever moves.
  *
- * Runs `TRUNCATE ... CASCADE` rather than a table-by-table DELETE, so
- * Postgres resolves foreign-key ordering itself. CASCADE is a deliberate
- * choice over a strict, closure-only TRUNCATE (which would refuse to run at
- * all if staging has a non-seed table with a foreign key into a seed table —
- * e.g. a scratch table someone created only in staging while experimenting).
- * Reset's contract is "discard the staging app's data"; a staging-only table
- * IS staging data, so sweeping it is within that contract, and refusing to
- * run at all would be strictly worse for that legitimate case. See the Task
- * 16 fix-round-1 write-up for the schema audit establishing that
- * Butterbase's own data-plane infrastructure tables (`_rag_*`,
+ * Runs ONE `TRUNCATE ... CASCADE` over the whole list rather than a
+ * table-by-table DELETE, so Postgres resolves foreign-key ordering itself —
+ * this is why the plan's topo-sort is not replicated here. CASCADE is kept
+ * even though the list is now every user table, because the only thing left
+ * outside the list is Butterbase's own bookkeeping (`_rag_*`,
  * `_idempotency_keys`, `_data_plane_migrations`, `_ai_migrations`,
- * `_seed_tables`) never carry a foreign key into an app-defined seed table,
- * so CASCADE cannot reach them in practice.
+ * `_seed_tables`), and the Task 16 fix-round-1 schema audit established that
+ * none of those carries a foreign key into an app-defined table — so CASCADE
+ * has nothing outside the list to reach in practice.
  *
  * STANDING RULE (fifth time this feature has needed it — see Task 11's
  * ignoredRemovals, Task 13's surfaced RLS policies and disabled-trigger
  * disclosure, Task 14's zero-rewrite and Pages-still-building warnings): do
  * the conservative thing, then name it. CASCADE reaching a table outside the
- * seed set is exactly that shape — sweeping it is the right call, but the
- * user must be able to reconstruct what happened from the job record alone,
- * not from server logs they cannot see. Before running the TRUNCATE, this
- * makes a best-effort (non-blocking) attempt to discover which OTHER tables
- * a cascade would reach — via the same foreign-key graph Postgres itself
- * would follow — and appends a job warning naming them if any are found.
- * The discovery query itself must NEVER gate or fail the truncate: a missing
- * warning is not worth failing a reset that otherwise succeeded, so a
- * discovery failure is caught, logged, and the truncate proceeds anyway. Do
- * not "fix" that into a hard failure — a failed introspection query says
- * nothing about whether the TRUNCATE itself would have been safe.
+ * truncate list is exactly that shape — sweeping it is the right call, but
+ * the user must be able to reconstruct what happened from the job record
+ * alone, not from server logs they cannot see. Before running the TRUNCATE,
+ * this makes a best-effort (non-blocking) attempt to discover which OTHER
+ * tables a cascade would reach — via the same foreign-key graph Postgres
+ * itself would follow — and appends a job warning naming them if any are
+ * found. That should now be empty for every app; it is kept precisely so that
+ * "should now be empty" is a thing the job record proves rather than a thing
+ * this comment asserts. The discovery query itself must NEVER gate or fail
+ * the truncate: a missing warning is not worth failing a reset that otherwise
+ * succeeded, so a discovery failure is caught, logged, and the truncate
+ * proceeds anyway. Do not "fix" that into a hard failure — a failed
+ * introspection query says nothing about whether the TRUNCATE itself would
+ * have been safe.
  */
-async function truncateStagingSeedTables(args: {
+async function truncateStagingAppTables(args: {
   prodAppId: string;
   stagingAppId: string;
   prodPool: pg.Pool;
@@ -287,24 +311,28 @@ async function truncateStagingSeedTables(args: {
     );
   }
 
-  const rawSeedTables = await getSeedTableNames(stagingPool, logger);
+  // THE SAME INTROSPECTION THE APP-COPY PLAN USES (buildCopyPlan's
+  // deps.introspect IS this function) — see the doc comment for why the
+  // `_seed_tables` registry this used to read was the wrong source.
+  const stagingSchema = await introspectSchema(stagingPool);
+  const rawTables = Object.keys(stagingSchema.tables);
   // See the function doc comment on why this filter exists even though
-  // nothing currently reaches it: structural, not emergent.
-  const seedTables = rawSeedTables.filter((t) => !EXCLUDED_TABLES.includes(t));
-  if (seedTables.length !== rawSeedTables.length) {
+  // introspectSchema already applies it: structural, not emergent.
+  const tables = rawTables.filter((t) => !EXCLUDED_TABLES.includes(t));
+  if (tables.length !== rawTables.length) {
     logger.warn(
       {
         stagingAppId,
-        excluded: rawSeedTables.filter((t) => EXCLUDED_TABLES.includes(t)),
+        excluded: rawTables.filter((t) => EXCLUDED_TABLES.includes(t)),
       },
-      '[staging-reset] _seed_tables named a Butterbase-internal bookkeeping table; excluded it '
-        + 'from truncation (this should never happen — see truncateStagingSeedTables doc comment)',
+      '[staging-reset] introspection returned a Butterbase-internal bookkeeping table; excluded '
+        + 'it from truncation (this should never happen — see truncateStagingAppTables doc comment)',
     );
   }
-  if (seedTables.length === 0) {
+  if (tables.length === 0) {
     logger.info(
       { stagingAppId },
-      '[staging-reset] no seed-flagged tables on staging; nothing to truncate',
+      '[staging-reset] staging has no user tables; nothing to truncate',
     );
     return { tables: [] };
   }
@@ -317,10 +345,10 @@ async function truncateStagingSeedTables(args: {
   // name it.
   try {
     const closure = await stagingPool.query<{ table_name: string }>(
-      `WITH RECURSIVE seed(name) AS (
+      `WITH RECURSIVE targeted(name) AS (
          SELECT unnest($1::text[])
        ), reached AS (
-         SELECT name FROM seed
+         SELECT name FROM targeted
          UNION
          SELECT c.conrelid::regclass::text AS name
          FROM pg_constraint c
@@ -328,23 +356,23 @@ async function truncateStagingSeedTables(args: {
          WHERE c.contype = 'f'
        )
        SELECT DISTINCT name AS table_name FROM reached`,
-      [seedTables],
+      [tables],
     );
     const reached = closure.rows.map((r) => r.table_name.split('.').pop() ?? r.table_name);
-    const extra = reached.filter((t) => !seedTables.includes(t));
+    const extra = reached.filter((t) => !tables.includes(t));
     if (extra.length > 0) {
       logger.warn(
-        { stagingAppId, seedTables, cascadeReaches: extra },
-        '[staging-reset] TRUNCATE ... CASCADE will also reach these non-seed tables via foreign key',
+        { stagingAppId, truncating: tables, cascadeReaches: extra },
+        '[staging-reset] TRUNCATE ... CASCADE will also reach tables outside the truncate list',
       );
       // Job-level, not just a log line: the user cannot see server logs, and
       // has to be able to learn from the job record alone that their reset
       // also cleared these tables.
       await appendCloneJobWarnings(controlDb, jobId, [
-        `Reset also cleared ${extra.length} non-seed ${extra.length === 1 ? 'table' : 'tables'} `
-          + `on staging via foreign-key cascade: ${extra.join(', ')}. These tables exist on `
-          + 'staging but are not flagged _seed:true, so TRUNCATE ... CASCADE swept them along '
-          + 'with the seed tables it truncated deliberately.',
+        `Reset also cleared ${extra.length} ${extra.length === 1 ? 'table' : 'tables'} on `
+          + `staging via foreign-key cascade: ${extra.join(', ')}. These sit outside the set of `
+          + 'app data tables reset truncates deliberately, and TRUNCATE ... CASCADE swept them '
+          + 'along with it.',
       ]);
     }
   } catch (err) {
@@ -375,14 +403,14 @@ async function truncateStagingSeedTables(args: {
     );
   }
 
-  const tableList = seedTables.map((t) => `"${t}"`).join(', ');
+  const tableList = tables.map((t) => `"${t}"`).join(', ');
   await stagingPool.query(`TRUNCATE TABLE ${tableList} CASCADE`);
   logger.info(
-    { stagingAppId, tables: seedTables },
-    '[staging-reset] truncated staging seed tables before re-seed',
+    { stagingAppId, tables },
+    '[staging-reset] truncated staging data tables before re-populating from production',
   );
 
-  return { tables: seedTables };
+  return { tables };
 }
 
 /**
@@ -423,7 +451,7 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
   // Hard-refuse before touching anything: on a reset job these two ids must
   // always differ. If they were ever equal, something upstream is broken and
   // the correct response is to fail loudly rather than run any SQL — see
-  // truncateStagingSeedTables's doc comment for why this is checked again,
+  // truncateStagingAppTables's doc comment for why this is checked again,
   // defense-in-depth, right before the TRUNCATE itself. This one is checked
   // even earlier — before the job status is even touched — and is NOT
   // attempt-gated: it is a config invariant, not a transient failure, so
@@ -464,10 +492,39 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
   try {
     await setCloneJobStatus(controlDb, jobId, { status: 'seeding_data' });
 
-    // Truncate BEFORE re-seeding: replaySeedData is INSERT ... ON CONFLICT DO
-    // NOTHING, so without this step a reset would leave every row staging
-    // already had untouched — see truncateStagingSeedTables's doc comment.
-    const truncated = await truncateStagingSeedTables({
+    // SCHEMA FIRST, THEN DATA. Reset's contract is "make staging look like
+    // production again", and schema is part of that: the app-copy engine reads
+    // production's column list and INSERTs it into staging verbatim, so once
+    // staging's schema has diverged every row of the copy fails with `column
+    // "x" of relation "y" does not exist` and the reset job goes to `failed`
+    // — permanently, because nothing here ever reconciled schema, so the state
+    // could only be cleared by hand-written DDL on the staging database. The
+    // feature's own supported flow produces exactly that divergence (drop a
+    // column in staging, promote, production keeps it — promote-preview's
+    // `ignoredRemovals`).
+    //
+    // ADDITIVE ONLY, and it names what it could not fix. See
+    // reconcileStagingSchema: a dropped column comes back, a changed column
+    // TYPE and a staging-only column do not, because both would need
+    // destructive DDL against staging that reset is not entitled to choose on
+    // the user's behalf. Those become job warnings rather than a silent
+    // no-op or a false claim of success — the copy below may still fail on
+    // them, but it fails having already said which divergence it could not
+    // repair. Run BEFORE the truncate so the truncate sees the reconciled
+    // table set (a table only production had is created, empty, then swept
+    // harmlessly and refilled by the copy).
+    const reconciled = await reconcileStagingSchema({
+      prodPool, stagingPool, stagingAppId, logger,
+    });
+    if (reconciled.unreconciled.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, reconciled.unreconciled);
+    }
+
+    // Truncate BEFORE re-populating: both replaySeedData and the app-copy
+    // engine's data phase are INSERT ... ON CONFLICT DO NOTHING, so without
+    // this step a reset leaves every row staging already had untouched — see
+    // truncateStagingAppTables's doc comment.
+    const truncated = await truncateStagingAppTables({
       prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, controlDb, jobId, logger,
     });
 
@@ -490,33 +547,33 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
       await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
     }
 
-    // THE TRUNCATE LIST AND THE RE-SEED LIST COME FROM DIFFERENT DATABASES.
-    // truncateStagingSeedTables reads `_seed_tables` from STAGING (correct —
+    // THE TRUNCATE LIST IS READ FROM STAGING; WHAT REFILLS IT IS READ FROM
+    // PRODUCTION. truncateStagingAppTables introspects STAGING (correct —
     // those are the tables that physically exist on the pool being emptied),
-    // while replaySeedData reads it from PRODUCTION. A table flagged _seed on
-    // staging but not on production is therefore TRUNCATED and then never
-    // repopulated: reset empties it and reports success. No warning came from
-    // replaySeedData for it, because from production's point of view the table
-    // was never in scope at all — so it has to be computed here, from the two
-    // lists, or it cannot be seen at all.
+    // while both replaySeedData and the app-copy engine's plan introspect
+    // PRODUCTION. A table that exists only on staging is therefore TRUNCATED
+    // and then never repopulated: reset empties it and reports success.
+    // Nothing downstream can warn about it, because from production's point of
+    // view the table was never in scope at all — so it has to be computed
+    // here, from the two lists, or it cannot be seen at all.
     //
     // Emptying it is still the right behaviour: reset is defined as "discard
-    // the staging app's data", and a staging-only seed table is staging data.
-    // What is not acceptable is doing it silently.
-    const reseeded = new Set(seedResult.tables);
-    const emptiedNotReseeded = truncated.tables.filter((t) => !reseeded.has(t));
-    if (emptiedNotReseeded.length > 0) {
+    // the staging app's data", and a staging-only table is staging data. What
+    // is not acceptable is doing it silently.
+    const inProduction = new Set(reconciled.productionTables);
+    const emptiedNotRefilled = truncated.tables.filter((t) => !inProduction.has(t));
+    if (emptiedNotRefilled.length > 0) {
       logger.warn(
-        { stagingAppId, prodAppId, emptiedNotReseeded },
-        '[staging-reset] tables truncated on staging were not re-seeded from production',
+        { stagingAppId, prodAppId, emptiedNotRefilled },
+        '[staging-reset] tables truncated on staging have no counterpart in production',
       );
       await appendCloneJobWarnings(controlDb, jobId, [
-        `${emptiedNotReseeded.length} `
-          + `${emptiedNotReseeded.length === 1 ? 'table was' : 'tables were'} emptied on staging `
-          + `but not re-populated from production: ${emptiedNotReseeded.join(', ')}. `
-          + 'They are flagged _seed:true on staging but production does not carry them as seed '
-          + `${emptiedNotReseeded.length === 1 ? 'data' : 'data'}, so there was nothing to copy `
-          + 'back. They are now empty.',
+        `${emptiedNotRefilled.length} `
+          + `${emptiedNotRefilled.length === 1 ? 'table was' : 'tables were'} emptied on staging `
+          + `but not re-populated from production: ${emptiedNotRefilled.join(', ')}. `
+          + `${emptiedNotRefilled.length === 1 ? 'It exists' : 'They exist'} only on staging, so `
+          + `there was nothing to copy back. ${emptiedNotRefilled.length === 1 ? 'It is' : 'They are'} `
+          + 'now empty; the table itself is left in place.',
       ]);
     }
 

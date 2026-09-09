@@ -368,3 +368,36 @@ export function parseIndexDef(indexdef: string): IndexInfo | null {
 
   return info;
 }
+
+/**
+ * Tables and columns present in `a` but absent from `b`, as human-readable
+ * descriptions ('table "notes"', 'column "notes"."priority"').
+ *
+ * Deliberately generic and direction-free, because two callers ask the same
+ * comparison in opposite directions:
+ *   - promote-preview.ts asks production -> staging: "what did staging remove
+ *     that promote will not carry over" (its `ignoredRemovals`).
+ *   - staging-schema-reconcile.ts asks staging -> production: "what does
+ *     staging have that production does not, and that a reset's data copy will
+ *     therefore never populate".
+ * One comparison, one implementation; the direction lives entirely in the
+ * argument order at the call site.
+ */
+export function describeMissing(
+  a: IntrospectedSchema, b: IntrospectedSchema,
+): string[] {
+  const out: string[] = [];
+  for (const [tableName, aTable] of Object.entries(a.tables)) {
+    const bTable = b.tables[tableName];
+    if (!bTable) {
+      out.push(`table "${tableName}"`);
+      continue;
+    }
+    for (const columnName of Object.keys(aTable.columns)) {
+      if (!(columnName in bTable.columns)) {
+        out.push(`column "${tableName}"."${columnName}"`);
+      }
+    }
+  }
+  return out;
+}

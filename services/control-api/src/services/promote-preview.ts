@@ -2,7 +2,7 @@ import type pg from 'pg';
 import type { SchemaDSL } from './schema-validator.js';
 import { diffSchema, type DDLStatement } from './schema-differ.js';
 import { filterAdditive } from './schema-additive-filter.js';
-import { introspectSchema, type IntrospectedSchema } from './schema-introspector.js';
+import { describeMissing, introspectSchema, type IntrospectedSchema } from './schema-introspector.js';
 
 export interface PromotePreview {
   additive: DDLStatement[];
@@ -32,22 +32,10 @@ function computeIgnoredRemovals(
   prodSchema: IntrospectedSchema,
   stagingSchema: IntrospectedSchema,
 ): string[] {
-  const removals: string[] = [];
-
-  for (const [tableName, prodTable] of Object.entries(prodSchema.tables)) {
-    const stagingTable = stagingSchema.tables[tableName];
-    if (!stagingTable) {
-      removals.push(`table "${tableName}"`);
-      continue;
-    }
-    for (const columnName of Object.keys(prodTable.columns)) {
-      if (!(columnName in stagingTable.columns)) {
-        removals.push(`column "${tableName}"."${columnName}"`);
-      }
-    }
-  }
-
-  return removals;
+  // Production first, staging second: "what does production have that staging
+  // does not". staging-schema-reconcile.ts asks the same helper the other way
+  // round for a reset; the direction lives entirely in this argument order.
+  return describeMissing(prodSchema, stagingSchema);
 }
 
 /**

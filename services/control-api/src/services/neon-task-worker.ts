@@ -1718,11 +1718,19 @@ async function beginStagingDataCopy(args: {
  *     an explicit timeout in the pathological one, and "not yet ready" is a
  *     state the API and the dashboard can both read off the job.
  *
- * ISOLATION RUNS HERE, AFTER THE COPY. isolateStagingApp clears connected
- * accounts, disables integration configs and disables cron triggers; the copy
- * that just finished re-imported all three from production. Isolating only
- * before the copy would re-arm exactly what staging isolation disarms - a
- * staging app calling a third party with production's identity on a timer.
+ * ISOLATION RUNS HERE, AFTER THE COPY, ON BOTH TERMINAL PATHS.
+ * isolateStagingApp clears connected accounts, disables integration configs
+ * and disables cron triggers; the copy that just finished re-imported all
+ * three from production. Isolating only before the copy would re-arm exactly
+ * what staging isolation disarms - a staging app calling a third party with
+ * production's identity on a timer.
+ *
+ * "Both terminal paths" is load-bearing, not symmetry for its own sake. The
+ * copy's phases run in order and the `platform` phase that re-imports
+ * production's connected accounts completes before `verify`, so a copy that
+ * FAILS has very often already imported them. Isolating only on success left
+ * production's connected-account record sitting inside a staging app whose
+ * reset had failed.
  */
 export async function executeStagingCopyWaitTask(
   controlDb: pg.Pool,
@@ -1806,6 +1814,42 @@ export async function executeStagingCopyWaitTask(
       { err, jobId, stagingAppId },
       '[staging-copy-wait] could not record the retained-staging-app warning',
     ));
+
+    // ISOLATION RUNS ON THE FAILURE PATH TOO.
+    //
+    // The copy's phases run in order and it can fail at any of them — the
+    // `platform` phase, which re-imports production's `app_connected_accounts`
+    // rows, completes before `verify`, so a copy that fails at verify has
+    // ALREADY put production's connections into staging. Isolation used to
+    // live only on the success path below, so a failed copy left them there:
+    // verified live as production's own connected-account record sitting in
+    // the staging app after a failed reset.
+    //
+    // A staging app that failed to populate must still not hold production's
+    // connections, enabled integrations or armed cron triggers — the failure
+    // makes that MORE urgent, not less, because a failed job is exactly the
+    // state a user leaves sitting around while they work out what happened.
+    //
+    // Best-effort, and never allowed to stop the job reaching a terminal
+    // status: a job stuck in `copying_data` forever would be a worse outcome
+    // than an isolation pass that has to be re-run. A failure here is logged
+    // AND named on the job, because it is the one case where staging may still
+    // hold production's connections and nobody would otherwise know.
+    const failRuntimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+    await isolateStagingEnvironment(failRuntimeDb, controlDb, stagingAppId).catch(
+      async (err) => {
+        logger.error(
+          { err, jobId, stagingAppId },
+          '[staging-copy-wait] isolation after a failed copy did not complete',
+        );
+        await appendCloneJobWarnings(controlDb, jobId, [
+          `Staging isolation could not be completed after the failed copy. Staging app `
+          + `${stagingAppId} may still hold connected-account records, enabled integrations or `
+          + 'enabled cron triggers copied from production. Re-run the reset, or delete the '
+          + 'staging app.',
+        ]).catch(() => {});
+      },
+    );
 
     // Terminal for the STAGING job, and NOT rethrown: this task did exactly
     // what it was queued to do - observe the copy - and throwing would burn a
@@ -2018,7 +2062,7 @@ async function executePromoteTask(
 // Exported for testing only — nothing else should call it, dispatch goes
 // through processNextTask. Same rationale as executeUpdate: this wrapper is
 // where the pool-assignment hazard lives (see the header comment above and
-// truncateStagingSeedTables's Guard 3 in staging-reset.ts), so it needs
+// truncateStagingAppTables's Guard 3 in staging-reset.ts), so it needs
 // direct coverage rather than relying on executeStagingReset's own unit
 // tests, which inject prodPool/stagingPool directly and cannot see a swap
 // made here.
@@ -2096,7 +2140,7 @@ export async function executeResetTask(
         runtimeDb,
         prodPool,
         stagingPool,
-        // Passed through so truncateStagingSeedTables can assert, right
+        // Passed through so truncateStagingAppTables can assert, right
         // before the TRUNCATE, that stagingPool's live connection is
         // actually pointed at this database — the guard that still catches
         // a swap of the two getAppPoolForApp calls above, which no

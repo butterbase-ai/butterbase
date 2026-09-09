@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ introspectSchema: vi.fn(), diffSchema: vi.fn() }));
-vi.mock('./schema-introspector.js', () => ({ introspectSchema: mocks.introspectSchema }));
+// PARTIAL mock: only `introspectSchema` is stubbed. `describeMissing` — the
+// pure schema comparison `computeIgnoredRemovals` delegates to, shared with
+// staging-schema-reconcile.ts — must be the REAL one, or these tests would
+// assert against a stub of the very logic they exist to check.
+vi.mock('./schema-introspector.js', async (orig) => ({
+  ...(await orig<typeof import('./schema-introspector.js')>()),
+  introspectSchema: mocks.introspectSchema,
+}));
 vi.mock('./schema-differ.js', () => ({ diffSchema: mocks.diffSchema }));
 
 import { buildPromotePreview, formatBlockedStatements, formatIgnoredRemovals } from './promote-preview.js';
