@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { getCurrentUsage, getAiCreditsUsed, getStorageUsed, getDbSize, getMAU, getCreditsBalance, type MeterType } from '../services/usage-metering.js';
 import { getSpendingCapStatus } from '../services/billing-service.js';
 import { resolveOrganizationId } from '../services/org-resolver.js';
+import { getUsageByEnvironment } from '../services/staging-billing-attribution.js';
 
 // Stripe-backed billing functions live in the cloud overlay. In OSS mode they
 // resolve to no-op / unavailable stubs and Stripe-specific endpoints return
@@ -438,6 +439,44 @@ export async function billingRoutes(app: FastifyInstance) {
       }
       app.log.error({ err: error }, 'Failed to get usage history');
       return reply.code(500).send(apiError(error, 'Failed to retrieve usage history'));
+    }
+  });
+
+  /**
+   * GET /dashboard/usage/by-environment
+   *
+   * The same usage `/dashboard/usage` already reports, split into production
+   * and staging so a customer can see what their staging environments cost
+   * them. Staging has always consumed credits against the org meter with no
+   * separate line item (spec §6.7); the data to separate it was already being
+   * captured per app_id, so this is a read, not new metering — see
+   * services/staging-billing-attribution.ts.
+   *
+   * A NEW endpoint rather than a shape change to /dashboard/usage: that
+   * response is consumed by the dashboard and by API clients, and the standing
+   * rule on this branch is that changes to shared billing surfaces are
+   * additive with byte-identical defaults. Nothing about what is charged
+   * changes here.
+   */
+  app.get('/dashboard/usage/by-environment', async (request, reply) => {
+    const userId = requireUserId(request);
+
+    try {
+      const organizationId = await resolveOrganizationId(app.controlDb, userId);
+      const query = usageQuerySchema.parse(request.query);
+
+      const endDate = query.endDate || new Date().toISOString().split('T')[0];
+      const startDate = query.startDate
+        || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+      return await getUsageByEnvironment(app.controlDb, organizationId, startDate, endDate);
+    } catch (error) {
+      if (isHttpError(error)) throw error;
+      if (error instanceof z.ZodError) {
+        return reply.code(400).send({ error: 'Invalid query parameters', details: error.errors });
+      }
+      app.log.error({ err: error }, 'Failed to get usage split by environment');
+      return reply.code(500).send(apiError(error, 'Failed to retrieve usage by environment'));
     }
   });
 

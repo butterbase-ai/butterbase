@@ -45,6 +45,7 @@ import { appConfigRoutes } from './routes/app-config.js';
 import { cloneWebhookConfigRoutes } from './routes/clone-webhook-config.js';
 import { repoRoutes } from './routes/repo.js';
 import { cloneRoutes } from './routes/clone.js';
+import { stagingRoutes } from './routes/staging.js';
 import { cloneRoutesPreflight } from './routes/clone-preflight.js';
 import { cloneIntentRoutes } from './routes/clone-intent.js';
 import { templatesDiscoveryRoutes } from './routes/templates-discovery.js';
@@ -81,6 +82,7 @@ import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
 import { startCloneIntentsPruner } from './services/clone-intents-pruner.js';
 import { startCloneJobsReaper } from './services/clone-jobs-reaper.js';
 import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
+import { startStagingReaper } from './services/staging-reaper.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { aiMeetingsRoutes } from './routes/ai-meetings.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
@@ -123,6 +125,7 @@ import { partnerProxyRoutes } from './routes/partner-proxy.js';
 import { partnerPoolsAdminRoutes } from './routes/partner-pools-admin.js';
 import stateOutboxRoutes from './routes/admin/state-outbox.js';
 import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
+import stagingLinkReconcilerRoutes from './routes/admin/staging-link-reconciler.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
 import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
 import kvResolveJwtRoutes from './routes/internal/kv-resolve-jwt.js';
@@ -571,6 +574,7 @@ app.register(kvAdminRoutes);
 app.register(kvAuditRecentRoutes);
 app.register(stateOutboxRoutes);
 app.register(appIndexReaperRoutes);
+app.register(stagingLinkReconcilerRoutes);
 app.register(quotaStateRoutes);
 app.register(regionStateRoutes);
 app.register(activeMigrationsRoutes);
@@ -659,6 +663,7 @@ app.register(appConfigRoutes);
 app.register(cloneWebhookConfigRoutes);
 app.register(repoRoutes);
 app.register(cloneRoutes);
+app.register(stagingRoutes);
 app.register(cloneRoutesPreflight);
 app.register(cloneIntentRoutes);
 app.register(templatesDiscoveryRoutes);
@@ -1110,6 +1115,15 @@ Promise.resolve(app.ready())
       const cloneWebhookSweeperHandle = startCloneWebhookSweeper(app.controlDb, app.log);
       (app as any).cloneWebhookSweeperHandle = cloneWebhookSweeperHandle;
       app.log.info('Clone-webhook sweeper started (30s interval)');
+    }
+
+    // Staging reaper: pauses (never deletes) staging apps idle beyond
+    // BUTTERBASE_STAGING_IDLE_DAYS (default 30 days; runs every 6h). Scoped
+    // to this instance's own region — app_environments is a regional
+    // runtime-plane table, same as the other per-region background jobs.
+    if (process.env.SKIP_STAGING_REAPER !== '1') {
+      const stagingReaperStop = startStagingReaper(app.runtimeDb(regionConfig.instanceRegion), app.log);
+      (app as any).stagingReaperStop = stagingReaperStop;
     }
   })
   .catch((err: unknown) => {

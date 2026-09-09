@@ -43,7 +43,9 @@ export async function startActiveWindowListener(connectionString: string) {
       });
       await c.connect();
       await c.query('LISTEN hackathon_active_changed');
-      console.log('active-window listener connected');
+      // stderr, not stdout: this process may be running as an MCP stdio server,
+      // where stdout is the JSON-RPC transport. See services/mcp-server/src/index.ts.
+      console.error('active-window listener connected');
     } catch (err) {
       console.error('active-window listener connect failed — retrying', err);
       scheduleReconnect();

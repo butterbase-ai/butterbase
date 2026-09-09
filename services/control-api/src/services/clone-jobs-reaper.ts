@@ -11,19 +11,47 @@
 // the backstop.
 //
 // Every REAPER_INTERVAL_MS it looks for template_clone_jobs whose status is
-// neither terminal nor pre-processing (i.e. one of the mid-stage statuses)
-// and whose updated_at is older than STALE_THRESHOLD_MINUTES. For each
-// candidate it checks the dest region's neon_tasks table for a live task
-// row (status pending or processing) — if one exists, the queue is still
-// working on it and we leave it alone. Otherwise we flip the job to
-// 'failed' with a diagnostic error_message, insert the audit event, and
-// notify the dest owner + ops.
+// neither terminal nor pending (i.e. one of the mid-stage statuses, or —
+// for the staging modes this plan introduced — 'processing') and whose
+// updated_at is older than STALE_THRESHOLD_MINUTES. For each candidate it
+// checks the dest region's neon_tasks table for a live task row (status
+// pending or processing) — if one exists, the queue is still working on it
+// and we leave it alone. Otherwise we flip the job to 'failed' with a
+// diagnostic error_message, insert the audit event, and notify the dest
+// owner + ops.
+//
+// 'processing' and idx_template_clone_jobs_one_promote (migration 116): the
+// neon-task queue's own stale-task recovery (recoverStaleTasks in
+// neon-task-worker.ts) only reacts to task_type 'provision' when a task
+// permanently fails after exhausting its attempts — a 'clone' task_type
+// (which is what clone, update, staging_create, promote and staging_reset
+// all dispatch through) that dies this way leaves template_clone_jobs
+// exactly where it was, which is 'processing' if the worker never reached
+// its first per-stage status update. Every OTHER mid-stage status was
+// already reapable here; 'processing' was the one gap. For 'promote'
+// specifically that gap is permanent and user-visible, not just untidy:
+// idx_template_clone_jobs_one_promote enforces at most one non-terminal
+// promote row per dest_app_id, so a stuck 'processing' row blocks every
+// future promote for that app until someone edits the database by hand.
+// The same shape exists for 'update', but update has no equivalent
+// one-in-flight index, so its consequence is a lingering row, not a
+// permanently wedged feature.
+//
+// Reaping 'processing' is scoped to staging_create, promote and
+// staging_reset — the three modes migration 116 (this plan) added — rather
+// than every mode. 'clone' and 'update' are pre-existing, currently serve
+// real customer traffic, and were deliberately excluded from 'processing'
+// reaping by whoever wrote this file; changing their behavior is out of
+// scope here and not something to do incidentally while fixing the new
+// modes' blind spot. If a stranded 'clone' or 'update' processing row turns
+// out to need the same fix, that is a deliberate, separately-reviewed
+// change.
 
 import type pg from 'pg';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { config } from '../config.js';
 import { setCloneJobStatus, type CloneJobStatus } from './clone-jobs.js';
-import { insertCloneAuditLog } from './audit/audit-events-service.js';
+import { insertCloneAuditLog, type CloneAuditEventType } from './audit/audit-events-service.js';
 import { notifyCloneFailed, notifyCloneReaperDigest } from './failure-notifications.service.js';
 
 const STALE_THRESHOLD_MINUTES = 15;
@@ -31,11 +59,22 @@ const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const BATCH_LIMIT = 100;
 const REAP_ERROR_MESSAGE = 'Clone worker abandoned mid-stage; reaped by clone-jobs-reaper.';
 
+/**
+ * Modes for which a job stranded in 'processing' — not just a later
+ * mid-stage status — is reapable. See the file header comment: this is
+ * deliberately narrower than CloneJob['mode'] to avoid an incidental
+ * behavior change to the pre-existing clone/update pipelines.
+ */
+const PROCESSING_REAPABLE_MODES = ['staging_create', 'promote', 'staging_reset'] as const;
+
 export interface ReaperLogger {
   info(obj: unknown, msg?: string): void;
   warn(obj: unknown, msg?: string): void;
   error(obj: unknown, msg?: string): void;
 }
+
+/** Matches template_clone_jobs.mode's full CHECK constraint (migration 116). */
+type CloneJobMode = 'clone' | 'update' | 'staging_create' | 'promote' | 'staging_reset';
 
 interface Candidate {
   id: string;
@@ -45,9 +84,39 @@ interface Candidate {
   status: CloneJobStatus;
   requested_by_user_id: string;
   updated_at: Date;
-  /** Update-mode jobs ride this same table; the failure email must not call them clones. */
-  mode: 'clone' | 'update';
+  /**
+   * The database column allows five values (migration 116), not two — this
+   * type used to lie and say 'clone' | 'update', which mislabeled every
+   * staging_create/promote/staging_reset failure as a plain clone failure in
+   * both the audit log and the failure-notification email.
+   */
+  mode: CloneJobMode;
   ageMinutes: number;
+}
+
+/**
+ * Maps a candidate's mode to the audit event type its reap should record.
+ * 'staging_create' shares 'template_clone_failed' with 'clone' on purpose:
+ * staging_create dispatches through executeClone itself (see
+ * resolveCloneDispatch / neon-task-worker.ts), which already emits
+ * template_clone_started/completed/failed regardless of mode — this keeps
+ * the reaper consistent with what the queue's own success/failure path
+ * already records for that mode, rather than inventing a third label for
+ * the same event.
+ */
+function auditEventTypeForMode(mode: CloneJobMode): CloneAuditEventType {
+  switch (mode) {
+    case 'update':
+      return 'template_update_failed';
+    case 'promote':
+      return 'staging_promote_failed';
+    case 'staging_reset':
+      return 'staging_reset_failed';
+    case 'staging_create':
+    case 'clone':
+    default:
+      return 'template_clone_failed';
+  }
 }
 
 async function fetchCandidates(controlDb: Pick<pg.Pool, 'query'>): Promise<Candidate[]> {
@@ -60,12 +129,15 @@ async function fetchCandidates(controlDb: Pick<pg.Pool, 'query'>): Promise<Candi
     requested_by_user_id: string;
     updated_at: Date;
     age_minutes: string;
-    mode: 'clone' | 'update';
+    mode: CloneJobMode;
   }>(
     `SELECT id, source_app_id, dest_app_id, dest_region, status, requested_by_user_id, updated_at, mode,
             EXTRACT(EPOCH FROM (now() - updated_at)) / 60 AS age_minutes
        FROM template_clone_jobs
-      WHERE status NOT IN ('completed', 'failed', 'pending', 'processing')
+      WHERE (
+              status NOT IN ('completed', 'failed', 'pending', 'processing')
+              OR (status = 'processing' AND mode IN (${PROCESSING_REAPABLE_MODES.map((m) => `'${m}'`).join(', ')}))
+            )
         AND updated_at < now() - interval '${STALE_THRESHOLD_MINUTES} minutes'
       ORDER BY updated_at ASC
       LIMIT $1`,
@@ -148,7 +220,7 @@ export async function runOnce(
     insertCloneAuditLog(controlDb, {
       appId: c.source_app_id,
       userId: c.requested_by_user_id,
-      eventType: c.mode === 'update' ? 'template_update_failed' : 'template_clone_failed',
+      eventType: auditEventTypeForMode(c.mode),
       metadata: {
         job_id: c.id,
         dest_app_id: c.dest_app_id,

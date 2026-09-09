@@ -19,7 +19,18 @@ import { getRuntimeDbForApp } from '../region-resolver.js';
  */
 export type CloneAuditEventType =
   | 'template_clone_started' | 'template_clone_completed' | 'template_clone_failed'
-  | 'template_update_started' | 'template_update_completed' | 'template_update_failed';
+  | 'template_update_started' | 'template_update_completed' | 'template_update_failed'
+  // Promote writes a staging app's state onto a LIVE production app; the
+  // owner deserves the same record an update leaves. event_type is free text
+  // in auth_audit_logs (db/control-plane/006_audit_logs.sql), so no migration
+  // is needed to widen this union.
+  | 'staging_promote_started' | 'staging_promote_completed' | 'staging_promote_failed'
+  // staging_reset re-seeds an existing staging app's code AND data from
+  // production — as consequential to that app's owner as an update is to a
+  // fork's. Added for clone-jobs-reaper.ts (Task 17), which can now reap a
+  // stranded staging_reset job and needs an event type that isn't a lie.
+  // Same free-text column, same no-migration-needed story as staging_promote.
+  | 'staging_reset_started' | 'staging_reset_completed' | 'staging_reset_failed';
 
 export async function insertCloneAuditLog(
   controlDb: Pool,

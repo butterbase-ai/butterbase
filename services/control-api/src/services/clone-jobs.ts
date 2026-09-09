@@ -13,6 +13,7 @@ export type CloneJobStatus =
   | 'replaying_config'
   | 'copying_repo'
   | 'seeding_data'
+  | 'copying_data'
   | 'completed'
   | 'failed';
 
@@ -32,7 +33,15 @@ export function isTerminalCloneStatus(status: CloneJobStatus): boolean {
 export interface CloneJob {
   id: string;
   source_app_id: string;
-  source_snapshot_id: string;
+  /**
+   * NULL only for mode='promote' jobs whose staging app had no repo snapshot
+   * yet at request time (see startPromote in promote-jobs.ts). Every other
+   * mode requires a real, pinned-at-create-time snapshot id: start-clone.ts
+   * refuses with NO_SNAPSHOT before creating a clone job, and
+   * template-releases.ts's NoRepoSnapshotError makes the same guarantee for
+   * update jobs (created from a published release's snapshot_id).
+   */
+  source_snapshot_id: string | null;
   source_region: string;
   dest_app_id: string | null;
   dest_region: string;
@@ -40,6 +49,23 @@ export interface CloneJob {
   dest_organization_id: string | null;
   dest_app_name: string | null;
   status: CloneJobStatus;
+  /**
+   * The `app_copy_jobs` row a staging_create/staging_reset job is waiting on
+   * while `status = 'copying_data'`. NULL for every other mode, and for a
+   * staging job on a deployment with no app-copy engine (see
+   * staging-data-copy.ts). Added by control-plane migration 118.
+   */
+  data_copy_job_id: string | null;
+  /**
+   * Staging only: the subdomain allocated at request time by
+   * `allocateStagingSubdomain` and reported to the caller in the
+   * `POST /v1/apps/:id/staging` response. The clone worker applies it verbatim
+   * for `mode = 'staging_create'` rather than deriving its own from the
+   * destination name, so the value the API promised is the value that lands.
+   * NULL for every other mode, which keeps the worker's pre-existing
+   * derive-from-name path byte-identical. Added by control-plane migration 119.
+   */
+  dest_subdomain: string | null;
   retry_count: number;
   error_message: string | null;
   warnings: string[] | null;
@@ -49,7 +75,7 @@ export interface CloneJob {
   pending_env_vars: string | null;       // encrypted JSON blob (AUTH_ENCRYPTION_KEY)
   auto_mint_requests: { fn_name: string; key: string }[] | null;
   unfilled_env_vars: Record<string, string[]> | null;
-  mode: 'clone' | 'update';
+  mode: 'clone' | 'update' | 'staging_create' | 'promote' | 'staging_reset';
   target_release_id: string | null;
   pre_sync_snapshot_id: string | null;
   pre_sync_lineage: PreSyncLineage | null;
@@ -81,7 +107,8 @@ export async function createCloneJob(
   controlDb: pg.Pool,
   args: {
     sourceAppId: string;
-    sourceSnapshotId: string;
+    /** See CloneJob.source_snapshot_id — null only for a promote whose staging app has no repo yet. */
+    sourceSnapshotId: string | null;
     sourceRegion: string;
     destRegion: string;
     requestedByUserId: string;
@@ -133,15 +160,71 @@ export async function getCloneJob(controlDb: pg.Pool, jobId: string): Promise<Cl
   return res.rows[0] ?? null;
 }
 
+export interface LatestStagingJobPointer {
+  job_id: string;
+  mode: 'staging_create' | 'promote' | 'staging_reset';
+  status: CloneJobStatus;
+  created_at: Date;
+}
+
+/**
+ * The most recent staging-related job for a PRODUCTION app id — i.e. the job
+ * the staging dashboard should poll (via GET /v1/clone-jobs/:job_id) to
+ * recover warnings from an operation nobody's tab is still open for.
+ *
+ * The three staging modes do not key the same way (see 116_staging_job_modes.sql
+ * and start-staging.ts / promote-jobs.ts / staging-reset.ts):
+ *   - staging_create, staging_reset: source_app_id = production, dest_app_id = staging
+ *   - promote:                       source_app_id = staging,     dest_app_id = production
+ * So "for this production app" means source_app_id = prodAppId for the first
+ * two modes, OR dest_app_id = prodAppId for promote — never the same column
+ * for all three. The mode filter also excludes ordinary 'clone'/'update' jobs
+ * that happen to share an app id (e.g. this app was itself cloned from a
+ * template, or updated from a release) — those are not staging operations on
+ * this prod/staging pair and must not be surfaced here.
+ */
+export async function getLatestStagingJob(
+  controlDb: pg.Pool, prodAppId: string,
+): Promise<LatestStagingJobPointer | null> {
+  const res = await controlDb.query<LatestStagingJobPointer>(
+    `SELECT id AS job_id, mode, status, created_at
+       FROM template_clone_jobs
+      WHERE (mode IN ('staging_create', 'staging_reset') AND source_app_id = $1)
+         OR (mode = 'promote' AND dest_app_id = $1)
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [prodAppId],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function setCloneJobStatus(
   controlDb: pg.Pool,
   jobId: string,
-  patch: Partial<Pick<CloneJob, 'status' | 'dest_app_id' | 'error_message' | 'completed_at'>>,
+  patch: Partial<Pick<
+    CloneJob,
+    'status' | 'dest_app_id' | 'error_message' | 'completed_at' | 'data_copy_job_id'
+    | 'dest_subdomain'
+  >>,
 ): Promise<void> {
+  // A completion patch that doesn't explicitly say otherwise clears
+  // error_message. Every 'failed' transition in this codebase sets
+  // error_message alongside status in the same patch (see execute-promote.ts,
+  // neon-task-worker.ts, staging-reset.ts), so this only fires for genuine
+  // completions. Without it, a job that hit an internal error on an earlier
+  // attempt and then succeeded on retry keeps carrying that stale message —
+  // a caller polling the job sees status: 'completed' with an error_message
+  // still attached, and a naive truthiness check on error_message reads a
+  // successful job as failed.
+  const effectivePatch =
+    patch.status === 'completed' && patch.error_message === undefined
+      ? { ...patch, error_message: null }
+      : patch;
+
   const fields: string[] = ['updated_at = now()'];
   const values: unknown[] = [];
   let i = 1;
-  for (const [k, v] of Object.entries(patch)) {
+  for (const [k, v] of Object.entries(effectivePatch)) {
     fields.push(`${k} = $${i++}`);
     values.push(v);
   }
@@ -383,17 +466,24 @@ export async function getActiveUpdateJob(
  * statuses left the source snapshot unpinned for most of the clone's life, so a
  * repo push on the template mid-clone could delete the very snapshot being
  * copied. Same predicate mistake migration 111 fixed for the update mutex.
+ *
+ * A promote job's source_snapshot_id can be NULL (staging app had no repo at
+ * request time — see startPromote) — filtered out here rather than pinning
+ * the literal string "null" or similar. Nothing to protect means nothing to
+ * pin, not a bug.
  */
 export async function listActiveCloneSnapshotIdsForApp(
   controlDb: pg.Pool,
   sourceAppId: string,
 ): Promise<Set<string>> {
-  const res = await controlDb.query<{ source_snapshot_id: string }>(
+  const res = await controlDb.query<{ source_snapshot_id: string | null }>(
     `SELECT source_snapshot_id FROM template_clone_jobs
       WHERE source_app_id = $1 AND NOT (status = ANY($2::text[]))`,
     [sourceAppId, TERMINAL_CLONE_STATUSES],
   );
-  return new Set(res.rows.map(r => r.source_snapshot_id));
+  return new Set(
+    res.rows.map(r => r.source_snapshot_id).filter((id): id is string => id !== null),
+  );
 }
 
 /**

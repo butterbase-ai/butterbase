@@ -73,6 +73,27 @@ export async function startClone(args: {
   envVarValues?: Record<string, Record<string, string>>;
   autoMintRequests?: { fn_name: string; key: string }[];
   logger: { warn(obj: unknown, msg?: string): void };
+  /**
+   * Skip the two admission rules that only make sense for "clone someone
+   * else's public template": the source must be `visibility = 'public'`, and
+   * the source must already have a `repo_latest_snapshot`. Additive, opt-in,
+   * same shape as clone-replay.ts's `preserveDestinationTriggerEnabled` /
+   * `warnOnZeroRewrite` / `throwOnFailure` (Tasks 13/14).
+   *
+   * Only `startStaging` passes this. The default (`false`/undefined) keeps
+   * `startClone` byte-identical for the public-template-clone route and the
+   * anonymous clone-intent redemption path — both of which legitimately
+   * require a public, snapshotted source. A staging environment is a
+   * database-only concept: the source is the caller's own (necessarily
+   * private) production app, and it may have no repo/frontend snapshot at
+   * all — Task 14 gave `executePromote` a backend-only path for exactly that
+   * case (`source_snapshot_id` nullable).
+   *
+   * Every other admission rule still applies: name-collision, the per-user
+   * in-flight cap, the payload validators, region resolution and the project
+   * quota are all unconditional below.
+   */
+  skipVisibilityAndSnapshotChecks?: boolean;
 }): Promise<StartCloneResult> {
   const { controlDb, sourceAppId, userId, destOrgId, logger } = args;
 
@@ -106,11 +127,17 @@ export async function startClone(args: {
     [sourceAppId],
   );
   const src = srcRow.rows[0];
-  if (!src || src.visibility !== 'public') {
-    return { ok: false, code: 'SOURCE_NOT_FOUND', reason: 'not_public' };
-  }
-  if (!src.repo_latest_snapshot) {
-    return { ok: false, code: 'NO_SNAPSHOT' };
+  if (!args.skipVisibilityAndSnapshotChecks) {
+    if (!src || src.visibility !== 'public') {
+      return { ok: false, code: 'SOURCE_NOT_FOUND', reason: 'not_public' };
+    }
+    if (!src.repo_latest_snapshot) {
+      return { ok: false, code: 'NO_SNAPSHOT' };
+    }
+  } else if (!src) {
+    // Staging still requires the row to exist — it just doesn't require it
+    // to be public or already snapshotted.
+    return { ok: false, code: 'SOURCE_NOT_FOUND', reason: 'unknown_app' };
   }
 
   // App names are NOT a global namespace — subdomains are. The only DB-level

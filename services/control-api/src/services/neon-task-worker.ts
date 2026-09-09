@@ -5,12 +5,25 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { provisionNeonDbForApp } from './app-db-provision.js';
 import { teardownAppDb } from './app-db-teardown.js';
+import { teardownAppStorage } from './app-storage-teardown.js';
+import { deleteObject as deleteStorageObject } from './s3.js';
 import { runMigrationsWithRetry, generateAppId, insertAppRow, provisionAppBackground } from './provisioner.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import { notifyProvisioningFailed, notifyCloneFailed } from './failure-notifications.service.js';
 import { addOrgAppIndex, removeOrgAppIndex } from './org-app-index.js';
 import { resolveOrganizationId } from './org-resolver.js';
-import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus } from './clone-jobs.js';
+import { getCloneJob, setCloneJobStatus, appendCloneJobWarnings, isTerminalCloneStatus, type CloneJob } from './clone-jobs.js';
+import { allocateDestSubdomainForJob } from './staging-naming.js';
+import {
+  finalizeStagingClone, isolateStagingEnvironment, linkStagingEnvironment,
+} from './staging-completion.js';
+import {
+  enqueueStagingDataCopy, enqueueCopyWaitTask, getStagingDataCopy,
+  classifyStagingCopyWait, stagingCopyWarnings, COPY_POLL_INTERVAL_MS,
+} from './staging-data-copy.js';
+import { executePromote } from './execute-promote.js';
+import { executeStagingReset } from './staging-reset.js';
+import { getEnvironmentLink, touchEnvironmentTimestamp } from './app-environments.js';
 import {
   getManifestJson,
   putManifest,
@@ -30,7 +43,8 @@ import { getAppPoolForApp } from './app-pool.js';
 import { replaySchema, replayRls, replaySeedData, replayFunctions, replayNonSecretConfig, replayMeetingsWebhook, replayAuthHookBinding, replaySubstrateLink, replayFrontend } from './clone-replay.js';
 import { replayDurableObjectsForClone, listDoEnvVarKeys } from './durable-objects.service.js';
 import { AUTO_MINT_CONVENTION_KEYS, mintApiKeyForClone } from './clone-env-vars.js';
-import { replayAppEnvVars } from './clone-app-env.js';
+import { replayAppEnvVars, appEnvReplayOptsForCloneMode } from './clone-app-env.js';
+import { getStagingOverrides } from './staging-overrides.js';
 import { decrypt } from './crypto.js';
 import { insertCloneAuditLog } from './audit/audit-events-service.js';
 import { enqueueWebhookDelivery } from './clone-webhook-store.js';
@@ -198,8 +212,25 @@ async function processNextTask(
       // the precise error for that case.
       const cloneJobId = task.task_meta?.job_id;
       const queuedJob = cloneJobId ? await getCloneJob(controlDb, cloneJobId) : null;
-      if (resolveCloneDispatch(queuedJob) === 'update') {
+      const dispatch = resolveCloneDispatch(queuedJob);
+      if (dispatch === 'update') {
         await executeUpdate(controlDb, task, logger);
+      } else if (dispatch === 'promote') {
+        // NOT the clone branch. A promote writes onto an existing production
+        // app; executeClone provisions a new one. See resolveCloneDispatch.
+        await executePromoteTask(controlDb, task, logger);
+      } else if (dispatch === 'staging_copy_wait') {
+        // A staging_create/staging_reset job parked on the app-copy engine.
+        // NOT the clone or reset branch - both of those already ran for this
+        // job; see resolveCloneDispatch.
+        await executeStagingCopyWaitTask(controlDb, task, logger);
+      } else if (dispatch === 'staging_reset') {
+        // NOT the clone branch. A reset writes onto an existing staging app
+        // and reads from production; executeClone provisions a brand-new
+        // app. See resolveCloneDispatch and staging-reset.ts's direction
+        // warning — getting this dispatch wrong would run the fresh-provision
+        // pipeline against a reset job's dest_app_id.
+        await executeResetTask(controlDb, task, logger);
       } else {
         await executeClone(controlDb, dataPlaneDb, task, logger);
       }
@@ -402,6 +433,30 @@ async function executeDeprovision(
     if (appRow.rows.length > 0) {
       await dataPlaneDb.query(`DROP DATABASE IF EXISTS "${appRow.rows[0].db_name}"`);
     }
+  }
+
+  // Delete the app's uploaded object BYTES *before* the row delete below,
+  // because `storage_objects.app_id` cascades: once the app row is gone, the
+  // only record of which keys belonged to this app is gone with it and the
+  // bytes are unreachable forever. This matters most for a STAGING app, whose
+  // objects are a second physical copy of a customer's files written by the
+  // app-copy engine — see app-storage-teardown.ts for the shared-key guard
+  // that stops this deleting production's bytes. Best-effort by contract
+  // (never throws); counts only, never a key, since a key embeds a filename.
+  const storageTeardown = await teardownAppStorage({
+    runtimeDb: runtimePool, appId, deleteObject: deleteStorageObject,
+  });
+  if (storageTeardown.total > 0) {
+    logger.info(
+      { appId, ...storageTeardown },
+      '[neon-task-worker] storage objects deleted for app',
+    );
+  }
+  if (storageTeardown.failed > 0) {
+    logger.warn(
+      { appId, failed: storageTeardown.failed, total: storageTeardown.total },
+      '[neon-task-worker] some storage objects could not be deleted; bytes remain in the bucket',
+    );
   }
 
   // Delete the app row (cascade handles app_db_connections, app_users, etc.) — apps is runtime-tier
@@ -632,23 +687,49 @@ async function executeClone(
         // after provisioning has already started, which is the worst place to
         // discover it. Bounded so a pathological slug cannot spin forever; the
         // loop widens the suffix as it goes so later attempts collide less.
-        let destSubdomain = baseSlug;
-        for (let attempt = 0; attempt < 6; attempt++) {
-          const taken = await controlDb.query<{ app_id: string }>(
-            `SELECT app_id FROM org_app_index WHERE subdomain = $1`,
-            [destSubdomain],
+        // ONE allocator decides this, for every mode — see
+        // allocateDestSubdomainForJob in staging-naming.ts.
+        //
+        // For a staging_create job that carries a pinned dest_subdomain, that
+        // pinned value is the one POST /v1/apps/:id/staging already promised
+        // the caller, so it is the one that must land. Before migration 119
+        // there was nothing to carry it and this code derived a SECOND
+        // subdomain of its own from the destination name with a random numeric
+        // suffix, checked against a different table from the one the
+        // request-time allocator checked — so the API's answer and the app's
+        // real subdomain agreed only by luck. Every other mode keeps exactly
+        // the previous derive-from-name behaviour.
+        const allocated = await allocateDestSubdomainForJob({
+          job,
+          pools: {
+            controlDb,
+            runtimeDb: getRuntimeDbPool(config.runtimeDb, job.dest_region),
+          },
+          baseSlug,
+          logger,
+        });
+        const destSubdomain = allocated.subdomain;
+        if (allocated.reallocatedFrom) {
+          // Standing rule on this feature: do the conservative thing (keep the
+          // create working), then NAME it. The user cannot see server logs, so
+          // the divergence goes on the job record, and dest_subdomain is
+          // updated to what actually landed so the column is never a stale
+          // promise.
+          logger.warn(
+            { destAppId, pinned: allocated.reallocatedFrom, applied: destSubdomain },
+            '[clone] pinned staging subdomain was taken between request and provision; re-allocated',
           );
-          if (taken.rows.length === 0) break;
-          // 4 digits for the first few retries, 8 for the last ones.
-          const span = attempt < 3 ? 9000 : 90_000_000;
-          const floor = attempt < 3 ? 1000 : 10_000_000;
-          destSubdomain = `${baseSlug}-${Math.floor(Math.random() * span + floor)}`;
-          if (attempt === 5) {
-            logger.warn(
-              { destAppId, baseSlug },
-              '[clone] subdomain still colliding after 6 attempts; inserting anyway — the UNIQUE index is the backstop',
-            );
-          }
+          await appendCloneJobWarnings(controlDb, jobId, [
+            `The staging subdomain "${allocated.reallocatedFrom}" reported when this environment `
+              + 'was requested had been taken by the time it was provisioned. The staging app was '
+              + `given "${destSubdomain}" instead.`,
+          ]).catch((err) => {
+            logger.warn({ err, jobId }, '[clone] could not append subdomain re-allocation warning');
+          });
+          await setCloneJobStatus(controlDb, jobId, { dest_subdomain: destSubdomain })
+            .catch((err) => {
+              logger.warn({ err, jobId }, '[clone] could not record applied staging subdomain');
+            });
         }
 
         // Cross-region index so authorizeRepoRead/Write and other lookups can
@@ -738,56 +819,81 @@ async function executeClone(
         '[clone] RLS replayed',
       );
 
-      // 2. Read source manifest.
+      // 2. Read source manifest. job.source_snapshot_id is non-null for a
+      // normal template clone — start-clone.ts refuses with NO_SNAPSHOT
+      // before a clone job row is ever created if the source app has no
+      // repo — but a 'staging_create' job is the second legitimate NULL
+      // case (alongside promote's, Task 14 fix round 1): startStaging opts
+      // start-clone.ts out of that check (skipVisibilityAndSnapshotChecks)
+      // because a staging environment is a database concept and the
+      // production source may have no frontend/repo at all. Skip the whole
+      // repo-copy step in that case rather than throw — mirrors
+      // execute-promote.ts's 'repo' case for the same null.
       scope.setTag('step', 'copying_repo');
-      const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
-      if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
-      const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
-
-      // 3. Copy blobs.
-      const sameRegion = job.source_region === job.dest_region;
-      const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
-      if (sameRegion) {
-        for (const sha of distinctShas) {
-          await copyBlobSameRegion(job.source_app_id, resolvedDestAppId, sha);
+      const sourceSnapshotId = job.source_snapshot_id;
+      let manifestJson: string | null = null;
+      if (!sourceSnapshotId) {
+        if (job.mode !== 'staging_create') {
+          throw new Error(`[clone] job ${jobId} has no source_snapshot_id; expected the source app to have a repo snapshot`);
         }
+        await appendCloneJobWarnings(controlDb, jobId, [
+          'Source app has no repo snapshot to copy (nothing has been pushed to its repo yet). '
+            + 'Schema, RLS, durable objects, functions and config were still cloned.',
+        ]);
+        logger.info(
+          { jobId, sourceAppId: job.source_app_id },
+          '[clone] job.source_snapshot_id is null (staging_create); skipping repo copy',
+        );
       } else {
-        // Cross-region: stream GET from source S3 → PUT to dest S3.
-        // In local dev both regions share one LocalStack endpoint; in production
-        // each region has its own bucket/endpoint (injected via config).
-        const s3Opts = {
-          region: config.s3.region,
-          endpoint: config.s3.endpoint,
-          forcePathStyle: config.s3.forcePathStyle,
-          requestChecksumCalculation: 'WHEN_REQUIRED' as const,
-          responseChecksumValidation: 'WHEN_REQUIRED' as const,
-          credentials: config.s3.accessKeyId && config.s3.secretAccessKey
-            ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
-            : undefined,
-        };
-        const srcS3 = new S3Client(s3Opts);
-        const dstS3 = new S3Client(s3Opts);
-        const bucket = config.s3.bucket;
-        for (const sha of distinctShas) {
-          await copyBlobCrossRegion(job.source_app_id, resolvedDestAppId, sha, srcS3, bucket, dstS3, bucket);
+        manifestJson = await getManifestJson(job.source_app_id, sourceSnapshotId);
+        if (!manifestJson) throw new Error(`Source manifest ${sourceSnapshotId} not found`);
+        const manifest = JSON.parse(manifestJson) as { files: { path: string; sha256: string; size: number }[] };
+
+        // 3. Copy blobs.
+        const sameRegion = job.source_region === job.dest_region;
+        const distinctShas = Array.from(new Set(manifest.files.map((f) => f.sha256)));
+        if (sameRegion) {
+          for (const sha of distinctShas) {
+            await copyBlobSameRegion(job.source_app_id, resolvedDestAppId, sha);
+          }
+        } else {
+          // Cross-region: stream GET from source S3 → PUT to dest S3.
+          // In local dev both regions share one LocalStack endpoint; in production
+          // each region has its own bucket/endpoint (injected via config).
+          const s3Opts = {
+            region: config.s3.region,
+            endpoint: config.s3.endpoint,
+            forcePathStyle: config.s3.forcePathStyle,
+            requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+            responseChecksumValidation: 'WHEN_REQUIRED' as const,
+            credentials: config.s3.accessKeyId && config.s3.secretAccessKey
+              ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+              : undefined,
+          };
+          const srcS3 = new S3Client(s3Opts);
+          const dstS3 = new S3Client(s3Opts);
+          const bucket = config.s3.bucket;
+          for (const sha of distinctShas) {
+            await copyBlobCrossRegion(job.source_app_id, resolvedDestAppId, sha, srcS3, bucket, dstS3, bucket);
+          }
         }
-      }
 
-      // 4. Copy manifest.
-      if (sameRegion) {
-        await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, job.source_snapshot_id);
-      } else {
-        await putManifest(resolvedDestAppId, job.source_snapshot_id, manifestJson);
-      }
+        // 4. Copy manifest.
+        if (sameRegion) {
+          await copyManifestSameRegion(job.source_app_id, resolvedDestAppId, sourceSnapshotId);
+        } else {
+          await putManifest(resolvedDestAppId, sourceSnapshotId, manifestJson);
+        }
 
-      // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
-      //    region-direct pool (we already know dest's region from the job).
-      await setLatest(resolvedDestAppId, job.source_snapshot_id);
-      const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
-      await destRuntimeAppPool.query(
-        `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
-        [job.source_snapshot_id, resolvedDestAppId],
-      );
+        // 5. Set dest's latest pointer + repo_latest_snapshot column. Use the
+        //    region-direct pool (we already know dest's region from the job).
+        await setLatest(resolvedDestAppId, sourceSnapshotId);
+        const destRuntimeAppPool = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+        await destRuntimeAppPool.query(
+          `UPDATE apps SET repo_latest_snapshot = $1, updated_at = now() WHERE id = $2`,
+          [sourceSnapshotId, resolvedDestAppId],
+        );
+      }
 
       // Step 8 (Phase 5 A3): Copy seed-flagged table rows onto the dest DB.
       scope.setTag('step', 'seeding_data');
@@ -800,20 +906,77 @@ async function executeClone(
 
       // Replay app-level env vars BEFORE DO + function replay so both
       // downstream surfaces see the merged blob at first deploy/insert.
+      //
+      // STAGING ONLY (mode === 'staging_create'): production's app-level env
+      // vars are the one place a source app's secret VALUES reach the
+      // destination — replayFunctions blanks per-function env vars and DO
+      // replay copies key names only. Copying them verbatim hands a staging
+      // app production's live Stripe/SendGrid credentials, so an
+      // HTTP-triggered function in staging charges real cards. Task 9's
+      // isolateStagingApp neutralises connected accounts, integration configs
+      // and cron triggers but never touched raw secrets.
+      //
+      // So for staging we withhold every inherited VALUE (key names survive as
+      // empty strings, so the owner can see what to fill) and layer the
+      // owner's `staging_env_overrides` on top. Both are opt-in via `opts`;
+      // clone / update / public-template behaviour is byte-identical.
+      const isStagingCreate = job.mode === 'staging_create';
       try {
+        // Overrides are keyed on the PRODUCTION app (migration 053), which is
+        // this job's SOURCE — so they can be set before staging exists and are
+        // already in place on the very first create. Read from the source
+        // region's pool, which is where the route wrote them (staging is
+        // pinned to production's region, so the two pools are the same DB).
+        const stagingOverrides = isStagingCreate
+          ? await getStagingOverrides(sourceRuntimePool, job.source_app_id)
+          : undefined;
         const appEnvResult = await replayAppEnvVars(
           sourceRuntimePool, destRuntimePool,
           job.source_app_id, resolvedDestAppId, job.requested_by_user_id,
+          appEnvReplayOptsForCloneMode(job.mode, stagingOverrides),
         );
         if (appEnvResult.copied) {
           logger.info(
-            { destAppId: resolvedDestAppId, keyCount: appEnvResult.keyCount },
+            {
+              destAppId: resolvedDestAppId,
+              keyCount: appEnvResult.keyCount,
+              // Key NAMES only — a value is never logged.
+              withheldKeys: appEnvResult.withheldKeys,
+              overriddenKeys: appEnvResult.overriddenKeys,
+            },
             '[clone] copied app_env_vars from source',
+          );
+        }
+        // Standing rule for this phase: do the conservative thing, then NAME
+        // it. A staging app whose functions fail with a missing key is only
+        // recoverable if the owner is told which keys to set.
+        const withheld = appEnvResult.withheldKeys ?? [];
+        if (withheld.length > 0) {
+          await appendCloneJobWarnings(controlDb, jobId, [
+            `Production's app-level env var VALUES were deliberately not copied into staging: `
+              + `${withheld.join(', ')}. Each key exists on the staging app with an empty value, so `
+              + `functions that need it will fail with a missing-key error rather than silently `
+              + `running against production's live credentials. Set staging values with `
+              + `PUT /v1/apps/${job.source_app_id}/staging/env-overrides (or manage_staging `
+              + `action="set_env_overrides").`,
+          ]);
+        }
+        if ((appEnvResult.overriddenKeys?.length ?? 0) > 0) {
+          logger.info(
+            { destAppId: resolvedDestAppId, overriddenKeys: appEnvResult.overriddenKeys },
+            '[clone] staging env overrides applied over inherited keys',
           );
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        await appendCloneJobWarnings(controlDb, jobId, [`app_env_vars replay failed: ${msg}`]);
+        await appendCloneJobWarnings(controlDb, jobId, [
+          `app_env_vars replay failed: ${msg}`
+          + (isStagingCreate
+            ? ' — the staging app has NO app-level env vars as a result. This is the safe '
+              + 'direction (it cannot have inherited production values), but functions that '
+              + 'need them will fail until you set them.'
+            : ''),
+        ]);
         logger.warn({ err, destAppId: resolvedDestAppId }, '[clone] app_env_vars replay failed; continuing');
       }
 
@@ -1216,37 +1379,78 @@ async function executeClone(
       // captured HERE because it can only be captured at clone time — a fork
       // created without it can never be safely merged later, since by the time we
       // want a base it has already diverged.
-      try {
-        const releases = await listReleases(controlDb, job.source_app_id, 1);
-        const { baseRelease, baseSnapshotId } = decideLineageBase(
-          releases[0] ?? null,
-          job.source_snapshot_id,
-        );
-        // Point at the release when one exists; materialize inline only when the
-        // fork was cloned from live. Never both.
-        const baseFingerprint = baseRelease
-          ? null
-          : await captureAppState(sourceRuntimePool, sourceAppPool, job.source_app_id);
-
-        await recordLineage(controlDb, {
-          destAppId: resolvedDestAppId,
-          destRegion: job.dest_region,
-          sourceAppId: job.source_app_id,
-          sourceRegion: job.source_region,
-          baseReleaseId: baseRelease?.id ?? null,
-          baseFingerprint,
-          baseSnapshotId,
-        });
+      if (!sourceSnapshotId) {
+        // staging_create with no source repo (see the copying_repo step
+        // above): nothing was replayed at any snapshot, so there is no
+        // lineage base to record. decideLineageBase requires a real
+        // snapshot id — leave the fork with no lineage row rather than
+        // fabricate one.
         logger.info(
-          { destAppId: resolvedDestAppId, baseReleaseId: baseRelease?.id ?? null },
-          '[clone] lineage recorded',
+          { destAppId: resolvedDestAppId },
+          '[clone] no source_snapshot_id; skipping lineage record',
         );
-      } catch (err) {
-        logger.warn(
-          { err, destAppId: resolvedDestAppId },
-          '[clone] lineage record failed; backfill will repair',
-        );
+      } else {
+        try {
+          const releases = await listReleases(controlDb, job.source_app_id, 1);
+          const { baseRelease, baseSnapshotId } = decideLineageBase(
+            releases[0] ?? null,
+            sourceSnapshotId,
+          );
+          // Point at the release when one exists; materialize inline only when the
+          // fork was cloned from live. Never both.
+          const baseFingerprint = baseRelease
+            ? null
+            : await captureAppState(sourceRuntimePool, sourceAppPool, job.source_app_id);
+
+          await recordLineage(controlDb, {
+            destAppId: resolvedDestAppId,
+            destRegion: job.dest_region,
+            sourceAppId: job.source_app_id,
+            sourceRegion: job.source_region,
+            baseReleaseId: baseRelease?.id ?? null,
+            baseFingerprint,
+            baseSnapshotId,
+          });
+          logger.info(
+            { destAppId: resolvedDestAppId, baseReleaseId: baseRelease?.id ?? null },
+            '[clone] lineage recorded',
+          );
+        } catch (err) {
+          logger.warn(
+            { err, destAppId: resolvedDestAppId },
+            '[clone] lineage record failed; backfill will repair',
+          );
+        }
       }
+
+      // Staging pairs are linked only after every replay stage has succeeded, so
+      // a half-provisioned app never appears in the dashboard as a usable
+      // staging environment. finalizeStagingClone is a no-op for other modes.
+      // linkEnvironments is idempotent for a retry of this same job, but a
+      // permanent failure here (attempts exhausted) leaves a fully-provisioned,
+      // correctly-replayed staging app with no app_environments row — the job
+      // is marked 'failed' even though the app itself is fine; backfill will repair.
+      //
+      // STAGING WITH A PRODUCTION DATA COPY takes a different exit. Everything
+      // above replays SCHEMA and the _seed-flagged tables only; production's
+      // rows, auth users and uploaded files are copied by the app-copy engine,
+      // which runs on its own worker and finishes LATER than this task. So a
+      // staging_create that successfully enqueues a copy does not link the pair
+      // and does not complete here: it isolates (closing the window while the
+      // copy runs), parks the job in 'copying_data', and arms a wait task.
+      // Completing here would put a staging app in the dashboard, described as
+      // ready, holding schema and no rows — the same untruth this whole change
+      // exists to remove.
+      if (job.mode === 'staging_create') {
+        const started = await beginStagingDataCopy({
+          controlDb, runtimeDb: destRuntimePool, job, jobId,
+          prodAppId: job.source_app_id, stagingAppId: resolvedDestAppId,
+          region: job.dest_region, logger,
+        });
+        if (started) return;
+      }
+
+      await finalizeStagingClone(destRuntimePool, controlDb, job);
 
       // 6. Mark job completed.
       const completedAt = new Date();
@@ -1377,9 +1581,584 @@ export function shouldAbortUpdate(
  * Exported for the same reason decideLineageBase is: it is a one-line decision
  * inside an untestable effectful caller, and getting it wrong points a
  * destructive update at a fresh-provision path (or vice versa).
+ *
+ * This is NOT an exhaustive switch over CloneJob['mode'] — widening the mode
+ * union (Task 3) added 'staging_create', 'promote', and 'staging_reset'
+ * without the compiler flagging this function, so every new mode silently
+ * falls into the 'clone' branch unless named here explicitly.
+ *
+ * 'staging_create' is named below and dispatches to 'clone' ON PURPOSE: a
+ * staging create genuinely runs the same provision-and-replay pipeline as a
+ * template clone (see finalizeStagingClone, called at the end of
+ * executeClone, for the staging-specific step that runs after replay).
+ *
+ * 'promote' and 'staging_reset' (Tasks 13 and 16) must NOT be added to the
+ * 'clone' case below — running executeClone for either would be wrong: a
+ * promote/reset operates on an existing linked pair, not a fresh provision.
+ * Each needs its own dispatch branch and executor when implemented.
+ *
+ * 'promote' is routed explicitly (Task 13) to executePromoteTask, and
+ * 'staging_reset' is routed explicitly (Task 16) to executeResetTask. Because
+ * the switch is not exhaustive, both routes are pinned by a unit test rather
+ * than by the compiler: deleting either line below would silently point a
+ * reset/promote job at the fresh-provision clone pipeline instead.
+ *
+ * 'staging_reset' in particular must NEVER fall through to 'clone':
+ * executeClone provisions a brand-new app, which is not what a reset job's
+ * dest_app_id (an existing staging app) needs, and is not what executeClone
+ * even validates against. Its own direction hazard lives in staging-reset.ts,
+ * not here — this function only decides WHICH executor a `clone` task_type
+ * row reaches.
  */
-export function resolveCloneDispatch(job: { mode?: string } | null): 'clone' | 'update' {
-  return job?.mode === 'update' ? 'update' : 'clone';
+export function resolveCloneDispatch(
+  job: { mode?: string; status?: string } | null,
+): 'clone' | 'update' | 'promote' | 'staging_reset' | 'staging_copy_wait' {
+  // STATUS BEFORE MODE, and deliberately so. A staging_create or staging_reset
+  // job in 'copying_data' has already run its own executor to completion and is
+  // now waiting on the app-copy engine. Routing it back to executeClone would
+  // re-provision a second staging app; routing it back to executeResetTask
+  // would re-truncate the staging database the copy is at that moment writing
+  // into. Neither executor is re-entrant with respect to this state, so the
+  // wait branch has to win over both.
+  if (job?.status === 'copying_data'
+      && (job?.mode === 'staging_create' || job?.mode === 'staging_reset')) {
+    return 'staging_copy_wait';
+  }
+  if (job?.mode === 'update') return 'update';
+  if (job?.mode === 'promote') return 'promote';
+  if (job?.mode === 'staging_reset') return 'staging_reset';
+  if (job?.mode === 'staging_create') return 'clone'; // deliberate: see comment above
+  return 'clone';
+}
+
+/**
+ * Enqueue the production -> staging data copy and park the staging job on it.
+ *
+ * Returns true when the job has been PARKED - the caller must return without
+ * completing it. Returns false when this deployment has no app-copy engine, in
+ * which case the caller carries on with the pre-existing seed-only behaviour
+ * and the job now carries a warning saying exactly that.
+ *
+ * Isolation runs here as well as after the copy. This call closes the window
+ * between "the staging app exists, replayed from production's config" and "the
+ * copy has landed and been re-isolated": during that window the app is real,
+ * reachable, and would otherwise still hold whatever the clone replay brought
+ * across. The isolation after the copy is the one that matters for the copied
+ * rows, and it lives in the wait task.
+ */
+async function beginStagingDataCopy(args: {
+  controlDb: pg.Pool;
+  runtimeDb: pg.Pool;
+  job: CloneJob;
+  jobId: string;
+  prodAppId: string;
+  stagingAppId: string;
+  region: string;
+  logger: Logger;
+}): Promise<boolean> {
+  const { controlDb, runtimeDb, job, jobId, prodAppId, stagingAppId, region, logger } = args;
+
+  await isolateStagingEnvironment(runtimeDb, controlDb, stagingAppId);
+
+  const enqueued = await enqueueStagingDataCopy({
+    controlDb, prodAppId, stagingAppId, region,
+    requestedByUserId: job.requested_by_user_id,
+  });
+
+  if (!enqueued.ok) {
+    if (enqueued.reason === 'unsupported') {
+      // OSS-only deployment. Degrade to seed-only rather than fail the create,
+      // but say so on the job - a silent degrade is the exact failure mode this
+      // work exists to remove.
+      await appendCloneJobWarnings(controlDb, jobId, [enqueued.message]);
+      logger.warn(
+        { jobId, prodAppId, stagingAppId },
+        '[staging] no app-copy engine on this deployment; staging seeded from _seed tables only',
+      );
+      return false;
+    }
+    // A conflicting copy that went terminal mid-flight. Transient: let the
+    // queue's normal retry contract have another go.
+    throw new Error(enqueued.message);
+  }
+
+  await setCloneJobStatus(controlDb, jobId, {
+    status: 'copying_data',
+    data_copy_job_id: enqueued.copyJobId,
+  });
+  await enqueueCopyWaitTask({
+    appId: stagingAppId, region, jobId, delayMs: COPY_POLL_INTERVAL_MS,
+  });
+  logger.info(
+    { jobId, prodAppId, stagingAppId, copyJobId: enqueued.copyJobId },
+    '[staging] production data copy enqueued; job parked in copying_data',
+  );
+  return true;
+}
+
+/**
+ * Observe one poll of the production data copy a staging job is waiting on.
+ *
+ * This is the answer to "how does the create/reset job avoid reporting
+ * completed before the data is there". Three options were live:
+ *
+ *   - BLOCK inside the clone task until the copy finishes. Rejected outright.
+ *     The neon-task worker is a single serialised poll loop, so a copy of a
+ *     large app would stall every provision in the region behind it, and
+ *     `recoverStaleTasks` reclaims anything held for five minutes - the block
+ *     would be torn down and re-run concurrently with itself.
+ *   - Let the clone task FAIL-AND-RETRY until the copy lands. Rejected: the
+ *     queue's attempt budget exists to bound genuine failures and tops out
+ *     around a minute of backoff, so every staging app slower than that would
+ *     permanently fail.
+ *   - A CHAINED task, which is what this is. The staging job sits in the
+ *     non-terminal status 'copying_data'; each wait task reads the copy job and
+ *     either re-arms itself on a fresh queue row or reaches a terminal answer.
+ *     Nothing blocks, the wait is unbounded in the ordinary case and bounded by
+ *     an explicit timeout in the pathological one, and "not yet ready" is a
+ *     state the API and the dashboard can both read off the job.
+ *
+ * ISOLATION RUNS HERE, AFTER THE COPY, ON BOTH TERMINAL PATHS.
+ * isolateStagingApp clears connected accounts, disables integration configs
+ * and disables cron triggers; the copy that just finished re-imported all
+ * three from production. Isolating only before the copy would re-arm exactly
+ * what staging isolation disarms - a staging app calling a third party with
+ * production's identity on a timer.
+ *
+ * "Both terminal paths" is load-bearing, not symmetry for its own sake. The
+ * copy's phases run in order and the `platform` phase that re-imports
+ * production's connected accounts completes before `verify`, so a copy that
+ * FAILS has very often already imported them. Isolating only on success left
+ * production's connected-account record sitting inside a staging app whose
+ * reset had failed.
+ */
+export async function executeStagingCopyWaitTask(
+  controlDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Staging copy-wait task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Staging job ${jobId} not found`);
+  if (isTerminalCloneStatus(job.status)) {
+    logger.info({ jobId, status: job.status }, '[staging-copy-wait] job terminal; skipping');
+    return;
+  }
+  if (job.status !== 'copying_data') {
+    // Another attempt of this same wait already resolved it, or an operator
+    // moved the job by hand. Re-arming here would loop forever.
+    logger.info(
+      { jobId, status: job.status },
+      '[staging-copy-wait] job no longer waiting; skipping',
+    );
+    return;
+  }
+
+  const stagingAppId = job.dest_app_id;
+  if (!stagingAppId) throw new Error(`Staging job ${jobId} has no dest_app_id`);
+
+  const copy = job.data_copy_job_id
+    ? await getStagingDataCopy(controlDb, job.data_copy_job_id)
+    : null;
+  const verdict = classifyStagingCopyWait({ copy, now: new Date() });
+
+  if (verdict.kind === 'waiting') {
+    // HEARTBEAT. clone-jobs-reaper treats any mid-stage status older than 15
+    // minutes as a candidate for being flipped to 'failed'. A copy that runs
+    // longer than that is entirely normal, and while the reaper would skip it
+    // anyway (there is always a live neon_task for this job - the wait re-arms
+    // before the current task is marked done), that protection is a lookup that
+    // fails open on error. Moving updated_at on every poll means the job never
+    // becomes a candidate in the first place, rather than relying on a second
+    // check to rescue it. An empty patch writes updated_at = now() and nothing
+    // else - see setCloneJobStatus.
+    await setCloneJobStatus(controlDb, jobId, {});
+    await enqueueCopyWaitTask({
+      appId: stagingAppId, region: job.dest_region, jobId, delayMs: COPY_POLL_INTERVAL_MS,
+    });
+    logger.info(
+      { jobId, copyJobId: job.data_copy_job_id, copyStatus: copy?.status, phase: copy?.phase },
+      '[staging-copy-wait] copy still running; re-armed',
+    );
+    return;
+  }
+
+  if (verdict.kind === 'failed') {
+    // WHAT SURVIVES A FAILED COPY. The staging app is already fully
+    // provisioned at this point, and the copy failed PART WAY THROUGH - the
+    // engine's phases run in order (app data, then users, then storage), so
+    // whatever landed before the failure is still sitting in the staging app.
+    // For a staging_create that app never gets an `app_environments` row, so
+    // it is invisible to the idle reaper (scoped through that table) forever.
+    // Deleting it from here is not this task's call - it may hold the only
+    // evidence of why the copy failed - but leaving it SILENTLY is not an
+    // option either, because what it holds is a partial copy of a customer's
+    // personal data. Name it on the job the caller is already polling; the
+    // dashboard surfaces job warnings on failure.
+    //
+    // Only for staging_create. A failed staging_RESET leaves an app that is
+    // still linked, so the reaper can still see it and `POST .../staging/reset`
+    // can be retried — a different, lesser situation that this warning would
+    // describe wrongly.
+    const retentionWarnings = job.mode === 'staging_create'
+      ? [
+        `Staging app ${stagingAppId} was provisioned before the data copy failed, and still exists. `
+        + 'It may hold a PARTIAL copy of production data (rows, auth users and/or uploaded files) '
+        + 'from the phases that completed. It is not linked as a staging environment, so idle '
+        + `pausing will never reach it. Delete it with: DELETE /apps/${stagingAppId}`,
+      ]
+      : [];
+    await appendCloneJobWarnings(controlDb, jobId, retentionWarnings).catch((err) => logger.error(
+      { err, jobId, stagingAppId },
+      '[staging-copy-wait] could not record the retained-staging-app warning',
+    ));
+
+    // ISOLATION RUNS ON THE FAILURE PATH TOO.
+    //
+    // The copy's phases run in order and it can fail at any of them — the
+    // `platform` phase, which re-imports production's `app_connected_accounts`
+    // rows, completes before `verify`, so a copy that fails at verify has
+    // ALREADY put production's connections into staging. Isolation used to
+    // live only on the success path below, so a failed copy left them there:
+    // verified live as production's own connected-account record sitting in
+    // the staging app after a failed reset.
+    //
+    // A staging app that failed to populate must still not hold production's
+    // connections, enabled integrations or armed cron triggers — the failure
+    // makes that MORE urgent, not less, because a failed job is exactly the
+    // state a user leaves sitting around while they work out what happened.
+    //
+    // Best-effort, and never allowed to stop the job reaching a terminal
+    // status: a job stuck in `copying_data` forever would be a worse outcome
+    // than an isolation pass that has to be re-run. A failure here is logged
+    // AND named on the job, because it is the one case where staging may still
+    // hold production's connections and nobody would otherwise know.
+    const failRuntimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+    await isolateStagingEnvironment(failRuntimeDb, controlDb, stagingAppId).catch(
+      async (err) => {
+        logger.error(
+          { err, jobId, stagingAppId },
+          '[staging-copy-wait] isolation after a failed copy did not complete',
+        );
+        await appendCloneJobWarnings(controlDb, jobId, [
+          `Staging isolation could not be completed after the failed copy. Staging app `
+          + `${stagingAppId} may still hold connected-account records, enabled integrations or `
+          + 'enabled cron triggers copied from production. Re-run the reset, or delete the '
+          + 'staging app.',
+        ]).catch(() => {});
+      },
+    );
+
+    // Terminal for the STAGING job, and NOT rethrown: this task did exactly
+    // what it was queued to do - observe the copy - and throwing would burn a
+    // queue attempt and re-run the same observation to the same conclusion.
+    await setCloneJobStatus(controlDb, jobId, {
+      status: 'failed', error_message: verdict.message, completed_at: new Date(),
+    });
+    logger.error(
+      { jobId, stagingAppId, copyJobId: job.data_copy_job_id, error: verdict.message },
+      '[staging-copy-wait] production data copy did not succeed; staging job failed',
+    );
+    return;
+  }
+
+  const runtimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+
+  // AFTER the copy, never before - see the function doc comment.
+  await isolateStagingEnvironment(runtimeDb, controlDb, stagingAppId);
+
+  await appendCloneJobWarnings(controlDb, jobId, stagingCopyWarnings(copy!));
+
+  if (job.mode === 'staging_create') {
+    // The pair becomes visible only now. Until this row exists the dashboard,
+    // reset and promote all see "no staging environment" - which is the honest
+    // answer for an app that was still being populated.
+    await linkStagingEnvironment(runtimeDb, job);
+  } else {
+    // staging_reset: the pair is already linked; what moves is the timestamp,
+    // keyed on the PRODUCTION app id (app_environments.prod_app_id is the PK).
+    await touchEnvironmentTimestamp(runtimeDb, job.source_app_id, 'last_reset_at');
+  }
+
+  const completedAt = new Date();
+  await setCloneJobStatus(controlDb, jobId, { status: 'completed', completed_at: completedAt });
+
+  await insertCloneAuditLog(controlDb, {
+    appId: job.source_app_id,
+    userId: job.requested_by_user_id,
+    eventType: job.mode === 'staging_create'
+      ? 'template_clone_completed'
+      : 'staging_reset_completed',
+    metadata: {
+      job_id: jobId, dest_app_id: stagingAppId, dest_region: job.dest_region,
+      data_copy_job_id: job.data_copy_job_id,
+    },
+  }).catch((err) => logger.error({ err }, '[staging-copy-wait] audit log insert failed'));
+
+  logger.info(
+    { jobId, stagingAppId, copyJobId: job.data_copy_job_id, mode: job.mode },
+    '[staging-copy-wait] production data copy complete; staging job completed',
+  );
+}
+
+/**
+ * Task-level wrapper for a promote: resolve the job, re-check the link, open
+ * the four pools executePromote needs, and hand off.
+ *
+ * The replay itself lives in execute-promote.ts with its dependencies injected,
+ * so the one function that writes to a customer's production database is unit
+ * testable without a live Postgres. Everything effectful and untestable —
+ * queue plumbing, pool resolution, Sentry scope, the audit trail — stays here,
+ * exactly as executeUpdate keeps its own.
+ *
+ * Resumability: the terminal-status guard matches executeUpdate's. Any
+ * mid-flight status ('replaying_schema' … 'copying_repo') is re-entered and
+ * finished, because every step executePromote runs is idempotent; only
+ * 'completed'/'failed' short-circuit.
+ */
+async function executePromoteTask(
+  controlDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Promote task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Promote job ${jobId} not found`);
+  if (isTerminalCloneStatus(job.status)) {
+    logger.info({ jobId, status: job.status }, '[promote] job in terminal status; skipping');
+    return;
+  }
+
+  const prodAppId = job.dest_app_id;
+  if (!prodAppId) throw new Error(`Promote job ${jobId} has no dest_app_id (production app)`);
+
+  await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
+
+  await Sentry.withScope(async (scope) => {
+    scope.setTag('clone_job_id', jobId);
+    scope.setTag('clone_mode', 'promote');
+    scope.setTag('source_app_id', job.source_app_id);
+    scope.setTag('target_app_id', prodAppId);
+    scope.setTag('attempt', String(task.attempts));
+
+    try {
+      // startPromote pins source_region and dest_region to the production
+      // app's region, and start-staging pins staging to production's region,
+      // so both apps live in one regional runtime DB.
+      const runtimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+
+      // Re-checked at execution time, not just at request time — the same
+      // reason executeUpdate re-runs its eligibility gate. If the pair was
+      // unlinked (or staging deleted) between queueing and now, promoting
+      // would push a stale or unrelated app's state onto production.
+      const link = await getEnvironmentLink(runtimeDb, prodAppId);
+      if (!link || link.staging_app_id !== job.source_app_id) {
+        throw new Error(
+          `[promote] ${prodAppId} is no longer linked to staging app ${job.source_app_id}; `
+            + 'refusing to promote',
+        );
+      }
+
+      const prodRow = await runtimeDb.query<{ db_name: string; owner_id: string }>(
+        `SELECT db_name, owner_id FROM apps WHERE id = $1`, [prodAppId],
+      );
+      if (prodRow.rows.length === 0) {
+        throw new Error(`[promote] production app ${prodAppId} not found in ${job.dest_region} runtime DB`);
+      }
+      const stagingRow = await runtimeDb.query<{ db_name: string }>(
+        `SELECT db_name FROM apps WHERE id = $1`, [job.source_app_id],
+      );
+      if (stagingRow.rows.length === 0) {
+        throw new Error(`[promote] staging app ${job.source_app_id} not found in ${job.dest_region} runtime DB`);
+      }
+
+      const stagingPool = await getAppPoolForApp(controlDb, job.source_app_id, stagingRow.rows[0].db_name);
+      const prodPool = await getAppPoolForApp(controlDb, prodAppId, prodRow.rows[0].db_name);
+
+      await insertCloneAuditLog(controlDb, {
+        appId: prodAppId,
+        userId: job.requested_by_user_id,
+        eventType: 'staging_promote_started',
+        metadata: { job_id: jobId, staging_app_id: job.source_app_id },
+      }).catch((err) => logger.error({ err }, '[promote] audit log started event insert failed'));
+
+      await executePromote(
+        {
+          controlDb,
+          runtimeDb,
+          stagingPool,
+          prodPool,
+          prodOwnerId: prodRow.rows[0].owner_id,
+          attempt: task.attempts,
+          maxAttempts: task.max_attempts,
+          logger,
+        },
+        job,
+      );
+
+      await insertCloneAuditLog(controlDb, {
+        appId: prodAppId,
+        userId: job.requested_by_user_id,
+        eventType: 'staging_promote_completed',
+        metadata: { job_id: jobId, staging_app_id: job.source_app_id },
+      }).catch((err) => logger.error({ err }, '[promote] audit log completed event insert failed'));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Same retry contract as executeUpdate, and the same one executePromote
+      // applies internally: only go terminal once the queue is out of attempts.
+      // This block covers BOTH the pre-flight throws above (pool resolution,
+      // link re-check) and anything executePromote rethrew — the write below is
+      // idempotent with the one it already made, so a double-write is harmless
+      // while a missing one would leave the job stuck in 'processing' forever.
+      // That matters here specifically: idx_template_clone_jobs_one_promote
+      // keys on a NON-terminal status, so a stuck row blocks every future
+      // promote for this app.
+      const isPermanent = task.attempts >= task.max_attempts;
+      if (isPermanent) {
+        await setCloneJobStatus(controlDb, jobId, {
+          status: 'failed', error_message: msg, completed_at: new Date(),
+        }).catch(() => {});
+        await insertCloneAuditLog(controlDb, {
+          appId: prodAppId,
+          userId: job.requested_by_user_id,
+          eventType: 'staging_promote_failed',
+          metadata: { job_id: jobId, staging_app_id: job.source_app_id, error: msg },
+        }).catch((auditErr) => logger.error({ auditErr }, '[promote] audit log failed event insert failed'));
+        logger.error({ err, jobId, prodAppId }, '[promote] task permanently failed');
+      } else {
+        await setCloneJobStatus(controlDb, jobId, { error_message: msg }).catch(() => {});
+        logger.warn(
+          { jobId, prodAppId, attempt: task.attempts, maxAttempts: task.max_attempts, error: msg },
+          '[promote] transient failure, will retry',
+        );
+      }
+      throw err;
+    }
+  });
+}
+
+/**
+ * Task-level wrapper for a staging reset: resolve the job, open the pools
+ * executeStagingReset needs, and hand off.
+ *
+ * DIRECTION IS REVERSED FROM executePromoteTask. A promote's job.source_app_id
+ * is the staging app and job.dest_app_id is production; a reset's
+ * job.source_app_id is PRODUCTION and job.dest_app_id is STAGING (see
+ * staging-reset.ts's startStagingReset, which writes the job row that way).
+ * prodAppId/stagingAppId below are read from the CloneJob fields by name —
+ * never repurpose executePromoteTask's variable names or copy its pool
+ * assignment by pattern-matching the code shape, since here they point at the
+ * opposite fields.
+ *
+ * Resumability matches executePromoteTask: any non-terminal status is
+ * re-entered, because replaySeedData and isolateStagingApp/
+ * isolateStagingMeetingsWebhook are all idempotent (INSERT ... ON CONFLICT DO
+ * NOTHING, DELETE of an already-empty set, UPDATE of already-disabled rows).
+ */
+// Exported for testing only — nothing else should call it, dispatch goes
+// through processNextTask. Same rationale as executeUpdate: this wrapper is
+// where the pool-assignment hazard lives (see the header comment above and
+// truncateStagingAppTables's Guard 3 in staging-reset.ts), so it needs
+// direct coverage rather than relying on executeStagingReset's own unit
+// tests, which inject prodPool/stagingPool directly and cannot see a swap
+// made here.
+export async function executeResetTask(
+  controlDb: pg.Pool,
+  task: NeonTask,
+  logger: Logger,
+): Promise<void> {
+  const jobId = task.task_meta?.job_id;
+  if (!jobId) throw new Error('Reset task missing job_id in task_meta');
+
+  const job = await getCloneJob(controlDb, jobId);
+  if (!job) throw new Error(`Reset job ${jobId} not found`);
+  if (isTerminalCloneStatus(job.status)) {
+    logger.info({ jobId, status: job.status }, '[staging-reset] job in terminal status; skipping');
+    return;
+  }
+
+  // job.source_app_id is PRODUCTION for a reset job — see the header comment.
+  const prodAppId = job.source_app_id;
+  const stagingAppId = job.dest_app_id;
+  if (!stagingAppId) throw new Error(`Reset job ${jobId} has no dest_app_id (staging app)`);
+
+  await setCloneJobStatus(controlDb, jobId, { status: 'processing' });
+
+  await Sentry.withScope(async (scope) => {
+    scope.setTag('clone_job_id', jobId);
+    scope.setTag('clone_mode', 'staging_reset');
+    scope.setTag('source_app_id', prodAppId);
+    scope.setTag('target_app_id', stagingAppId);
+    scope.setTag('attempt', String(task.attempts));
+
+    // startStagingReset pins source_region and dest_region to the production
+    // app's region (region-resolver.ts's getRuntimeDbForApp result), and
+    // staging is always pinned to production's region (start-staging.ts), so
+    // both apps live in one regional runtime DB.
+    const runtimeDb = getRuntimeDbPool(config.runtimeDb, job.dest_region);
+
+    // Re-checked at execution time, not just at request time — the same
+    // reason executePromoteTask re-checks the link. If the pair was unlinked
+    // between queueing and now, resetting would re-seed the wrong (or a
+    // deleted) staging app.
+    const link = await getEnvironmentLink(runtimeDb, prodAppId);
+    if (!link || link.staging_app_id !== stagingAppId) {
+      const msg = `[staging-reset] ${prodAppId} is no longer linked to staging app ${stagingAppId}; refusing to reset`;
+      const isPermanent = task.attempts >= task.max_attempts;
+      await setCloneJobStatus(controlDb, jobId, isPermanent
+        ? { status: 'failed', error_message: msg, completed_at: new Date() }
+        : { error_message: msg }).catch(() => {});
+      throw new Error(msg);
+    }
+
+    const prodRow = await runtimeDb.query<{ db_name: string }>(
+      `SELECT db_name FROM apps WHERE id = $1`, [prodAppId],
+    );
+    if (prodRow.rows.length === 0) {
+      throw new Error(`[staging-reset] production app ${prodAppId} not found in ${job.dest_region} runtime DB`);
+    }
+    const stagingRow = await runtimeDb.query<{ db_name: string }>(
+      `SELECT db_name FROM apps WHERE id = $1`, [stagingAppId],
+    );
+    if (stagingRow.rows.length === 0) {
+      throw new Error(`[staging-reset] staging app ${stagingAppId} not found in ${job.dest_region} runtime DB`);
+    }
+
+    // prodPool/stagingPool are named — and assigned — for exactly what they
+    // are. Do not shorten these to match executePromoteTask's stagingPool/
+    // prodPool assignment order; the source/dest roles are swapped here.
+    const prodPool = await getAppPoolForApp(controlDb, prodAppId, prodRow.rows[0].db_name);
+    const stagingPool = await getAppPoolForApp(controlDb, stagingAppId, stagingRow.rows[0].db_name);
+
+    await executeStagingReset(
+      {
+        controlDb,
+        runtimeDb,
+        prodPool,
+        stagingPool,
+        // Passed through so truncateStagingAppTables can assert, right
+        // before the TRUNCATE, that stagingPool's live connection is
+        // actually pointed at this database — the guard that still catches
+        // a swap of the two getAppPoolForApp calls above, which no
+        // id-based or object-identity check can see. See ResetDeps's doc
+        // comment on stagingDbName.
+        stagingDbName: stagingRow.rows[0].db_name,
+        attempt: task.attempts,
+        maxAttempts: task.max_attempts,
+        logger,
+        // Both apps are in job.dest_region: startStagingReset pins
+        // source_region and dest_region to the production app row, and staging
+        // is pinned to production region at admission. This is the queue the
+        // copy-wait task is armed on and the region stamped on the copy job.
+        region: job.dest_region,
+      },
+      job,
+    );
+  });
 }
 
 /** How a resumed update should treat the fork's current repo HEAD. */
@@ -1533,8 +2312,18 @@ export async function executeUpdate(
       scope.setTag('step', 'copying_repo');
       await setCloneJobStatus(controlDb, jobId, { status: 'copying_repo' });
 
-      const manifestJson = await getManifestJson(job.source_app_id, job.source_snapshot_id);
-      if (!manifestJson) throw new Error(`Source manifest ${job.source_snapshot_id} not found`);
+      // job.source_snapshot_id is guaranteed non-null for update jobs:
+      // createUpdateJob always fills it from a published release's
+      // snapshot_id, and template-releases.ts's NoRepoSnapshotError refuses
+      // to publish a release with none (Task 14 fix round 1 gave the column
+      // its one legitimate NULL case — a promote whose staging app has no
+      // repo yet — but executeUpdate never runs against a promote-mode job).
+      const sourceSnapshotId = job.source_snapshot_id;
+      if (!sourceSnapshotId) {
+        throw new Error(`[update] job ${jobId} has no source_snapshot_id; expected the release to have a repo snapshot`);
+      }
+      const manifestJson = await getManifestJson(job.source_app_id, sourceSnapshotId);
+      if (!manifestJson) throw new Error(`Source manifest ${sourceSnapshotId} not found`);
       const manifest = JSON.parse(manifestJson) as { files: RepoManifestEntry[]; message?: string };
 
       // Land the source blobs under the fork's own prefix first, so the rewrite

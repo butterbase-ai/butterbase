@@ -21,7 +21,22 @@ import { startClone, sendStartCloneFailure } from '../services/start-clone.js';
 import {
   VALIDATION_INVALID_SCHEMA,
   RESOURCE_NOT_FOUND,
+  RESOURCE_CONFLICT,
 } from '@butterbase/shared/error-types';
+
+/**
+ * Job modes the generic retry endpoint refuses. Every one of them has a start
+ * route that performs admission checks a retry would skip; see the comment at
+ * the refusal itself. Kept as an explicit list rather than "anything that is
+ * not clone/update" so a future mode has to make the decision consciously.
+ */
+const RETRY_REFUSED_MODES = ['promote', 'staging_create', 'staging_reset'] as const;
+
+const FRESH_START_ROUTE = {
+  promote: { verb: 'promote', route: 'POST /v1/apps/{prod_app_id}/staging/promote' },
+  staging_create: { verb: 'staging create', route: 'POST /v1/apps/{prod_app_id}/staging' },
+  staging_reset: { verb: 'staging reset', route: 'POST /v1/apps/{prod_app_id}/staging/reset' },
+} as const;
 
 export function cloneRoutes(app: FastifyInstance) {
   // POST /v1/templates/:source_app_id/clone
@@ -144,6 +159,42 @@ export function cloneRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     }
+    // This endpoint is mode-agnostic by construction: it takes any job id the
+    // caller owns. Modes added after it was written (Task 3's staging_create /
+    // promote / staging_reset) inherited a retry path that skips EVERY
+    // admission check their own start-route performs, which for promote means
+    // an unreviewed production deploy: a week-old failed promote re-enqueued
+    // here republishes a stale pinned source_snapshot_id and redeploys an old
+    // staging bundle onto a live production frontend, with no
+    // buildPromotePreview, no destructive-DDL preflight and no in-flight
+    // re-check. (executePromote's filterAdditive still blocks destructive DDL,
+    // so it is not data loss — but it is still a deploy nobody reviewed.)
+    //
+    // Refused rather than gated. A retry re-runs a job pinned to the state of
+    // the world when it was created; a fresh operation re-previews against the
+    // state of the world now, which IS the safety the retry path skips. For
+    // these three modes the proper route is cheap and idempotent-ish
+    // (startPromote re-previews, startStaging 409s if staging already exists,
+    // startStagingReset re-checks for an in-flight promote at both admission
+    // and execution time), so there is nothing a retry buys that a fresh call
+    // does not, and plenty it loses. Refusing also makes the 23505 against
+    // idx_template_clone_jobs_one_promote structurally unreachable from here
+    // rather than something to catch after the fact.
+    //
+    // 'clone' and 'update' are deliberately NOT in this set — their retry
+    // behaviour is unchanged.
+    if (RETRY_REFUSED_MODES.includes(job.mode as (typeof RETRY_REFUSED_MODES)[number])) {
+      const { route, verb } = FRESH_START_ROUTE[job.mode as keyof typeof FRESH_START_ROUTE];
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: `Cannot retry a '${job.mode}' job.`,
+        remediation:
+          `Start a fresh ${verb} instead: ${route}. A retry would re-run this job against `
+          + 'the state it was created in, skipping the checks that run when the operation '
+          + 'is started normally.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
     // Retrying an update is only safe while the fork is still in the state this
     // job left it in. A stale retry re-enters the worker's 'republish' path,
     // which by design skips the divergence gate, so it would overwrite whatever
@@ -174,7 +225,28 @@ export function cloneRoutes(app: FastifyInstance) {
       }
     }
 
-    await incrementRetry(app.controlDb, job_id);
+    // incrementRetry flips status back to 'pending', which re-enters the
+    // partial unique indexes on (dest_app_id) WHERE status NOT IN
+    // ('completed','failed') — idx_template_clone_jobs_one_update (migration
+    // 111) and idx_template_clone_jobs_one_promote (116). Refusing the promote
+    // modes above puts the promote index out of reach from here, but the update
+    // index is still live: the staleness gate only looks for a newer COMPLETED
+    // update, so an update already IN FLIGHT for the same dest app raises a raw
+    // 23505 that used to leak as a 500. It is a conflict, so report it as one.
+    // The success path for clone and update is untouched.
+    try {
+      await incrementRetry(app.controlDb, job_id);
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505') {
+        return reply.code(409).send(createAgentError({
+          code: RESOURCE_CONFLICT,
+          message: 'Another job for this app is already in flight.',
+          remediation: 'Wait for the in-progress job to finish, then retry this one.',
+          documentation_url: getDocUrl(RESOURCE_CONFLICT),
+        }));
+      }
+      throw err;
+    }
     await enqueueCloneTask(job.source_app_id, job.source_region, job.id);
     return reply.send({ job_id: job.id, status: 'pending' });
   });

@@ -50,6 +50,25 @@ export interface ReplayFunctionsEnvVarOpts {
    *  update) instead of leaving them untouched (clone). Defaults to false —
    *  clone behaviour is unaffected. */
   overwriteExisting?: boolean;
+  /**
+   * When true, an upsert onto a trigger the destination ALREADY HAS updates
+   * `trigger_config` but leaves the destination's `enabled` flag alone.
+   * Only meaningful alongside `overwriteExisting`. Defaults to false, so
+   * clone / staging_create / template-update behaviour is byte-identical.
+   *
+   * Set by the PROMOTE path, and it is not a nicety there. Staging apps have
+   * their cron triggers deliberately switched off by isolateStagingApp
+   * (staging-isolation.ts) so a staging environment does not fire scheduled
+   * work against real integrations. Without this flag, promoting from staging
+   * copies that `enabled = false` straight onto the customer's LIVE production
+   * app and silently stops every nightly billing, cleanup and digest job —
+   * our own isolation mechanism transported into production as damage.
+   *
+   * The template-update path must NOT set this: its source is a template app
+   * whose triggers were never deliberately disabled, and a release that turns
+   * a trigger off is a real intent that should reach forks.
+   */
+  preserveDestinationTriggerEnabled?: boolean;
 }
 
 /**
@@ -94,16 +113,42 @@ export function buildFunctionInsertSql(overwriteExisting: boolean): string {
  * Builds the INSERT INTO function_triggers statement used by replayFunctions.
  * Column list and placeholders are copied verbatim from the original inline
  * query; only the ON CONFLICT clause varies with `overwriteExisting`.
+ *
+ * `preserveDestinationEnabled` drops `enabled` from the DO UPDATE SET list so
+ * the destination keeps its own on/off state while still picking up the new
+ * schedule. See ReplayFunctionsEnvVarOpts.preserveDestinationTriggerEnabled for
+ * why promote needs it and why nothing else may set it. Defaults to false, so
+ * every existing caller produces byte-identical SQL.
+ *
+ * NOTE: this governs the CONFLICT branch only. A trigger the destination does
+ * NOT have yet is INSERTed with the source's `enabled` value, because there is
+ * no destination state to preserve. For promote that means a cron trigger added
+ * in staging lands on production switched off, since isolation disabled it
+ * there. That is the deliberately conservative choice — force-enabling it would
+ * start a recurring job firing at real production data that the user never
+ * enabled in production — but it must not be silent, which is why the RETURNING
+ * clause below reports it. See replayFunctions' `disabledTriggersInserted`.
+ *
+ * `RETURNING (xmax = 0) AS inserted, enabled` is the standard Postgres idiom for
+ * "this row came from the INSERT, not the DO UPDATE branch" (the same one
+ * buildFunctionInsertSql uses). It is pure reporting: under DO NOTHING a
+ * conflicting row returns nothing at all, and no caller's writes change.
  */
-export function buildTriggerInsertSql(overwriteExisting: boolean): string {
+export function buildTriggerInsertSql(
+  overwriteExisting: boolean,
+  preserveDestinationEnabled = false,
+): string {
   const conflict = overwriteExisting
     ? `ON CONFLICT (function_id, trigger_type) DO UPDATE SET
-         trigger_config = EXCLUDED.trigger_config,
+         trigger_config = EXCLUDED.trigger_config${
+           preserveDestinationEnabled ? '' : `,
          enabled = EXCLUDED.enabled`
+         }`
     : `ON CONFLICT (function_id, trigger_type) DO NOTHING`;
   return `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
              VALUES ($1, $2, $3, $4, $5)
-             ${conflict}`;
+             ${conflict}
+             RETURNING (xmax = 0) AS inserted, enabled`;
 }
 
 /**
@@ -193,6 +238,24 @@ export interface ReplayConfigOpts {
    * destroyed credentials are not.
    */
   insertOnly?: boolean;
+  /**
+   * Skip the app_integration_configs subsystem entirely.
+   *
+   * Set by PROMOTE, where replay-registry.ts declares `integrations` as
+   * `promotable: false` — "staging integrations are deliberately disabled by
+   * isolateStagingApp, so promoting them would disable production
+   * integrations." replayNonSecretConfig calls replayIntegrations internally,
+   * so without this flag the registry's stated policy and the executed
+   * behaviour were only coincidentally aligned: the integrations replay reads
+   * `WHERE enabled = true`, and staging's rows are disabled, so nothing moved
+   * BY ACCIDENT. A user who re-enabled an integration on staging would, on
+   * promote, mint a fresh Composio auth config against PRODUCTION. Nobody
+   * decided that.
+   *
+   * Defaults to false, so clone / staging_create / template-update are
+   * unaffected.
+   */
+  skipIntegrations?: boolean;
 }
 
 export interface ReplaySchemaOpts {
@@ -266,13 +329,36 @@ export async function replaySchema(
 const SEED_BATCH_SIZE = 500;
 
 /**
+ * The `_seed_tables` registry names every table a schema author flagged
+ * `_seed: true` (see schema-applier.ts). This is the single place that reads
+ * it, so every caller that needs "which tables carry seed data" — a seed
+ * copy (below), or a reset's pre-copy truncation (staging-reset.ts) — agrees
+ * on the same list rather than each re-deriving (or hardcoding) it.
+ *
+ * Forward-compat: apps pre-dating the `_seed_tables` bootstrap (data-plane
+ * migration 012) don't have the table at all. That is not an error — it
+ * means the app was provisioned before seed-flagged tables existed — so this
+ * returns an empty list rather than throwing.
+ */
+export async function getSeedTableNames(pool: pg.Pool, logger: ReplayLogger): Promise<string[]> {
+  try {
+    const flagged = await pool.query<{ name: string }>(`SELECT name FROM _seed_tables`);
+    return flagged.rows.map((r) => r.name);
+  } catch (err) {
+    logger.warn({ err }, '[clone] _seed_tables missing; no seed tables to report');
+    return [];
+  }
+}
+
+/**
  * Copy rows from every seed-flagged table on the source DB into the matching
  * table on the dest DB.
  *
- * Seed-flagged tables are recorded in the source's `_seed_tables` registry
- * (populated by Phase 4d's schema-applier when `_seed: true` is set on a
- * table).  Apps that pre-date the bootstrap won't have `_seed_tables` at all;
- * in that case the function returns immediately with an empty result
+ * Seed-flagged tables come from getSeedTableNames (the source's
+ * `_seed_tables` registry, populated by Phase 4d's schema-applier when
+ * `_seed: true` is set on a table). Apps that pre-date the bootstrap won't
+ * have `_seed_tables` at all; in that case getSeedTableNames returns an empty
+ * list and this function returns immediately with an empty result
  * (forward-compat / soft-fail).
  *
  * Per-table soft-fail: a constraint / column-mismatch error on INSERT is
@@ -289,19 +375,14 @@ export async function replaySeedData(
   destAppPool: pg.Pool,
   logger: ReplayLogger,
 ): Promise<{ tables: string[]; rows: number; warnings: string[] }> {
-  let flagged;
-  try {
-    flagged = await sourceAppPool.query<{ name: string }>(`SELECT name FROM _seed_tables`);
-  } catch (err) {
-    // Forward-compat: apps pre-dating the _seed_tables bootstrap don't have it.
-    logger.warn({ err }, '[clone] _seed_tables missing on source; no seed copy');
+  const seedTableNames = await getSeedTableNames(sourceAppPool, logger);
+  if (seedTableNames.length === 0) {
     return { tables: [], rows: 0, warnings: [] };
   }
   const warnings: string[] = [];
   let totalRows = 0;
   const tablesCopied: string[] = [];
-  for (const row of flagged.rows) {
-    const table = row.name;
+  for (const table of seedTableNames) {
     const cols = await sourceAppPool.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`,
@@ -573,6 +654,19 @@ export async function replayFunctions(
   warnings: string[];
   unfilledEnvVars: Record<string, string[]>;
   overrideFilledFunctions: Record<string, string[]>;
+  /**
+   * Triggers this replay CREATED on the destination in a disabled state, as
+   * `<function name>.<trigger type>`. Additive and purely informational — no
+   * existing caller has to read it.
+   *
+   * It exists for promote. A cron trigger added in staging has no counterpart
+   * on production, so it is INSERTed rather than upserted, and it carries the
+   * source's `enabled = false` that isolateStagingApp set. The trigger is
+   * created but never fires. Leaving that undisclosed is the silent-surprise
+   * failure mode this pipeline keeps closing, so executePromote turns this list
+   * into a job warning naming each one.
+   */
+  disabledTriggersInserted: string[];
 }> {
   const src = await sourceRuntimePool.query<{
     id: string;
@@ -598,6 +692,7 @@ export async function replayFunctions(
   let inserted = 0;
   const unfilledEnvVars: Record<string, string[]> = {};
   const overrideFilledFunctions: Record<string, string[]> = {};
+  const disabledTriggersInserted: string[] = [];
 
   // Pre-compute "what env vars does each source function need" — we use this
   // to subtract filled (provided + auto-minted) keys and surface the rest.
@@ -664,6 +759,7 @@ export async function replayFunctions(
   }
 
   const overwriteExisting = opts?.overwriteExisting ?? false;
+  const preserveDestTriggerEnabled = opts?.preserveDestinationTriggerEnabled ?? false;
 
   for (const f of src.rows) {
     try {
@@ -711,10 +807,18 @@ export async function replayFunctions(
           [f.id],
         );
         for (const t of trigSrc.rows) {
-          await destRuntimePool.query(
-            buildTriggerInsertSql(overwriteExisting),
+          const trigRes = await destRuntimePool.query<{ inserted: boolean; enabled: boolean }>(
+            buildTriggerInsertSql(overwriteExisting, preserveDestTriggerEnabled),
             [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
           );
+          // A trigger the destination did not have, created switched off. Under
+          // DO NOTHING a conflicting row returns nothing, so this is only ever
+          // true for a genuine insert. Recorded, never acted on here — the
+          // caller decides whether it is worth telling the user about.
+          const trigRow = trigRes.rows[0];
+          if (trigRow?.inserted === true && trigRow.enabled === false) {
+            disabledTriggersInserted.push(`${f.name}.${t.trigger_type}`);
+          }
         }
 
         // --- apply env vars ---
@@ -837,7 +941,10 @@ export async function replayFunctions(
     }
   }
 
-  return { count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions };
+  return {
+    count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions,
+    disabledTriggersInserted,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,7 +1617,16 @@ export async function replayNonSecretConfig(
   await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
   await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
   await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
-  await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  // Opt-out, not opt-in: every existing caller keeps replaying integrations.
+  // Only promote skips them — see ReplayConfigOpts.skipIntegrations.
+  if (opts.skipIntegrations) {
+    logger.info(
+      { destAppId },
+      '[clone] integrations replay skipped by caller (non-promotable primitive)',
+    );
+  } else {
+    await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  }
   return { warnings };
 }
 
@@ -1683,10 +1799,36 @@ export async function replayMeetingsWebhook(
  * provisioned lazily inside deployViaPages on first publish, so no separate
  * project-create step is needed here.
  *
- * Soft-fails: errors are recorded as warnings and the broader clone job
- * is allowed to complete (the schema/RLS/functions/etc. are already done;
- * the user can re-publish their frontend manually).
+ * Soft-fails BY DEFAULT: errors are recorded as warnings and the broader
+ * clone/update job is allowed to complete (the schema/RLS/functions/etc. are
+ * already done; the user can re-publish their frontend manually).
+ *
+ * `opts.throwOnFailure` is the opt-in override promote (Task 14) needs: a
+ * promote's deploy step is not best-effort, it IS the job, so a failure here
+ * must fail the whole promote rather than complete with a stale production
+ * bundle and a buried warning. Same pattern Task 13 used for
+ * `preserveDestinationTriggerEnabled` / `skipIntegrations` — additive, opt-in,
+ * default (clone, update) callers are byte-for-byte unaffected.
+ *
+ * `opts.warnOnZeroRewrite` is the same additive-opt-in shape for a second
+ * gap (Task 14 fix round 2): by default, a bundle with zero occurrences of
+ * `sourceAppId` only ever gets a `logger.warn` — it never reaches the
+ * `warnings` this function returns, so it never reaches the job via
+ * `appendCloneJobWarnings`. On promote that is dangerous, not cosmetic: it
+ * means production is silently serving a bundle whose baked-in
+ * `VITE_APP_ID` still points at the STAGING app, reported as a successful
+ * promote. Left off by default because filesRewritten === 0 is genuinely
+ * ambiguous (it also happens for a legitimate bundle with no baked-in app id
+ * at all — runtime-injected config, a static site with no API calls) and
+ * clone/update must stay byte-identical; promote opts in because it is the
+ * one caller where "might be nothing, might be a live app pointed at the
+ * wrong backend" is worth surfacing every time.
  */
+export interface ReplayFrontendOpts {
+  throwOnFailure?: boolean;
+  warnOnZeroRewrite?: boolean;
+}
+
 export async function replayFrontend(
   controlDb: pg.Pool,
   destRuntimePool: pg.Pool,
@@ -1694,6 +1836,7 @@ export async function replayFrontend(
   destAppId: string,
   userId: string,
   logger: ReplayLogger,
+  opts?: ReplayFrontendOpts,
 ): Promise<{ warnings: string[] }> {
   const warnings: string[] = [];
 
@@ -1737,6 +1880,15 @@ export async function replayFrontend(
         { sourceAppId, destAppId },
         '[clone] frontend artifact had no occurrences of source app id; cloned frontend may still target the source app',
       );
+      if (opts?.warnOnZeroRewrite) {
+        warnings.push(
+          `The deployed frontend bundle had no occurrences of the source app id (${sourceAppId}) to `
+            + `rewrite. This is expected for a bundle with no baked-in app id (runtime-injected config, `
+            + `a static site with no API calls) — but if this bundle DOES call the Butterbase API, the `
+            + `deployed bundle may still point at app ${sourceAppId} instead of ${destAppId}. Verify the `
+            + 'deployed site before relying on it.',
+        );
+      }
     }
 
     // Persist the rewritten artifact back to the dest's R2 slot so future
@@ -1754,6 +1906,14 @@ export async function replayFrontend(
   } catch (err) {
     const msg = `frontend replay failed: ${(err as Error).message}`;
     warnings.push(msg);
+    if (opts?.throwOnFailure) {
+      // Promote path: do not swallow. Log the same as the default path (so
+      // the failure is still visible in the warnings this function would
+      // otherwise have returned) and then rethrow so the caller's job fails
+      // instead of reporting a completed promote with a stale bundle live.
+      logger.warn({ err }, '[clone] frontend replay failed; rethrowing (throwOnFailure)');
+      throw err instanceof Error ? err : new Error(msg);
+    }
     logger.warn({ err }, '[clone] frontend replay failed; continuing');
   }
 
