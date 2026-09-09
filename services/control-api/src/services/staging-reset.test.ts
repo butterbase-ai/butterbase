@@ -89,7 +89,13 @@ const job = {
   id: 'job_r1', mode: 'staging_reset', source_app_id: 'app_prod', dest_app_id: 'app_staging',
 } as never;
 
-const STAGING_DB_NAME = 'db_staging';
+// The two names are DIFFERENT on purpose, and that difference is the whole
+// point. `apps.db_name` stores the unprefixed, app-id-shaped name; the physical
+// Neon database carries a `db_` prefix. A fixture that used one value for both
+// made Guard 3 compare a string to itself, so it passed in every test while
+// refusing every real reset in production.
+const STAGING_DB_NAME = 'app_staging';
+const STAGING_PHYSICAL_DB = 'db_app_staging';
 
 /**
  * Point the truncate's table set at `names`.
@@ -130,7 +136,7 @@ function setReconcile(destroyed: string[] = []): void {
  */
 function defaultStagingQueryResponse(sql: unknown) {
   if (typeof sql === 'string' && /current_database/.test(sql)) {
-    return { rows: [{ current_database: STAGING_DB_NAME }] };
+    return { rows: [{ current_database: STAGING_PHYSICAL_DB }] };
   }
   return { rows: [] };
 }
@@ -894,6 +900,45 @@ describe('executeStagingReset — schema reconcile', () => {
       return { rows: [] };
     });
     await expect(guard!()).rejects.toThrow(/refusing to alter schema.*db_someone_elses_app/s);
+  });
+
+  it('compares against the PREFIXED database name, not the raw apps.db_name', async () => {
+    // Regression: Guard 3 used to compare current_database() straight against
+    // apps.db_name. apps.db_name is unprefixed ('app_XXX'); the physical Neon
+    // database is 'db_app_XXX'. The two never matched, so the guard refused
+    // every reset in production while the test suite stayed green — the old
+    // fixture fed the same string to both sides.
+    //
+    // Both directions are pinned here. Accepting the raw apps.db_name would be
+    // just as wrong as rejecting the prefixed one: it would mean the guard had
+    // been loosened to match whatever it was handed.
+    let guard: (() => Promise<void>) | null = null;
+    mocks.reconcileStagingSchema.mockImplementation(async (args: never) => {
+      guard = (args as unknown as { assertStagingTarget: () => Promise<void> })
+        .assertStagingTarget;
+      return { applied: [], destroyed: [] };
+    });
+    await executeStagingReset(deps as never, job);
+
+    // The physical name is what a real connection reports — accepted.
+    stagingPool.query.mockImplementation(async (sql: unknown) => {
+      if (typeof sql === 'string' && /current_database/.test(sql)) {
+        return { rows: [{ current_database: STAGING_PHYSICAL_DB }] };
+      }
+      return { rows: [] };
+    });
+    await expect(guard!()).resolves.toBeUndefined();
+
+    // The unprefixed apps.db_name is NOT a database any connection reports.
+    stagingPool.query.mockImplementation(async (sql: unknown) => {
+      if (typeof sql === 'string' && /current_database/.test(sql)) {
+        return { rows: [{ current_database: STAGING_DB_NAME }] };
+      }
+      return { rows: [] };
+    });
+    await expect(guard!()).rejects.toThrow(
+      new RegExp(`expected "${STAGING_PHYSICAL_DB}"`),
+    );
   });
 
   it('never re-seeds, and fails the job, when the schema replay itself fails', async () => {
