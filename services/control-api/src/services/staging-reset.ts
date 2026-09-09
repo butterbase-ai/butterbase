@@ -173,6 +173,81 @@ export async function startStagingReset(args: {
 }
 
 /**
+ * THE THREE GUARDS, in one place, callable immediately before every
+ * destructive statement a reset issues.
+ *
+ * A reset now runs TWO kinds of destructive SQL against staging — the
+ * `TRUNCATE ... CASCADE`, and (since the destructive-reconcile ruling) `DROP
+ * TABLE` / `DROP COLUMN` / `ALTER COLUMN ... TYPE` from
+ * reconcileStagingSchema. Aimed at the wrong pool, either one destroys a
+ * customer's PRODUCTION database unrecoverably. They were previously inline in
+ * truncateStagingAppTables, which meant the new DDL would have executed with
+ * no protection at all; extracting them is what lets both hazards be guarded
+ * by the same three checks rather than by one copy each that can drift.
+ *
+ *   1. stagingAppId === prodAppId is refused — on a reset job these must
+ *      always differ (source_app_id is production, dest_app_id is staging).
+ *      If they were ever equal, something upstream (startStagingReset,
+ *      resolveCloneDispatch's routing, or the CloneJob row itself) is broken,
+ *      and the only safe response is to fail loudly before running any SQL.
+ *   2. stagingPool === prodPool (reference equality) is refused — this catches
+ *      a pool-resolution bug (e.g. getAppPoolForApp's cache keyed wrong) that
+ *      the id check above cannot see, since two different app ids could resolve
+ *      to the same pool object if the caching key were ever wrong.
+ *   3. `SELECT current_database()` on stagingPool must equal the caller-
+ *      supplied `stagingDbName`. Guards 1 and 2 both compare values chosen
+ *      UPSTREAM of the getAppPoolForApp call in neon-task-worker.ts's
+ *      executeResetTask — if that call's two `pg.Pool` assignments were ever
+ *      swapped (i.e. `prodPool` gets the app id/db_name that actually belong to
+ *      staging, and vice versa), both ids would still differ and both pool
+ *      objects would still be distinct, so guards 1 and 2 would both pass while
+ *      the destructive statement ran against production. Guard 3 is the only
+ *      one that asks the LIVE CONNECTION instead of a value threaded through
+ *      arguments, so it is the only one that still catches that swap. It is a
+ *      round trip, and it is worth one per hazard.
+ *
+ * Call this immediately before the hazard, never once at the top of the reset:
+ * the distance between the check and the statement is the whole point.
+ */
+async function assertStagingTarget(args: {
+  prodAppId: string;
+  stagingAppId: string;
+  prodPool: pg.Pool;
+  stagingPool: pg.Pool;
+  stagingDbName: string;
+  /** Names the operation in the refusal message ('truncate', 'alter schema'). */
+  action: string;
+}): Promise<void> {
+  const { prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, action } = args;
+
+  // Guard 1: id-level.
+  if (stagingAppId === prodAppId) {
+    throw new Error(
+      `[staging-reset] refusing to ${action}: dest_app_id (staging, ${stagingAppId}) equals `
+        + `source_app_id (production, ${prodAppId})`,
+    );
+  }
+  // Guard 2: pool-identity level.
+  if (stagingPool === prodPool) {
+    throw new Error(
+      `[staging-reset] refusing to ${action}: the staging pool is reference-identical to the `
+        + 'production pool',
+    );
+  }
+  // Guard 3: connection-level.
+  const dbCheck = await stagingPool.query<{ current_database: string }>(
+    'SELECT current_database()',
+  );
+  const connectedDb = dbCheck.rows[0]?.current_database;
+  if (connectedDb !== stagingDbName) {
+    throw new Error(
+      `[staging-reset] refusing to ${action}: staging pool for app ${stagingAppId} is connected `
+        + `to database "${connectedDb}", expected "${stagingDbName}"`,
+    );
+  }
+}
+
+/**
  * Empties the staging app's data tables before production's rows are copied
  * back in.
  *
@@ -220,30 +295,16 @@ export async function startStagingReset(args: {
  * at the wrong pool destroys a customer's PRODUCTION data, unrecoverably —
  * this is exactly as dangerous as the replaySeedData argument-order hazard
  * documented on executeStagingReset below, just on the truncate side instead
- * of the insert side:
+ * of the insert side. The three checks themselves now live in
+ * `assertStagingTarget` above — shared, unchanged, with the destructive schema
+ * reconcile, which issues DROP TABLE / DROP COLUMN / ALTER COLUMN ... TYPE
+ * against the same pool and therefore needs exactly the same protection at
+ * exactly the same distance.
  *
- *   1. stagingAppId === prodAppId is refused — on a reset job these must
- *      always differ (source_app_id is production, dest_app_id is staging).
- *      If they were ever equal, something upstream (startStagingReset,
- *      resolveCloneDispatch's routing, or the CloneJob row itself) is
- *      broken, and the only safe response is to fail loudly before running
- *      any SQL.
- *   2. stagingPool === prodPool (reference equality) is refused — this
- *      catches a pool-resolution bug (e.g. getAppPoolForApp's cache keyed
- *      wrong) that the id check above cannot see, since it is entirely
- *      possible for two different app ids to end up resolving to the same
- *      pool object if the caching key were ever wrong.
- *   3. `SELECT current_database()` on stagingPool must equal the caller-
- *      supplied `stagingDbName`, checked immediately before the TRUNCATE.
- *      Guards 1 and 2 both compare values chosen UPSTREAM of the
- *      getAppPoolForApp call in neon-task-worker.ts's executeResetTask — if
- *      that call's two `pg.Pool` assignments were ever swapped (i.e.
- *      `prodPool` gets the app id/db_name that actually belong to staging,
- *      and vice versa), both ids would still differ and both pool objects
- *      would still be distinct, so guards 1 and 2 would both pass while the
- *      TRUNCATE runs against production. Guard 3 is the only one that asks
- *      about the live connection instead of a value threaded through
- *      arguments, so it is the only one that still catches that swap.
+ * They run TWICE in this function: once before the cascade introspection, and
+ * once immediately before the TRUNCATE statement itself. That is not
+ * redundancy — Guard 3 asks what the LIVE CONNECTION is pointed at, and other
+ * queries run in between.
  *
  * `introspectSchema` already excludes schema-introspector.ts's
  * `EXCLUDED_TABLES` (Butterbase's own per-app bookkeeping: `_rag_*`,
@@ -296,20 +357,12 @@ async function truncateStagingAppTables(args: {
     prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, controlDb, jobId, logger,
   } = args;
 
-  // Guard 1: id-level. See doc comment above.
-  if (stagingAppId === prodAppId) {
-    throw new Error(
-      `[staging-reset] refusing to truncate: dest_app_id (staging, ${stagingAppId}) equals `
-        + `source_app_id (production, ${prodAppId})`,
-    );
-  }
-  // Guard 2: pool-identity level. See doc comment above.
-  if (stagingPool === prodPool) {
-    throw new Error(
-      '[staging-reset] refusing to truncate: the staging pool is reference-identical to the '
-        + 'production pool',
-    );
-  }
+  // All three guards, immediately before the TRUNCATE's own introspection and
+  // re-run once more right before the TRUNCATE statement itself (below). See
+  // assertStagingTarget.
+  await assertStagingTarget({
+    prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, action: 'truncate',
+  });
 
   // THE SAME INTROSPECTION THE APP-COPY PLAN USES (buildCopyPlan's
   // deps.introspect IS this function) — see the doc comment for why the
@@ -385,23 +438,12 @@ async function truncateStagingAppTables(args: {
     );
   }
 
-  // Guard 3: connection-level. See doc comment above — this is the only
-  // guard that catches a swap of the getAppPoolForApp assignments upstream
-  // (neon-task-worker.ts's executeResetTask), because it asks the live
-  // connection which physical database it is pointed at instead of
-  // re-checking a value that was already threaded through the same
-  // (possibly swapped) call. Checked immediately before the TRUNCATE, as
-  // close to the hazard as possible.
-  const dbCheck = await stagingPool.query<{ current_database: string }>(
-    'SELECT current_database()',
-  );
-  const connectedDb = dbCheck.rows[0]?.current_database;
-  if (connectedDb !== stagingDbName) {
-    throw new Error(
-      `[staging-reset] refusing to truncate: staging pool for app ${stagingAppId} is connected `
-        + `to database "${connectedDb}", expected "${stagingDbName}"`,
-    );
-  }
+  // Re-run, as close to the hazard as it is possible to get: the cascade
+  // introspection above issued queries between the first check and this line,
+  // and Guard 3 is specifically about what the LIVE connection is pointed at.
+  await assertStagingTarget({
+    prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, action: 'truncate',
+  });
 
   const tableList = tables.map((t) => `"${t}"`).join(', ');
   await stagingPool.query(`TRUNCATE TABLE ${tableList} CASCADE`);
@@ -492,41 +534,74 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
   try {
     await setCloneJobStatus(controlDb, jobId, { status: 'seeding_data' });
 
-    // SCHEMA FIRST, THEN DATA. Reset's contract is "make staging look like
-    // production again", and schema is part of that: the app-copy engine reads
-    // production's column list and INSERTs it into staging verbatim, so once
-    // staging's schema has diverged every row of the copy fails with `column
-    // "x" of relation "y" does not exist` and the reset job goes to `failed`
-    // — permanently, because nothing here ever reconciled schema, so the state
+    // ROWS OUT FIRST, THEN SCHEMA, THEN ROWS BACK IN.
+    //
+    // Truncate BEFORE re-populating: both replaySeedData and the app-copy
+    // engine's data phase are INSERT ... ON CONFLICT DO NOTHING, so without
+    // this step a reset leaves every row staging already had untouched — see
+    // truncateStagingAppTables's doc comment.
+    await truncateStagingAppTables({
+      prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, controlDb, jobId, logger,
+    });
+
+    // SCHEMA AFTER THE TRUNCATE, AND THAT ORDER IS LOAD-BEARING. It is what
+    // makes "a reset always succeeds" true rather than merely intended:
+    //
+    //   - `ALTER COLUMN ... TYPE` on a POPULATED table needs a `USING` clause
+    //     and fails outright when no implicit cast exists (`ALTER TABLE notes
+    //     ALTER COLUMN body TYPE integer` on text rows is exactly the case the
+    //     live smoke test hit). On an EMPTY table it always succeeds, with no
+    //     `USING` and no guess about how to reinterpret a customer's values.
+    //   - `SET NOT NULL` cannot trip over an existing NULL.
+    //   - Dropping a staging-only table costs nothing once its rows are gone,
+    //     and its rows were always going to go: reset discards staging's data
+    //     by definition.
+    //
+    // Running the DDL first would mean choosing, on the user's behalf, how to
+    // cast rows that the very next statement deletes. Running it second means
+    // never having to.
+    //
+    // Reset's contract is "make staging look like production again", and
+    // schema is part of that: the app-copy engine reads production's column
+    // list and INSERTs it into staging verbatim, so once staging's schema has
+    // diverged every row of the copy fails and the reset job goes to `failed`
+    // — permanently, because nothing here reconciled schema, so the state
     // could only be cleared by hand-written DDL on the staging database. The
     // feature's own supported flow produces exactly that divergence (drop a
     // column in staging, promote, production keeps it — promote-preview's
     // `ignoredRemovals`).
     //
-    // ADDITIVE ONLY, and it names what it could not fix. See
-    // reconcileStagingSchema: a dropped column comes back, a changed column
-    // TYPE and a staging-only column do not, because both would need
-    // destructive DDL against staging that reset is not entitled to choose on
-    // the user's behalf. Those become job warnings rather than a silent
-    // no-op or a false claim of success — the copy below may still fail on
-    // them, but it fails having already said which divergence it could not
-    // repair. Run BEFORE the truncate so the truncate sees the reconciled
-    // table set (a table only production had is created, empty, then swept
-    // harmlessly and refilled by the copy).
+    // DESTRUCTIVE, DELIBERATELY, AND ONLY AGAINST STAGING. reconcileStagingSchema
+    // drops staging-only tables and columns and rewrites diverged types. Its
+    // own doc comment carries the reasoning; the two things to hold onto here
+    // are that PROMOTE's hard refusal is untouched and opposite by design, and
+    // that every destroyed object is named on the job below.
     const reconciled = await reconcileStagingSchema({
-      prodPool, stagingPool, stagingAppId, logger,
+      prodPool,
+      stagingPool,
+      stagingAppId,
+      // Re-run immediately before the DDL executes. Passed as a callback so
+      // the guards keep ONE implementation — the reconcile module has no
+      // business knowing about job id pairs or `apps.db_name`, and a second
+      // copy of these checks over there is exactly how they drift.
+      assertStagingTarget: () => assertStagingTarget({
+        prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, action: 'alter schema',
+      }),
+      logger,
     });
-    if (reconciled.unreconciled.length > 0) {
-      await appendCloneJobWarnings(controlDb, jobId, reconciled.unreconciled);
-    }
 
-    // Truncate BEFORE re-populating: both replaySeedData and the app-copy
-    // engine's data phase are INSERT ... ON CONFLICT DO NOTHING, so without
-    // this step a reset leaves every row staging already had untouched — see
-    // truncateStagingAppTables's doc comment.
-    const truncated = await truncateStagingAppTables({
-      prodAppId, stagingAppId, prodPool, stagingPool, stagingDbName, controlDb, jobId, logger,
-    });
+    // NAME WHAT IT DESTROYED. The standing rule's ninth application: a user who
+    // loses a scratch column or table to a reset learns it from the job record,
+    // not by noticing later that it is gone.
+    if (reconciled.destroyed.length > 0) {
+      await appendCloneJobWarnings(controlDb, jobId, [
+        `Reset changed staging's schema to match production and, in doing so, `
+          + `destroyed ${reconciled.destroyed.length} `
+          + `${reconciled.destroyed.length === 1 ? 'object' : 'objects'} that existed only on `
+          + `staging or differed from production: ${reconciled.destroyed.join('; ')}. Reset `
+          + 'makes staging match production; production was not touched.',
+      ]);
+    }
 
     // Direction is PRODUCTION -> STAGING. prodPool is always the first
     // argument, stagingPool always the second — matches replaySeedData's
@@ -547,35 +622,16 @@ export async function executeStagingReset(deps: ResetDeps, job: CloneJob): Promi
       await appendCloneJobWarnings(controlDb, jobId, seedResult.warnings);
     }
 
-    // THE TRUNCATE LIST IS READ FROM STAGING; WHAT REFILLS IT IS READ FROM
-    // PRODUCTION. truncateStagingAppTables introspects STAGING (correct —
-    // those are the tables that physically exist on the pool being emptied),
-    // while both replaySeedData and the app-copy engine's plan introspect
-    // PRODUCTION. A table that exists only on staging is therefore TRUNCATED
-    // and then never repopulated: reset empties it and reports success.
-    // Nothing downstream can warn about it, because from production's point of
-    // view the table was never in scope at all — so it has to be computed
-    // here, from the two lists, or it cannot be seen at all.
-    //
-    // Emptying it is still the right behaviour: reset is defined as "discard
-    // the staging app's data", and a staging-only table is staging data. What
-    // is not acceptable is doing it silently.
-    const inProduction = new Set(reconciled.productionTables);
-    const emptiedNotRefilled = truncated.tables.filter((t) => !inProduction.has(t));
-    if (emptiedNotRefilled.length > 0) {
-      logger.warn(
-        { stagingAppId, prodAppId, emptiedNotRefilled },
-        '[staging-reset] tables truncated on staging have no counterpart in production',
-      );
-      await appendCloneJobWarnings(controlDb, jobId, [
-        `${emptiedNotRefilled.length} `
-          + `${emptiedNotRefilled.length === 1 ? 'table was' : 'tables were'} emptied on staging `
-          + `but not re-populated from production: ${emptiedNotRefilled.join(', ')}. `
-          + `${emptiedNotRefilled.length === 1 ? 'It exists' : 'They exist'} only on staging, so `
-          + `there was nothing to copy back. ${emptiedNotRefilled.length === 1 ? 'It is' : 'They are'} `
-          + 'now empty; the table itself is left in place.',
-      ]);
-    }
+    // NO "emptied but not refilled" WARNING ANY MORE, and the absence is
+    // deliberate. That warning existed for the table the truncate emptied and
+    // nothing refilled — a staging-only table — back when reset left it in
+    // place. Reset now DROPS it, and the `destroyed` disclosure above names it
+    // precisely ('dropped staging-only table "scratch_notes"'). Reinstating a
+    // second line saying the same table "is now empty; the table itself is
+    // left in place" would state the opposite of what happened. The
+    // arithmetic that produced it — staging's truncated tables minus
+    // production's — is exactly the set the reconcile now drops, so there is
+    // nothing left for it to report.
 
     // Re-isolate: a fresh copy of production carries production's connected
     // accounts, enabled integrations and enabled cron triggers back into

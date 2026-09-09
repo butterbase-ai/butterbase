@@ -105,11 +105,17 @@ function setStagingTables(names: string[]): void {
   });
 }
 
-/** Point `reconcileStagingSchema` at a production table set. */
-function setProductionTables(names: string[], unreconciled: string[] = []): void {
-  mocks.reconcileStagingSchema.mockResolvedValue({
-    applied: [], productionTables: names, unreconciled,
-  });
+/**
+ * Point `reconcileStagingSchema` at a result.
+ *
+ * `destroyed` is the plain-language list of staging objects the reconcile
+ * dropped or rewrote. Reset is entitled to destroy staging schema so that it
+ * always succeeds; naming what it destroyed is the other half of that deal, so
+ * the default is deliberately empty and a test that wants the disclosure asks
+ * for it explicitly.
+ */
+function setReconcile(destroyed: string[] = []): void {
+  mocks.reconcileStagingSchema.mockResolvedValue({ applied: [], destroyed });
 }
 
 /**
@@ -180,7 +186,7 @@ beforeEach(() => {
   // from here and therefore truncated NOTHING for an app shaped like this.
   mocks.getSeedTableNames.mockResolvedValue([]);
   setStagingTables(['widgets', 'orders']);
-  setProductionTables(['widgets', 'orders']);
+  setReconcile();
   mocks.isolateStagingApp.mockResolvedValue(undefined);
   mocks.isolateStagingMeetingsWebhook.mockResolvedValue(undefined);
   mocks.touchEnvironmentTimestamp.mockResolvedValue(undefined);
@@ -698,22 +704,31 @@ describe('executeStagingReset — seed warnings reach the job record', () => {
     );
   });
 
-  it('names a table truncated on staging that production cannot refill', async () => {
-    // Staging (which drives the TRUNCATE) carries a table production does
-    // not, so nothing ever repopulates it. Emptying it is correct — reset
-    // discards staging's data and a staging-only table is staging data —
-    // doing so silently is the defect.
-    setStagingTables(['widgets', 'orders', 'staging_only_notes']);
-    setProductionTables(['widgets', 'orders']);
-    mocks.replaySeedData.mockResolvedValue({
-      tables: ['widgets', 'orders'], rows: 9, warnings: [],
-    });
+  it('names every schema object the reconcile destroyed, on the job', async () => {
+    // THE STANDING RULE. Reset is entitled to drop staging-only objects and
+    // rewrite diverged types so that it always succeeds; the other half of
+    // that deal is that a user who loses a scratch table learns it from the
+    // job record rather than by noticing later.
+    setReconcile([
+      'dropped staging-only table "scratch_notes" (it does not exist in production)',
+      'rewrote column "notes"."body" from integer to text',
+    ]);
 
     await executeStagingReset(deps as never, job);
 
     const appended = mocks.appendCloneJobWarnings.mock.calls.flatMap((c) => c[2] as string[]);
-    expect(appended.some((w) => w.includes('staging_only_notes'))).toBe(true);
-    expect(appended.some((w) => w.includes('widgets'))).toBe(false);
+    const disclosure = appended.find((w) => w.includes('scratch_notes'));
+    expect(disclosure).toBeDefined();
+    expect(disclosure).toContain('rewrote column "notes"."body" from integer to text');
+    // And it says which side was changed — the whole reassurance a user needs.
+    expect(disclosure).toContain('production was not touched');
+  });
+
+  it('does not claim to have destroyed anything when nothing diverged', async () => {
+    setReconcile([]);
+    await executeStagingReset(deps as never, job);
+    const appended = mocks.appendCloneJobWarnings.mock.calls.flatMap((c) => c[2] as string[]);
+    expect(appended.some((w) => /destroyed/.test(w))).toBe(false);
   });
 });
 
@@ -727,18 +742,24 @@ describe('executeStagingReset — seed warnings reach the job record', () => {
  * "priority" of relation "notes" does not exist` and the job went to `failed`
  * — permanently, because nothing in the pipeline ever reconciled schema.
  *
- * The fix is a production -> staging ADDITIVE schema replay before the data
- * phase, and an honest warning for the divergence additive DDL cannot repair.
- * These tests assert the wiring and the ordering; the reconcile's own
- * direction and additive-only behaviour are covered in
- * staging-schema-reconcile.test.ts.
+ * The fix is a production -> staging schema replay, now DESTRUCTIVE against
+ * staging so that a reset always succeeds. These tests assert the wiring, the
+ * ordering and the disclosure; the reconcile's own direction, destruction and
+ * guard behaviour are covered in staging-schema-reconcile.test.ts.
  */
-describe('executeStagingReset — schema reconcile before the data copy', () => {
-  it('replays production schema onto staging, in that direction, before truncating', async () => {
+describe('executeStagingReset — schema reconcile', () => {
+  it('reconciles schema AFTER the truncate, on an empty table', async () => {
+    // THE ORDER IS LOAD-BEARING, not incidental. `ALTER COLUMN ... TYPE` on a
+    // POPULATED table needs a `USING` clause and fails outright when no
+    // implicit cast exists — the live smoke test's `body text -> integer` is
+    // exactly that case. On an empty table it always succeeds. Reconciling
+    // first would mean choosing how to cast rows the very next statement
+    // deletes; reconciling second means never having to. Reverse these two and
+    // "a reset always succeeds" stops being true.
     const order: string[] = [];
     mocks.reconcileStagingSchema.mockImplementation(async () => {
       order.push('reconcile');
-      return { applied: [], productionTables: ['widgets', 'orders'], unreconciled: [] };
+      return { applied: [], destroyed: [] };
     });
     stagingPool.query.mockImplementation(async (sql: unknown) => {
       if (typeof sql === 'string' && /^TRUNCATE TABLE/i.test(sql)) order.push('truncate');
@@ -747,9 +768,14 @@ describe('executeStagingReset — schema reconcile before the data copy', () => 
 
     await executeStagingReset(deps as never, job);
 
-    expect(order).toEqual(['reconcile', 'truncate']);
-    // Direction: production is the SOURCE of the schema, staging the target.
-    // Reversed, this would replay staging's schema onto PRODUCTION.
+    expect(order).toEqual(['truncate', 'reconcile']);
+  });
+
+  it('passes production as the schema SOURCE and staging as the target', async () => {
+    await executeStagingReset(deps as never, job);
+    // Reversed, this would replay staging's schema onto PRODUCTION — and the
+    // reconcile now EXECUTES destructive DDL, so that mistake drops a
+    // customer's production columns.
     expect(mocks.reconcileStagingSchema).toHaveBeenCalledWith(
       expect.objectContaining({
         prodPool: deps.prodPool,
@@ -762,35 +788,51 @@ describe('executeStagingReset — schema reconcile before the data copy', () => 
     expect(s).not.toBe(prodPool);
   });
 
-  it('surfaces what the reconcile could NOT fix as job warnings, and still runs', async () => {
-    setProductionTables(['widgets', 'orders'], [
-      'Change column "notes"."body" type to integer — production and staging disagree here in a '
-      + 'way that only destructive DDL could reconcile.',
-    ]);
+  it('hands the reconcile a REAL guard, not a stub — it refuses a wrong database', async () => {
+    // The reconcile issues DROP TABLE / DROP COLUMN / ALTER COLUMN ... TYPE
+    // against staging, so it must be able to re-run the same three guards the
+    // TRUNCATE uses, immediately before its own DDL. Asserting the callback is
+    // merely PRESENT would pass against a no-op; this captures it and invokes
+    // it for real, with the staging pool answering `current_database()` with
+    // somebody else's database.
+    let guard: (() => Promise<void>) | null = null;
+    mocks.reconcileStagingSchema.mockImplementation(async (args: never) => {
+      guard = (args as unknown as { assertStagingTarget: () => Promise<void> })
+        .assertStagingTarget;
+      return { applied: [], destroyed: [] };
+    });
 
     await executeStagingReset(deps as never, job);
+    expect(guard).toBeInstanceOf(Function);
 
-    const appended = mocks.appendCloneJobWarnings.mock.calls.flatMap((c) => c[2] as string[]);
-    expect(appended.some((w) => w.includes('"notes"."body"'))).toBe(true);
-    // A warning, not a failure: the reset still does everything else it can.
-    expect(mocks.replaySeedData).toHaveBeenCalled();
-    expect(mocks.setCloneJobStatus).toHaveBeenCalledWith(
-      deps.controlDb, 'job_r1', expect.objectContaining({ status: 'completed' }),
-    );
+    // Passes while the connection is pointed at the staging database...
+    await expect(guard!()).resolves.toBeUndefined();
+
+    // ...and refuses the moment it is not. This is Guard 3, the only one that
+    // catches a swap of the two getAppPoolForApp assignments upstream.
+    stagingPool.query.mockImplementation(async (sql: unknown) => {
+      if (typeof sql === 'string' && /current_database/.test(sql)) {
+        return { rows: [{ current_database: 'db_someone_elses_app' }] };
+      }
+      return { rows: [] };
+    });
+    await expect(guard!()).rejects.toThrow(/refusing to alter schema.*db_someone_elses_app/s);
   });
 
-  it('does not warn when staging and production schemas already agree', async () => {
-    await executeStagingReset(deps as never, job);
-    expect(mocks.appendCloneJobWarnings).not.toHaveBeenCalled();
-  });
-
-  it('never truncates or re-seeds when the schema replay itself fails', async () => {
-    mocks.reconcileStagingSchema.mockRejectedValue(new Error('ADD COLUMN boom'));
-    await expect(executeStagingReset(deps as never, job)).rejects.toThrow('ADD COLUMN boom');
-    const truncateCalls = stagingPool.query.mock.calls.filter(
-      (c) => typeof c[0] === 'string' && /^TRUNCATE TABLE/i.test(c[0]),
-    );
-    expect(truncateCalls).toHaveLength(0);
+  it('never re-seeds, and fails the job, when the schema replay itself fails', async () => {
+    // The truncate has already run by this point — that is the deliberate
+    // ordering — so staging is left EMPTY. That is the right outcome for a
+    // half-reconciled schema: seeding production's rows into a schema that is
+    // still wrong is how the original defect produced 3 failed rows and a
+    // useless staging app. Fail loudly and leave it recoverable by re-running
+    // the reset, which is now idempotent.
+    mocks.reconcileStagingSchema.mockRejectedValue(new Error('DROP COLUMN boom'));
+    await expect(executeStagingReset(deps as never, job)).rejects.toThrow('DROP COLUMN boom');
     expect(mocks.replaySeedData).not.toHaveBeenCalled();
+    expect(mocks.enqueueStagingDataCopy).not.toHaveBeenCalled();
+    expect(mocks.setCloneJobStatus).toHaveBeenLastCalledWith(
+      deps.controlDb, 'job_r1', expect.objectContaining({ status: 'failed' }),
+    );
   });
+
 });
