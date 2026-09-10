@@ -77,6 +77,7 @@ import { aiVideoRoutes } from './routes/ai-videos.js';
 import { aiImageRoutes } from './routes/ai-images.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
+import { startEmailLookupSweeper } from './services/people/email-lookup-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
 import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
 import { startCloneIntentsPruner } from './services/clone-intents-pruner.js';
@@ -1082,6 +1083,15 @@ Promise.resolve(app.ready())
       (app as any).responsesSweeperHandle = responsesSweeperHandle;
     }
 
+    // People email-lookup sweeper: expires people_email_lookups rows stuck in
+    // 'pending' past the TTL (provider never called back) across all runtime
+    // regions, writing a zero-cost profile_email_expired audit row for each.
+    // Runs hourly; gracefully skips regions that have not run migration 031.
+    if (process.env.SKIP_PEOPLE_EMAIL_SWEEPER !== '1') {
+      const peopleEmailSweeperHandle = startEmailLookupSweeper(config.runtimeDb, app.log);
+      (app as any).peopleEmailSweeperHandle = peopleEmailSweeperHandle;
+    }
+
     // Clone-jobs pruner: deletes template_clone_jobs rows in status
     // 'completed' or 'failed' older than 30 days (runs every 24 h).
     if (process.env.SKIP_CLONE_JOBS_PRUNER !== '1') {
@@ -1184,6 +1194,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});
+      if ((app as any).peopleEmailSweeperHandle) await (app as any).peopleEmailSweeperHandle.stop().catch(() => {});
       if ((app as any).cloneJobsPrunerHandle) await (app as any).cloneJobsPrunerHandle.stop().catch(() => {});
       if ((app as any).cloneJobsReaperHandle) await (app as any).cloneJobsReaperHandle.stop().catch(() => {});
       if ((app as any).cloneWebhookSweeperHandle) await (app as any).cloneWebhookSweeperHandle.stop().catch(() => {});
