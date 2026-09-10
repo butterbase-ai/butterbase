@@ -22,6 +22,7 @@ import { getRuntimeDbForApp } from './region-resolver.js';
 import { deriveStagingName, allocateStagingSubdomain } from './staging-naming.js';
 import { getProvisionAllowedRegions } from './provision-region.js';
 import { createAgentError, getDocUrl } from './error-handler.js';
+import { quotaErrors } from '../utils/quota-errors.js';
 import { VALIDATION_INVALID_SCHEMA, RESOURCE_NOT_FOUND } from '@butterbase/shared/error-types';
 
 export type StartStagingFailure =
@@ -54,11 +55,18 @@ export async function startStaging(args: {
 
   const runtimeDb = await getRuntimeDbForApp(controlDb, prodAppId);
 
-  const appRow = await runtimeDb.query<{ name: string; region: string; subdomain: string | null }>(
-    `SELECT name, region, subdomain FROM apps WHERE id = $1`, [prodAppId],
+  const appRow = await runtimeDb.query<{ name: string; region: string; subdomain: string | null; organization_id: string | null }>(
+    `SELECT name, region, subdomain, organization_id FROM apps WHERE id = $1`, [prodAppId],
   );
   if (appRow.rows.length === 0) return { ok: false, code: 'PROD_NOT_FOUND' };
   const region = appRow.rows[0].region;
+  // Staging belongs to whoever owns production, not to whoever clicked the
+  // button: the caller's orgId (e.g. their personal org) may differ from the
+  // team org the production app actually lives in. Billing, the Task 5 quota
+  // check, and the Task 3 plan gate all need the production app's org.
+  // apps.organization_id is nullable for legacy pre-backfill apps, so fall
+  // back to the caller-supplied orgId only when it is NULL.
+  const destOrgId = appRow.rows[0].organization_id ?? orgId;
 
   // A staging app must not itself sprout a staging app: the link table would
   // need a chain and promote would have no unambiguous production target.
@@ -133,7 +141,7 @@ export async function startStaging(args: {
     controlDb,
     sourceAppId: prodAppId,
     userId,
-    destOrgId: orgId,
+    destOrgId,
     name: stagingName,
     destRegion: region,
     logger,
@@ -228,6 +236,17 @@ export function sendStartStagingFailure(
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     case 'CLONE_REFUSED':
+      // startClone's own project-quota check (Task 4 pins it to the
+      // production app's org) is what actually enforces the limit — this is
+      // only the render step. Everything else that startClone can refuse for
+      // keeps the generic 400 below; this is the one inner code with numbers
+      // and an upgrade path worth surfacing, so it gets the house 403 shape
+      // (routes/init.ts) instead of being flattened into a bare enum name.
+      if (result.inner.code === 'QUOTA_EXCEEDED') {
+        return reply.code(403).send(
+          quotaErrors.stagingProjectLimitReached(result.inner.current, result.inner.limit),
+        );
+      }
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
         message: `Cannot create a staging environment: ${result.inner.code}.`,

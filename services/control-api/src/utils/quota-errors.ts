@@ -53,6 +53,28 @@ export const quotaErrors = {
     };
   },
 
+  // Same error code, field shape and status as projectLimitReached (existing
+  // clients keying off `error: 'project_limit_reached'` keep working) — only
+  // the message differs. A staging environment IS a project: someone looking
+  // at two apps in their dashboard and told they're at limit/limit reads that
+  // as a bug unless told the second app (staging) counts against the same cap
+  // as production.
+  stagingProjectLimitReached(current: number, limit: number) {
+    return {
+      error: 'project_limit_reached',
+      current,
+      limit,
+      // checkProjectQuota refuses when current >= limit, so at this point the
+      // org is ALREADY at or over the cap and staging would be one MORE than
+      // `current` — not `current` itself. Saying "creating it would use 3 of 3"
+      // to someone already using 3 of 3 is the exact confusion this message
+      // exists to remove.
+      message: `Your plan allows ${limit} project${limit === 1 ? '' : 's'}, and a staging environment counts as one of them. `
+        + `You are already using ${current} of ${limit}. Upgrade to create more.`,
+      upgradeUrl,
+    };
+  },
+
   accountSoftLocked() {
     return {
       error: 'account_soft_locked',

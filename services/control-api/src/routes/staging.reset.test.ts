@@ -16,8 +16,12 @@ const mocks = vi.hoisted(() => ({
   startPromote: vi.fn(),
   buildPromotePreview: vi.fn(),
   getAppPoolForApp: vi.fn(),
+  getAppPlanFeatures: vi.fn(),
 }));
 
+vi.mock('../services/plan-features.js', () => ({
+  getAppPlanFeatures: mocks.getAppPlanFeatures,
+}));
 vi.mock('../services/staging-reset.js', () => ({ startStagingReset: mocks.startStagingReset }));
 vi.mock('../services/clone-task-queue.js', () => ({ enqueueCloneTask: mocks.enqueueCloneTask }));
 vi.mock('../services/region-resolver.js', () => ({
@@ -66,6 +70,10 @@ beforeEach(() => {
   mocks.resolveOrganizationId.mockResolvedValue('org_1');
   mocks.resolveApp.mockResolvedValue({ id: 'app_prod', owner_id: 'u1' });
   mocks.resolveAppHomeRegion.mockResolvedValue('us-east-1');
+  // Reset is deliberately NOT gated on features.staging — blocking it would
+  // strand a downgraded user's work inside staging with no way out. A plan
+  // that lacks the feature entirely must not affect reset.
+  mocks.getAppPlanFeatures.mockResolvedValue({});
 });
 
 describe('POST /v1/apps/:app_id/staging/reset', () => {
@@ -81,6 +89,16 @@ describe('POST /v1/apps/:app_id/staging/reset', () => {
     // source app id, and neon_tasks is a per-region queue the worker claims
     // from its own instanceRegion, so this must land in production's region.
     expect(mocks.enqueueCloneTask).toHaveBeenCalledWith('app_prod', 'us-east-1', 'job_r1');
+  });
+
+  it('is not gated on features.staging — succeeds even when the plan lacks the feature', async () => {
+    mocks.getAppPlanFeatures.mockResolvedValue({ staging: false });
+    mocks.startStagingReset.mockResolvedValue({
+      ok: true, jobId: 'job_r2', stagingAppId: 'app_staging',
+    });
+    const res = await build().inject({ method: 'POST', url: '/v1/apps/app_prod/staging/reset' });
+    expect(res.statusCode).toBe(200);
+    expect(mocks.enqueueCloneTask).toHaveBeenCalledWith('app_prod', 'us-east-1', 'job_r2');
   });
 
   it('returns 404 with the NO_STAGING message and enqueues nothing', async () => {

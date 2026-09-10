@@ -13,6 +13,7 @@ import {
 import { config } from '../config.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
+import { getAppPlanFeatures } from '../services/plan-features.js';
 import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
@@ -59,27 +60,8 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
     // personal org may be Playground even when the team org paid for Launch
     // (and vice versa — a paid personal org can't reach a team app it's a
     // member of). Fall back to personal_organization_id only for legacy apps
-    // with NULL organization_id (pre-backfill).
-    const appOrgResult = await runtimeDb.query<{ organization_id: string | null; owner_id: string }>(
-      'SELECT organization_id, owner_id FROM apps WHERE id = $1',
-      [appId],
-    );
-    const appOrgId = appOrgResult.rows[0]?.organization_id;
-    const planResult = appOrgId
-      ? await controlDb.query(
-          `SELECT p.features FROM organizations o
-           JOIN plans p ON p.id = o.plan_id
-           WHERE o.id = $1`,
-          [appOrgId],
-        )
-      : await controlDb.query(
-          `SELECT p.features FROM platform_users pu
-           JOIN organizations o ON o.id = pu.personal_organization_id
-           JOIN plans p ON p.id = o.plan_id
-           WHERE pu.id = $1`,
-          [appOrgResult.rows[0]?.owner_id ?? userId],
-        );
-    const features = (planResult.rows[0]?.features as Record<string, unknown>) || {};
+    // with NULL organization_id (pre-backfill). See plan-features.ts.
+    const features = await getAppPlanFeatures(controlDb, appId, userId);
     if (!features.custom_domain) {
       return reply.status(403).send(quotaErrors.featureNotAvailable('custom_domain'));
     }

@@ -36,7 +36,21 @@ vi.mock('./clone-jobs.js', async (importOriginal) => {
   return { ...actual, setCloneJobStatus: mocks.setCloneJobStatus };
 });
 
-import { startStaging } from './start-staging.js';
+import { startStaging, sendStartStagingFailure } from './start-staging.js';
+import { quotaErrors } from '../utils/quota-errors.js';
+
+// Minimal FastifyReply stand-in — same shape used by start-clone.test.ts's
+// fakeReply for the same purpose (asserting a status/body mapping without
+// spinning up a real Fastify instance).
+function fakeReply() {
+  const reply: any = {
+    statusCode: 0,
+    body: undefined,
+    code(c: number) { reply.statusCode = c; return reply; },
+    send(b: unknown) { reply.body = b; return reply; },
+  };
+  return reply;
+}
 
 const controlDbQuery = vi.fn().mockResolvedValue({ rows: [] });
 
@@ -51,7 +65,7 @@ const baseArgs = {
 // getRuntimeDbForApp resolves to a plain pg.Pool (see region-resolver.ts) —
 // not a { pool, region } wrapper. Region for a given app comes from the
 // `apps` row itself, exactly as start-clone.ts does it.
-function fakeRuntimePool(rows: Array<{ name: string; region: string; subdomain: string | null }>) {
+function fakeRuntimePool(rows: Array<{ name: string; region: string; subdomain: string | null; organization_id?: string | null }>) {
   return { query: vi.fn().mockResolvedValue({ rows }) };
 }
 
@@ -62,7 +76,7 @@ beforeEach(() => {
   mocks.getEnvironmentLink.mockResolvedValue(null);
   mocks.getLinkByStagingApp.mockResolvedValue(null);
   mocks.getRuntimeDbForApp.mockResolvedValue(
-    fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm' }]),
+    fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm', organization_id: 'org_1' }]),
   );
   mocks.allocateStagingSubdomain.mockResolvedValue('my-crm-staging');
   // Empty list = no restriction configured (see provision-region.ts), matching
@@ -231,6 +245,34 @@ describe('startStaging', () => {
     expect(modeWrites[0][0]).toContain('dest_subdomain');
   });
 
+  // --- Destination org must come from the production app, not the caller.
+  //
+  // The caller's orgId is whoever happened to click the button; the app's
+  // organization_id is whoever actually owns production. Billing, quota
+  // (Task 5) and the plan gate (Task 3) all need the latter, not the former.
+
+  it('uses the production app organization_id as destOrgId, not the caller-supplied orgId', async () => {
+    mocks.getRuntimeDbForApp.mockResolvedValue(
+      fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm', organization_id: 'org_team' }]),
+    );
+    const res = await startStaging({ ...baseArgs, orgId: 'org_personal' });
+    expect(res.ok).toBe(true);
+    expect(mocks.startClone).toHaveBeenCalledWith(
+      expect.objectContaining({ destOrgId: 'org_team' }),
+    );
+  });
+
+  it('falls back to the caller-supplied orgId when the production app has no organization_id (legacy pre-backfill)', async () => {
+    mocks.getRuntimeDbForApp.mockResolvedValue(
+      fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm', organization_id: null }]),
+    );
+    const res = await startStaging({ ...baseArgs, orgId: 'org_personal' });
+    expect(res.ok).toBe(true);
+    expect(mocks.startClone).toHaveBeenCalledWith(
+      expect.objectContaining({ destOrgId: 'org_personal' }),
+    );
+  });
+
   it('allocates against BOTH planes, not the regional runtime plane alone', async () => {
     await startStaging(baseArgs);
     // Subdomains are globally unique via the control-plane org_app_index; an
@@ -244,5 +286,77 @@ describe('startStaging', () => {
       }),
       'my-crm',
     );
+  });
+
+  // --- Task 5: the quota refusal startClone already enforces (Task 4 pins it
+  // to the production app's org, not the caller's) must reach the caller with
+  // its numbers and an upgrade path intact, not as a bare 400 enum name.
+
+  it('drives QUOTA_EXCEEDED through the existing startClone mock as a CLONE_REFUSED with the numbers intact', async () => {
+    mocks.startClone.mockResolvedValue({ ok: false, code: 'QUOTA_EXCEEDED', current: 3, limit: 3 });
+    const res = await startStaging(baseArgs);
+    expect(res).toMatchObject({
+      ok: false,
+      code: 'CLONE_REFUSED',
+      inner: { code: 'QUOTA_EXCEEDED', current: 3, limit: 3 },
+    });
+  });
+
+  it('checks the quota against the production app org, not the caller org (Task 4 interaction)', async () => {
+    mocks.getRuntimeDbForApp.mockResolvedValue(
+      fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm', organization_id: 'org_team' }]),
+    );
+    mocks.startClone.mockResolvedValue({ ok: false, code: 'QUOTA_EXCEEDED', current: 3, limit: 3 });
+    await startStaging({ ...baseArgs, orgId: 'org_personal' });
+    expect(mocks.startClone).toHaveBeenCalledWith(
+      expect.objectContaining({ destOrgId: 'org_team' }),
+    );
+  });
+});
+
+describe('sendStartStagingFailure', () => {
+  it('renders a QUOTA_EXCEEDED CLONE_REFUSED as 403 with current, limit and an upgrade URL', () => {
+    const reply = fakeReply();
+    sendStartStagingFailure(reply, {
+      ok: false,
+      code: 'CLONE_REFUSED',
+      inner: { code: 'QUOTA_EXCEEDED', current: 3, limit: 3 },
+    });
+    expect(reply.statusCode).toBe(403);
+    expect(reply.body).toMatchObject({
+      error: 'project_limit_reached',
+      current: 3,
+      limit: 3,
+      upgradeUrl: expect.any(String),
+    });
+    expect(reply.body.message).toEqual(expect.any(String));
+  });
+
+  it('states that a staging environment counts as its own project', () => {
+    const reply = fakeReply();
+    sendStartStagingFailure(reply, {
+      ok: false,
+      code: 'CLONE_REFUSED',
+      inner: { code: 'QUOTA_EXCEEDED', current: 3, limit: 3 },
+    });
+    expect(reply.body).toEqual(quotaErrors.stagingProjectLimitReached(3, 3));
+    expect(reply.body.message.toLowerCase()).toContain('staging');
+    expect(reply.body.message).not.toEqual(quotaErrors.projectLimitReached(3, 3).message);
+    // checkProjectQuota refuses when current >= limit, so the org is ALREADY at
+    // the cap — staging would be one MORE than `current`. The message must not
+    // tell someone already using 3 of 3 that creating it "would use 3 of 3".
+    expect(reply.body.message).toMatch(/already using 3 of 3/);
+    expect(reply.body.message).not.toMatch(/would use 3 of 3/);
+  });
+
+  it('leaves other CLONE_REFUSED inner codes at their existing 400/generic-error shape', () => {
+    const reply = fakeReply();
+    sendStartStagingFailure(reply, {
+      ok: false,
+      code: 'CLONE_REFUSED',
+      inner: { code: 'NAME_TAKEN', name: 'my-crm-staging' },
+    });
+    expect(reply.statusCode).toBe(400);
+    expect(reply.body.error.message).toBe('Cannot create a staging environment: NAME_TAKEN.');
   });
 });

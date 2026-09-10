@@ -21,6 +21,13 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-09-10',
+    category: 'deploy',
+    title: 'Staging now requires a paid plan',
+    description: 'Staging environments now require Launch or higher — they are not available on the free Playground tier. A staging environment counts as a project against your plan limit, so on Launch (3 projects) you get production + staging + one more app. Custom domains are also a paid feature, available on Launch and above.',
+    href: '/core-concepts/staging/',
+  },
+  {
     date: '2026-09-09',
     category: 'deploy',
     title: 'Staging environments',

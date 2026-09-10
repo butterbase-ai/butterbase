@@ -32,6 +32,8 @@ Storage object **ids** also change. If your app stores a storage object id insid
 
 ## Creating a staging environment
 
+Staging requires **Launch** or a paid plan above it. Free-tier apps see an upgrade prompt instead of a create button.
+
 You get **one** staging environment per production app, and it's always created in the same region as production.
 
 **MCP**
@@ -149,6 +151,9 @@ Deleting a staging environment is always a deliberate, manual decision.
 
 ## Limits and interactions
 
+- **Staging requires Launch or above.** The free Playground tier cannot create staging environments.
+- **A staging environment counts as a project** against your plan's limit. On Launch (3 projects), production + staging = 2 of 3, leaving room for one more app. Attempting to create staging on a plan at its project limit fails with a quota refusal.
+- **Custom domains are a paid feature.** Only Launch and above can use custom domains.
 - **One staging environment per production app.**
 - **Staging lives in production's region.** The link between the two is region-local.
 - **You cannot move an app between regions while a staging link exists.** Unlink or delete the staging environment first, then move the app. This applies in both directions — you can't move the staging app away from its production app either.
