@@ -29,8 +29,11 @@ On a self-hosted deployment without the app-copy engine, staging is populated
 from tables marked _seed:true only; the create/reset job says so in its warnings.
 
 Actions:
-  "create" — provision a staging environment for this app. Returns a job_id;
-             poll GET /v1/clone-jobs/{job_id} for progress. One per app.
+  "create" — provision a staging environment for this app. Requires Launch or a
+             paid plan above it (free Playground tier is not allowed). The staging
+             environment counts as a project against the plan's max_projects limit,
+             so attempting to create when the limit is reached fails with 402. Returns
+             a job_id; poll GET /v1/clone-jobs/{job_id} for progress. One per app.
              The job reaches status "copying_data" once the app exists and the
              production data copy is running, and only reports "completed" once
              that copy has finished — a job that is not "completed" is not a
