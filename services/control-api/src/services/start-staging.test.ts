@@ -342,6 +342,11 @@ describe('sendStartStagingFailure', () => {
     expect(reply.body).toEqual(quotaErrors.stagingProjectLimitReached(3, 3));
     expect(reply.body.message.toLowerCase()).toContain('staging');
     expect(reply.body.message).not.toEqual(quotaErrors.projectLimitReached(3, 3).message);
+    // checkProjectQuota refuses when current >= limit, so the org is ALREADY at
+    // the cap — staging would be one MORE than `current`. The message must not
+    // tell someone already using 3 of 3 that creating it "would use 3 of 3".
+    expect(reply.body.message).toMatch(/already using 3 of 3/);
+    expect(reply.body.message).not.toMatch(/would use 3 of 3/);
   });
 
   it('leaves other CLONE_REFUSED inner codes at their existing 400/generic-error shape', () => {

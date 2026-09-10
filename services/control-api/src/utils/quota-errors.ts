@@ -64,8 +64,13 @@ export const quotaErrors = {
       error: 'project_limit_reached',
       current,
       limit,
+      // checkProjectQuota refuses when current >= limit, so at this point the
+      // org is ALREADY at or over the cap and staging would be one MORE than
+      // `current` — not `current` itself. Saying "creating it would use 3 of 3"
+      // to someone already using 3 of 3 is the exact confusion this message
+      // exists to remove.
       message: `Your plan allows ${limit} project${limit === 1 ? '' : 's'}, and a staging environment counts as one of them. `
-        + `Creating it would use ${current} of ${limit}. Upgrade to create more.`,
+        + `You are already using ${current} of ${limit}. Upgrade to create more.`,
       upgradeUrl,
     };
   },
