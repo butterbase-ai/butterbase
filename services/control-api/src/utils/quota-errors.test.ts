@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { quotaErrors } from './quota-errors.js';
 import {
   kvRateLimited,
   kvCreditsExhausted,
@@ -85,5 +86,37 @@ describe('KV quota error helpers', () => {
 
       expect(result.headers).toBeUndefined();
     });
+  });
+});
+
+/**
+ * Regression: this message named a "Pro plan", which does not exist on this
+ * platform. The tiers are playground / launch / certified / enterprise. It went
+ * unnoticed because every caller's test asserted the payload SHAPE — comparing
+ * against quotaErrors.featureNotAvailable(...) itself — so both sides of the
+ * assertion carried the same wrong string and it could never fail. A live call
+ * against the running API is what surfaced it.
+ */
+describe('quotaErrors.featureNotAvailable', () => {
+  const REAL_PLANS = ['playground', 'launch', 'certified', 'enterprise'];
+
+  it('names a plan that actually exists', () => {
+    const msg = quotaErrors.featureNotAvailable('staging').message.toLowerCase();
+    expect(REAL_PLANS.some((p) => msg.includes(p))).toBe(true);
+  });
+
+  it('does not invent a plan tier', () => {
+    const msg = quotaErrors.featureNotAvailable('staging').message;
+    // Word-boundary matched so a future "Pro-rated" or similar does not trip it.
+    expect(msg).not.toMatch(/pro/i);
+    expect(msg).not.toMatch(/premium/i);
+    expect(msg).not.toMatch(/team/i);
+  });
+
+  it('carries the feature name and an upgrade path', () => {
+    const e = quotaErrors.featureNotAvailable('custom_domain');
+    expect(e.error).toBe('feature_not_available');
+    expect(e.feature).toBe('custom_domain');
+    expect(e.upgradeUrl).toBeTruthy();
   });
 });

@@ -95,7 +95,12 @@ export const quotaErrors = {
     return {
       error: 'feature_not_available',
       feature,
-      message: `This feature requires a Pro plan or above. Upgrade to unlock it.`,
+      // Names the real entry-level paid plan. There is no "Pro" plan on this
+      // platform — the tiers are playground / launch / certified / enterprise —
+      // and telling someone to upgrade to a plan that does not exist sends them
+      // to the billing page hunting for something they will never find.
+      // Both gated features (custom_domain, staging) unlock at Launch.
+      message: `This feature requires the Launch plan or above. Upgrade to unlock it.`,
       upgradeUrl,
     };
   },
