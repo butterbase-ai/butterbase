@@ -22,6 +22,7 @@ import { getRuntimeDbForApp } from './region-resolver.js';
 import { deriveStagingName, allocateStagingSubdomain } from './staging-naming.js';
 import { getProvisionAllowedRegions } from './provision-region.js';
 import { createAgentError, getDocUrl } from './error-handler.js';
+import { quotaErrors } from '../utils/quota-errors.js';
 import { VALIDATION_INVALID_SCHEMA, RESOURCE_NOT_FOUND } from '@butterbase/shared/error-types';
 
 export type StartStagingFailure =
@@ -235,6 +236,17 @@ export function sendStartStagingFailure(
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     case 'CLONE_REFUSED':
+      // startClone's own project-quota check (Task 4 pins it to the
+      // production app's org) is what actually enforces the limit — this is
+      // only the render step. Everything else that startClone can refuse for
+      // keeps the generic 400 below; this is the one inner code with numbers
+      // and an upgrade path worth surfacing, so it gets the house 403 shape
+      // (routes/init.ts) instead of being flattened into a bare enum name.
+      if (result.inner.code === 'QUOTA_EXCEEDED') {
+        return reply.code(403).send(
+          quotaErrors.stagingProjectLimitReached(result.inner.current, result.inner.limit),
+        );
+      }
       return reply.code(400).send(createAgentError({
         code: VALIDATION_INVALID_SCHEMA,
         message: `Cannot create a staging environment: ${result.inner.code}.`,
