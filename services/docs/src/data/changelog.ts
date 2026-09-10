@@ -21,6 +21,14 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-09-09',
+    category: 'deploy',
+    title: 'Staging environments',
+    description: 'Give any app a staging environment: a full copy — schema, functions, and your real production data, including auth accounts and uploaded files — that you can break without touching production. Staging never inherits your secret values (the keys are created empty so functions fail loudly instead of quietly using live credentials), connected accounts are cleared, and cron triggers and integrations are switched off, so a staging copy of a nightly job cannot fire. Set sandbox values per key with env var overrides. When the change is ready, promote it back: schema, RLS, functions, Durable Objects, config and the repo snapshot are applied to production and the frontend is deployed. Data is never promoted, and destructive DDL is refused outright — the refusal names the exact statements so you can apply them yourself if you mean them. Reset re-seeds staging from production whenever it drifts. One per app, in the same region as production, from `manage_staging` / `promote_staging`, the REST API, or the new Staging page in the dashboard.',
+    href: '/core-concepts/staging/',
+    icon: '🧪',
+  },
+  {
     date: '2026-07-05',
     category: 'functions',
     title: 'App-level environment variables',
