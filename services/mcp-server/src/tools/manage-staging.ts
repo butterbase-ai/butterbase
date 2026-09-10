@@ -32,7 +32,9 @@ Actions:
   "create" — provision a staging environment for this app. Requires Launch or a
              paid plan above it (free Playground tier is not allowed). The staging
              environment counts as a project against the plan's max_projects limit,
-             so attempting to create when the limit is reached fails with 402. Returns
+             so attempting to create when the limit is reached fails with 403 (the
+             message names the current count and the limit). A plan without staging
+             at all also fails with 403. Returns
              a job_id; poll GET /v1/clone-jobs/{job_id} for progress. One per app.
              The job reaches status "copying_data" once the app exists and the
              production data copy is running, and only reports "completed" once
