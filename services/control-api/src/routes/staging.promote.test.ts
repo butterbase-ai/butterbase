@@ -13,8 +13,12 @@ const mocks = vi.hoisted(() => ({
   resolveOrganizationId: vi.fn(),
   resolveApp: vi.fn(),
   startStaging: vi.fn(),
+  getAppPlanFeatures: vi.fn(),
 }));
 
+vi.mock('../services/plan-features.js', () => ({
+  getAppPlanFeatures: mocks.getAppPlanFeatures,
+}));
 vi.mock('../services/promote-jobs.js', () => ({ startPromote: mocks.startPromote }));
 vi.mock('../services/promote-preview.js', () => ({ buildPromotePreview: mocks.buildPromotePreview }));
 vi.mock('../services/clone-task-queue.js', () => ({ enqueueCloneTask: mocks.enqueueCloneTask }));
@@ -79,6 +83,10 @@ beforeEach(() => {
   mocks.getRuntimeDbForApp.mockResolvedValue(fakeRuntimeDb());
   mocks.getEnvironmentLink.mockResolvedValue({ staging_app_id: 'app_staging' });
   mocks.getAppPoolForApp.mockResolvedValue({});
+  // Promote is deliberately NOT gated on features.staging — blocking it
+  // would strand a downgraded user's work inside staging with no way to get
+  // it out. A plan that lacks the feature entirely must not affect promote.
+  mocks.getAppPlanFeatures.mockResolvedValue({});
 });
 
 describe('GET /v1/apps/:app_id/staging/promote/preview', () => {
@@ -141,6 +149,14 @@ describe('POST /v1/apps/:app_id/staging/promote', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ job_id: 'job_p1', status: 'pending' });
     expect(mocks.enqueueCloneTask).toHaveBeenCalledWith('app_staging', 'us-east-1', 'job_p1');
+  });
+
+  it('is not gated on features.staging — succeeds even when the plan lacks the feature', async () => {
+    mocks.getAppPlanFeatures.mockResolvedValue({ staging: false });
+    mocks.startPromote.mockResolvedValue({ ok: true, jobId: 'job_p2' });
+    const res = await build().inject({ method: 'POST', url: '/v1/apps/app_prod/staging/promote' });
+    expect(res.statusCode).toBe(200);
+    expect(mocks.enqueueCloneTask).toHaveBeenCalledWith('app_staging', 'us-east-1', 'job_p2');
   });
 
   it('returns 409 with the blocked message verbatim and enqueues nothing', async () => {

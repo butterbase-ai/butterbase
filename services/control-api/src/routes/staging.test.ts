@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   resolveOrganizationId: vi.fn(),
   resolveApp: vi.fn(),
   getLatestStagingJob: vi.fn(),
+  getAppPlanFeatures: vi.fn(),
 }));
 
 vi.mock('../services/start-staging.js', async () => {
@@ -19,6 +20,9 @@ vi.mock('../services/start-staging.js', async () => {
   );
   return { ...actual, startStaging: mocks.startStaging };
 });
+vi.mock('../services/plan-features.js', () => ({
+  getAppPlanFeatures: mocks.getAppPlanFeatures,
+}));
 vi.mock('../services/app-environments.js', () => ({
   getEnvironmentLink: mocks.getEnvironmentLink,
   getEnvironmentLinkWithPauseState: mocks.getEnvironmentLinkWithPauseState,
@@ -45,6 +49,7 @@ vi.mock('../services/app-resolver.js', async () => {
 
 import { stagingRoutes } from './staging.js';
 import { AppNotFoundError } from '../services/app-resolver.js';
+import { quotaErrors } from '../utils/quota-errors.js';
 
 function build() {
   const app = Fastify();
@@ -62,6 +67,7 @@ beforeEach(() => {
   mocks.getRuntimeDbForApp.mockResolvedValue({});
   mocks.resolveApp.mockResolvedValue({ id: 'app_prod', owner_id: 'u1' });
   mocks.getLatestStagingJob.mockResolvedValue(null);
+  mocks.getAppPlanFeatures.mockResolvedValue({ staging: true });
 });
 
 describe('POST /v1/apps/:app_id/staging', () => {
@@ -93,6 +99,49 @@ describe('POST /v1/apps/:app_id/staging', () => {
     expect(res.statusCode).toBe(404);
     expect(mocks.startStaging).not.toHaveBeenCalled();
     expect(mocks.enqueueCloneTask).not.toHaveBeenCalled();
+  });
+
+  it('refuses with 403 when the plan lacks the staging feature', async () => {
+    mocks.getAppPlanFeatures.mockResolvedValue({ staging: false });
+    const app = build();
+    const res = await app.inject({ method: 'POST', url: '/v1/apps/app_prod/staging' });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual(quotaErrors.featureNotAvailable('staging'));
+  });
+
+  it('writes no clone job row when the plan lacks the staging feature', async () => {
+    // The refusal must land before ANY side effect: no clone job row, no
+    // queued task. startStaging is what performs the control-plane write
+    // that creates the clone job row, and enqueueCloneTask is what queues
+    // the worker task for it — neither must be called on refusal.
+    mocks.getAppPlanFeatures.mockResolvedValue({});
+    const app = build();
+    const res = await app.inject({ method: 'POST', url: '/v1/apps/app_prod/staging' });
+    expect(res.statusCode).toBe(403);
+    expect(mocks.startStaging).not.toHaveBeenCalled();
+    expect(mocks.enqueueCloneTask).not.toHaveBeenCalled();
+  });
+
+  it('allows staging creation to proceed end to end when the plan has the feature', async () => {
+    mocks.getAppPlanFeatures.mockResolvedValue({ staging: true });
+    mocks.startStaging.mockResolvedValue({
+      ok: true, jobId: 'job_2', stagingName: 'my-crm-staging', stagingSubdomain: 'my-crm-staging', region: 'us-east-1',
+    });
+    const app = build();
+    const res = await app.inject({ method: 'POST', url: '/v1/apps/app_prod/staging' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ job_id: 'job_2', staging_name: 'my-crm-staging' });
+    expect(mocks.enqueueCloneTask).toHaveBeenCalledWith('app_prod', 'us-east-1', 'job_2');
+  });
+
+  it('returns 404, not 403, when a non-owner calls with a plan that lacks staging — ownership beats the gate', async () => {
+    mocks.resolveApp.mockRejectedValue(new AppNotFoundError('app_prod'));
+    mocks.getAppPlanFeatures.mockResolvedValue({ staging: false });
+    const app = build();
+    const res = await app.inject({ method: 'POST', url: '/v1/apps/app_prod/staging' });
+    expect(res.statusCode).toBe(404);
+    expect(mocks.getAppPlanFeatures).not.toHaveBeenCalled();
+    expect(mocks.startStaging).not.toHaveBeenCalled();
   });
 });
 

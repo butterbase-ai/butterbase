@@ -24,6 +24,8 @@ import { startPromote } from '../services/promote-jobs.js';
 import { buildPromotePreview } from '../services/promote-preview.js';
 import { startStagingReset } from '../services/staging-reset.js';
 import { getAppPoolForApp } from '../services/app-pool.js';
+import { getAppPlanFeatures } from '../services/plan-features.js';
+import { quotaErrors } from '../utils/quota-errors.js';
 import {
   setStagingOverrides, getStagingOverrides, applyStagingOverridesToAppEnv,
 } from '../services/staging-overrides.js';
@@ -87,6 +89,14 @@ export function stagingRoutes(app: FastifyInstance) {
 
     if (!(await assertCallerOwnsApp(app, app_id, userId, request.auth?.organizationId))) {
       return reply.code(404).send(notFound(app_id));
+    }
+
+    // Gate creation only (Launch and above). R1: this handler has no
+    // runtimeDb in scope, so getAppPlanFeatures resolves its own. Must run
+    // before any side effect — no clone job row, no queued task — on refusal.
+    const features = await getAppPlanFeatures(app.controlDb, app_id, userId);
+    if (!features.staging) {
+      return reply.code(403).send(quotaErrors.featureNotAvailable('staging'));
     }
 
     const orgId = request.auth?.organizationId
