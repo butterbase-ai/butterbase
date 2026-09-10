@@ -54,11 +54,18 @@ export async function startStaging(args: {
 
   const runtimeDb = await getRuntimeDbForApp(controlDb, prodAppId);
 
-  const appRow = await runtimeDb.query<{ name: string; region: string; subdomain: string | null }>(
-    `SELECT name, region, subdomain FROM apps WHERE id = $1`, [prodAppId],
+  const appRow = await runtimeDb.query<{ name: string; region: string; subdomain: string | null; organization_id: string | null }>(
+    `SELECT name, region, subdomain, organization_id FROM apps WHERE id = $1`, [prodAppId],
   );
   if (appRow.rows.length === 0) return { ok: false, code: 'PROD_NOT_FOUND' };
   const region = appRow.rows[0].region;
+  // Staging belongs to whoever owns production, not to whoever clicked the
+  // button: the caller's orgId (e.g. their personal org) may differ from the
+  // team org the production app actually lives in. Billing, the Task 5 quota
+  // check, and the Task 3 plan gate all need the production app's org.
+  // apps.organization_id is nullable for legacy pre-backfill apps, so fall
+  // back to the caller-supplied orgId only when it is NULL.
+  const destOrgId = appRow.rows[0].organization_id ?? orgId;
 
   // A staging app must not itself sprout a staging app: the link table would
   // need a chain and promote would have no unambiguous production target.
@@ -133,7 +140,7 @@ export async function startStaging(args: {
     controlDb,
     sourceAppId: prodAppId,
     userId,
-    destOrgId: orgId,
+    destOrgId,
     name: stagingName,
     destRegion: region,
     logger,

@@ -51,7 +51,7 @@ const baseArgs = {
 // getRuntimeDbForApp resolves to a plain pg.Pool (see region-resolver.ts) —
 // not a { pool, region } wrapper. Region for a given app comes from the
 // `apps` row itself, exactly as start-clone.ts does it.
-function fakeRuntimePool(rows: Array<{ name: string; region: string; subdomain: string | null }>) {
+function fakeRuntimePool(rows: Array<{ name: string; region: string; subdomain: string | null; organization_id?: string | null }>) {
   return { query: vi.fn().mockResolvedValue({ rows }) };
 }
 
@@ -62,7 +62,7 @@ beforeEach(() => {
   mocks.getEnvironmentLink.mockResolvedValue(null);
   mocks.getLinkByStagingApp.mockResolvedValue(null);
   mocks.getRuntimeDbForApp.mockResolvedValue(
-    fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm' }]),
+    fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm', organization_id: 'org_1' }]),
   );
   mocks.allocateStagingSubdomain.mockResolvedValue('my-crm-staging');
   // Empty list = no restriction configured (see provision-region.ts), matching
@@ -229,6 +229,34 @@ describe('startStaging', () => {
     );
     expect(modeWrites).toHaveLength(1);
     expect(modeWrites[0][0]).toContain('dest_subdomain');
+  });
+
+  // --- Destination org must come from the production app, not the caller.
+  //
+  // The caller's orgId is whoever happened to click the button; the app's
+  // organization_id is whoever actually owns production. Billing, quota
+  // (Task 5) and the plan gate (Task 3) all need the latter, not the former.
+
+  it('uses the production app organization_id as destOrgId, not the caller-supplied orgId', async () => {
+    mocks.getRuntimeDbForApp.mockResolvedValue(
+      fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm', organization_id: 'org_team' }]),
+    );
+    const res = await startStaging({ ...baseArgs, orgId: 'org_personal' });
+    expect(res.ok).toBe(true);
+    expect(mocks.startClone).toHaveBeenCalledWith(
+      expect.objectContaining({ destOrgId: 'org_team' }),
+    );
+  });
+
+  it('falls back to the caller-supplied orgId when the production app has no organization_id (legacy pre-backfill)', async () => {
+    mocks.getRuntimeDbForApp.mockResolvedValue(
+      fakeRuntimePool([{ name: 'my-crm', region: 'us-east-1', subdomain: 'my-crm', organization_id: null }]),
+    );
+    const res = await startStaging({ ...baseArgs, orgId: 'org_personal' });
+    expect(res.ok).toBe(true);
+    expect(mocks.startClone).toHaveBeenCalledWith(
+      expect.objectContaining({ destOrgId: 'org_personal' }),
+    );
   });
 
   it('allocates against BOTH planes, not the regional runtime plane alone', async () => {
