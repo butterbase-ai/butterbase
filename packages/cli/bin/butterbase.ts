@@ -153,6 +153,16 @@ import {
   agentsDeleteCommand,
 } from '../src/commands/agents.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
+import {
+  stagingCreateCommand,
+  stagingStatusCommand,
+  stagingResetCommand,
+  stagingDeleteCommand,
+  stagingEnvGetCommand,
+  stagingEnvSetCommand,
+  stagingPromotePreviewCommand,
+  stagingPromoteRunCommand,
+} from '../src/commands/staging.js';
 import { templatesCommand } from '../src/commands/templates.js';
 import { mcpInstallCommand } from '../src/commands/mcp.js';
 import {
@@ -1762,6 +1772,74 @@ people
   .option('--json', 'Output raw JSON')
   .option('--watch', 'Poll every 5 seconds until the lookup reaches a terminal state (max 5 min)')
   .action((lookupId, opts) => peopleEmailStatusCommand(lookupId, opts));
+
+// Staging
+const staging = program.command('staging').description('Manage staging environments');
+
+staging
+  .command('create')
+  .description('Create a staging environment for the current app (clones production data)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--wait', 'Poll until the staging environment is ready')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => stagingCreateCommand(opts));
+
+staging
+  .command('status')
+  .description('Show the staging environment linked to this app')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => stagingStatusCommand(opts));
+
+staging
+  .command('reset')
+  .description('Discard staging data and re-seed from production')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--wait', 'Poll until the reset is complete')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => stagingResetCommand(opts));
+
+staging
+  .command('delete')
+  .description('Delete the staging environment')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => stagingDeleteCommand(opts));
+
+const stagingEnv = staging.command('env').description('Manage staging env var overrides');
+
+stagingEnv
+  .command('get')
+  .description('List the keys that have staging overrides (values are write-only)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => stagingEnvGetCommand(opts));
+
+stagingEnv
+  .command('set <vars...>')
+  .description('Set staging env var overrides (KEY=value pairs)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((vars, opts) => stagingEnvSetCommand(vars, opts));
+
+const stagingPromote = staging.command('promote').description('Promote staging changes to production');
+
+stagingPromote
+  .command('preview')
+  .description('Preview what would be promoted (read-only)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => stagingPromotePreviewCommand(opts));
+
+stagingPromote
+  .command('run')
+  .description('Promote staging schema + functions to production')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .option('--wait', 'Poll until the promote is complete')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => stagingPromoteRunCommand(opts));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {
