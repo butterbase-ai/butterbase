@@ -9,18 +9,27 @@ For charging **your own end users**, see [Charging Your Users](/core-concepts/bi
 
 ## Plans
 
-Plans are billed per **organization**, and every account starts on the free tier. Tiers differ on AI credits, project count, MAU, database size, bandwidth, file storage, function invocations, frontend deployments, request rate, realtime listeners, KV limits, [custom domains](/core-concepts/custom-domains/), support level, and compliance add-ons.
+There are four, and each one is the one before it plus more:
 
-Current tiers, prices, and allowances live in two canonical places — deliberately not duplicated here, because they change:
+| | |
+|---|---|
+| **Playground** | Free. Build something and find out whether it works. No card needed. |
+| **Launch** | Everything in Playground, plus the things you need to put a real app in front of real users: more room, [custom domains](/core-concepts/custom-domains/), and [preview deployments](/core-concepts/preview-deployments/). |
+| **Certified** | Everything in Launch, plus room to grow, a bigger AI allowance at a cheaper rate, and priority support. |
+| **Enterprise** | Everything in Certified, plus SSO, a SOC 2 report, a HIPAA add-on, an uptime guarantee, and a dedicated contact. Priced with you. |
 
-- **[butterbase.ai/pricing](https://butterbase.ai/pricing)** — the tier comparison
+You pay per **organization**, not per app, and every account starts on Playground.
+
+The exact prices and allowances live in two places, on purpose — they're not copied here, because they change and this page would go stale:
+
+- **[butterbase.ai/pricing](https://butterbase.ai/pricing)** — the side-by-side comparison
 - **[Your dashboard Billing page](https://dashboard.butterbase.ai/billing)** — what *your* organization is actually on, with live usage against each limit
 
 ```bash
 butterbase billing status
 ```
 
-Free-tier projects are paused after a week of inactivity. Resume them from the dashboard.
+Playground projects are paused after a week with nothing happening on them. Nothing is deleted — resume them from the dashboard whenever you come back.
 
 ## Usage meters
 

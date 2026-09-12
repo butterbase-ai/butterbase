@@ -353,8 +353,8 @@ async function assertStagingTarget(args: {
  * phase — so any row already present in staging (which is the entire reason
  * anyone runs a reset: staging has drifted) survives with its stale staging
  * value, and a row that exists only in staging survives outright.
- * `manage_staging`'s tool text promises callers reset "discards the staging
- * app's data"; this is what makes that true.
+ * `manage_preview`'s tool text promises callers reset "throws away the
+ * preview's data"; this is what makes that true.
  *
  * WHICH TABLES. Every user table on the staging database, via
  * `introspectSchema` — NOT the `_seed_tables` registry this used to read.

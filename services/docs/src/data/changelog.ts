@@ -21,18 +21,11 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
-    date: '2026-09-10',
-    category: 'deploy',
-    title: 'Staging now requires a paid plan',
-    description: 'Staging environments now require Launch or higher — they are not available on the free Playground tier. A staging environment counts as a project against your plan limit, so on Launch (3 projects) you get production + staging + one more app. Custom domains are also a paid feature, available on Launch and above.',
-    href: '/core-concepts/staging/',
-  },
-  {
     date: '2026-09-09',
     category: 'deploy',
-    title: 'Staging environments',
-    description: 'Give any app a staging environment: a full copy — schema, functions, and your real production data, including auth accounts and uploaded files — that you can break without touching production. Staging never inherits your secret values (the keys are created empty so functions fail loudly instead of quietly using live credentials), connected accounts are cleared, and cron triggers and integrations are switched off, so a staging copy of a nightly job cannot fire. Set sandbox values per key with env var overrides. When the change is ready, promote it back: schema, RLS, functions, Durable Objects, config and the repo snapshot are applied to production and the frontend is deployed. Data is never promoted, and destructive DDL is refused outright — the refusal names the exact statements so you can apply them yourself if you mean them. Reset re-seeds staging from production whenever it drifts. One per app, in the same region as production, from `manage_staging` / `promote_staging`, the REST API, or the new Staging page in the dashboard.',
-    href: '/core-concepts/staging/',
+    title: 'Preview deployments',
+    description: 'Give any app a preview deployment: a full copy — your tables, your functions, and your real live data, including signed-up accounts and uploaded files — that you can break without touching the app your users are on. A preview never inherits your secret values (the key names are created empty so anything that needs one fails loudly instead of quietly spending your money), connected accounts are disconnected, and scheduled jobs and integrations are switched off, so a preview copy of a nightly job cannot fire. Set test values per key with preview secrets. When the change is ready, push it live: your tables, access rules, functions, Durable Objects, settings and code are applied to your live app and the frontend is deployed. Data is never pushed, and anything that would throw away live data is refused outright — the refusal names the exact change that is stuck so you can make it yourself if you mean it. Reset copies the preview fresh from your live app whenever it wanders. One per app, on Launch and above, in the same region as your live app, from `manage_preview` / `promote_preview`, the REST API, or the new Preview page in the dashboard.',
+    href: '/core-concepts/preview-deployments/',
     icon: '🧪',
   },
   {
