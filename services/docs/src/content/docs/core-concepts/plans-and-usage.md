@@ -15,7 +15,7 @@ There are four, and each one is the one before it plus more:
 |---|---|
 | **Playground** | Free. Build something and find out whether it works. No card needed. |
 | **Launch** | Everything in Playground, plus the things you need to put a real app in front of real users: more room, [custom domains](/core-concepts/custom-domains/), and [preview deployments](/core-concepts/preview-deployments/). |
-| **Certified** | Everything in Launch, plus room to grow, a bigger AI allowance at a cheaper rate, and priority support. |
+| **Certified** | Everything in Launch, plus room to grow, a bigger AI allowance, and priority support. |
 | **Enterprise** | Everything in Certified, plus SSO, a SOC 2 report, a HIPAA add-on, an uptime guarantee, and a dedicated contact. Priced with you. |
 
 You pay per **organization**, not per app, and every account starts on Playground.
@@ -46,7 +46,8 @@ AI usage draws down a single credit balance per organization, in this order:
 
 1. **Monthly allowance** — a per-tier credit grant, refilled on each successful subscription invoice.
 2. **Top-up balance** — pay-as-you-go credit you buy in advance; never expires.
-3. **Overage** — paid tiers keep serving past zero, down to a per-tier **credit floor**, then hard-stop. The free tier has a floor of $0 and stops the moment the balance is exhausted.
+
+When both run out, AI calls stop. Buy a top-up or upgrade to carry on — nothing keeps running up a bill in the background.
 
 **Buy a top-up:**
 
@@ -59,7 +60,7 @@ POST /dashboard/billing/topup
 butterbase billing topup 25
 ```
 
-**Spending cap** — an org-level ceiling on AI spend. Paid tiers get a default cap; when you hit it, AI calls are refused until you raise it. Your current cap and floor are on the dashboard Billing page.
+**Spending cap** — an org-level ceiling on AI spend, shown on the dashboard Billing page and adjustable per org.
 
 ```bash
 butterbase billing cap get
@@ -112,7 +113,7 @@ butterbase billing portal
 
 **Free tier:** the org is soft-locked. Reads still work; writes are blocked until usage drops or you upgrade.
 
-**Paid plans:** usage past an allowance is not blocked — overage is billed at your tier's per-meter rate. You get an email. If a payment fails, a grace period begins; after it expires the org is suspended.
+**Paid plans:** when your AI credit balance runs out, AI calls stop until you top up or upgrade. Other limits — storage, for instance — are enforced as plan caps. If a payment fails, a grace period begins; after it expires the org is suspended.
 
 ## Account statuses
 
