@@ -953,11 +953,11 @@ async function executeClone(
         const withheld = appEnvResult.withheldKeys ?? [];
         if (withheld.length > 0) {
           await appendCloneJobWarnings(controlDb, jobId, [
-            `Production's app-level env var VALUES were deliberately not copied into staging: `
-              + `${withheld.join(', ')}. Each key exists on the staging app with an empty value, so `
-              + `functions that need it will fail with a missing-key error rather than silently `
-              + `running against production's live credentials. Set staging values with `
-              + `PUT /v1/apps/${job.source_app_id}/staging/env-overrides (or manage_staging `
+            `Your live app's secret VALUES were deliberately not copied into the preview: `
+              + `${withheld.join(', ')}. Each key exists on the preview app with an empty value, so `
+              + `anything that needs it will fail with a missing-key error rather than quietly `
+              + `running against your live credentials. Set preview values with `
+              + `PUT /v1/apps/${job.source_app_id}/staging/env-overrides (or manage_preview `
               + `action="set_env_overrides").`,
           ]);
         }

@@ -38,6 +38,7 @@ async function loadSponsorOverlay(): Promise<SponsorOverlay | null> {
 }
 import { requireUserId } from '../utils/require-auth.js';
 import { apiError } from '../utils/api-error.js';
+import { sortPlansForDisplay } from '../utils/plan-order.js';
 import { teardownAppDb } from '../services/app-db-teardown.js';
 import * as DeploymentService from '../services/deployment.service.js';
 import { deleteObject } from '../services/s3.js';
@@ -564,7 +565,9 @@ export async function billingRoutes(app: FastifyInstance) {
          FROM plans ORDER BY price_monthly_cents ASC`
       );
 
-      const plans = result.rows.map((row) => ({
+      // ASC alone puts Enterprise first — it stores -1 for "Custom". See
+      // sortPlansForDisplay.
+      const plans = sortPlansForDisplay(result.rows).map((row) => ({
         id: row.id,
         name: row.name,
         priceMonthly: row.price_monthly_cents,

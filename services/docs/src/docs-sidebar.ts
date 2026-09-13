@@ -25,7 +25,7 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'Serverless Functions', slug: 'core-concepts/functions' },
       { label: 'Agents', slug: 'core-concepts/agents' },
       { label: 'Frontend Deployment', slug: 'core-concepts/frontend-deployment' },
-      { label: 'Staging Environments', slug: 'core-concepts/staging' },
+      { label: 'Preview Deployments', slug: 'core-concepts/preview-deployments' },
       { label: 'Custom Domains', slug: 'core-concepts/custom-domains' },
       { label: 'Durable Objects', slug: 'core-concepts/durable-objects' },
       { label: 'Edge SSR Deployment', slug: 'core-concepts/edge-ssr-deployment' },
