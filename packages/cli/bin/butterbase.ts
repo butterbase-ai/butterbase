@@ -153,6 +153,16 @@ import {
   agentsDeleteCommand,
 } from '../src/commands/agents.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
+import {
+  previewCreateCommand,
+  previewStatusCommand,
+  previewResetCommand,
+  previewDeleteCommand,
+  previewEnvGetCommand,
+  previewEnvSetCommand,
+  previewPromoteCheckCommand,
+  previewPromoteRunCommand,
+} from '../src/commands/preview.js';
 import { templatesCommand } from '../src/commands/templates.js';
 import { mcpInstallCommand } from '../src/commands/mcp.js';
 import {
@@ -1762,6 +1772,76 @@ people
   .option('--json', 'Output raw JSON')
   .option('--watch', 'Poll every 5 seconds until the lookup reaches a terminal state (max 5 min)')
   .action((lookupId, opts) => peopleEmailStatusCommand(lookupId, opts));
+
+// Preview deployments
+const preview = program.command('preview').description('Manage preview deployments');
+
+preview
+  .command('create')
+  .description('Create a preview deployment for the current app (clones production data)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--wait', 'Poll until the preview deployment is ready')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => previewCreateCommand(opts));
+
+preview
+  .command('status')
+  .description('Show the preview deployment linked to this app')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => previewStatusCommand(opts));
+
+preview
+  .command('reset')
+  .description('Discard preview data and re-seed from production')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--wait', 'Poll until the reset is complete')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => previewResetCommand(opts));
+
+preview
+  .command('delete')
+  .description('Delete the preview deployment')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => previewDeleteCommand(opts));
+
+const previewEnv = preview.command('env').description('Manage preview env var overrides');
+
+previewEnv
+  .command('get')
+  .description('List the keys that have preview overrides (values are write-only)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => previewEnvGetCommand(opts));
+
+previewEnv
+  .command('set <vars...>')
+  .description('Set preview env var overrides (KEY=value pairs)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((vars, opts) => previewEnvSetCommand(vars, opts));
+
+const previewPromote = preview.command('promote').description('Promote preview changes to production');
+
+// `check`, not `preview` — the read-only action was renamed alongside the MCP
+// tools, and `preview promote preview` would read as a stutter regardless.
+previewPromote
+  .command('check')
+  .description('Show what would be promoted (read-only)')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => previewPromoteCheckCommand(opts));
+
+previewPromote
+  .command('run')
+  .description('Promote preview schema + functions to production')
+  .option('--app <app-id>', 'App ID (uses current app if not specified)')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .option('--wait', 'Poll until the promote is complete')
+  .option('--json', 'Output raw JSON')
+  .action((opts) => previewPromoteRunCommand(opts));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {

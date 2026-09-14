@@ -84,12 +84,17 @@ export function parseApiError(status: number, body: unknown): ButterbaseError {
     return new Cls(message, code, status, remediation, details);
   }
   // Legacy shape — backend sometimes returns { error: "string" } or { message }.
+  // Quota/plan errors send BOTH: a machine code in `error` and the human
+  // sentence in `message`, plus an `upgradeUrl`. Reading `error` first showed
+  // the user a bare "feature_not_available" and threw the sentence away, so
+  // prefer `message` whenever the backend sent one. Plan names stay server-side —
+  // restating them in a client is how the dead "Pro plan" copy survived so long.
+  const b = (body && typeof body === 'object' ? body : {}) as any;
   const message =
-    body && typeof body === 'object'
-      ? (typeof (body as any).error === 'string' ? (body as any).error
-         : typeof (body as any).message === 'string' ? (body as any).message
-         : 'Unknown error')
-      : 'Unknown error';
+    typeof b.message === 'string' ? b.message
+    : typeof b.error === 'string' ? b.error
+    : 'Unknown error';
+  const remediation = typeof b.upgradeUrl === 'string' ? b.upgradeUrl : undefined;
   const Cls = classifyByStatus(status);
-  return new Cls(message, `HTTP_${status}`, status);
+  return new Cls(message, `HTTP_${status}`, status, remediation);
 }
