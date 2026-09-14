@@ -154,15 +154,15 @@ import {
 } from '../src/commands/agents.js';
 import { cloneCommand, cloneRetryCommand } from '../src/commands/clone.js';
 import {
-  stagingCreateCommand,
-  stagingStatusCommand,
-  stagingResetCommand,
-  stagingDeleteCommand,
-  stagingEnvGetCommand,
-  stagingEnvSetCommand,
-  stagingPromotePreviewCommand,
-  stagingPromoteRunCommand,
-} from '../src/commands/staging.js';
+  previewCreateCommand,
+  previewStatusCommand,
+  previewResetCommand,
+  previewDeleteCommand,
+  previewEnvGetCommand,
+  previewEnvSetCommand,
+  previewPromoteCheckCommand,
+  previewPromoteRunCommand,
+} from '../src/commands/preview.js';
 import { templatesCommand } from '../src/commands/templates.js';
 import { mcpInstallCommand } from '../src/commands/mcp.js';
 import {
@@ -1773,73 +1773,75 @@ people
   .option('--watch', 'Poll every 5 seconds until the lookup reaches a terminal state (max 5 min)')
   .action((lookupId, opts) => peopleEmailStatusCommand(lookupId, opts));
 
-// Staging
-const staging = program.command('staging').description('Manage staging environments');
+// Preview deployments
+const preview = program.command('preview').description('Manage preview deployments');
 
-staging
+preview
   .command('create')
-  .description('Create a staging environment for the current app (clones production data)')
+  .description('Create a preview deployment for the current app (clones production data)')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
-  .option('--wait', 'Poll until the staging environment is ready')
+  .option('--wait', 'Poll until the preview deployment is ready')
   .option('--json', 'Output raw JSON')
-  .action((opts) => stagingCreateCommand(opts));
+  .action((opts) => previewCreateCommand(opts));
 
-staging
+preview
   .command('status')
-  .description('Show the staging environment linked to this app')
+  .description('Show the preview deployment linked to this app')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('--json', 'Output raw JSON')
-  .action((opts) => stagingStatusCommand(opts));
+  .action((opts) => previewStatusCommand(opts));
 
-staging
+preview
   .command('reset')
-  .description('Discard staging data and re-seed from production')
+  .description('Discard preview data and re-seed from production')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('--wait', 'Poll until the reset is complete')
   .option('--json', 'Output raw JSON')
-  .action((opts) => stagingResetCommand(opts));
+  .action((opts) => previewResetCommand(opts));
 
-staging
+preview
   .command('delete')
-  .description('Delete the staging environment')
+  .description('Delete the preview deployment')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('-y, --yes', 'Skip confirmation prompt')
   .option('--json', 'Output raw JSON')
-  .action((opts) => stagingDeleteCommand(opts));
+  .action((opts) => previewDeleteCommand(opts));
 
-const stagingEnv = staging.command('env').description('Manage staging env var overrides');
+const previewEnv = preview.command('env').description('Manage preview env var overrides');
 
-stagingEnv
+previewEnv
   .command('get')
-  .description('List the keys that have staging overrides (values are write-only)')
+  .description('List the keys that have preview overrides (values are write-only)')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('--json', 'Output raw JSON')
-  .action((opts) => stagingEnvGetCommand(opts));
+  .action((opts) => previewEnvGetCommand(opts));
 
-stagingEnv
+previewEnv
   .command('set <vars...>')
-  .description('Set staging env var overrides (KEY=value pairs)')
+  .description('Set preview env var overrides (KEY=value pairs)')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('--json', 'Output raw JSON')
-  .action((vars, opts) => stagingEnvSetCommand(vars, opts));
+  .action((vars, opts) => previewEnvSetCommand(vars, opts));
 
-const stagingPromote = staging.command('promote').description('Promote staging changes to production');
+const previewPromote = preview.command('promote').description('Promote preview changes to production');
 
-stagingPromote
-  .command('preview')
-  .description('Preview what would be promoted (read-only)')
+// `check`, not `preview` — the read-only action was renamed alongside the MCP
+// tools, and `preview promote preview` would read as a stutter regardless.
+previewPromote
+  .command('check')
+  .description('Show what would be promoted (read-only)')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('--json', 'Output raw JSON')
-  .action((opts) => stagingPromotePreviewCommand(opts));
+  .action((opts) => previewPromoteCheckCommand(opts));
 
-stagingPromote
+previewPromote
   .command('run')
-  .description('Promote staging schema + functions to production')
+  .description('Promote preview schema + functions to production')
   .option('--app <app-id>', 'App ID (uses current app if not specified)')
   .option('-y, --yes', 'Skip confirmation prompt')
   .option('--wait', 'Poll until the promote is complete')
   .option('--json', 'Output raw JSON')
-  .action((opts) => stagingPromoteRunCommand(opts));
+  .action((opts) => previewPromoteRunCommand(opts));
 
 // Top-level error handlers for unhandled exceptions / rejections
 process.on('uncaughtException', (err) => {

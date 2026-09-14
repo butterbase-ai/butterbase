@@ -4,6 +4,11 @@ import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api-client.js';
 import { getCurrentAppId } from '../lib/config.js';
 import { cloneApi, type CloneJob } from '../lib/repo-api.js';
 
+// The product calls these "preview deployments". The REST surface still says
+// /staging — the control-api routes, the app_environments link row and the
+// staging_env_overrides table all predate the rename — so the paths below keep
+// the old spelling on purpose. Only what a user reads says "preview".
+
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -18,7 +23,22 @@ async function requireAppId(opt?: string): Promise<string> {
   return cur;
 }
 
-async function pollStagingJob(jobId: string, label: string): Promise<CloneJob | undefined> {
+/**
+ * Fail a spinner using the server's own words.
+ *
+ * Plan-gated routes answer 403 with a sentence plus an upgrade URL, which the
+ * SDK surfaces as message + remediation. Printing both is what turns a dead
+ * end into a next step. Never restate the plan name here: the server owns that
+ * copy, and a stale client copy is how "upgrade to Pro" outlived the Pro plan.
+ */
+function failSpinner(spin: ReturnType<typeof ora>, err: unknown): never {
+  const e = err as { message?: string; remediation?: string };
+  spin.fail(e?.message ?? String(err));
+  if (e?.remediation) console.log(chalk.gray(`  ${e.remediation}`));
+  process.exit(1);
+}
+
+async function pollPreviewJob(jobId: string, label: string): Promise<CloneJob | undefined> {
   const spin = ora(`${label}…`).start();
   const start = Date.now();
   while (Date.now() - start < POLL_TIMEOUT_MS) {
@@ -27,9 +47,7 @@ async function pollStagingJob(jobId: string, label: string): Promise<CloneJob | 
     try {
       cur = await cloneApi.get(jobId);
     } catch (e) {
-      spin.fail((e as Error).message);
-      process.exit(1);
-      return undefined;
+      failSpinner(spin, e);
     }
     if (cur.status === 'completed' || cur.status === 'failed') {
       spin.stop();
@@ -47,31 +65,33 @@ async function pollStagingJob(jobId: string, label: string): Promise<CloneJob | 
   return undefined;
 }
 
-export async function stagingCreateCommand(opts: { app?: string; wait?: boolean; json?: boolean }) {
+function printWarnings(final: CloneJob) {
+  if (final.warnings?.length) {
+    for (const w of final.warnings) console.log(chalk.yellow(`warning: ${w}`));
+  }
+}
+
+export async function previewCreateCommand(opts: { app?: string; wait?: boolean; json?: boolean }) {
   const appId = await requireAppId(opts.app);
-  const spin = ora('Creating staging environment…').start();
+  const spin = ora('Creating preview deployment…').start();
   let result: { job_id: string };
   try {
     result = await apiPost<{ job_id: string }>(`/v1/apps/${appId}/staging`, {});
   } catch (e) {
-    spin.fail((e as Error).message);
-    process.exit(1);
-    return;
+    failSpinner(spin, e);
   }
-  spin.succeed(`Staging job ${result.job_id} started`);
+  spin.succeed(`Preview job ${result.job_id} started`);
   console.log(chalk.gray(`  Production data is being copied — this can take a few minutes.`));
-  console.log(chalk.gray(`  Poll with: butterbase staging status --app ${appId}`));
+  console.log(chalk.gray(`  Poll with: butterbase preview status --app ${appId}`));
 
   if (opts.wait) {
-    const final = await pollStagingJob(result.job_id, 'Waiting for staging to be ready');
+    const final = await pollPreviewJob(result.job_id, 'Waiting for the preview to be ready');
     if (!final) return;
-    if (final.warnings?.length) {
-      for (const w of final.warnings) console.log(chalk.yellow(`warning: ${w}`));
-    }
+    printWarnings(final);
     if (opts.json) {
-      console.log(JSON.stringify({ job_id: final.job_id, staging_app_id: final.dest_app_id, warnings: final.warnings }));
+      console.log(JSON.stringify({ job_id: final.job_id, preview_app_id: final.dest_app_id, warnings: final.warnings }));
     } else {
-      console.log(chalk.green(`✓ Staging ready — app id: ${final.dest_app_id}`));
+      console.log(chalk.green(`✓ Preview ready — app id: ${final.dest_app_id}`));
     }
     return;
   }
@@ -81,7 +101,7 @@ export async function stagingCreateCommand(opts: { app?: string; wait?: boolean;
   }
 }
 
-export async function stagingStatusCommand(opts: { app?: string; json?: boolean }) {
+export async function previewStatusCommand(opts: { app?: string; json?: boolean }) {
   const appId = await requireAppId(opts.app);
   const result = await apiGet<{
     staging_app_id: string | null;
@@ -89,43 +109,42 @@ export async function stagingStatusCommand(opts: { app?: string; json?: boolean 
     last_reset_at: string | null;
   }>(`/v1/apps/${appId}/staging`);
 
+  // Re-key the wire field so every JSON this command group emits says
+  // "preview" — a caller should not have to know the REST spelling.
   if (opts.json) {
-    console.log(JSON.stringify(result, null, 2));
+    const { staging_app_id, ...rest } = result;
+    console.log(JSON.stringify({ preview_app_id: staging_app_id, ...rest }, null, 2));
     return;
   }
 
   if (!result.staging_app_id) {
-    console.log(chalk.gray('No staging environment. Create one with: butterbase staging create'));
+    console.log(chalk.gray('No preview deployment. Create one with: butterbase preview create'));
     return;
   }
-  console.log(`Staging app:     ${result.staging_app_id}`);
+  console.log(`Preview app:     ${result.staging_app_id}`);
   console.log(`Last promoted:   ${result.last_promoted_at ?? 'never'}`);
   console.log(`Last reset:      ${result.last_reset_at ?? 'never'}`);
 }
 
-export async function stagingResetCommand(opts: { app?: string; wait?: boolean; json?: boolean }) {
+export async function previewResetCommand(opts: { app?: string; wait?: boolean; json?: boolean }) {
   const appId = await requireAppId(opts.app);
-  const spin = ora('Resetting staging environment…').start();
+  const spin = ora('Resetting preview deployment…').start();
   let result: { job_id: string };
   try {
     result = await apiPost<{ job_id: string }>(`/v1/apps/${appId}/staging/reset`, {});
   } catch (e) {
-    spin.fail((e as Error).message);
-    process.exit(1);
-    return;
+    failSpinner(spin, e);
   }
   spin.succeed(`Reset job ${result.job_id} started`);
 
   if (opts.wait) {
-    const final = await pollStagingJob(result.job_id, 'Waiting for reset to complete');
+    const final = await pollPreviewJob(result.job_id, 'Waiting for reset to complete');
     if (!final) return;
-    if (final.warnings?.length) {
-      for (const w of final.warnings) console.log(chalk.yellow(`warning: ${w}`));
-    }
+    printWarnings(final);
     if (opts.json) {
       console.log(JSON.stringify({ job_id: final.job_id, warnings: final.warnings }));
     } else {
-      console.log(chalk.green('✓ Staging reset complete'));
+      console.log(chalk.green('✓ Preview reset complete'));
     }
     return;
   }
@@ -135,14 +154,14 @@ export async function stagingResetCommand(opts: { app?: string; wait?: boolean; 
   }
 }
 
-export async function stagingDeleteCommand(opts: { app?: string; yes?: boolean; json?: boolean }) {
+export async function previewDeleteCommand(opts: { app?: string; yes?: boolean; json?: boolean }) {
   const appId = await requireAppId(opts.app);
   if (!opts.yes) {
     const { default: prompts } = await import('prompts');
     const { confirmed } = await prompts({
       type: 'confirm',
       name: 'confirmed',
-      message: 'Delete staging environment? This is irreversible.',
+      message: 'Delete this preview deployment? This is irreversible.',
       initial: false,
     });
     if (!confirmed) {
@@ -150,19 +169,17 @@ export async function stagingDeleteCommand(opts: { app?: string; yes?: boolean; 
       return;
     }
   }
-  const spin = ora('Deleting staging environment…').start();
+  const spin = ora('Deleting preview deployment…').start();
   try {
     await apiDelete(`/v1/apps/${appId}/staging`);
   } catch (e) {
-    spin.fail((e as Error).message);
-    process.exit(1);
-    return;
+    failSpinner(spin, e);
   }
-  spin.succeed('Staging environment deleted');
+  spin.succeed('Preview deployment deleted');
   if (opts.json) console.log(JSON.stringify({ deleted: true }));
 }
 
-export async function stagingEnvGetCommand(opts: { app?: string; json?: boolean }) {
+export async function previewEnvGetCommand(opts: { app?: string; json?: boolean }) {
   const appId = await requireAppId(opts.app);
   const result = await apiGet<{ env_overrides: Record<string, string> }>(
     `/v1/apps/${appId}/staging/env-overrides`,
@@ -179,7 +196,7 @@ export async function stagingEnvGetCommand(opts: { app?: string; json?: boolean 
   for (const k of keys) console.log(k);
 }
 
-export async function stagingEnvSetCommand(vars: string[], opts: { app?: string; json?: boolean }) {
+export async function previewEnvSetCommand(vars: string[], opts: { app?: string; json?: boolean }) {
   const appId = await requireAppId(opts.app);
   const env_overrides: Record<string, string> = {};
   for (const v of vars) {
@@ -199,7 +216,7 @@ export async function stagingEnvSetCommand(vars: string[], opts: { app?: string;
   }
 }
 
-export async function stagingPromotePreviewCommand(opts: { app?: string; json?: boolean }) {
+export async function previewPromoteCheckCommand(opts: { app?: string; json?: boolean }) {
   const appId = await requireAppId(opts.app);
   const result = await apiGet<{
     can_promote: boolean;
@@ -228,14 +245,14 @@ export async function stagingPromotePreviewCommand(opts: { app?: string; json?: 
   }
 }
 
-export async function stagingPromoteRunCommand(opts: { app?: string; yes?: boolean; wait?: boolean; json?: boolean }) {
+export async function previewPromoteRunCommand(opts: { app?: string; yes?: boolean; wait?: boolean; json?: boolean }) {
   const appId = await requireAppId(opts.app);
   if (!opts.yes) {
     const { default: prompts } = await import('prompts');
     const { confirmed } = await prompts({
       type: 'confirm',
       name: 'confirmed',
-      message: 'Promote staging to production? This deploys schema + functions to production.',
+      message: 'Promote this preview to production? This deploys schema + functions to production.',
       initial: false,
     });
     if (!confirmed) {
@@ -248,18 +265,14 @@ export async function stagingPromoteRunCommand(opts: { app?: string; yes?: boole
   try {
     result = await apiPost<{ job_id: string }>(`/v1/apps/${appId}/staging/promote`, {});
   } catch (e) {
-    spin.fail((e as Error).message);
-    process.exit(1);
-    return;
+    failSpinner(spin, e);
   }
   spin.succeed(`Promote job ${result.job_id} started`);
 
   if (opts.wait) {
-    const final = await pollStagingJob(result.job_id, 'Waiting for promote to complete');
+    const final = await pollPreviewJob(result.job_id, 'Waiting for promote to complete');
     if (!final) return;
-    if (final.warnings?.length) {
-      for (const w of final.warnings) console.log(chalk.yellow(`warning: ${w}`));
-    }
+    printWarnings(final);
     if (opts.json) {
       console.log(JSON.stringify({ job_id: final.job_id, warnings: final.warnings }));
     } else {
