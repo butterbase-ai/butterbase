@@ -8,6 +8,22 @@ Most CRMs are a database with forms on top. This one keeps its core entities in 
 
 ---
 
+## What you get
+
+A working CRM you can sign into and use on day one. Here's what the product looks like:
+
+- **Companies and contacts** — a searchable directory with company profiles, linked people, open deals, meeting history, notes, and an activity feed. Enrichment runs automatically when you add a new company: logo, description, headcount, and industry pulled from People Data Labs (with Exa as fallback).
+- **Deals** — a kanban board with customizable stages. Drag deals through your pipeline, attach notes and files, link meetings and contacts.
+- **Gmail and Calendar sync** — connect your Google account and the CRM ingests your email threads and calendar events. Counterparties get upserted as contacts and companies automatically. Your CRM reflects your actual communication without manual entry.
+- **Campaigns** — build contact lists, send email campaigns, and track per-contact delivery and open status.
+- **Social publishing** — draft and schedule posts to X, LinkedIn, Reddit, and TikTok from inside the CRM. Posts tie back to the contacts and deals they relate to.
+- **Workspace AI agent** — a chat panel where you ask questions about your pipeline ("which deals haven't had activity in two weeks?"), get AI summaries of any company, and have the agent propose actions (draft a follow-up, create a deal, log a note). You review and approve before anything is written.
+- **Team workspaces** — invite teammates, scope all data to a shared workspace, control access with row-level security.
+
+If you also run butterSupport, the two apps share the same customer identity through substrate — no integration code needed between them.
+
+---
+
 ## What's inside
 
 | Subsystem | What it is |
