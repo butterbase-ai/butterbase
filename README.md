@@ -65,6 +65,53 @@ Butterbase gives you the building blocks for AI-driven applications without lock
 - **MCP server** — every capability above is exposed as MCP tools at `/mcp` (HTTP) or via stdio (`@butterbase/mcp` — `npx @butterbase/mcp`).
 - **Claude Code plugin** — `packages/plugin` (submodule of [butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)) ships 30+ guided skills (idea → plan → schema → auth → functions → deploy → submit) for agentic app building.
 
+## Templates
+
+[`templates/`](./templates) contains full, production-shaped applications built on Butterbase. These aren't starter skeletons — each one is a complete, running app with schema, RLS policies, deployed functions, auth config, and a React frontend. You clone the backend into your own Butterbase account and own a working product from day one.
+
+> **How cloning works:** `butterbase clone <app_id> <name>` is a managed-platform operation — it forks the live backend (schema, RLS, functions, auth/storage/realtime/AI configs) into a new `app_<id>` you own, with its own database, URL, and API key. The `butterbase clone` path requires an account at [butterbase.ai](https://butterbase.ai). If you're self-hosting, the `backend/` folder in each template contains the schema, RLS policies, and function code you would deploy manually against your own stack.
+
+### [`butterbaseCRM`](./templates/butterbaseCRM)
+
+An open-source CRM for founders. Companies, people, deals (kanban), meetings, notes, and an activity feed — with Gmail and Google Calendar sync, company and person enrichment, email campaigns, multi-platform social publishing (X, LinkedIn, Reddit, TikTok), and a workspace AI agent that can query your CRM and propose actions for you to approve.
+
+Core CRM entities are stored as **substrate entities** — a cross-app, agent-readable memory layer — so other Butterbase apps you build (like butterSupport) share the same customer identity without any integration code between them.
+
+**What's included:** 29 Postgres tables · 55+ serverless functions · Workspace AI agent (`agent-chat`) · Gmail + Calendar ingest via Composio · Enrichment (People Data Labs + Exa) · Social publishing via Composio · Realtime on 7 tables · Google OAuth + email auth · RLS on every table
+
+```bash
+butterbase clone app_44zjayftl7b3 butterbaseCRM
+cd butterbaseCRM
+cp frontend/.env.example frontend/.env.local   # fill in your APP_ID
+cd frontend && npm install && npm run dev
+```
+
+Full setup: [`templates/butterbaseCRM/QUICKSTART.md`](./templates/butterbaseCRM/QUICKSTART.md)
+
+---
+
+### [`butterSupport`](./templates/butterSupport)
+
+An AI support agent that diagnoses against your real product data, not just your help-center docs. A per-ticket Durable Object agent loop reads live customer state from substrate (failed payments, auth errors, account tier), drafts a reply, and posts it for founder approval before anything reaches the customer. Ships with an embeddable widget and a founder console (inbox, live reasoning stream, approval flow).
+
+It works in two depths from the same clone:
+
+- **Commodity tier** — paste a help-center URL, get a working agent in under 60 seconds. No product integration required.
+- **Deep tier** — link your main product app so the agent reads live substrate signals and can propose governed actions (resend verification, retry webhook, flag bug, apply credit).
+
+**What's included:** 20 Postgres tables · 23 serverless functions · 1 Durable Object (`SupportTicketDO`) · RAG collection over your help center · Embeddable widget (53KB gzipped) · HMAC-signed user identity · Founder approval on every customer-visible reply · Escalation to Slack or Gmail via Composio
+
+```bash
+butterbase clone app_0ycj4ad7odud my-support
+cd my-support
+```
+
+Visit your new subdomain, sign in with magic link, paste your help-center URL. Copy the embed snippet into your product HTML.
+
+Full setup: [`templates/butterSupport/README.md`](./templates/butterSupport/README.md)
+
+---
+
 ## Open-source vs. managed
 
 This repo ships the **runtime data plane** — everything required to self-host a fully featured Butterbase instance. The **managed offering** at [butterbase.ai](https://butterbase.ai) adds multi-region orchestration, billing, upstream AI router adapters, lease-based quota enforcement, and ops dashboards (those live in a private repo that consumes this one as a submodule).
@@ -279,14 +326,4 @@ See [`SECURITY.md`](./SECURITY.md). Report vulnerabilities to `security@butterba
 
 <a href="https://github.com/butterbase-ai/butterbase/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=butterbase-ai/butterbase" alt="Contributors" />
-</a>
-
-## Star history
-
-<a href="https://www.star-history.com/#butterbase-ai/butterbase&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=butterbase-ai/butterbase&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=butterbase-ai/butterbase&type=Date" />
-  </picture>
 </a>
