@@ -16,6 +16,7 @@ import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
 import type { MarkupSource } from './special-pricing.js';
 import { acquireForEstimatedCost, acquireNominal, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
+import { isCoveredByPromo, recordPromoSpend } from './promo-coverage-registry.js';
 import { writeAiUsageRow } from './usage-log.js';
 import { classifyCostSource, type CostSource } from './cost-source.js';
 import { pickProviderCost } from './adapters/openrouter.js';
@@ -206,7 +207,29 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   const worstUsd = estimateWorstCaseUsd(ranked[0], promptTokens, maxTokens);
   const reservedUsd = worstUsd * (1 + ctx.markupPct / 100);
 
-  const lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+  // A promo-covered call is paid for by a provider coupon, not the caller's
+  // credits. Skip the lease entirely rather than leasing and refunding: a lease
+  // admits on the org credit floor, so leasing first would 402 a zero-balance
+  // user on a call they are not being charged for.
+  const promoCovered = await isCoveredByPromo(canonicalId);
+  const lease = promoCovered
+    ? null
+    : await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+
+  /**
+   * Settle the lease, or record promo spend when there is no lease. Every
+   * settlement site in this function goes through here so the two cases cannot
+   * drift apart. `providerCostUsd` is the pre-markup cost — promo budgets are
+   * denominated in what the provider charges us, not what we would have
+   * charged the user.
+   */
+  const settleCall = async (chargedCreditsUsd: number, providerCostUsd: number): Promise<void> => {
+    if (lease) {
+      await settleAfterCall(ctx.platformPool, lease, chargedCreditsUsd);
+      return;
+    }
+    if (providerCostUsd > 0) await recordPromoSpend(canonicalId, providerCostUsd);
+  };
 
   // ---- Sticky binding lookup ------------------------------------------------
   // Conversations pinned to a specific router via session_id (preferred) or a
@@ -281,13 +304,13 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       }
       // Non-fallback error (auth, bad_request) — release lease + rethrow.
       // Do NOT touch the sticky binding; the upstream wasn't a routing failure.
-      await settleAfterCall(ctx.platformPool, lease, 0);
+      await settleCall(0, 0);
       throw err;
     }
   }
 
   if (!result || !chosenRouter) {
-    await settleAfterCall(ctx.platformPool, lease, 0);
+    await settleCall(0, 0);
     const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
     (err as any).cause = lastError;
     throw err;
@@ -299,7 +322,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cacheReadInputTokens ?? 0, usage.cacheCreationInputTokens ?? 0);
       const costSource = classifyCostSource(providerCost, ranked[0]);
       const chargedCredits = applyMarkup(cost, ctx.markupPct);
-      await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+      await settleCall(chargedCredits, cost);
       maybeTriggerAutoRefill(
         { pool: ctx.platformPool, redis: ctx.redis },
         ctx.organizationId,
@@ -309,9 +332,9 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         totalTokens: usage.promptTokens + usage.completionTokens,
-        providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
-        keyType: 'platform', chargedToUser: true,
+        providerCostUsd: cost, chargedCreditsUsd: promoCovered ? 0 : chargedCredits,
+        markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease?.leaseId ?? null,
+        keyType: 'platform', chargedToUser: !promoCovered,
         cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
         cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
       }).catch(err => console.error('[router] usage-log write failed:', err));
@@ -325,7 +348,8 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         chosen_router: chosenRouter,
         fallback_chain: fallbackChain,
         provider_cost_usd: cost,
-        charged_credits_usd: chargedCredits,
+        charged_credits_usd: promoCovered ? 0 : chargedCredits,
+        promo_covered: promoCovered,
         markup_pct: ctx.markupPct,
         markup_source: ctx.markupSource,
         latency_ms: t1 - t0,
@@ -342,7 +366,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
-  await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+  await settleCall(chargedCredits, providerCost);
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
@@ -352,9 +376,9 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
     totalTokens: usage.promptTokens + usage.completionTokens,
-    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
-    keyType: 'platform', chargedToUser: true,
+    providerCostUsd: providerCost, chargedCreditsUsd: promoCovered ? 0 : chargedCredits,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease?.leaseId ?? null,
+    keyType: 'platform', chargedToUser: !promoCovered,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
   }).catch(err => console.error('[router] usage-log write failed:', err));
@@ -368,7 +392,8 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     chosen_router: chosenRouter,
     fallback_chain: fallbackChain,
     provider_cost_usd: providerCost,
-    charged_credits_usd: chargedCredits,
+    charged_credits_usd: promoCovered ? 0 : chargedCredits,
+    promo_covered: promoCovered,
     markup_pct: ctx.markupPct,
     markup_source: ctx.markupSource,
     latency_ms: t1 - t0,
