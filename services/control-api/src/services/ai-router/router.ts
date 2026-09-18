@@ -16,7 +16,7 @@ import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
 import type { MarkupSource } from './special-pricing.js';
 import { acquireForEstimatedCost, acquireNominal, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
-import { isCoveredByPromo, recordPromoSpend } from './promo-coverage-registry.js';
+import { promoFundedRouter, recordPromoSpend } from './promo-coverage-registry.js';
 import { writeAiUsageRow } from './usage-log.js';
 import { classifyCostSource, type CostSource } from './cost-source.js';
 import { pickProviderCost } from './adapters/openrouter.js';
@@ -211,10 +211,31 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   // credits. Skip the lease entirely rather than leasing and refunding: a lease
   // admits on the org credit floor, so leasing first would 402 a zero-balance
   // user on a call they are not being charged for.
-  const promoCovered = await isCoveredByPromo(canonicalId);
-  const lease = promoCovered
+  //
+  // Coverage is a property of the ROUTER that ends up serving the call, not of
+  // the model: most coupon-eligible models are also carried by routers the
+  // coupon does not pay for. Coverage therefore only holds while we are still
+  // on a funded router — if the call falls back, `covered` is cleared and a
+  // lease is taken before the unfunded upstream is contacted, so the caller is
+  // billed normally. Without that, a fallback would hand out free inference we
+  // pay for ourselves and book it against a coupon that is never charged.
+  const fundedRouter = await promoFundedRouter(canonicalId);
+  let covered = fundedRouter !== null && ranked.some((r) => r.name === fundedRouter);
+  let lease = covered
     ? null
     : await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+
+  /**
+   * Take a lease mid-flight when a covered call is about to leave its funded
+   * router. Called BEFORE the unfunded upstream is contacted, so a caller with
+   * no credits gets a 402 instead of a call we cannot bill for.
+   */
+  const dropCoverageAndLease = async (): Promise<void> => {
+    covered = false;
+    if (!lease) {
+      lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+    }
+  };
 
   /**
    * Settle the lease, or record promo spend when there is no lease. Every
@@ -228,7 +249,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       await settleAfterCall(ctx.platformPool, lease, chargedCreditsUsd);
       return;
     }
-    if (providerCostUsd > 0) await recordPromoSpend(canonicalId, providerCostUsd);
+    if (covered && providerCostUsd > 0) await recordPromoSpend(canonicalId, providerCostUsd);
   };
 
   // ---- Sticky binding lookup ------------------------------------------------
@@ -256,16 +277,32 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       ]
     : ranked;
 
+  // Spend the coupon before our own money: a covered call tries the funded
+  // router first, ahead of both price rank and any sticky pin. Losing prompt-
+  // cache continuity for a turn is cheaper than paying for a call the coupon
+  // would have covered, and the fallback order below is otherwise unchanged.
+  const candidates = covered
+    ? [
+        ...orderedCandidates.filter(r => r.name === fundedRouter),
+        ...orderedCandidates.filter(r => r.name !== fundedRouter),
+      ]
+    : orderedCandidates;
+
   const fallbackChain: string[] = [];
   let result: AdapterResult | null = null;
   let chosenRouter: RouterName | null = null;
   let lastError: unknown = null;
 
-  for (const candidate of orderedCandidates) {
+  for (const candidate of candidates) {
     const adapter = ctx.adapters.get(candidate.name);
     if (!adapter) {
       fallbackChain.push(`${candidate.name}:no_adapter`);
       continue;
+    }
+    if (covered && candidate.name !== fundedRouter) {
+      // Ordered deliberately: acquire the lease first, so an InsufficientCredits
+      // rejection surfaces before we spend money upstream.
+      await dropCoverageAndLease();
     }
     try {
       const upstreamId = candidate.upstreamId ?? adapter.toUpstreamId(canonicalId);
@@ -332,9 +369,9 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         totalTokens: usage.promptTokens + usage.completionTokens,
-        providerCostUsd: cost, chargedCreditsUsd: promoCovered ? 0 : chargedCredits,
+        providerCostUsd: cost, chargedCreditsUsd: covered ? 0 : chargedCredits,
         markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease?.leaseId ?? null,
-        keyType: 'platform', chargedToUser: !promoCovered,
+        keyType: 'platform', chargedToUser: !covered,
         cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
         cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
       }).catch(err => console.error('[router] usage-log write failed:', err));
@@ -348,8 +385,8 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         chosen_router: chosenRouter,
         fallback_chain: fallbackChain,
         provider_cost_usd: cost,
-        charged_credits_usd: promoCovered ? 0 : chargedCredits,
-        promo_covered: promoCovered,
+        charged_credits_usd: covered ? 0 : chargedCredits,
+        promo_covered: covered,
         markup_pct: ctx.markupPct,
         markup_source: ctx.markupSource,
         latency_ms: t1 - t0,
@@ -376,9 +413,9 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
     totalTokens: usage.promptTokens + usage.completionTokens,
-    providerCostUsd: providerCost, chargedCreditsUsd: promoCovered ? 0 : chargedCredits,
+    providerCostUsd: providerCost, chargedCreditsUsd: covered ? 0 : chargedCredits,
     markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease?.leaseId ?? null,
-    keyType: 'platform', chargedToUser: !promoCovered,
+    keyType: 'platform', chargedToUser: !covered,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
   }).catch(err => console.error('[router] usage-log write failed:', err));
@@ -392,8 +429,8 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     chosen_router: chosenRouter,
     fallback_chain: fallbackChain,
     provider_cost_usd: providerCost,
-    charged_credits_usd: promoCovered ? 0 : chargedCredits,
-    promo_covered: promoCovered,
+    charged_credits_usd: covered ? 0 : chargedCredits,
+    promo_covered: covered,
     markup_pct: ctx.markupPct,
     markup_source: ctx.markupSource,
     latency_ms: t1 - t0,
