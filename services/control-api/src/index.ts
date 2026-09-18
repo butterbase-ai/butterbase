@@ -707,6 +707,16 @@ try {
 }
 try {
   // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/qwen-promo.js');
+  await app.register(overlay.default ?? overlay.qwenPromoRoutes);
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a genuine
+  // registration error would otherwise silently 404 the promo banner and its
+  // admin console.
+  console.warn('[control-api] qwen-promo overlay not registered:', err);
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/app-copy/routes.js');
   await app.register(overlay.default ?? overlay.appCopyRoutes);
 } catch (err) {
