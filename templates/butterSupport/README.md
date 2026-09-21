@@ -14,6 +14,24 @@ It ships in two depths, **same recipe**:
 
 ---
 
+## What you get
+
+Two things: a widget your customers use to submit tickets, and a founder console where you handle them.
+
+**For your customers** — a small embed script you drop into your product. When a customer clicks the widget, they describe their problem. That's it. Behind the scenes the agent is already reading your docs (and, if you've opted into the deep tier, your actual product data — their account, recent errors, payment state) to understand what's happening.
+
+**For you as the founder** — a web console with:
+- **Inbox** — all open tickets, sorted by wait time. At a glance you see which ones the agent has diagnosed and drafted a reply for.
+- **Ticket detail** — the agent's live reasoning stream as it works through the problem. You see what it searched, what it found, what it's proposing before the draft is written.
+- **Draft approval** — every reply the agent writes is a draft. You read it, edit if needed, and click approve. Nothing reaches the customer without your sign-off. This is not configurable in v1 — it's the design.
+- **Settings** — connect your help center (URL or file upload), configure escalation to Slack or Gmail, manage team access.
+
+The commodity tier works for any company — no Butterbase product required. Paste your help-center URL and the agent answers from your docs, the same as any AI support tool, except you own the infrastructure.
+
+The deep tier is where it diverges: link your main product app and the agent reads live signals from substrate — the failed payment, the auth error, the expired trial — and can propose governed actions your product executes. That's what pushes resolution rates past what doc-only agents can do.
+
+---
+
 ## What's inside
 
 | Subsystem | What it is |
