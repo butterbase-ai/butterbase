@@ -61,6 +61,16 @@ describe('maybeSendCreditsEmail', () => {
     expect(sendBillingEmail.mock.calls[0][1]).toBe('credits_exhausted');
   });
 
+  it('sends credits_exhausted when the balance has gone negative', async () => {
+    // With plans.credit_floor_usd at 0 the last admitted call still settles at
+    // its true cost, so an exhausted org lands just below zero rather than on
+    // it. An exact-equality check here meant the email never fired at all.
+    const db = mockDb(orgRow({ credits_usd: '-0.0040' }));
+    await maybeSendCreditsEmail({ db: db as never, organizationId: ORG, postBalance: -0.004, sendBillingEmail });
+    expect(sendBillingEmail).toHaveBeenCalledTimes(1);
+    expect(sendBillingEmail.mock.calls[0][1]).toBe('credits_exhausted');
+  });
+
   it('does not double-send credits_exhausted', async () => {
     const db = mockDb(orgRow({ credits_exhausted_emailed_at: new Date().toISOString() }));
     await maybeSendCreditsEmail({ db: db as never, organizationId: ORG, postBalance: 0, sendBillingEmail });

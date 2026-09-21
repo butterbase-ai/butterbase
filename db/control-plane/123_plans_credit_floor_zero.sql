@@ -1,0 +1,41 @@
+-- @scope: platform
+-- Stop every plan, including enterprise, running an AI bill past zero.
+--
+-- credit_floor_usd is a BALANCE THRESHOLD, not an amount: grantLease admits a
+-- request while (monthly_allowance_usd + credits_usd) >= floor. Migration 122
+-- pulled the three self-serve plans to -0.5 and deliberately left enterprise
+-- at -50, because enterprise grants $0/month (plans.monthly_credit_grant_usd
+-- is 0 — migration 094's backfill skipped it, its `max_ai_credits_usd = -1`
+-- unlimited sentinel failing the `> 0` guard) and that floor was the only
+-- thing making the plan usable.
+--
+-- Zero is now the floor for every plan. The product decision behind it: an org
+-- may dip below zero, but it must stop there. It cannot run up a bill on
+-- credit the platform never agreed to extend, and enterprise is no longer an
+-- exception — those accounts get recharged directly when the time comes.
+--
+-- Zero does NOT mean "never negative", and that is intentional, not a gap.
+-- The AI router reserves a nominal amount (billing-gate MIN_LEASE_USD) and
+-- charges the true cost at settle, which settleLease debits regardless of the
+-- floor — settle never reads it. So the call that exhausts an org completes,
+-- bills in full, and lands the balance a fraction of a cent below zero; every
+-- call after it is refused with a 402. Admission is the only thing this
+-- column governs. Making the balance strictly non-negative would require a
+-- pre-charge cost estimate, which the reserve-small design removed on purpose.
+--
+-- What 122's -0.5 was actually buying, for the record, was not protection for
+-- an in-flight call (nothing can cut one of those off) but slack for the NEXT
+-- admission: an agent loop that overshot to -$0.12 used to keep going until
+-- -$0.50. At zero it stops on the next call, which is the point.
+--
+-- Already applied to production directly on 2026-09-22, the same way 122 was;
+-- this file exists so fresh and local environments match rather than keeping
+-- -0.5/-50. The UPDATE is idempotent, so re-running it there is a no-op.
+--
+-- Per-org overrides are deliberately untouched. organizations.credit_floor_usd
+-- beats this value when non-NULL and is how a negotiated exception should be
+-- expressed; there were none set when this was applied. Note the trap in
+-- migration 104: an override of exactly 0 is indistinguishable from "unset"
+-- and would be cleared back to "inherit from plan" if that file ever re-ran.
+-- Inheriting zero from here is now the same behaviour anyway.
+UPDATE plans SET credit_floor_usd = 0 WHERE credit_floor_usd <> 0;

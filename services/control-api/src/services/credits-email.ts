@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { sendBillingEmail } from './auth/email-service.js';
 
 /**
  * Fallback trigger point for the low-balance warning, used when the org has
@@ -75,7 +76,12 @@ export async function maybeSendCreditsEmail(args: MaybeSendArgs): Promise<void> 
     ? parsedThreshold
     : DEFAULT_LOW_THRESHOLD;
 
-  const wantsExhausted = postBalance === 0 && o.credits_exhausted_emailed_at == null;
+  // `<= 0`, not `=== 0`. The balance rarely lands on zero exactly: the AI
+  // router reserves a nominal amount and charges the true cost at settle, so
+  // the call that exhausts an org overshoots into the red by a fraction of a
+  // cent. Under the old equality check that overshoot meant the exhausted
+  // email never fired — the org simply went silent.
+  const wantsExhausted = postBalance <= 0 && o.credits_exhausted_emailed_at == null;
   const wantsLow = postBalance > 0 && postBalance < threshold && o.credits_low_emailed_at == null;
   if (!wantsExhausted && !wantsLow) return;
 
@@ -116,6 +122,43 @@ export async function maybeSendCreditsEmail(args: MaybeSendArgs): Promise<void> 
         .catch((err) => console.error(`[credits-email] ${template} to ${to} failed:`, err)),
     ),
   );
+}
+
+/**
+ * Read the org's current balance and let maybeSendCreditsEmail decide whether
+ * to warn. The post-debit entry point for spend paths that do NOT go through
+ * the lease subsystem — deductCreditsBalance (people, apollo, enrichlayer),
+ * which debits `credits_usd` directly and, until this existed, told the
+ * customer nothing at all when it emptied their account.
+ *
+ * MUST be handed a Pool, never an in-transaction PoolClient: this reads,
+ * stamps a dedup marker and sends mail, none of which belong inside someone
+ * else's transaction. Callers on the lease path use the router's own
+ * post-settle hook instead.
+ *
+ * Non-fatal by construction — a warning email is never worth failing a
+ * request that already succeeded and already billed.
+ */
+export async function fireCreditsEmailForOrg(pool: Pool, organizationId: string): Promise<void> {
+  try {
+    const r = await pool.query<{ monthly_allowance_usd: string; credits_usd: string }>(
+      `SELECT monthly_allowance_usd::text, credits_usd::text
+         FROM organizations WHERE id = $1`,
+      [organizationId],
+    );
+    if (r.rows.length === 0) return;
+    const postBalance = parseFloat(r.rows[0].monthly_allowance_usd ?? '0')
+      + parseFloat(r.rows[0].credits_usd ?? '0');
+    await maybeSendCreditsEmail({
+      db: pool,
+      organizationId,
+      postBalance,
+      sendBillingEmail: (to, template, data) => sendBillingEmail(to, template as never, data),
+      resetDate: null,
+    });
+  } catch (err) {
+    console.warn('[credits-email] fireCreditsEmailForOrg failed (non-fatal):', err);
+  }
 }
 
 /**

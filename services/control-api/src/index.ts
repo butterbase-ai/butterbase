@@ -114,6 +114,7 @@ import { startNeonTaskWorker } from './services/neon-task-worker.js';
 import { reconcileOrphans } from './services/neon-orphan-reconciler.js';
 import { reconcileTenantProjects, PartialInventoryError } from './services/neon-tenant-reconciler.js';
 import { startFailureNotifier } from './services/failure-notifier.js';
+import { startLowBalanceNotifier } from './services/low-balance-notifier.js';
 import { startDigestNotifier } from './services/digest-notifier.js';
 import { startRagWorker } from './services/rag-worker.js';
 import { startAnalyticsPullerCron } from './services/cf-analytics-puller.js';
@@ -841,6 +842,11 @@ Promise.resolve(app.ready())
     const failureNotifierInterval = startFailureNotifier(app.controlDb, app.log);
     (app as any).failureNotifierInterval = failureNotifierInterval;
 
+    // Start low-balance ops sweep (every 15 minutes; pages the team when a
+    // paying org drops under the alert threshold or gets cut off by the floor)
+    const lowBalanceNotifierInterval = startLowBalanceNotifier(app.controlDb, app.log);
+    (app as any).lowBalanceNotifierInterval = lowBalanceNotifierInterval;
+
     // Start weekly-digest scanner (hourly tick; sends Sunday 18:00 UTC)
     const digestNotifierInterval = startDigestNotifier(app.controlDb, app.log);
     (app as any).digestNotifierInterval = digestNotifierInterval;
@@ -1198,6 +1204,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).nightlyInterval) clearInterval((app as any).nightlyInterval);
       if ((app as any).neonWorkerInterval) clearInterval((app as any).neonWorkerInterval);
       if ((app as any).failureNotifierInterval) clearInterval((app as any).failureNotifierInterval);
+      if ((app as any).lowBalanceNotifierInterval) clearInterval((app as any).lowBalanceNotifierInterval);
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
       if ((app as any).orphanReconcilerInterval) clearInterval((app as any).orphanReconcilerInterval);

@@ -757,3 +757,63 @@ describe('PATCH /admin/organizations/:id/plan', () => {
     expect(JSON.parse(r.body)).toEqual({ error: 'organization_not_found' });
   });
 });
+
+describe('GET /admin/organizations/at-risk', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('returns 403 for non-admin', async () => {
+    const controlDb = makeControlDbMock(() => null);
+    const app = await makeApp(controlDb, false);
+    const r = await app.inject({ method: 'GET', url: '/admin/organizations/at-risk', headers: { authorization: 'Bearer ok' } });
+    expect(r.statusCode).toBe(403);
+  });
+
+  it('marks an org below its floor as cut off', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (/FROM organizations o/i.test(sql)) {
+        return {
+          rows: [
+            { id: 'o1', name: 'CutOff', plan_id: 'enterprise', owner_email: 'a@b.com',
+              balance_usd: -0.004, credits_usd: -0.004, monthly_allowance_usd: 0, credit_floor_usd: 0 },
+            { id: 'o2', name: 'Low', plan_id: 'launch', owner_email: 'c@d.com',
+              balance_usd: 0.42, credits_usd: 0.42, monthly_allowance_usd: 0, credit_floor_usd: 0 },
+          ],
+        };
+      }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    const r = await app.inject({ method: 'GET', url: '/admin/organizations/at-risk', headers: { authorization: 'Bearer ok' } });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.data.find((o: any) => o.id === 'o1').cut_off).toBe(true);
+    expect(body.data.find((o: any) => o.id === 'o2').cut_off).toBe(false);
+  });
+
+  it('defaults the threshold to $1 and accepts an override', async () => {
+    let captured: unknown[] = [];
+    const controlDb = makeControlDbMock((sql, params) => {
+      if (/FROM organizations o/i.test(sql)) { captured = params; return { rows: [] }; }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    await app.inject({ method: 'GET', url: '/admin/organizations/at-risk', headers: { authorization: 'Bearer ok' } });
+    expect(captured[0]).toBe(1);
+
+    await app.inject({ method: 'GET', url: '/admin/organizations/at-risk?threshold=5', headers: { authorization: 'Bearer ok' } });
+    expect(captured[0]).toBe(5);
+  });
+
+  it('includes every plan, unlike the ops alert', async () => {
+    // The sweep pages only on paid plans to stay readable; the admin view is
+    // a deliberate look, so it should show playground too.
+    let sql = '';
+    const controlDb = makeControlDbMock((s) => {
+      if (/FROM organizations o/i.test(s)) { sql = s; return { rows: [] }; }
+      return null;
+    });
+    const app = await makeApp(controlDb);
+    await app.inject({ method: 'GET', url: '/admin/organizations/at-risk', headers: { authorization: 'Bearer ok' } });
+    expect(sql).not.toMatch(/plan_id\s*=\s*ANY/i);
+  });
+});

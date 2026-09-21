@@ -159,6 +159,7 @@ export type BillingEmailTemplate =
   | 'auto_refill_failed'
   | 'credits_low'
   | 'credits_exhausted'
+  | 'org_balance_low_ops'
   | 'weekly_digest';
 
 const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
@@ -178,6 +179,7 @@ const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   auto_refill_failed: 'Action Required: Auto-Refill Failed',
   credits_low: 'Your AI credits are running low',
   credits_exhausted: 'Your AI credits are exhausted',
+  org_balance_low_ops: '[butterbase] Orgs low on credits',
   weekly_digest: 'Your weekly Butterbase digest',
 };
 
@@ -377,6 +379,33 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       }
       lines.push('');
       lines.push('Users have been notified individually via clone_failed emails.');
+      return lines.join('\n');
+    }
+
+    // Ops-only. Sent to OPS_ALERT_EMAIL by low-balance-notifier, never to a
+    // customer — it names other organizations, so it must never be wired to a
+    // user-facing recipient.
+    case 'org_balance_low_ops': {
+      interface LowOrg { id: string; name: string; planId: string; balanceUsd: number; cutOff: boolean }
+      let orgs: LowOrg[] = [];
+      try {
+        orgs = JSON.parse(data.orgs_json || '[]');
+      } catch {
+        // Fall through with an empty list — the counts below still carry the
+        // alert, and a malformed payload is no reason to drop it.
+      }
+      const cutOff = data.cut_off_count ?? '0';
+      const lines: string[] = [
+        `${data.org_count} organization(s) are below $${data.threshold_usd} in credits.`,
+        `${cutOff} of them are already cut off — the credit floor is refusing their AI calls right now.`,
+        '',
+      ];
+      for (const o of orgs) {
+        const mark = o.cutOff ? '[CUT OFF]' : '[low]    ';
+        lines.push(`${mark} ${o.name} (${o.planId}) — $${Number(o.balanceUsd).toFixed(4)} — ${o.id}`);
+      }
+      lines.push('');
+      lines.push('Recharge with: tsx scripts/grant-credits.ts --org-id <id> --amount <usd>');
       return lines.join('\n');
     }
 

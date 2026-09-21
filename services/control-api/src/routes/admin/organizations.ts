@@ -202,6 +202,52 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     return { data: merged.slice(offset, offset + limit), total: merged.length };
   });
 
+  // GET /admin/organizations/at-risk — the standing "who is out of credits"
+  // list behind the low-balance ops alert.
+  //
+  // Registered before /:id for readability only; Fastify's router prefers a
+  // static segment over a parametric one regardless of registration order, so
+  // 'at-risk' can never be swallowed as an org id.
+  //
+  // Deliberately NOT plan-filtered, unlike low-balance-notifier. The sweep
+  // pages on paid plans only so the alert stays readable at 2am; this page is
+  // something an operator opens on purpose, so it shows playground too.
+  fastify.get('/admin/organizations/at-risk', { config: { public: true } }, async (req, reply) => {
+    const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
+    if (!user) return;
+
+    const ctrl = (fastify as any).controlDb;
+    const q = req.query as { threshold?: string; limit?: string };
+    const parsedThreshold = parseFloat(q.threshold ?? '');
+    const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 1;
+    const limit = parseIntParam(q.limit, 100, 500);
+
+    const rows = await ctrl.query(
+      `SELECT o.id, o.name, o.plan_id, o.account_status,
+              pu.email AS owner_email,
+              o.credits_usd::float8                                     AS credits_usd,
+              coalesce(o.monthly_allowance_usd, 0)::float8              AS monthly_allowance_usd,
+              (o.monthly_allowance_usd + o.credits_usd)::float8         AS balance_usd,
+              COALESCE(o.credit_floor_usd, p.credit_floor_usd, 0)::float8 AS credit_floor_usd
+         FROM organizations o
+         JOIN platform_users pu ON pu.id = o.owner_id
+         LEFT JOIN plans p ON p.id = o.plan_id
+        WHERE (o.monthly_allowance_usd + o.credits_usd) < $1
+        ORDER BY (o.monthly_allowance_usd + o.credits_usd) ASC
+        LIMIT $2`,
+      [threshold, limit]
+    );
+
+    const data = rows.rows.map((r: any) => ({
+      ...r,
+      // Balance is under the floor, so grantLease is refusing this org's AI
+      // calls right now — the thing an operator is actually looking for.
+      cut_off: Number(r.balance_usd) < Number(r.credit_floor_usd),
+    }));
+
+    return { data, total: data.length, threshold };
+  });
+
   fastify.get('/admin/organizations/:id', { config: { public: true } }, async (req, reply) => {
     const user = await requireAdmin(req, reply, (fastify as any).controlDb, (fastify as any).authProvider);
     if (!user) return;
