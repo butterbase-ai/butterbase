@@ -4,6 +4,7 @@ import { OAuthStateService } from '../services/oauth-state-service.js';
 import { OAuthCodeService } from '../services/oauth-code-service.js';
 import { ApiKeyService } from '../services/api-key-service.js';
 import { config } from '../config.js';
+import { mcpAttributionParams } from '../services/mcp-client-attribution.js';
 
 const ALLOWED_SCOPES = new Set(['mcp', 'ai:gateway']);
 const DEFAULT_SCOPE = 'mcp';
@@ -157,6 +158,20 @@ export async function oauthRoutes(app: FastifyInstance) {
       const dashboardUrl = config.dashboardUrl ?? 'http://localhost:5173';
       const target = new URL('/oauth/consent', dashboardUrl);
       target.searchParams.set('st', st);
+
+      // Tag the landing so an MCP-originated signup is attributable. The
+      // dashboard's first-touch capture runs on every page load and reads
+      // utm_* off the query string, so these ride the existing pipeline into
+      // platform_users.signup_source with nothing new behind it. Omitted when
+      // the client's name yields no usable slug — see mcp-client-attribution.
+      //
+      // First-touch means this never overwrites an earlier marketing source:
+      // someone who arrived from a campaign link and only later connected over
+      // MCP stays attributed to that campaign, which is the correct answer.
+      const attribution = mcpAttributionParams(client.client_name);
+      if (attribution) {
+        for (const [k, v] of Object.entries(attribution)) target.searchParams.set(k, v);
+      }
       return reply.code(302).header('location', target.toString()).send();
     },
   });

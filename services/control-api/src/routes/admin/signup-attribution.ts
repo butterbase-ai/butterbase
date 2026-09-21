@@ -23,6 +23,20 @@ function parseRange(v: unknown): Range {
   return v === 'all' ? 'all' : '30d';
 }
 
+// A blank or whitespace-only `campaign` means "no filter", not "campaign named
+// empty string" — an empty dropdown selection serialises to `campaign=`.
+function parseCampaign(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const trimmed = v.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+// utm_campaign lives inside the stored signup_source string
+// (`utm_source=x&utm_medium=y&utm_campaign=z`), so both the breakdown and the
+// filter extract it with the same pattern. Kept in one place so they cannot
+// disagree about what counts as a campaign.
+const CAMPAIGN_EXPR = `substring(signup_source from 'utm_campaign=([^&]+)')`;
+
 // Return the SQL fragment + bound param for created_at, or null for all-time.
 // Kept as a helper so the four queries share one definition.
 function rangeClause(range: Range): { where: string; params: unknown[] } {
@@ -45,8 +59,15 @@ const signupAttributionRoutes = async (app: FastifyInstance) => {
       const q = request.query as Record<string, string | undefined>;
       const range = parseRange(q.range);
       const excludeInternal = parseBool(q.exclude_internal ?? '1');
+      const campaign = parseCampaign(q.campaign);
 
       const { where: rangeWhere } = rangeClause(range);
+
+      // The campaign value is caller-supplied, so it binds as a parameter —
+      // unlike the range and internal-email fragments, which are static
+      // constants and safe to inline.
+      const campaignWhere = campaign ? `AND ${CAMPAIGN_EXPR} = $1` : '';
+      const campaignParams: unknown[] = campaign ? [campaign] : [];
 
       // Internal-exclusion is a WHERE fragment we can inline; no extra param
       // needed since the ILIKE pattern is a static constant.
@@ -65,7 +86,8 @@ const signupAttributionRoutes = async (app: FastifyInstance) => {
            count(*) FILTER (WHERE signup_source IS NOT NULL)::text AS tagged_signups,
            count(*) FILTER (WHERE signup_referrer IS NOT NULL)::text AS with_referrer
          FROM platform_users
-         WHERE 1=1 ${rangeWhere} ${internalWhere}`
+         WHERE 1=1 ${rangeWhere} ${internalWhere} ${campaignWhere}`,
+        campaignParams
       );
 
       // By utm_source. Extract via substring; falls back to '(other)' when the
@@ -78,6 +100,23 @@ const signupAttributionRoutes = async (app: FastifyInstance) => {
              NULLIF(substring(signup_source from '(?:^|&)source=([^&]+)'), ''),
              '(unparsed)'
            ) AS source,
+           count(*)::text AS count
+         FROM platform_users
+         WHERE signup_source IS NOT NULL ${rangeWhere} ${internalWhere} ${campaignWhere}
+         GROUP BY 1
+         ORDER BY count(*) DESC
+         LIMIT ${TOP_N}`,
+        campaignParams
+      );
+
+      // By utm_campaign. Deliberately NOT campaign-filtered: this list
+      // populates the campaign dropdown, so filtering it would collapse the
+      // options to the one already selected and strand the user there.
+      // Signups tagged with a source but no campaign group under '(none)' so
+      // the counts still add up to the tagged total.
+      const byCampaignQ = app.controlDb.query<{ campaign: string; count: string }>(
+        `SELECT
+           COALESCE(NULLIF(${CAMPAIGN_EXPR}, ''), '(none)') AS campaign,
            count(*)::text AS count
          FROM platform_users
          WHERE signup_source IS NOT NULL ${rangeWhere} ${internalWhere}
@@ -95,10 +134,11 @@ const signupAttributionRoutes = async (app: FastifyInstance) => {
            ) AS domain,
            count(*)::text AS count
          FROM platform_users
-         WHERE signup_referrer IS NOT NULL ${rangeWhere} ${internalWhere}
+         WHERE signup_referrer IS NOT NULL ${rangeWhere} ${internalWhere} ${campaignWhere}
          GROUP BY 1
          ORDER BY count(*) DESC
-         LIMIT ${TOP_N}`
+         LIMIT ${TOP_N}`,
+        campaignParams
       );
 
       // Recent tagged signups — the audit-trail table on the page.
@@ -117,13 +157,16 @@ const signupAttributionRoutes = async (app: FastifyInstance) => {
          WHERE (pu.signup_source IS NOT NULL OR pu.signup_referrer IS NOT NULL)
            ${rangeWhere.replace(/created_at/g, 'pu.created_at')}
            ${excludeInternal ? `AND pu.email NOT ILIKE '%${INTERNAL_EMAIL_SUFFIX}'` : ''}
+           ${campaignWhere.replace(/signup_source/g, 'pu.signup_source')}
          ORDER BY pu.created_at DESC
-         LIMIT ${RECENT_LIMIT}`
+         LIMIT ${RECENT_LIMIT}`,
+        campaignParams
       );
 
-      const [kpisRes, bySourceRes, byReferrerRes, recentRes] = await Promise.all([
+      const [kpisRes, bySourceRes, byCampaignRes, byReferrerRes, recentRes] = await Promise.all([
         kpisQ,
         bySourceQ,
+        byCampaignQ,
         byReferrerQ,
         recentQ,
       ]);
@@ -136,6 +179,7 @@ const signupAttributionRoutes = async (app: FastifyInstance) => {
       return {
         range,
         exclude_internal: excludeInternal,
+        campaign,
         kpis: {
           total_signups: total,
           tagged_signups: tagged,
@@ -144,6 +188,10 @@ const signupAttributionRoutes = async (app: FastifyInstance) => {
         },
         by_source: bySourceRes.rows.map((r) => ({
           source: r.source,
+          count: parseInt(r.count, 10),
+        })),
+        by_campaign: byCampaignRes.rows.map((r) => ({
+          campaign: r.campaign,
           count: parseInt(r.count, 10),
         })),
         by_referrer: byReferrerRes.rows.map((r) => ({
