@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { getRuntimeDbPool } from './runtime-db.js';
 import { resolveOrganizationId } from './org-resolver.js';
+import { fireCreditsEmailForOrg } from './credits-email.js';
 
 type DbClient = Pool | PoolClient;
 
@@ -658,6 +659,21 @@ export async function deductCreditsBalance(
   // Calculate how much was actually deducted
   const remaining = parseFloat(result.rows[0].credits_usd);
   const balance = remaining + amountUsd; // what it was before
+
+  // Warn the customer if this debit emptied them. This path bypasses the
+  // lease subsystem, so the AI router's post-settle hook never sees it —
+  // without this, people/apollo/enrichlayer spend could drain an account in
+  // silence.
+  //
+  // Pool only, and the `instanceof` is the whole point: DbClient is
+  // `Pool | PoolClient`, and a PoolClient here means we are inside someone
+  // else's transaction, where sending mail and stamping a dedup marker would
+  // fire for a debit that may still roll back. Fire-and-forget either way —
+  // the debit has already happened and must not fail on a notification.
+  if (db instanceof Pool) {
+    void fireCreditsEmailForOrg(db, organizationId);
+  }
+
   return Math.min(amountUsd, balance); // actual deduction
 }
 
