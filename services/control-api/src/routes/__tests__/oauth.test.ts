@@ -209,6 +209,55 @@ describe('GET /oauth/authorize', () => {
     await app.close();
   });
 
+  // Without these params an MCP-originated signup lands with
+  // signup_source = NULL: the dashboard's first-touch capture reads utm_* off
+  // the query string, and this redirect used to carry only `st`.
+  it('tags the consent redirect with the MCP client as a UTM source', async () => {
+    const app = await buildAppForTest();
+    const reg = await app.inject({
+      method: 'POST', url: '/oauth/register',
+      payload: { client_name: 'Cursor', redirect_uris: ['http://127.0.0.1:55555/cb'] },
+    });
+    const client = reg.json();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge=${'a'.repeat(43)}&code_challenge_method=S256&scope=mcp&state=xyz`,
+    });
+    expect(res.statusCode).toBe(302);
+    const loc = new URL(res.headers.location as string);
+    expect(loc.searchParams.get('utm_source')).toBe('mcp-cursor');
+    expect(loc.searchParams.get('utm_medium')).toBe('mcp');
+    expect(loc.searchParams.get('utm_campaign')).toBe('mcp-oauth');
+    // The state token must survive the added params.
+    expect(loc.searchParams.get('st')).toBeTruthy();
+    await app.close();
+  });
+
+  // client_name is attacker-controlled — /oauth/register is open by design.
+  it('never lets a hostile client_name escape into the redirect', async () => {
+    const app = await buildAppForTest();
+    const reg = await app.inject({
+      method: 'POST', url: '/oauth/register',
+      payload: {
+        client_name: 'evil\r\nX-Injected: 1&utm_campaign=hijack',
+        redirect_uris: ['http://127.0.0.1:55555/cb'],
+      },
+    });
+    const client = reg.json();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge=${'a'.repeat(43)}&code_challenge_method=S256&scope=mcp&state=xyz`,
+    });
+    expect(res.statusCode).toBe(302);
+    const location = res.headers.location as string;
+    expect(location).not.toMatch(/[\r\n]/);
+    const loc = new URL(location);
+    expect(loc.searchParams.get('utm_source')).toMatch(/^mcp-[a-z0-9-]+$/);
+    // The forged campaign must not have displaced the real one.
+    expect(loc.searchParams.get('utm_campaign')).toBe('mcp-oauth');
+    await app.close();
+  });
+
   // Regression: Qoder's MCP connector omits `scope` on /authorize. RFC 6749
   // §3.1.2 makes it optional, but we required it and 400'd every such client at
   // the first hop. Query below is a real Qoder authorize URL, scope and all.
