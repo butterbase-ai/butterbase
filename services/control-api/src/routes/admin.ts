@@ -155,6 +155,7 @@ export async function adminRoutes(app: FastifyInstance) {
       search?: string; plan?: string; status?: string; sub_status?: string; has_apps?: string;
       joined_after?: string; joined_before?: string; has_stripe?: string;
       min_spend?: string; max_spend?: string; min_apps?: string; max_apps?: string;
+      utm_source?: string; utm_campaign?: string;
       sort_by?: string; sort_dir?: string; limit?: string; offset?: string;
       all?: string;
     };
@@ -219,6 +220,17 @@ export async function adminRoutes(app: FastifyInstance) {
       controlConditions.push(`o.stripe_customer_id IS NOT NULL`);
     } else if (q.has_stripe === 'no') {
       controlConditions.push(`o.stripe_customer_id IS NULL`);
+    }
+    // signup_source is stored as `utm_source=x&utm_medium=y&utm_campaign=z`, so
+    // extract the one key before matching — a plain ILIKE on the whole string
+    // would let a source filter of "reddit" also match utm_campaign=reddit-q3.
+    for (const key of ['utm_source', 'utm_campaign'] as const) {
+      const value = q[key]?.trim();
+      if (!value) continue;
+      controlConditions.push(
+        `substring(pu.signup_source from '(?:^|&)${key}=([^&]+)') ILIKE $${cidx++}`
+      );
+      controlParams.push(`%${value}%`);
     }
 
     const controlWhere = controlConditions.length > 0 ? `WHERE ${controlConditions.join(' AND ')}` : '';
