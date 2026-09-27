@@ -545,66 +545,117 @@ export async function getMAU(db: DbClient, organizationId: string): Promise<numb
   return total;
 }
 
+/** Per-app database connections opened at once when sizing an org's apps. */
+export const DB_SIZE_CONCURRENCY = 6;
+const DB_SIZE_FRESH_TTL_S = 300;
+const DB_SIZE_LAST_KNOWN_TTL_S = 7 * 24 * 60 * 60;
+const DB_SIZE_REFRESH_LOCK_TTL_S = 120;
+
 /**
- * Get total database size (bytes) across all provisioned app databases for an organization.
- * Connects to each app's database to run pg_database_size (source of truth).
- * Caches for 300 seconds (5 minutes) since this is an expensive operation.
+ * Total database size (bytes) across an organization's provisioned app
+ * databases.
+ *
+ * Measuring it opens a connection to every app's database (pg_database_size,
+ * the source of truth), which for a 25-app org took ~14s when done one app at
+ * a time — the bulk of a 16.7s /dashboard/billing response. So:
+ *   - apps are sized DB_SIZE_CONCURRENCY at a time;
+ *   - a fresh value (≤5 min) is served from Redis as before;
+ *   - past that, the last known value is returned immediately and a single
+ *     refresh runs in the background (a lock keeps concurrent readers from
+ *     each starting one). Only an org with no known size waits on a measure.
+ * Database size moves slowly; a reading one refresh old is fine for both the
+ * billing page and quota checks.
  */
 export async function getDbSize(db: DbClient, organizationId: string): Promise<number> {
-  const cacheKey = `db_size_org:${organizationId}`;
+  const freshKey = `db_size_org:${organizationId}`;
+  const lastKnownKey = `db_size_org_last:${organizationId}`;
 
   try {
-    const cached = await getRedisClient().get(cacheKey);
-    if (cached !== null) return parseFloat(cached);
+    const [fresh, lastKnown] = await Promise.all([
+      getRedisClient().get(freshKey),
+      getRedisClient().get(lastKnownKey),
+    ]);
+    if (fresh !== null) return parseFloat(fresh);
+    if (lastKnown !== null) {
+      refreshDbSizeInBackground(organizationId);
+      return parseFloat(lastKnown);
+    }
   } catch {
-    // Redis failure — fall through to DB query
+    // Redis failure — fall through to measuring
   }
 
+  return measureDbSize(organizationId);
+}
+
+function refreshDbSizeInBackground(organizationId: string): void {
+  const lockKey = `db_size_org_refreshing:${organizationId}`;
+  getRedisClient()
+    .set(lockKey, '1', 'EX', DB_SIZE_REFRESH_LOCK_TTL_S, 'NX')
+    .then((acquired) => {
+      if (acquired !== 'OK') return;
+      return measureDbSize(organizationId)
+        .catch((err) => console.error(`[db-size] background refresh failed for org ${organizationId}:`, err))
+        .finally(() => getRedisClient().del(lockKey).catch(() => {}));
+    })
+    .catch(() => {});
+}
+
+/** Measure now: list the org's provisioned apps in every region, size their databases, cache. */
+export async function measureDbSize(organizationId: string): Promise<number> {
   // apps + app_db_connections are per-region — gather every region's
   // provisioned apps for this org, then size each data DB.
-  const allApps: Array<{ id: string; db_name: string; connection_string: string | null }> = [];
-  for (const region of Object.keys(config.runtimeDb.urlsByRegion)) {
-    const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
-    const appsResult = await runtimePool.query<{ id: string; db_name: string; connection_string: string | null }>(
-      `SELECT a.id, a.db_name, adc.connection_string
-       FROM apps a
-       LEFT JOIN app_db_connections adc ON adc.app_id = a.id
-       WHERE a.organization_id = $1 AND a.db_provisioned = true`,
-      [organizationId]
-    );
-    allApps.push(...appsResult.rows);
-  }
+  const perRegion = await Promise.all(
+    Object.keys(config.runtimeDb.urlsByRegion).map((region) =>
+      getRuntimeDbPool(config.runtimeDb, region).query<{ id: string; db_name: string; connection_string: string | null }>(
+        `SELECT a.id, a.db_name, adc.connection_string
+         FROM apps a
+         LEFT JOIN app_db_connections adc ON adc.app_id = a.id
+         WHERE a.organization_id = $1 AND a.db_provisioned = true`,
+        [organizationId]
+      )
+    )
+  );
+  const apps = perRegion.flatMap((r) => r.rows).filter((a) => a.connection_string);
 
-  let total = 0;
-
-  for (const app of allApps) {
-    if (!app.connection_string) continue;
-
+  const sizes = await mapWithConcurrency(apps, DB_SIZE_CONCURRENCY, async (app) => {
     let tempPool: Pool | null = null;
     try {
       tempPool = new Pool({
-        connectionString: app.connection_string,
+        connectionString: app.connection_string!,
         max: 1,
         ssl: { rejectUnauthorized: false },
         connectionTimeoutMillis: 5000,
         idleTimeoutMillis: 1000,
       });
-      const sizeResult = await tempPool.query(
-        'SELECT pg_database_size(current_database()) as size'
-      );
-      total += parseInt(sizeResult.rows[0].size, 10);
+      const sizeResult = await tempPool.query('SELECT pg_database_size(current_database()) as size');
+      return parseInt(sizeResult.rows[0].size, 10);
     } catch (err) {
       console.error(`Failed to get db size for app ${app.id}:`, err);
-      // Skip this app — don't block the billing page
+      return 0; // Skip this app — don't block the billing page
     } finally {
-      if (tempPool) {
-        await tempPool.end().catch(() => {});
-      }
+      if (tempPool) await tempPool.end().catch(() => {});
     }
-  }
+  });
+  const total = sizes.reduce((a, b) => a + b, 0);
 
-  getRedisClient().setex(cacheKey, 300, total.toString()).catch(() => {});
+  const redis = getRedisClient();
+  redis.setex(`db_size_org:${organizationId}`, DB_SIZE_FRESH_TTL_S, total.toString()).catch(() => {});
+  redis.setex(`db_size_org_last:${organizationId}`, DB_SIZE_LAST_KNOWN_TTL_S, total.toString()).catch(() => {});
   return total;
+}
+
+/** Map with at most `limit` calls in flight; results keep input order. */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 export interface CreditsBalance {

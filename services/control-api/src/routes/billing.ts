@@ -77,7 +77,12 @@ export async function billingRoutes(app: FastifyInstance) {
   void notImpl; // reserved for future explicit 501s
 
   // Get current billing info (plan, usage, subscription status)
-  app.get('/dashboard/billing', async (request, reply) => {
+  /**
+   * The org a billing read is about, with its plan's limits: the ?org_id the
+   * caller is a member of, else their personal org. Sends the 403/404 itself
+   * and returns null in those cases.
+   */
+  async function loadBillingOrg(request: any, reply: any): Promise<any | null> {
     const userId = requireUserId(request);
 
     // Optional ?org_id=<uuid>: view billing for a specific org the caller is a
@@ -94,43 +99,142 @@ export async function billingRoutes(app: FastifyInstance) {
         [requestedOrgId, userId]
       );
       if (membership.rows.length === 0) {
-        return reply.code(403).send({ error: 'Not a member of the requested organization' });
+        reply.code(403).send({ error: 'Not a member of the requested organization' });
+        return null;
       }
       targetOrgId = requestedOrgId;
     }
 
+    // Get billing state for the resolved org: either the ?org_id path arg
+    // (membership already checked above) or the caller's personal org.
+    //
+    // The plans join is a LEFT JOIN keyed on a COALESCE'd plan id on purpose.
+    // plan_id is nullable, and an org whose plan_id is NULL (or names a plan
+    // row that no longer exists) is still a real org that may be holding a
+    // real credit balance. An inner join drops the row entirely, which turned
+    // the whole endpoint into a 404 and made the org's topped-up balance
+    // invisible in the dashboard — money present in the ledger, unreadable in
+    // the UI. Fall back to playground limits so the balance always renders.
+    const userResult = await app.controlDb.query(
+      `SELECT o.id AS org_id, o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
+              p.name as plan_name, p.price_monthly_cents,
+              p.max_storage_gb, p.max_ai_credits_usd, p.ai_credits_lifetime,
+              p.max_lambda_invocations, p.max_db_size_gb, p.max_bandwidth_gb, p.max_mau,
+              p.max_projects, p.overage_rates, p.features
+       FROM platform_users pu
+       JOIN organizations o ON o.id = COALESCE($2::uuid, pu.personal_organization_id)
+       LEFT JOIN plans p ON p.id = COALESCE(o.plan_id, 'playground')
+       WHERE pu.id = $1`,
+      [userId, targetOrgId]
+    );
+
+    // Zero rows now means only what it says: no such platform user, or the
+    // requested org does not exist. A missing plan no longer lands here.
+    if (userResult.rows.length === 0) {
+      reply.code(404).send({ error: 'Organization not found' });
+      return null;
+    }
+    return userResult.rows[0];
+  }
+
+  /**
+   * An org's plan limits as numbers. The plans join is a LEFT JOIN, so every
+   * p.* column can be null if the fallback plan row is itself missing.
+   * parseFloat(null) is NaN, which would serialize as null and poison every
+   * percentage — treat an absent limit as 0 (i.e. "no stated limit").
+   */
+  function planLimits(user: any) {
+    const num = (v: unknown) => {
+      const n = parseFloat(v as string);
+      return Number.isFinite(n) ? n : 0;
+    };
+    return {
+      maxAiCreditsUsd: num(user.max_ai_credits_usd),
+      maxStorageGb: num(user.max_storage_gb),
+      maxBandwidthGb: num(user.max_bandwidth_gb),
+      maxDbSizeGb: num(user.max_db_size_gb),
+      maxMau: user.max_mau ?? 0,
+      maxProjects: user.max_projects ?? 0,
+    };
+  }
+
+  /**
+   * Current usage for every meter, and each as a percentage of the plan.
+   * These reads cross to the runtime DBs (ai_usage_logs, apps, storage_objects,
+   * app_users, app_db_connections) and are independent, so they run together;
+   * awaiting them one by one stacked their latencies.
+   */
+  async function computeUsage(user: any) {
+    const region = assertRegionConfig().instanceRegion;
+    const billingOrgId: string = user.org_id;
+    const [aiCreditsUsed, projectCountResult, storageBytes, lambdaInvocations, bandwidthBytes, dbSizeBytes, mau] =
+      await Promise.all([
+        getAiCreditsUsed(app.runtimeDb(region), billingOrgId, user.ai_credits_lifetime),
+        // Project count must aggregate across ALL regions. org_app_index is the
+        // authoritative cross-region index on controlDb — counting `apps` on the
+        // local runtimeDb undercounts users with apps in other regions (and shows
+        // 0 when the local region has no apps for the user).
+        app.controlDb.query(
+          'SELECT COUNT(*)::int as count FROM org_app_index WHERE organization_id = $1',
+          [billingOrgId]
+        ),
+        getStorageUsed(app.runtimeDb(region), billingOrgId),
+        getCurrentUsage(app.runtimeDb(region), billingOrgId, 'lambda_invocations'),
+        getCurrentUsage(app.runtimeDb(region), billingOrgId, 'bandwidth_bytes'),
+        getDbSize(app.runtimeDb(region), billingOrgId),
+        getMAU(app.runtimeDb(region), billingOrgId),
+      ]);
+
+    const usage = {
+      storage_bytes: storageBytes,
+      ai_credits_usd: aiCreditsUsed,
+      lambda_invocations: lambdaInvocations,
+      bandwidth_bytes: bandwidthBytes,
+      db_size_bytes: dbSizeBytes,
+      mau,
+      project_count: projectCountResult.rows[0].count,
+    };
+
+    const { maxAiCreditsUsd, maxStorageGb, maxBandwidthGb, maxDbSizeGb, maxMau, maxProjects } = planLimits(user);
+    // Calculate usage percentages (only for non-unlimited limits)
+    const pct = (current: number, limit: number) => limit > 0 ? (current / limit) * 100 : 0;
+    const usagePercentages = {
+      storage_bytes: maxStorageGb > 0 ? pct(usage.storage_bytes, maxStorageGb * 1024 * 1024 * 1024) : 0,
+      ai_credits: maxAiCreditsUsd > 0 ? pct(aiCreditsUsed, maxAiCreditsUsd) : 0,
+      lambda_invocations: user.max_lambda_invocations > 0 ? pct(usage.lambda_invocations, user.max_lambda_invocations) : 0,
+      bandwidth_bytes: maxBandwidthGb > 0 ? pct(usage.bandwidth_bytes, maxBandwidthGb * 1024 * 1024 * 1024) : 0,
+      db_size_bytes: maxDbSizeGb > 0 ? pct(usage.db_size_bytes, maxDbSizeGb * 1024 * 1024 * 1024) : 0,
+      mau: maxMau > 0 ? pct(usage.mau, maxMau) : 0,
+      project_count: maxProjects > 0 ? pct(usage.project_count, maxProjects) : 0,
+    };
+    return { usage, usagePercentages };
+  }
+
+  // Usage meters on their own, so the dashboard can render the rest of the
+  // billing page first — measuring usage is the slow part (it sizes every app
+  // database). Same ?org_id semantics as GET /dashboard/billing.
+  app.get('/dashboard/billing/usage', async (request, reply) => {
+    try {
+      const user = await loadBillingOrg(request, reply);
+      if (!user) return reply;
+      return await computeUsage(user);
+    } catch (error) {
+      if (isHttpError(error)) throw error;
+      app.log.error({ err: error }, 'Failed to get billing usage');
+      return reply.code(500).send(apiError(error, 'Failed to retrieve usage'));
+    }
+  });
+
+  // ?usage=0 leaves out `usage` and `usagePercentages` (both null) — the
+  // dashboard fetches those from /dashboard/billing/usage. Without it the
+  // response is unchanged for the CLI, SDK and MCP billing tools.
+  app.get('/dashboard/billing', async (request, reply) => {
+    const userId = requireUserId(request);
+    const includeUsage = ((request.query ?? {}) as { usage?: string }).usage !== '0';
     const region = assertRegionConfig().instanceRegion;
     try {
-      // Get billing state for the resolved org: either the ?org_id path arg
-      // (membership already checked above) or the caller's personal org.
-      //
-      // The plans join is a LEFT JOIN keyed on a COALESCE'd plan id on purpose.
-      // plan_id is nullable, and an org whose plan_id is NULL (or names a plan
-      // row that no longer exists) is still a real org that may be holding a
-      // real credit balance. An inner join drops the row entirely, which turned
-      // the whole endpoint into a 404 and made the org's topped-up balance
-      // invisible in the dashboard — money present in the ledger, unreadable in
-      // the UI. Fall back to playground limits so the balance always renders.
-      const userResult = await app.controlDb.query(
-        `SELECT o.id AS org_id, o.plan_id, o.stripe_customer_id, o.billing_period_start, o.account_status,
-                p.name as plan_name, p.price_monthly_cents,
-                p.max_storage_gb, p.max_ai_credits_usd, p.ai_credits_lifetime,
-                p.max_lambda_invocations, p.max_db_size_gb, p.max_bandwidth_gb, p.max_mau,
-                p.max_projects, p.overage_rates, p.features
-         FROM platform_users pu
-         JOIN organizations o ON o.id = COALESCE($2::uuid, pu.personal_organization_id)
-         LEFT JOIN plans p ON p.id = COALESCE(o.plan_id, 'playground')
-         WHERE pu.id = $1`,
-        [userId, targetOrgId]
-      );
-
-      // Zero rows now means only what it says: no such platform user, or the
-      // requested org does not exist. A missing plan no longer lands here.
-      if (userResult.rows.length === 0) {
-        return reply.code(404).send({ error: 'Organization not found' });
-      }
-
-      const user = userResult.rows[0];
+      const user = await loadBillingOrg(request, reply);
+      if (!user) return reply;
       // Resolve once — used for subscription queries and usage meter queries below.
       const billingOrgId: string = user.org_id;
 
@@ -166,62 +270,22 @@ export async function billingRoutes(app: FastifyInstance) {
         }
       }
 
-      // Get current usage for all meters — these helpers query runtime tables
-      // (ai_usage_logs, apps, storage_objects, app_users, app_db_connections)
       const isLifetime = user.ai_credits_lifetime;
-      const aiCreditsUsed = await getAiCreditsUsed(app.runtimeDb(region), billingOrgId, isLifetime);
-      // Project count must aggregate across ALL regions. org_app_index is the
-      // authoritative cross-region index on controlDb — counting `apps` on the
-      // local runtimeDb undercounts users with apps in other regions (and shows
-      // 0 when the local region has no apps for the user).
-      const projectCountResult = await app.controlDb.query(
-        'SELECT COUNT(*)::int as count FROM org_app_index WHERE organization_id = $1',
-        [billingOrgId]
-      );
-
-      const usage = {
-        storage_bytes: await getStorageUsed(app.runtimeDb(region), billingOrgId),
-        ai_credits_usd: aiCreditsUsed,
-        lambda_invocations: await getCurrentUsage(app.runtimeDb(region), billingOrgId, 'lambda_invocations'),
-        bandwidth_bytes: await getCurrentUsage(app.runtimeDb(region), billingOrgId, 'bandwidth_bytes'),
-        db_size_bytes: await getDbSize(app.runtimeDb(region), billingOrgId),
-        mau: await getMAU(app.runtimeDb(region), billingOrgId),
-        project_count: projectCountResult.rows[0].count,
-      };
-
-      // The plans join is a LEFT JOIN, so every p.* column can be null if the
-      // fallback plan row is itself missing. parseFloat(null) is NaN, which
-      // would serialize as null and poison every percentage below — treat an
-      // absent limit as 0 (i.e. "no stated limit") rather than NaN.
-      const num = (v: unknown) => {
-        const n = parseFloat(v as string);
-        return Number.isFinite(n) ? n : 0;
-      };
-      const maxAiCreditsUsd = num(user.max_ai_credits_usd);
-      const maxStorageGb = num(user.max_storage_gb);
-      const maxBandwidthGb = num(user.max_bandwidth_gb);
-      const maxDbSizeGb = num(user.max_db_size_gb);
-      const maxMau = user.max_mau ?? 0;
-      const maxProjects = user.max_projects ?? 0;
-
-      // Calculate usage percentages (only for non-unlimited limits)
-      const pct = (current: number, limit: number) => limit > 0 ? (current / limit) * 100 : 0;
-      const usagePercentages = {
-        storage_bytes: maxStorageGb > 0 ? pct(usage.storage_bytes, maxStorageGb * 1024 * 1024 * 1024) : 0,
-        ai_credits: maxAiCreditsUsd > 0 ? pct(aiCreditsUsed, maxAiCreditsUsd) : 0,
-        lambda_invocations: user.max_lambda_invocations > 0 ? pct(usage.lambda_invocations, user.max_lambda_invocations) : 0,
-        bandwidth_bytes: maxBandwidthGb > 0 ? pct(usage.bandwidth_bytes, maxBandwidthGb * 1024 * 1024 * 1024) : 0,
-        db_size_bytes: maxDbSizeGb > 0 ? pct(usage.db_size_bytes, maxDbSizeGb * 1024 * 1024 * 1024) : 0,
-        mau: maxMau > 0 ? pct(usage.mau, maxMau) : 0,
-        project_count: maxProjects > 0 ? pct(usage.project_count, maxProjects) : 0,
-      };
+      const [aiCreditsUsed, usageBlock] = await Promise.all([
+        getAiCreditsUsed(app.runtimeDb(region), billingOrgId, isLifetime),
+        includeUsage ? computeUsage(user) : Promise.resolve(null),
+      ]);
+      const usage = usageBlock?.usage ?? null;
+      const usagePercentages = usageBlock?.usagePercentages ?? null;
+      const { maxAiCreditsUsd, maxStorageGb, maxBandwidthGb, maxDbSizeGb, maxMau, maxProjects } = planLimits(user);
 
       // Get AI usage breakdown (BYOK vs platform)
       const periodStart = user.billing_period_start || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const periodEnd = new Date().toISOString().split('T')[0];
 
-      // ai_usage_logs and apps are runtime tables — use runtimeDb
-      const aiUsageResult = await app.runtimeDb(region).query(
+      // ai_usage_logs and apps are runtime tables — use runtimeDb. Started now,
+      // awaited below alongside the balance and cap reads.
+      const aiUsagePromise = app.runtimeDb(region).query(
         `SELECT
            key_type,
            COUNT(*) as requests,
@@ -234,6 +298,17 @@ export async function billingRoutes(app: FastifyInstance) {
          GROUP BY key_type`,
         [billingOrgId, periodStart, periodEnd]
       );
+      // Per-org billing balance (migration 093 + Phase 3b). Keyed on the
+      // resolved billingOrgId, which honors ?org_id when the caller is a
+      // member and otherwise defaults to their personal org.
+      // getSpendingCapStatus reads platform_users+plans (controlDb) and ai_usage_logs (runtime);
+      // FIXME: getSpendingCapStatus internally calls getAiCreditsUsed which hits runtimeDb tables
+      // (ai_usage_logs, apps). The service function signature must be updated in a follow-on batch.
+      const [aiUsageResult, credits, capStatus] = await Promise.all([
+        aiUsagePromise,
+        getCreditsBalance(app.controlDb, billingOrgId),
+        getSpendingCapStatus(app.controlDb, userId),
+      ]);
 
       const aiUsageBreakdown = {
         byok: { requests: 0, tokens: 0, cost: 0 },
@@ -249,14 +324,6 @@ export async function billingRoutes(app: FastifyInstance) {
         };
       }
 
-      // Per-org billing balance (migration 093 + Phase 3b). Keyed on the
-      // resolved billingOrgId, which honors ?org_id when the caller is a
-      // member and otherwise defaults to their personal org.
-      const credits = await getCreditsBalance(app.controlDb, billingOrgId);
-      // getSpendingCapStatus reads platform_users+plans (controlDb) and ai_usage_logs (runtime);
-      // FIXME: getSpendingCapStatus internally calls getAiCreditsUsed which hits runtimeDb tables
-      // (ai_usage_logs, apps). The service function signature must be updated in a follow-on batch.
-      const capStatus = await getSpendingCapStatus(app.controlDb, userId);
       const aiOverageRate = user.overage_rates?.ai_credits ?? null;
 
       const aiCreditsIncluded = maxAiCreditsUsd > 0 ? maxAiCreditsUsd : 0;
