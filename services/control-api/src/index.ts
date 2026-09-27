@@ -24,6 +24,7 @@ import { databasePlugin } from './plugins/database.js';
 import runtimeDatabasePlugin from './plugins/runtime-database.js';
 import { dataPlanePlugin } from './plugins/data-plane.js';
 import corsPlugin from './plugins/cors.js';
+import helmetPlugin from './plugins/helmet.js';
 import authPlugin from './plugins/auth.js';
 import internalAuthPlugin from './plugins/internal-auth.js';
 import rateLimitPlugin from './plugins/rate-limit.js';
@@ -538,6 +539,7 @@ app.register(runtimeDatabasePlugin);
 app.register(dataPlanePlugin);
 app.register(realtimePlugin);
 app.register(corsPlugin);
+app.register(helmetPlugin);
 app.register(internalAuthPlugin);
 
 // Cloud overlays bootstrap — registers StripeBillingProvider + LeaseQuotaEnforcer
