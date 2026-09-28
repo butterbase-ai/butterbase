@@ -26,9 +26,15 @@ export async function adminAuthRoutes(app: FastifyInstance) {
       const token = authHeader.substring(7);
       const claims = await authProvider.verifyJwt(token);
 
-      // Look up user by cognito_sub and check is_admin
+      // Look up user by cognito_sub and check role membership
       const result = await app.controlDb.query(
-        'SELECT id, email, display_name, is_admin FROM platform_users WHERE cognito_sub = $1',
+        `SELECT pu.id, pu.email, pu.display_name,
+           EXISTS (
+             SELECT 1 FROM platform_user_roles pur
+             JOIN platform_roles pr ON pr.id = pur.role_id
+             WHERE pur.platform_user_id = pu.id AND pr.name = 'admin'
+           ) AS is_admin
+         FROM platform_users pu WHERE pu.cognito_sub = $1`,
         [claims.sub]
       );
 
@@ -68,9 +74,15 @@ export async function requireAdmin(app: FastifyInstance, request: FastifyRequest
     const token = authHeader.substring(7);
     const claims = await authProvider.verifyJwt(token);
 
-    // Look up user by cognito_sub and check is_admin
+    // Look up user by cognito_sub and check role membership
     const result = await app.controlDb.query(
-      'SELECT id, is_admin FROM platform_users WHERE cognito_sub = $1',
+      `SELECT pu.id,
+         EXISTS (
+           SELECT 1 FROM platform_user_roles pur
+           JOIN platform_roles pr ON pr.id = pur.role_id
+           WHERE pur.platform_user_id = pu.id AND pr.name = 'admin'
+         ) AS is_admin
+       FROM platform_users pu WHERE pu.cognito_sub = $1`,
       [claims.sub]
     );
 

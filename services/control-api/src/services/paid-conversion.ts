@@ -11,8 +11,8 @@
  * and is missing rows for some orgs. owner_id has no FK, so the join through
  * platform_users is what drops orgs whose owner no longer exists.
  *
- * "Internal" covers staff and seeded demo accounts. is_admin alone is not
- * enough — two internal accounts are not flagged admin, and one of them owns
+ * "Internal" covers staff and seeded demo accounts. The admin role check alone
+ * is not enough — two internal accounts hold no role, and one of them owns
  * eleven demo orgs carrying live Stripe subscriptions. Both rules are applied.
  */
 
@@ -32,7 +32,11 @@ WITH internal AS (
   SELECT id FROM platform_users
   WHERE email LIKE '%@butterbase.ai'
      OR email = ANY($1::text[])
-     OR is_admin
+     OR EXISTS (
+       SELECT 1 FROM platform_user_roles pur
+       JOIN platform_roles pr ON pr.id = pur.role_id
+       WHERE pur.platform_user_id = platform_users.id AND pr.name = 'admin'
+     )
 ),
 ext_users AS (
   SELECT id FROM platform_users WHERE id NOT IN (SELECT id FROM internal)
