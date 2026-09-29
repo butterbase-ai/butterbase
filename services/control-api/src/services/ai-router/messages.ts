@@ -82,6 +82,7 @@ function wrapNativeAnthropicStreamForSettlement(
         ? estimatePromptTokens([{ role: 'assistant', content: thinkingText }], canonicalId)
         : undefined;
       writeAiUsageRow(ctx.runtimePool, {
+        modality: 'chat',
         appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId,
         router: chosenRouter as any,
         promptTokens: inputTokens, completionTokens: outputTokens,
@@ -243,6 +244,7 @@ export async function routeMessages(
     maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId)
       .catch(err => console.error('[messages] credits-email failed:', err));
     writeAiUsageRow(ctx.runtimePool, {
+      modality: 'chat',
       appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: stripped,
       router: native.router.name as any,
       promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,

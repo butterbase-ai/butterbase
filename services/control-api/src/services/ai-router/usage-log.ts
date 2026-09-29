@@ -2,6 +2,7 @@ import type pg from 'pg';
 import type { RouterName } from './normalize.js';
 import { incrementUsage } from '../usage-metering.js';
 import type { CostSource } from './cost-source.js';
+import type { Modality } from './adapters/types.js';
 
 export type { CostSource };
 
@@ -34,6 +35,8 @@ export interface AiUsageRow {
   cacheCreationInputTokens?: number;
   /** Reasoning tokens consumed by thinking/reasoning models (e.g. o1, claude thinking). Null when not applicable. */
   reasoningTokens?: number;
+  /** Modality of the call; NULL for legacy rows. */
+  modality?: Modality | null;
 }
 
 /**
@@ -50,8 +53,8 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
        cost_usd, key_type, charged_to_user, request_metadata,
        router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id,
        cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, organization_id, markup_source,
-       cost_source
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+       cost_source, modality
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
     [
       row.appId,
       row.userId,
@@ -76,6 +79,7 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.organizationId,
       row.markupSource,
       row.costSource,
+      row.modality ?? null,
     ]
   );
 

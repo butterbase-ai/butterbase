@@ -366,6 +366,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       ).catch((err) => console.error('[router] auto-refill check failed:', err));
       maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
       writeAiUsageRow(ctx.runtimePool, {
+        modality: 'chat',
         appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         totalTokens: usage.promptTokens + usage.completionTokens,
@@ -410,6 +411,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'chat',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
     totalTokens: usage.promptTokens + usage.completionTokens,
@@ -588,6 +590,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
   maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'embedding',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: 0,
     totalTokens: usage.promptTokens,
@@ -1124,6 +1127,7 @@ export async function settleVideoJob(
     (err) => console.error('[router] credits-email failed:', err),
   );
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'video',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
@@ -1309,6 +1313,7 @@ export async function settleImageJob(
     (err) => console.error('[router] credits-email failed:', err),
   );
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'image',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,

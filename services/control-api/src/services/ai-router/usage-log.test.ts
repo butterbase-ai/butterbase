@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import pg from 'pg';
 import { writeAiUsageRow, type AiUsageRow } from './usage-log.js';
 
@@ -152,5 +152,20 @@ describeDb('writeAiUsageRow', () => {
     );
     expect(Number(got.rows[0].cache_read_input_tokens)).toBe(0);
     expect(Number(got.rows[0].cache_creation_input_tokens)).toBe(0);
+  });
+});
+
+describe('writeAiUsageRow modality (mocked pool)', () => {
+  it('writes modality as the 24th parameter', async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await writeAiUsageRow({ query } as any, {
+      appId: 'a', organizationId: 'o', userId: null, model: 'typesafe/jev-1.13', router: 'openrouter',
+      promptTokens: 10, completionTokens: 1, totalTokens: 10, providerCostUsd: 0.000001, chargedCreditsUsd: 0.0000012,
+      markupPct: 20, markupSource: 'global', costSource: 'upstream', fallbackChain: [], leaseId: null,
+      keyType: 'platform', chargedToUser: false, modality: 'decisions',
+    });
+    const [sql, params] = query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toMatch(/cost_source,\s*modality/);
+    expect(params[23]).toBe('decisions');
   });
 });
