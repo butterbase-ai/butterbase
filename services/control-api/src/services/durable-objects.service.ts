@@ -632,9 +632,10 @@ export async function replayDurableObjectsForClone(
   }
 
   // Auto-mint convention keys into app_do_env_vars BEFORE bundleAndDeploy so
-  // the deploy picks up the values on first roll. Bypasses setDoEnvVar's
-  // reserved-prefix guard (BUTTERBASE_API_KEY starts with BUTTERBASE_) via
-  // direct SQL — a platform-controlled write of a platform-recognized key,
+  // the deploy picks up the values on first roll. Writes via direct SQL
+  // rather than setDoEnvVar (whose reserved-prefix guard allows
+  // BUTTERBASE_API_KEY but would redeploy per key) — a platform-controlled
+  // write of a platform-recognized key,
   // mirroring how clone-replay writes function encrypted_env_vars for the
   // same convention. Explicit + convention targets are unioned so a caller
   // can request a non-convention key too, at the cost of naming it up front.

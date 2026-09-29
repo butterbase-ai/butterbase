@@ -137,6 +137,13 @@ describe('app-level env vars', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('PATCH accepts BUTTERBASE_API_KEY (user-supplied convention key)', async () => {
+    const res = await app.inject({ method: 'PATCH', url: `/v1/${appId}/env`, headers: authHeaders,
+      payload: { envVars: { BUTTERBASE_API_KEY: 'bb_sk_x' } } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().updatedKeys).toEqual(['BUTTERBASE_API_KEY']);
+  });
+
   it('PATCH rejects empty envVars body', async () => {
     const res = await app.inject({ method: 'PATCH', url: `/v1/${appId}/env`, headers: authHeaders,
       payload: { envVars: {} } });
@@ -284,6 +291,30 @@ describe('POST /v1/:appId/functions — envVars merge semantics', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.message).toContain('BUTTERBASE_FOO');
     expect(functionsStore['reserved-test']).toBeUndefined();
+  });
+
+  it('accepts and stores BUTTERBASE_API_KEY on deploy (docs tell users to set it; the runtime never injects it)', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'api-key-test', code: validCode, envVars: { BUTTERBASE_API_KEY: 'bb_sk_x' } },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const stored = JSON.parse(
+      functionsStore['api-key-test'].encrypted_env_vars!.replace('encrypted_', '')
+    );
+    expect(stored).toEqual({ BUTTERBASE_API_KEY: 'bb_sk_x' });
+  });
+
+  it('still rejects runtime-injected BUTTERBASE_APP_ID on deploy', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'app-id-test', code: validCode, envVars: { BUTTERBASE_APP_ID: 'x' } },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('BUTTERBASE_APP_ID');
+    expect(functionsStore['app-id-test']).toBeUndefined();
   });
 });
 
