@@ -1893,6 +1893,46 @@ Authorization: Bearer {token}
 
 Embedding usage costs count against the same AI credits allowance as chat completions.
 
+### Decision models (typed classification)
+
+Decision models return a **typed answer with probabilities** instead of text. Use them for routing, classification, moderation, verification and scoring, anywhere your code needs a decision it can branch on. Use a chat model when you need prose or explanations. (This is unrelated to substrate decisions.)
+
+**Question types**
+- \`choice\`: pick one option from \`criteria\` (an object of option → description). Returns \`choice\`, \`confidence\`, and \`probabilities\` per option.
+- \`noul\`: yes/no. \`criteria\` is \`{ true, false }\`. Returns \`noul\`, the probability of yes (0–1).
+- \`score\`: position on an ordered scale. \`criteria\` is an array, lowest first. Returns \`score\` (a probability-weighted index), \`confidence\`, \`probabilities\` and \`legend\`.
+
+Every question in one request is answered independently and in parallel against the same \`state\`.
+
+**SDK**
+\`\`\`ts
+const { data, error } = await butterbase.ai.decide({
+  state: { customer_tier: 'enterprise', ticket: 'Checkout is blank after I click Pay.' },
+  questions: {
+    is_bug: { type: 'noul', instructions: 'Is this a software defect?',
+              criteria: { true: 'Broken or unexpected behavior', false: 'Question or feature request' } },
+    team:   { type: 'choice', instructions: 'Which team owns this?',
+              criteria: { payments: 'Checkout/billing', frontend: 'Rendering/browser', account: 'Login/profile' } },
+    urgency:{ type: 'score', instructions: 'How urgent?',
+              criteria: ['Next release', 'This week', 'Blocking revenue now'] },
+  },
+});
+if (error) throw error;
+if (data.answers.is_bug.noul > 0.8) { /* open a bug */ }
+\`\`\`
+
+**HTTP**: \`POST /v1/{app_id}/ai/decide\` with the same body. Platform gateway keys (\`ai:gateway\`) use \`POST /v1/decide\` and must pass \`model\`.
+
+**MCP**: \`manage_ai\` with \`action: "decide"\`, \`questions\`, and optional \`state\`/\`model\`.
+
+**Models**: list them with \`manage_ai list_models modality: "decisions"\` (or \`ai.listModels({ modality: 'decisions' })\`). The default is \`typesafe/jev-1.13\`; set a per-app default with \`update_config { config: { defaultDecisionModel } }\`. Context length varies by model (Jev: 32K tokens). Respan models (\`respan/span-01\`, \`respan/span-01-lite\`) require \`state\` to be a string (or \`{ input: [messages], output: message }\`); Jev, Kev and Solar accept any JSON \`state\`.
+
+**Errors**: a malformed request returns 400 \`UPSTREAM_REJECTED\` with the field that failed, e.g. \`questions.q.type: Invalid discriminator value. Expected 'noul' | 'choice' | 'score'\`.
+
+**Pricing**: input tokens only. Output is free. The response's \`usage.cost\` is the amount charged to your credits.
+
+**Reading results**: a \`noul\` of 0.5 means "unsure", not "medium". For low-confidence answers, route to a human or ask a chat model instead. Decision models never return reasoning.
+
 ### Video generation
 
 Some models in the catalog render **video** instead of text. Video generation is **asynchronous** — you submit a job, poll for its status, and download the result when it's ready (typically 30 seconds to several minutes per video).

@@ -9,6 +9,7 @@ vi.mock('../services/ai-router/router.js', async (orig) => {
     ...actual,
     routeChatCompletion: vi.fn(),
     routeEmbedding: vi.fn(),
+    routeDecision: vi.fn(),
   };
 });
 
@@ -39,12 +40,13 @@ vi.mock('../services/auto-refill-service.js', () => ({
   maybeTriggerAutoRefill: vi.fn(() => Promise.resolve()),
 }));
 
-import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
+import { routeChatCompletion, routeEmbedding, routeDecision, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
 
 const mockRouteChatCompletion = routeChatCompletion as ReturnType<typeof vi.fn>;
 const mockRouteEmbedding = routeEmbedding as ReturnType<typeof vi.fn>;
+const routeDecisionMock = routeDecision as ReturnType<typeof vi.fn>;
 const mockListCatalogModels = listCatalogModels as ReturnType<typeof vi.fn>;
 const mockReadCatalogEntry = readCatalogEntry as ReturnType<typeof vi.fn>;
 
@@ -312,6 +314,50 @@ describe('POST /v1/embeddings', () => {
     const [ctx] = mockRouteEmbedding.mock.calls[0];
     expect(ctx.appId).toBeNull();
     expect(ctx.userId).toBe('user-embed-1');
+  });
+});
+
+describe('POST /v1/decide', () => {
+  let app: FastifyInstance;
+
+  afterAll(async () => { await app?.close(); });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('routes to routeDecision with app-less context and returns the body', async () => {
+    app = await buildTestApp({ userId: 'user-decide-1', authMethod: 'jwt', scopes: [] });
+    routeDecisionMock.mockResolvedValue({ status: 200, body: { answers: { a: { type: 'noul', noul: 0.5 } }, usage: { input_tokens: 5, output_tokens: 1, cost: 0.0000001 } } });
+    const r = await app.inject({ method: 'POST', url: '/v1/decide', headers: { 'content-type': 'application/json' }, payload: { model: 'typesafe/jev-1.13', questions: { a: { type: 'noul', instructions: 'x', criteria: { true: 'y', false: 'n' } } } } });
+    expect(r.statusCode).toBe(200);
+    expect(routeDecisionMock.mock.calls[0][0]).toMatchObject({ appId: null, userId: 'user-decide-1' });
+    expect(r.json().answers.a.noul).toBe(0.5);
+  });
+
+  it('400 when model is missing', async () => {
+    app = await buildTestApp({ userId: 'user-decide-2', authMethod: 'jwt', scopes: [] });
+    const r = await app.inject({ method: 'POST', url: '/v1/decide', headers: { 'content-type': 'application/json' }, payload: { questions: { a: {} } } });
+    expect(r.statusCode).toBe(400);
+    expect(routeDecisionMock).not.toHaveBeenCalled();
+  });
+
+  const DECIDE_Q = { a: { type: 'noul', instructions: 'x', criteria: { true: 'y', false: 'n' } } };
+
+  it('upstream bad_request → 400 upstream_rejected carrying the upstream reason', async () => {
+    app = await buildTestApp({ userId: 'user-decide-3', authMethod: 'jwt', scopes: [] });
+    routeDecisionMock.mockRejectedValue(new AdapterError('openrouter', 400, 'bad_request', '{"error":{"message":"criteria must have true and false"}}'));
+    const r = await app.inject({ method: 'POST', url: '/v1/decide', headers: { 'content-type': 'application/json' }, payload: { model: 'typesafe/jev-1.13', questions: DECIDE_Q } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({ error: { message: 'criteria must have true and false', type: 'invalid_request_error', code: 'upstream_rejected' } });
+  });
+
+  it('non-bad_request AdapterError still goes through the generic mapping without upstream text', async () => {
+    app = await buildTestApp({ userId: 'user-decide-4', authMethod: 'jwt', scopes: [] });
+    routeDecisionMock.mockRejectedValue(new AdapterError('openrouter', 401, 'auth', 'SECRET-UPSTREAM-DETAIL'));
+    const r = await app.inject({ method: 'POST', url: '/v1/decide', headers: { 'content-type': 'application/json' }, payload: { model: 'typesafe/jev-1.13', questions: DECIDE_Q } });
+    expect(r.statusCode).not.toBe(400);
+    expect(r.body).not.toContain('SECRET-UPSTREAM-DETAIL');
   });
 });
 

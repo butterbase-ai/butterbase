@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { getRedisClient } from '../services/redis.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import {
-  routeChatCompletion, routeEmbedding,
+  routeChatCompletion, routeEmbedding, routeDecision,
   RouterError, InsufficientCreditsError,
 } from '../services/ai-router/router.js';
 import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../services/ai-router/catalog.js';
@@ -15,10 +15,13 @@ import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
+import { upstreamReason } from '../services/ai-router/upstream-reason.js';
+import { AI_BODY_LIMIT_BYTES } from '../services/ai-router/body-limit.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 import {
   chatCompletionRequestSchema as chatCompletionSchema,
   embeddingRequestSchema as embeddingSchema,
+  decisionRequestSchema,
 } from '../services/ai-router/schemas.js';
 import { messagesRequestSchema, guardMessagesRoutingShape } from '../services/ai-router/messages-schema.js';
 import { routeMessages } from '../services/ai-router/messages.js';
@@ -63,7 +66,7 @@ async function resolveGatewayOrg(
 
 export async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
-  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
+  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey, decisionsUrl: config.aiRouter.openrouterDecisionsUrl }));
   try {
     // @ts-expect-error — overlay path resolved at runtime
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
@@ -163,7 +166,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
 }
 
 interface GatewayAuditContext {
-  endpoint: 'chat.completions' | 'embeddings' | 'messages' | 'responses';
+  endpoint: 'chat.completions' | 'embeddings' | 'decide' | 'messages' | 'responses';
   model?: string;
   appId: string;
   userId: string;
@@ -248,12 +251,6 @@ export async function gatewayRoutes(app: FastifyInstance) {
       },
     });
   });
-
-  // Fastify defaults to a 1 MB body limit, which a multi-turn conversation
-  // carrying base64 images blows through in a handful of turns — the client
-  // sees a bare 413 with no hint that the images are the cause. 25 MB clears
-  // realistic agent histories while still bounding a single request.
-  const AI_BODY_LIMIT_BYTES = 25 * 1024 * 1024;
 
   app.post('/v1/chat/completions', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
@@ -581,6 +578,50 @@ export async function gatewayRoutes(app: FastifyInstance) {
           errorCode: e.gatewayCode ?? e.code ?? 'error',
           status: e.gatewayStatus ?? e.statusCode,
         });
+      }
+      return handleRouterError(reply, err);
+    }
+  });
+
+  app.post('/v1/decide', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
+    const startedAt = Date.now();
+    let auditCtx: GatewayAuditContext | null = null;
+    try {
+      const user = resolveGatewayUser(request);
+      const body = decisionRequestSchema.parse(request.body);
+      auditCtx = {
+        endpoint: 'decide',
+        model: body.model,
+        appId: request.auth.appId ?? '_platform',
+        userId: user.userId,
+        ipAddress: request.ip ?? null,
+        userAgent: request.headers['user-agent'] ?? null,
+        startedAt,
+      };
+      const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+      const result = await routeDecision(
+        {
+          platformPool: app.controlDb, runtimePool, redis: getRedisClient(), adapters,
+          markupPct, markupSource, appId: null, organizationId, userId: user.userId, region: user.region,
+        },
+        body,
+      );
+      emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage: null, stream: false });
+      return reply.code(result.status).send(result.body);
+    } catch (err) {
+      if (auditCtx) {
+        const e = err as { message?: string; gatewayCode?: string; code?: string; statusCode?: number; gatewayStatus?: number };
+        emitGatewayEvent(app, auditCtx, {
+          success: false, errorMessage: e.message ?? 'unknown',
+          errorCode: e.gatewayCode ?? e.code ?? 'error', status: e.gatewayStatus ?? e.statusCode,
+        });
+      }
+      // Spec §3.3 step 4: a provider 400 carries a reason the caller can act on
+      // (bad question type, malformed criteria) — surface it, don't genericize.
+      if (err instanceof AdapterError && err.kind === 'bad_request') {
+        return reply.code(400).send(openaiError(upstreamReason(err.message), 'invalid_request_error', 'upstream_rejected'));
       }
       return handleRouterError(reply, err);
     }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Fastify from 'fastify';
+import { AI_BODY_LIMIT_BYTES } from '../services/ai-router/body-limit.js';
 
 /**
  * The AI gateway routes raise Fastify's body limit above the 1 MB default so
@@ -9,7 +10,6 @@ import Fastify from 'fastify';
  * no-op that nobody notices until a customer reports it again.
  */
 const ONE_MB = 1024 * 1024;
-const AI_BODY_LIMIT_BYTES = 25 * ONE_MB;
 
 function bodyOfBytes(bytes: number): string {
   // {"d":"AAA…"} — pad the filler so the serialized body lands on `bytes`.

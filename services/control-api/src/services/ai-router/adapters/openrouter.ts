@@ -1,4 +1,4 @@
-import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
+import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, DecisionRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
 import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
 
@@ -47,6 +47,7 @@ interface OpenRouterConfig {
   fetch?: typeof fetch;
   referer?: string;
   title?: string;
+  decisionsUrl?: string;   // default https://openrouter.ai/api/alpha/decisions (outside /api/v1)
 }
 
 /**
@@ -103,6 +104,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
   const fetcher = cfg.fetch ?? fetch;
   const referer = cfg.referer ?? 'https://butterbase.ai';
   const title = cfg.title ?? 'Butterbase';
+  const decisionsUrl = cfg.decisionsUrl ?? 'https://openrouter.ai/api/alpha/decisions';
 
   /**
    * Classify an OpenRouter /v1/models entry by `architecture.output_modalities`.
@@ -111,6 +113,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
    */
   function classifyModality(arch: { output_modalities?: string[] } | undefined): Modality {
     const outs = (arch?.output_modalities ?? []).map(s => s.toLowerCase());
+    if (outs.includes('decisions')) return 'decisions';
     if (outs.includes('video')) return 'video';
     if (outs.includes('image')) return 'image';
     if (outs.includes('audio')) return 'audio';
@@ -129,16 +132,19 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     architecture?: { output_modalities?: string[]; input_modalities?: string[] };
   }): UpstreamModel {
     const modality = classifyModality(m.architecture);
+    // OpenRouter prices variable-cost routers (openrouter/auto, typesafe/jev-router)
+    // as "-1". Stored raw that became -1,000,000/Mtok; clamp so the catalog never
+    // holds a negative price. NaN (missing/garbled) also becomes 0.
+    const toMtok = (s: string) => Math.max(0, parseFloat(s) * 1_000_000) || 0;
     return {
       upstreamId: m.id,
       displayName: m.name,
-      promptPricePerMtok: parseFloat(m.pricing.prompt) * 1_000_000,
-      completionPricePerMtok: parseFloat(m.pricing.completion) * 1_000_000,
+      promptPricePerMtok: toMtok(m.pricing.prompt),
+      completionPricePerMtok: toMtok(m.pricing.completion),
       contextLength: m.context_length,
       modality,
-      // For non-chat modalities the per-call pricing isn't in this response —
-      // stash architecture + pricing so future media-router code can recover it.
-      ...(modality === 'chat'
+      // Token-priced modalities carry no rawPricing.
+      ...(modality === 'chat' || modality === 'decisions'
         ? {}
         : { rawPricing: { source: '/v1/models', architecture: m.architecture, pricing: m.pricing } }),
     };
@@ -180,6 +186,22 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       }
     } catch (err) {
       console.warn('[openrouter] ?output_modalities=image fetch failed — skipping:', err);
+    }
+
+    // 3) Decision models (typed choice/yes-no/score, e.g. typesafe/jev-1.13).
+    // Absent from the default response; best-effort like the image pass.
+    try {
+      const decRes = await fetcher(`${base}/models?output_modalities=decisions`, {
+        headers: { 'HTTP-Referer': referer, 'X-Title': title },
+      });
+      if (decRes.ok) {
+        const decJson = await decRes.json() as ModelRowJson;
+        for (const m of decJson.data ?? []) {
+          if (!byId.has(m.id)) byId.set(m.id, parseModelRow(m));
+        }
+      }
+    } catch (err) {
+      console.warn('[openrouter] ?output_modalities=decisions fetch failed — skipping:', err);
     }
 
     const out: UpstreamModel[] = Array.from(byId.values());
@@ -312,6 +334,40 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       usage: json.usage ? {
         promptTokens: json.usage.prompt_tokens ?? 0,
         completionTokens: 0,
+        totalCost: cost,
+      } : null,
+      providerCostUsd: cost,
+    };
+  }
+
+  async function decisions(req: DecisionRequest, upstreamId: string): Promise<AdapterResult> {
+    const res = await fetcher(decisionsUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'HTTP-Referer': referer,
+        'X-Title': title,
+      },
+      body: JSON.stringify({ ...req, model: upstreamId }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
+      throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
+    }
+    const json = await res.json() as any;
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
+    const cost = pickProviderCost(json.usage);
+    return {
+      status: res.status,
+      body: json,
+      // Decisions report input_tokens/output_tokens, not prompt_/completion_tokens.
+      usage: json.usage ? {
+        promptTokens: json.usage.input_tokens ?? 0,
+        completionTokens: json.usage.output_tokens ?? 0,
         totalCost: cost,
       } : null,
       providerCostUsd: cost,
@@ -510,6 +566,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     listModels,
     chatCompletion,
     embedding,
+    decisions,
     submitVideo,
     pollVideo,
     fetchVideoContent,

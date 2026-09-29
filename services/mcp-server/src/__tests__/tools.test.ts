@@ -1,7 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { registerManageAi } from '../tools/manage-ai.js';
+import * as apiClient from '../api-client.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { createButterbaseMcpServer } from '../create-server.js';
+
+vi.mock('../api-client.js');
 
 async function createConnectedPair() {
   const server = await createButterbaseMcpServer();
@@ -220,5 +225,41 @@ describe('MCP Server Tools', () => {
       .join('\n');
     expect(text).toContain('Butterbase');
     expect(text).toContain('Declarative schema');
+  });
+});
+
+describe('manage_ai decisions', () => {
+  // The registered handler is invoked directly (as manage-agents.test.ts does),
+  // with api-client mocked, so we assert the exact HTTP call it makes.
+  type Result = { content: { type: 'text'; text: string }[]; isError?: boolean };
+  let callManageAi: (args: Record<string, unknown>) => Promise<Result>;
+  const apiPostMock = vi.mocked(apiClient.apiPost);
+  const apiGetMock = vi.mocked(apiClient.apiGet);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    registerManageAi(server);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handler = (server as any)._registeredTools['manage_ai'].handler;
+    callManageAi = (args) => handler(args);
+  });
+
+  it('manage_ai decide posts state+questions to /ai/decide', async () => {
+    await callManageAi({ app_id: 'app_1', action: 'decide', model: 'typesafe/jev-1.13', state: { t: 1 }, questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'y', false: 'n' } } } });
+    expect(apiPostMock).toHaveBeenCalledWith('/v1/app_1/ai/decide', {
+      model: 'typesafe/jev-1.13', state: { t: 1 }, questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'y', false: 'n' } } },
+    });
+  });
+
+  it('manage_ai decide without questions returns an isError result', async () => {
+    const r = await callManageAi({ app_id: 'app_1', action: 'decide' });
+    expect(r.isError).toBe(true);
+    expect(apiPostMock).not.toHaveBeenCalled();
+  });
+
+  it('manage_ai list_models forwards modality', async () => {
+    await callManageAi({ app_id: 'app_1', action: 'list_models', modality: 'decisions' });
+    expect(apiGetMock).toHaveBeenCalledWith('/v1/app_1/ai/models?modality=decisions');
   });
 });

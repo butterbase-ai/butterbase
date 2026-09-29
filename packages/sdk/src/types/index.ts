@@ -141,6 +141,7 @@ export interface InvokeFunctionOptions {
 export type {
   ChatMessage, ChatOptions, ChatCompletion, ChatStreamChunk, AiConfig, AiUsage,
   EmbeddingRequest, EmbeddingResponse, EmbeddingVector, AiModel,
+  AiModality, DecisionQuestion, DecisionAnswer, DecisionRequest, DecisionResponse,
 } from '../ai/types.js';
 
 // Re-export Billing types
