@@ -24,7 +24,7 @@ import { logAuditEvent } from '../audit/audit-events-service.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 import { maybeSendCreditsEmail } from '../credits-email.js';
 import { sendBillingEmail } from '../auth/email-service.js';
-import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult, type ImageGenerationRequest, type ImageSubmitResult, type ImagePollResult } from './adapters/types.js';
+import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult, type ImageGenerationRequest, type ImageSubmitResult, type ImagePollResult, type DecisionRequest } from './adapters/types.js';
 import type { RouterName } from './normalize.js';
 
 // Error kinds that must trigger fallover to the next candidate provider.
@@ -55,6 +55,11 @@ function pickRanker() {
   if (mode === 'waterfall') return rankRoutersWaterfall;
   if (mode === 'presence' || config.aiRouter.presenceModeEnabled) return rankRoutersPresenceMode;
   return rankRoutersForModel;
+}
+
+/** True when every route for this model is a decision model (Jev etc.). */
+function isDecisionsOnly(entry: { routers: Array<{ modality?: string }> }): boolean {
+  return entry.routers.length > 0 && entry.routers.every(r => r.modality === 'decisions');
 }
 
 /**
@@ -189,6 +194,9 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   const entry = await readCatalogEntry(ctx.redis, canonicalId);
   if (!entry) {
     throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  }
+  if (isDecisionsOnly(entry)) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is a decision model. Use /ai/decide instead.`);
   }
   const enabledStatuses = await readEnabledRouters(ctx.redis);
   const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
@@ -523,6 +531,9 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   const canonicalId = req.model;
   const entry = await readCatalogEntry(ctx.redis, canonicalId);
   if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  if (isDecisionsOnly(entry)) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is a decision model. Use /ai/decide instead.`);
+  }
 
   const enabledStatuses = await readEnabledRouters(ctx.redis);
   const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
@@ -786,6 +797,102 @@ function resolveRateForRequest(
     if (rate !== null && (best === null || rate > best)) best = rate;
   }
   return best;
+}
+
+export async function routeDecision(ctx: RouteContext, req: DecisionRequest): Promise<{ status: number; body: unknown }> {
+  const t0 = Date.now();
+  const canonicalId = req.model;
+  const entry = await readCatalogEntry(ctx.redis, canonicalId);
+  if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  if (!entry.routers.some(r => r.modality === 'decisions')) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is not a decision model. Use /chat/completions or /embeddings instead.`);
+  }
+
+  const enabledStatuses = await readEnabledRouters(ctx.redis);
+  const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
+  const downSlots = await readDownSlots(ctx.redis, KNOWN_ROUTER_SLOTS);
+  for (const s of downSlots) enabled.delete(s);
+  const ranked = pickRanker()(entry, enabled);
+  if (ranked.length === 0) throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
+
+  // Pre-call estimate is ONLY for the credit hold; settlement uses reported usage.
+  const estimatedTokens = estimatePromptTokens(
+    [{ role: 'user', content: JSON.stringify({ state: req.state ?? null, questions: req.questions }) }],
+    canonicalId,
+  );
+  const reservedUsd = (estimatedTokens / 1_000_000) * ranked[0].promptPricePerMtok * (1 + ctx.markupPct / 100);
+  const lease = await acquireWithAudit(ctx, reservedUsd, 60);
+
+  const fallbackChain: string[] = [];
+  let result: AdapterResult | null = null;
+  let chosenRouter: RouterName | null = null;
+  let lastError: unknown = null;
+
+  for (const candidate of ranked) {
+    const adapter = ctx.adapters.get(candidate.name);
+    if (!adapter || !adapter.decisions) {
+      fallbackChain.push(`${candidate.name}:no_decisions`);
+      continue;
+    }
+    try {
+      result = await adapter.decisions(req, candidate.upstreamId ?? adapter.toUpstreamId(canonicalId));
+      chosenRouter = candidate.name;
+      break;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        if (COOLDOWN_TRIGGER_KINDS.has(err.kind)) {
+          void markSlotDown(ctx.redis, candidate.name, config.aiRouter.slotCooldownSeconds);
+        }
+        fallbackChain.push(`${candidate.name}:${err.kind}`);
+        continue;
+      }
+      await settleAfterCall(ctx.platformPool, lease, 0);
+      throw err;
+    }
+  }
+
+  if (!result || !chosenRouter) {
+    await settleAfterCall(ctx.platformPool, lease, 0);
+    const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
+    (err as any).cause = lastError;
+    throw err;
+  }
+
+  // Billing order: upstream usage.cost -> reported input_tokens x catalog price -> estimate.
+  const inputTokens = result.usage?.promptTokens ?? estimatedTokens;
+  const outputTokens = result.usage?.completionTokens ?? 0;
+  const providerCost = result.providerCostUsd ?? estimateWorstCaseUsd(ranked[0], inputTokens, 0, 0, 0);
+  const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
+  const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
+
+  await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+  maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
+    .catch((err) => console.error('[router] auto-refill check failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
+  writeAiUsageRow(ctx.runtimePool, {
+    appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+    promptTokens: inputTokens, completionTokens: outputTokens, totalTokens: inputTokens + outputTokens,
+    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
+    keyType: 'platform', chargedToUser: true, modality: 'decisions',
+  }).catch(err => console.error('[router] usage-log write failed:', err));
+  console.log(JSON.stringify({
+    level: 'info', type: 'ai_router.call', modality: 'decisions',
+    app_id: ctx.appId, user_id: ctx.userId, canonical_model: canonicalId, chosen_router: chosenRouter,
+    fallback_chain: fallbackChain, provider_cost_usd: providerCost, charged_credits_usd: chargedCredits,
+    markup_pct: ctx.markupPct, markup_source: ctx.markupSource, latency_ms: Date.now() - t0, status: result.status,
+  }));
+
+  // Pass-through body; only usage.cost is replaced with what we charged.
+  let body = result.body;
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    const b = body as Record<string, unknown>;
+    if (b.usage && typeof b.usage === 'object') {
+      body = { ...b, usage: { ...(b.usage as Record<string, unknown>), cost: chargedCredits } };
+    }
+  }
+  return { status: result.status, body };
 }
 
 /**

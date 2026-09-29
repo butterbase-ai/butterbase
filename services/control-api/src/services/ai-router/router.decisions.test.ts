@@ -1,0 +1,123 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { routeDecision, routeChatCompletion, routeEmbedding, RouterError } from './router.js';
+import { AdapterError, type RouterAdapter } from './adapters/types.js';
+import { applyMarkup } from './markup.js';
+import { settleAfterCall } from './billing-gate.js';
+import { writeAiUsageRow } from './usage-log.js';
+
+vi.mock('./billing-gate.js', () => ({
+  acquireForEstimatedCost: vi.fn(async () => ({ leaseId: 'lease-1', amountGrantedUsd: 1, expiresAt: new Date() })),
+  settleAfterCall: vi.fn(async () => ({ refundedUsd: 0 })),
+  leaseTtlSeconds: vi.fn(() => 60),
+  InsufficientCreditsError: class InsufficientCreditsError extends Error {},
+}));
+vi.mock('./usage-log.js', () => ({ writeAiUsageRow: vi.fn(async () => {}) }));
+vi.mock('../auto-refill-service.js', () => ({ maybeTriggerAutoRefill: vi.fn(() => Promise.resolve()) }));
+
+const ROUTERS = [{ name: 'openrouter', enabled: true, lastRefreshAt: '', lastRefreshStatus: 'ok' }];
+
+function decisionsEntry(modality: 'decisions' | 'chat' = 'decisions') {
+  return {
+    canonicalId: 'm', displayName: 'm', updatedAt: new Date().toISOString(),
+    routers: [{ name: 'openrouter', upstreamId: 'm', promptPricePerMtok: 0.042, completionPricePerMtok: 0, contextLength: 32000, modality }],
+  };
+}
+
+function makeRedis(entry: unknown) {
+  return {
+    get: vi.fn(async (key: string) => {
+      if (key === 'ai_catalog:model:m') return entry ? JSON.stringify(entry) : null;
+      if (key === 'ai_catalog:routers') return JSON.stringify(ROUTERS);
+      return null;
+    }),
+  } as any;
+}
+
+function pool() {
+  return {
+    connect: vi.fn(async () => ({ query: vi.fn(async () => ({ rows: [] })), release: vi.fn() })),
+    query: vi.fn(async () => ({ rows: [] })),
+  } as any;
+}
+
+function ctx(entry: unknown, adapter: Partial<RouterAdapter>) {
+  return {
+    platformPool: pool(), runtimePool: pool(), redis: makeRedis(entry),
+    adapters: new Map([['openrouter', { name: 'openrouter', toUpstreamId: (x: string) => x, ...adapter } as RouterAdapter]]),
+    markupPct: 20, markupSource: 'global', appId: 'app_1', organizationId: 'org_1', userId: 'u', region: 'r',
+  } as any;
+}
+
+const REQ = { model: 'm', state: { ticket: 'blank checkout' }, questions: { is_bug: { type: 'noul', instructions: 'bug?', criteria: { true: 'y', false: 'n' } } } };
+
+function okResult(cost: number | null, inputTokens = 476) {
+  return {
+    status: 200,
+    body: { id: 'gen-dec-1', answers: { is_bug: { type: 'noul', noul: 0.9 } }, usage: { input_tokens: inputTokens, output_tokens: 70, ...(cost !== null ? { cost } : {}) } },
+    usage: { promptTokens: inputTokens, completionTokens: 70, totalCost: cost },
+    providerCostUsd: cost,
+  };
+}
+
+beforeEach(() => vi.clearAllMocks());
+
+describe('routeDecision', () => {
+  it('404 MODEL_NOT_FOUND for an unknown model', async () => {
+    await expect(routeDecision(ctx(null, {}), REQ)).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND', statusCode: 404 });
+  });
+
+  it('400 WRONG_MODALITY when the model is a chat model', async () => {
+    await expect(routeDecision(ctx(decisionsEntry('chat'), {}), REQ)).rejects.toMatchObject({ code: 'WRONG_MODALITY', statusCode: 400 });
+  });
+
+  it('settles on upstream usage.cost x markup and rewrites usage.cost in the body', async () => {
+    const decisions = vi.fn(async () => okResult(0.00002));
+    const r = await routeDecision(ctx(decisionsEntry(), { decisions }), REQ);
+    const charged = applyMarkup(0.00002, 20);
+    expect(settleAfterCall).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ leaseId: 'lease-1' }), charged);
+    expect((r.body as any).usage.cost).toBeCloseTo(charged, 12);
+    expect((r.body as any).usage.input_tokens).toBe(476);
+    expect((r.body as any).answers.is_bug.noul).toBe(0.9);
+  });
+
+  it('falls back to reported input_tokens x catalog price when usage.cost is absent', async () => {
+    const decisions = vi.fn(async () => okResult(null, 1_000_000));
+    await routeDecision(ctx(decisionsEntry(), { decisions }), REQ);
+    // 1M tokens x $0.042/Mtok = $0.042, x 1.2 markup
+    expect(settleAfterCall).toHaveBeenCalledWith(expect.anything(), expect.anything(), applyMarkup(0.042, 20));
+  });
+
+  it('writes a usage row with modality=decisions and reported tokens', async () => {
+    await routeDecision(ctx(decisionsEntry(), { decisions: vi.fn(async () => okResult(0.00002)) }), REQ);
+    expect(writeAiUsageRow).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      modality: 'decisions', promptTokens: 476, completionTokens: 70, model: 'm', router: 'openrouter',
+    }));
+  });
+
+  it('forwards the request body verbatim with the upstream id', async () => {
+    const decisions = vi.fn(async () => okResult(0.00002));
+    await routeDecision(ctx(decisionsEntry(), { decisions }), REQ);
+    expect(decisions).toHaveBeenCalledWith(REQ, 'm');
+  });
+
+  it('releases the lease and rethrows a non-fallback upstream 400', async () => {
+    const decisions = vi.fn(async () => { throw new AdapterError('openrouter', 400, 'bad_request', '{"error":{"message":"bad criteria"}}'); });
+    await expect(routeDecision(ctx(decisionsEntry(), { decisions }), REQ)).rejects.toMatchObject({ kind: 'bad_request' });
+    expect(settleAfterCall).toHaveBeenCalledWith(expect.anything(), expect.anything(), 0);
+  });
+
+  it('ROUTER_FALLBACK_EXHAUSTED when the only adapter has no decisions()', async () => {
+    await expect(routeDecision(ctx(decisionsEntry(), {}), REQ)).rejects.toMatchObject({ code: 'ROUTER_FALLBACK_EXHAUSTED' });
+  });
+});
+
+describe('decision models on chat and embedding routes', () => {
+  it('routeChatCompletion rejects a decisions-only model with WRONG_MODALITY', async () => {
+    await expect(routeChatCompletion(ctx(decisionsEntry(), {}), { model: 'm', messages: [{ role: 'user', content: 'hi' }] } as any))
+      .rejects.toMatchObject({ code: 'WRONG_MODALITY', statusCode: 400 });
+  });
+  it('routeEmbedding rejects a decisions-only model with WRONG_MODALITY', async () => {
+    await expect(routeEmbedding(ctx(decisionsEntry(), {}), { model: 'm', input: 'hi' } as any))
+      .rejects.toMatchObject({ code: 'WRONG_MODALITY', statusCode: 400 });
+  });
+});
