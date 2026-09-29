@@ -160,6 +160,111 @@ describe('app-level env vars', () => {
   });
 });
 
+describe('POST /v1/:appId/functions — envVars merge semantics', () => {
+  let app: FastifyInstance;
+  // In-memory store simulating app_functions rows, keyed by function name.
+  let functionsStore: Record<string, { id: string; encrypted_env_vars: string | null }>;
+
+  const validCode = 'export async function handler(req, ctx) { return new Response("ok"); }';
+
+  beforeEach(async () => {
+    vi.stubEnv('AUTH_ENCRYPTION_KEY', '00'.repeat(32));
+    functionsStore = {};
+    app = Fastify();
+    app.decorate('controlDb', {});
+
+    (getRuntimeDbForApp as any).mockImplementation(() => {
+      const clientQuery = vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+        const normalised = sql.replace(/\s+/g, ' ').trim();
+        if (normalised === 'BEGIN' || normalised === 'COMMIT' || normalised === 'ROLLBACK') {
+          return Promise.resolve({ rows: [] });
+        }
+        if (normalised.startsWith('SELECT encrypted_env_vars FROM app_functions')) {
+          const name = params[1] as string;
+          const row = functionsStore[name];
+          return Promise.resolve({ rows: row ? [{ encrypted_env_vars: row.encrypted_env_vars }] : [] });
+        }
+        if (normalised.startsWith('INSERT INTO app_functions')) {
+          const name = params[1] as string;
+          const encVal = (params[4] as string | null) ?? null;
+          const prev = functionsStore[name];
+          const encrypted_env_vars = encVal !== null ? encVal : (prev ? prev.encrypted_env_vars : null);
+          const id = prev?.id ?? `fn_${name}`;
+          functionsStore[name] = { id, encrypted_env_vars };
+          return Promise.resolve({ rows: [{ id, name, deployed_at: new Date() }] });
+        }
+        if (normalised.startsWith('DELETE FROM function_triggers')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (normalised.startsWith('INSERT INTO function_triggers')) {
+          return Promise.resolve({ rows: [] });
+        }
+        // GET single function reads via f.* — not exercised here directly.
+        return Promise.resolve({ rows: [] });
+      });
+      return Promise.resolve({
+        connect: () => Promise.resolve({ query: clientQuery, release: vi.fn() }),
+        query: clientQuery,
+      });
+    });
+
+    app.register(registerFunctionRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await app.close();
+  });
+
+  it('merges incoming envVars into existing env by default (incoming keys win)', async () => {
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'merge-test', code: validCode, envVars: { A: '1' } },
+    });
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'merge-test', code: validCode, envVars: { B: '2' } },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const stored = JSON.parse(
+      functionsStore['merge-test'].encrypted_env_vars!.replace('encrypted_', '')
+    );
+    expect(stored).toEqual({ A: '1', B: '2' });
+  });
+
+  it('envVarsReplace:true keeps the old full-replace behavior', async () => {
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'replace-test', code: validCode, envVars: { A: '1' } },
+    });
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'replace-test', code: validCode, envVars: { B: '2' }, envVarsReplace: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const stored = JSON.parse(
+      functionsStore['replace-test'].encrypted_env_vars!.replace('encrypted_', '')
+    );
+    expect(stored).toEqual({ B: '2' });
+  });
+
+  it('rejects reserved BUTTERBASE_* keys on deploy and writes nothing', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'reserved-test', code: validCode, envVars: { BUTTERBASE_FOO: 'x' } },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('BUTTERBASE_FOO');
+    expect(functionsStore['reserved-test']).toBeUndefined();
+  });
+});
+
 describe('Functions Routes - Reserved Key Validation', () => {
   let app: FastifyInstance;
 

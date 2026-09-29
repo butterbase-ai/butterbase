@@ -28,6 +28,9 @@ const deployFunctionSchema = z.object({
   code: z.string().min(1),
   description: z.string().optional(),
   envVars: z.record(z.string()).optional(),
+  // Default false: envVars MERGE into the existing decrypted blob (incoming
+  // keys win). Set true to keep the old full-replace-on-redeploy behavior.
+  envVarsReplace: z.boolean().default(false),
   timeoutMs: z.number().int().positive().optional(),
   memoryLimitMb: z.number().int().positive().optional(),
   // Canonical multi-trigger shape. At most one trigger per type (DB unique index).
@@ -83,6 +86,33 @@ function redactTriggerConfig(type: string, cfg: unknown): unknown {
   return cfg;
 }
 
+// Shared env-vars merge helpers, used by both the deploy path (POST
+// /v1/:appId/functions with envVarsReplace: false, the default) and the
+// PATCH .../env path — keeps "incoming keys win, null deletes" in one place.
+function decryptEnvBlob(encryptedBlob: string | null | undefined): Record<string, string> {
+  if (!encryptedBlob) return {};
+  try {
+    return JSON.parse(decrypt(encryptedBlob, process.env.AUTH_ENCRYPTION_KEY!));
+  } catch {
+    return {};
+  }
+}
+
+function mergeEnvVars(
+  existing: Record<string, string>,
+  incoming: Record<string, string | null | undefined>
+): Record<string, string> {
+  const merged = { ...existing };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value === null || value === undefined) {
+      delete merged[key];
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
 export async function registerFunctionRoutes(fastify: FastifyInstance) {
   const { controlDb } = fastify;
   // Per-request home-region resolution: each handler that needs the
@@ -127,10 +157,19 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       }));
     }
 
-    // Encrypt environment variables
-    const encryptedEnvVars = body.envVars
-      ? encrypt(JSON.stringify(body.envVars), process.env.AUTH_ENCRYPTION_KEY!)
-      : null;
+    // Reject reserved BUTTERBASE_* keys — matches PATCH .../env and
+    // PATCH /v1/:appId/env so all env-write surfaces agree.
+    if (body.envVars) {
+      const badKey = validateEnvKeys(Object.keys(body.envVars));
+      if (badKey) {
+        return reply.status(400).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: `Reserved key: "${badKey.key}" — keys starting with BUTTERBASE_ are reserved for platform use`,
+          remediation: 'Rename the key. Platform values like BUTTERBASE_APP_ID cannot be overridden.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+    }
 
     // Normalize, apply HTTP-auth default, encrypt webhook secrets.
     const triggers = normalizeTriggers(body).map(applyHttpAuthDefault).map(encryptWebhookSecret);
@@ -157,6 +196,29 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     let fnResult: import('pg').QueryResult<{ id: string; name: string; deployed_at: Date }>;
     try {
       await client.query('BEGIN');
+
+      // Compute the env-vars blob to write. Omitting envVars leaves the
+      // existing blob untouched (encryptedEnvVars stays null; the SQL
+      // COALESCE below keeps app_functions.encrypted_env_vars as-is).
+      // Passing envVars MERGES into the existing decrypted env by default
+      // (incoming keys win) — envVarsReplace: true keeps the old
+      // full-replace-on-redeploy behavior.
+      let encryptedEnvVars: string | null = null;
+      if (body.envVars) {
+        if (body.envVarsReplace) {
+          encryptedEnvVars = encrypt(JSON.stringify(body.envVars), process.env.AUTH_ENCRYPTION_KEY!);
+        } else {
+          const existingRow = await client.query(
+            `SELECT encrypted_env_vars FROM app_functions WHERE app_id = $1 AND name = $2`,
+            [appId, body.name]
+          );
+          const mergedVars = mergeEnvVars(
+            decryptEnvBlob(existingRow.rows[0]?.encrypted_env_vars ?? null),
+            body.envVars
+          );
+          encryptedEnvVars = encrypt(JSON.stringify(mergedVars), process.env.AUTH_ENCRYPTION_KEY!);
+        }
+      }
 
       fnResult = await client.query(
         `INSERT INTO app_functions (
@@ -308,23 +370,8 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       }));
     }
 
-    let mergedVars: Record<string, string> = {};
-    if (existing.rows[0].encrypted_env_vars) {
-      try {
-        mergedVars = JSON.parse(decrypt(existing.rows[0].encrypted_env_vars, process.env.AUTH_ENCRYPTION_KEY!));
-      } catch {
-        // If decryption fails, start fresh
-      }
-    }
-
-    // Merge: new values overwrite existing; null values delete keys
-    for (const [key, value] of Object.entries(body.envVars)) {
-      if (value === null || value === undefined) {
-        delete mergedVars[key];
-      } else {
-        mergedVars[key] = value;
-      }
-    }
+    // Merge: new values overwrite existing; null values delete keys.
+    const mergedVars = mergeEnvVars(decryptEnvBlob(existing.rows[0].encrypted_env_vars), body.envVars);
 
     const encryptedEnvVars = encrypt(JSON.stringify(mergedVars), process.env.AUTH_ENCRYPTION_KEY!);
 

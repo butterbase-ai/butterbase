@@ -122,6 +122,13 @@ Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist
   - Syntax error: Code must be valid TypeScript/JavaScript
 
+envVars on redeploy: MERGES into the function's existing env by default —
+incoming keys overwrite matching existing keys, everything else is kept.
+Pass envVarsReplace: true to instead REPLACE the entire env blob with just
+the keys you send (deletes every key you don't include). Use manage_function
+(action: "update_env") for a dedicated partial update, including deleting a
+single key by setting its value to null.
+
 Idempotency: Safe to call multiple times (updates existing function with same name).
 
 Next steps: Use invoke_function to test, then manage_function (action: "get_logs") to debug.`,
@@ -130,7 +137,15 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
       name: z.string().describe('Function name (alphanumeric, hyphens, underscores)'),
       code: z.string().describe('TypeScript/JavaScript code that exports a handler function'),
       description: z.string().optional().describe('Function description'),
-      envVars: z.record(z.string()).optional().describe('Environment variables (will be encrypted)'),
+      envVars: z.record(z.string()).optional().describe(
+        'Environment variables (will be encrypted). On redeploy, MERGES into the existing ' +
+        'env by default (incoming keys overwrite matching keys; other existing keys are kept). ' +
+        'Pass envVarsReplace: true to replace the entire env blob instead.'
+      ),
+      envVarsReplace: z.boolean().optional().describe(
+        'Default false (merge). Set true to REPLACE the entire env blob with just the ' +
+        'envVars you send on this call, deleting any existing key not included.'
+      ),
       timeoutMs: z.number().optional().describe('Execution timeout in milliseconds (default: 30000)'),
       memoryLimitMb: z.number().optional().describe('Memory limit in MB (default: 128)'),
       trigger: z.object({
@@ -182,7 +197,7 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
     },
     async (args) => {
       const {
-        app_id, name, code, description, envVars, timeoutMs, memoryLimitMb,
+        app_id, name, code, description, envVars, envVarsReplace, timeoutMs, memoryLimitMb,
         trigger, triggers,
         agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
         allow_service_key_impersonation,
@@ -193,6 +208,7 @@ Next steps: Use invoke_function to test, then manage_function (action: "get_logs
         code,
         description,
         envVars,
+        ...(envVarsReplace !== undefined ? { envVarsReplace } : {}),
         timeoutMs,
         memoryLimitMb,
         ...(triggers ? { triggers } : {}),
