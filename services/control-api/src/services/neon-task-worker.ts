@@ -1193,6 +1193,8 @@ async function executeClone(
         job.source_app_id,
         resolvedDestAppId,
         logger,
+        {},
+        destAppPoolForReplay,
       );
       if (cfgResult.warnings.length > 0) {
         await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);
@@ -2584,7 +2586,7 @@ export async function executeUpdate(
       await setCloneJobStatus(controlDb, jobId, { status: 'replaying_config' });
       const cfgResult = await replayNonSecretConfig(
         sourceRuntimePool, forkRuntimePool, job.source_app_id, forkAppId, logger,
-        { insertOnly: true },
+        { insertOnly: true }, forkAppPool,
       );
       if (cfgResult.warnings.length > 0) {
         await appendCloneJobWarnings(controlDb, jobId, cfgResult.warnings);

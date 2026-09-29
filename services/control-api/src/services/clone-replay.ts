@@ -11,7 +11,7 @@ import type pg from 'pg';
 import { randomBytes } from 'node:crypto';
 import { introspectSchema } from './schema-introspector.js';
 import { diffSchema, type DDLStatement } from './schema-differ.js';
-import { applyMigration } from './schema-applier.js';
+import { applyMigration, installRealtimeTrigger } from './schema-applier.js';
 import type { SchemaDSL } from './schema-validator.js';
 import {
   introspectRls,
@@ -1191,9 +1191,10 @@ async function replayAiConfig(
   }
 }
 
-async function replayRealtimeConfig(
+export async function replayRealtimeConfig(
   sourceRuntimePool: pg.Pool,
   destRuntimePool: pg.Pool,
+  destAppPool: pg.Pool,
   sourceAppId: string,
   destAppId: string,
   warnings: string[],
@@ -1213,6 +1214,13 @@ async function replayRealtimeConfig(
       logger.info({ destAppId }, '[clone] no realtime config to replay');
       return;
     }
+    // Config rows are runtime-plane metadata only. The Postgres trigger that
+    // actually emits change events lives in the DEST APP'S OWN per-app DB and
+    // has to be installed separately — same code path manage_realtime
+    // action=configure uses (installRealtimeTrigger) — or every cloned table
+    // with realtime enabled lands with trigger_installed:false, drift:true
+    // and events silently never fire (U18).
+    const driftedTables: string[] = [];
     for (const row of src.rows) {
       try {
         await destRuntimePool.query(
@@ -1223,7 +1231,21 @@ async function replayRealtimeConfig(
         const msg = `app_realtime_config row ${row.table_name} failed: ${(err as Error).message}`;
         warnings.push(msg);
         logger.warn({ table: row.table_name, err }, '[clone] realtime config row failed; continuing');
+        continue;
       }
+      if (!row.enabled) continue;
+      try {
+        await installRealtimeTrigger(destAppPool, row.table_name);
+      } catch (err) {
+        driftedTables.push(row.table_name);
+        logger.warn({ table: row.table_name, err }, '[clone] realtime trigger install failed; continuing');
+      }
+    }
+    if (driftedTables.length > 0) {
+      warnings.push(
+        `realtime trigger install failed for: ${driftedTables.join(', ')}; `
+          + 'these tables will show drift:true until reconfigured (manage_realtime action=configure)',
+      );
     }
     logger.info({ destAppId, count: src.rows.length }, '[clone] realtime config replayed');
   } catch (err) {
@@ -1594,12 +1616,20 @@ export async function replaySubstrateLink(
  *   - jwt_config (apps.jwt_config)                   — verbatim
  *   - allowed_origins (apps.allowed_origins)         — verbatim
  *   - ai_config (apps.ai_config)                     — byokKey BLANKED; rest verbatim
- *   - app_realtime_config (table)                    — verbatim
+ *   - app_realtime_config (table)                    — verbatim; enabled tables' change
+ *                                                       triggers are (re)installed on the
+ *                                                       dest app's own per-app DB (destAppPool)
  *   - app_oauth_configs (table)                      — client_id + client_secret_encrypted BLANKED
  *   - app_integration_configs (table)                — composio_auth_config_id re-minted per dest app
  *
  * Each subsystem soft-fails independently: an error is pushed to `warnings`
  * and the function continues with the next subsystem.
+ *
+ * @param destAppPool - Connected pool for the dest app's per-app (data-plane)
+ *   DB, distinct from destRuntimePool. Only used by the realtime subsystem,
+ *   which has to run `realtime.enable_table_trigger` against the app's own
+ *   database — the same DB replaySchema/replayRls target — not the runtime
+ *   DB that `app_realtime_config` rows live in.
  */
 export async function replayNonSecretConfig(
   sourceRuntimePool: pg.Pool,
@@ -1608,6 +1638,7 @@ export async function replayNonSecretConfig(
   destAppId: string,
   logger: ReplayLogger,
   opts: ReplayConfigOpts = {},
+  destAppPool: pg.Pool,
 ): Promise<{ warnings: string[] }> {
   const insertOnly = opts.insertOnly ?? false;
   const warnings: string[] = [];
@@ -1615,7 +1646,7 @@ export async function replayNonSecretConfig(
   await replayJwtConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
   await replayAllowedOrigins(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
   await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
-  await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, destAppPool, sourceAppId, destAppId, warnings, logger, insertOnly);
   await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
   // Opt-out, not opt-in: every existing caller keeps replaying integrations.
   // Only promote skips them — see ReplayConfigOpts.skipIntegrations.
