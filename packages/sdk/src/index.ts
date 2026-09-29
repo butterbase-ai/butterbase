@@ -122,6 +122,7 @@ export type {
   // AI types
   ChatMessage, ChatOptions, ChatCompletion, ChatStreamChunk, AiConfig, AiUsage,
   EmbeddingRequest, EmbeddingResponse, EmbeddingVector, AiModel,
+  AiModality, DecisionQuestion, DecisionAnswer, DecisionRequest, DecisionResponse,
 
   // Billing types
   Plan, CreatePlanParams, Product, CreateProductParams,
