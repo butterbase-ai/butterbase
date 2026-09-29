@@ -248,7 +248,7 @@ describe('executePromote', () => {
     await executePromote(deps, job);
     expect(mocks.replayNonSecretConfig).toHaveBeenCalledWith(
       deps.runtimeDb, deps.runtimeDb, 'app_staging', 'app_prod',
-      expect.anything(), { insertOnly: true, skipIntegrations: true },
+      expect.anything(), { insertOnly: true, skipIntegrations: true }, deps.prodPool,
     );
   });
 

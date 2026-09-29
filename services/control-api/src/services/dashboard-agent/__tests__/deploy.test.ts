@@ -88,6 +88,50 @@ describe('deploy_frontend', () => {
  * turn, and the frontend deploy is best-effort anyway. Losing the turn's
  * completed backend work to it is not.
  */
+/**
+ * U40 — "Failed to parse URL from undefined". Before the fix, a
+ * `create_from_source` response missing `upload_url` (e.g. the raw, unparsed
+ * MCP envelope `{content:[...]}` that `defaultMcp()` used to hand back) flowed
+ * straight into `fetch(undefined, ...)`, which throws Node's opaque
+ * `TypeError [ERR_INVALID_URL]: Failed to parse URL from undefined`. The guard
+ * in `deploy.ts` must catch this before `fetch` and report which field is
+ * missing instead.
+ */
+describe('deploy_frontend — missing upload_url is a structured error, not a fetch TypeError', () => {
+  it('reports the missing field instead of calling fetch(undefined, ...)', async () => {
+    const cache = new WorkingTreeCache()
+    cache.write(CONV, APP, 'package.json', '{"name":"x"}')
+
+    const originalFetch = globalThis.fetch
+    // Mirrors Node's real `fetch`/undici behavior for a non-string URL, so a
+    // pre-fix run (no guard) reproduces the exact reported symptom.
+    const fetchSpy = vi.fn(async (url: unknown) => {
+      if (typeof url !== 'string') {
+        throw new TypeError(`Failed to parse URL from ${String(url)}`)
+      }
+      return new Response('', { status: 200 })
+    })
+    globalThis.fetch = fetchSpy as any
+
+    // Simulates the unparsed MCP envelope reaching deploy.ts: no upload_url.
+    const mcp = makeMcp({
+      create_from_source: () => ({ deployment_id: 'dep_3' }),
+    })
+
+    try {
+      const d = createDeployer({ cache, mcp, onDeploymentProgress: () => {} })
+      const r = await d.deploy({ convId: CONV, appId: APP, jwt: JWT })
+
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.error).toMatch(/upload_url/)
+      expect(r.ok === false && r.error).not.toMatch(/Failed to parse URL/)
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
 describe('deploy_frontend — a throwing mcp is a failed deploy, not a failed turn', () => {
   it('returns ok:false instead of throwing when manage_frontend is refused', async () => {
     const cache = new WorkingTreeCache()

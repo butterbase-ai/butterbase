@@ -388,4 +388,14 @@ describe('setDoEnvVar reserved prefix', () => {
     const res = await DurableObjectsService.setDoEnvVar(m.db, makeMockDb().db, 'app_xyz', 'STRIPE_SECRET', 'sk_test_x');
     expect(res).toEqual({ redeployed: false });
   });
+
+  it('accepts BUTTERBASE_API_KEY (user-supplied convention key, not platform-injected)', async () => {
+    const m = makeMockDb();
+    m.queryResults.push(
+      { rows: [] }, // INSERT INTO app_do_env_vars (upsert)
+      { rows: [] }, // SELECT active classes for maybeRedeploy → empty
+    );
+    const res = await DurableObjectsService.setDoEnvVar(m.db, makeMockDb().db, 'app_xyz', 'BUTTERBASE_API_KEY', 'bb_sk_x');
+    expect(res).toEqual({ redeployed: false });
+  });
 });

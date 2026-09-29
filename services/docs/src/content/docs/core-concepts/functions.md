@@ -30,7 +30,8 @@ Authorization: Bearer {token}
 
 **Optional fields:**
 - `description` — What the function does
-- `envVars` — Key-value pairs for environment variables (encrypted at rest)
+- `envVars` — Key-value pairs for environment variables (encrypted at rest). On redeploy they merge into the existing env (incoming keys win); omit `envVars` to leave it untouched.
+- `envVarsReplace` — Set `true` to replace the function's entire env with `envVars` instead of merging (default: `false`).
 - `timeoutMs` — Max execution time (default: 30000, max: 300000)
 - `memoryLimitMb` — Memory limit (default: 128, range: 64-1024)
 - `triggers` — Array of one or more triggers describing how the function is invoked (`trigger` singular is also accepted and normalized to a 1-element array).

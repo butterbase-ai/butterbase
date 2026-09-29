@@ -22,8 +22,8 @@ describe('repo-sync', () => {
       pull_latest: () => ({
         snapshot_id: 'snap_1',
         files: [
-          { path: 'src/App.tsx', sha256: 'a'.repeat(64), download_url: 'https://s3/a' },
-          { path: 'package.json', sha256: 'b'.repeat(64), download_url: 'https://s3/b' },
+          { path: 'src/App.tsx', sha256: 'a'.repeat(64), downloadUrl: 'https://s3/a' },
+          { path: 'package.json', sha256: 'b'.repeat(64), downloadUrl: 'https://s3/b' },
         ],
       }),
     })
@@ -62,7 +62,7 @@ describe('repo-sync', () => {
         return {
           snapshot_id: 'snap_old',
           files: [
-            { path: 'src/App.tsx', sha256: 'a'.repeat(64), download_url: 'https://s3/a' },
+            { path: 'src/App.tsx', sha256: 'a'.repeat(64), downloadUrl: 'https://s3/a' },
           ],
         }
       },

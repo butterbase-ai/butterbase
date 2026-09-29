@@ -447,7 +447,7 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
     /** Queue the three MCP calls a successful rewind makes, in order. */
     function mockRewindMcpCalls(opts: {
       snapshots: string[];
-      pullFiles: Array<{ path: string; sha256: string; download_url: string }>;
+      pullFiles: Array<{ path: string; sha256: string; downloadUrl: string }>;
       pullSnapshotId: string;
       pushSnapshotId: string;
     }) {
@@ -523,7 +523,7 @@ describe.skipIf(!RUN)('dashboard-agent e2e', () => {
           mockRewindMcpCalls({
             snapshots: ['snap_1', 'snap_2'],
             pullFiles: [
-              { path: 'src/App.tsx', sha256: 'a'.repeat(64), download_url: 'https://s3/a' },
+              { path: 'src/App.tsx', sha256: 'a'.repeat(64), downloadUrl: 'https://s3/a' },
             ],
             pullSnapshotId: 'snap_1',
             pushSnapshotId: 'snap_3',

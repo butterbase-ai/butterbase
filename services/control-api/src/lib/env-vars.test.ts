@@ -15,6 +15,17 @@ describe('validateEnvKeys', () => {
       code: 'reserved_key_prefix', key: 'butterbase_x',
     });
   });
+  it('accepts BUTTERBASE_API_KEY (user-supplied convention key, never injected by the runtime)', () => {
+    expect(validateEnvKeys(['BUTTERBASE_API_KEY', 'OTHER'])).toBeNull();
+  });
+  it('still rejects every other BUTTERBASE_* key, including runtime-injected ones', () => {
+    expect(validateEnvKeys(['BUTTERBASE_API_KEY', 'BUTTERBASE_ANON_KEY'])).toEqual({
+      code: 'reserved_key_prefix', key: 'BUTTERBASE_ANON_KEY',
+    });
+    expect(validateEnvKeys(['butterbase_api_key'])).toEqual({
+      code: 'reserved_key_prefix', key: 'butterbase_api_key',
+    });
+  });
   it('accepts empty list', () => {
     expect(validateEnvKeys([])).toBeNull();
   });

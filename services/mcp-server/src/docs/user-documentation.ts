@@ -115,7 +115,7 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 
 | Tool | What it does |
 |------|--------------|
-| **deploy_function** | Deploy a TypeScript/JavaScript function. You provide the code, a name, optional environment variables, and a trigger type (HTTP or cron schedule). The function runs in an isolated environment with database access. |
+| **deploy_function** | Deploy a TypeScript/JavaScript function. You provide the code, a name, optional environment variables, and a trigger type (HTTP or cron schedule). The function runs in an isolated environment with database access. On redeploy, \`envVars\` merge into the existing env (incoming keys win); pass \`envVarsReplace: true\` to replace the whole env instead. |
 | **manage_function** (action: "list") | List all deployed functions for an app with their status and metrics. |
 | **invoke_function** | Test-invoke a deployed function and see its response. |
 | **manage_function** (action: "delete") | Delete a deployed function. Removes the function code and stops it from being invoked. |
@@ -902,7 +902,8 @@ Authorization: Bearer {token}
 
 **Optional fields:**
 - \`description\` — What the function does
-- \`envVars\` — Key-value pairs for environment variables (encrypted at rest, accessible via \`ctx.env\`)
+- \`envVars\` — Key-value pairs for environment variables (encrypted at rest, accessible via \`ctx.env\`). On redeploy they merge into the existing env (incoming keys win; omit \`envVars\` to leave it untouched).
+- \`envVarsReplace\` — Set \`true\` to replace the function's entire env with \`envVars\` instead of merging (default: false)
 - \`timeoutMs\` — Max execution time in milliseconds (default: 30000, max: 300000)
 - \`memoryLimitMb\` — Memory limit in MB (default: 128, range: 64-1024)
 - \`trigger\` — How the function is invoked

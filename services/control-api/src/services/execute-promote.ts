@@ -317,7 +317,7 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
           // minted against PRODUCTION on the next promote.
           const cfg = await replayNonSecretConfig(
             runtimeDb, runtimeDb, stagingAppId, prodAppId, logger,
-            { insertOnly: true, skipIntegrations: true },
+            { insertOnly: true, skipIntegrations: true }, prodPool,
           );
           if (cfg.warnings.length > 0) await appendCloneJobWarnings(controlDb, jobId, cfg.warnings);
           break;

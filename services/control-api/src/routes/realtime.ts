@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { getAppPoolForApp } from '../services/app-pool.js';
+import { installRealtimeTrigger } from '../services/schema-applier.js';
 import { introspectSchema } from '../services/schema-introspector.js';
 import { AppResolver, AppNotFoundError, AppAuthRequiredError, AppPausedError, assertAppNotPaused } from '../services/app-resolver.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
@@ -341,7 +342,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
       // Enable triggers on each table in the app DB
       const results: Array<{ table: string; status: string }> = [];
       for (const table of tables) {
-        await pool.query('SELECT realtime.enable_table_trigger($1)', [table]);
+        await installRealtimeTrigger(pool, table);
 
         // Record in runtime DB
         await (await runtimeDbForApp(app_id)).query(

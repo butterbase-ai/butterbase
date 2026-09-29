@@ -159,7 +159,7 @@ describe('PUT /v1/apps/:app_id/staging/env-overrides', () => {
     ['missing body key', {}],
     ['array', { env_overrides: ['A'] }],
     ['non-string value', { env_overrides: { A: 1 } }],
-    ['reserved prefix', { env_overrides: { BUTTERBASE_API_KEY: 'x' } }],
+    ['reserved prefix', { env_overrides: { BUTTERBASE_APP_ID: 'x' } }],
   ])('400s on %s without writing', async (_label, payload) => {
     const res = await build().inject({ method: 'PUT', url: URL, payload });
 

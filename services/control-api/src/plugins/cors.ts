@@ -10,6 +10,34 @@ import { getRuntimeDbPool } from '../services/runtime-db.js';
 // carries `resource_metadata`, the entry point to the whole discovery flow.
 const EXPOSED_HEADERS = ['WWW-Authenticate', 'Mcp-Session-Id'];
 
+// Chromium's cap on Access-Control-Max-Age — anything higher gets silently
+// clamped. Without this, every non-simple browser request (the SDK always
+// sends Content-Type: application/json) pays a full preflight round trip.
+const PREFLIGHT_MAX_AGE_SECONDS = 7200;
+
+// Passed as the "resolved origin" for a request whose origin failed the
+// allowlist check. It must be truthy (unlike `false`) so @fastify/cors still
+// treats this request as CORS-participating and completes the OPTIONS
+// preflight with 204 instead of falling through to its wildcard OPTIONS
+// route, which 404s when no request has marked itself CORS-enabled. Because
+// it is an empty array, @fastify/cors's own origin-matching (which checks
+// membership) never finds the actual request origin in it, so
+// Access-Control-Allow-Origin is correctly left off the response — the
+// allowlist check itself is unchanged.
+const NO_ORIGIN_MATCH: string[] = [];
+
+// User function routes — `/v1/:app_id/fn/:name` (auto-api.ts) and the
+// subdomain form `/fn/:name` (subdomain-api.ts) — are `app.all` routes, so an
+// OPTIONS preflight can reach the function itself. That is the only way a
+// function can answer CORS for third-party origins that aren't on the app's
+// allowlist. For these paths a denied origin resolves to `false`, which makes
+// @fastify/cors step aside and let the preflight through to the function,
+// instead of NO_ORIGIN_MATCH, which would answer it 204 with no ACAO.
+function isFunctionPath(url: string): boolean {
+  const path = url.split('?')[0];
+  return /^\/v1\/[^/]+\/fn\/[^/]+/.test(path) || /^\/fn\/[^/]+/.test(path);
+}
+
 // Endpoints any origin must be able to read for OAuth discovery to work from a
 // browser-hosted client. RFC 9728 §3.1 and RFC 8414 §3 both say metadata
 // endpoints should be publicly readable, and the MCP authorization spec assumes
@@ -40,9 +68,13 @@ const PUBLIC_CORS: FastifyCorsOptions = {
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'MCP-Protocol-Version', 'Mcp-Session-Id', 'Last-Event-ID'],
   exposedHeaders: EXPOSED_HEADERS,
+  maxAge: PREFLIGHT_MAX_AGE_SECONDS,
 };
 
-function defaultCorsOptions(fastify: FastifyInstance): FastifyCorsOptions {
+function defaultCorsOptions(
+  fastify: FastifyInstance,
+  deniedOrigin: string[] | false,
+): FastifyCorsOptions {
   return {
     origin: (origin, callback) => {
       // Allow requests with no origin (mobile apps, curl, Postman, etc.)
@@ -92,9 +124,12 @@ function defaultCorsOptions(fastify: FastifyInstance): FastifyCorsOptions {
           if (matches.some(Boolean)) {
             callback(null, true);
           } else {
-            // Returning `false` tells @fastify/cors to deny the origin without
-            // throwing, which avoids turning CORS rejections into 500s.
-            callback(null, false);
+            // NO_ORIGIN_MATCH denies the origin (no Access-Control-Allow-Origin
+            // is emitted) without throwing, which avoids turning CORS
+            // rejections into 500s, and without returning `false`, which would
+            // make @fastify/cors 404 an OPTIONS preflight instead of replying
+            // 204. Function paths pass `false` on purpose — see isFunctionPath.
+            callback(null, deniedOrigin);
           }
         })
         .catch((error) => {
@@ -113,14 +148,18 @@ function defaultCorsOptions(fastify: FastifyInstance): FastifyCorsOptions {
       'X-Butterbase-As-User',
     ],
     exposedHeaders: EXPOSED_HEADERS,
+    maxAge: PREFLIGHT_MAX_AGE_SECONDS,
   };
 }
 
 const corsPlugin: FastifyPluginAsync = async (fastify) => {
-  const fallback = defaultCorsOptions(fastify);
+  const fallback = defaultCorsOptions(fastify, NO_ORIGIN_MATCH);
+  const functionFallback = defaultCorsOptions(fastify, false);
   await fastify.register(cors, {
     delegator: (req, callback) => {
-      callback(null, isPublicOAuthPath(req.url ?? '') ? PUBLIC_CORS : fallback);
+      const url = req.url ?? '';
+      if (isPublicOAuthPath(url)) callback(null, PUBLIC_CORS);
+      else callback(null, isFunctionPath(url) ? functionFallback : fallback);
     },
   });
 };
