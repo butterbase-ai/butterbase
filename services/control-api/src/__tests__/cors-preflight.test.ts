@@ -21,6 +21,21 @@ async function buildAppForTest() {
   const app = Fastify({ logger: false });
   await app.register(corsPlugin);
   app.route({ method: 'GET', url: '/v1/app_123/widgets', handler: async (_r, reply) => reply.send({ ok: true }) });
+  // Same registration style as the real function routes (auto-api.ts
+  // `app.all('/v1/:app_id/fn/:functionName')`, subdomain-api.ts
+  // `app.all('/fn/:functionName')`): the function answers its own preflight.
+  const fnHandler = async (request: any, reply: any) => {
+    if (request.method === 'OPTIONS') {
+      return reply
+        .code(204)
+        .header('access-control-allow-origin', request.headers.origin)
+        .header('x-served-by', 'function')
+        .send();
+    }
+    return reply.send({ fn: true });
+  };
+  app.all('/v1/:app_id/fn/:functionName', fnHandler);
+  app.all('/fn/:functionName', fnHandler);
   return app;
 }
 
@@ -59,6 +74,35 @@ describe('CORS preflight', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    await app.close();
+  });
+
+  it.each([
+    ['/v1/app_123/fn/hello'],
+    ['/fn/hello'],
+  ])('lets a disallowed-origin preflight to %s reach the function so it can serve its own CORS', async (url) => {
+    const app = await buildAppForTest();
+    const res = await app.inject({
+      method: 'OPTIONS',
+      url,
+      headers: { origin: DISALLOWED_ORIGIN, 'access-control-request-method': 'POST' },
+    });
+    expect(res.headers['x-served-by']).toBe('function');
+    expect(res.headers['access-control-allow-origin']).toBe(DISALLOWED_ORIGIN);
+    await app.close();
+  });
+
+  it('still answers an allowed-origin preflight to a function path itself', async () => {
+    const app = await buildAppForTest();
+    const res = await app.inject({
+      method: 'OPTIONS',
+      url: '/v1/app_123/fn/hello',
+      headers: { origin: ALLOWED_ORIGIN, 'access-control-request-method': 'POST' },
+    });
+    expect(res.statusCode).toBe(204);
+    expect(res.headers['x-served-by']).toBeUndefined();
+    expect(res.headers['access-control-allow-origin']).toBe(ALLOWED_ORIGIN);
+    expect(res.headers['access-control-max-age']).toBe('7200');
     await app.close();
   });
 });
