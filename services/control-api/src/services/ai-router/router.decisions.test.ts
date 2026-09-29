@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { routeDecision, routeChatCompletion, routeEmbedding, RouterError } from './router.js';
 import { AdapterError, type RouterAdapter } from './adapters/types.js';
 import { applyMarkup } from './markup.js';
+import { estimatePromptTokens } from './tokenizer.js';
+import { estimateWorstCaseUsd } from './select.js';
 import { settleAfterCall } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
 
@@ -119,5 +121,71 @@ describe('decision models on chat and embedding routes', () => {
   it('routeEmbedding rejects a decisions-only model with WRONG_MODALITY', async () => {
     await expect(routeEmbedding(ctx(decisionsEntry(), {}), { model: 'm', input: 'hi' } as any))
       .rejects.toMatchObject({ code: 'WRONG_MODALITY', statusCode: 400 });
+  });
+});
+
+describe('routeDecision billing step 3 and edge paths', () => {
+  const estimateCharged = () => {
+    const tokens = estimatePromptTokens([{ role: 'user', content: JSON.stringify({ state: REQ.state ?? null, questions: REQ.questions }) }], 'm');
+    return applyMarkup(estimateWorstCaseUsd({ promptPricePerMtok: 0.042, completionPricePerMtok: 0 } as any, tokens, 0, 0, 0), 20);
+  };
+
+  it('bills the estimate when usage is absent and cost is null', async () => {
+    const decisions = vi.fn(async () => ({ status: 200, body: { answers: {} }, usage: undefined, providerCostUsd: null }));
+    await routeDecision(ctx(decisionsEntry(), { decisions: decisions as any }), REQ);
+    const charged = (settleAfterCall as any).mock.calls[0][2];
+    expect(charged).toBeGreaterThan(0);
+    expect(charged).toBeCloseTo(estimateCharged(), 12);
+    expect(writeAiUsageRow).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ chargedCreditsUsd: charged }));
+  });
+
+  it('bills the estimate when usage reports 0 prompt tokens and cost is null', async () => {
+    const decisions = vi.fn(async () => ({
+      status: 200, body: { answers: {}, usage: { output_tokens: 70 } },
+      usage: { promptTokens: 0, completionTokens: 70, totalCost: null }, providerCostUsd: null,
+    }));
+    await routeDecision(ctx(decisionsEntry(), { decisions }), REQ);
+    const charged = (settleAfterCall as any).mock.calls[0][2];
+    expect(charged).toBeGreaterThan(0);
+    expect(charged).toBeCloseTo(estimateCharged(), 12);
+    expect(writeAiUsageRow).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ chargedCreditsUsd: charged, promptTokens: expect.any(Number) }));
+    expect((writeAiUsageRow as any).mock.calls[0][1].promptTokens).toBeGreaterThan(0);
+  });
+
+  it('falls back to the second router on a rate_limit error', async () => {
+    const entry = decisionsEntry();
+    entry.routers.push({ ...entry.routers[0], name: 'provider-primary' } as any);
+    const routers = [
+      { name: 'openrouter', enabled: true, lastRefreshAt: '', lastRefreshStatus: 'ok' },
+      { name: 'provider-primary', enabled: true, lastRefreshAt: '', lastRefreshStatus: 'ok' },
+    ];
+    const c = ctx(entry, {});
+    c.redis.get = vi.fn(async (key: string) => key === 'ai_catalog:model:m' ? JSON.stringify(entry) : key === 'ai_catalog:routers' ? JSON.stringify(routers) : null);
+    const first = vi.fn(async () => { throw new AdapterError('openrouter', 429, 'rate_limit', 'slow'); });
+    const second = vi.fn(async () => okResult(0.00002));
+    c.adapters = new Map([
+      ['openrouter', { name: 'openrouter', toUpstreamId: (x: string) => x, decisions: first }],
+      ['provider-primary', { name: 'provider-primary', toUpstreamId: (x: string) => x, decisions: second }],
+    ]);
+    const r = await routeDecision(c, REQ);
+    expect(r.status).toBe(200);
+    // ranking order is not asserted; at least one adapter served the call and success settled > 0
+    expect(second).toHaveBeenCalled();
+    expect((settleAfterCall as any).mock.calls[0][2]).toBeGreaterThan(0);
+  });
+
+  it('NO_ROUTERS_AVAILABLE when the only router is disabled', async () => {
+    const c = ctx(decisionsEntry(), { decisions: vi.fn() });
+    c.redis.get = vi.fn(async (key: string) => key === 'ai_catalog:model:m' ? JSON.stringify(decisionsEntry())
+      : key === 'ai_catalog:routers' ? JSON.stringify([{ ...ROUTERS[0], enabled: false }]) : null);
+    await expect(routeDecision(c, REQ)).rejects.toMatchObject({ code: 'NO_ROUTERS_AVAILABLE' });
+  });
+
+  it('returns a body without usage, and a non-object body, unchanged', async () => {
+    const noUsage = { answers: { a: 1 } };
+    const r1 = await routeDecision(ctx(decisionsEntry(), { decisions: vi.fn(async () => ({ status: 200, body: noUsage, usage: { promptTokens: 10, completionTokens: 1, totalCost: null }, providerCostUsd: 0.001 })) as any }), REQ);
+    expect(r1.body).toBe(noUsage);
+    const r2 = await routeDecision(ctx(decisionsEntry(), { decisions: vi.fn(async () => ({ status: 200, body: 'plain', usage: { promptTokens: 10, completionTokens: 1, totalCost: null }, providerCostUsd: 0.001 })) as any }), REQ);
+    expect(r2.body).toBe('plain');
   });
 });

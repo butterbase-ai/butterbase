@@ -860,7 +860,10 @@ export async function routeDecision(ctx: RouteContext, req: DecisionRequest): Pr
   }
 
   // Billing order: upstream usage.cost -> reported input_tokens x catalog price -> estimate.
-  const inputTokens = result.usage?.promptTokens ?? estimatedTokens;
+  // When upstream reports no cost, a missing or non-positive token count is "not reported": bill the estimate.
+  const reportedTokens = result.usage?.promptTokens;
+  const tokensReported = typeof reportedTokens === 'number' && reportedTokens > 0;
+  const inputTokens = result.providerCostUsd == null && !tokensReported ? estimatedTokens : (reportedTokens ?? estimatedTokens);
   const outputTokens = result.usage?.completionTokens ?? 0;
   const providerCost = result.providerCostUsd ?? estimateWorstCaseUsd(ranked[0], inputTokens, 0, 0, 0);
   const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
