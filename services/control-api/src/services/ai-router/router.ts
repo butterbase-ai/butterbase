@@ -804,8 +804,12 @@ export const DECISION_HOLD_TOKEN_MULTIPLIER = 2;
 /** Per-question hold allowance for the model's hidden prompt scaffolding. */
 export const DECISION_HOLD_TOKENS_PER_QUESTION = 500;
 
-export async function routeDecision(ctx: RouteContext, req: DecisionRequest): Promise<{ status: number; body: unknown }> {
+export async function routeDecision(ctx: RouteContext, rawReq: DecisionRequest): Promise<{ status: number; body: unknown }> {
   const t0 = Date.now();
+  // The Decisions API rejects a body without `state`, but ours documents it as
+  // optional (questions can be self-contained). Default a missing one to {};
+  // an explicit value — including "" or null — passes through untouched.
+  const req: DecisionRequest = rawReq.state === undefined ? { ...rawReq, state: {} } : rawReq;
   const canonicalId = req.model;
   const entry = await readCatalogEntry(ctx.redis, canonicalId);
   if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);

@@ -44,10 +44,23 @@ function renderResultPage(opts: {
 
 const paramsSchema = z.object({ token: z.string().regex(TOKEN_RE) });
 
+// The global helmet CSP is API-only (`default-src 'none'`), which blocks the
+// inline `style=` attributes renderResultPage relies on. This page needs
+// inline styles and nothing else — no scripts, no framing, no forms.
+const RESULT_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
 export async function notificationActionsRoutes(app: FastifyInstance) {
   app.get(
     '/v1/notif/action/:token',
-    { config: { public: true } },
+    {
+      config: { public: true },
+      // onSend runs after helmet's onRequest hook, so this replaces its header
+      // for this route only.
+      onSend: async (_request, reply, payload) => {
+        reply.header('content-security-policy', RESULT_PAGE_CSP);
+        return payload;
+      },
+    },
     async (request, reply) => {
       const parsed = paramsSchema.safeParse(request.params);
       if (!parsed.success) {

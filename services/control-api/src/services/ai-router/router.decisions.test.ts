@@ -102,6 +102,21 @@ describe('routeDecision', () => {
     expect(decisions).toHaveBeenCalledWith(REQ, 'm');
   });
 
+  // OpenRouter's Decisions API rejects a body without `state` ("state: Invalid
+  // input"), verified live 2026-09-29; `{}` is accepted.
+  it('defaults a missing state to {} before calling upstream', async () => {
+    const decisions = vi.fn(async () => okResult(0.00002));
+    const { state: _omit, ...noState } = REQ;
+    await routeDecision(ctx(decisionsEntry(), { decisions }), noState as typeof REQ);
+    expect(decisions).toHaveBeenCalledWith({ ...noState, state: {} }, 'm');
+  });
+
+  it('passes an explicit falsy state (empty string) through unchanged', async () => {
+    const decisions = vi.fn(async () => okResult(0.00002));
+    await routeDecision(ctx(decisionsEntry(), { decisions }), { ...REQ, state: '' });
+    expect(decisions).toHaveBeenCalledWith({ ...REQ, state: '' }, 'm');
+  });
+
   it('releases the lease and rethrows a non-fallback upstream 400', async () => {
     const decisions = vi.fn(async () => { throw new AdapterError('openrouter', 400, 'bad_request', '{"error":{"message":"bad criteria"}}'); });
     await expect(routeDecision(ctx(decisionsEntry(), { decisions }), REQ)).rejects.toMatchObject({ kind: 'bad_request' });
