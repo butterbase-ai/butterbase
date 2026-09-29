@@ -13,12 +13,17 @@ Actions:
                        Default model is the app's configured default, or "openai/gpt-4o-mini".
   - embed             { app_id, input (string | string[]), model?, encoding_format? }
                        Returns OpenAI-shaped embedding response.
-  - list_models       { app_id }
+  - decide            { app_id, questions, state?, model? }
+                       Typed decisions (choice / yes-no "noul" / score) with probabilities from a
+                       decision model (default typesafe/jev-1.13). NOT for text generation — use
+                       chat. Billed on input tokens. Unrelated to substrate decisions.
+  - list_models       { app_id, modality? }
                        Returns { models: AiModel[] } — discover what the app can call.
+                       modality: chat | embedding | image | video | audio | decisions.
   - get_config        { app_id }
                        Returns { defaultModel, allowedModels, maxTokensPerRequest, ... }
   - update_config     { app_id, config }
-                       Set defaultModel, allowedModels, maxTokensPerRequest (1–100000), or rotate BYOK.
+                       Set defaultModel, defaultDecisionModel, allowedModels, maxTokensPerRequest (1–100000), or rotate BYOK.
   - get_usage         { app_id, startDate?, endDate? }
                        Aggregate token counts and costs over a window.
   - submit_video      { app_id, model, prompt, duration?, resolution?, aspect_ratio?, generate_audio?, seed?, input_images?, input_references?, frame_images?, provider? }
@@ -78,13 +83,13 @@ Actions:
                        Returns the last 100 rows from actor_usage_logs for the app.
                        Each row has { id, dimension, seconds, usd_charged, created_at }.
 
-This tool wraps the same /v1/:app_id/chat/completions, /embeddings, /ai/config, /ai/models,
+This tool wraps the same /v1/:app_id/chat/completions, /embeddings, /ai/decide, /ai/config, /ai/models,
 /ai/usage routes the SDK uses. The "chat" action sets stream: false; for streamed deltas,
 drive the SDK from inside a function or DO.`,
     {
       app_id: z.string().describe('The app ID'),
       action: z.enum([
-        'chat', 'embed', 'list_models', 'get_config', 'update_config', 'get_usage',
+        'chat', 'embed', 'decide', 'list_models', 'get_config', 'update_config', 'get_usage',
         'submit_video', 'poll_video',
         'submit_image', 'poll_image',
         'start_meeting', 'get_meeting', 'list_meetings', 'stop_meeting', 'estimate_meeting',
@@ -103,9 +108,14 @@ drive the SDK from inside a function or DO.`,
       // embed
       input: z.union([z.string(), z.array(z.string())]).optional().describe('Required for embed'),
       encoding_format: z.enum(['float', 'base64']).optional(),
+      // decide
+      state: z.unknown().optional().describe('For decide: the application state the questions are about (any JSON)'),
+      questions: z.record(z.unknown()).optional().describe('Required for decide: { <name>: { type: "choice"|"noul"|"score", instructions, criteria } }'),
+      modality: z.enum(['chat', 'embedding', 'image', 'video', 'audio', 'decisions']).optional().describe('For list_models: only return models of this type'),
       // update_config
       config: z.object({
         defaultModel: z.string().optional(),
+        defaultDecisionModel: z.string().optional(),
         byokKey: z.string().optional(),
         maxTokensPerRequest: z.number().int().min(1).max(100_000).optional(),
         allowedModels: z.array(z.string()).optional(),
@@ -194,8 +204,20 @@ drive the SDK from inside a function or DO.`,
             });
             break;
           }
+          case 'decide': {
+            if (!args.questions || Object.keys(args.questions).length === 0) {
+              return { content: [{ type: 'text' as const, text: 'Error: "questions" is required for "decide".' }], isError: true as const };
+            }
+            result = await apiPost(`/v1/${app_id}/ai/decide`, {
+              ...(args.model ? { model: args.model } : {}),
+              ...(args.state !== undefined ? { state: args.state } : {}),
+              questions: args.questions,
+            });
+            break;
+          }
           case 'list_models': {
-            result = await apiGet(`/v1/${app_id}/ai/models`);
+            const qs = args.modality ? `?modality=${encodeURIComponent(args.modality)}` : '';
+            result = await apiGet(`/v1/${app_id}/ai/models${qs}`);
             break;
           }
           case 'get_config': {
