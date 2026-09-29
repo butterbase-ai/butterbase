@@ -15,6 +15,8 @@ import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
+import { upstreamReason } from '../services/ai-router/upstream-reason.js';
+import { AI_BODY_LIMIT_BYTES } from '../services/ai-router/body-limit.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 import {
   chatCompletionRequestSchema as chatCompletionSchema,
@@ -249,12 +251,6 @@ export async function gatewayRoutes(app: FastifyInstance) {
       },
     });
   });
-
-  // Fastify defaults to a 1 MB body limit, which a multi-turn conversation
-  // carrying base64 images blows through in a handful of turns — the client
-  // sees a bare 413 with no hint that the images are the cause. 25 MB clears
-  // realistic agent histories while still bounding a single request.
-  const AI_BODY_LIMIT_BYTES = 25 * 1024 * 1024;
 
   app.post('/v1/chat/completions', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
@@ -587,7 +583,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/v1/decide', async (request, reply) => {
+  app.post('/v1/decide', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
@@ -621,6 +617,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
           success: false, errorMessage: e.message ?? 'unknown',
           errorCode: e.gatewayCode ?? e.code ?? 'error', status: e.gatewayStatus ?? e.statusCode,
         });
+      }
+      // Spec §3.3 step 4: a provider 400 carries a reason the caller can act on
+      // (bad question type, malformed criteria) — surface it, don't genericize.
+      if (err instanceof AdapterError && err.kind === 'bad_request') {
+        return reply.code(400).send(openaiError(upstreamReason(err.message), 'invalid_request_error', 'upstream_rejected'));
       }
       return handleRouterError(reply, err);
     }

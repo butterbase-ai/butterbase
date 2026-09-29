@@ -29,6 +29,8 @@ import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
+import { upstreamReason } from '../services/ai-router/upstream-reason.js';
+import { AI_BODY_LIMIT_BYTES } from '../services/ai-router/body-limit.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 
@@ -127,16 +129,6 @@ const embeddingSchema = embeddingRequestSchema.extend({
 const decideSchema = decisionRequestSchema.extend({ model: z.string().optional() });
 
 const MODALITIES = ['chat', 'embedding', 'image', 'video', 'audio', 'decisions'] as const;
-
-/** Best-effort extraction of OpenRouter's human-readable error from an AdapterError message. */
-function upstreamReason(raw: string): string {
-  try {
-    const j = JSON.parse(raw);
-    const msg = j?.error?.message ?? j?.message;
-    if (typeof msg === 'string') return msg.slice(0, 500);
-  } catch { /* not JSON */ }
-  return 'The model provider rejected the request.';
-}
 
 export async function aiConfigRoutes(app: FastifyInstance) {
   const adapters = await buildAdapters();
@@ -387,7 +379,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         // Public response uses a generic code/message so we don't reveal which
         // upstream providers we use or that we run a fan-out router.
         app.log.warn({ err: error, attempted: error.attempted, internalCode: error.code }, 'Model request failed');
-        const publicCode = error.code === 'MODEL_NOT_FOUND' ? 'MODEL_NOT_FOUND' : 'MODEL_UNAVAILABLE';
+        const publicCode = error.code === 'MODEL_NOT_FOUND' || error.code === 'WRONG_MODALITY' ? error.code : 'MODEL_UNAVAILABLE';
         return reply.code(error.statusCode).send({
           error: error.message,
           code: publicCode,
@@ -481,7 +473,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       }
       if (error instanceof RouterError) {
         app.log.warn({ err: error, attempted: error.attempted, internalCode: error.code }, 'Model request failed');
-        const publicCode = error.code === 'MODEL_NOT_FOUND' ? 'MODEL_NOT_FOUND' : 'MODEL_UNAVAILABLE';
+        const publicCode = error.code === 'MODEL_NOT_FOUND' || error.code === 'WRONG_MODALITY' ? error.code : 'MODEL_UNAVAILABLE';
         return reply.code(error.statusCode).send({
           error: error.message, code: publicCode,
         });
@@ -499,7 +491,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
   });
 
   // Decision models (typed choice / noul / score) — OpenRouter Decisions API pass-through.
-  app.post('/v1/:appId/ai/decide', async (request, reply) => {
+  app.post('/v1/:appId/ai/decide', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const { appId } = request.params as { appId: string };
     const authz = await authorizeAppAiCall(app.controlDb, appId, request);
     if (!authz.ok) return reply.code(authz.status).send(authz.body);
@@ -587,10 +579,13 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         const redis = getRedisClient();
         const ids = await listCatalogModels(redis);
         const entries = await Promise.all(ids.map(id => readCatalogEntry(redis, id)));
-        const models = await Promise.all(entries.filter(Boolean).map(async e => {
+        // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
+        const modalityOf = (e: NonNullable<(typeof entries)[number]>) => e.routers[0]?.modality ?? 'chat';
+        // Filter before pricing so a filtered request doesn't do a markup lookup per catalog model.
+        const selected = entries.filter(Boolean).filter(e => !modalityFilter || modalityOf(e!) === modalityFilter);
+        const models = await Promise.all(selected.map(async e => {
           const firstRouter = e!.routers.length > 0 ? e!.routers[0] : null;
-          // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
-          const modality = firstRouter?.modality ?? 'chat';
+          const modality = modalityOf(e!);
           // For token-priced modalities (chat, embedding), expose token pricing
           const isTokenPriced = modality === 'chat' || modality === 'embedding' || modality === 'decisions';
           const { pct } = await resolveMarkupPct(app.controlDb, organizationId, e!.canonicalId);
@@ -606,7 +601,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
             raw_pricing: !isTokenPriced && firstRouter ? firstRouter.rawPricing ?? null : null,
           };
         }));
-        return { models: modalityFilter ? models.filter(m => m.modality === modalityFilter) : models };
+        return { models };
       }
 
       // ---- legacy v1 path (unchanged) ----

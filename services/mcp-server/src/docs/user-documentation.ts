@@ -1917,14 +1917,15 @@ const { data, error } = await butterbase.ai.decide({
               criteria: ['Next release', 'This week', 'Blocking revenue now'] },
   },
 });
-if (data!.answers.is_bug.noul > 0.8) { /* open a bug */ }
+if (error) throw error;
+if (data.answers.is_bug.noul > 0.8) { /* open a bug */ }
 \`\`\`
 
 **HTTP**: \`POST /v1/{app_id}/ai/decide\` with the same body. Platform gateway keys (\`ai:gateway\`) use \`POST /v1/decide\` and must pass \`model\`.
 
 **MCP**: \`manage_ai\` with \`action: "decide"\`, \`questions\`, and optional \`state\`/\`model\`.
 
-**Models**: list them with \`manage_ai list_models modality: "decisions"\` (or \`ai.listModels({ modality: 'decisions' })\`). The default is \`typesafe/jev-1.13\`; set a per-app default with \`update_config { defaultDecisionModel }\`. Context length varies by model (Jev: 32K tokens).
+**Models**: list them with \`manage_ai list_models modality: "decisions"\` (or \`ai.listModels({ modality: 'decisions' })\`). The default is \`typesafe/jev-1.13\`; set a per-app default with \`update_config { config: { defaultDecisionModel } }\`. Context length varies by model (Jev: 32K tokens).
 
 **Pricing**: input tokens only. Output is free. The response's \`usage.cost\` is the amount charged to your credits.
 

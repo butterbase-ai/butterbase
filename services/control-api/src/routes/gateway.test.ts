@@ -341,6 +341,24 @@ describe('POST /v1/decide', () => {
     expect(r.statusCode).toBe(400);
     expect(routeDecisionMock).not.toHaveBeenCalled();
   });
+
+  const DECIDE_Q = { a: { type: 'noul', instructions: 'x', criteria: { true: 'y', false: 'n' } } };
+
+  it('upstream bad_request → 400 upstream_rejected carrying the upstream reason', async () => {
+    app = await buildTestApp({ userId: 'user-decide-3', authMethod: 'jwt', scopes: [] });
+    routeDecisionMock.mockRejectedValue(new AdapterError('openrouter', 400, 'bad_request', '{"error":{"message":"criteria must have true and false"}}'));
+    const r = await app.inject({ method: 'POST', url: '/v1/decide', headers: { 'content-type': 'application/json' }, payload: { model: 'typesafe/jev-1.13', questions: DECIDE_Q } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({ error: { message: 'criteria must have true and false', type: 'invalid_request_error', code: 'upstream_rejected' } });
+  });
+
+  it('non-bad_request AdapterError still goes through the generic mapping without upstream text', async () => {
+    app = await buildTestApp({ userId: 'user-decide-4', authMethod: 'jwt', scopes: [] });
+    routeDecisionMock.mockRejectedValue(new AdapterError('openrouter', 401, 'auth', 'SECRET-UPSTREAM-DETAIL'));
+    const r = await app.inject({ method: 'POST', url: '/v1/decide', headers: { 'content-type': 'application/json' }, payload: { model: 'typesafe/jev-1.13', questions: DECIDE_Q } });
+    expect(r.statusCode).not.toBe(400);
+    expect(r.body).not.toContain('SECRET-UPSTREAM-DETAIL');
+  });
 });
 
 // ---------- Fix 1: ROUTER_FALLBACK_EXHAUSTED → public model_unavailable ----------

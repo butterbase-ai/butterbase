@@ -34,16 +34,17 @@ vi.mock('../services/ai-router/special-pricing.js', () => ({
 }));
 vi.mock('../services/ai-router/router.js', async () => {
   const actual = await vi.importActual<typeof import('../services/ai-router/router.js')>('../services/ai-router/router.js');
-  return { ...actual, routeDecision: vi.fn() };
+  return { ...actual, routeDecision: vi.fn(), routeChatCompletion: vi.fn(), routeEmbedding: vi.fn() };
 });
 
 import { aiConfigRoutes } from './ai-config.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
-import { routeDecision, RouterError } from '../services/ai-router/router.js';
+import { routeDecision, routeChatCompletion, routeEmbedding, RouterError } from '../services/ai-router/router.js';
 import { InsufficientCreditsError } from '../services/ai-router/billing-gate.js';
 import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { config } from '../config.js';
+import { resolveMarkupPct } from '../services/ai-router/special-pricing.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
 import type { CatalogEntry } from '../services/ai-router/catalog.js';
 
@@ -180,6 +181,12 @@ describe('POST /v1/:appId/ai/decide', () => {
     }
   });
 
+  it('accepts a body above Fastify\'s 1 MB default (AI body limit)', async () => {
+    routeDecisionMock.mockResolvedValue({ status: 200, body: {} });
+    const r = await post({ questions: Q, state: { blob: 'A'.repeat(Math.floor(1.8 * 1024 * 1024)) } });
+    expect(r.statusCode).toBe(200);
+  });
+
   it('non-JSON upstream bad_request falls back to the generic reason', async () => {
     routeDecisionMock.mockRejectedValue(new AdapterError('openrouter', 400, 'bad_request', '<html>Bad Gateway</html>'));
     const r = await post();
@@ -194,7 +201,10 @@ describe('GET /v1/:appId/ai/models?modality=', () => {
       { canonicalId: 'typesafe/jev-1.13', displayName: 'Jev', updatedAt: '', routers: [{ name: 'openrouter', upstreamId: 'typesafe/jev-1.13', promptPricePerMtok: 0.042, completionPricePerMtok: 0, contextLength: 32000, modality: 'decisions' }] },
       { canonicalId: 'openai/gpt-4o-mini', displayName: 'mini', updatedAt: '', routers: [{ name: 'openrouter', upstreamId: 'openai/gpt-4o-mini', promptPricePerMtok: 0.15, completionPricePerMtok: 0.6, contextLength: 128000, modality: 'chat' }] },
     ] as CatalogEntry[]);
+    (resolveMarkupPct as unknown as ReturnType<typeof vi.fn>).mockClear();
     const r = await app.inject({ method: 'GET', url: '/v1/app_1/ai/models?modality=decisions' });
+    // Filter runs before pricing: only the matching model gets a markup lookup.
+    expect(resolveMarkupPct).toHaveBeenCalledTimes(1);
     expect(r.statusCode).toBe(200);
     const models = r.json().models;
     expect(models.map((m: any) => m.id)).toEqual(['typesafe/jev-1.13']);
@@ -206,5 +216,24 @@ describe('GET /v1/:appId/ai/models?modality=', () => {
     const r = await app.inject({ method: 'GET', url: '/v1/app_1/ai/models?modality=decison' });
     expect(r.statusCode).toBe(400);
     expect(r.json().code).toBe('INVALID_MODALITY');
+  });
+});
+
+describe('decision model sent to chat / embeddings routes', () => {
+  it('POST /v1/:appId/chat/completions surfaces 400 WRONG_MODALITY', async () => {
+    readMock.mockResolvedValue(null);
+    (routeChatCompletion as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new RouterError('WRONG_MODALITY', 400, 'Model typesafe/jev-1.13 is a decision model. Use /ai/decide instead.'));
+    const r = await app.inject({ method: 'POST', url: '/v1/app_1/chat/completions', payload: { model: 'typesafe/jev-1.13', messages: [{ role: 'user', content: 'hi' }] } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().code).toBe('WRONG_MODALITY');
+  });
+
+  it('POST /v1/:appId/embeddings surfaces 400 WRONG_MODALITY', async () => {
+    (routeEmbedding as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new RouterError('WRONG_MODALITY', 400, 'Model typesafe/jev-1.13 is a decision model. Use /ai/decide instead.'));
+    const r = await app.inject({ method: 'POST', url: '/v1/app_1/embeddings', payload: { model: 'typesafe/jev-1.13', input: 'hi' } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().code).toBe('WRONG_MODALITY');
   });
 });
