@@ -72,7 +72,7 @@ async function getAppDefaultModel(runtimePool: pg.Pool, appId: string): Promise<
 
 async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
-  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
+  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey, decisionsUrl: config.aiRouter.openrouterDecisionsUrl }));
   try {
     // @ts-expect-error — overlay path resolved at runtime
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');

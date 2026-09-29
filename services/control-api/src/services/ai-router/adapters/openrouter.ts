@@ -1,4 +1,4 @@
-import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
+import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, DecisionRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
 import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
 
@@ -47,6 +47,7 @@ interface OpenRouterConfig {
   fetch?: typeof fetch;
   referer?: string;
   title?: string;
+  decisionsUrl?: string;   // default https://openrouter.ai/api/alpha/decisions (outside /api/v1)
 }
 
 /**
@@ -103,6 +104,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
   const fetcher = cfg.fetch ?? fetch;
   const referer = cfg.referer ?? 'https://butterbase.ai';
   const title = cfg.title ?? 'Butterbase';
+  const decisionsUrl = cfg.decisionsUrl ?? 'https://openrouter.ai/api/alpha/decisions';
 
   /**
    * Classify an OpenRouter /v1/models entry by `architecture.output_modalities`.
@@ -338,6 +340,40 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     };
   }
 
+  async function decisions(req: DecisionRequest, upstreamId: string): Promise<AdapterResult> {
+    const res = await fetcher(decisionsUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'HTTP-Referer': referer,
+        'X-Title': title,
+      },
+      body: JSON.stringify({ ...req, model: upstreamId }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+      throwIfUpstreamCreditExhaustion('openrouter', res.status, parsed ?? text);
+      throw new AdapterError('openrouter', res.status, classifyHttp(res.status), text || `HTTP ${res.status}`);
+    }
+    const json = await res.json() as any;
+    throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
+    const cost = pickProviderCost(json.usage);
+    return {
+      status: res.status,
+      body: json,
+      // Decisions report input_tokens/output_tokens, not prompt_/completion_tokens.
+      usage: json.usage ? {
+        promptTokens: json.usage.input_tokens ?? 0,
+        completionTokens: json.usage.output_tokens ?? 0,
+        totalCost: cost,
+      } : null,
+      providerCostUsd: cost,
+    };
+  }
+
   /**
    * Seed imagery is forwarded verbatim in whatever shape the caller supplied —
    * this upstream names the fields `frame_images` (temporal positioning via
@@ -530,6 +566,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     listModels,
     chatCompletion,
     embedding,
+    decisions,
     submitVideo,
     pollVideo,
     fetchVideoContent,

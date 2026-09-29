@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openrouterAdapter } from './openrouter.js';
+import { AdapterError } from './types.js';
 
 /** Query-aware fetcher: keys are path+query suffixes, e.g. '/models?output_modalities=decisions'. */
 function queryFetcher(routes: Record<string, unknown | { __status: number; body?: unknown }>): typeof fetch {
@@ -75,4 +76,54 @@ describe('openrouter adapter — decisions catalog', () => {
     expect(router.completionPricePerMtok).toBe(0);
   });
 
+});
+
+describe('openrouter adapter — decisions()', () => {
+  const req = {
+    model: 'typesafe/jev-1.13',
+    state: { ticket: 'Checkout is blank after Pay' },
+    questions: { is_bug: { type: 'noul', instructions: 'Is this a defect?', criteria: { true: 'broken', false: 'question' } } },
+  };
+
+  it('POSTs the body verbatim to /api/alpha/decisions and maps input/output tokens', async () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    const fetcher = (async (url: string, init: RequestInit) => {
+      calls.push({ url, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({
+        id: 'gen-dec-1', model: 'typesafe/jev-1.13-20260917', provider: 'TypeSafe',
+        answers: { is_bug: { type: 'noul', noul: 0.96 } },
+        usage: { input_tokens: 476, output_tokens: 70, cost: 0.000019992 },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+    const r = await a.decisions!(req, 'typesafe/jev-1.13');
+    expect(calls[0].url).toBe('https://openrouter.ai/api/alpha/decisions');
+    expect(calls[0].body).toEqual(req);
+    expect(r.usage).toEqual({ promptTokens: 476, completionTokens: 70, totalCost: 0.000019992 });
+    expect(r.providerCostUsd).toBeCloseTo(0.000019992, 12);
+    expect((r.body as any).answers.is_bug.noul).toBe(0.96);
+  });
+
+  it('honours a configured decisionsUrl', async () => {
+    let seen = '';
+    const fetcher = (async (url: string) => { seen = url; return new Response(JSON.stringify({ answers: {}, usage: { input_tokens: 1, output_tokens: 0 } }), { status: 200 }); }) as unknown as typeof fetch;
+    const a = openrouterAdapter({ apiKey: 'k', fetch: fetcher, decisionsUrl: 'https://example.test/alpha/decisions' });
+    await a.decisions!(req, 'typesafe/jev-1.13');
+    expect(seen).toBe('https://example.test/alpha/decisions');
+  });
+
+  it('returns providerCostUsd=null when usage.cost is absent', async () => {
+    const fetcher = (async () => new Response(JSON.stringify({ answers: {}, usage: { input_tokens: 10, output_tokens: 1 } }), { status: 200 })) as unknown as typeof fetch;
+    const r = await openrouterAdapter({ apiKey: 'k', fetch: fetcher }).decisions!(req, 'typesafe/jev-1.13');
+    expect(r.providerCostUsd).toBeNull();
+    expect(r.usage?.promptTokens).toBe(10);
+  });
+
+  it('upstream 400 throws AdapterError kind=bad_request carrying the upstream text', async () => {
+    const fetcher = (async () => new Response(JSON.stringify({ error: { message: 'questions.is_bug.criteria must have true and false' } }), { status: 400 })) as unknown as typeof fetch;
+    const p = openrouterAdapter({ apiKey: 'k', fetch: fetcher }).decisions!(req, 'typesafe/jev-1.13');
+    await expect(p).rejects.toBeInstanceOf(AdapterError);
+    await expect(p).rejects.toMatchObject({ kind: 'bad_request' });
+    await expect(p).rejects.toThrow(/criteria must have/);
+  });
 });
