@@ -4,7 +4,7 @@ import type {
   EmbeddingRequest as SchemaEmbeddingRequest,
 } from '../schemas.js';
 
-export type Modality = 'chat' | 'embedding' | 'image' | 'video' | 'audio';
+export type Modality = 'chat' | 'embedding' | 'image' | 'video' | 'audio' | 'decisions';
 
 export interface UpstreamModel {
   upstreamId: string;

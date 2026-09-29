@@ -111,6 +111,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
    */
   function classifyModality(arch: { output_modalities?: string[] } | undefined): Modality {
     const outs = (arch?.output_modalities ?? []).map(s => s.toLowerCase());
+    if (outs.includes('decisions')) return 'decisions';
     if (outs.includes('video')) return 'video';
     if (outs.includes('image')) return 'image';
     if (outs.includes('audio')) return 'audio';
@@ -138,7 +139,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       modality,
       // For non-chat modalities the per-call pricing isn't in this response —
       // stash architecture + pricing so future media-router code can recover it.
-      ...(modality === 'chat'
+      ...(modality === 'chat' || modality === 'decisions'
         ? {}
         : { rawPricing: { source: '/v1/models', architecture: m.architecture, pricing: m.pricing } }),
     };
@@ -180,6 +181,22 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       }
     } catch (err) {
       console.warn('[openrouter] ?output_modalities=image fetch failed — skipping:', err);
+    }
+
+    // 3) Decision models (typed choice/yes-no/score, e.g. typesafe/jev-1.13).
+    // Absent from the default response; best-effort like the image pass.
+    try {
+      const decRes = await fetcher(`${base}/models?output_modalities=decisions`, {
+        headers: { 'HTTP-Referer': referer, 'X-Title': title },
+      });
+      if (decRes.ok) {
+        const decJson = await decRes.json() as ModelRowJson;
+        for (const m of decJson.data ?? []) {
+          if (!byId.has(m.id)) byId.set(m.id, parseModelRow(m));
+        }
+      }
+    } catch (err) {
+      console.warn('[openrouter] ?output_modalities=decisions fetch failed — skipping:', err);
     }
 
     const out: UpstreamModel[] = Array.from(byId.values());
