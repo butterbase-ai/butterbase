@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { replayRealtimeConfig } from '../clone-replay.js';
+import { buildRealtimeConfigInsertSql, replayRealtimeConfig } from '../clone-replay.js';
 
 // U18: clone copied app_realtime_config rows (runtime-plane metadata) but
 // never installed the Postgres change-event trigger those rows describe, so
@@ -19,6 +19,39 @@ function fakePool(query: (sql: string, params?: unknown[]) => Promise<{ rows: un
   return { query } as any;
 }
 
+/**
+ * Dest runtime DB's app_realtime_config, answering the replay INSERT the way
+ * Postgres does: a fresh row or ON CONFLICT DO UPDATE returns the stored row
+ * (when the statement says RETURNING); ON CONFLICT DO NOTHING on an existing
+ * row returns no rows at all. `existing` seeds rows the destination already
+ * has (keyed by table_name).
+ */
+function destRealtimeConfig(existing: Record<string, { enabled: boolean }> = {}) {
+  const table = new Map(Object.entries(existing));
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    const tableName = String(params?.[1]);
+    const enabled = params?.[3] as boolean;
+    const returning = /RETURNING enabled/.test(sql);
+    if (table.has(tableName)) {
+      if (/DO NOTHING/.test(sql)) return { rows: [] };
+      table.set(tableName, { enabled });
+    } else {
+      table.set(tableName, { enabled });
+    }
+    return { rows: returning ? [{ enabled: table.get(tableName)!.enabled }] : [] };
+  });
+  return { pool: fakePool(query), query, table };
+}
+
+function recordingAppPool() {
+  const installCalls: string[] = [];
+  const pool = fakePool(async (_sql, params) => {
+    installCalls.push(String(params?.[0]));
+    return { rows: [] };
+  });
+  return { pool, installCalls };
+}
+
 describe('replayRealtimeConfig', () => {
   it('installs the realtime trigger for each enabled table after replaying config rows', async () => {
     const sourceRows = [
@@ -26,8 +59,7 @@ describe('replayRealtimeConfig', () => {
       { table_name: 'archive', events: ['insert'], enabled: false },
     ];
     const sourceRuntimePool = fakePool(async () => ({ rows: sourceRows }));
-    const destRuntimeQuery = vi.fn(async () => ({ rows: [] }));
-    const destRuntimePool = fakePool(destRuntimeQuery);
+    const { pool: destRuntimePool, query: destRuntimeQuery } = destRealtimeConfig();
     const installCalls: string[] = [];
     const destAppPool = fakePool(async (_sql, params) => {
       installCalls.push(String(params?.[0]));
@@ -52,7 +84,7 @@ describe('replayRealtimeConfig', () => {
       { table_name: 'invoices', events: ['insert'], enabled: true },
     ];
     const sourceRuntimePool = fakePool(async () => ({ rows: sourceRows }));
-    const destRuntimePool = fakePool(async () => ({ rows: [] }));
+    const { pool: destRuntimePool } = destRealtimeConfig();
     const destAppPool = fakePool(async (_sql, params) => {
       if (params?.[0] === 'invoices') throw new Error('permission denied for schema realtime');
       return { rows: [] };
@@ -76,9 +108,10 @@ describe('replayRealtimeConfig', () => {
       { table_name: 'bad_insert', events: ['insert'], enabled: true },
     ];
     const sourceRuntimePool = fakePool(async () => ({ rows: sourceRows }));
-    const destRuntimePool = fakePool(async (_sql, params) => {
+    const dest = destRealtimeConfig();
+    const destRuntimePool = fakePool(async (sql, params) => {
       if (params?.[1] === 'bad_insert') throw new Error('duplicate key value');
-      return { rows: [] };
+      return dest.query(sql, params);
     });
     const installCalls: string[] = [];
     const destAppPool = fakePool(async (_sql, params) => {
@@ -96,5 +129,57 @@ describe('replayRealtimeConfig', () => {
     expect(warnings.some((w) => w.includes('bad_insert'))).toBe(true);
     // No drift warning, since no table successfully replayed AND enabled.
     expect(warnings.filter((w) => w.includes('drift'))).toHaveLength(0);
+  });
+
+  it('insertOnly: does not re-arm a table the destination owner disabled', async () => {
+    const sourceRuntimePool = fakePool(async () => ({
+      rows: [{ table_name: 'orders', events: ['insert'], enabled: true }],
+    }));
+    const dest = destRealtimeConfig({ orders: { enabled: false } });
+    const { pool: destAppPool, installCalls } = recordingAppPool();
+
+    const warnings: string[] = [];
+    await replayRealtimeConfig(
+      sourceRuntimePool, dest.pool, destAppPool, 'app_src', 'app_dst', warnings, noopLogger, true,
+    );
+
+    expect(installCalls).toEqual([]);
+    expect(dest.table.get('orders')).toEqual({ enabled: false });
+    expect(warnings).toEqual([]);
+  });
+
+  it('insertOnly: installs for a table the destination did not have yet', async () => {
+    const sourceRuntimePool = fakePool(async () => ({
+      rows: [{ table_name: 'orders', events: ['insert'], enabled: true }],
+    }));
+    const dest = destRealtimeConfig();
+    const { pool: destAppPool, installCalls } = recordingAppPool();
+
+    await replayRealtimeConfig(
+      sourceRuntimePool, dest.pool, destAppPool, 'app_src', 'app_dst', [], noopLogger, true,
+    );
+
+    expect(installCalls).toEqual(['orders']);
+  });
+
+  it('overwrite mode: installs when the stored (overwritten) row is enabled', async () => {
+    const sourceRuntimePool = fakePool(async () => ({
+      rows: [{ table_name: 'orders', events: ['insert'], enabled: true }],
+    }));
+    const dest = destRealtimeConfig({ orders: { enabled: false } });
+    const { pool: destAppPool, installCalls } = recordingAppPool();
+
+    await replayRealtimeConfig(
+      sourceRuntimePool, dest.pool, destAppPool, 'app_src', 'app_dst', [], noopLogger, false,
+    );
+
+    expect(dest.table.get('orders')).toEqual({ enabled: true });
+    expect(installCalls).toEqual(['orders']);
+  });
+
+  it('the replay INSERT returns the stored enabled flag in both conflict modes', () => {
+    for (const insertOnly of [true, false]) {
+      expect(buildRealtimeConfigInsertSql(insertOnly).trim()).toMatch(/RETURNING enabled$/);
+    }
   });
 });

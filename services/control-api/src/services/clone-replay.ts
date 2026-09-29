@@ -991,7 +991,8 @@ export function buildRealtimeConfigInsertSql(insertOnly: boolean): string {
          SET events = EXCLUDED.events, enabled = EXCLUDED.enabled, updated_at = now()`;
   return `INSERT INTO app_realtime_config (id, app_id, table_name, events, enabled)
           VALUES (gen_random_uuid(), $1, $2, $3, $4)
-          ${conflict}`;
+          ${conflict}
+          RETURNING enabled`;
 }
 
 export function buildOauthConfigInsertSql(insertOnly: boolean): string {
@@ -1220,20 +1221,28 @@ export async function replayRealtimeConfig(
     // action=configure uses (installRealtimeTrigger) — or every cloned table
     // with realtime enabled lands with trigger_installed:false, drift:true
     // and events silently never fire (U18).
+    //
+    // Install only when the DEST row this statement actually wrote is
+    // enabled (RETURNING enabled). Under insertOnly, ON CONFLICT DO NOTHING
+    // returns no row when the fork/prod already has one — including an
+    // enabled=false row its owner set via DELETE /realtime/:table — and the
+    // source's `enabled` must not re-arm a trigger the destination disabled.
     const driftedTables: string[] = [];
     for (const row of src.rows) {
+      let written: { enabled: boolean } | undefined;
       try {
-        await destRuntimePool.query(
+        const res = await destRuntimePool.query<{ enabled: boolean }>(
           buildRealtimeConfigInsertSql(insertOnly),
           [destAppId, row.table_name, row.events, row.enabled],
         );
+        written = res.rows[0];
       } catch (err) {
         const msg = `app_realtime_config row ${row.table_name} failed: ${(err as Error).message}`;
         warnings.push(msg);
         logger.warn({ table: row.table_name, err }, '[clone] realtime config row failed; continuing');
         continue;
       }
-      if (!row.enabled) continue;
+      if (!written?.enabled) continue;
       try {
         await installRealtimeTrigger(destAppPool, row.table_name);
       } catch (err) {
