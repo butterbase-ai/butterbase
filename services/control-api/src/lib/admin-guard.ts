@@ -1,6 +1,11 @@
 // Centralized admin authorization for /admin/* routes.
-// Returns the platform_user row when the caller has a valid JWT AND is_admin = true.
-// Returns null AND sends an appropriate 401/403 response when not authorized.
+// Returns the platform_user row when the caller has a valid JWT AND holds the
+// 'admin' role in platform_user_roles. Returns null AND sends an appropriate
+// 401/403 response when not authorized.
+//
+// is_admin is computed via EXISTS against the role join rather than read off
+// platform_users directly — the column is left in place for now (dropped in
+// a follow-up once nothing reads it) but this guard no longer trusts it.
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { Pool } from 'pg';
@@ -32,7 +37,14 @@ export async function requireAdmin(
     return null;
   }
   const r = await controlDb.query<AdminUser>(
-    'SELECT id, email, display_name, is_admin FROM platform_users WHERE cognito_sub = $1',
+    `SELECT pu.id, pu.email, pu.display_name,
+            EXISTS (
+              SELECT 1 FROM platform_user_roles pur
+              JOIN platform_roles pr ON pr.id = pur.role_id
+              WHERE pur.platform_user_id = pu.id AND pr.name = 'admin'
+            ) AS is_admin
+     FROM platform_users pu
+     WHERE pu.cognito_sub = $1`,
     [claims.sub],
   );
   const user = r.rows[0];

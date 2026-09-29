@@ -45,6 +45,13 @@ async function mkUser(email: string, isAdmin = false): Promise<Fixture> {
   );
   const userId = user.rows[0].id;
   await client.query(`UPDATE organizations SET owner_id = $1 WHERE id = $2`, [userId, orgId]);
+  if (isAdmin) {
+    await client.query(
+      `INSERT INTO platform_user_roles (platform_user_id, role_id)
+       SELECT $1, id FROM platform_roles WHERE name = 'admin'`,
+      [userId],
+    );
+  }
   return { userId, orgId };
 }
 

@@ -32,7 +32,11 @@ WITH internal AS (
   SELECT id FROM platform_users
   WHERE email LIKE '%@butterbase.ai'
      OR email = ANY($1::text[])
-     OR is_admin
+     OR EXISTS (
+       SELECT 1 FROM platform_user_roles pur
+       JOIN platform_roles pr ON pr.id = pur.role_id
+       WHERE pur.platform_user_id = platform_users.id AND pr.name = 'admin'
+     )
 ),
 ext_users AS (
   SELECT id FROM platform_users WHERE id NOT IN (SELECT id FROM internal)
