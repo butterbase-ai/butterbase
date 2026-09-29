@@ -130,15 +130,18 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     architecture?: { output_modalities?: string[]; input_modalities?: string[] };
   }): UpstreamModel {
     const modality = classifyModality(m.architecture);
+    // OpenRouter prices variable-cost routers (openrouter/auto, typesafe/jev-router)
+    // as "-1". Stored raw that became -1,000,000/Mtok; clamp so the catalog never
+    // holds a negative price. NaN (missing/garbled) also becomes 0.
+    const toMtok = (s: string) => Math.max(0, parseFloat(s) * 1_000_000) || 0;
     return {
       upstreamId: m.id,
       displayName: m.name,
-      promptPricePerMtok: parseFloat(m.pricing.prompt) * 1_000_000,
-      completionPricePerMtok: parseFloat(m.pricing.completion) * 1_000_000,
+      promptPricePerMtok: toMtok(m.pricing.prompt),
+      completionPricePerMtok: toMtok(m.pricing.completion),
       contextLength: m.context_length,
       modality,
-      // For non-chat modalities the per-call pricing isn't in this response —
-      // stash architecture + pricing so future media-router code can recover it.
+      // Token-priced modalities carry no rawPricing.
       ...(modality === 'chat' || modality === 'decisions'
         ? {}
         : { rawPricing: { source: '/v1/models', architecture: m.architecture, pricing: m.pricing } }),

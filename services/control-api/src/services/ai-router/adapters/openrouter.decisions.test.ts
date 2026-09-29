@@ -60,4 +60,19 @@ describe('openrouter adapter — decisions catalog', () => {
     expect(models.map(m => m.upstreamId)).toContain('openai/gpt-4o-mini');
   });
 
+  it('clamps OpenRouter "-1" variable-price sentinels to 0', async () => {
+    const a = openrouterAdapter({
+      apiKey: 'k',
+      fetch: queryFetcher({
+        '/models': { data: [{ id: 'typesafe/jev-router', name: 'Jev Router', pricing: { prompt: '-1', completion: '-1' }, context_length: 1000000, architecture: { output_modalities: ['text'] } }] },
+        '/models?output_modalities=image': { data: [] },
+        '/models?output_modalities=decisions': { data: [] },
+        '/videos/models': { data: [] },
+      }),
+    });
+    const [router] = await a.listModels();
+    expect(router.promptPricePerMtok).toBe(0);
+    expect(router.completionPricePerMtok).toBe(0);
+  });
+
 });
