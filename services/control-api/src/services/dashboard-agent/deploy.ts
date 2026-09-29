@@ -93,8 +93,19 @@ export function createDeployer(deps: DeployDeps) {
       const zipBuf = await zip.generateAsync({ type: 'uint8array' })
 
       const create = await deps.mcp.call('manage_frontend', { action: 'create_from_source', app_id: input.appId }, input.jwt)
-      const deployment_id: string = create.deployment_id
-      const upload_url: string = create.upload_url
+      const deployment_id: string = create?.deployment_id
+      const upload_url: string = create?.upload_url
+
+      // Defense in depth against a malformed/unparsed `create_from_source`
+      // response (U40): naming the missing field and failing loudly here beats
+      // `fetch(undefined, ...)` throwing the opaque
+      // `TypeError [ERR_INVALID_URL]: Failed to parse URL from undefined`.
+      if (!upload_url || !deployment_id) {
+        const missing = !deployment_id ? 'deployment_id' : 'upload_url'
+        throw new Error(
+          `manage_frontend create_from_source did not return "${missing}" — cannot upload the build. Response: ${JSON.stringify(create)}`,
+        )
+      }
 
       const put = await fetch(upload_url, { method: 'PUT', body: zipBuf as BodyInit, headers: { 'Content-Type': 'application/zip' } })
       if (!put.ok) return { ok: false as const, error: `upload failed: ${put.status}` }

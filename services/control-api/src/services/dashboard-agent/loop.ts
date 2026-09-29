@@ -202,12 +202,62 @@ export function getSharedWorkingTreeCache(): WorkingTreeCache {
   return _sharedCache;
 }
 
+/**
+ * Unwrap a raw MCP `tools/call` JSON-RPC result — `{content:[{type:'text',
+ * text}], isError?}` — into the flat payload internal loop-callers
+ * (deploy.ts, repo-sync.ts, schema-context.ts, deploy-function.ts) already
+ * expect, by JSON-parsing the text content item.
+ *
+ * Root cause of U40 ("Failed to parse URL from undefined"): `defaultMcp()`
+ * used to hand back this envelope UNPARSED, so `deploy.ts`'s
+ * `create.upload_url` read `undefined` off `{content:[...]}` and the very
+ * next line called `fetch(undefined, ...)`. Every MCP tool on the server
+ * side (see `services/mcp-server/src/tools/manage-frontend.ts`) returns
+ * exactly this envelope; `frontend-http.ts`/`function-http.ts` (the
+ * operator's HTTP transports) already return flat parsed JSON directly, so
+ * this makes `defaultMcp()` match that same flat shape.
+ *
+ * `isError` results become throws carrying the tool's own text — matching
+ * `defaultMcp()`'s existing "throw on failure" contract (see its callers'
+ * try/catch and best-effort comments).
+ *
+ * Falls back to returning `result` unchanged for anything that isn't this
+ * envelope shape, so a caller injecting an already-flat mock (as most unit
+ * tests do) is unaffected.
+ *
+ * Exported for testing; `defaultMcp()` is the only production caller.
+ */
+export function parseMcpToolResult(name: string, result: unknown): unknown {
+  const envelope = result as
+    | { content?: Array<{ type?: string; text?: string }>; isError?: boolean }
+    | null
+    | undefined;
+  const content = envelope?.content;
+  const textItem = Array.isArray(content)
+    ? content.find((c) => c?.type === 'text' && typeof c.text === 'string')
+    : undefined;
+  const text = textItem?.text;
+
+  if (envelope?.isError) {
+    throw new Error(text ?? `Tool "${name}" returned an error`);
+  }
+
+  if (text === undefined) return result;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Not JSON (e.g. a plain-text success message) — hand back the raw text.
+    return text;
+  }
+}
+
 function defaultMcp(): Mcp {
   return {
     async call(name: string, args: unknown, jwt: string) {
       const r = await callMcpTool(name, args, jwt);
       if (!r.ok) throw new Error(r.error ?? 'mcp call failed');
-      return r.result;
+      return parseMcpToolResult(name, r.result);
     },
   };
 }
