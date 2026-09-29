@@ -41,6 +41,9 @@ import { aiConfigRoutes } from './ai-config.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
 import { routeDecision, RouterError } from '../services/ai-router/router.js';
+import { InsufficientCreditsError } from '../services/ai-router/billing-gate.js';
+import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
+import { config } from '../config.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
 import type { CatalogEntry } from '../services/ai-router/catalog.js';
 
@@ -67,7 +70,10 @@ beforeAll(async () => {
   await app.ready();
 });
 afterAll(async () => { await app.close(); });
+const authorizeMock = authorizeAppAiCall as unknown as ReturnType<typeof vi.fn>;
 beforeEach(() => {
+  authorizeMock.mockReset();
+  authorizeMock.mockResolvedValue({ ok: true, ownerId: 'user_1' });
   routeDecisionMock.mockReset();
   setAiConfig(null);
 });
@@ -76,9 +82,11 @@ const Q = { is_bug: { type: 'noul', instructions: 'bug?', criteria: { true: 'y',
 
 describe('POST /v1/:appId/ai/decide', () => {
   it('uses request model when given', async () => {
-    routeDecisionMock.mockResolvedValue({ status: 200, body: { answers: {}, usage: { input_tokens: 1, output_tokens: 0, cost: 0.0000012 } } });
+    const upstreamBody = { answers: {}, usage: { input_tokens: 1, output_tokens: 0, cost: 0.0000012 } };
+    routeDecisionMock.mockResolvedValue({ status: 200, body: upstreamBody });
     const r = await app.inject({ method: 'POST', url: '/v1/app_1/ai/decide', payload: { model: 'upstage/solar-decide', state: {}, questions: Q } });
     expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual(upstreamBody);
     expect(routeDecisionMock.mock.calls[0][1]).toMatchObject({ model: 'upstage/solar-decide', questions: Q });
   });
 
@@ -119,6 +127,64 @@ describe('POST /v1/:appId/ai/decide', () => {
     const r = await app.inject({ method: 'POST', url: '/v1/app_1/ai/decide', payload: { questions: Q } });
     expect(r.statusCode).toBe(400);
     expect(r.json()).toMatchObject({ code: 'UPSTREAM_REJECTED', error: 'criteria must have true and false' });
+  });
+
+  const post = (payload: unknown = { questions: Q }) =>
+    app.inject({ method: 'POST', url: '/v1/app_1/ai/decide', payload: payload as object });
+
+  it('denied caller gets 403 and routeDecision is never called', async () => {
+    authorizeMock.mockResolvedValue({ ok: false, status: 403, body: { error: 'forbidden' } });
+    const r = await post();
+    expect(r.statusCode).toBe(403);
+    expect(routeDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it('402 INSUFFICIENT_CREDITS', async () => {
+    routeDecisionMock.mockRejectedValue(new InsufficientCreditsError({ balanceUsd: 0.5, floorUsd: 1 }));
+    const r = await post();
+    expect(r.statusCode).toBe(402);
+    expect(r.json()).toMatchObject({ code: 'INSUFFICIENT_CREDITS', balance_usd: 0.5, credit_floor_usd: 1 });
+  });
+
+  it('404 MODEL_NOT_FOUND', async () => {
+    routeDecisionMock.mockRejectedValue(new RouterError('MODEL_NOT_FOUND', 404, 'Model nope not found.'));
+    const r = await post({ model: 'nope/x', questions: Q });
+    expect(r.statusCode).toBe(404);
+    expect(r.json().code).toBe('MODEL_NOT_FOUND');
+  });
+
+  it('502 MODEL_UNAVAILABLE for ROUTER_FALLBACK_EXHAUSTED', async () => {
+    routeDecisionMock.mockRejectedValue(new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'all routers failed'));
+    const r = await post();
+    expect(r.statusCode).toBe(502);
+    expect(r.json().code).toBe('MODEL_UNAVAILABLE');
+  });
+
+  it('502 MODEL_UNAVAILABLE for a non-bad_request AdapterError, without leaking upstream text', async () => {
+    routeDecisionMock.mockRejectedValue(new AdapterError('openrouter', 401, 'auth', 'SECRET-UPSTREAM-DETAIL bad key'));
+    const r = await post();
+    expect(r.statusCode).toBe(502);
+    expect(r.json().code).toBe('MODEL_UNAVAILABLE');
+    expect(r.body).not.toContain('SECRET-UPSTREAM-DETAIL');
+  });
+
+  it('501 when the AI router is disabled', async () => {
+    const original = config.aiRouter.enabled;
+    config.aiRouter.enabled = false;
+    try {
+      const r = await post();
+      expect(r.statusCode).toBe(501);
+      expect(routeDecisionMock).not.toHaveBeenCalled();
+    } finally {
+      config.aiRouter.enabled = original;
+    }
+  });
+
+  it('non-JSON upstream bad_request falls back to the generic reason', async () => {
+    routeDecisionMock.mockRejectedValue(new AdapterError('openrouter', 400, 'bad_request', '<html>Bad Gateway</html>'));
+    const r = await post();
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toMatchObject({ code: 'UPSTREAM_REJECTED', error: 'The model provider rejected the request.' });
   });
 });
 
