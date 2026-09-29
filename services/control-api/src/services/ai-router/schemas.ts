@@ -193,3 +193,10 @@ export const embeddingRequestSchema = z.object({
 
 export type ChatCompletionRequest = z.infer<typeof chatCompletionRequestSchema>;
 export type EmbeddingRequest = z.infer<typeof embeddingRequestSchema>;
+
+/** OpenRouter Decisions API body. Pass-through: unknown keys are kept. */
+export const decisionRequestSchema = z.object({
+  model: z.string().min(1),
+  state: z.unknown().optional(),
+  questions: z.record(z.unknown()).refine(q => Object.keys(q).length > 0, { message: 'questions must contain at least one question' }),
+}).passthrough();
