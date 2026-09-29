@@ -86,4 +86,25 @@ describe('fn gateway – per-function auth enforcement', () => {
     expect(res.statusCode).toBe(404);
     expect(mockFetch).toHaveBeenCalledOnce();
   });
+
+  it('relays a 302 with an external Location instead of following it (undici redirect: manual)', async () => {
+    // Regression for U04: without redirect: 'manual', undici's fetch default
+    // ('follow') tries to chase the Location itself. When that host is
+    // unresolvable, the outbound attempt throws and the caller sees a
+    // misleading 502 EXTERNAL_NETWORK_ERROR even though the function
+    // completed successfully and returned a 302 server-side.
+    triggerConfig = { auth: 'none' };
+    mockFetch.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://unresolvable.invalid/x' },
+      })
+    );
+    const res = await app.inject({ method: 'GET', url: '/v1/app_test001/fn/lti-login' });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('https://unresolvable.invalid/x');
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const [, fetchOptions] = mockFetch.mock.calls[0];
+    expect(fetchOptions.redirect).toBe('manual');
+  });
 });
