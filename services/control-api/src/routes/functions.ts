@@ -89,11 +89,21 @@ function redactTriggerConfig(type: string, cfg: unknown): unknown {
 // Shared env-vars merge helpers, used by both the deploy path (POST
 // /v1/:appId/functions with envVarsReplace: false, the default) and the
 // PATCH .../env path — keeps "incoming keys win, null deletes" in one place.
-function decryptEnvBlob(encryptedBlob: string | null | undefined): Record<string, string> {
+// An undecryptable blob degrades to {} so the write still succeeds, but that
+// means the merge silently drops every existing key — so say so in the logs
+// (ids only, never values).
+function decryptEnvBlob(
+  encryptedBlob: string | null | undefined,
+  ctx: { appId: string; functionName: string }
+): Record<string, string> {
   if (!encryptedBlob) return {};
   try {
     return JSON.parse(decrypt(encryptedBlob, process.env.AUTH_ENCRYPTION_KEY!));
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[functions] could not decrypt existing env vars for app_id=${ctx.appId} function=${ctx.functionName}; ` +
+        `merging into an empty env (${err instanceof Error ? err.name : 'unknown error'})`
+    );
     return {};
   }
 }
@@ -212,16 +222,21 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
           // concurrent redeploys of the same function serialize instead of
           // both reading the same pre-image and one silently clobbering the
           // other's merged env (lost update under READ COMMITTED).
-          // No `deleted_at IS NULL` filter: the ON CONFLICT upsert below
-          // already revives a soft-deleted row of the same (app_id, name)
-          // via COALESCE, so the merge intentionally reads that row's prior
-          // env too — consistent with the rest of the upsert's semantics.
-          const existingRow = await client.query(
-            `SELECT encrypted_env_vars FROM app_functions WHERE app_id = $1 AND name = $2 FOR UPDATE`,
+          // The lock also covers a soft-deleted row (no `deleted_at IS NULL`
+          // filter), since the ON CONFLICT upsert below revives it. But a
+          // deleted function's env is NOT merged in: recreating a function
+          // with new envVars must not silently inherit the old one's secrets,
+          // so a soft-deleted row contributes an empty env.
+          const existingRow = await client.query<{ encrypted_env_vars: string | null; deleted_at: Date | null }>(
+            `SELECT encrypted_env_vars, deleted_at FROM app_functions WHERE app_id = $1 AND name = $2 FOR UPDATE`,
             [appId, body.name]
           );
+          const existing = existingRow.rows[0];
           const mergedVars = mergeEnvVars(
-            decryptEnvBlob(existingRow.rows[0]?.encrypted_env_vars ?? null),
+            decryptEnvBlob(existing && !existing.deleted_at ? existing.encrypted_env_vars : null, {
+              appId,
+              functionName: body.name,
+            }),
             body.envVars
           );
           encryptedEnvVars = encrypt(JSON.stringify(mergedVars), process.env.AUTH_ENCRYPTION_KEY!);
@@ -379,7 +394,10 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
     }
 
     // Merge: new values overwrite existing; null values delete keys.
-    const mergedVars = mergeEnvVars(decryptEnvBlob(existing.rows[0].encrypted_env_vars), body.envVars);
+    const mergedVars = mergeEnvVars(
+      decryptEnvBlob(existing.rows[0].encrypted_env_vars, { appId, functionName: name }),
+      body.envVars
+    );
 
     const encryptedEnvVars = encrypt(JSON.stringify(mergedVars), process.env.AUTH_ENCRYPTION_KEY!);
 
