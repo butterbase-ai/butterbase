@@ -22,16 +22,48 @@ export type RepoSync = {
   pushCurrentTree(input: { convId: string; appId: string; jwt: string }): Promise<{ snapshotId: string | null; filesPushed: number }>
 }
 
+/**
+ * One manifest entry as manage_repo pull_latest / pull_snapshot return it
+ * (services/mcp-server/src/tools/manage-repo.ts): the presigned URL is
+ * `downloadUrl`, and is null when the blob batch returned no URL for a sha.
+ */
+type RepoFile = { path: string; sha256: string; size?: number; downloadUrl: string | null }
+
+/**
+ * The repo route's messages for "this app has no latest snapshot"
+ * (routes/repo.ts GET /v1/:app_id/repo/snapshots/latest). manage_repo passes
+ * the route's JSON error body through as its error text.
+ */
+const NO_SNAPSHOT_RE = /No snapshots have been pushed for this app|latest pointer references missing manifest/
+
+function downloadUrlOf(f: RepoFile): string {
+  if (!f.downloadUrl) throw new Error(`repo pull: no download url returned for ${f.path}`)
+  return f.downloadUrl
+}
+
 export function createRepoSync(deps: { cache: WorkingTreeCache; mcp: Mcp }): RepoSync {
   const { cache, mcp } = deps
   return {
     async pullLatest({ convId, appId, jwt }) {
-      const res = await mcp.call('manage_repo', { action: 'pull_latest', app_id: appId }, jwt)
-      const files: Array<{ path: string; sha256: string; download_url: string }> = res?.files ?? []
+      let res: any
+      try {
+        res = await mcp.call('manage_repo', { action: 'pull_latest', app_id: appId }, jwt)
+      } catch (err) {
+        // A new app has no snapshot yet: the repo route 404s and manage_repo
+        // surfaces that as an isError result, which the MCP transport turns
+        // into a throw. That is "empty repo", not a failure — report it as
+        // unhydrated so ensureHydrated scaffolds from a template (mirrors
+        // repo-http.ts's allow404). Only the no-snapshot messages count: an
+        // "App not found" 404 (no access) must still throw, or the turn would
+        // push a template into an app it cannot see.
+        if (err instanceof Error && NO_SNAPSHOT_RE.test(err.message)) return { hydrated: false }
+        throw err
+      }
+      const files: RepoFile[] = res?.files ?? []
       if (!res?.snapshot_id || files.length === 0) return { hydrated: false }
       const tree: WorkingTree = new Map()
       await Promise.all(files.map(async (f) => {
-        const resp = await fetch(f.download_url)
+        const resp = await fetch(downloadUrlOf(f))
         const content = await resp.text()
         const wf: WorkingFile = { path: f.path, content, sha256: f.sha256 }
         tree.set(f.path, wf)
@@ -42,11 +74,11 @@ export function createRepoSync(deps: { cache: WorkingTreeCache; mcp: Mcp }): Rep
 
     async pullSnapshot({ convId, appId, snapshotId, jwt }) {
       const res = await mcp.call('manage_repo', { action: 'pull_snapshot', app_id: appId, snapshot_id: snapshotId }, jwt)
-      const files: Array<{ path: string; sha256: string; download_url: string }> = res?.files ?? []
+      const files: RepoFile[] = res?.files ?? []
       if (!res?.snapshot_id || files.length === 0) return { hydrated: false }
       const tree: WorkingTree = new Map()
       await Promise.all(files.map(async (f) => {
-        const resp = await fetch(f.download_url)
+        const resp = await fetch(downloadUrlOf(f))
         const content = await resp.text()
         const wf: WorkingFile = { path: f.path, content, sha256: f.sha256 }
         tree.set(f.path, wf)
