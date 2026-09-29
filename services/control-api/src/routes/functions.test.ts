@@ -164,18 +164,23 @@ describe('POST /v1/:appId/functions — envVars merge semantics', () => {
   let app: FastifyInstance;
   // In-memory store simulating app_functions rows, keyed by function name.
   let functionsStore: Record<string, { id: string; encrypted_env_vars: string | null }>;
+  // Every SQL statement issued via `client.query`, in order — lets tests
+  // assert on locking/query shape without re-parsing the store.
+  let queryLog: string[];
 
   const validCode = 'export async function handler(req, ctx) { return new Response("ok"); }';
 
   beforeEach(async () => {
     vi.stubEnv('AUTH_ENCRYPTION_KEY', '00'.repeat(32));
     functionsStore = {};
+    queryLog = [];
     app = Fastify();
     app.decorate('controlDb', {});
 
     (getRuntimeDbForApp as any).mockImplementation(() => {
       const clientQuery = vi.fn().mockImplementation((sql: string, params: unknown[]) => {
         const normalised = sql.replace(/\s+/g, ' ').trim();
+        queryLog.push(normalised);
         if (normalised === 'BEGIN' || normalised === 'COMMIT' || normalised === 'ROLLBACK') {
           return Promise.resolve({ rows: [] });
         }
@@ -233,6 +238,23 @@ describe('POST /v1/:appId/functions — envVars merge semantics', () => {
       functionsStore['merge-test'].encrypted_env_vars!.replace('encrypted_', '')
     );
     expect(stored).toEqual({ A: '1', B: '2' });
+  });
+
+  it('locks the existing row with FOR UPDATE before merging (prevents lost updates on concurrent redeploys)', async () => {
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'lock-test', code: validCode, envVars: { A: '1' } },
+    });
+    queryLog = [];
+
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'lock-test', code: validCode, envVars: { B: '2' } },
+    });
+
+    const selectQueries = queryLog.filter((q) => q.startsWith('SELECT encrypted_env_vars FROM app_functions'));
+    expect(selectQueries).toHaveLength(1);
+    expect(selectQueries[0]).toMatch(/FOR UPDATE$/);
   });
 
   it('envVarsReplace:true keeps the old full-replace behavior', async () => {

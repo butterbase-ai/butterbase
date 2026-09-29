@@ -208,8 +208,16 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
         if (body.envVarsReplace) {
           encryptedEnvVars = encrypt(JSON.stringify(body.envVars), process.env.AUTH_ENCRYPTION_KEY!);
         } else {
+          // FOR UPDATE locks the row for the rest of this transaction so two
+          // concurrent redeploys of the same function serialize instead of
+          // both reading the same pre-image and one silently clobbering the
+          // other's merged env (lost update under READ COMMITTED).
+          // No `deleted_at IS NULL` filter: the ON CONFLICT upsert below
+          // already revives a soft-deleted row of the same (app_id, name)
+          // via COALESCE, so the merge intentionally reads that row's prior
+          // env too — consistent with the rest of the upsert's semantics.
           const existingRow = await client.query(
-            `SELECT encrypted_env_vars FROM app_functions WHERE app_id = $1 AND name = $2`,
+            `SELECT encrypted_env_vars FROM app_functions WHERE app_id = $1 AND name = $2 FOR UPDATE`,
             [appId, body.name]
           );
           const mergedVars = mergeEnvVars(
