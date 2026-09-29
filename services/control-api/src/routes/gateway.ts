@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { getRedisClient } from '../services/redis.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import {
-  routeChatCompletion, routeEmbedding,
+  routeChatCompletion, routeEmbedding, routeDecision,
   RouterError, InsufficientCreditsError,
 } from '../services/ai-router/router.js';
 import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../services/ai-router/catalog.js';
@@ -19,6 +19,7 @@ import type { RouterName } from '../services/ai-router/normalize.js';
 import {
   chatCompletionRequestSchema as chatCompletionSchema,
   embeddingRequestSchema as embeddingSchema,
+  decisionRequestSchema,
 } from '../services/ai-router/schemas.js';
 import { messagesRequestSchema, guardMessagesRoutingShape } from '../services/ai-router/messages-schema.js';
 import { routeMessages } from '../services/ai-router/messages.js';
@@ -163,7 +164,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
 }
 
 interface GatewayAuditContext {
-  endpoint: 'chat.completions' | 'embeddings' | 'messages' | 'responses';
+  endpoint: 'chat.completions' | 'embeddings' | 'decide' | 'messages' | 'responses';
   model?: string;
   appId: string;
   userId: string;
@@ -580,6 +581,45 @@ export async function gatewayRoutes(app: FastifyInstance) {
           errorMessage: e.message ?? 'unknown',
           errorCode: e.gatewayCode ?? e.code ?? 'error',
           status: e.gatewayStatus ?? e.statusCode,
+        });
+      }
+      return handleRouterError(reply, err);
+    }
+  });
+
+  app.post('/v1/decide', async (request, reply) => {
+    const startedAt = Date.now();
+    let auditCtx: GatewayAuditContext | null = null;
+    try {
+      const user = resolveGatewayUser(request);
+      const body = decisionRequestSchema.parse(request.body);
+      auditCtx = {
+        endpoint: 'decide',
+        model: body.model,
+        appId: request.auth.appId ?? '_platform',
+        userId: user.userId,
+        ipAddress: request.ip ?? null,
+        userAgent: request.headers['user-agent'] ?? null,
+        startedAt,
+      };
+      const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+      const result = await routeDecision(
+        {
+          platformPool: app.controlDb, runtimePool, redis: getRedisClient(), adapters,
+          markupPct, markupSource, appId: null, organizationId, userId: user.userId, region: user.region,
+        },
+        body,
+      );
+      emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage: null, stream: false });
+      return reply.code(result.status).send(result.body);
+    } catch (err) {
+      if (auditCtx) {
+        const e = err as { message?: string; gatewayCode?: string; code?: string; statusCode?: number; gatewayStatus?: number };
+        emitGatewayEvent(app, auditCtx, {
+          success: false, errorMessage: e.message ?? 'unknown',
+          errorCode: e.gatewayCode ?? e.code ?? 'error', status: e.gatewayStatus ?? e.statusCode,
         });
       }
       return handleRouterError(reply, err);
