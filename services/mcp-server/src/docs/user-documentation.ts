@@ -1925,7 +1925,9 @@ if (data.answers.is_bug.noul > 0.8) { /* open a bug */ }
 
 **MCP**: \`manage_ai\` with \`action: "decide"\`, \`questions\`, and optional \`state\`/\`model\`.
 
-**Models**: list them with \`manage_ai list_models modality: "decisions"\` (or \`ai.listModels({ modality: 'decisions' })\`). The default is \`typesafe/jev-1.13\`; set a per-app default with \`update_config { config: { defaultDecisionModel } }\`. Context length varies by model (Jev: 32K tokens).
+**Models**: list them with \`manage_ai list_models modality: "decisions"\` (or \`ai.listModels({ modality: 'decisions' })\`). The default is \`typesafe/jev-1.13\`; set a per-app default with \`update_config { config: { defaultDecisionModel } }\`. Context length varies by model (Jev: 32K tokens). Respan models (\`respan/span-01\`, \`respan/span-01-lite\`) require \`state\` to be a string (or \`{ input: [messages], output: message }\`); Jev, Kev and Solar accept any JSON \`state\`.
+
+**Errors**: a malformed request returns 400 \`UPSTREAM_REJECTED\` with the field that failed, e.g. \`questions.q.type: Invalid discriminator value. Expected 'noul' | 'choice' | 'score'\`.
 
 **Pricing**: input tokens only. Output is free. The response's \`usage.cost\` is the amount charged to your credits.
 
