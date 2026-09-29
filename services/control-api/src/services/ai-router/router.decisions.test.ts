@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { routeDecision, routeChatCompletion, routeEmbedding, RouterError } from './router.js';
+import { routeDecision, routeChatCompletion, routeEmbedding, RouterError, DECISION_HOLD_TOKEN_MULTIPLIER, DECISION_HOLD_TOKENS_PER_QUESTION } from './router.js';
 import { AdapterError, type RouterAdapter } from './adapters/types.js';
 import { applyMarkup } from './markup.js';
 import { estimatePromptTokens } from './tokenizer.js';
 import { estimateWorstCaseUsd } from './select.js';
-import { settleAfterCall } from './billing-gate.js';
+import { settleAfterCall, acquireForEstimatedCost } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
 
 vi.mock('./billing-gate.js', () => ({
@@ -187,5 +187,19 @@ describe('routeDecision billing step 3 and edge paths', () => {
     expect(r1.body).toBe(noUsage);
     const r2 = await routeDecision(ctx(decisionsEntry(), { decisions: vi.fn(async () => ({ status: 200, body: 'plain', usage: { promptTokens: 10, completionTokens: 1, totalCost: null }, providerCostUsd: 0.001 })) as any }), REQ);
     expect(r2.body).toBe('plain');
+  });
+});
+
+describe('routeDecision credit hold', () => {
+  it('pads the hold for per-question scaffolding so it covers an observed 476-token call', async () => {
+    const decisions = vi.fn(async () => okResult(0.00002));
+    await routeDecision(ctx(decisionsEntry(), { decisions }), REQ);
+    const reserved = (acquireForEstimatedCost as any).mock.calls[0][4];
+    const estimated = estimatePromptTokens([{ role: 'user', content: JSON.stringify({ state: REQ.state ?? null, questions: REQ.questions }) }], 'm');
+    const holdTokens = estimated * DECISION_HOLD_TOKEN_MULTIPLIER + DECISION_HOLD_TOKENS_PER_QUESTION * Object.keys(REQ.questions).length;
+    expect(DECISION_HOLD_TOKEN_MULTIPLIER).toBe(2);
+    expect(DECISION_HOLD_TOKENS_PER_QUESTION).toBe(500);
+    expect(reserved).toBeCloseTo((holdTokens / 1_000_000) * 0.042 * 1.2, 15);
+    expect(reserved).toBeGreaterThanOrEqual(applyMarkup((476 / 1_000_000) * 0.042, 20));
   });
 });

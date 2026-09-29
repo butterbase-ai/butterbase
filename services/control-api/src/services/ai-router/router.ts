@@ -799,6 +799,11 @@ function resolveRateForRequest(
   return best;
 }
 
+/** Hold multiplier over the client-visible payload estimate (see routeDecision). */
+export const DECISION_HOLD_TOKEN_MULTIPLIER = 2;
+/** Per-question hold allowance for the model's hidden prompt scaffolding. */
+export const DECISION_HOLD_TOKENS_PER_QUESTION = 500;
+
 export async function routeDecision(ctx: RouteContext, req: DecisionRequest): Promise<{ status: number; body: unknown }> {
   const t0 = Date.now();
   const canonicalId = req.model;
@@ -820,7 +825,14 @@ export async function routeDecision(ctx: RouteContext, req: DecisionRequest): Pr
     [{ role: 'user', content: JSON.stringify({ state: req.state ?? null, questions: req.questions }) }],
     canonicalId,
   );
-  const reservedUsd = (estimatedTokens / 1_000_000) * ranked[0].promptPricePerMtok * (1 + ctx.markupPct / 100);
+  // Pad the hold: decision models wrap each question in prompt scaffolding the
+  // client never sees (observed 476 input tokens for one yes/no question over a
+  // one-line state), and with reserve-small off settleLease clamps the charge to
+  // the reservation — an unpadded hold would under-debit. Padding is hold-only;
+  // the settlement fallback below still uses the unpadded estimate.
+  const holdTokens = estimatedTokens * DECISION_HOLD_TOKEN_MULTIPLIER
+    + DECISION_HOLD_TOKENS_PER_QUESTION * Object.keys(req.questions).length;
+  const reservedUsd = (holdTokens / 1_000_000) * ranked[0].promptPricePerMtok * (1 + ctx.markupPct / 100);
   const lease = await acquireWithAudit(ctx, reservedUsd, 60);
 
   const fallbackChain: string[] = [];
