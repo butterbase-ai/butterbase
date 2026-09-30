@@ -321,6 +321,52 @@ describe('040_people_organization_id migration', () => {
   });
 });
 
+describe('055_audit_events_organization_id migration', () => {
+  const migrationPath = path.join(__dirname, '055_audit_events_organization_id.sql');
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('adds nullable organization_id to audit_events', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/ALTER TABLE\s+audit_events[\s\S]+ADD COLUMN IF NOT EXISTS organization_id\s+uuid/i);
+  });
+
+  it('does NOT add a FK constraint on organization_id', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).not.toMatch(/organization_id\s+uuid[\s\S]{0,80}REFERENCES/i);
+  });
+
+  it('backfills organization_id from apps.organization_id', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/UPDATE\s+audit_events[\s\S]+FROM\s+apps[\s\S]+WHERE[\s\S]+app_id/i);
+  });
+
+  it('creates all 4 organization-scoped indexes', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    const indexNames = [
+      'idx_audit_events_org_created',
+      'idx_audit_events_org_category',
+      'idx_audit_events_org_resource',
+      'idx_audit_events_org_event_type',
+    ];
+    for (const name of indexNames) {
+      expect(sql, `${name} missing`).toMatch(new RegExp(`CREATE INDEX IF NOT EXISTS ${name}`, 'i'));
+    }
+  });
+
+  it('all organization indexes are partial (WHERE organization_id IS NOT NULL)', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    const matches = sql.match(/CREATE INDEX[\s\S]+?organization_id[\s\S]+?;/gi) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(4);
+    for (const m of matches) {
+      expect(m, `index missing partial clause: ${m}`).toMatch(/WHERE organization_id IS NOT NULL/i);
+    }
+  });
+});
+
 describe('041_remaining_org_id_not_null migration', () => {
   const migrationPath = path.join(__dirname, '041_remaining_org_id_not_null.sql');
   const TABLES = [
