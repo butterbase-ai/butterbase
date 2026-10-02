@@ -352,3 +352,36 @@ describe('041_remaining_org_id_not_null migration', () => {
     expect(sql).not.toMatch(/RENAME COLUMN/i);
   });
 });
+
+describe('056_audit_events_purge_fn migration', () => {
+  const migrationPath = path.join(__dirname, '056_audit_events_purge_fn.sql');
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('creates a SECURITY DEFINER purge_audit_events function', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE OR REPLACE FUNCTION\s+purge_audit_events/i);
+    expect(sql).toMatch(/SECURITY DEFINER/i);
+    expect(sql).toMatch(/RETURNS\s+bigint/i);
+  });
+
+  it('accepts enterprise_org_ids uuid[] with a default empty array', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/enterprise_org_ids\s+uuid\[\]\s+DEFAULT\s+'{}'/i);
+  });
+
+  it('applies 365-day retention for enterprise orgs and 180-day floor for others', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/interval\s+'365 days'/i);
+    expect(sql).toMatch(/interval\s+'180 days'/i);
+    expect(sql).toMatch(/ANY\(enterprise_org_ids\)/i);
+  });
+
+  it('revokes UPDATE and DELETE on audit_events', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/REVOKE\s+UPDATE,\s*DELETE\s+ON\s+audit_events\s+FROM\s+PUBLIC/i);
+  });
+});
