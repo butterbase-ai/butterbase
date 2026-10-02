@@ -398,3 +398,54 @@ describe('041_remaining_org_id_not_null migration', () => {
     expect(sql).not.toMatch(/RENAME COLUMN/i);
   });
 });
+
+describe('057_audit_events_purge_fn migration', () => {
+  const migrationPath = path.join(__dirname, '057_audit_events_purge_fn.sql');
+
+  it('has a valid runtime scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('runtime');
+  });
+
+  it('creates the audit_events_guard trigger function', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE OR REPLACE FUNCTION\s+audit_events_guard\(\)/i);
+    expect(sql).toMatch(/RETURNS TRIGGER/i);
+    expect(sql).toMatch(/audit\.purge_active/i);
+  });
+
+  it('attaches the immutability trigger to audit_events', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE TRIGGER\s+audit_events_immutability_guard/i);
+    expect(sql).toMatch(/BEFORE UPDATE OR DELETE ON audit_events/i);
+  });
+
+  it('creates a SECURITY DEFINER purge_audit_events function', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE OR REPLACE FUNCTION\s+purge_audit_events/i);
+    expect(sql).toMatch(/SECURITY DEFINER/i);
+    expect(sql).toMatch(/RETURNS\s+bigint/i);
+  });
+
+  it('purge function sets audit.purge_active before deleting', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/set_config\('audit\.purge_active',\s*'true',\s*true\)/i);
+  });
+
+  it('accepts enterprise_org_ids uuid[] with a default empty array', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/enterprise_org_ids\s+uuid\[\]\s+DEFAULT\s+'{}'/i);
+  });
+
+  it('applies 365-day retention for enterprise orgs and 180-day floor for others', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/interval\s+'365 days'/i);
+    expect(sql).toMatch(/interval\s+'180 days'/i);
+    expect(sql).toMatch(/ANY\(enterprise_org_ids\)/i);
+  });
+
+  it('also revokes UPDATE/DELETE from non-owner roles via PUBLIC', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/REVOKE\s+UPDATE,\s*DELETE\s+ON\s+audit_events\s+FROM\s+PUBLIC/i);
+  });
+});
