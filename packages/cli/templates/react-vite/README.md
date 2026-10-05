@@ -29,7 +29,6 @@ This project is connected to Butterbase app: `{{APP_ID}}`
 
 - `npm run dev` - Start development server
 - `npm run build` - Build for production
-- `npm run lint` - Lint with ESLint
 - `npm run preview` - Preview production build
 
 ## Learn More

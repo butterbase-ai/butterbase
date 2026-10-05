@@ -49,17 +49,23 @@ function App() {
         <h1>Welcome to {{PROJECT_NAME}}</h1>
         <p>Powered by Butterbase</p>
         <div>
-          <h2>Sign In</h2>
+          <h2>Sign In or Sign Up</h2>
           <form onSubmit={(e) => {
             e.preventDefault();
-            const form = e.target as HTMLFormElement;
+            const form = e.currentTarget;
             const email = (form.elements.namedItem('email') as HTMLInputElement).value;
             const password = (form.elements.namedItem('password') as HTMLInputElement).value;
-            handleSignIn(email, password);
+            const submitter = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+            if (submitter?.value === 'signup') {
+              handleSignUp(email, password);
+            } else {
+              handleSignIn(email, password);
+            }
           }}>
             <input name="email" type="email" placeholder="Email" required />
             <input name="password" type="password" placeholder="Password" required />
-            <button type="submit">Sign In</button>
+            <button type="submit" value="signin">Sign In</button>
+            <button type="submit" value="signup">Sign Up</button>
           </form>
         </div>
       </div>
