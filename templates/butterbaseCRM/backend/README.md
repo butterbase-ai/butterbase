@@ -32,7 +32,7 @@ backend/
 
 | Surface | Where | Notes |
 |---|---|---|
-| **Database** | live Postgres on Butterbase, `app_44zjayftl7b3` | 29 tables, RLS on every table |
+| **Database** | live Postgres on Butterbase, `app_44zjayftl7b3` | 29 tables; `rls/policies.json` has policies for 19 of them |
 | **API** | auto-generated REST at `https://api.butterbase.ai/v1/app_44zjayftl7b3/<table>` | accessed from the frontend via `@butterbase/sdk` |
 | **Auth** | `/auth/app_44zjayftl7b3/...` | email/password + Google OAuth |
 | **Storage** | presigned-URL flow at `/storage/app_44zjayftl7b3/...` | 10 MB/file cap |
@@ -65,14 +65,16 @@ workspaces
   ├─ workspace_integrations + integration_state + reconciler_cursor   # Composio bindings
   ├─ enrichment_settings  # which agent enriches what
   ├─ agent_threads + agent_messages + agent_proposals + deal_proposals
-  └─ campaigns + campaign_lists + campaign_list_members + campaign_sends
+  ├─ campaigns + campaign_lists + campaign_list_members + campaign_sends
+  ├─ comment_campaigns + comment_campaign_items + workspace_competitors
+  └─ social_posts + social_post_sends + social_comments + social_reply_inbox
 ```
 
 Substrate entities (`ent_...`) are reached via `ctx.substrate` inside functions or via the `substrate-proxy` / `list-substrate-entities` functions from the browser. See `functions/crm-upsert-meeting/handler.ts`, `functions/ingest-gmail/handler.ts` etc. for the read/write patterns.
 
 ## RLS model — read this before touching policies
 
-Every business table is **workspace-membership-scoped** via this predicate:
+Most workspace tables are **workspace-membership-scoped** via this predicate:
 
 ```sql
 workspace_id IN (
@@ -83,9 +85,11 @@ workspace_id IN (
 
 The `::uuid` cast is required — `current_user_id()` returns `text`. Without the cast you'll get `RLS_TYPE_MISMATCH: operator does not exist: uuid = text`.
 
-Edit/delete authority on `deals`, `notes`, `meetings`, `attachments` is **author-or-admin** (the row's `created_by`/`uploaded_by` matches the caller, OR the caller is `owner`/`admin` in the workspace).
+Edit/delete authority on `notes` and `attachments` is **author-or-admin** (the row's `created_by` / `uploaded_by` matches the caller, OR the caller is `owner`/`admin` in the workspace). Deals and meetings are substrate entities, so they have no Postgres policies.
 
-`memberships` SELECT was narrowed to **your own membership row only** (not all teammates'). This was tightened during frontend debugging — see the deferred v1.1 note in `02-plan.md` about teammate-name lookup.
+`rls/policies.json` currently has **no policies at all** for 10 tables: `campaigns`, `campaign_lists`, `campaign_list_members`, `campaign_sends`, `comment_campaigns`, `comment_campaign_items`, `social_comments`, `social_reply_inbox`, `workspace_competitors` and `reconciler_cursor`. The mirror can't show whether RLS is enabled on them, so check live (`manage_rls` / `butterbase rls list`) before relying on workspace isolation there.
+
+`memberships` SELECT is narrowed to **your own membership row only** (`user_id = current_user_id()::uuid`), not all teammates'. See the deferred v1.1 note in `docs/butterbase/02-plan.md` about teammate-name lookup.
 
 There are two carve-out INSERT policies to know about:
 
@@ -94,7 +98,7 @@ There are two carve-out INSERT policies to know about:
 
 Activities are append-only from the frontend: members can INSERT (with `actor_user_id = me`) but cannot UPDATE or DELETE.
 
-Pending invites are admin-only — neither regular members nor invitees can SELECT them (the redeem path uses the `accept-invite` function which runs as service).
+Pending invites are admin-only (select/insert/delete require `owner`/`admin`) — neither regular members nor invitees can SELECT them (the redeem path uses the `accept-invite` function which runs as service).
 
 See `rls/policies.sql` for the full picture.
 

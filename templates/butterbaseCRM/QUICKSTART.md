@@ -87,10 +87,10 @@ The frontend reads two Vite env vars. Create `frontend/.env.local`:
 ```bash
 # frontend/.env.local
 VITE_BUTTERBASE_APP_ID=app_44zjayftl7b3
-VITE_BUTTERBASE_API_URL=https://api.butterbase.ai/v1/app_44zjayftl7b3
+VITE_BUTTERBASE_API_URL=https://api.butterbase.ai
 ```
 
-That's it — auth, storage, realtime, AI, and functions all go through the same base URL via `@butterbase/sdk`.
+That's it — auth, storage, realtime, AI, and functions all go through the same base URL via `@butterbase/sdk`, which adds the `/v1/<app_id>`, `/auth/<app_id>` and `/storage/<app_id>` path segments itself. Don't put an app-id suffix on the URL.
 
 > If you instead cloned the Butterbase app, **skip this section** and do § 5 — you'll point the frontend at *your* app, not the shared one.
 
@@ -135,9 +135,11 @@ Required for `invite-member`:
 
 | Var | Value |
 |---|---|
-| `FRONTEND_URL` | the URL where you deploy the frontend (e.g. `https://crm.yourdomain.com` or `http://localhost:5173` for local dev) — used to build `/invite/<token>` links inside the email |
+| `BUTTERBASE_FRONTEND_URL` | the URL where you deploy the frontend (e.g. `https://crm.yourdomain.com` or `http://localhost:5173` for local dev) — used to build `/invite/<token>` links inside the email |
 
-> Enrichment (`enrich-company`, `enrich-person`) does **not** need any third-party API keys. It runs entirely through the Butterbase AI gateway and the in-app copilot agent. See the `crm-enrichment` skill in `.claude/skills/` for how to drive enrichment from the agent.
+> Enrichment (`enrich-company`, `enrich-person`) does **not** need any third-party API keys. It runs entirely through the Butterbase AI gateway and People API, using the same three `BUTTERBASE_*` vars above.
+
+> A few functions need extra vars of their own: `AI_SERVICE_KEY` (`discover-comment-targets`, `run-comment-discovery`) and `NOTETAKER_WEBHOOK_SECRET` (`notetaker-webhook`; see `docs/known-limitations.md` for the one-time webhook registration).
 
 Set the required vars with the MCP tool or CLI:
 
@@ -170,7 +172,7 @@ After § 5.1–5.4, point the frontend at *your* app:
 ```bash
 # frontend/.env.local
 VITE_BUTTERBASE_APP_ID=app_xyz123                              # your new id
-VITE_BUTTERBASE_API_URL=https://api.butterbase.ai/v1/app_xyz123
+VITE_BUTTERBASE_API_URL=https://api.butterbase.ai
 ```
 
 ### 5.6 First-run sanity check
@@ -181,7 +183,7 @@ Smoke-test in order — if one step fails, fix it before moving on:
 2. `select_rows --table workspaces --limit 1` returns `[]` cleanly (✓ DB + RLS reachable, just empty)
 3. Sign up + create a workspace from the frontend (✓ auth + RLS write path)
 4. `invoke_function --name summarize-company --body '{"company_id":"<id>"}'` returns 200 (✓ `ctx.env` and AI gateway wired)
-5. Send a workspace invite (✓ `FRONTEND_URL` + Gmail integration)
+5. Send a workspace invite (✓ `BUTTERBASE_FRONTEND_URL` + Gmail integration)
 
 ---
 
@@ -191,9 +193,9 @@ Smoke-test in order — if one step fails, fix it before moving on:
 butterbaseCRM/
 ├── frontend/                  ← the React app you just ran
 │   ├── src/
-│   │   ├── pages/             ← 16 routes (Companies, Deals, Meetings, Auth, …)
+│   │   ├── pages/             ← 19 page components (Companies, Deals, Meetings, Campaigns, Social, Login, …)
 │   │   ├── components/        ← shadcn/ui-based UI primitives + feature components
-│   │   ├── hooks/             ← useCompanies, useDeals, useAuth, useRealtime, …
+│   │   ├── hooks/             ← useCompanies, useDeals, useNotes, useAgentRealtime, …
 │   │   ├── lib/butterbase.ts  ← the SDK client — every API call flows through here
 │   │   ├── lib/realtime.ts    ← WebSocket subscription wiring
 │   │   ├── lib/activity.ts    ← writes activity-log rows after mutations
@@ -202,16 +204,17 @@ butterbaseCRM/
 │   └── .env.local             ← you just created this
 │
 ├── backend/                   ← READ-ONLY MIRROR of the live platform state
-│   ├── schema.json            ← 11 tables, indexes
+│   ├── schema.json            ← 29 tables, indexes
 │   ├── rls/policies.sql       ← workspace-scoped RLS policies
-│   ├── functions/             ← summarize-company, invite-member, accept-invite
-│   ├── auth/, storage.json, realtime.json, ai.json, integrations/
+│   ├── functions/             ← 56 functions, one folder each (handler.ts + function.json)
+│   ├── auth/, storage/objects.json, realtime.json, ai.json, integrations/
 │   └── sync.sh                ← refreshes the mirror from the live app
 │
 ├── docs/butterbase/           ← Journey artifacts
 │   ├── 01-idea.md             ← Product vision
 │   ├── 02-plan.md             ← Schema + RLS + function design
-│   └── 03-preflight.md        ← Account / MCP / app-id check
+│   ├── 03-preflight.md        ← Account / MCP / app-id check
+│   └── …                      ← build log, frontend spec, deferred items
 │
 └── .butterbase/config.json    ← pinned app id + snapshot
 ```
@@ -380,14 +383,16 @@ butterbase repo push --message "follow-up tweaks"
 
 ## 10. Architecture cheat-sheet
 
-- **Database** — Postgres, 11 tables, RLS on every table. Every row keyed on `workspace_id`; access goes through the `memberships` table.
+- **Database** — Postgres, 29 tables (core CRM entities — companies, people, deals, meetings — live in substrate, not Postgres). Workspace-scoped RLS goes through the `memberships` table; `backend/rls/policies.json` currently lists policies for 19 of the 29 tables.
 - **Auth** — email/password + Google OAuth, via Butterbase. JWT is attached to every request by `@butterbase/sdk`.
-- **Realtime** — WebSocket subscriptions on 7 tables. Row events invalidate the matching React Query caches automatically — no manual refetch in components.
+- **Realtime** — WebSocket subscriptions on 17 tables. Row events invalidate the matching React Query caches automatically — no manual refetch in components.
 - **Storage** — presigned-URL upload flow (10 MB / file). See `frontend/src/lib/storage.ts`.
-- **Functions** — TypeScript handlers deployed to Butterbase, invoked via the SDK:
+- **Functions** — 56 TypeScript handlers (HTTP + cron) deployed to Butterbase, invoked via the SDK. Highlights:
   - `summarize-company` — AI overview of a company
-  - `invite-member` — emails a workspace invite (Composio + Gmail)
-  - `accept-invite` — redeems an invite token
+  - `invite-member` / `accept-invite` — emails a workspace invite (Composio + Gmail) and redeems the token
+  - `ingest-gmail` / `ingest-calendar` / `auto-sync-google` — Google sync
+  - `agent-chat`, `ai-search`, `enrich-*` — in-app copilot, NL search, enrichment
+  - campaign, lead-search, meeting-notetaker and social-publishing functions — see `backend/README.md`
 - **AI** — Anthropic Claude Haiku 4.5 via the Butterbase gateway. No API key needed in the frontend.
 - **Substrate** — Companies & People are exported as substrate entities for cross-app identity.
 
@@ -409,7 +414,7 @@ For the full design rationale read `docs/butterbase/02-plan.md`.
 
 **(Path B) Function 500s with `TypeError: ... undefined ... fetch`.** You forgot to set `BUTTERBASE_API_URL` / `BUTTERBASE_APP_ID` / `BUTTERBASE_API_KEY` on the cloned function. See § 5.1.
 
-**(Path B) Invite emails arrive but the link is broken / points to localhost.** `FRONTEND_URL` on `invite-member` is wrong or unset. See § 5.1.
+**(Path B) Invite emails arrive but the link is broken / points to localhost.** `BUTTERBASE_FRONTEND_URL` on `invite-member` is wrong or unset. See § 5.1.
 
 **(Path B) "Sign in with Google" loops or errors with `redirect_uri_mismatch`.** The cloned app inherited the provider list but not your Google client. Either disable Google or run `manage_oauth configure` with your own client and redirect URI. See § 5.2.
 

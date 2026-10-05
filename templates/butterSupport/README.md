@@ -36,12 +36,12 @@ The deep tier is where it diverges: link your main product app and the agent rea
 
 | Subsystem | What it is |
 |---|---|
-| **20 Postgres tables** | Tickets, messages, agent threads + messages + proposals, diagnoses, pattern signals, escalations, RAG docs, escalation targets, autonomy settings, capability config, widget secrets, the structured `support_skill`, activity log, integration plumbing, memberships, app allowlist |
+| **20 Postgres tables** | Tickets, messages, agent threads + messages + proposals, diagnoses, pattern signals, escalations, RAG docs, escalation targets, autonomy settings, capability config, legacy widget secrets, the structured `support_skill`, activity log, integration plumbing, memberships, app allowlist |
 | **30 functions** | Auth hook · widget intake · per-ticket ops · admin/setup · escalation outbox · crons (see `backend/functions/`) |
 | **2 Durable Objects** (`SupportTicketDO`, `WidgetTicketDO`) | `SupportTicketDO`: per-ticket live agent loop with 6 tools (`search_docs`, `propose_diagnosis`, `propose_draft_reply`, `propose_escalation`, `request_followup_question`, `propose_action`); WebSocket stream to founder UI; single-driver lock. `WidgetTicketDO`: per-ticket WebSocket push to the customer widget |
 | **1 RAG collection** (`support-docs`) | Customer's help center, scraped from URLs or uploaded files (PDF/MD/TXT/HTML/CSV/JSON/DOCX/XLSX/PPTX) |
 | **1 platform agent** (`support-overview`) | Read-only summary your Claude can call: open tickets, oldest waiting, surfaced patterns |
-| **2 frontend artifacts** | Vite + React founder console + embeddable widget (53KB gzipped) |
+| **2 frontend artifacts** | Vite + React founder console + embeddable widget (~95KB gzipped, measured with `npm run build:widget`) |
 | **Native magic-link auth** | + email/password fallback. First user is auto-owner; admins invite the rest via `app_allowlist`. |
 
 ## Architecture in one diagram
@@ -53,10 +53,10 @@ Customer's product                              YOUR cloned support recipe
 [end user]                                     │  founder console (SPA)   │
    │                                           │  - inbox, ticket detail  │
    ▼                                           │  - draft approval        │
-[<script src=widget.js                         │  - settings, setup       │
-   data-user-payload=                          └──────┬───────────────────┘
-   data-user-signature=…>]                            │ realtime + DO WS
-   │ HMAC POST                                        │
+[<script async src=widget.js                   │  - settings, setup       │
+   data-app-id=…>]                             └──────┬───────────────────┘
+   │ POST + anonymous visitor_token                   │ realtime + DO WS
+   │ (+ optional identify())                          │
    ▼                                           ┌──────▼───────────────────┐
 [widget-ingest] ─────►  Postgres ◄─── realtime ──────┤ SupportTicketDO    │
    │                       │                         │ (1 per ticket)     │
@@ -157,7 +157,7 @@ Auto-minted on clone (the cloner doesn't need to set these manually):
 |---|---|
 | `request-doc-upload-url`, `ingest-docs`, `delete-docs-source`, `fetch-ai-usage`, `refresh-docs` | `BUTTERBASE_API_KEY` (service key, app-scoped) — `auto_mint_api_key` at clone time |
 | `SupportTicketDO` | `BUTTERBASE_API_KEY`, `BUTTERBASE_API_URL`, `BUTTERBASE_APP_ID`, `RAG_COLLECTION`, `DEFAULT_MODEL`, `HAIKU_MODEL` |
-| `execute-escalation` | `SUBSTRATE_OUTBOX_SECRET` — **you must set this** after registering the outbox target (the substrate gives you the signing secret) |
+| `execute-escalation` | `SUBSTRATE_OUTBOX_SECRET` — set this after registering the outbox target (the substrate gives you the signing secret). It verifies the `X-Butterbase-Signature` HMAC on incoming outbox calls; if unset, the function logs a warning and **skips verification (dev only)**, so set it in production. |
 
 Vite frontend (set at deploy build time):
 ```
@@ -178,6 +178,8 @@ The widget mints an anonymous visitor token (stored in `localStorage` on your or
 ```
 
 Other methods: `open()`, `close()`, `toggle()`, `reset()` (see `frontend/src/widget/Widget.tsx`).
+
+> **Legacy widget secret:** the `widget_secrets` table and the admin-only `rotate-widget-secret` function still ship, but nothing in `backend/functions/` or the Durable Objects reads `widget_secrets` or verifies a signature on widget requests (`widget-ingest` is `auth: none` and validates only the `visitor_token` format). Treat it as dead code left from the earlier signed-embed design; you do not need to rotate or use it.
 
 ## Safety floor (non-editable)
 
@@ -206,7 +208,7 @@ See [`docs/butterbase/06-v1-deferred.md`](./docs/butterbase/06-v1-deferred.md) f
 - **Outbound disclosure filter** — placeholder in `send-draft-reply`. Deep-tier work.
 - **Multi-page web crawler** — `ingest-docs` web mode is single-page. Customers call it per URL.
 - **Skill / Autonomy / Integrations settings UI** — read-only stubs in v1. The data is editable via the auto-API; UI polish is post-v1.
-- **Subdomain `/fn/` routing for auth:none functions** — there's a Butterbase platform bug. Widget hits `api.butterbase.ai/v1/{app_id}/fn/*` directly. See `06-v1-deferred.md` DEP1.
+- **Subdomain `/fn/` routing for auth:none functions** — `06-v1-deferred.md` DEP1 recorded a June 2026 "ReadableStream is disturbed" 500 on `<subdomain>.butterbase.dev/fn/*`. The current control-api route (`services/control-api/src/routes/subdomain-api.ts`) maps `/fn/:name` to `/v1/{app_id}/fn/:name`, but we have not re-tested DEP1 live. The widget avoids the question: it always calls `api.butterbase.ai/v1/{app_id}/fn/*` directly (`frontend/src/widget/lib.ts`).
 
 ## Repo layout
 

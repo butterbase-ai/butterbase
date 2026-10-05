@@ -40,9 +40,9 @@ npm test
 
 Two test files:
 
-1. **`worker.test.ts`** — Native Vitest against a hand-mocked `env.ASSETS`. Fast, deterministic, covers the resolution chain, SPA fallback, honest 404s for asset-shaped misses, error handling. ~10ms.
+1. **`worker.test.ts`** — Native Vitest against a hand-mocked `env.ASSETS`. Fast, deterministic, covers the resolution chain, SPA fallback, honest 404s for asset-shaped misses, error handling. ~20ms.
 
-2. **`worker.miniflare.test.ts`** — Boots the actual compiled worker against Miniflare 4 (real `workerd` runtime + real Assets binding configured with `html_handling: 'none'`). Catches regressions where the hand-mock and real runtime diverge. ~350ms.
+2. **`worker.miniflare.test.ts`** — Boots the actual compiled worker against Miniflare 4 (real `workerd` runtime + real Assets binding configured with `html_handling: 'none'`). Catches regressions where the hand-mock and real runtime diverge. ~2s.
 
 Note: Miniflare's default routes assets BEFORE the user worker (the standalone Workers Static Assets behavior). In a WfP dispatch namespace, the user worker is the entry point and `env.ASSETS` is just a binding it calls. The test enables `routerConfig.invoke_user_worker_ahead_of_assets: true` to match prod.
 
@@ -71,7 +71,7 @@ curl -sI http://localhost:8787/about             # 200 + text/html (resolves /ab
 
 ## Local dev — Mode 2: docker-compose service
 
-`docker-compose.local.yml` ships a `miniflare-frontend` service:
+The managed-platform monorepo's `docker-compose.local.yml` ships a `miniflare-frontend` service (it is not in this OSS repo's compose file, and its Dockerfile build context is that monorepo's root, so this mode only works there; OSS users should use Mode 1):
 
 ```
 docker compose -f docker-compose.local.yml up -d miniflare-frontend
@@ -122,4 +122,4 @@ Apps that don't ship `_redirects` keep the existing default: direct asset lookup
 
 ## Production deployment
 
-This package's `WORKER_SOURCE` is uploaded to the WfP dispatch namespace as `worker.mjs` by `services/control-api/src/services/cloudflare-wfp.ts:deployUserWorker`. After upload, `services/control-api/src/services/deployment.service.ts:deployViaWfp` runs the SPA routing probe (PR #36) against the live URL and fails the deploy with `SPA_ROUTING_PROBE_FAILED` if the worker's fallback isn't resolving deep paths to 200 + text/html. Both layers together close the bug-via-user-complaint path.
+This package's `WORKER_SOURCE` is uploaded to the WfP dispatch namespace as `worker.mjs` by `services/control-api/src/services/cloudflare-wfp.ts:deployUserWorker`. After upload, `services/control-api/src/services/deployment.service.ts:deployViaWfp` runs the SPA routing probe (`feat(deploy): probe SPA routing after WfP deploy`, PR #36) against the live URL and fails the deploy with `SPA_ROUTING_PROBE_FAILED` if the worker's fallback isn't resolving deep paths to 200 + text/html. Both layers together close the bug-via-user-complaint path.

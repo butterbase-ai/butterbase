@@ -68,15 +68,15 @@ uvicorn agent_runtime.app:app --reload --port 7140
 
 ## Running with a fake OpenRouter
 
-Set `OPENROUTER_BASE_URL` to a local mock server and `OPENROUTER_API_KEY` to any non-empty string. The `tests/live/` helpers include `fake_openrouter.py` which can serve as a drop-in:
+Set `OPENROUTER_BASE_URL` to a local mock server and `OPENROUTER_API_KEY` to any non-empty string. The `tests/live/` helpers include `fake_openrouter.py`, a stdlib server (`python tests/live/fake_openrouter.py [PORT]`, default port 7141) that you start by hand; it can serve as a drop-in:
 
 ```bash
-OPENROUTER_BASE_URL=http://localhost:9000 \
+OPENROUTER_BASE_URL=http://localhost:7141 \
 OPENROUTER_API_KEY=fake \
 uvicorn agent_runtime.app:app --reload --port 7140
 ```
 
-This is useful for offline development and CI runs that should not hit the real API.
+This is useful for offline development; the `tests/live/e2e_*.py` scripts expect it running separately (e.g. on 7141) and are not run in CI.
 
 ## Tests
 
@@ -92,7 +92,7 @@ Step checkpoints are written by `src/agent_runtime/checkpoint.py` to the `agent_
 
 ## Deployment
 
-Fly app: `butterbase-agent-runtime` (`services/agent-runtime/fly.toml`). The service is internal-only and not exposed via a public hostname. The `fly.toml` sets only `PORT=7140` and `ENV=production` (which makes `INTERNAL_SERVICE_TOKEN` and `AUTH_ENCRYPTION_KEY` mandatory at boot); secrets (`AUTH_ENCRYPTION_KEY`, `INTERNAL_SERVICE_TOKEN`, `OPENROUTER_API_KEY`, `CONTROL_PLANE_URL`) are stored as Fly secrets. CI builds the Docker image and deploys to Fly on every push to `main`.
+Fly app: `butterbase-agent-runtime` (`services/agent-runtime/fly.toml`). The service is internal-only and not exposed via a public hostname. The `fly.toml` sets only `PORT=7140` and `ENV=production` (which makes `INTERNAL_SERVICE_TOKEN` and `AUTH_ENCRYPTION_KEY` mandatory at boot); secrets (`AUTH_ENCRYPTION_KEY`, `INTERNAL_SERVICE_TOKEN`, `OPENROUTER_API_KEY`, `CONTROL_PLANE_URL`) are stored as Fly secrets. Deploys are manual (there is no push-triggered CI deploy): in the managed platform, agent-runtime is bundled into the platform Fly image and shipped by the `deploy.yml` `workflow_dispatch` workflow in the private parent repo.
 
 ## Troubleshooting
 

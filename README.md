@@ -78,7 +78,7 @@ An open-source CRM for founders. Companies, people, deals (kanban), meetings, no
 
 Core CRM entities are stored as **substrate entities** — a cross-app, agent-readable memory layer — so other Butterbase apps you build (like butterSupport) share the same customer identity without any integration code between them.
 
-**What's included:** 29 Postgres tables · 55+ serverless functions · Workspace AI agent (`agent-chat`) · Gmail + Calendar ingest via Composio · Enrichment (People Data Labs + Exa) · Social publishing via Composio · Realtime on 7 tables · Google OAuth + email auth · RLS on every table
+**What's included:** 29 Postgres tables · 56 serverless functions · Workspace AI agent (`agent-chat`) · Gmail + Calendar ingest via Composio · Enrichment (People Data Labs + Exa) · Social publishing via Composio · Realtime on 17 tables · Google OAuth + email auth · RLS on every table
 
 ```bash
 butterbase clone app_44zjayftl7b3 butterbaseCRM
@@ -100,7 +100,7 @@ It works in two depths from the same clone:
 - **Commodity tier** — paste a help-center URL, get a working agent in under 60 seconds. No product integration required.
 - **Deep tier** — link your main product app so the agent reads live substrate signals and can propose governed actions (resend verification, retry webhook, flag bug, apply credit).
 
-**What's included:** 20 Postgres tables · 23 serverless functions · 1 Durable Object (`SupportTicketDO`) · RAG collection over your help center · Embeddable widget (53KB gzipped) · HMAC-signed user identity · Founder approval on every customer-visible reply · Escalation to Slack or Gmail via Composio
+**What's included:** 20 Postgres tables · 30 serverless functions · 2 Durable Objects (`SupportTicketDO`, `WidgetTicketDO`) · RAG collection over your help center · Embeddable widget (53KB gzipped) · HMAC-signed user identity · Founder approval on every customer-visible reply · Escalation to Slack or Gmail via Composio
 
 ```bash
 butterbase clone app_0ycj4ad7odud my-support
