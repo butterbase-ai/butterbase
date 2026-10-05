@@ -12,7 +12,7 @@ Most CRMs are a database with forms on top. This one keeps its core entities in 
 
 A working CRM you can sign into and use on day one. Here's what the product looks like:
 
-- **Companies and contacts** — a searchable directory with company profiles, linked people, open deals, meeting history, notes, and an activity feed. Enrichment runs automatically when you add a new company: logo, description, headcount, and industry pulled from People Data Labs (with Exa as fallback).
+- **Companies and contacts** — a searchable directory with company profiles, linked people, open deals, meeting history, notes, and an activity feed. Company and person enrichment uses the Butterbase People API (logo, description, location, and profile fields where available).
 - **Deals** — a kanban board with customizable stages. Drag deals through your pipeline, attach notes and files, link meetings and contacts.
 - **Gmail and Calendar sync** — connect your Google account and the CRM ingests your email threads and calendar events. Counterparties get upserted as contacts and companies automatically. Your CRM reflects your actual communication without manual entry.
 - **Campaigns** — build contact lists, send email campaigns, and track per-contact delivery and open status.
@@ -33,7 +33,7 @@ If you also run butterSupport, the two apps share the same customer identity thr
 | **55+ functions** | Gmail/Calendar ingest · meeting notetaker bot + transcript ingest · company/person enrichment · duplicate finder · deal proposals · lead search & save · email campaigns · multi-platform social publishing + comment campaigns · workspace AI agent chat · substrate proxy · crons |
 | **Workspace AI agent** | Chat over your CRM with a proposal flow — the agent proposes deals, edits and actions; a human approves before anything is written |
 | **Integrations** | Composio-backed Gmail and Google Calendar; X/Twitter, Reddit, Instagram and TikTok for social publishing — each user connects their own accounts |
-| **Realtime** | 7 tables broadcast INSERT/UPDATE/DELETE over WebSocket to the SPA |
+| **Realtime** | 17 tables broadcast INSERT/UPDATE/DELETE over WebSocket to the SPA |
 | **Frontend** | Vite + React + Tailwind + shadcn/ui |
 | **Auth** | Email/password + Google OAuth, with an `app_allowlist` login gate and admin-issued invites |
 | **RLS** | Row-level security on every table, scoped by workspace membership |

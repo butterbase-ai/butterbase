@@ -318,6 +318,10 @@ const { data } = await bb.integrations
   .execute('GOOGLECALENDAR_EVENTS_LIST', { timeMin: new Date().toISOString() });
 ```
 
+## Other clients
+
+The client also exposes `butterbase.realtime` (table-change subscriptions and presence: `connect`, `on`, `trackPresence`, `onPresence`, `send`), `butterbase.ai` (`chat`, `chatStream`, `embed`, `decide`, `listModels`, `getConfig`, `getUsage`), `butterbase.rag` (collections, `ingest`, documents, `query`), `butterbase.billing` (app-level Stripe Connect plans, products, subscriptions, orders), `butterbase.partners`, `butterbase.people`, `butterbase.substrate`, and `butterbase.admin.*` (schema, RLS, OAuth, config, functions, API keys, audit logs, frontend, domains, Durable Objects, edge SSR, migrations). The package also exports `defineKvConfig` and the `Kv*` error classes.
+
 ## Error handling
 
 All client methods return `{ data, error }`. When the backend returned a
@@ -350,4 +354,4 @@ fetch yourself and want to dispatch to the same typed classes.
 
 ## License
 
-MIT
+Apache-2.0

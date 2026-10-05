@@ -20,7 +20,7 @@ Install Butterbase Skills for Claude Code. This auto-configures the MCP server a
 claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
 
 # Install the plugin
-claude plugin install butterbase
+claude plugin install butterbase-skills@butterbase-skills
 ```
 
 Set your API key:
@@ -30,8 +30,8 @@ export BUTTERBASE_API_KEY=bb_sk_your_key_here
 ```
 
 The plugin includes:
-- **Auto-configured MCP server** — 43 tools and 1 prompt available immediately
-- **6 skills** — `/butterbase-skills:build-app`, `/butterbase-skills:schema`, `/butterbase-skills:deploy`, `/butterbase-skills:debug-rls`, `/butterbase-skills:function`, `/butterbase-skills:contributing`
+- **Auto-configured MCP server** — nearly 40 tools and 1 prompt available immediately
+- **39 skills and 34 slash commands** — including the guided `/butterbase-skills:journey` (idea → plan → build → deploy), plus `/butterbase-skills:build-app`, `/butterbase-skills:schema`, `/butterbase-skills:deploy`, `/butterbase-skills:debug-rls`, `/butterbase-skills:function`, and more
 - **Always-on context** — environment variables, workflows, and patterns
 
 ### Option 2: CLI Setup

@@ -6,32 +6,30 @@ Demonstrates using an **external MCP server** as an agent tool source. This exam
 
 ```bash
 # 1. Register the MCP server with the app.
-butterbase mcp-servers add \
-  --name "Stripe docs" \
-  --url "https://mcp.stripe.com" \
-  --auth-token "$STRIPE_DOCS_TOKEN"
+curl -X POST https://api.butterbase.ai/v1/<app_id>/mcp-servers \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "stripe-docs", "transport": "streamable_http", "url": "https://mcp.stripe.com", "auth_header": "Bearer '"$STRIPE_DOCS_TOKEN"'"}'
 
-# Note the printed server_id — you'll paste it into agent-spec.json.
+# Note the returned server.id — you'll paste it into agent-spec.json.
 
 # 2. Probe to load the server's advertised tool list.
-butterbase mcp-servers probe <server_id>
+curl -X POST https://api.butterbase.ai/v1/<app_id>/mcp-servers/<server_id>/probe \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY"
 
 # 3. Edit agent-spec.json and replace REPLACE_WITH_SERVER_ID with the UUID printed above.
 
-# 4. Create the agent.
-butterbase agents create \
-  --name docs-helper \
-  --display-name "Stripe docs helper" \
-  --default-model anthropic/claude-3.5-sonnet \
-  --spec ./agent-spec.json
+# 4. Create the agent (MCP tool manage_agents).
+#    { action: "create", app_id, name: "docs-helper", display_name: "Stripe docs helper",
+#      default_model: "anthropic/claude-3.5-sonnet", graph_spec: <contents of ./agent-spec.json> }
 ```
 
 ## Run
 
 ```bash
-butterbase agents run docs-helper \
-  --input '{"question": "How do I create a subscription with a trial period?"}' \
-  --stream
+curl -X POST https://api.butterbase.ai/v1/<app_id>/agents/docs-helper/runs \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"input": {"question": "How do I create a subscription with a trial period?"}}'
+# Returns 202 {run_id, status}. Poll GET /v1/<app_id>/agents/docs-helper/runs/<run_id>/events.json
 ```
 
 You'll see the agent issue one or more `search` tool calls to the Stripe MCP server, then synthesize an answer.

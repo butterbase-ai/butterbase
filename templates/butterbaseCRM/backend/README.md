@@ -10,19 +10,20 @@ This folder is a **read-only mirror** of what currently lives on the Butterbase 
 backend/
 ├── README.md                       # this file
 ├── sync.sh                         # pulls live state into the files below
-├── schema.json                     # 22 tables + indexes (manage_schema get)
+├── schema.json                     # 29 tables + indexes (manage_schema get)
 ├── auth/
 │   └── config.json                 # JWT TTLs, OAuth providers, password rules
 ├── rls/
 │   ├── policies.sql                # CREATE POLICY statements (auto-generated from policies.json)
 │   └── policies.json               # raw output of manage_rls list / butterbase rls list
-├── functions/                      # one folder per deployed function (32 today)
+├── functions/                      # one folder per deployed function (56 today)
 │   └── <name>/
 │       ├── handler.ts              # the deployed source
 │       └── function.json           # triggers, timeoutMs, memoryLimitMb, agent_tool flags
 ├── integrations/
 │   └── integrations.json           # configured Composio toolkits
-├── storage.json                    # storage limits + flags
+├── storage/
+│   └── objects.json                # storage object listing
 ├── realtime.json                   # which tables broadcast row changes
 └── ai.json                         # default model + allowed models
 ```
@@ -31,12 +32,12 @@ backend/
 
 | Surface | Where | Notes |
 |---|---|---|
-| **Database** | live Postgres on Butterbase, `app_44zjayftl7b3` | 22 tables, RLS on every table |
+| **Database** | live Postgres on Butterbase, `app_44zjayftl7b3` | 29 tables, RLS on every table |
 | **API** | auto-generated REST at `https://api.butterbase.ai/v1/app_44zjayftl7b3/<table>` | accessed from the frontend via `@butterbase/sdk` |
 | **Auth** | `/auth/app_44zjayftl7b3/...` | email/password + Google OAuth |
 | **Storage** | presigned-URL flow at `/storage/app_44zjayftl7b3/...` | 10 MB/file cap |
-| **Realtime** | `wss://api.butterbase.ai/v1/app_44zjayftl7b3/realtime?token=<jwt>` | 7 tables broadcast INSERT/UPDATE/DELETE |
-| **Functions** | `/v1/app_44zjayftl7b3/fn/<name>` | 32 functions (HTTP + cron) — see below |
+| **Realtime** | `wss://api.butterbase.ai/v1/app_44zjayftl7b3/realtime?token=<jwt>` | 17 tables broadcast INSERT/UPDATE/DELETE |
+| **Functions** | `/v1/app_44zjayftl7b3/fn/<name>` | 56 functions (HTTP + cron) — see `functions/` and below |
 | **Integrations** | via Composio (gmail) | end-users connect their own accounts |
 | **AI gateway** | `/v1/app_44zjayftl7b3/chat/completions` | locked to `anthropic/claude-haiku-4.5` |
 | **Substrate** | linked to owner's substrate user | `ctx.substrate` injected in every function |
@@ -99,7 +100,7 @@ See `rls/policies.sql` for the full picture.
 
 ## Functions
 
-The function set has grown well past the original three (`summarize-company` / `invite-member` / `accept-invite`). The list below is generated from the live `/functions` endpoint; the `function.json` file in each folder is the authoritative metadata (triggers, timeout, memory, agent-tool flags).
+The function set has grown well past the original three (`summarize-company` / `invite-member` / `accept-invite`). The list below is a partial snapshot (the social-publishing, lead-search and several other functions are not listed; see `functions/`); the `function.json` file in each folder is the authoritative metadata (triggers, timeout, memory, agent-tool flags).
 
 | Name | Trigger | Description |
 |---|---|---|
@@ -115,8 +116,8 @@ The function set has grown well past the original three (`summarize-company` / `
 | `create-campaign-list` | http | Create a saved audience list (SQL). Members are substrate entity ids, pre-resolved with email + vars snapshots. |
 | `crm-record-activity` | http | Shared write path: dedupe + insert an activity row. Dedupes on `(workspace_id, kind, payload->>dedupe_key)`. |
 | `crm-upsert-meeting` | http | Substrate-backed meeting upsert with `as_user_id` service mode + `_custom_fields_replace` flag. |
-| `enrich-company` | http | **STUB** post-substrate migration. TODO: rewrite to enrich a substrate company entity via `updateEntityMerge`. |
-| `enrich-person` | http | **STUB** post-substrate migration. TODO: rewrite to enrich a substrate person entity via `updateEntityMerge`. |
+| `enrich-company` | http | Enrich a substrate company entity using the Butterbase People API (light pass: logo, description, location). |
+| `enrich-person` | http | Enrich a substrate person entity using the Butterbase People API (LinkedIn profile lookup first). |
 | `find-duplicates` | http | **STUB** post-substrate migration. Was SQL self-join dedup on people/companies. TODO: rewrite to scan substrate entities. |
 | `get-meeting-notes` | http | Bundle meeting notetaker view: source_artifact (transcript) + decisions/commitments/learnings linked to the meeting. |
 | `ingest-calendar` | http | Calendar ingest — substrate-native. Incremental via time-window keyed off `last_synced_at` (1h overlap). |

@@ -29,10 +29,11 @@ This project is connected to Butterbase app: `{{APP_ID}}`
 
 - `npm run dev` - Start development server
 - `npm run build` - Build for production
+- `npm run lint` - Lint with ESLint
 - `npm run preview` - Preview production build
 
 ## Learn More
 
-- [Butterbase Documentation](https://docs.butterbase.com)
+- [Butterbase Documentation](https://docs.butterbase.ai)
 - [React Documentation](https://react.dev)
 - [Vite Documentation](https://vitejs.dev)

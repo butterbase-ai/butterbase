@@ -37,8 +37,8 @@ The deep tier is where it diverges: link your main product app and the agent rea
 | Subsystem | What it is |
 |---|---|
 | **20 Postgres tables** | Tickets, messages, agent threads + messages + proposals, diagnoses, pattern signals, escalations, RAG docs, escalation targets, autonomy settings, capability config, widget secrets, the structured `support_skill`, activity log, integration plumbing, memberships, app allowlist |
-| **23 functions** | Auth hook · widget intake (5) · per-ticket ops (5) · admin/setup (7) · escalation outbox · 4 crons |
-| **1 Durable Object** (`SupportTicketDO`) | Per-ticket live agent loop with 5 tools (`search_docs`, `propose_diagnosis`, `propose_draft_reply`, `propose_escalation`, `request_followup_question`); WebSocket stream to founder UI; single-driver lock |
+| **30 functions** | Auth hook · widget intake · per-ticket ops · admin/setup · escalation outbox · crons (see `backend/functions/`) |
+| **2 Durable Objects** (`SupportTicketDO`, `WidgetTicketDO`) | `SupportTicketDO`: per-ticket live agent loop with 6 tools (`search_docs`, `propose_diagnosis`, `propose_draft_reply`, `propose_escalation`, `request_followup_question`, `propose_action`); WebSocket stream to founder UI; single-driver lock. `WidgetTicketDO`: per-ticket WebSocket push to the customer widget |
 | **1 RAG collection** (`support-docs`) | Customer's help center, scraped from URLs or uploaded files (PDF/MD/TXT/HTML/CSV/JSON/DOCX/XLSX/PPTX) |
 | **1 platform agent** (`support-overview`) | Read-only summary your Claude can call: open tickets, oldest waiting, surfaced patterns |
 | **2 frontend artifacts** | Vite + React founder console + embeddable widget (53KB gzipped) |
@@ -91,15 +91,11 @@ Customer's product                              YOUR cloned support recipe
 
 3. **Setup wizard, step 1:** paste your help-center URL. The recipe crawls + ingests into the `support-docs` RAG collection.
 
-4. **Setup wizard, step 2:** click "Generate widget secret." Copy the secret — **shown once.** Paste the embed snippet into your product's HTML (server-renders the HMAC signature):
+4. **Setup wizard, step 2:** paste the embed snippet into your product's HTML:
    ```html
-   <script src="https://api.butterbase.ai/widget.js"
-     data-recipe-base="https://<your-subdomain>.butterbase.dev"
-     data-user-payload="<base64 of {user_id,email,name?,plan?}>"
-     data-user-signature="<HMAC-SHA256 of ts.payload with widget secret>"></script>
-   <div id="butter-support-widget"></div>
+   <script async src="https://<your-subdomain>.butterbase.dev/widget.js" data-app-id="<your_clone_app_id>"></script>
    ```
-   See [Widget signing](#widget-signing) for the HMAC computation.
+   See [Identifying users](#identifying-users) to attach the signed-in user to tickets.
 
 5. **Setup wizard, step 3:** choose escalation channel (Slack or Gmail via Composio).
 
@@ -113,7 +109,7 @@ Commodity tier ships value day-zero. Deep tier requires your **main product app*
 
 Run on your main product app:
 ```bash
-butterbase app link-substrate <main_app_id> --user <your_substrate_user_id>
+butterbase apps link-substrate <main_app_id>
 ```
 Now this support recipe and your main app share the same substrate entity graph.
 
@@ -145,14 +141,13 @@ Per capability, in the founder console → Settings → Action capabilities:
 For each enabled capability, the console reveals:
 1. A signing secret (shown once)
 2. An adapter snippet you paste into a function in your main product app
-3. A registration command to run from your main app:
+3. A registration call (there is no CLI command; use the substrate REST API, `PUT /v1/me/substrate/outbox-targets/<capability>`):
    ```
-   butterbase substrate register-outbox-target support.resend_verification_email \
-     --webhook-url https://<your-main-app>.butterbase.dev/fn/support-resend-verification \
-     --signing-secret "<from console>"
+   { "webhook_url": "https://<your-main-app>.butterbase.dev/fn/support-resend-verification",
+     "signing_secret": "<from console>" }
    ```
 
-See [`adapter-snippets/`](./adapter-snippets/) for ready-to-paste reference handlers. Stay in commodity tier as long as you want — enabling capabilities is optional.
+Stay in commodity tier as long as you want — enabling capabilities is optional.
 
 ## Env vars
 
@@ -171,34 +166,18 @@ VITE_BUTTERBASE_API_URL=https://api.butterbase.ai
 VITE_BUTTERBASE_SUBDOMAIN=<your_subdomain>
 ```
 
-## Widget signing
+## Identifying users
 
-Server-side (NOT in browser), on every page load that renders the widget snippet:
+The widget mints an anonymous visitor token (stored in `localStorage` on your origin) and works with no server-side code. To attach the signed-in user to tickets, call `identify` from your page (identity is client-supplied and not signature-verified):
 
-```typescript
-import { createHmac } from 'crypto';
-
-const payload = Buffer.from(JSON.stringify({
-  user_id: currentUser.id,
-  email: currentUser.email,
-  name: currentUser.displayName,
-  plan: currentUser.plan,
-})).toString('base64');
-
-const ts = Date.now();
-const signature = createHmac('sha256', WIDGET_SECRET)
-  .update(`${ts}.${payload}`)
-  .digest('hex');
-```
-
-Then render:
 ```html
-<script src="..."
-  data-user-payload="<%= payload %>"
-  data-user-signature="<%= signature %>"></script>
+<script>
+  window.ButterSupport = window.ButterSupport || { q: [] };
+  window.ButterSupport.q.push(['identify', { user_id: '...', email: '...', name: '...' }]);
+</script>
 ```
 
-Window: 24 hours from `ts`. The widget detects expiry via a 401 response, dispatches a `widget:auth-expired` `CustomEvent` on `window`, and pauses polling until the host calls `window.ButterSupport.updateCreds({ userPayload, signature, userTs })` with freshly-minted values. Refresh proactively (e.g. every ~12h) from a server endpoint that holds the widget secret — don't expose the secret to the browser.
+Other methods: `open()`, `close()`, `toggle()`, `reset()` (see `frontend/src/widget/Widget.tsx`).
 
 ## Safety floor (non-editable)
 
@@ -226,7 +205,6 @@ See [`docs/butterbase/06-v1-deferred.md`](./docs/butterbase/06-v1-deferred.md) f
 - **Customer-facing autonomous mode** — v1 is founder-approve-every-reply. Autonomy dial exists; default is `draft_for_approval` for every issue type.
 - **Outbound disclosure filter** — placeholder in `send-draft-reply`. Deep-tier work.
 - **Multi-page web crawler** — `ingest-docs` web mode is single-page. Customers call it per URL.
-- **Widget WebSocket** — v1 widget polls every 5s. Public WS endpoint is post-v1.
 - **Skill / Autonomy / Integrations settings UI** — read-only stubs in v1. The data is editable via the auto-API; UI polish is post-v1.
 - **Subdomain `/fn/` routing for auth:none functions** — there's a Butterbase platform bug. Widget hits `api.butterbase.ai/v1/{app_id}/fn/*` directly. See `06-v1-deferred.md` DEP1.
 
@@ -237,13 +215,9 @@ See [`docs/butterbase/06-v1-deferred.md`](./docs/butterbase/06-v1-deferred.md) f
 ├── README.md                   # this file
 ├── agents/
 │   └── support-overview.json   # platform-agent spec — re-imported on clone
-├── adapter-snippets/           # paste-into-your-main-app handlers (deep tier)
-│   ├── support-resend-verification.ts
-│   ├── support-retry-webhook.ts
-│   ├── support-flag-bug.ts
-│   ├── support-apply-credit.ts
-│   ├── _lib/verify-sig.ts
-│   └── _types/support-actions.d.ts
+├── backend/                    # read-only mirror of the live app (schema, RLS, functions, DOs, configs)
+├── durable-objects/            # SupportTicketDO / WidgetTicketDO source
+├── DEPLOY.md                   # frontend deploy checklist (widget.js + subdomain)
 ├── frontend/                   # Vite + React console + widget
 │   ├── src/console/            # Founder console SPA
 │   ├── src/widget/             # Embeddable customer widget
@@ -256,7 +230,8 @@ See [`docs/butterbase/06-v1-deferred.md`](./docs/butterbase/06-v1-deferred.md) f
     ├── 03b-docs-cache.md       # Cached Butterbase docs
     ├── 04-build-log.md         # Stage-by-stage build log
     ├── 05-frontend-spec.md     # Spec the spawned Claude built from
-    └── 06-v1-deferred.md       # Known limitations + post-v1 work
+    ├── 06-v1-deferred.md       # Known limitations + post-v1 work
+    └── 07-template.md          # Template publication details
 ```
 
 ## Local development
@@ -270,9 +245,9 @@ npm install
 npm run dev    # http://localhost:5173
 
 # Functions, DO, schema — use MCP via Claude / Cursor, or the CLI:
-butterbase functions deploy ./src/fns/<name>.ts
-butterbase do deploy ./src/do/SupportTicketDO.ts
-butterbase schema apply ./schema.json
+butterbase functions deploy ./backend/functions/<name>/handler.ts
+butterbase do deploy ./durable-objects/support-ticket-do.ts
+butterbase schema apply ./backend/schema.json
 ```
 
 ## Contributing

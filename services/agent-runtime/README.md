@@ -2,7 +2,7 @@
 
 ## What this service does
 
-agent-runtime compiles declarative graph specs (expressed as Pydantic models) into runnable LangGraph graphs and executes them. It is an internal service: control-api calls it over the `INTERNAL_SERVICE_TOKEN` channel, and it is never reachable from the public internet. Each run persists its checkpoint state to Postgres and emits incremental events to Redis so control-api can stream them to clients.
+agent-runtime compiles declarative graph specs (expressed as Pydantic models) into runnable async graph runners (llm tool-calling loop, tool, and end nodes) and executes them. It is an internal service: control-api calls it over the `INTERNAL_SERVICE_TOKEN` channel, and it is never reachable from the public internet. Each run persists per-step checkpoint state to Postgres (`agent_checkpoints` table) and emits incremental events to Redis so control-api can stream them to clients.
 
 ## Architecture
 
@@ -11,9 +11,9 @@ control-api
     │  (internal-service-token, HTTP)
     ▼
 agent-runtime
-    ├── Pydantic spec model  →  LangGraph compiler
+    ├── Pydantic spec model  →  graph compiler
     │       └── tool sources: built-in | MCP | function
-    ├── Postgres checkpointer  (agent_runtime schema, same DB as control-plane)
+    ├── Postgres checkpointer  (agent_checkpoints table, runtime DB)
     └── Redis event bus        (run events streamed back to control-api)
 ```
 
@@ -33,7 +33,8 @@ pip install -e '.[dev]'
 Required environment variables:
 
 ```bash
-# Postgres connection string for the control-plane DB
+# Postgres connection string (single-region fallback; or set BUTTERBASE_REGIONS
+# + RUNTIME_DB_URL_<REGION>, or RUNTIME_DB_URL)
 CONTROL_PLANE_URL=postgres://postgres:postgres@localhost:5432/butterbase_control
 
 # OpenRouter credentials
@@ -47,8 +48,11 @@ AUTH_ENCRYPTION_KEY=<64-hex-chars>
 # Shared secret between control-api and agent-runtime
 INTERNAL_SERVICE_TOKEN=<token>
 
-# Base URL control-api uses to call back into itself (e.g. for HITL callbacks)
+# Base URL of control-api for callbacks (default http://control-api:4000)
 CONTROL_API_URL=http://localhost:3000
+
+# Redis for run events (default redis://redis:6379)
+REDIS_URL=redis://localhost:6379
 ```
 
 Start the server:
@@ -61,14 +65,6 @@ INTERNAL_SERVICE_TOKEN=<token> \
 CONTROL_API_URL=http://localhost:3000 \
 uvicorn agent_runtime.app:app --reload --port 7140
 ```
-
-## Running with the local docker-compose
-
-```bash
-docker compose -f docker-compose.local.yml up agent-runtime
-```
-
-All required env vars are mapped in `docker-compose.local.yml`; no extra configuration is needed beyond what you set there.
 
 ## Running with a fake OpenRouter
 
@@ -90,13 +86,13 @@ pytest
 
 Tests live directly under `tests/` (flat layout). The `tests/live/` subdirectory contains end-to-end scripts that require a running stack (`fake_control_api.py`, `fake_mcp_server.py`, `fake_openrouter.py`, and scenario runners). Flat tests cover individual units such as the compiler, spec model, tool sources, crypto, events, checkpointing, and HTTP routes.
 
-## Checkpointer schema
+## Checkpointer
 
-LangGraph's `PostgresSaver` bootstraps the `agent_runtime` schema in the control-plane database on first startup — no manual migration needed. The schema lives in the same database as `agents`, `agent_runs`, and `agent_run_events` (transactional sanity) but in a dedicated `agent_runtime` schema to limit blast radius if LangGraph internals change.
+Step checkpoints are written by `src/agent_runtime/checkpoint.py` to the `agent_checkpoints` table (keyed by `run_id`, `step`) in the runtime database, alongside the agent run tables. The schema is created by the SQL migrations under `db/runtime-plane/`, not bootstrapped by this service.
 
 ## Deployment
 
-Fly app: `butterbase-agent-runtime` (`services/agent-runtime/fly.toml`). The service is internal-only and not exposed via a public hostname. The `fly.toml` sets the same env keys as local; secrets (`AUTH_ENCRYPTION_KEY`, `INTERNAL_SERVICE_TOKEN`, `OPENROUTER_API_KEY`, `CONTROL_PLANE_URL`) are stored as Fly secrets. CI builds the Docker image and deploys to Fly on every push to `main`.
+Fly app: `butterbase-agent-runtime` (`services/agent-runtime/fly.toml`). The service is internal-only and not exposed via a public hostname. The `fly.toml` sets only `PORT=7140` and `ENV=production` (which makes `INTERNAL_SERVICE_TOKEN` and `AUTH_ENCRYPTION_KEY` mandatory at boot); secrets (`AUTH_ENCRYPTION_KEY`, `INTERNAL_SERVICE_TOKEN`, `OPENROUTER_API_KEY`, `CONTROL_PLANE_URL`) are stored as Fly secrets. CI builds the Docker image and deploys to Fly on every push to `main`.
 
 ## Troubleshooting
 
