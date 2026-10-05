@@ -12,9 +12,9 @@ cd bb-placeholder
 npx wrangler deploy --dispatch-namespace bb-frontends
 ```
 
-Wrangler 3.x does not recognize the `dispatch_namespace` top-level key,
-so the CLI flag is required. Wrangler 4.x may accept the key — update
-the README if/when we upgrade.
+`wrangler.json` has no dispatch-namespace setting, so the CLI flag is
+required. (The repo now uses Wrangler 4.x; whether it accepts a
+`dispatch_namespace` config key here is unverified.)
 
 Re-deploy whenever `index.js` changes.
 

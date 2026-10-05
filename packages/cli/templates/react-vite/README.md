@@ -33,6 +33,6 @@ This project is connected to Butterbase app: `{{APP_ID}}`
 
 ## Learn More
 
-- [Butterbase Documentation](https://docs.butterbase.com)
+- [Butterbase Documentation](https://docs.butterbase.ai)
 - [React Documentation](https://react.dev)
 - [Vite Documentation](https://vitejs.dev)

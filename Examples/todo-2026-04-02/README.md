@@ -23,7 +23,7 @@ A complete example demonstrating the Butterbase user experience: building a todo
 
 ```bash
 cd /path/to/butterbase
-docker-compose up -d
+docker compose -f docker-compose.local.yml up -d
 ```
 
 ### 2. Provision Backend
@@ -31,8 +31,8 @@ docker-compose up -d
 The backend was provisioned using Butterbase MCP tools. See [BUTTERBASE_SETUP.md](./BUTTERBASE_SETUP.md) for the exact commands used.
 
 If you need to recreate it:
-- App ID: `todo-2026-04-02`
-- Use MCP tools: `init_app`, `apply_schema`, `create_user_isolation_policy`
+- Use MCP tools: `init_app`, `manage_schema` (action `apply`), `manage_rls` (action `create_user_isolation`)
+- Set `VITE_APP_ID` in `frontend/.env` to the app id returned by `init_app` (ids look like `app_xxxx`; the endpoint examples below use `todo-2026-04-02` as a placeholder)
 
 ### 3. Install Frontend Dependencies
 
@@ -78,7 +78,7 @@ Open http://localhost:5173
 ### Frontend (React + TypeScript)
 - Vite build tool
 - React Router for navigation
-- Axios for HTTP requests
+- `@butterbase/sdk` for auth, data, and storage calls
 - Context API for auth state
 
 ## Project Structure
@@ -88,7 +88,8 @@ frontend/
 ├── src/
 │   ├── pages/          # LoginPage, SignupPage, TodosPage
 │   ├── components/     # TodoList, TodoItem, TodoForm, ImageUpload
-│   ├── services/       # api, auth, storage
+│   ├── lib/            # butterbase SDK client
+│   ├── services/       # auth, functions, storage
 │   ├── contexts/       # AuthContext
 │   └── types/          # TypeScript definitions
 ├── package.json
@@ -126,7 +127,7 @@ All endpoints use base URL: `http://localhost:4000`
 ## Troubleshooting
 
 **"Failed to fetch"**
-- Ensure Butterbase services are running: `docker-compose ps`
+- Ensure Butterbase services are running: `docker compose -f docker-compose.local.yml ps`
 - Check API base URL in `.env`
 
 **"App not found"**

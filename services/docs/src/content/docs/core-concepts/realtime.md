@@ -8,7 +8,7 @@ Butterbase provides real-time data change notifications via WebSocket connection
 ## Enabling realtime
 
 ```
-configure_realtime({ app_id: "app_abc123", tables: ["messages", "notifications"] })
+manage_realtime({ app_id: "app_abc123", action: "configure", tables: ["messages", "notifications"] })
 ```
 
 This installs database triggers that capture changes and broadcast them via pg_notify.

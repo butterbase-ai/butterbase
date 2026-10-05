@@ -293,7 +293,7 @@ For Butterbase Skills with guided skills, install separately:
 
 ```bash
 claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
-claude plugin install butterbase
+claude plugin install butterbase-skills@butterbase-skills
 ```
 
 ## Data

@@ -11,7 +11,7 @@ Frontend deployments are served globally and aren't tied to a single [region](/c
 
 1. Call `create_frontend_deployment` to get a deployment ID and upload URL
 2. Upload your built frontend as a zip file
-3. Call `start_frontend_deployment` to trigger the deployment
+3. Call `manage_frontend` with `action: "start_deployment"` to trigger the deployment
 4. Your site goes live at a `.pages.dev` URL
 
 ## Supported frameworks
@@ -42,7 +42,7 @@ curl -X PUT "{uploadUrl}" \
 **Step 3: Start deployment**
 
 ```
-start_frontend_deployment({ app_id: "app_abc123", deployment_id: "uuid-1234" })
+manage_frontend({ app_id: "app_abc123", action: "start_deployment", deployment_id: "uuid-1234" })
 ```
 
 ## Deployment statuses

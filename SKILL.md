@@ -26,7 +26,7 @@ This repo ships the open-source runtime. The managed offering at [butterbase.ai]
 
 ## What the MCP server can do
 
-40+ tools across the platform's surface area, including:
+Nearly 40 tools across the platform's surface area, including:
 
 - **Apps & regions** — `init_app`, `manage_app` (actions: list/delete/pause/get_config/update_access_mode/secure/update_cors/set_visibility/preview_clone_env_vars/clone/get_clone_job/find_templates/set_clone_webhook/link_substrate/unlink_substrate/move/move_status/teardown_source_replica), `list_regions`
 - **Schema** — `manage_schema` (declarative DSL, dry-run diffs), `manage_migrations`
@@ -49,10 +49,10 @@ This repo ships the open-source runtime. The managed offering at [butterbase.ai]
 
 ```bash
 claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
-claude plugin install butterbase
+claude plugin install butterbase-skills@butterbase-skills
 ```
 
-Plugin includes 30+ guided skills (`/butterbase-skills:journey`, `/butterbase-skills:build-app`, …) and auto-configures the MCP server.
+Plugin includes 39 guided skills and 34 slash commands (`/butterbase-skills:journey`, `/butterbase-skills:build-app`, …) and auto-configures the MCP server.
 
 ### Option 2 — Hosted MCP (any client)
 
@@ -112,7 +112,7 @@ Any MCP-capable client works. Tested with: **Claude Code**, **Claude Desktop**, 
 ## Related
 
 - **[@butterbase/mcp](https://www.npmjs.com/package/@butterbase/mcp)** — stdio MCP server (this repo, installable from npm)
-- **[butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)** — Claude Code plugin with 30+ guided skills
+- **[butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)** — Claude Code plugin with 39 guided skills and 34 slash commands
 - **[@butterbase/sdk](https://www.npmjs.com/package/@butterbase/sdk)** — TypeScript SDK
 - **[@butterbase/cli](https://www.npmjs.com/package/@butterbase/cli)** — local dev / scaffolding CLI
 

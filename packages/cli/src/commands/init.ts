@@ -40,6 +40,34 @@ async function replaceVariables(content: string, variables: TemplateVariables): 
   return result;
 }
 
+const SDK_PACKAGE = '@butterbase/sdk';
+
+/**
+ * Point the scaffolded app at the latest published SDK. The template's pinned
+ * range is only a fallback for when the registry can't be reached, so a stale
+ * pin never ships new apps on an old major.
+ */
+export async function pinLatestSdk(targetDir: string, timeoutMs = 3000): Promise<string | null> {
+  const pkgPath = path.join(targetDir, 'package.json');
+  if (!await fs.pathExists(pkgPath)) return null;
+  const pkg = await fs.readJson(pkgPath);
+  if (!pkg.dependencies?.[SDK_PACKAGE]) return null;
+
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${SDK_PACKAGE}/latest`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const { version } = (await res.json()) as { version?: string };
+    if (!version || !/^\d+\.\d+\.\d+/.test(version)) return null;
+    pkg.dependencies[SDK_PACKAGE] = `^${version}`;
+    await fs.writeJson(pkgPath, pkg, { spaces: 2 });
+    return version;
+  } catch {
+    return null;
+  }
+}
+
 async function copyTemplate(
   templateDir: string,
   targetDir: string,
@@ -141,6 +169,7 @@ export async function initCommand(template?: string) {
     };
 
     await copyTemplate(templateDir, targetDir, variables);
+    await pinLatestSdk(targetDir);
 
     // Create .env from .env.example
     const envExamplePath = path.join(targetDir, '.env.example');
@@ -160,7 +189,7 @@ export async function initCommand(template?: string) {
     console.log(chalk.cyan('\n\ud83e\udd16 AI Agent Integration:'));
     console.log(chalk.white('  .mcp.json has been created for Claude Code / MCP integration.'));
     console.log(chalk.gray('  Set your API key: ') + chalk.white('export BUTTERBASE_API_KEY=bb_sk_...'));
-    console.log(chalk.gray('  Install skills:   ') + chalk.white('claude plugin add @butterbase/skills'));
+    console.log(chalk.gray('  Install skills:   ') + chalk.white('claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills && claude plugin install butterbase-skills@butterbase-skills'));
 
     if (!appId) {
       console.log(chalk.yellow('\n⚠ Remember to update .env with your Butterbase App ID'));

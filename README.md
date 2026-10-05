@@ -51,6 +51,7 @@ Butterbase gives you the building blocks for AI-driven applications without lock
 - **Frontend hosting** — zip or build-from-source static / SPA deploys with custom domains (`/frontend`, `/custom-domains`).
 
 **AI**
+- **Agents** — declarative multi-step LLM workflows (graph specs) with checkpointed runs, function/MCP tools, and human-approval pauses, executed by `agent-runtime` (`/agents`; examples in `Examples/agents/`).
 - **AI gateway** — single endpoint for chat, embeddings, model listing; pluggable router adapters (`/gateway`, `/ai-config`).
 - **RAG** — managed collections, document ingestion, semantic search and synthesized answers (`/rag`).
 - **Integrations** — third-party tool access via Composio (`/integrations`).
@@ -59,11 +60,11 @@ Butterbase gives you the building blocks for AI-driven applications without lock
 - **Auth** — email + OAuth (Google, GitHub, Apple, X, …), JWT tuning, post-login hooks, service keys (`/auth`, `/oauth-config`, `/api-keys`).
 - **Audit logs** — structured request audit trail across KV and other surfaces (`/audit-logs`).
 - **Webhooks** — outbound webhooks for app events (`/webhooks`).
-- **Multi-region app moves** — relocate an app across regions with retained source replicas (`scripts/move-app/`).
+- **Multi-region app moves** — relocate an app across regions with retained source replicas (`butterbase apps move`; see [`docs/move-app.md`](./docs/move-app.md)).
 
 **Agent surface**
 - **MCP server** — every capability above is exposed as MCP tools at `/mcp` (HTTP) or via stdio (`@butterbase/mcp` — `npx @butterbase/mcp`).
-- **Claude Code plugin** — `packages/plugin` (submodule of [butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)) ships 30+ guided skills (idea → plan → schema → auth → functions → deploy → submit) for agentic app building.
+- **Claude Code plugin** — `packages/plugin` (submodule of [butterbase-skills](https://github.com/butterbase-ai/butterbase-skills)) ships 39 guided skills and 34 slash commands (idea → plan → schema → auth → functions → deploy → submit) for agentic app building.
 
 ## Templates
 
@@ -77,7 +78,7 @@ An open-source CRM for founders. Companies, people, deals (kanban), meetings, no
 
 Core CRM entities are stored as **substrate entities** — a cross-app, agent-readable memory layer — so other Butterbase apps you build (like butterSupport) share the same customer identity without any integration code between them.
 
-**What's included:** 29 Postgres tables · 55+ serverless functions · Workspace AI agent (`agent-chat`) · Gmail + Calendar ingest via Composio · Enrichment (People Data Labs + Exa) · Social publishing via Composio · Realtime on 7 tables · Google OAuth + email auth · RLS on every table
+**What's included:** 29 Postgres tables · 56 serverless functions · Workspace AI agent (`agent-chat`) · Gmail + Calendar ingest via Composio · Enrichment (People Data Labs + Exa) · Social publishing via Composio · Realtime on 17 tables · Google OAuth + email auth · RLS on every table
 
 ```bash
 butterbase clone app_44zjayftl7b3 butterbaseCRM
@@ -99,7 +100,7 @@ It works in two depths from the same clone:
 - **Commodity tier** — paste a help-center URL, get a working agent in under 60 seconds. No product integration required.
 - **Deep tier** — link your main product app so the agent reads live substrate signals and can propose governed actions (resend verification, retry webhook, flag bug, apply credit).
 
-**What's included:** 20 Postgres tables · 23 serverless functions · 1 Durable Object (`SupportTicketDO`) · RAG collection over your help center · Embeddable widget (53KB gzipped) · HMAC-signed user identity · Founder approval on every customer-visible reply · Escalation to Slack or Gmail via Composio
+**What's included:** 20 Postgres tables · 30 serverless functions · 2 Durable Objects (`SupportTicketDO`, `WidgetTicketDO`) · RAG collection over your help center · Embeddable widget (53KB gzipped) · HMAC-signed user identity · Founder approval on every customer-visible reply · Escalation to Slack or Gmail via Composio
 
 ```bash
 butterbase clone app_0ycj4ad7odud my-support
@@ -255,6 +256,7 @@ Full setup (auth, MCP clients, troubleshooting, production notes): **[`SETUP.md`
 | `deno-runtime` | Deno | Executes user serverless functions in isolates. |
 | `agent-runtime` | Python (uv) | Long-running agent executor for `manage_ai` / agent tasks. |
 | `build-runner` | Cloudflare Worker | Builds frontends and edge-SSR bundles from source. |
+| `do-invoker` | Cloudflare Worker | Lets non-Cloudflare services reach user Durable Objects. |
 | `storage-indexer` | Node.js | Async indexer for uploaded objects. |
 | `docs` | Astro | Public documentation site (also served locally at `:4321`). |
 
@@ -264,15 +266,16 @@ Full setup (auth, MCP clients, troubleshooting, production notes): **[`SETUP.md`
 |---|---|
 | `@butterbase/sdk` | Universal TypeScript SDK (browser + server). |
 | `@butterbase/cli` | `butterbase` CLI for scaffolding and backend management. |
-| `@butterbase/plugin` | Claude Code plugin — 30+ guided skills for AI-driven app building. Git submodule of [butterbase-skills](https://github.com/butterbase-ai/butterbase-skills). |
+| `@butterbase/skills` | Claude Code plugin — 39 guided skills and 34 slash commands for AI-driven app building. Git submodule of [butterbase-skills](https://github.com/butterbase-ai/butterbase-skills). |
 | `@butterbase/shared` | Shared types, constants, and pluggable interfaces (`BillingProvider`, `QuotaEnforcer`, `RouterAdapter`). |
+| `@butterbase/static-frontend-worker` | Per-app static-frontend Cloudflare worker source (SPA fallback, `_redirects`); private, consumed by `control-api`. |
 
 **Other top-level pieces**
 - `dispatch-worker/` — Cloudflare Worker that routes per-app subdomain traffic.
 - `bb-placeholder/` — placeholder origin for unprovisioned subdomains.
 - `infra/` — `pgbouncer` and `traefik` configs for self-host.
 - `db/` — SQL migrations for the three Postgres planes.
-- `Examples/` — `todo-2026-04-02`, `grocery-list-2026-04-03`.
+- `Examples/` — `todo-2026-04-02`, `grocery-list-2026-04-03`, `agents/`.
 - `templates/` — full production-shaped apps: `butterSupport`, `butterbaseCRM`.
 
 ## What's *not* in this repo
@@ -289,19 +292,17 @@ If you need these for self-host, implement against the interfaces in `packages/s
 ## Documentation
 
 - [`SETUP.md`](./SETUP.md) — self-host and local development guide
-- [`CHANGELOG.md`](./CHANGELOG.md) — release notes (latest: **v0.2.0**, 2026-05-25 — KV store)
+- [`CHANGELOG.md`](./CHANGELOG.md) — release notes (latest: **v0.3.0**, 2026-06-08 — Agents)
 - [`ROADMAP.md`](./ROADMAP.md) — what's next
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor workflow and OSS scope
-- [`SUBDOMAIN_IMPLEMENTATION.md`](./SUBDOMAIN_IMPLEMENTATION.md) — tenant subdomain routing
-- [`docs/runbooks/local-e2e.md`](./docs/runbooks/local-e2e.md) — multi-region E2E stack
-- [`docs/runbooks`](./docs/runbooks) — operational runbooks
+- [`docs/move-app.md`](./docs/move-app.md) — multi-region app moves
 - [`Examples/`](./Examples) — small example apps (todo, grocery list)
 - [`templates/`](./templates) — full apps you can clone and run (butterSupport, butterbaseCRM)
 - Docs site (local): `http://localhost:4321` after `docker compose up`
 
 ## Project status
 
-Latest release: **v0.2.0** (2026-05-25) — adds the KV store across SDK / REST / CLI / MCP. The data plane is production-tested by the managed offering; the OSS distribution is young — please file self-host issues and we'll tighten docs and defaults from feedback. See [`CHANGELOG.md`](./CHANGELOG.md) for the full history.
+Latest release: **v0.3.0** (2026-06-08) — adds Agents (graph-spec LLM workflows, function-as-agent-tool, multi-trigger functions); v0.2.0 added the KV store across SDK / REST / CLI / MCP. The data plane is production-tested by the managed offering; the OSS distribution is young — please file self-host issues and we'll tighten docs and defaults from feedback. See [`CHANGELOG.md`](./CHANGELOG.md) for the full history.
 
 ## Community & support
 

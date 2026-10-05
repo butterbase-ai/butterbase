@@ -52,26 +52,17 @@ After deployment, the owner must call `manage_app update_cors` with the deployed
 
 ## Widget embed snippet
 
-Customers paste this onto their site. Three values must be rendered server-side per page load:
-
-- `data-user-payload` — base64-encoded JSON `{user_id, email, name}`
-- `data-user-ts` — unix milliseconds (`Date.now()`)
-- `data-user-signature` — `HMAC-SHA256("${ts}.${payload}", widget_secret)` (hex)
-
-The widget passes all three verbatim on every API call. The HMAC freshness window is 5 minutes, so re-render the snippet per page load.
+Customers paste this onto their site. The widget needs only the app id; it mints an anonymous visitor token on its own (no server-side signing).
 
 ```html
-<script src="https://butter-support.butterbase.dev/widget.js"
-  data-recipe-base="https://butter-support.butterbase.dev"
-  data-user-payload="<base64 JSON>"
-  data-user-signature="<hex HMAC>"
-  data-user-ts="<unix ms>"></script>
-<div id="butter-support-widget"></div>
+<script async src="https://butter-support.butterbase.dev/widget.js" data-app-id="app_0ycj4ad7odud"></script>
 ```
+
+To attach the signed-in user, call `window.ButterSupport.identify({ user_id, email, name })` (or push `['identify', {...}]` onto `window.ButterSupport.q` before the bundle loads). Identity is client-supplied and not signature-verified.
 
 ## Local widget test
 
-Open `test-widget.html` (from `frontend/`) after `npm run dev` or after `npm run build && npm run preview`. The widget will render in launcher mode but API calls will fail (no valid HMAC) — verify the bundle loads without console errors.
+Open `test-widget.html` (from `frontend/`) after `npm run dev` or after `npm run build && npm run preview`. Verify the bundle loads without console errors (API calls need a valid `data-app-id` / app id).
 
 ## Project layout
 
