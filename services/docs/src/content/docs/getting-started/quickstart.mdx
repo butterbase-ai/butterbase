@@ -70,7 +70,7 @@ This guide walks you through creating an app, defining a schema, inserting data,
    <Tabs>
      <TabItem label="MCP">
      ```
-     Use create_user_isolation_policy with table_name: "posts", user_column: "user_id"
+     Use manage_rls with action: "create_user_isolation", table_name: "posts", user_column: "user_id"
      ```
      </TabItem>
      <TabItem label="REST API">
@@ -131,7 +131,7 @@ This guide walks you through creating an app, defining a schema, inserting data,
    # Zip the dist/ folder (use archiver or Git Bash zip)
    ```
 
-   Then use the `create_frontend_deployment` and `start_frontend_deployment` MCP tools, or the REST API.
+   Then use the `create_frontend_deployment` and `manage_frontend` (action `start_deployment`) MCP tools, or the REST API.
 
 </Steps>
 

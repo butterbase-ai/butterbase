@@ -75,6 +75,8 @@ Include your API key as a Bearer token in the Authorization header.
 
 ## Available tools
 
+Butterbase exposes 38 tools. Most areas are consolidated into one `manage_*` tool that takes an `action` argument. See the [MCP Tools reference](/api-reference/mcp-tools) for every action and parameter.
+
 ### App Management
 
 | Tool | What it does |
@@ -85,20 +87,25 @@ Include your API key as a Bearer token in the Authorization header.
 | **manage_app** (action: "delete") | Permanently delete an app and its database. This is irreversible. |
 | **manage_app** (action: "get_config") | Read an app's current configuration (CORS origins, JWT settings, storage limits). |
 | **manage_app** (action: "update_cors") | Set the list of allowed origins for browser requests to your app's API. |
-| **manage_app** (action: "move") | Move an existing app to another region. Pass `dest_region`; returns a `migration_id`. |
-| **manage_app** (action: "move_status") | Check the progress of a move in flight. Pass `migration_id`. |
-| **manage_app** (action: "teardown_source_replica") | Decommission the retained source-region replica after a completed move. |
+| **manage_app** (actions: "pause", "update_access_mode", "secure", "set_visibility") | Pause or resume an app, switch between public and authenticated access, secure tables with user isolation, and publish an app as a template. |
+| **manage_app** (actions: "get_env", "update_env") | Read and set app-level environment variables. |
+| **manage_app** (actions: "find_templates", "clone", "get_clone_job", ...) | Find public templates and clone them, plus template release actions. |
+| **manage_app** (actions: "move", "move_status", "teardown_source_replica") | Move an existing app to another region and track the migration. |
+| **manage_migrations** | Inspect, abort, or reverse in-flight region migrations. |
 | **manage_auth_config** (action: "update_jwt") | Configure access token lifetime and refresh token lifetime. |
 | **manage_auth_config** (action: "generate_service_key") | Generate a `bb_sk_` prefixed API key for programmatic access. |
+| **manage_auth_config** (action: "configure_auth_hook") | Set the function invoked after every successful auth event. |
+| **manage_api_keys** | List or revoke API keys. |
+| **manage_billing** | Check plan and usage, top up credits, and manage spending caps. |
 
 ### Schema & Migrations
 
 | Tool | What it does |
 |------|--------------|
-| **get_schema** | Read the current database schema for an app. |
-| **apply_schema** | Apply a declarative schema. Set `dry_run: true` to preview. |
-| **dry_run_schema** | Preview SQL statements without executing. |
-| **list_migrations** | View the history of all schema migrations. |
+| **manage_schema** (action: "get") | Read the current database schema for an app. |
+| **manage_schema** (action: "apply") | Apply a declarative schema. |
+| **manage_schema** (action: "dry_run") | Preview SQL statements without executing. |
+| **manage_schema** (action: "list_migrations") | View the history of all schema migrations. |
 
 ### Data Operations
 
@@ -106,65 +113,78 @@ Include your API key as a Bearer token in the Authorization header.
 |------|--------------|
 | **select_rows** | Query table rows with filtering, sorting, pagination. |
 | **insert_row** | Insert a row into a table. |
+| **seed_database** | Bulk-insert rows into tables in one call. |
 
 ### Authentication & Security
 
 | Tool | What it does |
 |------|--------------|
-| **configure_oauth_provider** | Register a social sign-in provider. |
-| **get_oauth_config** | List all configured OAuth providers. |
-| **update_oauth_provider** | Modify an existing OAuth provider. |
-| **delete_oauth_provider** | Remove an OAuth provider. |
-| **enable_rls** | Enable row-level security on a table. |
-| **create_policy** | Create a custom RLS policy. |
-| **create_user_isolation_policy** | Quick user isolation setup. |
-| **get_rls_policies** | List active RLS policies. |
-| **delete_rls_policy** | Remove RLS from a table. |
-| **query_audit_logs** | Search authentication audit logs. |
+| **manage_oauth** (actions: "configure", "get", "update", "delete") | Register, list, modify, and remove social sign-in providers. |
+| **manage_rls** (action: "enable") | Enable row-level security on a table. |
+| **manage_rls** (action: "create_policy") | Create a custom RLS policy. |
+| **manage_rls** (action: "create_user_isolation") | Quick user isolation setup. |
+| **manage_rls** (actions: "list", "update_policy", "delete") | List, modify, and remove RLS policies. |
+| **manage_auth_users** (actions: "list", "delete") | List or delete your app's end users. |
+| **query_audit_logs** | Search authentication, admin, and function audit logs. |
 
 ### Storage
 
 | Tool | What it does |
 |------|--------------|
-| **generate_upload_url** | Get a presigned upload URL. |
-| **generate_download_url** | Get a presigned download URL. |
-| **get_storage_objects** | List all files for an app. |
-| **delete_storage_object** | Delete a file from storage. |
+| **manage_storage** (action: "upload_url") | Get a presigned upload URL. |
+| **manage_storage** (action: "download_url") | Get a presigned download URL. |
+| **manage_storage** (action: "list") | List all files for an app. |
+| **manage_storage** (action: "delete") | Delete a file from storage. |
+| **manage_storage** (action: "update_config") | Toggle public read access and storage limits. |
 
-### Serverless Functions
+### Serverless Functions and Durable Objects
 
 | Tool | What it does |
 |------|--------------|
 | **deploy_function** | Deploy a TypeScript/JavaScript function. |
-| **list_functions** | List all deployed functions. |
 | **invoke_function** | Test-invoke a deployed function. |
-| **delete_function** | Delete a deployed function. |
-| **update_function_env** | Update environment variables. |
-| **get_function_logs** | View invocation logs. |
+| **manage_function** (actions: "list", "get", "delete") | List, inspect, and delete deployed functions. |
+| **manage_function** (action: "update_env") | Update function environment variables. |
+| **manage_function** (action: "get_logs") | View invocation logs. |
+| **manage_function** (action: "update_settings") | Change per-function settings. |
+| **manage_durable_objects** | Deploy and manage Durable Objects and their env vars. |
+| **manage_kv** | Configure and read or write the app's KV store. |
 
 ### Frontend Deployment
 
 | Tool | What it does |
 |------|--------------|
 | **create_frontend_deployment** | Create a deployment and get an upload URL. |
-| **start_frontend_deployment** | Start a deployment after uploading. |
-| **list_frontend_deployments** | View deployment history. |
-| **set_frontend_env** | Configure environment variables for builds. |
+| **manage_frontend** (action: "start_deployment") | Start a deployment after uploading. |
+| **manage_frontend** (action: "list_deployments") | View deployment history. |
+| **manage_frontend** (action: "set_env") | Configure environment variables for builds. |
+| **manage_frontend** (action: "configure_custom_domain") | Add, verify, or remove custom domains. |
+| **manage_edge_ssr** | Deploy and list Edge SSR deployments. |
+| **manage_preview** | Create and manage a preview copy of your app. |
+| **promote_preview** | Check and push a preview's changes onto the live app. |
+| **manage_repo** | Push, pull, and inspect your app's code snapshots. |
 
-### Realtime
-
-| Tool | What it does |
-|------|--------------|
-| **configure_realtime** | Enable realtime on tables. |
-| **get_realtime_config** | View current realtime configuration. |
-
-### Feedback & Documentation
+### Realtime, AI, and Integrations
 
 | Tool | What it does |
 |------|--------------|
+| **manage_realtime** (actions: "configure", "get") | Enable realtime on tables and view the current configuration. |
+| **manage_ai** | Chat, embeddings, video, image, and meeting-bot actions through the AI gateway. |
+| **manage_agents** | Create and manage agent definitions. |
+| **manage_rag_content** | Manage RAG collections and documents. |
+| **rag_query** | Semantic search over a RAG collection. |
+| **manage_integrations** | Enable third-party toolkits and execute their actions. |
+| **manage_people** | Search and enrich people and company data. |
+
+### Hackathon, Feedback & Documentation
+
+| Tool | What it does |
+|------|--------------|
+| **list_partner_apis** | List partner APIs available to hackathon apps. |
+| **prep_and_submit_hackathon_entry** | Prepare and submit a hackathon entry. |
 | **submit_suggestion** | Submit feedback or bug reports. |
 | **butterbase_docs** | Read the documentation by topic. |
 
 ## Generating an API key
 
-You can generate API keys through the [dashboard](https://dashboard.butterbase.ai) on the API Keys page, or using the `generate_service_key` MCP tool. Keys are prefixed with `bb_sk_` and provide full access to your apps and data.
+You can generate API keys through the [dashboard](https://dashboard.butterbase.ai) on the API Keys page, or using the `manage_auth_config` MCP tool (action `generate_service_key`). Keys are prefixed with `bb_sk_` and provide full access to your apps and data.

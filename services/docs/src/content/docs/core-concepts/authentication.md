@@ -241,7 +241,7 @@ The reset code expires after **1 hour**. All existing sessions are invalidated.
 
 ## Social sign-in (OAuth)
 
-Configure a provider using the `configure_oauth_provider` MCP tool or the [OAuth configuration API](/api-reference/auth-api).
+Configure a provider using the `manage_oauth` MCP tool (action `configure`) or the [OAuth configuration API](/api-reference/auth-api).
 
 ### Built-in providers
 

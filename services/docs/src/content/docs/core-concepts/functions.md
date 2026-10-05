@@ -511,7 +511,7 @@ Logs include: HTTP method and path, status code, execution duration, memory usag
 
 ### Reading logs for a deleted function (forensics)
 
-By default, `get_function_logs` returns 404 for soft-deleted functions — the logs are still in the database but hidden so the function looks gone. For post-incident forensics, pass `include_deleted=true`:
+By default, `manage_function` action `get_logs` returns 404 for soft-deleted functions — the logs are still in the database but hidden so the function looks gone. For post-incident forensics, pass `include_deleted=true`:
 
 ```bash
 butterbase functions logs my-fn --include-deleted
@@ -529,7 +529,7 @@ This is owner-scoped (same auth as the default path) — only the app owner can 
 
 ## Pausing an app (kill-switch)
 
-`pause_app` is a single API call that halts **all data-plane traffic** for an app — useful when a buggy webhook is spamming end users, a runaway cron is burning external API quotas, or you want to take an app offline for maintenance.
+The `manage_app` `pause` action is a single call that halts **all data-plane traffic** for an app — useful when a buggy webhook is spamming end users, a runaway cron is burning external API quotas, or you want to take an app offline for maintenance.
 
 While paused:
 - Function invocations (HTTP and cron) return **503** with code `APP_PAUSED`.
@@ -538,7 +538,7 @@ While paused:
 - Realtime websockets close with code `1013` ("Try again later").
 
 What stays available so you can recover:
-- All control-plane endpoints (`list_apps`, `get_app_config`, schema, RLS, env vars, the `pause_app` toggle itself).
+- All control-plane endpoints (`manage_app` `list` and `get_config`, schema, RLS, env vars, the `manage_app` `pause` toggle itself).
 - Auth (login / signup) — operators may need to re-authenticate while paused.
 
 **MCP:**

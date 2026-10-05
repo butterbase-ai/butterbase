@@ -5,6 +5,8 @@ sidebar:
   order: 8
 ---
 
+The open-source MCP server exposes 38 tools; the hosted platform adds `manage_substrate`. Most areas are consolidated into a single `manage_*` tool that takes an `action` argument (for example `manage_schema` with `action: "apply"`).
+
 These tools are available when connected via MCP. See [MCP Setup](/getting-started/mcp-setup) for connection instructions.
 
 ## App Management
@@ -23,16 +25,20 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `delete` | Permanently delete an app. Irreversible. |
 | `pause` | Kill-switch — pause/resume all data-plane traffic. Returns 503 (`APP_PAUSED`) on data-plane endpoints while paused. |
 | `get_config` | Read app configuration (CORS, JWT, storage limits). |
+| `secure` | Set `access_mode = "authenticated"` and create user-isolation RLS policies on the listed `tables` in one call. |
 | `update_cors` | Set allowed CORS origins. |
 | `update_access_mode` | Toggle anonymous vs authenticated-only access. |
 | `set_visibility` | Mark an app public or private, optionally setting the templates-browser `listed` flag. |
 | `move` | Move an existing app to another region. Pass `dest_region`. Returns a `migration_id`; the app stays available for reads during the move. |
 | `move_status` | Check the progress of a move in flight. Pass `migration_id` (returned by `action: "move"`). |
 | `teardown_source_replica` | After a completed move, decommission the retained source-region replica. Pass `migration_id`. |
+| `preview_clone_env_vars` | Preview which env vars a source app's functions and Durable Objects need before cloning. Pass `source_app_id`. |
 | `find_templates` | Search public, listed app templates. Pass optional `q` (name prefix), `region`, `sort` (`recent` or `popular`), `limit` (max 50), `offset`. Returns `{ items: [...], total, limit, offset }`. |
 | `clone` | Clone a public app's repo snapshot into a new app you own. Pass `source_app_id` and optionally `name` and `region`. Returns `{ job_id, status: "pending" }`. |
 | `get_clone_job` | Poll the status of a clone job by `job_id`. Returns `status` (`pending`, `completed`, or `failed`), `dest_app_id` when completed, and `error_message` when failed. |
 | `set_clone_webhook` | Configure a webhook that fires when someone clones this app. Pass `webhook_url` and `webhook_secret`, or `clear_webhook: true` to remove. |
+| `link_substrate` / `unlink_substrate` / `set_substrate_autopropagate` | Link or unlink the app to your substrate and control event auto-propagation. |
+| `publish_template_release` / `list_template_releases` / `get_template_release` / `check_template_updates` / `update_from_template` | Publish versioned releases of a template app and let forks check for and pull updates. |
 | `get_env` | Read the app-level environment variable **key names** (values are never returned). Returns `{ keys: string[], updated_at }`. See [Environment variables](/core-concepts/functions/#environment-variables). |
 | `update_env` | Merge app-level env vars in one call. Pass `env: { KEY: "value" }` to set/upsert, or `env: { KEY: null }` to delete. Values live for every function in the app via `ctx.env.<KEY>`. Response reports `updated_keys` plus the list of functions whose cache was invalidated. Keys matching `/^BUTTERBASE_/i` are rejected as reserved. |
 
@@ -40,10 +46,26 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 
 | Tool | Description |
 |------|-------------|
-| `get_schema` | Read current database schema. |
-| `apply_schema` | Apply declarative schema. Set `dry_run: true` to preview. |
-| `dry_run_schema` | Preview SQL without executing. |
+| `manage_schema` | Read, apply, preview, and list schema migrations. See actions below. |
+| `manage_migrations` | Read and control in-flight region migrations (complements `manage_app` `move`). |
+
+### manage_schema actions
+
+| Action | Description |
+|--------|-------------|
+| `get` | Read the current database schema. |
+| `apply` | Apply a declarative schema. Pass `schema` and optionally `name`. |
+| `dry_run` | Preview the SQL a schema would run without executing it. |
 | `list_migrations` | View migration history. |
+
+### manage_migrations actions
+
+| Action | Description |
+|--------|-------------|
+| `get_active` | Return the running migration for an app, or `{ migration: null }`. |
+| `abort` | Cancel a migration that has not yet reached cutover. Pass `migration_id`. |
+| `reverse` | Roll a completed migration back to the source region while the source replica is retained. Pass `migration_id`. |
+| `list_source_replicas` | List retained source replicas for your apps. |
 
 ## Data Operations
 
@@ -57,20 +79,56 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 
 | Tool | Description |
 |------|-------------|
-| `configure_oauth_provider` | Register a social sign-in provider. |
-| `get_oauth_config` | List configured OAuth providers. |
-| `update_oauth_provider` | Modify an OAuth provider. |
-| `delete_oauth_provider` | Remove an OAuth provider. |
-| `enable_rls` | Enable row-level security on a table. |
-| `create_policy` | Create a custom RLS policy. |
-| `create_user_isolation_policy` | Quick user isolation setup. |
-| `get_rls_policies` | List active RLS policies. |
-| `delete_rls_policy` | Remove RLS from a table. |
-| `query_audit_logs` | Search auth audit logs. |
-| `update_app_access_mode` | Toggle an app's data-API access between `public` and `authenticated`. |
-| `set_visibility` | Mark an app public or private as a template, optionally setting the templates browser `listed` flag. |
-| `secure_app` | Set `access_mode = "authenticated"` and create user-isolation RLS policies on listed tables in one call. |
+| `manage_oauth` | Configure social sign-in providers. |
+| `manage_rls` | Manage row-level security on tables. |
+| `manage_auth_config` | Auth hook, JWT lifetimes, and service keys. |
+| `manage_auth_users` | List or delete an app's end users. |
+| `manage_api_keys` | List or revoke platform API keys. |
+| `query_audit_logs` | Search auth, admin, and function audit logs. |
+
+### manage_oauth actions
+
+| Action | Description |
+|--------|-------------|
+| `configure` | Register a social sign-in provider (`provider`, `client_id`, `client_secret`, `redirect_uris`). |
+| `get` | List configured OAuth providers, or one by `provider`. |
+| `update` | Modify an OAuth provider. |
+| `delete` | Remove an OAuth provider. |
+
+### manage_rls actions
+
+| Action | Description |
+|--------|-------------|
+| `enable` | Enable row-level security on a table. Pass `table_name`. |
+| `create_policy` | Create a custom RLS policy (`table_name`, `policy_name`, `command`, `role`, `using_expression`, `with_check_expression`, optional `user_column`). |
+| `update_policy` | Modify an existing policy. |
+| `create_user_isolation` | Quick user isolation setup. Pass `table_name` and `user_column`, optionally `public_read_column`. |
+| `list` | List active RLS policies. |
+| `delete` | Remove one policy (`policy_name`) or all policies on a table. |
+
+To set `access_mode` or secure many tables at once, use `manage_app` actions `update_access_mode` and `secure`.
+
+### manage_auth_config actions
+
+| Action | Description |
+|--------|-------------|
 | `configure_auth_hook` | Configure (or remove) the function invoked after every successful auth event. |
+| `update_jwt` | Update access and refresh token lifetimes. |
+| `generate_service_key` | Generate a service key. |
+
+### manage_auth_users actions
+
+| Action | Description |
+|--------|-------------|
+| `list` | List end users (`limit`, `cursor`). |
+| `delete` | Delete an end user by `user_id`. |
+
+### manage_api_keys actions
+
+| Action | Description |
+|--------|-------------|
+| `list` | List API keys (prefix `bb_sk_`). |
+| `revoke` | Revoke a key by `key_id`. |
 
 ## App Repo
 
@@ -82,38 +140,81 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 
 | Tool | Description |
 |------|-------------|
-| `generate_upload_url` | Get a presigned upload URL. |
-| `generate_download_url` | Get a presigned download URL. |
-| `get_storage_objects` | List all files. |
-| `delete_storage_object` | Delete a file. |
-| `update_storage_config` | Toggle app-wide public read access for storage objects. |
+| `manage_storage` | Presigned upload/download URLs, file listing and deletion, and storage config. |
+
+### manage_storage actions
+
+| Action | Description |
+|--------|-------------|
+| `upload_url` | Get a presigned upload URL. Pass `filename`, `content_type`, `size_bytes`. Returns `object_id`. |
+| `download_url` | Get a presigned download URL for an `object_id`. |
+| `list` | List all files. |
+| `delete` | Delete a file by `object_id`. |
+| `update_config` | Toggle app-wide public read access and storage limits. |
 
 ## Serverless Functions
 
 | Tool | Description |
 |------|-------------|
 | `deploy_function` | Deploy a TypeScript/JavaScript function. |
-| `list_functions` | List deployed functions. |
 | `invoke_function` | Test-invoke a function. |
-| `delete_function` | Delete a function. |
-| `update_function_env` | Update **function-level** environment variables (overrides app-level values on collision). For env vars shared across every function in the app, use `manage_app.update_env` instead. See [Environment variables](/core-concepts/functions/#environment-variables). |
-| `get_function_logs` | View invocation logs. |
+| `manage_function` | List, inspect, delete, configure, and read logs for deployed functions. |
+
+### manage_function actions
+
+| Action | Description |
+|--------|-------------|
+| `list` | List deployed functions. |
+| `get` | Get a function's details. |
+| `delete` | Delete a function. |
+| `get_logs` | View invocation logs. |
+| `update_env` | Update **function-level** environment variables (overrides app-level values on collision). For env vars shared across every function in the app, use `manage_app` action `update_env` instead. See [Environment variables](/core-concepts/functions/#environment-variables). |
+| `update_settings` | Update function settings such as `allow_service_key_impersonation`. |
+
+## Durable Objects
+
+| Tool | Description |
+|------|-------------|
+| `manage_durable_objects` | Deploy and manage Durable Objects. |
+
+### manage_durable_objects actions
+
+`deploy`, `list`, `get`, `delete`, `usage`, `list_env`, `set_env`, `delete_env`.
 
 ## Frontend Deployment
 
 | Tool | Description |
 |------|-------------|
 | `create_frontend_deployment` | Create deployment and get upload URL. |
-| `start_frontend_deployment` | Start deployment after upload. |
-| `list_frontend_deployments` | View deployment history. |
-| `set_frontend_env` | Configure build environment variables. |
+| `manage_frontend` | Start deployments, list history, set build env vars, and manage custom domains. |
+| `manage_edge_ssr` | Deploy and list Edge SSR (Cloudflare Workers) deployments. |
+
+### manage_frontend actions
+
+| Action | Description |
+|--------|-------------|
+| `start_deployment` | Start deployment after upload. Pass `deployment_id`. |
+| `list_deployments` | View deployment history. |
+| `create_from_source` / `start_from_source` | Server-side build flow from a source zip. |
+| `set_env` | Configure build environment variables (`vars`). |
+| `configure_custom_domain` | Add, list, check status, verify, or remove custom domains via `domain_action` (`add`, `list`, `status`, `verify`, `remove`). |
+
+### manage_edge_ssr actions
+
+`create`, `start`, `create_from_source`, `start_from_source`, `list`.
+
+## Previews
+
+| Tool | Description |
+|------|-------------|
+| `manage_preview` | Create and manage a preview deployment, a safe copy of the live app. Actions: `create`, `status`, `reset`, `get_env_overrides`, `set_env_overrides`. |
+| `promote_preview` | Push a preview's structure and code onto the live app. Actions: `check`, `run`. |
 
 ## Realtime
 
 | Tool | Description |
 |------|-------------|
-| `configure_realtime` | Enable realtime on tables. |
-| `get_realtime_config` | View realtime configuration. |
+| `manage_realtime` | Enable and read realtime configuration. Actions: `configure` (enable realtime on `tables`), `get`. |
 
 ## AI Gateway
 
@@ -130,6 +231,9 @@ All AI actions are routed through the single `manage_ai` MCP tool. Pass `{ app_i
 | `submit_video` | Submit an async video generation job. Pass `model`, `prompt`, optional `duration`, `resolution`, `aspect_ratio`, `generate_audio`, `seed`. Returns `{ job_id, status, polling_url }`. |
 | `poll_video` | Poll a video job's status. Pass `job_id`. Returns the current job state including `content_urls` (absolute) and `charged_credits_usd` when `status === 'completed'`. |
 | `configure_meetings_webhook` | Configure where Butterbase forwards meeting-bot events for this app. Pass `forward_url` and optionally `rotate_secret: true` to mint a fresh signing-secret identifier (returned **once**). The stored hash is used in the `x-bb-key-id` header so your handler can detect post-rotation staleness. |
+| `decide` | Constrained decision call over a set of options. |
+| `submit_image` / `poll_image` | Submit and poll an async image generation job. |
+| `start_meeting` / `get_meeting` / `list_meetings` / `stop_meeting` / `estimate_meeting` | Manage meeting-bot sessions. |
 | `usage_meetings` | List recent meeting-bot usage rows for this app — `actor_id`, dimension (`recording` or `transcription`), `seconds`, `usd_charged`, `created_at`. Last 100 rows ordered by time desc. |
 
 For the full HTTP request/response shapes and end-to-end video example, see the [AI API reference](./ai-api.md).
@@ -138,24 +242,45 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 
 | Tool | Description |
 |------|-------------|
-| `rag_create_collection` | Create a named collection for storing and querying documents. |
-| `rag_list_collections` | List all RAG collections with document counts. |
-| `rag_delete_collection` | Delete a collection and all its documents, chunks, and embeddings. |
-| `rag_ingest` | Ingest raw text or an uploaded file into a collection. Returns a document ID; processing is async. |
-| `rag_ingest_status` | Poll ingestion status (`pending` → `processing` → `ready` / `failed`). |
+| `manage_rag_content` | Manage collections and documents. |
 | `rag_query` | Semantic search over a collection. Returns ranked chunks; optionally synthesizes an AI answer. |
-| `rag_list_documents` | List all documents in a collection with status and metadata. |
-| `rag_delete_document` | Delete a document and all its vector chunks. |
+
+### manage_rag_content actions
+
+| Action | Description |
+|--------|-------------|
+| `create_collection` | Create a named collection for storing and querying documents. |
+| `list_collections` | List all RAG collections with document counts. |
+| `get_collection` | Get one collection. |
+| `delete_collection` | Delete a collection and all its documents, chunks, and embeddings. |
+| `ingest_document` | Ingest raw text or an uploaded file into a collection. Returns a document ID; processing is async. |
+| `list_documents` | List all documents in a collection with status and metadata. |
+| `get_document_status` | Poll ingestion status (`pending`, `processing`, `ready`, `failed`). |
+| `delete_document` | Delete a document and all its vector chunks. |
 
 ## Integrations
 
 | Tool | Description |
 |------|-------------|
-| `configure_integration` | Enable a toolkit (Gmail, Slack, etc.) for an app. |
-| `list_available_integrations` | List curated toolkits or search the full catalog. |
-| `list_integration_tools` | List executable tools for a connected toolkit. |
-| `execute_integration_action` | Execute a tool on behalf of a user. |
-| `list_connected_accounts` | List all users with connected accounts for an app. |
+| `manage_integrations` | Enable toolkits (Gmail, Slack, etc.) and execute their actions. |
+
+### manage_integrations actions
+
+| Action | Description |
+|--------|-------------|
+| `configure` | Enable a toolkit for an app. |
+| `rotate_credentials` | Rotate a toolkit's OAuth credentials. |
+| `disable` | Disable a toolkit. |
+| `list_available` | List curated toolkits or search the full catalog. |
+| `list_connected` | List all users with connected accounts for an app. |
+| `list_tools` | List executable tools for a connected toolkit. |
+| `execute_action` | Execute a tool on behalf of a user. |
+
+## Agents
+
+| Tool | Description |
+|------|-------------|
+| `manage_agents` | Manage agent definitions. Actions: `list`, `get`, `create`, `update`, `delete`, `validate`. |
 
 ## People (people / company search + enrichment)
 
@@ -175,6 +300,7 @@ All actions take `{ app_id, action, ... }` where `action` selects the operation.
 | `search_company` | Search for companies using structured filters, a free-form `query`, or both. Filters: `industry`, `country`, `employee_count_max`, plus `page_size`, `next_token`. |
 | `get_profile` | Fetch a full profile by LinkedIn URL with cache. Pass `linkedin_profile_url`. Optional `live_fetch: "force"` skips cache. 2 credits on a cache miss, 0 on a hit (cache TTL: 30d for hits, 7d for not-found, 1h for failed). |
 | `queue_email_lookup` | Queue an async work-email lookup. Pass `linkedin_profile_url`. Returns `lookup_id` and `status: "pending"`. Poll with `get_email_lookup`. Charged ~3 credits at queue time and 1 more when the webhook resolves. |
+| `set_byok_key` / `clear_byok_key` | Store or remove your own provider key (bring your own key). |
 | `get_email_lookup` | Poll an email lookup by `id`. Returns `{ status, email, credits_consumed }`. |
 
 ### Search examples
@@ -284,6 +410,8 @@ Costs vary by which provider the operator routes the action to. Numbers below ar
 
 ## Substrate
 
+> Hosted platform only (butterbase.ai). `manage_substrate` ships with the managed service and is not one of the 38 tools in the open-source MCP server.
+
 All substrate operations are routed through the single `manage_substrate` MCP tool. Pass `{ action, ... }` where `action` selects the operation. The agent's calling user is implicit — there is no `app_id` and no `substrate_user_id`; every call operates on the substrate that belongs to the caller.
 
 | Tool | Description |
@@ -373,11 +501,18 @@ Snapshots & settings.
 }
 ```
 
-## Custom Domains
+## Billing
 
 | Tool | Description |
 |------|-------------|
-| `configure_custom_domain` | Add, list, check status, verify, or remove custom domains. Actions: `add`, `list`, `status`, `verify`, `remove`. |
+| `manage_billing` | Account billing. Actions: `status`, `portal`, `topup`, `cap_get`, `cap_raise`, `plans`, `usage`. |
+
+## Partner APIs & Regions
+
+| Tool | Description |
+|------|-------------|
+| `list_partner_apis` | List partner APIs available to hackathon apps. |
+| `list_regions` | List available regions. |
 
 ## Hackathon
 

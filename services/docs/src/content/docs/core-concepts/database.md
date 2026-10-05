@@ -106,7 +106,7 @@ Each app's database lives in the [region](/core-concepts/regions/) you picked wh
 }
 ```
 
-After creating this table, use `create_user_isolation_policy` with `table_name: "comments"` and `user_column: "user_id"` for per-user data isolation.
+After creating this table, use `manage_rls` with `action: "create_user_isolation"`, `table_name: "comments"` and `user_column: "user_id"` for per-user data isolation.
 
 ### Foreign keys with referential actions
 

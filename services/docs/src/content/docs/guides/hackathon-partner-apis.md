@@ -12,8 +12,8 @@ key, and Butterbase handles partner-side auth.
 
 - **Hackathon slug** — the URL identifier of the hackathon you're in (e.g. `butterbase-may-2026`). Get it from the host or copy it out of the dashboard URL when you're viewing the hackathon.
 - **Submission code** — provided by the organizer. You only need it once, on your first submission, to bind your account to the hackathon.
-- **Butterbase service key** (`bb_sk_…`) — generate one in the dashboard or via the `generate_service_key` MCP tool. Use this in `Authorization: Bearer …` for all partner-proxy calls.
-- **Your `app_id`** — the Butterbase app the request is associated with (`app_…`). Visible in the dashboard or via `list_apps`.
+- **Butterbase service key** (`bb_sk_…`) — generate one in the dashboard or via the `manage_auth_config` MCP tool (action `generate_service_key`). Use this in `Authorization: Bearer …` for all partner-proxy calls.
+- **Your `app_id`** — the Butterbase app the request is associated with (`app_…`). Visible in the dashboard or via `manage_app` action `list`.
 
 ## 1. Discover what's available
 
