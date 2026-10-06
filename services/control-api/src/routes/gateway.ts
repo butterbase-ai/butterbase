@@ -5,29 +5,56 @@ import { config } from '../config.js';
 import { getRedisClient } from '../services/redis.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import {
-  routeChatCompletion, routeEmbedding,
+  routeChatCompletion, routeEmbedding, routeDecision,
   RouterError, InsufficientCreditsError,
 } from '../services/ai-router/router.js';
 import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../services/ai-router/catalog.js';
 import { rankRoutersForModel } from '../services/ai-router/select.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
+import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
+import { upstreamReason } from '../services/ai-router/upstream-reason.js';
+import { AI_BODY_LIMIT_BYTES } from '../services/ai-router/body-limit.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 import {
   chatCompletionRequestSchema as chatCompletionSchema,
   embeddingRequestSchema as embeddingSchema,
+  decisionRequestSchema,
 } from '../services/ai-router/schemas.js';
 import { messagesRequestSchema, guardMessagesRoutingShape } from '../services/ai-router/messages-schema.js';
 import { routeMessages } from '../services/ai-router/messages.js';
 import { responsesRequestSchema, guardResponsesRoutingShape } from '../services/ai-router/responses-schema.js';
 import { routeResponses } from '../services/ai-router/responses.js';
 import { logAuditEvent } from '../services/audit/audit-events-service.js';
+import { resolveMarkupPct } from '../services/ai-router/special-pricing.js';
+import { stripThinkingSuffix } from '../services/ai-router/reasoning.js';
 
 const GATEWAY_SCOPE = 'ai:gateway';
 
-async function resolveGatewayOrg(controlDb: pg.Pool, userId: string): Promise<string> {
+/**
+ * The organization AI spend is attributed to: usage rows, credit gating, and
+ * markup all key off this.
+ *
+ * Prefers the caller's ACTIVE organization over their personal one. Every other
+ * route already honours that org — `plugins/auth.ts` resolves it from
+ * `X-Organization-Id` for JWT sessions and from the bound org for `bb_sk_*`
+ * keys, and it is membership-validated there before it ever reaches us (a
+ * header naming an org the caller does not belong to is dropped, not honoured).
+ * The gateway previously ignored it and always billed personal, so a team's AI
+ * spend landed on whichever member happened to make the call and team-scoped
+ * pricing never applied.
+ *
+ * Falls back to the personal org when no active org is present, which is the
+ * pre-existing behaviour for callers that send no org context.
+ */
+async function resolveGatewayOrg(
+  controlDb: pg.Pool,
+  userId: string,
+  activeOrgId?: string | null,
+): Promise<string> {
+  if (activeOrgId) return activeOrgId;
   const r = await controlDb.query<{ personal_organization_id: string }>(
     'SELECT personal_organization_id FROM platform_users WHERE id = $1',
     [userId],
@@ -39,13 +66,14 @@ async function resolveGatewayOrg(controlDb: pg.Pool, userId: string): Promise<st
 
 export async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
-  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
+  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey, decisionsUrl: config.aiRouter.openrouterDecisionsUrl }));
   try {
     // @ts-expect-error — overlay path resolved at runtime
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
     if (config.aiRouter.providerPrimaryApiKey) m.set('provider-primary', overlay.providerPrimaryAdapter({ apiKey: config.aiRouter.providerPrimaryApiKey, baseUrl: config.aiRouter.providerPrimaryBaseUrl }));
     if (config.aiRouter.providerSecondaryApiKey) m.set('provider-secondary', overlay.providerSecondaryAdapter({ apiKey: config.aiRouter.providerSecondaryApiKey, baseUrl: config.aiRouter.providerSecondaryBaseUrl, catalogUrl: config.aiRouter.providerSecondaryCatalogUrl }));
     if (config.aiRouter.providerTertiaryApiKey) m.set('provider-tertiary', overlay.providerTertiaryAdapter({ apiKey: config.aiRouter.providerTertiaryApiKey, baseUrl: config.aiRouter.providerTertiaryBaseUrl }));
+    if (config.aiRouter.providerQuaternaryApiKey) m.set('provider-quaternary', overlay.providerQuaternaryAdapter({ apiKey: config.aiRouter.providerQuaternaryApiKey, baseUrl: config.aiRouter.providerQuaternaryBaseUrl }));
   } catch { /* OSS mode: only openrouter is available */ }
   return m;
 }
@@ -87,7 +115,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
   if (err instanceof InsufficientCreditsError) {
     return reply.code(402).send(openaiError(
       err.message, 'billing_error', 'insufficient_credits',
-      { required_usd: err.requiredUsd, available_usd: err.availableUsd },
+      insufficientCreditsFields(err),
     ));
   }
   if (err instanceof RouterError) {
@@ -138,7 +166,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
 }
 
 interface GatewayAuditContext {
-  endpoint: 'chat.completions' | 'embeddings' | 'messages' | 'responses';
+  endpoint: 'chat.completions' | 'embeddings' | 'decide' | 'messages' | 'responses';
   model?: string;
   appId: string;
   userId: string;
@@ -224,7 +252,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     });
   });
 
-  app.post('/v1/chat/completions', async (request, reply) => {
+  app.post('/v1/chat/completions', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
@@ -244,14 +272,16 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeChatCompletion(
         {
           platformPool: app.controlDb,
           runtimePool,
           redis: getRedisClient(),
           adapters,
-          markupPct: config.aiRouter.markupPct,
+          markupPct,
+          markupSource,
           appId: null,
           organizationId,
           userId: user.userId,
@@ -299,7 +329,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/v1/messages', async (request, reply) => {
+  app.post('/v1/messages', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
@@ -345,11 +375,13 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
+      const { model: markupModel } = stripThinkingSuffix(body.model);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, markupModel);
       const result = await routeMessages(
         {
           platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct: config.aiRouter.markupPct,
+          adapters, markupPct, markupSource,
           appId: request.auth.appId ?? null, organizationId, userId: user.userId, region: user.region,
         },
         body,
@@ -413,7 +445,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/v1/responses', async (request, reply) => {
+  app.post('/v1/responses', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
     const startedAt = Date.now();
     let auditCtx: GatewayAuditContext | null = null;
     try {
@@ -453,10 +485,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeResponses(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct: config.aiRouter.markupPct,
+          adapters, markupPct, markupSource,
           appId: request.auth.appId ?? null, organizationId, userId: user.userId, region: user.region },
         body,
       );
@@ -516,14 +549,16 @@ export async function gatewayRoutes(app: FastifyInstance) {
         startedAt,
       };
       const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
-      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const result = await routeEmbedding(
         {
           platformPool: app.controlDb,
           runtimePool,
           redis: getRedisClient(),
           adapters,
-          markupPct: config.aiRouter.markupPct,
+          markupPct,
+          markupSource,
           appId: null,
           organizationId,
           userId: user.userId,
@@ -543,6 +578,50 @@ export async function gatewayRoutes(app: FastifyInstance) {
           errorCode: e.gatewayCode ?? e.code ?? 'error',
           status: e.gatewayStatus ?? e.statusCode,
         });
+      }
+      return handleRouterError(reply, err);
+    }
+  });
+
+  app.post('/v1/decide', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
+    const startedAt = Date.now();
+    let auditCtx: GatewayAuditContext | null = null;
+    try {
+      const user = resolveGatewayUser(request);
+      const body = decisionRequestSchema.parse(request.body);
+      auditCtx = {
+        endpoint: 'decide',
+        model: body.model,
+        appId: request.auth.appId ?? '_platform',
+        userId: user.userId,
+        ipAddress: request.ip ?? null,
+        userAgent: request.headers['user-agent'] ?? null,
+        startedAt,
+      };
+      const runtimePool = getRuntimeDbPool(config.runtimeDb, user.region);
+      const organizationId = await resolveGatewayOrg(app.controlDb, user.userId, request.auth.organizationId);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+      const result = await routeDecision(
+        {
+          platformPool: app.controlDb, runtimePool, redis: getRedisClient(), adapters,
+          markupPct, markupSource, appId: null, organizationId, userId: user.userId, region: user.region,
+        },
+        body,
+      );
+      emitGatewayEvent(app, auditCtx, { success: true, status: result.status, usage: null, stream: false });
+      return reply.code(result.status).send(result.body);
+    } catch (err) {
+      if (auditCtx) {
+        const e = err as { message?: string; gatewayCode?: string; code?: string; statusCode?: number; gatewayStatus?: number };
+        emitGatewayEvent(app, auditCtx, {
+          success: false, errorMessage: e.message ?? 'unknown',
+          errorCode: e.gatewayCode ?? e.code ?? 'error', status: e.gatewayStatus ?? e.statusCode,
+        });
+      }
+      // Spec §3.3 step 4: a provider 400 carries a reason the caller can act on
+      // (bad question type, malformed criteria) — surface it, don't genericize.
+      if (err instanceof AdapterError && err.kind === 'bad_request') {
+        return reply.code(400).send(openaiError(upstreamReason(err.message), 'invalid_request_error', 'upstream_rejected'));
       }
       return handleRouterError(reply, err);
     }
@@ -584,6 +663,11 @@ export async function gatewayRoutes(app: FastifyInstance) {
         return {
           id: e.canonicalId,
           name: e.displayName,
+          // Defaults to 'chat' for rows written before the field existed, the
+          // same fallback readCatalogEntry consumers use elsewhere. Browsing
+          // UIs filter on this — the dashboard assistant's picker lists only
+          // `chat` so users cannot point a text thread at a video model.
+          modality: best?.modality ?? 'chat',
           inputPricePerMTokens: best ? applyMarkup(best.promptPricePerMtok, markupPct) : undefined,
           outputPricePerMTokens: best ? applyMarkup(best.completionPricePerMtok, markupPct) : undefined,
           contextWindow: best?.contextLength ?? null,

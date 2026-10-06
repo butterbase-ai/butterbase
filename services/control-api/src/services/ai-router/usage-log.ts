@@ -1,6 +1,10 @@
 import type pg from 'pg';
 import type { RouterName } from './normalize.js';
 import { incrementUsage } from '../usage-metering.js';
+import type { CostSource } from './cost-source.js';
+import type { Modality } from './adapters/types.js';
+
+export type { CostSource };
 
 export interface AiUsageRow {
   appId: string | null;
@@ -14,6 +18,13 @@ export interface AiUsageRow {
   providerCostUsd: number;
   chargedCreditsUsd: number;
   markupPct: number;
+  markupSource: string;
+  /**
+   * Provenance of providerCostUsd. Required, not optional: a wrong value here
+   * is invisible, so every writer must state which case it is in rather than
+   * inheriting a default. See migration 051 for the vocabulary.
+   */
+  costSource: CostSource;
   fallbackChain: string[];   // router_name:reason entries from upstream fallbacks
   leaseId: string | null;
   keyType: 'platform' | 'byok';
@@ -24,6 +35,8 @@ export interface AiUsageRow {
   cacheCreationInputTokens?: number;
   /** Reasoning tokens consumed by thinking/reasoning models (e.g. o1, claude thinking). Null when not applicable. */
   reasoningTokens?: number;
+  /** Modality of the call; NULL for legacy rows. */
+  modality?: Modality | null;
 }
 
 /**
@@ -39,8 +52,9 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
        app_id, user_id, model, provider, prompt_tokens, completion_tokens, total_tokens,
        cost_usd, key_type, charged_to_user, request_metadata,
        router, provider_cost_usd, charged_credits_usd, markup_pct, fallback_chain, lease_id,
-       cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, organization_id
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+       cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, organization_id, markup_source,
+       cost_source, modality
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
     [
       row.appId,
       row.userId,
@@ -63,6 +77,9 @@ export async function writeAiUsageRow(runtimePool: pg.Pool, row: AiUsageRow): Pr
       row.cacheCreationInputTokens ?? 0,
       row.reasoningTokens ?? null,
       row.organizationId,
+      row.markupSource,
+      row.costSource,
+      row.modality ?? null,
     ]
   );
 

@@ -24,6 +24,7 @@ import { databasePlugin } from './plugins/database.js';
 import runtimeDatabasePlugin from './plugins/runtime-database.js';
 import { dataPlanePlugin } from './plugins/data-plane.js';
 import corsPlugin from './plugins/cors.js';
+import helmetPlugin from './plugins/helmet.js';
 import authPlugin from './plugins/auth.js';
 import internalAuthPlugin from './plugins/internal-auth.js';
 import rateLimitPlugin from './plugins/rate-limit.js';
@@ -45,8 +46,12 @@ import { appConfigRoutes } from './routes/app-config.js';
 import { cloneWebhookConfigRoutes } from './routes/clone-webhook-config.js';
 import { repoRoutes } from './routes/repo.js';
 import { cloneRoutes } from './routes/clone.js';
+import { stagingRoutes } from './routes/staging.js';
 import { cloneRoutesPreflight } from './routes/clone-preflight.js';
+import { cloneIntentRoutes } from './routes/clone-intent.js';
 import { templatesDiscoveryRoutes } from './routes/templates-discovery.js';
+import { templateReleaseRoutes } from './routes/template-releases.js';
+import { templateUpdateRoutes } from './routes/template-update.js';
 import { registerFunctionRoutes } from './routes/functions.js';
 import { registerAppEnvRoutes } from './routes/app-env.js';
 import { registerFrontendRoutes } from './routes/frontend.js';
@@ -56,6 +61,7 @@ import { registerFrontendFromSourceRoutes } from './routes/frontend-from-source.
 import { registerDurableObjectRoutes } from './routes/durable-objects.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { agentsRoutes } from './routes/agents.js';
+import { dashboardAgentRoutes } from './routes/dashboard-agent.js';
 import { agentPublicRoutes } from './routes/agent-public.js';
 import { agentStreamsRoutes } from './routes/agent-streams.js';
 import { internalAgentToolsRoutes } from './routes/internal-agent-tools.js';
@@ -72,10 +78,13 @@ import { aiVideoRoutes } from './routes/ai-videos.js';
 import { aiImageRoutes } from './routes/ai-images.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
+import { startEmailLookupSweeper } from './services/people/email-lookup-sweeper.js';
 import { startForkCountSweeper } from './services/fork-count-sweeper.js';
 import { startCloneJobsPruner } from './services/clone-jobs-pruner.js';
+import { startCloneIntentsPruner } from './services/clone-intents-pruner.js';
 import { startCloneJobsReaper } from './services/clone-jobs-reaper.js';
 import { startCloneWebhookSweeper } from './services/clone-webhook-sweeper.js';
+import { startStagingReaper } from './services/staging-reaper.js';
 import { gatewayRoutes } from './routes/gateway.js';
 import { aiMeetingsRoutes } from './routes/ai-meetings.js';
 import { autoRefillRoutes } from './routes/auto-refill.js';
@@ -104,7 +113,9 @@ import { enforceExpiredGracePeriods } from './services/billing-service.js';
 import { autoRestoreSoftLockedUsers } from './services/billing-service.js';
 import { startNeonTaskWorker } from './services/neon-task-worker.js';
 import { reconcileOrphans } from './services/neon-orphan-reconciler.js';
+import { reconcileTenantProjects, PartialInventoryError } from './services/neon-tenant-reconciler.js';
 import { startFailureNotifier } from './services/failure-notifier.js';
+import { startLowBalanceNotifier } from './services/low-balance-notifier.js';
 import { startDigestNotifier } from './services/digest-notifier.js';
 import { startRagWorker } from './services/rag-worker.js';
 import { startAnalyticsPullerCron } from './services/cf-analytics-puller.js';
@@ -117,6 +128,7 @@ import { partnerProxyRoutes } from './routes/partner-proxy.js';
 import { partnerPoolsAdminRoutes } from './routes/partner-pools-admin.js';
 import stateOutboxRoutes from './routes/admin/state-outbox.js';
 import appIndexReaperRoutes from './routes/admin/app-index-reaper.js';
+import stagingLinkReconcilerRoutes from './routes/admin/staging-link-reconciler.js';
 import internalLeaseRoutes from './routes/internal/lease.js';
 import kvCredentialsRoutes from './routes/internal/kv-credentials.js';
 import kvResolveJwtRoutes from './routes/internal/kv-resolve-jwt.js';
@@ -132,9 +144,13 @@ import quotaStateRoutes from './routes/admin/quota-state.js';
 import regionStateRoutes from './routes/admin/region-state.js';
 import activeMigrationsRoutes from './routes/admin/active-migrations.js';
 import kvAdminStatsRoutes from './routes/admin/kv-admin-stats.js';
+import organizationsRoutes from './routes/admin/organizations.js';
+import specialPricingRoutes from './routes/admin/special-pricing.js';
 import wapaMetricsRoutes from './routes/admin/wapa-metrics.js';
 import adminActivityRoutes from './routes/admin/activity.js';
 import signupAttributionRoutes from './routes/admin/signup-attribution.js';
+import mcpClientsRoutes from './routes/admin/mcp-clients.js';
+import promoUsageRoutes from './routes/admin/promo-usage.js';
 import moveAppRoutes from './routes/apps/move.js';
 import reverseMoveRoutes from './routes/apps/reverse-move.js';
 import sourceReplicaRoutes from './routes/apps/source-replicas.js';
@@ -149,6 +165,7 @@ import { runtimePoolFor, listRuntimeRegions } from './services/runtime-pool-regi
 import { redisFor } from './services/redis-registry.js';
 import { auditRuntimeTablesForPool } from './services/move-app/runtime-table-audit.js';
 import { waitForReplicationCaughtUp, promoteSourceToPrimary } from './services/move-app/neon-replication.js';
+import { writePaidConversionSnapshot } from './services/paid-conversion.js';
 
 // Initialize Sentry
 if (config.sentry.enabled) {
@@ -522,6 +539,7 @@ app.register(runtimeDatabasePlugin);
 app.register(dataPlanePlugin);
 app.register(realtimePlugin);
 app.register(corsPlugin);
+app.register(helmetPlugin);
 app.register(internalAuthPlugin);
 
 // Cloud overlays bootstrap — registers StripeBillingProvider + LeaseQuotaEnforcer
@@ -562,13 +580,18 @@ app.register(kvAdminRoutes);
 app.register(kvAuditRecentRoutes);
 app.register(stateOutboxRoutes);
 app.register(appIndexReaperRoutes);
+app.register(stagingLinkReconcilerRoutes);
 app.register(quotaStateRoutes);
 app.register(regionStateRoutes);
 app.register(activeMigrationsRoutes);
 app.register(kvAdminStatsRoutes);
+app.register(organizationsRoutes);
+app.register(specialPricingRoutes);
 app.register(wapaMetricsRoutes);
 app.register(adminActivityRoutes);
 app.register(signupAttributionRoutes);
+app.register(mcpClientsRoutes);
+app.register(promoUsageRoutes);
 app.register(subdomainPlugin);
 app.register(authPlugin);
 app.register(quotaEnforcementPlugin);
@@ -648,8 +671,12 @@ app.register(appConfigRoutes);
 app.register(cloneWebhookConfigRoutes);
 app.register(repoRoutes);
 app.register(cloneRoutes);
+app.register(stagingRoutes);
 app.register(cloneRoutesPreflight);
+app.register(cloneIntentRoutes);
 app.register(templatesDiscoveryRoutes);
+app.register(templateReleaseRoutes);
+app.register(templateUpdateRoutes);
 app.register(registerFunctionRoutes);
 app.register(registerAppEnvRoutes);
 app.register(registerFrontendRoutes);
@@ -659,6 +686,7 @@ app.register(registerFrontendFromSourceRoutes);
 app.register(registerDurableObjectRoutes);
 app.register(registerWebhookRoutes);
 app.register(agentsRoutes);
+app.register(dashboardAgentRoutes, { prefix: '/v1/dashboard-agent' });
 app.register(agentPublicRoutes);
 app.register(agentStreamsRoutes);
 app.register(internalAgentToolsRoutes);
@@ -674,6 +702,45 @@ try {
   const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/admin-enterprise-billing.js');
   await app.register(overlay.default ?? overlay.adminEnterpriseBillingRoutes);
 } catch { /* OSS mode: no enterprise billing */ }
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/admin-remediation.js');
+  await app.register(overlay.default ?? overlay.adminRemediationRoutes);
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a
+  // genuine registration error here would otherwise silently 404 the whole
+  // admin billing remediation console in production.
+  console.warn('[control-api] admin-remediation overlay not registered:', err);
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/billing/routes/qwen-promo.js');
+  await app.register(overlay.default ?? overlay.qwenPromoRoutes);
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a genuine
+  // registration error would otherwise silently 404 the promo banner and its
+  // admin console.
+  console.warn('[control-api] qwen-promo overlay not registered:', err);
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/app-copy/routes.js');
+  await app.register(overlay.default ?? overlay.appCopyRoutes);
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a genuine
+  // registration error would otherwise silently 404 the app-copy console.
+  console.warn('[control-api] app-copy overlay not registered:', err);
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const worker = await import('../../../cloud-overlays/dist/cloud-overlays/app-copy/worker.js');
+  // @ts-expect-error — overlay path resolved at runtime
+  const deps = await import('../../../cloud-overlays/dist/cloud-overlays/app-copy/deps.js');
+  worker.startAppCopyWorker(app.controlDb, deps.makeExecuteDeps(app.controlDb));
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw.
+  console.warn('[control-api] app-copy worker not started:', err);
+}
 app.register(apiKeyRoutes);
 app.register(realtimeRoutes);
 app.register(ragRoutes);
@@ -781,6 +848,11 @@ Promise.resolve(app.ready())
     const failureNotifierInterval = startFailureNotifier(app.controlDb, app.log);
     (app as any).failureNotifierInterval = failureNotifierInterval;
 
+    // Start low-balance ops sweep (every 15 minutes; pages the team when a
+    // paying org drops under the alert threshold or gets cut off by the floor)
+    const lowBalanceNotifierInterval = startLowBalanceNotifier(app.controlDb, app.log);
+    (app as any).lowBalanceNotifierInterval = lowBalanceNotifierInterval;
+
     // Start weekly-digest scanner (hourly tick; sends Sunday 18:00 UTC)
     const digestNotifierInterval = startDigestNotifier(app.controlDb, app.log);
     (app as any).digestNotifierInterval = digestNotifierInterval;
@@ -843,6 +915,50 @@ Promise.resolve(app.ready())
       app.log.info(
         { intervalHours: rc.runIntervalHours, dryRun: rc.dryRun, graceHours: rc.graceHours, maxDropsPerRun: rc.maxDropsPerRun },
         'Neon orphan reconciler started',
+      );
+    }
+
+    // Tenant-PROJECT reconciler (project-per-app Phase 4). Separate flags from
+    // the database reconciler above — see config.neon.tenantReconciler for why.
+    if (config.neon.enabled && config.neon.tenantReconciler.enabled) {
+      const tc = config.neon.tenantReconciler;
+      const runTenantReconciler = async () => {
+        const redis = getRedisClient();
+        const lockTtlSeconds = Math.max(60, tc.runIntervalHours * 3600);
+        const acquired = await redis.set('lock:tenant-reconciler', '1', 'EX', lockTtlSeconds, 'NX');
+        if (acquired !== 'OK') {
+          app.log.info('Tenant reconciler skipped (another instance holds the lock)');
+          return;
+        }
+        try {
+          await reconcileTenantProjects(app.controlDb, config.runtimeDb, app.log, {
+            graceHours: tc.graceHours,
+            maxDeletesPerRun: tc.maxDeletesPerRun,
+            dryRun: tc.dryRun,
+          });
+        } catch (err) {
+          // A partial inventory is an expected, benign outcome — the cycle
+          // refused to act because it could not see everything. Log it as a
+          // warning so it is visible without paging anyone.
+          if (err instanceof PartialInventoryError) {
+            app.log.warn({ err: err.message }, 'Tenant reconciler aborted (partial inventory)');
+          } else {
+            app.log.error({ err }, 'Tenant reconciler cycle failed');
+          }
+        } finally {
+          await redis.del('lock:tenant-reconciler').catch(() => {});
+        }
+      };
+      // Offset from the database reconciler's 30s so the two do not stack.
+      setTimeout(runTenantReconciler, 90_000);
+      const tenantReconcilerInterval = setInterval(
+        runTenantReconciler,
+        tc.runIntervalHours * 60 * 60 * 1000,
+      );
+      (app as any).tenantReconcilerInterval = tenantReconcilerInterval;
+      app.log.info(
+        { intervalHours: tc.runIntervalHours, dryRun: tc.dryRun, graceHours: tc.graceHours, maxDeletesPerRun: tc.maxDeletesPerRun },
+        'Neon tenant-project reconciler started',
       );
     }
 
@@ -933,6 +1049,12 @@ Promise.resolve(app.ready())
                 });
               }
             }
+            // Daily paid-conversion snapshot. Subscription rows carry no
+            // status history, so a day not captured here is a day of the
+            // trend permanently lost. Idempotent on date.
+            await writePaidConversionSnapshot(app.controlDb).catch((err) => {
+              app.log.error({ err }, 'Failed to write paid-conversion snapshot');
+            });
           } finally {
             await redis.del('lock:nightly-billing').catch(() => {});
           }
@@ -983,12 +1105,30 @@ Promise.resolve(app.ready())
       (app as any).responsesSweeperHandle = responsesSweeperHandle;
     }
 
+    // People email-lookup sweeper: expires people_email_lookups rows stuck in
+    // 'pending' past the TTL (provider never called back) across all runtime
+    // regions, writing a zero-cost profile_email_expired audit row for each.
+    // Runs hourly; gracefully skips regions that have not run migration 031.
+    if (process.env.SKIP_PEOPLE_EMAIL_SWEEPER !== '1') {
+      const peopleEmailSweeperHandle = startEmailLookupSweeper(config.runtimeDb, app.log);
+      (app as any).peopleEmailSweeperHandle = peopleEmailSweeperHandle;
+    }
+
     // Clone-jobs pruner: deletes template_clone_jobs rows in status
     // 'completed' or 'failed' older than 30 days (runs every 24 h).
     if (process.env.SKIP_CLONE_JOBS_PRUNER !== '1') {
       const cloneJobsPrunerHandle = startCloneJobsPruner(app.controlDb, app.log);
       (app as any).cloneJobsPrunerHandle = cloneJobsPrunerHandle;
       app.log.info('Clone-jobs pruner started (24h interval)');
+    }
+
+    // Clone-intents pruner: deletes expired-unredeemed template_clone_intents
+    // rows (which still hold encrypted_env_values secrets) promptly, plus
+    // redeemed audit rows older than 30 days (runs every 24 h).
+    if (process.env.SKIP_CLONE_INTENTS_PRUNER !== '1') {
+      const cloneIntentsPrunerHandle = startCloneIntentsPruner(app.controlDb, app.log);
+      (app as any).cloneIntentsPrunerHandle = cloneIntentsPrunerHandle;
+      app.log.info('Clone-intents pruner started (24h interval)');
     }
 
     // Clone-jobs reaper: flips template_clone_jobs stuck in a mid-stage
@@ -1007,6 +1147,15 @@ Promise.resolve(app.ready())
       const cloneWebhookSweeperHandle = startCloneWebhookSweeper(app.controlDb, app.log);
       (app as any).cloneWebhookSweeperHandle = cloneWebhookSweeperHandle;
       app.log.info('Clone-webhook sweeper started (30s interval)');
+    }
+
+    // Staging reaper: pauses (never deletes) staging apps idle beyond
+    // BUTTERBASE_STAGING_IDLE_DAYS (default 30 days; runs every 6h). Scoped
+    // to this instance's own region — app_environments is a regional
+    // runtime-plane table, same as the other per-region background jobs.
+    if (process.env.SKIP_STAGING_REAPER !== '1') {
+      const stagingReaperStop = startStagingReaper(app.runtimeDb(regionConfig.instanceRegion), app.log);
+      (app as any).stagingReaperStop = stagingReaperStop;
     }
   })
   .catch((err: unknown) => {
@@ -1061,12 +1210,14 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).nightlyInterval) clearInterval((app as any).nightlyInterval);
       if ((app as any).neonWorkerInterval) clearInterval((app as any).neonWorkerInterval);
       if ((app as any).failureNotifierInterval) clearInterval((app as any).failureNotifierInterval);
+      if ((app as any).lowBalanceNotifierInterval) clearInterval((app as any).lowBalanceNotifierInterval);
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
       if ((app as any).orphanReconcilerInterval) clearInterval((app as any).orphanReconcilerInterval);
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});
+      if ((app as any).peopleEmailSweeperHandle) await (app as any).peopleEmailSweeperHandle.stop().catch(() => {});
       if ((app as any).cloneJobsPrunerHandle) await (app as any).cloneJobsPrunerHandle.stop().catch(() => {});
       if ((app as any).cloneJobsReaperHandle) await (app as any).cloneJobsReaperHandle.stop().catch(() => {});
       if ((app as any).cloneWebhookSweeperHandle) await (app as any).cloneWebhookSweeperHandle.stop().catch(() => {});

@@ -1,7 +1,7 @@
 import type { ButterbaseClient } from '../lib/butterbase-client.js';
 import type { ButterbaseResponse } from '../types/index.js';
 import type { ChatMessage, ChatOptions, ChatCompletion, ChatStreamChunk, AiConfig, AiUsage,
-  EmbeddingRequest, EmbeddingResponse, AiModel } from './types.js';
+  EmbeddingRequest, EmbeddingResponse, AiModel, DecisionRequest, DecisionResponse, AiModality } from './types.js';
 import { MeetingsClient } from './meetings-client.js';
 
 export class AiClient {
@@ -171,12 +171,28 @@ export class AiClient {
   }
 
   /**
+   * Typed decision (choice / yes-no / score) from a decision model such as
+   * typesafe/jev-1.13. Returns probabilities, not text. Billed on input tokens.
+   */
+  async decide(req: DecisionRequest): Promise<ButterbaseResponse<DecisionResponse>> {
+    try {
+      const data = await this.client.request<DecisionResponse>(
+        'POST', `/v1/${this.client.appId}/ai/decide`, req,
+      );
+      return { data, error: null };
+    } catch (error) {
+      return { data: null, error: error as Error };
+    }
+  }
+
+  /**
    * List available AI models
    */
-  async listModels(): Promise<ButterbaseResponse<{ models: AiModel[] }>> {
+  async listModels(opts?: { modality?: AiModality }): Promise<ButterbaseResponse<{ models: AiModel[] }>> {
     try {
+      const qs = opts?.modality ? `?modality=${encodeURIComponent(opts.modality)}` : '';
       const data = await this.client.request<{ models: AiModel[] }>(
-        'GET', `/v1/${this.client.appId}/ai/models`,
+        'GET', `/v1/${this.client.appId}/ai/models${qs}`,
       );
       return { data, error: null };
     } catch (error) {

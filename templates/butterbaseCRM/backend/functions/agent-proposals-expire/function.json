@@ -1,0 +1,20 @@
+{
+  "name": "agent-proposals-expire",
+  "description": "Expire pending agent_proposals rows whose expires_at < now()",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "*/30 * * * *"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:35.282Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": null,
+  "agent_tool_exposed_to": null
+}

@@ -1,0 +1,26 @@
+{
+  "name": "ask-support-overview",
+  "description": "Passthrough that runs the support-overview platform agent using the function's service key, since /agents/.../runs does not accept end-user JWTs.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 60000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-23T02:40:05.045Z",
+  "envKeys": [
+    "BUTTERBASE_API_URL",
+    "BUTTERBASE_APP_ID",
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -117,19 +117,36 @@ describe('handleVideoError', () => {
     const app = makeApp({ rows: [dbRow] });
     const reply = makeReply();
 
-    const error = new InsufficientCreditsError(0.05, 0.01);
+    const error = new InsufficientCreditsError({ balanceUsd: 0.01, floorUsd: 0.05 });
     await handleVideoError(app, reply, 'user-1', error);
 
     expect(reply._sent.code).toBe(402);
     const body = reply._sent.body as Record<string, unknown>;
     expect(body.error).toBe('insufficient_credits');
     expect(body.code).toBe('INSUFFICIENT_CREDITS');
-    expect(body.required_usd).toBe(0.05);
+    expect(body.balance_usd).toBe(0.01);
+    expect(body.credit_floor_usd).toBe(0.05);
+    // Deprecated alias for balance_usd, kept for one release for old consumers.
     expect(body.available_usd).toBe(0.01);
     expect(body.monthly_allowance_usd).toBe(50);
     expect(body.credits_usd).toBe(5.5);
     expect(body.auto_refill_enabled).toBe(true);
     expect(body.auto_refill_amount_usd).toBe(10);
+  });
+
+  it('InsufficientCreditsError → 402 with balance and floor', async () => {
+    const app = makeApp({ rows: [{
+      auto_refill_enabled: true, auto_refill_amount_usd: '10.00',
+      monthly_allowance_usd: '0.00', credits_usd: '-30.00',
+    }] });
+    const reply = makeReply();
+    await handleVideoError(app, reply, 'user-1', new InsufficientCreditsError({ balanceUsd: -30, floorUsd: -25 }));
+    expect(reply._sent.code).toBe(402);
+    const body = reply._sent.body as Record<string, unknown>;
+    expect(body.code).toBe('INSUFFICIENT_CREDITS');
+    expect(body.balance_usd).toBe(-30);
+    expect(body.credit_floor_usd).toBe(-25);
+    expect(body).not.toHaveProperty('required_usd');
   });
 
   it('RouterError with WRONG_MODALITY → 400, public code WRONG_MODALITY', async () => {
@@ -244,5 +261,107 @@ describe('videoSubmitSchema', () => {
   it('rejects invalid (non-URL) alias value via .url() validator', () => {
     const res = videoSubmitSchema.safeParse({ ...base, image_url: 'not-a-url' });
     expect(res.success).toBe(false);
+  });
+
+  // Seed imagery may be supplied in an upstream's own object vocabulary; those
+  // entries are accepted opaquely and forwarded without inspection.
+  it('accepts frame_images objects and preserves them verbatim', () => {
+    const frames = [
+      { type: 'image_url', image_url: { url: 'https://example.com/a.jpg' }, frame_type: 'first_frame' },
+      { type: 'image_url', image_url: { url: 'https://example.com/b.jpg' }, frame_type: 'last_frame' },
+    ];
+    const res = videoSubmitSchema.parse({ ...base, frame_images: frames });
+    expect(res.frame_images).toEqual(frames);
+  });
+
+  it('accepts input_references in object form', () => {
+    const refs = [{ type: 'image_url', image_url: { url: 'https://example.com/ref.jpg' } }];
+    const res = videoSubmitSchema.parse({ ...base, input_references: refs });
+    expect(res.input_references).toEqual(refs);
+  });
+
+  it('still accepts input_references as plain URL strings', () => {
+    const res = videoSubmitSchema.parse({
+      ...base,
+      input_references: ['https://example.com/ref.jpg'],
+    });
+    expect(res.input_references).toEqual(['https://example.com/ref.jpg']);
+  });
+
+  it('does not fold frame_images into input_images', () => {
+    const res = videoSubmitSchema.parse({
+      ...base,
+      frame_images: [{ type: 'image_url', image_url: { url: 'https://example.com/a.jpg' } }],
+    });
+    expect(res.input_images).toBeUndefined();
+  });
+
+  // Canonical input_images must be mirrored onto frame_images so upstreams that
+  // only understand the object shape still receive the seed image. Without this
+  // the request succeeded, charged in full, and returned text-to-video.
+  it('mirrors a single input_images URL onto frame_images as first_frame', () => {
+    const res = videoSubmitSchema.parse({ ...base, input_images: ['https://example.com/a.jpg'] });
+    expect(res.frame_images).toEqual([
+      { type: 'image_url', image_url: { url: 'https://example.com/a.jpg' }, frame_type: 'first_frame' },
+    ]);
+    // canonical field is preserved for routers that consume it
+    expect(res.input_images).toEqual(['https://example.com/a.jpg']);
+  });
+
+  it('mirrors two input_images onto first_frame + last_frame', () => {
+    const res = videoSubmitSchema.parse({
+      ...base,
+      input_images: ['https://example.com/a.jpg', 'https://example.com/b.jpg'],
+    });
+    expect(res.frame_images).toEqual([
+      { type: 'image_url', image_url: { url: 'https://example.com/a.jpg' }, frame_type: 'first_frame' },
+      { type: 'image_url', image_url: { url: 'https://example.com/b.jpg' }, frame_type: 'last_frame' },
+    ]);
+  });
+
+  it('mirrors an alias-folded image onto frame_images too', () => {
+    const res = videoSubmitSchema.parse({ ...base, first_frame: 'https://example.com/a.jpg' });
+    expect(res.input_images).toEqual(['https://example.com/a.jpg']);
+    expect(res.frame_images).toEqual([
+      { type: 'image_url', image_url: { url: 'https://example.com/a.jpg' }, frame_type: 'first_frame' },
+    ]);
+  });
+
+  it('does not derive a mirror for 3+ images (no unambiguous positional reading)', () => {
+    const res = videoSubmitSchema.parse({
+      ...base,
+      input_images: ['https://example.com/a.jpg', 'https://example.com/b.jpg', 'https://example.com/c.jpg'],
+    });
+    expect(res.frame_images).toBeUndefined();
+    expect(res.input_images).toHaveLength(3);
+  });
+
+  it('never overwrites a caller-supplied frame_images', () => {
+    const explicit = [{ type: 'image_url', image_url: { url: 'https://example.com/explicit.jpg' }, frame_type: 'last_frame' }];
+    const res = videoSubmitSchema.parse({
+      ...base,
+      input_images: ['https://example.com/a.jpg'],
+      frame_images: explicit,
+    });
+    expect(res.frame_images).toEqual(explicit);
+  });
+
+  it('adds no frame_images for a text-to-video request', () => {
+    const res = videoSubmitSchema.parse({ ...base });
+    expect(res.frame_images).toBeUndefined();
+  });
+
+  // The strict object must survive the widened unions — a typo'd key is still
+  // a 400 rather than being silently dropped on the floor.
+  it('still rejects unknown fields alongside the passthrough fields', () => {
+    const res = videoSubmitSchema.safeParse({
+      ...base,
+      frame_images: [{ type: 'image_url' }],
+      frame_imagez: [{ type: 'image_url' }],
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0].code).toBe('unrecognized_keys');
+    }
   });
 });

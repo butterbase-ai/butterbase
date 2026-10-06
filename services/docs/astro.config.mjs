@@ -4,6 +4,11 @@ import { sidebar } from './src/docs-sidebar.ts';
 import { llmsGenerator } from './src/integrations/llms-generator.ts';
 
 export default defineConfig({
+  // Pages that moved. Kept so external links and search results don't 404.
+  redirects: {
+    '/guides/clone-from-template': '/templates/cloning',
+    '/core-concepts/staging': '/core-concepts/preview-deployments',
+  },
   // Don't set `site` here: Starlight auto-enables @astrojs/sitemap when `site` is set,
   // and that can pull a Zod + sitemap version combo that breaks `astro build` in CI/Docker.
   // Our `llms` integration still defaults the canonical public URL in generated llms files.

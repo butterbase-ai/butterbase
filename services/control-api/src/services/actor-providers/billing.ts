@@ -35,11 +35,11 @@ export async function reserveActorCredits(
   });
 
   if (!res.leaseId) {
-    throw new InsufficientCreditsError(requested, res.amountGranted);
+    throw new InsufficientCreditsError({ balanceUsd: res.balanceUsd, floorUsd: res.floorUsd });
   }
   if (res.amountGranted < requested) {
     await settleLease(platformPool, { leaseId: res.leaseId, actualUsd: 0 });
-    throw new InsufficientCreditsError(requested, res.amountGranted);
+    throw new InsufficientCreditsError({ balanceUsd: res.balanceUsd, floorUsd: res.floorUsd });
   }
   return {
     leaseId: res.leaseId,

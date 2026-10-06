@@ -1,0 +1,21 @@
+{
+  "name": "convert-to-policy",
+  "description": "Admin-only. Founder converts a recurring drafted-reply pattern into a substrate decision tagged kind=policy_decision (e.g., '50% credit for outages > 24h'). Substrate stores it; other recipes read it as ground truth.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T04:11:37.462Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

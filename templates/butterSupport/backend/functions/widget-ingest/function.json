@@ -1,0 +1,16 @@
+{
+  "name": "widget-ingest",
+  "description": "Public widget endpoint. Opens a new ticket. Auth v2: visitor_token in body. Looks up an existing person entity by email (read-only, FTS-safe via sanitizeQ); leaves customer_substrate_id null if no match — support never writes person entities (CRM populates the graph). Kicks the SupportTicketDO agent loop via ctx.invokeDO (no shared secret).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "envKeys": []
+}

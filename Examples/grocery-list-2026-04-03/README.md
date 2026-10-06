@@ -4,7 +4,7 @@ An example app that uses Butterbase as the backend: email/password auth, row-lev
 
 ## What this demonstrates
 
-- **Backend provisioning** via Butterbase MCP tools (`init_app`, `apply_schema`, `create_user_isolation_policy`, `update_cors`)
+- **Backend provisioning** via Butterbase MCP tools (`init_app`, `manage_schema` action `apply`, `manage_rls` action `create_user_isolation`, `manage_app` action `update_cors`)
 - **End-user JWT auth** (`/auth/{app_id}/*`)
 - **Auto-generated REST API** for `grocery_items`
 - **RLS with user isolation** so each user only sees their own rows
@@ -25,7 +25,7 @@ An example app that uses Butterbase as the backend: email/password auth, row-lev
 
 ```bash
 cd /path/to/butterbase
-docker compose up -d
+docker compose -f docker-compose.local.yml up -d
 ```
 
 ### 2. Backend
@@ -47,7 +47,7 @@ npm install
 cp .env.example .env
 ```
 
-Adjust `VITE_API_BASE_URL` if your gateway differs (see root [Readme.md](../../Readme.md)).
+Adjust `VITE_API_BASE_URL` if your gateway differs (see root [README.md](../../README.md)).
 
 ### 5. Run the app
 
@@ -77,7 +77,7 @@ Open http://localhost:5173
 
 ### Frontend
 
-- Vite, React, TypeScript, React Router, `fetch` for Auto-API and storage routes
+- Vite, React, TypeScript, React Router, `@butterbase/sdk` for auth, Auto-API, storage, and function calls
 
 ## API endpoints used
 
@@ -109,7 +109,7 @@ Base URL: value of `VITE_API_BASE_URL` (no trailing slash), e.g. `http://localho
 
 **Failed to fetch**
 
-- Confirm Butterbase is up: `docker compose ps`
+- Confirm Butterbase is up: `docker compose -f docker-compose.local.yml ps`
 - Confirm `VITE_API_BASE_URL` matches how you reach the API (Traefik / port)
 
 **App not found / 404 on auth**
@@ -126,5 +126,5 @@ Base URL: value of `VITE_API_BASE_URL` (no trailing slash), e.g. `http://localho
 
 ## Learn more
 
-- [Butterbase README](../../Readme.md)
+- [Butterbase README](../../README.md)
 - [MCP setup for this example](./BUTTERBASE_SETUP.md)

@@ -1,7 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { registerManageAi } from '../tools/manage-ai.js';
+import * as apiClient from '../api-client.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { createButterbaseMcpServer } from '../create-server.js';
+
+vi.mock('../api-client.js');
 
 async function createConnectedPair() {
   const server = await createButterbaseMcpServer();
@@ -37,13 +42,14 @@ describe('MCP Server Tools', () => {
       'manage_billing',
       'manage_durable_objects',
       'manage_edge_ssr',
-      'manage_people',
       'manage_frontend',
       'manage_function',
       'manage_integrations',
       'manage_kv',
       'manage_migrations',
       'manage_oauth',
+      'manage_people',
+      'manage_preview',
       'manage_rag_content',
       'manage_realtime',
       'manage_repo',
@@ -51,6 +57,7 @@ describe('MCP Server Tools', () => {
       'manage_schema',
       'manage_storage',
       'prep_and_submit_hackathon_entry',
+      'promote_preview',
       'query_audit_logs',
       'rag_query',
       'seed_database',
@@ -107,7 +114,7 @@ describe('MCP Server Tools', () => {
     const actions = (tool!.inputSchema as unknown as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'link_substrate', 'list', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'secure', 'set_clone_webhook', 'set_substrate_autopropagate', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors',
+      'check_template_updates', 'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'get_env', 'get_template_release', 'link_substrate', 'list', 'list_template_releases', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'publish_template_release', 'secure', 'set_clone_webhook', 'set_substrate_autopropagate', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors', 'update_env', 'update_from_template',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [
@@ -218,5 +225,41 @@ describe('MCP Server Tools', () => {
       .join('\n');
     expect(text).toContain('Butterbase');
     expect(text).toContain('Declarative schema');
+  });
+});
+
+describe('manage_ai decisions', () => {
+  // The registered handler is invoked directly (as manage-agents.test.ts does),
+  // with api-client mocked, so we assert the exact HTTP call it makes.
+  type Result = { content: { type: 'text'; text: string }[]; isError?: boolean };
+  let callManageAi: (args: Record<string, unknown>) => Promise<Result>;
+  const apiPostMock = vi.mocked(apiClient.apiPost);
+  const apiGetMock = vi.mocked(apiClient.apiGet);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    registerManageAi(server);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handler = (server as any)._registeredTools['manage_ai'].handler;
+    callManageAi = (args) => handler(args);
+  });
+
+  it('manage_ai decide posts state+questions to /ai/decide', async () => {
+    await callManageAi({ app_id: 'app_1', action: 'decide', model: 'typesafe/jev-1.13', state: { t: 1 }, questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'y', false: 'n' } } } });
+    expect(apiPostMock).toHaveBeenCalledWith('/v1/app_1/ai/decide', {
+      model: 'typesafe/jev-1.13', state: { t: 1 }, questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'y', false: 'n' } } },
+    });
+  });
+
+  it('manage_ai decide without questions returns an isError result', async () => {
+    const r = await callManageAi({ app_id: 'app_1', action: 'decide' });
+    expect(r.isError).toBe(true);
+    expect(apiPostMock).not.toHaveBeenCalled();
+  });
+
+  it('manage_ai list_models forwards modality', async () => {
+    await callManageAi({ app_id: 'app_1', action: 'list_models', modality: 'decisions' });
+    expect(apiGetMock).toHaveBeenCalledWith('/v1/app_1/ai/models?modality=decisions');
   });
 });

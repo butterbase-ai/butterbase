@@ -1,0 +1,38 @@
+{
+  "name": "support-overview",
+  "display_name": "Support Overview",
+  "description": "Read-only summary of current support state for the founder (and the founder's Claude). Counts by status, oldest waiting tickets, low-confidence diagnoses, surfaced cross-cutting patterns, recent escalation outcomes.",
+  "default_model": "anthropic/claude-haiku-4.5",
+  "visibility": "authenticated",
+  "daily_budget_usd": 1,
+  "max_runs_per_user_per_hour": 60,
+  "max_runs_per_app_per_hour": 600,
+  "graph_spec": {
+    "spec_version": "1",
+    "entry": "summarize",
+    "nodes": {
+      "summarize": {
+        "type": "llm",
+        "model": "anthropic/claude-haiku-4.5",
+        "system_prompt": "You summarize current support state for the founder. Use the query_table tool to read the inbox tables. Call query_table with EXACTLY these keys (and ONLY these keys): { \"table\": \"<name>\", \"filter\": { ... }, \"limit\": <n> }. Make tool calls ONE AT A TIME (no parallel calls). Whitelisted tables: support_tickets, escalations, pattern_signals, diagnoses. Example calls: {\"table\":\"support_tickets\",\"filter\":{\"status\":\"open\"},\"limit\":20}; {\"table\":\"support_tickets\",\"filter\":{},\"limit\":50}; {\"table\":\"escalations\",\"filter\":{},\"limit\":10}. Be concise: open count, status breakdown, oldest waiting, recent escalations, surfaced patterns. Cite specific ticket ids. Never invent rows.",
+        "input_template": "{{ state.message }}",
+        "output_key": "summary",
+        "tools": [{ "source": "builtin", "name": "query_table" }]
+      },
+      "done": { "type": "end", "output_template": "{{ state.summary }}" }
+    },
+    "edges": [{ "from": "summarize", "to": "done" }],
+    "tools": {
+      "builtin": ["query_table"],
+      "mcp_servers": [],
+      "functions": []
+    },
+    "limits": {
+      "max_steps": 5,
+      "max_tool_calls": 10,
+      "max_parallel_tools": 2,
+      "timeout_seconds": 60,
+      "human_timeout_seconds": 3600
+    }
+  }
+}

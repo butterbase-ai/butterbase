@@ -8,6 +8,22 @@ export interface MigrationResult {
   migration_id: number;
 }
 
+/**
+ * Install (or reinstall) the realtime change-event trigger for one table in
+ * an app's per-app DB. `enable_table_trigger` is idempotent (DROP IF EXISTS +
+ * CREATE — db/data-plane/007_realtime.sql), so calling this again for a table
+ * that already has its trigger is a safe no-op.
+ *
+ * This is the one code path that runs the installer SQL: the manage_realtime
+ * configure route (routes/realtime.ts), this module's own reconcileRealtimeTriggers
+ * (called after every schema migration), and clone/update/promote's realtime
+ * config replay (clone-replay.ts) all call through here instead of issuing
+ * `SELECT realtime.enable_table_trigger(...)` themselves.
+ */
+export async function installRealtimeTrigger(pool: pg.Pool, tableName: string): Promise<void> {
+  await pool.query('SELECT realtime.enable_table_trigger($1)', [tableName]);
+}
+
 function generateSqlDown(statements: DDLStatement[]): string {
   const reverseStatements: string[] = [];
 
@@ -71,6 +87,11 @@ export async function applyMigration(
     const newTables: string[] = [];
 
     for (const stmt of statements) {
+      if (stmt.destructive && !stmt.authorized) {
+        throw new Error(
+          `Refusing unauthorized destructive statement: ${stmt.description} (${stmt.sql})`,
+        );
+      }
       await client.query(stmt.sql);
       executedStatements.push({
         sql: stmt.sql,
@@ -200,7 +221,7 @@ async function reconcileRealtimeTriggers(pool: pg.Pool): Promise<void> {
 
     if (!triggerExists.rows[0]?.exists) {
       // Reinstall — enable_table_trigger is idempotent (DROP IF EXISTS + CREATE).
-      await pool.query(`SELECT realtime.enable_table_trigger($1)`, [table_name]);
+      await installRealtimeTrigger(pool, table_name);
     }
   }
 }

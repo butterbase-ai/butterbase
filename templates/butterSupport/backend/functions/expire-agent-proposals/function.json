@@ -1,0 +1,23 @@
+{
+  "name": "expire-agent-proposals",
+  "description": "Cron */30 min. Flip agent_proposals.status from 'pending' to 'expired' where expires_at < now(). For each expired row that has a substrate_action_id, also call substrate.reject(action_id, {reason: expired}) so the substrate twin stays in sync. Mirrors CRM's agent-proposals-expire pattern.",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "*/30 * * * *"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T16:22:46.816Z",
+  "envKeys": [
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

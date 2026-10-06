@@ -1,0 +1,21 @@
+{
+  "name": "create-campaign-list",
+  "description": "Create a saved audience list (SQL). Members are substrate entity ids, pre-resolved by the caller with email + vars snapshots. Pass list_id to append to an existing list instead.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-09T14:47:41.040Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

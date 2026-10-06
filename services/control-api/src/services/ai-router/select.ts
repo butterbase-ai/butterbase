@@ -11,6 +11,11 @@ export interface CatalogRouter {
   modality?: Modality;
   // Router-native pricing for non-chat modalities. See UpstreamModel.rawPricing.
   rawPricing?: unknown;
+  // Set when this row's per-Mtok prices were copied from a sibling router
+  // during refreshCatalog because the upstream publishes no rates of its own.
+  // Purely informational — nothing routes on it — but it makes an inherited
+  // estimate distinguishable from a real published price when debugging a bill.
+  priceInheritedFrom?: RouterName;
 }
 
 export interface CatalogEntry {
@@ -42,6 +47,10 @@ function score(r: CatalogRouter): number {
 const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
   'bytedance/seedance-2.0': 'provider-tertiary',
   'bytedance/seedance-2.0-fast': 'provider-tertiary',
+  // Qwen/provider-quaternary pins removed 2026-09-30: the Alibaba coupon expired
+  // 2026-09-23. Keeping the pins after expiry routes calls to DashScope at
+  // butterbase's cost while OpenRouter/provider-tertiary serve the same models.
+  // Qwen models fall back to normal price-based ranking (OpenRouter / tertiary).
 };
 
 /**
@@ -78,6 +87,10 @@ export const CANONICAL_IMAGE_MODEL_ROUTES: Readonly<Record<string, RouterName>> 
   'alibaba/wan-2.6-image':                 'provider-secondary',
   'prunaai/p-image':                       'provider-secondary',
   'prunaai/p-image-edit':                  'provider-secondary',
+  'black-forest-labs/flux.2-pro':          'openrouter',
+  'black-forest-labs/flux.2-max':          'openrouter',
+  'black-forest-labs/flux.2-flex':         'openrouter',
+  'black-forest-labs/flux.2-klein-4b':     'openrouter',
 };
 
 /**

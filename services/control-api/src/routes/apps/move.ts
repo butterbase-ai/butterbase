@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { checkMoveAppEligibility } from '../../services/move-app/eligibility.js';
 import { createMigration, getMigration, markAborted } from '../../services/move-app/migration-store.js';
 import { requireUserId } from '../../utils/require-auth.js';
+import { getRuntimeDbForApp } from '../../services/region-resolver.js';
 
 const HAPPY_PATH = [
   'requested',
@@ -27,7 +28,12 @@ const moveAppRoutes: FastifyPluginAsync = async (fastify) => {
       const { dest_region } = request.body ?? ({} as any);
       if (!dest_region) return reply.code(400).send({ error: 'dest_region required' });
 
-      const eligible = await checkMoveAppEligibility(fastify.controlDb, app_id, dest_region);
+      // The staging-link check needs the app's REGIONAL runtime DB —
+      // app_environments does not live in the control plane.
+      const runtimeDb = await getRuntimeDbForApp(fastify.controlDb, app_id);
+      const eligible = await checkMoveAppEligibility(fastify.controlDb, app_id, dest_region, {
+        runtimeDb,
+      });
       if (!eligible.ok) return reply.code(409).send({ error: 'ineligible', reason: eligible.reason });
 
       const ownerId = requireUserId(request);

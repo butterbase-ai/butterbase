@@ -14,14 +14,17 @@ import {
 import { config } from '../../config.js';
 import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
-import { acquireForEstimatedCost, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
+import type { MarkupSource } from './special-pricing.js';
+import { acquireForEstimatedCost, acquireNominal, settleAfterCall, leaseTtlSeconds, InsufficientCreditsError } from './billing-gate.js';
+import { promoFundedRouter, recordPromoSpend } from './promo-coverage-registry.js';
 import { writeAiUsageRow } from './usage-log.js';
+import { classifyCostSource, type CostSource } from './cost-source.js';
 import { pickProviderCost } from './adapters/openrouter.js';
 import { logAuditEvent } from '../audit/audit-events-service.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 import { maybeSendCreditsEmail } from '../credits-email.js';
 import { sendBillingEmail } from '../auth/email-service.js';
-import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult, type ImageGenerationRequest, type ImageSubmitResult, type ImagePollResult } from './adapters/types.js';
+import { AdapterError, type RouterAdapter, type AdapterResult, type AdapterUsage, type ChatCompletionRequest, type EmbeddingRequest, type VideoGenerationRequest, type VideoSubmitResult, type VideoPollResult, type ImageGenerationRequest, type ImageSubmitResult, type ImagePollResult, type DecisionRequest } from './adapters/types.js';
 import type { RouterName } from './normalize.js';
 
 // Error kinds that must trigger fallover to the next candidate provider.
@@ -36,7 +39,7 @@ const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 
  * slot-cooldown MGET stays O(known-slots) instead of scanning Redis keys.
  * Extend when adding new named slots.
  */
-const KNOWN_ROUTER_SLOTS = ['provider-primary', 'provider-secondary', 'provider-tertiary', 'openrouter'] as const;
+const KNOWN_ROUTER_SLOTS = ['provider-primary', 'provider-secondary', 'provider-tertiary', 'provider-quaternary', 'openrouter'] as const;
 
 /**
  * Pick the active ranker. Waterfall wins over presence-mode when both are
@@ -54,12 +57,11 @@ function pickRanker() {
   return rankRoutersForModel;
 }
 
-/**
- * Non-fatal post-settle hook: reads the user's current credits balance
- * (monthly allowance + topup) and lets credits-email decide whether to
- * fire credits_low / credits_exhausted. Dedup-guarded inside
- * maybeSendCreditsEmail via columns on platform_users.
- */
+/** True when every route for this model is a decision model (Jev etc.). */
+function isDecisionsOnly(entry: { routers: Array<{ modality?: string }> }): boolean {
+  return entry.routers.length > 0 && entry.routers.every(r => r.modality === 'decisions');
+}
+
 /**
  * Wraps acquireForEstimatedCost so that an InsufficientCreditsError also
  * emits a billing/denied audit event. The audit_events.app_id column is
@@ -72,6 +74,13 @@ export async function acquireWithAudit(
   ttlSeconds: number,
 ): Promise<ReturnType<typeof acquireForEstimatedCost>> {
   try {
+    if (config.aiRouter.reserveSmallEnabled) {
+      // reservedUsd is deliberately ignored: admission is the credit floor and
+      // the true cost is charged at settle.
+      return await acquireNominal(
+        ctx.platformPool, ctx.userId, ctx.organizationId, ctx.region, ttlSeconds,
+      );
+    }
     return await acquireForEstimatedCost(
       ctx.platformPool, ctx.userId, ctx.organizationId, ctx.region, reservedUsd, ttlSeconds,
     );
@@ -89,8 +98,8 @@ export async function acquireWithAudit(
           success: false,
           errorMessage: err.message,
           eventData: {
-            required_usd: err.requiredUsd,
-            available_usd: err.availableUsd,
+            floor_usd: err.floorUsd,
+            balance_usd: err.balanceUsd,
             region: ctx.region,
             // auto_refill state is not in scope here; omitted to avoid
             // extra SELECTs in the hot reject path.
@@ -105,21 +114,31 @@ export async function acquireWithAudit(
   }
 }
 
-export async function maybeFireCreditsEmail(pool: pg.Pool, userId: string): Promise<void> {
+/**
+ * Non-fatal post-settle hook: reads the org's current credits balance
+ * (monthly allowance + topup) and lets credits-email decide whether to
+ * fire credits_low / credits_exhausted. Dedup-guarded inside
+ * maybeSendCreditsEmail via columns on organizations (migration 113).
+ *
+ * Takes the org that was billed, not the calling user. The balance read here
+ * must be the one the settle just drew down, and under per-org billing that is
+ * `ctx.organizationId` — for a team-org request the caller's personal org has
+ * a completely unrelated balance.
+ */
+export async function maybeFireCreditsEmail(pool: pg.Pool, organizationId: string): Promise<void> {
   try {
     const r = await pool.query<{ monthly_allowance_usd: string; credits_usd: string }>(
       `SELECT o.monthly_allowance_usd::text, o.credits_usd::text
-         FROM platform_users pu
-         JOIN organizations o ON o.id = pu.personal_organization_id
-        WHERE pu.id = $1`,
-      [userId],
+         FROM organizations o
+        WHERE o.id = $1`,
+      [organizationId],
     );
     if (r.rows.length === 0) return;
     const postBalance = parseFloat(r.rows[0].monthly_allowance_usd ?? '0')
       + parseFloat(r.rows[0].credits_usd ?? '0');
     await maybeSendCreditsEmail({
       db: pool,
-      userId,
+      organizationId,
       postBalance,
       sendBillingEmail: (to, template, data) =>
         sendBillingEmail(to, template as any, data),
@@ -136,6 +155,7 @@ export interface RouteContext {
   redis: Redis;
   adapters: Map<RouterName, RouterAdapter>;
   markupPct: number;
+  markupSource: MarkupSource;
   appId: string | null;
   organizationId: string;
   userId: string;
@@ -175,6 +195,9 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   if (!entry) {
     throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
   }
+  if (isDecisionsOnly(entry)) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is a decision model. Use /ai/decide instead.`);
+  }
   const enabledStatuses = await readEnabledRouters(ctx.redis);
   const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
   // Skip any slot currently in cooldown from a recent fallback-kind failure.
@@ -192,7 +215,50 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   const worstUsd = estimateWorstCaseUsd(ranked[0], promptTokens, maxTokens);
   const reservedUsd = worstUsd * (1 + ctx.markupPct / 100);
 
-  const lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+  // A promo-covered call is paid for by a provider coupon, not the caller's
+  // credits. Skip the lease entirely rather than leasing and refunding: a lease
+  // admits on the org credit floor, so leasing first would 402 a zero-balance
+  // user on a call they are not being charged for.
+  //
+  // Coverage is a property of the ROUTER that ends up serving the call, not of
+  // the model: most coupon-eligible models are also carried by routers the
+  // coupon does not pay for. Coverage therefore only holds while we are still
+  // on a funded router — if the call falls back, `covered` is cleared and a
+  // lease is taken before the unfunded upstream is contacted, so the caller is
+  // billed normally. Without that, a fallback would hand out free inference we
+  // pay for ourselves and book it against a coupon that is never charged.
+  const fundedRouter = await promoFundedRouter(canonicalId);
+  let covered = fundedRouter !== null && ranked.some((r) => r.name === fundedRouter);
+  let lease = covered
+    ? null
+    : await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+
+  /**
+   * Take a lease mid-flight when a covered call is about to leave its funded
+   * router. Called BEFORE the unfunded upstream is contacted, so a caller with
+   * no credits gets a 402 instead of a call we cannot bill for.
+   */
+  const dropCoverageAndLease = async (): Promise<void> => {
+    covered = false;
+    if (!lease) {
+      lease = await acquireWithAudit(ctx, reservedUsd, leaseTtlSeconds(maxTokens));
+    }
+  };
+
+  /**
+   * Settle the lease, or record promo spend when there is no lease. Every
+   * settlement site in this function goes through here so the two cases cannot
+   * drift apart. `providerCostUsd` is the pre-markup cost — promo budgets are
+   * denominated in what the provider charges us, not what we would have
+   * charged the user.
+   */
+  const settleCall = async (chargedCreditsUsd: number, providerCostUsd: number): Promise<void> => {
+    if (lease) {
+      await settleAfterCall(ctx.platformPool, lease, chargedCreditsUsd);
+      return;
+    }
+    if (covered && providerCostUsd > 0) await recordPromoSpend(canonicalId, providerCostUsd);
+  };
 
   // ---- Sticky binding lookup ------------------------------------------------
   // Conversations pinned to a specific router via session_id (preferred) or a
@@ -219,16 +285,32 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       ]
     : ranked;
 
+  // Spend the coupon before our own money: a covered call tries the funded
+  // router first, ahead of both price rank and any sticky pin. Losing prompt-
+  // cache continuity for a turn is cheaper than paying for a call the coupon
+  // would have covered, and the fallback order below is otherwise unchanged.
+  const candidates = covered
+    ? [
+        ...orderedCandidates.filter(r => r.name === fundedRouter),
+        ...orderedCandidates.filter(r => r.name !== fundedRouter),
+      ]
+    : orderedCandidates;
+
   const fallbackChain: string[] = [];
   let result: AdapterResult | null = null;
   let chosenRouter: RouterName | null = null;
   let lastError: unknown = null;
 
-  for (const candidate of orderedCandidates) {
+  for (const candidate of candidates) {
     const adapter = ctx.adapters.get(candidate.name);
     if (!adapter) {
       fallbackChain.push(`${candidate.name}:no_adapter`);
       continue;
+    }
+    if (covered && candidate.name !== fundedRouter) {
+      // Ordered deliberately: acquire the lease first, so an InsufficientCredits
+      // rejection surfaces before we spend money upstream.
+      await dropCoverageAndLease();
     }
     try {
       const upstreamId = candidate.upstreamId ?? adapter.toUpstreamId(canonicalId);
@@ -267,13 +349,13 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
       }
       // Non-fallback error (auth, bad_request) — release lease + rethrow.
       // Do NOT touch the sticky binding; the upstream wasn't a routing failure.
-      await settleAfterCall(ctx.platformPool, lease, 0);
+      await settleCall(0, 0);
       throw err;
     }
   }
 
   if (!result || !chosenRouter) {
-    await settleAfterCall(ctx.platformPool, lease, 0);
+    await settleCall(0, 0);
     const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
     (err as any).cause = lastError;
     throw err;
@@ -283,20 +365,22 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   if (result.stream) {
     const wrapped = wrapStreamForSettlement(result.stream, async (usage, providerCost) => {
       const cost = providerCost ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cacheReadInputTokens ?? 0, usage.cacheCreationInputTokens ?? 0);
+      const costSource = classifyCostSource(providerCost, ranked[0]);
       const chargedCredits = applyMarkup(cost, ctx.markupPct);
-      await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+      await settleCall(chargedCredits, cost);
       maybeTriggerAutoRefill(
         { pool: ctx.platformPool, redis: ctx.redis },
         ctx.organizationId,
       ).catch((err) => console.error('[router] auto-refill check failed:', err));
-      maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+      maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
       writeAiUsageRow(ctx.runtimePool, {
+        modality: 'chat',
         appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter!,
         promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
         totalTokens: usage.promptTokens + usage.completionTokens,
-        providerCostUsd: cost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
-        keyType: 'platform', chargedToUser: true,
+        providerCostUsd: cost, chargedCreditsUsd: covered ? 0 : chargedCredits,
+        markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease?.leaseId ?? null,
+        keyType: 'platform', chargedToUser: !covered,
         cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
         cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
       }).catch(err => console.error('[router] usage-log write failed:', err));
@@ -310,8 +394,10 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
         chosen_router: chosenRouter,
         fallback_chain: fallbackChain,
         provider_cost_usd: cost,
-        charged_credits_usd: chargedCredits,
+        charged_credits_usd: covered ? 0 : chargedCredits,
+        promo_covered: covered,
         markup_pct: ctx.markupPct,
+        markup_source: ctx.markupSource,
         latency_ms: t1 - t0,
         status: result.status,
       }));
@@ -323,21 +409,23 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
   const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
     ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, usage.completionTokens, usage.cache_read_input_tokens ?? 0, usage.cache_creation_input_tokens ?? 0);
+  const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
-  await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+  await settleCall(chargedCredits, providerCost);
   maybeTriggerAutoRefill(
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'chat',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
     totalTokens: usage.promptTokens + usage.completionTokens,
-    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
-    keyType: 'platform', chargedToUser: true,
+    providerCostUsd: providerCost, chargedCreditsUsd: covered ? 0 : chargedCredits,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease?.leaseId ?? null,
+    keyType: 'platform', chargedToUser: !covered,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
   }).catch(err => console.error('[router] usage-log write failed:', err));
@@ -351,8 +439,10 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     chosen_router: chosenRouter,
     fallback_chain: fallbackChain,
     provider_cost_usd: providerCost,
-    charged_credits_usd: chargedCredits,
+    charged_credits_usd: covered ? 0 : chargedCredits,
+    promo_covered: covered,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     latency_ms: t1 - t0,
     status: result.status,
   }));
@@ -441,6 +531,9 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   const canonicalId = req.model;
   const entry = await readCatalogEntry(ctx.redis, canonicalId);
   if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  if (isDecisionsOnly(entry)) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is a decision model. Use /ai/decide instead.`);
+  }
 
   const enabledStatuses = await readEnabledRouters(ctx.redis);
   const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
@@ -498,6 +591,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
   const usage: AdapterUsage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalCost: null };
   const providerCost = result.providerCostUsd
     ?? estimateWorstCaseUsd(ranked[0], usage.promptTokens, 0, usage.cache_read_input_tokens ?? 0, usage.cache_creation_input_tokens ?? 0);
+  const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
   const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
 
   await settleAfterCall(ctx.platformPool, lease, chargedCredits);
@@ -505,13 +599,14 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch((err) => console.error('[router] credits-email failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'embedding',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
     promptTokens: usage.promptTokens, completionTokens: 0,
     totalTokens: usage.promptTokens,
     providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain, leaseId: lease.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
     keyType: 'platform', chargedToUser: true,
     cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
@@ -528,6 +623,7 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
     provider_cost_usd: providerCost,
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     latency_ms: t1 - t0,
     status: result.status,
   }));
@@ -546,11 +642,23 @@ export async function routeEmbedding(ctx: RouteContext, req: EmbeddingRequest): 
 const VIDEO_DEFAULT_ESTIMATE_USD = 3.0;
 
 /**
- * Video jobs may take several minutes. We hold the lease for 15 minutes;
- * if the customer never polls back, the lease auto-expires per
- * credit_leases.expires_at — credits are returned to the user.
+ * Legacy: video jobs may take several minutes. We hold the lease for 15
+ * minutes; if the customer never polls back, the lease auto-expires per
+ * credit_leases.expires_at — credits are returned to the user. TTL is a
+ * money control here (it decides when a real reservation is refunded), so it
+ * must not move on the flag-off path.
+ *
+ * Reserve-small: the reservation is nominal, so the TTL no longer protects
+ * credits — it is row hygiene only. 2h matches the video sweeper's lookback
+ * so a normal job never transits 'abandoned'.
  */
-const VIDEO_LEASE_TTL_SECONDS = 15 * 60;
+const VIDEO_LEASE_TTL_LEGACY_SECONDS = 15 * 60;
+const VIDEO_LEASE_TTL_RESERVE_SMALL_SECONDS = 2 * 60 * 60;
+function videoLeaseTtlSeconds(): number {
+  return config.aiRouter.reserveSmallEnabled
+    ? VIDEO_LEASE_TTL_RESERVE_SMALL_SECONDS
+    : VIDEO_LEASE_TTL_LEGACY_SECONDS;
+}
 
 /**
  * Estimate the worst-case credit-cost (in USD, pre-markup) of a video job from
@@ -646,14 +754,31 @@ function clampVideoCost(ratePerSecond: number, req: VideoGenerationRequest, with
 }
 
 /**
+ * Settle-time cost: rate x seconds, unclamped. The [$0.05, $9] bounds exist to
+ * stop a bad SKU producing an absurd RESERVATION; applied to a CHARGE they
+ * under-bill expensive jobs and over-bill cheap ones.
+ */
+function billedVideoCost(ratePerSecond: number, req: VideoGenerationRequest): number {
+  const seconds = req.duration ?? 10;
+  return Math.max(0, +(ratePerSecond * seconds).toFixed(6));
+}
+
+/**
  * Pick the rate-per-second to use, scanning all routers' rawPricing.
  * Returns null when no router has a parseable pricing shape.
  *
- * When `preferRouter` is provided, that router's pricing is used directly
- * (settle-time semantics — bill against the actual upstream that served
- * the request). When omitted, the function returns the MAX rate across
- * all routers (submit-time semantics — size the lease for any router the
- * fallback chain might land on).
+ * When `preferRouter` is provided, that router's pricing is tried first and
+ * the scan is used as a FALLBACK when it has none — i.e. the result may be a
+ * sibling router's rate. That is acceptable for sizing a reservation (which is
+ * refunded) but NOT for producing a bill: billing a customer at a provider
+ * that did not serve them is indefensible. The settle path only uses this
+ * shape on the legacy (reserve-small off) branch, where it is preserved
+ * verbatim for byte-compatibility; the reserve-small branch uses
+ * `rateForServingRouter`, which never substitutes.
+ *
+ * When `preferRouter` is omitted, returns the MAX rate across all routers
+ * (submit-time semantics — size the lease for any router the fallback chain
+ * might land on).
  */
 function resolveRateForRequest(
   entry: import('./catalog.js').CatalogEntry,
@@ -674,6 +799,121 @@ function resolveRateForRequest(
   return best;
 }
 
+/** Hold multiplier over the client-visible payload estimate (see routeDecision). */
+export const DECISION_HOLD_TOKEN_MULTIPLIER = 2;
+/** Per-question hold allowance for the model's hidden prompt scaffolding. */
+export const DECISION_HOLD_TOKENS_PER_QUESTION = 500;
+
+export async function routeDecision(ctx: RouteContext, rawReq: DecisionRequest): Promise<{ status: number; body: unknown }> {
+  const t0 = Date.now();
+  // The Decisions API rejects a body without `state`, but ours documents it as
+  // optional (questions can be self-contained). Default a missing one to {};
+  // an explicit value — including "" or null — passes through untouched.
+  const req: DecisionRequest = rawReq.state === undefined ? { ...rawReq, state: {} } : rawReq;
+  const canonicalId = req.model;
+  const entry = await readCatalogEntry(ctx.redis, canonicalId);
+  if (!entry) throw new RouterError('MODEL_NOT_FOUND', 404, `Model not found: ${canonicalId}`);
+  if (!entry.routers.some(r => r.modality === 'decisions')) {
+    throw new RouterError('WRONG_MODALITY', 400, `Model ${canonicalId} is not a decision model. Use /chat/completions or /embeddings instead.`);
+  }
+
+  const enabledStatuses = await readEnabledRouters(ctx.redis);
+  const enabled = new Set<string>(enabledStatuses.filter(r => r.enabled).map(r => r.name));
+  const downSlots = await readDownSlots(ctx.redis, KNOWN_ROUTER_SLOTS);
+  for (const s of downSlots) enabled.delete(s);
+  const ranked = pickRanker()(entry, enabled);
+  if (ranked.length === 0) throw new RouterError('NO_ROUTERS_AVAILABLE', 502, 'Model is temporarily unavailable. Please try again or use a different model.');
+
+  // Pre-call estimate is ONLY for the credit hold; settlement uses reported usage.
+  const estimatedTokens = estimatePromptTokens(
+    [{ role: 'user', content: JSON.stringify({ state: req.state ?? null, questions: req.questions }) }],
+    canonicalId,
+  );
+  // Pad the hold: decision models wrap each question in prompt scaffolding the
+  // client never sees (observed 476 input tokens for one yes/no question over a
+  // one-line state), and with reserve-small off settleLease clamps the charge to
+  // the reservation — an unpadded hold would under-debit. Padding is hold-only;
+  // the settlement fallback below still uses the unpadded estimate.
+  const holdTokens = estimatedTokens * DECISION_HOLD_TOKEN_MULTIPLIER
+    + DECISION_HOLD_TOKENS_PER_QUESTION * Object.keys(req.questions).length;
+  const reservedUsd = (holdTokens / 1_000_000) * ranked[0].promptPricePerMtok * (1 + ctx.markupPct / 100);
+  const lease = await acquireWithAudit(ctx, reservedUsd, 60);
+
+  const fallbackChain: string[] = [];
+  let result: AdapterResult | null = null;
+  let chosenRouter: RouterName | null = null;
+  let lastError: unknown = null;
+
+  for (const candidate of ranked) {
+    const adapter = ctx.adapters.get(candidate.name);
+    if (!adapter || !adapter.decisions) {
+      fallbackChain.push(`${candidate.name}:no_decisions`);
+      continue;
+    }
+    try {
+      result = await adapter.decisions(req, candidate.upstreamId ?? adapter.toUpstreamId(canonicalId));
+      chosenRouter = candidate.name;
+      break;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        if (COOLDOWN_TRIGGER_KINDS.has(err.kind)) {
+          void markSlotDown(ctx.redis, candidate.name, config.aiRouter.slotCooldownSeconds);
+        }
+        fallbackChain.push(`${candidate.name}:${err.kind}`);
+        continue;
+      }
+      await settleAfterCall(ctx.platformPool, lease, 0);
+      throw err;
+    }
+  }
+
+  if (!result || !chosenRouter) {
+    await settleAfterCall(ctx.platformPool, lease, 0);
+    const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
+    (err as any).cause = lastError;
+    throw err;
+  }
+
+  // Billing order: upstream usage.cost -> reported input_tokens x catalog price -> estimate.
+  // When upstream reports no cost, a missing or non-positive token count is "not reported": bill the estimate.
+  const reportedTokens = result.usage?.promptTokens;
+  const tokensReported = typeof reportedTokens === 'number' && reportedTokens > 0;
+  const inputTokens = result.providerCostUsd == null && !tokensReported ? estimatedTokens : (reportedTokens ?? estimatedTokens);
+  const outputTokens = result.usage?.completionTokens ?? 0;
+  const providerCost = result.providerCostUsd ?? estimateWorstCaseUsd(ranked[0], inputTokens, 0, 0, 0);
+  const costSource = classifyCostSource(result.providerCostUsd, ranked[0]);
+  const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
+
+  await settleAfterCall(ctx.platformPool, lease, chargedCredits);
+  maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
+    .catch((err) => console.error('[router] auto-refill check failed:', err));
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch((err) => console.error('[router] credits-email failed:', err));
+  writeAiUsageRow(ctx.runtimePool, {
+    appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId, router: chosenRouter,
+    promptTokens: inputTokens, completionTokens: outputTokens, totalTokens: inputTokens + outputTokens,
+    providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain, leaseId: lease.leaseId,
+    keyType: 'platform', chargedToUser: true, modality: 'decisions',
+  }).catch(err => console.error('[router] usage-log write failed:', err));
+  console.log(JSON.stringify({
+    level: 'info', type: 'ai_router.call', modality: 'decisions',
+    app_id: ctx.appId, user_id: ctx.userId, canonical_model: canonicalId, chosen_router: chosenRouter,
+    fallback_chain: fallbackChain, provider_cost_usd: providerCost, charged_credits_usd: chargedCredits,
+    markup_pct: ctx.markupPct, markup_source: ctx.markupSource, latency_ms: Date.now() - t0, status: result.status,
+  }));
+
+  // Pass-through body; only usage.cost is replaced with what we charged.
+  let body = result.body;
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    const b = body as Record<string, unknown>;
+    if (b.usage && typeof b.usage === 'object') {
+      body = { ...b, usage: { ...(b.usage as Record<string, unknown>), cost: chargedCredits } };
+    }
+  }
+  return { status: result.status, body };
+}
+
 /**
  * Estimate worst-case USD cost for a video request — used at submit time
  * to size the credit lease. Pads the rate by VIDEO_LEASE_BUFFER (1.2×) so
@@ -692,23 +932,62 @@ export function estimateVideoCostUsd(
 }
 
 /**
+ * Settle-time rate for exactly the router that served the request. Unlike
+ * resolveRateForRequest, this never substitutes another router's pricing —
+ * billing a customer at a provider that did not serve them is indefensible.
+ */
+function rateForServingRouter(
+  entry: import('./catalog.js').CatalogEntry,
+  req: VideoGenerationRequest,
+  router: RouterName,
+): number | null {
+  const r = entry.routers.find(x => x.name === router);
+  return r ? ratePerSecondFromRouter(r.rawPricing, req) : null;
+}
+
+/**
  * Compute settled billing cost for a completed video job — used at poll
- * time when the upstream's `providerCostUsd` is unavailable. Pins to the
- * chosen router's pricing variants (so a 480p text-to-video request bills
- * at the 480p text rate, not the worst-case 1080p rate) and does NOT apply
- * the lease buffer (this is the exact bill, not a reservation estimate).
+ * time when the upstream's `providerCostUsd` is unavailable.
  *
- * Returns null when neither the chosen router nor any sibling has parseable
- * pricing — the caller can decide whether to charge $0 (safer for goodwill)
- * or fall back to VIDEO_DEFAULT_ESTIMATE_USD (safer for revenue).
+ * `allowOverdraft` selects the pricing regime and defaults to the
+ * reserve-small flag, so with AI_RESERVE_SMALL_ENABLED unset this function is
+ * byte-equivalent to its pre-branch form. Tests pass it explicitly.
+ *
+ *   false (legacy): rate resolved with sibling fallback, cost clamped to
+ *     [$0.05, $9] and un-buffered. Exactly the pre-reserve-small behaviour —
+ *     it must stay, because a legacy job reserved a clamped amount and the
+ *     legacy settle path cannot debit beyond that reservation anyway.
+ *
+ *   true (reserve-small): pinned strictly to the router that served the
+ *     request (never a sibling's rate) and unclamped — the clamp exists to
+ *     stop a bad SKU producing an absurd RESERVATION; applied to a CHARGE it
+ *     under-bills expensive jobs and over-bills cheap ones.
+ *
+ * Returns null when no rate is resolvable; the caller treats null as "no cost
+ * signal" and settles $0.
  */
 export function billedVideoCostUsd(
   entry: import('./catalog.js').CatalogEntry,
   req: VideoGenerationRequest,
   chosenRouter: RouterName,
+  allowOverdraft: boolean = config.aiRouter.reserveSmallEnabled,
 ): number | null {
-  const rate = resolveRateForRequest(entry, req, chosenRouter);
-  return rate !== null ? clampVideoCost(rate, req, /*withBuffer*/ false) : null;
+  if (!allowOverdraft) {
+    const legacyRate = resolveRateForRequest(entry, req, chosenRouter);
+    return legacyRate !== null ? clampVideoCost(legacyRate, req, /*withBuffer*/ false) : null;
+  }
+  const rate = rateForServingRouter(entry, req, chosenRouter);
+  if (rate === null) {
+    // Caller (routes/ai-videos.ts) only reaches here when the upstream did
+    // not report providerCostUsd, so a null result here means the job is
+    // about to be settled for $0 with no cost signal at all. That's a
+    // silent revenue loss unless someone is watching for it.
+    console.warn('[billing] uncosted_job', JSON.stringify({
+      event: 'billing.uncosted_job', model: req.model, router: chosenRouter,
+    }));
+    return null;
+  }
+  return billedVideoCost(rate, req);
 }
 
 /**
@@ -737,10 +1016,16 @@ function pricePerImageFromRouter(
 }
 
 /**
- * Scan rawPricing across routers for a per-image rate. `preferRouter` pins
- * to that router's pricing (settle-time semantics — bill the actual upstream
- * that served the request); omitted, returns the MAX across all routers
- * (submit-time semantics — cover any router the fallback chain might land on).
+ * Scan rawPricing across routers for a per-image rate. `preferRouter` tries
+ * that router's pricing FIRST but falls back to the cross-router scan when it
+ * has none — so the result may be a sibling's rate. Fine for sizing a
+ * reservation; wrong for producing a bill. Only the legacy (reserve-small off)
+ * settle branch uses this shape, and only to stay byte-compatible with
+ * pre-branch behaviour; the reserve-small branch uses
+ * `rateForServingImageRouter`, which never substitutes.
+ *
+ * Omitted, returns the MAX across all routers (submit-time semantics — cover
+ * any router the fallback chain might land on).
  */
 function resolveImageRateForRequest(
   entry: import('./catalog.js').CatalogEntry,
@@ -759,6 +1044,21 @@ function resolveImageRateForRequest(
     if (rate !== null && (best === null || rate > best)) best = rate;
   }
   return best;
+}
+
+/**
+ * Settle-time rate for exactly the router that served the request. Unlike
+ * resolveImageRateForRequest, this never substitutes another router's
+ * pricing — billing a customer at a provider that did not serve them is
+ * indefensible. Mirrors `rateForServingRouter` for video.
+ */
+function rateForServingImageRouter(
+  entry: import('./catalog.js').CatalogEntry,
+  req: ImageGenerationRequest,
+  router: RouterName,
+): number | null {
+  const r = entry.routers.find(x => x.name === router);
+  return r ? pricePerImageFromRouter(r.rawPricing, req) : null;
 }
 
 /**
@@ -784,18 +1084,44 @@ export function estimateImageCostUsd(
 
 /**
  * Compute settled billing cost for a completed image job — used when the
- * upstream's `providerCostUsd` is unavailable. Pins to the chosen router's
- * pricing variants. Returns null when neither the chosen router nor any
- * sibling has parseable pricing — the caller treats null as "unknown, use
- * $0 as guard" (mirrors billedVideoCostUsd).
+ * upstream's `providerCostUsd` is unavailable.
+ *
+ * `allowOverdraft` selects the pricing regime and defaults to the
+ * reserve-small flag, so with AI_RESERVE_SMALL_ENABLED unset this function is
+ * byte-equivalent to its pre-branch form. Tests pass it explicitly.
+ *
+ *   false (legacy): rate resolved with sibling fallback (may bill at a router
+ *     that did not serve the request). Preserved verbatim — under the legacy
+ *     settle path the charge is clamped to the reservation regardless.
+ *
+ *   true (reserve-small): pinned strictly to the router that served the
+ *     request; a sibling's rate is never substituted.
+ *
+ * Returns null when no rate is resolvable; the caller (routes/ai-images.ts)
+ * treats null as "unknown, use $0 as guard" (mirrors billedVideoCostUsd).
  */
 export function billedImageCostUsd(
   entry: import('./catalog.js').CatalogEntry,
   req: ImageGenerationRequest,
   chosenRouter: RouterName,
+  allowOverdraft: boolean = config.aiRouter.reserveSmallEnabled,
 ): number | null {
-  const perImage = resolveImageRateForRequest(entry, req, chosenRouter);
-  if (perImage === null) return null;
+  if (!allowOverdraft) {
+    const legacyPerImage = resolveImageRateForRequest(entry, req, chosenRouter);
+    if (legacyPerImage === null) return null;
+    return legacyPerImage * (req.n ?? 1);
+  }
+  const perImage = rateForServingImageRouter(entry, req, chosenRouter);
+  if (perImage === null) {
+    // Caller (routes/ai-images.ts) only reaches here when the upstream did
+    // not report providerCostUsd, so a null result here means the job is
+    // about to be settled for $0 with no cost signal at all. That's a
+    // silent revenue loss unless someone is watching for it.
+    console.warn('[billing] uncosted_image_job', JSON.stringify({
+      event: 'billing.uncosted_image_job', model: req.model, router: chosenRouter,
+    }));
+    return null;
+  }
   const n = req.n ?? 1;
   return perImage * n;
 }
@@ -833,7 +1159,7 @@ export async function routeVideoSubmit(
 
   const estimatedUsd = estimateVideoCostUsd(entry, req);
   const reservedUsd = estimatedUsd * (1 + ctx.markupPct / 100);
-  const lease = await acquireWithAudit(ctx, reservedUsd, VIDEO_LEASE_TTL_SECONDS);
+  const lease = await acquireWithAudit(ctx, reservedUsd, videoLeaseTtlSeconds());
 
   const fallbackChain: string[] = [];
   let submitted: { result: VideoSubmitResult; router: RouterName } | null = null;
@@ -906,6 +1232,8 @@ export async function settleVideoJob(
     chosenRouter: RouterName;
     canonicalModel: string;
     providerCostUsd: number;
+    /** Whether providerCostUsd came from the upstream or from our own rate card. */
+    costSource: CostSource;
     fallbackChain?: string[];
   },
 ): Promise<{ chargedCreditsUsd: number; providerCostUsd: number }> {
@@ -921,14 +1249,15 @@ export async function settleVideoJob(
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch(
     (err) => console.error('[router] credits-email failed:', err),
   );
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'video',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource: args.costSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
     keyType: 'platform', chargedToUser: true,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   console.log(JSON.stringify({
@@ -942,6 +1271,7 @@ export async function settleVideoJob(
     provider_cost_usd: args.providerCostUsd,
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     modality: 'video',
   }));
   return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };
@@ -950,10 +1280,19 @@ export async function settleVideoJob(
 /**
  * Images typically finish in seconds, but OpenRouter's synchronous path
  * returns terminal state on submit — so the lease only needs to outlive a
- * background poll cycle for the (rarer) async providers. 15 minutes matches
- * the video lease TTL as a conservative shared default.
+ * background poll cycle for the (rarer) async providers.
+ *
+ * Legacy: 15 minutes, matching the video lease TTL — a money control, since it
+ * decides when a real reservation is refunded. Reserve-small: the reservation
+ * is nominal so the TTL is row hygiene only; 2h matches video.
  */
-const IMAGE_LEASE_TTL_SECONDS = 15 * 60;
+const IMAGE_LEASE_TTL_LEGACY_SECONDS = 15 * 60;
+const IMAGE_LEASE_TTL_RESERVE_SMALL_SECONDS = 2 * 60 * 60;
+function imageLeaseTtlSeconds(): number {
+  return config.aiRouter.reserveSmallEnabled
+    ? IMAGE_LEASE_TTL_RESERVE_SMALL_SECONDS
+    : IMAGE_LEASE_TTL_LEGACY_SECONDS;
+}
 
 export interface RouteImageSubmitResult {
   chosenRouter: RouterName;
@@ -995,7 +1334,7 @@ export async function routeImageSubmit(
 
   const estimatedCostUsd = estimateImageCostUsd(entry, req);
   const reservedUsd = estimatedCostUsd * (1 + ctx.markupPct / 100);
-  const lease = await acquireWithAudit(ctx, reservedUsd, IMAGE_LEASE_TTL_SECONDS);
+  const lease = await acquireWithAudit(ctx, reservedUsd, imageLeaseTtlSeconds());
 
   const fallbackChain: string[] = [];
   let submitted: { result: ImageSubmitResult; router: RouterName } | null = null;
@@ -1079,6 +1418,8 @@ export async function settleImageJob(
     chosenRouter: RouterName;
     canonicalModel: string;
     providerCostUsd: number;
+    /** Whether providerCostUsd came from the upstream or from our own rate card. */
+    costSource: CostSource;
     fallbackChain?: string[];
   },
 ): Promise<{ chargedCreditsUsd: number; providerCostUsd: number }> {
@@ -1094,14 +1435,15 @@ export async function settleImageJob(
     { pool: ctx.platformPool, redis: ctx.redis },
     ctx.organizationId,
   ).catch((err) => console.error('[router] auto-refill check failed:', err));
-  maybeFireCreditsEmail(ctx.platformPool, ctx.userId).catch(
+  maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId).catch(
     (err) => console.error('[router] credits-email failed:', err),
   );
   writeAiUsageRow(ctx.runtimePool, {
+    modality: 'image',
     appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: args.canonicalModel, router: args.chosenRouter,
     promptTokens: 0, completionTokens: 0, totalTokens: 0,
     providerCostUsd: args.providerCostUsd, chargedCreditsUsd: chargedCredits,
-    markupPct: ctx.markupPct, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
+    markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource: args.costSource, fallbackChain: args.fallbackChain ?? [], leaseId: args.leaseId,
     keyType: 'platform', chargedToUser: true,
   }).catch(err => console.error('[router] usage-log write failed:', err));
   console.log(JSON.stringify({
@@ -1115,6 +1457,7 @@ export async function settleImageJob(
     provider_cost_usd: args.providerCostUsd,
     charged_credits_usd: chargedCredits,
     markup_pct: ctx.markupPct,
+    markup_source: ctx.markupSource,
     modality: 'image',
   }));
   return { chargedCreditsUsd: chargedCredits, providerCostUsd: args.providerCostUsd };

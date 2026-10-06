@@ -80,6 +80,9 @@ const NONCE = 'a'.repeat(64); // 64-char hex nonce (simulated)
 const LOOKUP_ID = 'lookup-uuid-1';
 const APP_ID = 'app_test123';
 const USER_ID = 'user-uuid-1';
+// Deliberately distinct from USER_ID: a team org's id never equals a member's
+// user id, which is why billing the user id silently charges nothing there.
+const ORG_ID = 'org-uuid-1';
 const NORMALIZED_URL = 'https://www.linkedin.com/in/jane-doe';
 const USD_PER_CREDIT = 0.02016;
 
@@ -87,6 +90,7 @@ const SAMPLE_LOOKUP_ROW = {
   id: LOOKUP_ID,
   app_id: APP_ID,
   user_id: USER_ID,
+  organization_id: ORG_ID,
   normalized_url: NORMALIZED_URL,
   provider_slot: 'primary',
 };
@@ -169,18 +173,19 @@ describe('POST /v1/webhooks/people/email', () => {
       method: 'POST',
       url: `/v1/webhooks/people/email?nonce=${NONCE}`,
       payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '1' },   // vendor-reported cost; no cost ⇒ no charge
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
 
-    // credits deducted
+    // credits deducted from the org stamped on the lookup row
     expect(deductCreditsBalance).toHaveBeenCalledWith(
       expect.anything(), // controlDb
-      USER_ID,
+      ORG_ID,
       1 * USD_PER_CREDIT, // 1 credit × USD_PER_CREDIT
     );
-    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 1, APP_ID);
+    expect(incrementUsage).toHaveBeenCalledWith(ORG_ID, USER_ID, 'people_credits', 1, APP_ID);
 
     // audit log written
     const auditCall = pool.query.mock.calls.find(
@@ -307,9 +312,10 @@ describe('POST /v1/webhooks/people/email', () => {
 
     const url = `/v1/webhooks/people/email?nonce=${NONCE}`;
     const payload = { email: 'jane@example.com' };
+    const headers = { 'x-cost': '1' };   // vendor-reported cost; no cost ⇒ no charge
 
-    const res1 = await app.inject({ method: 'POST', url, payload });
-    const res2 = await app.inject({ method: 'POST', url, payload });
+    const res1 = await app.inject({ method: 'POST', url, payload, headers });
+    const res2 = await app.inject({ method: 'POST', url, payload, headers });
 
     expect(res1.statusCode).toBe(200);
     expect(res1.json()).toEqual({ ok: true });
@@ -543,10 +549,10 @@ describe('POST /v1/webhooks/people/email', () => {
       // 7 credits from header, not 9 from fallback
       expect(deductCreditsBalance).toHaveBeenCalledWith(
         expect.anything(),
-        USER_ID,
+        ORG_ID,
         7 * USD_PER_CREDIT,
       );
-      expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 7, APP_ID);
+      expect(incrementUsage).toHaveBeenCalledWith(ORG_ID, USER_ID, 'people_credits', 7, APP_ID);
 
       // Audit row records provider_slot='secondary'
       const auditCall = pool.query.mock.calls.find(
@@ -579,9 +585,277 @@ describe('POST /v1/webhooks/people/email', () => {
 
     expect(deductCreditsBalance).toHaveBeenCalledWith(
       expect.anything(),
-      USER_ID,
+      ORG_ID,
       5 * USD_PER_CREDIT, // 5 credits from header
     );
-    expect(incrementUsage).toHaveBeenCalledWith(USER_ID, USER_ID, 'people_credits', 5, APP_ID);
+    expect(incrementUsage).toHaveBeenCalledWith(ORG_ID, USER_ID, 'people_credits', 5, APP_ID);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-region nonce dispatch.
+//
+// people_email_lookups rows live in the runtime DB of the app's OWN region.
+// A receiver that probes only listRuntimeRegions()[0] can never find a nonce
+// belonging to an app homed in any other region — it answers 200 { ignored },
+// the provider treats the callback as delivered and never retries, and the row
+// stays 'pending' forever.  That is what stranded 596 us-west-2 lookups.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /v1/webhooks/people/email — multi-region nonce dispatch', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(getPeoplePricing).mockReturnValue({
+      baseUsdPerCredit: 0.0168,
+      markupPct: 20,
+      usdPerCredit: USD_PER_CREDIT,
+    });
+    vi.mocked(resolveOrganizationId).mockResolvedValue(USER_ID);
+    vi.mocked(resolveOrgFromApp).mockResolvedValue(ORG_ID);
+    vi.mocked(deductCreditsBalance).mockResolvedValue(1 * USD_PER_CREDIT);
+    vi.mocked(incrementUsage).mockResolvedValue(undefined);
+    app = await buildTestApp();
+    vi.mocked(listRuntimeRegions).mockReturnValue(['us-east-1', 'us-west-2']);
+  });
+
+  afterEach(async () => {
+    await app?.close();
+  });
+
+  it('claims a nonce that lives in a non-first region', async () => {
+    const eastPool = makeRuntimePool({ findRow: null });          // nonce absent here
+    const westPool = makeRuntimePool();                            // nonce lives here
+    vi.mocked(runtimePoolFor).mockImplementation((region: string) =>
+      (region === 'us-east-1' ? eastPool : westPool) as any,
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    // The claim UPDATE must run against the region that actually holds the row.
+    const westClaim = westPool.query.mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[0] === 'string' && (c[0] as string).includes("status = 'pending'"),
+    );
+    expect(westClaim).toBeDefined();
+    const eastClaim = eastPool.query.mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[0] === 'string' && (c[0] as string).includes("status = 'pending'"),
+    );
+    expect(eastClaim).toBeUndefined();
+  });
+
+  it('stops probing regions once the nonce is found', async () => {
+    const eastPool = makeRuntimePool();                            // found in the first region
+    const westPool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockImplementation((region: string) =>
+      (region === 'us-east-1' ? eastPool : westPool) as any,
+    );
+
+    await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+    });
+
+    expect(westPool.query).not.toHaveBeenCalled();
+  });
+
+  it('answers 503 when a region probe errors, so the provider retries', async () => {
+    // A transient DB failure means "we do not know whether this nonce exists".
+    // Answering 200 there would discard a resolvable callback exactly like the
+    // cross-region bug did.
+    const eastPool = { query: vi.fn().mockRejectedValue(new Error('ECONNRESET')) };
+    const westPool = makeRuntimePool({ findRow: null });
+    vi.mocked(runtimePoolFor).mockImplementation((region: string) =>
+      (region === 'us-east-1' ? eastPool : westPool) as any,
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+    });
+
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('answers 200 { ignored } when every region cleanly reports the nonce absent', async () => {
+    const pool = makeRuntimePool({ findRow: null });
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ignored: true });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resolve-time billing targets the organization that was charged at queue time.
+//
+// people.ts stamps the app's owning org onto people_email_lookups.organization_id
+// when the lookup is queued.  The receiver must bill that same org.  Passing
+// user_id where deductCreditsBalance expects an organization id matches zero
+// rows and silently charges nothing for every team org.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /v1/webhooks/people/email — resolve-time billing target', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(getPeoplePricing).mockReturnValue({
+      baseUsdPerCredit: 0.0168,
+      markupPct: 20,
+      usdPerCredit: USD_PER_CREDIT,
+    });
+    vi.mocked(resolveOrganizationId).mockResolvedValue(USER_ID);
+    vi.mocked(resolveOrgFromApp).mockResolvedValue(ORG_ID);
+    vi.mocked(deductCreditsBalance).mockResolvedValue(1 * USD_PER_CREDIT);
+    vi.mocked(incrementUsage).mockResolvedValue(undefined);
+    app = await buildTestApp();
+    vi.mocked(listRuntimeRegions).mockReturnValue(['local']);
+  });
+
+  afterEach(async () => {
+    await app?.close();
+  });
+
+  it("deducts from the lookup row's organization, not the user id", async () => {
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '1' },
+    });
+
+    expect(deductCreditsBalance).toHaveBeenCalledWith(
+      expect.anything(),
+      ORG_ID,
+      1 * USD_PER_CREDIT,
+    );
+    expect(deductCreditsBalance).not.toHaveBeenCalledWith(
+      expect.anything(),
+      USER_ID,
+      expect.anything(),
+    );
+  });
+
+  it("meters usage against the lookup row's organization", async () => {
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '1' },
+    });
+
+    expect(incrementUsage).toHaveBeenCalledWith(ORG_ID, USER_ID, 'people_credits', 1, APP_ID);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The callback is the provider calling US — it is not a billable request we
+// made, and it carries no credit-cost header.  Falling back to a per-action
+// credit count here invents a charge the vendor never reported: the queue call
+// already billed (and recorded) the real cost from its own response header, so
+// a fallback at resolve time bills the customer twice for one lookup.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /v1/webhooks/people/email — charges only vendor-reported credits', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(getPeoplePricing).mockReturnValue({
+      baseUsdPerCredit: 0.0168,
+      markupPct: 20,
+      usdPerCredit: USD_PER_CREDIT,
+    });
+    vi.mocked(resolveOrganizationId).mockResolvedValue(USER_ID);
+    vi.mocked(resolveOrgFromApp).mockResolvedValue(ORG_ID);
+    vi.mocked(deductCreditsBalance).mockResolvedValue(0);
+    vi.mocked(incrementUsage).mockResolvedValue(undefined);
+    app = await buildTestApp();
+    vi.mocked(listRuntimeRegions).mockReturnValue(['local']);
+  });
+
+  afterEach(async () => {
+    await app?.close();
+  });
+
+  it('charges nothing when the callback reports no credit cost', async () => {
+    // fallbackCreditsPerAction is 1 in the mocked config and 3 in production —
+    // either way, an unreported cost must not become a charge.
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },   // no x-cost header
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(deductCreditsBalance).not.toHaveBeenCalled();
+    expect(incrementUsage).not.toHaveBeenCalled();
+  });
+
+  it('records zero credits on the claim when the callback reports no cost', async () => {
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+
+    await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+    });
+
+    const claimCall = pool.query.mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[0] === 'string' && (c[0] as string).includes("status = 'pending'"),
+    );
+    expect(claimCall).toBeDefined();
+    // params: [status, email, credits_consumed, id]
+    expect(claimCall![1][2]).toBe(0);
+  });
+
+  it('still charges the exact cost when the callback does report one', async () => {
+    const pool = makeRuntimePool();
+    vi.mocked(runtimePoolFor).mockReturnValue(pool as any);
+    vi.mocked(deductCreditsBalance).mockResolvedValue(4 * USD_PER_CREDIT);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/webhooks/people/email?nonce=${NONCE}`,
+      payload: { email: 'jane@example.com' },
+      headers: { 'x-cost': '4' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(deductCreditsBalance).toHaveBeenCalledWith(
+      expect.anything(),
+      ORG_ID,
+      4 * USD_PER_CREDIT,
+    );
   });
 });

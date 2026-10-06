@@ -1,0 +1,974 @@
+{
+  "tables": {
+    "activities": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "actor_user_id": {
+          "type": "uuid"
+        },
+        "kind": {
+          "type": "text",
+          "nullable": false
+        },
+        "entity_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "entity_id": {
+          "type": "text"
+        },
+        "payload": {
+          "type": "jsonb"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "activities_created_idx": {
+          "columns": [
+            "created_at"
+          ]
+        },
+        "activities_entity_idx": {
+          "columns": [
+            "entity_type",
+            "entity_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "agent_messages": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "thread_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "agent_threads",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "role": {
+          "type": "text",
+          "nullable": false
+        },
+        "content": {
+          "type": "text"
+        },
+        "tool_calls": {
+          "type": "jsonb"
+        },
+        "tool_results": {
+          "type": "jsonb"
+        },
+        "token_usage": {
+          "type": "jsonb"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_messages_thread_idx": {
+          "columns": [
+            "thread_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "agent_proposals": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "thread_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "agent_threads",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "ticket_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "support_tickets",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "capability": {
+          "type": "text",
+          "nullable": false
+        },
+        "payload": {
+          "type": "jsonb",
+          "nullable": false
+        },
+        "rationale": {
+          "type": "text"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'pending'::text"
+        },
+        "policy_verdict": {
+          "type": "text"
+        },
+        "substrate_action_id": {
+          "type": "text"
+        },
+        "resolved_by": {
+          "type": "uuid"
+        },
+        "resolved_at": {
+          "type": "timestamptz"
+        },
+        "expires_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "(now() + '24:00:00'::interval)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_proposals_status_idx": {
+          "columns": [
+            "status",
+            "created_at"
+          ]
+        },
+        "agent_proposals_ticket_idx": {
+          "columns": [
+            "ticket_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "agent_threads": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "ticket_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "support_tickets",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "do_instance_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'idle'::text"
+        },
+        "last_event_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_threads_status_idx": {
+          "columns": [
+            "status",
+            "last_event_at"
+          ]
+        }
+      }
+    },
+    "app_allowlist": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "entry_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "value": {
+          "type": "text",
+          "nullable": false
+        },
+        "active": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        "default_role": {
+          "type": "text",
+          "nullable": false,
+          "default": "'member'::text"
+        },
+        "note": {
+          "type": "text"
+        },
+        "created_by": {
+          "type": "uuid"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "app_allowlist_active_idx": {
+          "columns": [
+            "active"
+          ]
+        },
+        "app_allowlist_unique": {
+          "columns": [
+            "entry_type",
+            "value"
+          ],
+          "unique": true
+        }
+      }
+    },
+    "autonomy_settings": {
+      "columns": {
+        "issue_type": {
+          "type": "text",
+          "primaryKey": true
+        },
+        "mode": {
+          "type": "text",
+          "nullable": false,
+          "default": "'draft_for_approval'::text"
+        },
+        "updated_by": {
+          "type": "uuid"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "_seed": true
+    },
+    "capability_config": {
+      "columns": {
+        "capability": {
+          "type": "text",
+          "primaryKey": true
+        },
+        "enabled": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        "target_webhook_url": {
+          "type": "text"
+        },
+        "signing_secret_hash": {
+          "type": "text"
+        },
+        "enabled_at": {
+          "type": "timestamptz"
+        },
+        "enabled_by": {
+          "type": "uuid"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      }
+    },
+    "diagnoses": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "ticket_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "support_tickets",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "summary": {
+          "type": "text"
+        },
+        "evidence": {
+          "type": "jsonb"
+        },
+        "confidence": {
+          "type": "text",
+          "nullable": false,
+          "default": "'med'::text"
+        },
+        "produced_by_thread_id": {
+          "type": "uuid"
+        },
+        "produced_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "superseded_at": {
+          "type": "timestamptz"
+        }
+      },
+      "indexes": {
+        "diagnoses_ticket_idx": {
+          "columns": [
+            "ticket_id",
+            "produced_at"
+          ]
+        }
+      }
+    },
+    "docs_sources": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "url": {
+          "type": "text"
+        },
+        "source_kind": {
+          "type": "text",
+          "nullable": false
+        },
+        "display_name": {
+          "type": "text"
+        },
+        "rag_collection_id": {
+          "type": "text"
+        },
+        "last_crawl_at": {
+          "type": "timestamptz"
+        },
+        "last_crawl_status": {
+          "type": "text"
+        },
+        "last_crawl_error": {
+          "type": "text"
+        },
+        "chunk_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "crawl_config": {
+          "type": "jsonb",
+          "default": "'{}'::jsonb"
+        },
+        "created_by": {
+          "type": "uuid"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "rag_document_ids": {
+          "type": "text[]",
+          "nullable": false,
+          "default": "'{}'::text[]"
+        }
+      },
+      "indexes": {
+        "docs_sources_kind_idx": {
+          "columns": [
+            "source_kind",
+            "last_crawl_at"
+          ]
+        }
+      }
+    },
+    "escalation_targets": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "channel": {
+          "type": "text",
+          "nullable": false
+        },
+        "config": {
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'{}'::jsonb"
+        },
+        "is_default": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        "active": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        "created_by": {
+          "type": "uuid"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      }
+    },
+    "escalations": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "ticket_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "support_tickets",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "target_id": {
+          "type": "uuid",
+          "references": {
+            "table": "escalation_targets",
+            "column": "id",
+            "onDelete": "SET NULL"
+          }
+        },
+        "reason": {
+          "type": "text"
+        },
+        "context_snapshot": {
+          "type": "jsonb"
+        },
+        "substrate_action_id": {
+          "type": "text"
+        },
+        "idempotency_key": {
+          "type": "text",
+          "unique": true
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'queued'::text"
+        },
+        "error": {
+          "type": "text"
+        },
+        "sent_at": {
+          "type": "timestamptz"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "escalations_status_idx": {
+          "columns": [
+            "status",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "integration_state": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "kind": {
+          "type": "text",
+          "nullable": false,
+          "unique": true
+        },
+        "cursor": {
+          "type": "text"
+        },
+        "last_synced_at": {
+          "type": "timestamptz"
+        },
+        "last_error": {
+          "type": "text"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      }
+    },
+    "memberships": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "type": "uuid",
+          "nullable": false,
+          "unique": true
+        },
+        "role": {
+          "type": "text",
+          "nullable": false,
+          "default": "'member'::text"
+        },
+        "invited_email": {
+          "type": "text"
+        },
+        "added_by": {
+          "type": "uuid"
+        },
+        "added_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "memberships_user_idx": {
+          "columns": [
+            "user_id"
+          ],
+          "unique": true
+        }
+      }
+    },
+    "outbound_disclosure_violations": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "ticket_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "support_tickets",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "message_id": {
+          "type": "uuid"
+        },
+        "attempted_field_path": {
+          "type": "text"
+        },
+        "redaction_applied": {
+          "type": "text"
+        },
+        "severity": {
+          "type": "text",
+          "nullable": false,
+          "default": "'warn'::text"
+        },
+        "agent_thread_id": {
+          "type": "uuid"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "outbound_violations_ticket_idx": {
+          "columns": [
+            "ticket_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "pattern_signals": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "signal_kind": {
+          "type": "text",
+          "nullable": false
+        },
+        "signal_key": {
+          "type": "text",
+          "nullable": false
+        },
+        "count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "1"
+        },
+        "first_seen_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "last_seen_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "sample_ticket_ids": {
+          "type": "uuid[]"
+        },
+        "surfaced": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        "surfaced_at": {
+          "type": "timestamptz"
+        }
+      },
+      "indexes": {
+        "pattern_signals_surfaced_idx": {
+          "columns": [
+            "surfaced",
+            "last_seen_at"
+          ]
+        },
+        "pattern_signals_unique": {
+          "columns": [
+            "signal_kind",
+            "signal_key"
+          ],
+          "unique": true
+        }
+      }
+    },
+    "support_messages": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "ticket_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "support_tickets",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "role": {
+          "type": "text",
+          "nullable": false
+        },
+        "body": {
+          "type": "text"
+        },
+        "drafted_by_thread_id": {
+          "type": "uuid"
+        },
+        "drafted_by_user_id": {
+          "type": "uuid"
+        },
+        "parent_message_id": {
+          "type": "uuid"
+        },
+        "token_usage": {
+          "type": "jsonb"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "support_messages_ticket_idx": {
+          "columns": [
+            "ticket_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "support_skill": {
+      "columns": {
+        "singleton": {
+          "type": "boolean",
+          "primaryKey": true,
+          "default": "true"
+        },
+        "dimensions": {
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'{}'::jsonb"
+        },
+        "freeform_context": {
+          "type": "text"
+        },
+        "version": {
+          "type": "integer",
+          "nullable": false,
+          "default": "1"
+        },
+        "updated_by": {
+          "type": "uuid"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "_seed": true
+    },
+    "support_tickets": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "channel": {
+          "type": "text",
+          "nullable": false,
+          "default": "'widget'::text"
+        },
+        "customer_substrate_id": {
+          "type": "text"
+        },
+        "customer_email": {
+          "type": "text"
+        },
+        "subject": {
+          "type": "text"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'open'::text"
+        },
+        "assigned_to": {
+          "type": "uuid"
+        },
+        "issue_type": {
+          "type": "text"
+        },
+        "priority": {
+          "type": "text",
+          "nullable": false,
+          "default": "'normal'::text"
+        },
+        "opened_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "last_message_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "customer_name": {
+          "type": "text"
+        },
+        "customer_external_id": {
+          "type": "text"
+        },
+        "visitor_token": {
+          "type": "text"
+        },
+        "identity_verified": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        "topic_tag": {
+          "type": "text"
+        }
+      },
+      "indexes": {
+        "support_tickets_customer_idx": {
+          "columns": [
+            "customer_substrate_id",
+            "opened_at"
+          ]
+        },
+        "support_tickets_status_idx": {
+          "columns": [
+            "status",
+            "last_message_at"
+          ]
+        },
+        "support_tickets_topic_idx": {
+          "columns": [
+            "topic_tag",
+            "opened_at"
+          ]
+        },
+        "support_tickets_visitor_idx": {
+          "columns": [
+            "visitor_token",
+            "last_message_at"
+          ]
+        }
+      }
+    },
+    "team_integrations": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "toolkit_slug": {
+          "type": "text",
+          "nullable": false
+        },
+        "composio_account_id": {
+          "type": "text"
+        },
+        "connected_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "metadata": {
+          "type": "jsonb",
+          "default": "'{}'::jsonb"
+        }
+      },
+      "indexes": {
+        "team_integrations_unique": {
+          "columns": [
+            "user_id",
+            "toolkit_slug"
+          ],
+          "unique": true
+        }
+      }
+    },
+    "widget_secrets": {
+      "columns": {
+        "singleton": {
+          "type": "boolean",
+          "primaryKey": true,
+          "default": "true"
+        },
+        "created_by": {
+          "type": "uuid"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "rotated_at": {
+          "type": "timestamptz"
+        },
+        "secret": {
+          "type": "text",
+          "nullable": false
+        }
+      }
+    }
+  }
+}

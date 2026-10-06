@@ -1,0 +1,21 @@
+{
+  "name": "start-campaign",
+  "description": "Move a draft campaign to active; materialise campaign_sends from list members. Reads email + vars from list-time snapshots; never touches substrate.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:29.990Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

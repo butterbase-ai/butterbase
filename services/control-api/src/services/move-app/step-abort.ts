@@ -1,7 +1,6 @@
 import type { StepHandler } from './saga-executor.js';
 import { invalidateAppRegion } from '../region-resolver.js';
-import * as neonClient from '../neon-client.js';
-import { getDataProjectIdForRegion } from '../neon-projects.js';
+import { teardownAppDb } from '../app-db-teardown.js';
 import { clearKvBlock } from '../kv/migration-sentinel.js';
 import { kvRedisFor } from '../kv/redis-registry.js';
 import { wrap } from '../kv/redis-client.js';
@@ -27,6 +26,30 @@ import { wrap } from '../kv/redis-client.js';
  * (saga-executor enforces this).
  */
 export const executeAbort: StepHandler = async (ctx, m) => {
+  // 0) Read the dest `app_db_connections` row BEFORE step 1 deletes it. Its
+  //    `neon_project_id` is the discriminator between the two teardown shapes
+  //    (same one `executeDeprovision` uses): equal to the region's shared data
+  //    project means the legacy `cust_*` database lives inside it; anything
+  //    else means provisionAppDb took the project-per-tenant path and created
+  //    a dedicated project that must be deleted whole, or it bills forever and
+  //    a retry adopts a project that already has the schema.
+  let destConn: { neon_project_id: string; neon_database_name: string } | null = null;
+  if (m.dest_resources.dest_app_id) {
+    try {
+      const destPool = ctx.runtimePoolFor(m.dest_region);
+      const r = await destPool.query<{ neon_project_id: string; neon_database_name: string }>(
+        `SELECT neon_project_id, neon_database_name FROM app_db_connections WHERE app_id = $1`,
+        [m.app_id],
+      );
+      destConn = r.rows?.[0] ?? null;
+    } catch (err) {
+      ctx.log.warn(
+        { migrationId: m.id, err: (err as Error).message },
+        '[move-app abort] dest app_db_connections lookup failed; falling back to shared-project teardown',
+      );
+    }
+  }
+
   // 1) Remove the dest reservation row, if reserving_dest got far enough
   //    to create it. Idempotent: row may already be gone.
   if (m.dest_resources.dest_app_id) {
@@ -54,21 +77,38 @@ export const executeAbort: StepHandler = async (ctx, m) => {
   //     Without this, restoring_data fails on the second attempt with
   //     'schema "realtime" already exists' (or similar) because the prior
   //     attempt's restore left objects behind in the same Neon DB.
+  //     Under project-per-tenant the dest is a whole project, not a database
+  //     inside the shared one; teardownAppDb picks the shape from destConn's
+  //     stored neon_project_id (see its docs for why the flag is not the test).
+  //     Best-effort: teardown failures warn and continue, never abort the abort.
   const neonDbName = m.dest_resources.neon_db_name as string | undefined;
-  if (neonDbName) {
-    const dataProjectId = getDataProjectIdForRegion(m.dest_region);
-    if (dataProjectId) {
-      try {
-        await neonClient.withNeonProjectLock(dataProjectId, async () => {
-          await neonClient.deleteDatabase(dataProjectId, neonDbName);
-        });
-      } catch (err) {
-        ctx.log.warn(
-          { migrationId: m.id, neonDbName, err: (err as Error).message },
-          '[move-app abort] dest Neon DB delete failed; continuing (manual cleanup may be needed)',
-        );
-      }
+  try {
+    const result = await teardownAppDb({
+      region: m.dest_region,
+      neonProjectId: destConn?.neon_project_id,
+      neonDatabaseName: neonDbName,
+    });
+    if (result.degraded) {
+      // getDataProjectIdForRegion threw for m.dest_region — see
+      // AppDbTeardownResult.degraded — so this took the legacy branch
+      // unable to prove it isn't actually an orphaned tenant project.
+      ctx.log.warn(
+        { migrationId: m.id, mode: result.mode, neonProjectId: result.projectId, neonDbName, destRegion: m.dest_region },
+        '[move-app abort] dest Neon teardown fell back to legacy without verifying tenant status (region config gap)',
+      );
     }
+    if (result.alreadyGone) {
+      // Idempotency: an already-deleted project/database (404) is success.
+      ctx.log.info(
+        { migrationId: m.id, mode: result.mode, neonProjectId: result.projectId, neonDbName, degraded: result.degraded },
+        '[move-app abort] dest Neon resource already deleted, continuing',
+      );
+    }
+  } catch (err) {
+    ctx.log.warn(
+      { migrationId: m.id, neonDbName, neonProjectId: destConn?.neon_project_id, err: (err as Error).message },
+      '[move-app abort] dest Neon teardown failed; continuing (manual cleanup may be needed)',
+    );
   }
 
   // 2) Restore source provisioning_status if blocking_writes flipped it.

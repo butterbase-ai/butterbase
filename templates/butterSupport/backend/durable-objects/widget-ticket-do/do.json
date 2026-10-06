@@ -1,0 +1,14 @@
+{
+  "id": "2df46871-5b68-47fe-a44b-83c172bb8d06",
+  "name": "widget-ticket-do",
+  "class_name": "WidgetTicketDO",
+  "status": "READY",
+  "access_mode": "public",
+  "last_deployed_at": "2026-06-23T11:37:27.651Z",
+  "error_message": null,
+  "sql_migrations": null,
+  "agent_tool": null,
+  "agent_tool_description": null,
+  "agent_tool_mode": null,
+  "agent_tool_exposed_to": null
+}

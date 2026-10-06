@@ -20,7 +20,9 @@ describe('getAiUsageSummary', () => {
     // First query: ai_usage_logs (no rows)
     mockRuntimePool.query
       .mockResolvedValueOnce({ rows: [] })
-      // Second query: actor_usage_logs with recording + transcription rows
+      // Second query: ai_usage_logs grouped by modality (no rows)
+      .mockResolvedValueOnce({ rows: [] })
+      // Third query: actor_usage_logs with recording + transcription rows
       .mockResolvedValueOnce({
         rows: [
           { dimension: 'recording', total_seconds: '3600', total_usd: '0.5' },
@@ -39,6 +41,7 @@ describe('getAiUsageSummary', () => {
   it('returns empty meetings array when no actor_usage_logs rows', async () => {
     mockRuntimePool.query
       .mockResolvedValueOnce({ rows: [] })  // ai_usage_logs
+      .mockResolvedValueOnce({ rows: [] })  // ai_usage_logs by modality
       .mockResolvedValueOnce({ rows: [] }); // actor_usage_logs
 
     const db = {} as any;
@@ -47,5 +50,26 @@ describe('getAiUsageSummary', () => {
     expect(result.meetings).toEqual([]);
     expect(result.totalTokens).toBe(0);
     expect(result.totalCost).toBe(0);
+  });
+
+  it('returns byModality, mapping NULL modality to unspecified', async () => {
+    mockRuntimePool.query
+      .mockResolvedValueOnce({ rows: [] })  // ai_usage_logs by model
+      .mockResolvedValueOnce({
+        rows: [
+          { modality: 'decisions', requests: '3', tokens: '30', cost: '0.0003' },
+          { modality: 'unspecified', requests: '2', tokens: '200', cost: '0.01' },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] }); // actor_usage_logs
+
+    const result = await getAiUsageSummary({} as any, 'app_1');
+
+    expect(result.byModality).toEqual({
+      decisions: { tokens: 30, cost: 0.0003, requests: 3 },
+      unspecified: { tokens: 200, cost: 0.01, requests: 2 },
+    });
+    const modalitySql = mockRuntimePool.query.mock.calls[1][0] as string;
+    expect(modalitySql).toMatch(/COALESCE\(modality, 'unspecified'\)/);
   });
 });

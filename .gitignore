@@ -15,3 +15,8 @@ stress_test_results*
 # Repo uses npm + package-lock.json; ignore stray pnpm lockfiles created
 # when someone runs `pnpm install` in a workspace.
 pnpm-lock.yaml
+
+# Local agent worktrees/scratch state — never intended for the public OSS
+# repo. tools/promote-to-oss.sh runs `git add -A` before pushing here, so an
+# untracked .claude/ would otherwise get swept in wholesale.
+.claude/

@@ -19,14 +19,15 @@ describe('MCP Client', () => {
       expect(catalog[0].parameters).toBeDefined();
     });
 
-    it('manage_app tool has parameters object with action and params fields', () => {
+    it('manage_app tool has flat parameters schema (no params wrapper)', () => {
       const catalog = getToolCatalog();
       const manageTool = catalog[0];
       expect(manageTool.parameters).toHaveProperty('type', 'object');
       expect(manageTool.parameters).toHaveProperty('properties');
       expect(manageTool.parameters.properties).toHaveProperty('action');
-      expect(manageTool.parameters.properties).toHaveProperty('params');
+      expect(manageTool.parameters.properties).not.toHaveProperty('params');
       expect(manageTool.parameters).toHaveProperty('required');
+      expect(manageTool.parameters).toHaveProperty('additionalProperties', true);
     });
   });
 

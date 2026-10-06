@@ -209,6 +209,121 @@ describe('GET /oauth/authorize', () => {
     await app.close();
   });
 
+  // Without these params an MCP-originated signup lands with
+  // signup_source = NULL: the dashboard's first-touch capture reads utm_* off
+  // the query string, and this redirect used to carry only `st`.
+  it('tags the consent redirect with the MCP client as a UTM source', async () => {
+    const app = await buildAppForTest();
+    const reg = await app.inject({
+      method: 'POST', url: '/oauth/register',
+      payload: { client_name: 'Cursor', redirect_uris: ['http://127.0.0.1:55555/cb'] },
+    });
+    const client = reg.json();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge=${'a'.repeat(43)}&code_challenge_method=S256&scope=mcp&state=xyz`,
+    });
+    expect(res.statusCode).toBe(302);
+    const loc = new URL(res.headers.location as string);
+    expect(loc.searchParams.get('utm_source')).toBe('mcp-cursor');
+    expect(loc.searchParams.get('utm_medium')).toBe('mcp');
+    expect(loc.searchParams.get('utm_campaign')).toBe('mcp-oauth');
+    // The state token must survive the added params.
+    expect(loc.searchParams.get('st')).toBeTruthy();
+    await app.close();
+  });
+
+  // client_name is attacker-controlled — /oauth/register is open by design.
+  it('never lets a hostile client_name escape into the redirect', async () => {
+    const app = await buildAppForTest();
+    const reg = await app.inject({
+      method: 'POST', url: '/oauth/register',
+      payload: {
+        client_name: 'evil\r\nX-Injected: 1&utm_campaign=hijack',
+        redirect_uris: ['http://127.0.0.1:55555/cb'],
+      },
+    });
+    const client = reg.json();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge=${'a'.repeat(43)}&code_challenge_method=S256&scope=mcp&state=xyz`,
+    });
+    expect(res.statusCode).toBe(302);
+    const location = res.headers.location as string;
+    expect(location).not.toMatch(/[\r\n]/);
+    const loc = new URL(location);
+    expect(loc.searchParams.get('utm_source')).toMatch(/^mcp-[a-z0-9-]+$/);
+    // The forged campaign must not have displaced the real one.
+    expect(loc.searchParams.get('utm_campaign')).toBe('mcp-oauth');
+    await app.close();
+  });
+
+  // Regression: Qoder's MCP connector omits `scope` on /authorize. RFC 6749
+  // §3.1.2 makes it optional, but we required it and 400'd every such client at
+  // the first hop. Query below is a real Qoder authorize URL, scope and all.
+  it('accepts an authorize request with no scope and defaults it to mcp', async () => {
+    const app = await buildAppForTest();
+    const client = await registerClient(app, 'http://127.0.0.1:19888/callback');
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}`
+        + `&redirect_uri=${encodeURIComponent('http://127.0.0.1:19888/callback')}`
+        + `&code_challenge=E4Kkq02ZefjL8aXyB8nY5M6clGZNr6l85x-1aPtC4bc&code_challenge_method=S256`
+        + `&resource=${encodeURIComponent('https://api.butterbase.ai/mcp')}`
+        + `&state=3kUI3Kr511KoM13Z-K0kiRUP1RcvrPHs`,
+    });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toMatch(/\/oauth\/consent\?st=/);
+    await app.close();
+  });
+
+  // RFC 6749 §4.1.1 makes `state` RECOMMENDED, not required; OAuth 2.1 §4.1.1
+  // says it MAY be omitted when PKCE supplies the CSRF binding. Same bug class
+  // as the `scope` regression above, one line down in the same guard.
+  it('accepts an authorize request with no state', async () => {
+    const app = await buildAppForTest();
+    const client = await registerClient(app);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge=${'a'.repeat(43)}&code_challenge_method=S256&scope=mcp`,
+    });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toMatch(/\/oauth\/consent\?st=/);
+    await app.close();
+  });
+
+  // §4.1.2.1: once client_id and redirect_uri are known-good, every other
+  // failure MUST come back on the redirect URI. Returning JSON stranded the
+  // client on a callback that never fired.
+  it('redirects errors to redirect_uri instead of returning JSON', async () => {
+    const app = await buildAppForTest();
+    const client = await registerClient(app);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=token&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge=${'a'.repeat(43)}&code_challenge_method=S256&scope=mcp&state=xyz`,
+    });
+    expect(res.statusCode).toBe(302);
+    const loc = new URL(res.headers.location as string);
+    expect(loc.origin + loc.pathname).toBe('http://127.0.0.1:55555/cb');
+    expect(loc.searchParams.get('error')).toBe('unsupported_response_type');
+    expect(loc.searchParams.get('state')).toBe('xyz');
+    await app.close();
+  });
+
+  it('omits state on the error redirect when the client sent none', async () => {
+    const app = await buildAppForTest();
+    const client = await registerClient(app);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge=${'a'.repeat(43)}&code_challenge_method=S256&scope=bogus`,
+    });
+    expect(res.statusCode).toBe(302);
+    const loc = new URL(res.headers.location as string);
+    expect(loc.searchParams.get('error')).toBe('invalid_scope');
+    expect(loc.searchParams.has('state')).toBe(false);
+    await app.close();
+  });
+
   it('400s on unregistered redirect_uri', async () => {
     const app = await buildAppForTest();
     const client = await registerClient(app);
@@ -220,14 +335,20 @@ describe('GET /oauth/authorize', () => {
     await app.close();
   });
 
-  it('400s on missing code_challenge', async () => {
+  // Was asserting 400. Per RFC 6749 §4.1.2.1 this error belongs on the redirect
+  // URI, because client_id and redirect_uri have already been validated by the
+  // time we look at code_challenge — so the client can be told what went wrong.
+  it('redirects with invalid_request on missing code_challenge', async () => {
     const app = await buildAppForTest();
     const client = await registerClient(app);
     const res = await app.inject({
       method: 'GET',
       url: `/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:55555/cb')}&code_challenge_method=S256&scope=mcp&state=xyz`,
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(302);
+    const loc = new URL(res.headers.location as string);
+    expect(loc.searchParams.get('error')).toBe('invalid_request');
+    expect(loc.searchParams.get('error_description')).toMatch(/code_challenge/);
     await app.close();
   });
 

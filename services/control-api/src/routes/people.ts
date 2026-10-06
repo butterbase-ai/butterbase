@@ -29,6 +29,13 @@ import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 // ---------------------------------------------------------------------------
 
 /** Set x-people-* response headers on every reply path. */
+/**
+ * How long a resolved email lookup stays reusable for the same
+ * (app_id, normalized_url). Matches TTL_OK_DAYS in services/people/cache.ts so
+ * both people caches age out on the same schedule.
+ */
+export const EMAIL_DEDUPE_WINDOW_DAYS = 30;
+
 function setPeopleHeaders(reply: FastifyReply, p: {
   slot: ProviderSlot;
   creditsConsumed: number;
@@ -425,6 +432,44 @@ export async function peopleRoutes(app: FastifyInstance) {
 
     const ownerCheck = await assertAppOwnership(app.controlDb, appId, userId, request.auth?.organizationId ?? null);
     if (!ownerCheck.ok) return reply.code(ownerCheck.reply.code).send(ownerCheck.reply.body);
+
+    // ── Dedupe: reuse a recent resolved lookup for the same profile ──────────
+    // The provider bills per queue call, so re-queueing a profile this app has
+    // already resolved is pure waste. `people_profile_cache` does not cover this
+    // path — it is only consulted by /people/profile — so the prior resolved
+    // lookup row *is* the cache. Runs after the ownership check (never serve a
+    // stored email to a caller who does not own the app) and before the balance
+    // gate, so a dedupe hit cannot 402 on an empty balance.
+    const priorLookup = await runtime.query<{ id: string; email: string | null }>(
+      `SELECT id, email
+         FROM people_email_lookups
+        WHERE app_id = $1
+          AND normalized_url = $2
+          AND status = 'resolved'
+          AND email IS NOT NULL
+          AND resolved_at > now() - ($3::int * interval '1 day')
+        ORDER BY resolved_at DESC
+        LIMIT 1`,
+      [appId, normalizedUrl, EMAIL_DEDUPE_WINDOW_DAYS],
+    );
+    const priorHit = priorLookup.rows[0];
+    if (priorHit?.email) {
+      await writeAuditRow(runtime, {
+        appId, userId, action: 'profile_email_cache_hit',
+        creditsConsumed: 0, usdCost: 0, usdCharged: 0,
+        keyType: 'platform', requestId: null,
+        status: 200, linkedinUrl: normalizedUrl,
+        providerSlot: slot,
+      });
+      setPeopleHeaders(reply, { slot, creditsConsumed: 0, usdCharged: 0, cached: true });
+      return reply.send({
+        lookupId: priorHit.id,
+        status: 'resolved',
+        email: priorHit.email,
+        cached: true,
+        usage: { creditsConsumed: 0 },
+      });
+    }
 
     const pricing = getPeoplePricing(slot);
 

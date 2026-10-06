@@ -150,7 +150,14 @@ export interface DeployFunctionParams extends AgentToolFields {
   name: string;
   code: string;
   description?: string;
+  /**
+   * On redeploy, MERGES into the function's existing env by default
+   * (incoming keys overwrite matching existing keys; other existing keys
+   * are kept). Pass envVarsReplace: true to replace the entire blob.
+   */
   envVars?: Record<string, string>;
+  /** Default false (merge). Set true to replace the entire env blob with just `envVars`. */
+  envVarsReplace?: boolean;
   timeoutMs?: number;
   memoryLimitMb?: number;
   trigger?: FunctionTrigger;

@@ -110,12 +110,26 @@ export async function notifyCloneFailed(
     sourceAppId: string;
     errorMessage: string;
     stalledStage?: string;
+    /**
+     * Which pipeline failed. template_clone_jobs now carries five modes
+     * (migration 116: clone, update, staging_create, promote, staging_reset) —
+     * all ride the same job table and the same reaper, but the failure means
+     * something completely different to the recipient depending on mode:
+     * "your new app wasn't created" vs. "your existing, live app was being
+     * reset and the reset broke" vs. "your production app may be mid-write".
+     * Emailing an update failure worded as a clone failure told the owner
+     * about an app that doesn't exist and offered them a "try cloning again"
+     * button; the same mismatch applies to every other mode. See
+     * buildBillingEmailBody / buildBillingEmailHtml's 'clone_failed' case.
+     */
+    mode?: 'clone' | 'update' | 'staging_create' | 'promote' | 'staging_reset';
   },
   log?: { warn: (payload: Record<string, unknown>, message: string) => void }
 ): Promise<void> {
   // Ops alert: fire independently of the user email so operators still see the
   // failure when the dest app has no owner, is deleted, or has silences on.
   const opsRecipient = process.env.OPS_ALERT_EMAIL || 'ken@butterbase.ai';
+  const mode = args.mode ?? 'clone';
   const opsKey = `failure_notif:clone:ops:${args.jobId}`;
   try {
     const opsSet = await getRedisClient().set(opsKey, '1', 'EX', NOTIF_TTL_SECONDS, 'NX');
@@ -127,6 +141,7 @@ export async function notifyCloneFailed(
         jobId: args.jobId,
         errorMessage: args.errorMessage,
         stalledStage: args.stalledStage || '',
+        mode,
       }).catch((err) => {
         log?.warn({ err, jobId: args.jobId }, 'failure-notifications: clone ops send failed');
       });
@@ -154,6 +169,7 @@ export async function notifyCloneFailed(
       jobId: args.jobId,
       errorMessage: args.errorMessage,
       stalledStage: args.stalledStage || '',
+      mode,
     }, {
       controlPool,
       userId: owner.userId,

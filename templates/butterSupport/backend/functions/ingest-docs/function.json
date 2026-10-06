@@ -1,0 +1,26 @@
+{
+  "name": "ingest-docs",
+  "description": "Admin-only. Ingest documentation into the support-docs RAG collection. Three source_kinds: 'web' (single URL OR same-domain BFS crawl up to crawl_config.max_depth), 'sitemap' (fetches a sitemap.xml and ingests each URL), 'uploaded_file' (storage_object_id), 'text' (raw). Records one docs_sources row covering the whole crawl; each page becomes its own RAG document. F2: rag_document_ids tracks every RAG documentId for precise delete. F3: multi-page crawl with same-domain BFS + sitemap support.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 120000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-23T10:00:41.452Z",
+  "envKeys": [
+    "BUTTERBASE_APP_ID",
+    "BUTTERBASE_API_URL",
+    "RAG_COLLECTION",
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

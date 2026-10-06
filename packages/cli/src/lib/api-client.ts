@@ -192,7 +192,10 @@ export async function deployFunction(appId: string, data: {
   name: string;
   code: string;
   description?: string;
+  /** On redeploy, merges into existing env by default (incoming keys win). */
   envVars?: Record<string, string>;
+  /** Default false (merge). Set true to replace the entire env blob with just `envVars`. */
+  envVarsReplace?: boolean;
   timeoutMs?: number;
   memoryLimitMb?: number;
   trigger?: { type: string; config?: any };

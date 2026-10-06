@@ -5,6 +5,7 @@ import { config } from '../../config.js';
 import { pollAndSettleVideoJob, buildVideoAdapters } from '../../routes/ai-videos.js';
 import type { VideoJobRow } from './video-jobs.js';
 import type { RouteContext } from './router.js';
+import type { MarkupSource } from './special-pricing.js';
 import { resolveOrgFromApp } from '../app-org-resolver.js';
 
 const SWEEP_BATCH_SIZE = 25;
@@ -70,6 +71,7 @@ export async function startVideoSweeper(
           const ctx: RouteContext = {
             platformPool: app.controlDb, runtimePool, redis,
             adapters, markupPct: parseFloat(job.markup_pct),
+            markupSource: (job.markup_source ?? 'global') as MarkupSource,
             appId: job.app_id, organizationId, userId: job.user_id, region,
           };
           try {

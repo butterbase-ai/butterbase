@@ -14,7 +14,7 @@ Result:
 
 ## Step 2: Apply Schema
 
-Tool: `apply_schema`
+Tool: `manage_schema` (action: `apply`)
 Parameters:
 - app_id: `app_14obgf28uzwa`
 - schema: [see below]
@@ -76,7 +76,7 @@ Result: Schema applied, todos table created with 2 indexes
 
 ## Step 3: Enable RLS
 
-Tool: `create_user_isolation_policy`
+Tool: `manage_rls` (action: `create_user_isolation`)
 Parameters:
 - app_id: `app_14obgf28uzwa`
 - table_name: `todos`
@@ -89,7 +89,7 @@ What it does:
 
 Result: RLS policy active, users can only access their own todos
 
-**Alternative (advanced):** For custom policies, use `enable_rls` + `create_policy`
+**Alternative (advanced):** For custom policies, use `manage_rls` with actions `enable` + `create_policy`
 
 ## Step 4: Configure CORS
 

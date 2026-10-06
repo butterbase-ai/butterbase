@@ -1,4 +1,4 @@
-import { getRequestAuthorizationHeader, getRequestTestUserId } from './request-auth-context.js';
+import { getRequestAuthorizationHeader, getRequestTestUserId, getRequestOrganizationId } from './request-auth-context.js';
 
 // On Fly (production), default to the public Fly-anycast URL so that
 // auto-CRUD/storage/function requests for cross-region apps pass through
@@ -46,6 +46,14 @@ export function getHeaders(): HeadersInit {
   const testUserId = getRequestTestUserId();
   if (testUserId) {
     (headers as Record<string, string>)['x-test-user-id'] = testUserId;
+  }
+
+  // Forward the caller-selected org scope for JWT MCP sessions. control-api's
+  // auth plugin verifies membership before honoring it; unauthorized values
+  // are silently dropped there.
+  const orgId = getRequestOrganizationId();
+  if (orgId) {
+    (headers as Record<string, string>)['x-organization-id'] = orgId;
   }
 
   return headers;

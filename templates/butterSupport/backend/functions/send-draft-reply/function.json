@@ -1,0 +1,16 @@
+{
+  "name": "send-draft-reply",
+  "description": "Founder approves a drafted reply (optionally edits) and sends to customer. Writes new support_messages row with role='founder'. Transitions ticket to 'sent' or 'resolved'. On resolve: syncs substrate artifact. Pushes to widget via ctx.invokeDO. NO record_learning here — learnings only flow from sweep-pattern-signals when a cross-ticket pattern crosses threshold.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "envKeys": []
+}

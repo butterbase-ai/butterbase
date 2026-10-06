@@ -82,4 +82,4 @@ npm run build
 cd dist && zip -r ../frontend.zip .
 ```
 
-Use `create_frontend_deployment` and `start_frontend_deployment` MCP tools to deploy.
+Use the `create_frontend_deployment` and `manage_frontend` (action `start_deployment`) MCP tools to deploy.

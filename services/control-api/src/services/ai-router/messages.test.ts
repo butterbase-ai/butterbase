@@ -72,7 +72,7 @@ describe('routeMessages (native passthrough)', () => {
       {
         adapters, redis: {} as any,
         platformPool: {} as any, runtimePool: {} as any,
-        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-1', userId: 'user-1', region: 'us-east-1',
       } as any,
       { model: 'anthropic/claude-opus-4.8', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }] },
       { anthropicVersion: '2023-06-01' },
@@ -119,7 +119,7 @@ describe('routeMessages (native passthrough, non-streaming)', () => {
       {
         adapters, redis: {} as any,
         platformPool: {} as any, runtimePool: {} as any,
-        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-1', userId: 'user-1', region: 'us-east-1',
       } as any,
       { model: 'anthropic/claude-opus-4.8', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }] },
       { anthropicVersion: '2023-06-01' },
@@ -168,7 +168,7 @@ describe('routeMessages (native passthrough, non-streaming, with reasoning token
       {
         adapters, redis: {} as any,
         platformPool: {} as any, runtimePool: {} as any,
-        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-1', userId: 'user-1', region: 'us-east-1',
       } as any,
       { model: 'anthropic/claude-opus-4.8', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }] },
       { anthropicVersion: '2023-06-01' },
@@ -208,7 +208,7 @@ describe('routeMessages (native passthrough, non-streaming, error path)', () => 
       {
         adapters, redis: {} as any,
         platformPool: {} as any, runtimePool: {} as any,
-        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-1', userId: 'user-1', region: 'us-east-1',
       } as any,
       { model: 'anthropic/claude-opus-4.8', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }] },
       { anthropicVersion: '2023-06-01' },
@@ -265,7 +265,7 @@ describe('routeMessages (native passthrough, streaming)', () => {
       {
         adapters, redis: {} as any,
         platformPool: {} as any, runtimePool: {} as any,
-        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-1', userId: 'user-1', region: 'us-east-1',
       } as any,
       { model: 'anthropic/claude-opus-4.8', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], stream: true },
       { anthropicVersion: '2023-06-01' },
@@ -335,7 +335,7 @@ describe('routeMessages (native passthrough, streaming, thinking tokens)', () =>
       {
         adapters, redis: {} as any,
         platformPool: {} as any, runtimePool: {} as any,
-        markupPct: 0, appId: 'app-1', userId: 'user-1', region: 'us-east-1',
+        markupPct: 0, markupSource: 'global', appId: 'app-1', userId: 'user-1', region: 'us-east-1',
       } as any,
       { model: 'anthropic/claude-opus-4.8', max_tokens: 200, messages: [{ role: 'user', content: 'think' }], stream: true },
       { anthropicVersion: '2023-06-01' },

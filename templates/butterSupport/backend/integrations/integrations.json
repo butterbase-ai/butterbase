@@ -1,0 +1,33 @@
+{
+  "app_id": "app_0ycj4ad7odud",
+  "integrations": [
+    {
+      "id": "9f6f9eb0-1def-4af5-a716-217903cbadab",
+      "app_id": "app_0ycj4ad7odud",
+      "toolkit_slug": "gmail",
+      "composio_auth_config_id": "ac_REPLACE_WITH_YOUR_OWN",
+      "display_name": "Gmail",
+      "enabled": true,
+      "scopes": [],
+      "created_at": "2026-06-23T02:45:32.478Z",
+      "updated_at": "2026-06-23T02:45:32.478Z",
+      "archived_after_move": null,
+      "credentials_encrypted": null,
+      "auth_scheme": null
+    },
+    {
+      "id": "39f32a4a-bd72-4e2d-9c59-8b837ca980ee",
+      "app_id": "app_0ycj4ad7odud",
+      "toolkit_slug": "slack",
+      "composio_auth_config_id": "ac_REPLACE_WITH_YOUR_OWN",
+      "display_name": "Slack",
+      "enabled": true,
+      "scopes": [],
+      "created_at": "2026-06-23T02:45:33.247Z",
+      "updated_at": "2026-06-23T02:45:33.247Z",
+      "archived_after_move": null,
+      "credentials_encrypted": null,
+      "auth_scheme": null
+    }
+  ]
+}

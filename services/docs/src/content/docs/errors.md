@@ -10,7 +10,7 @@ Every Butterbase API error response follows the agent-friendly shape defined by 
   "error": {
     "code": "RESOURCE_NOT_FOUND",
     "message": "App \"my-app\" not found",
-    "remediation": "Verify the app_id is correct. Use list_apps to see available apps.",
+    "remediation": "Verify the app_id is correct. Use manage_app with action "list" to see available apps.",
     "documentation_url": "https://docs.butterbase.ai/errors#resource-not-found",
     "details": { }
   }
@@ -178,7 +178,7 @@ The caller is authenticated but does not have permission to perform this action 
 
 The end-user JWT is invalid, signed with the wrong key, or end-user authentication is not configured for this app.
 
-**Remediation:** Verify the `Authorization: Bearer` token is a valid JWT issued for this app. If end-user auth has not been set up, configure OAuth or generate a signing key first via `configure_oauth_provider`.
+**Remediation:** Verify the `Authorization: Bearer` token is a valid JWT issued for this app. If end-user auth has not been set up, configure OAuth or generate a signing key first via `manage_oauth` (action `configure`).
 
 ### Auth End User JWT Expired
 
@@ -218,7 +218,7 @@ These indicate that the target resource does not exist or is in a conflicting st
 
 The requested resource (app, function, deployment, file, row, etc.) does not exist or is not accessible to the caller.
 
-**Remediation:** Verify the identifier. Use the corresponding `list_*` MCP tool (e.g. `list_apps`, `list_functions`) to enumerate available resources.
+**Remediation:** Verify the identifier. Use the corresponding `list` action (e.g. `manage_app` action `list`, `manage_function` action `list`) to enumerate available resources.
 
 ### App Not Found
 
@@ -227,7 +227,7 @@ The requested resource (app, function, deployment, file, row, etc.) does not exi
 
 The `app_id` in the request does not match any app you can access.
 
-**Remediation:** Run `list_apps` to see your apps, or check the dashboard for the correct ID. App IDs are short slugs, not UUIDs.
+**Remediation:** Run `manage_app` with `action: "list"` to see your apps, or check the dashboard for the correct ID. App IDs are short slugs, not UUIDs.
 
 ### Resource Already Exists
 
@@ -294,7 +294,7 @@ The caller exceeded the request-rate limit for this endpoint or app.
 
 The app has reached the maximum number of tables permitted by its plan.
 
-**Remediation:** Drop unused tables or upgrade the plan. Plan limits are listed on the [Billing & Plans](/core-concepts/billing/) page.
+**Remediation:** Drop unused tables or upgrade the plan. Plan limits are listed on the [Plans & Usage](/core-concepts/plans-and-usage/) page.
 
 ### Quota Deployment Limit
 
@@ -303,7 +303,7 @@ The app has reached the maximum number of tables permitted by its plan.
 
 The app has reached the maximum number of frontend or function deployments permitted by its plan.
 
-**Remediation:** Delete inactive deployments via `delete_app` / `manage_edge_ssr` or upgrade the plan.
+**Remediation:** Delete inactive deployments via `manage_app` action `delete` / `manage_edge_ssr` or upgrade the plan.
 
 ## State errors
 
@@ -407,7 +407,7 @@ The serverless function exceeded its execution timeout.
 
 The integrations subsystem is not set up for this app.
 
-**Remediation:** Run `configure_integration` to enable integrations, then connect the desired toolkit.
+**Remediation:** Run `manage_integrations` with `action: "configure"` to enable integrations, then connect the desired toolkit.
 
 ### Integrations Toolkit Not Enabled
 
@@ -416,7 +416,7 @@ The integrations subsystem is not set up for this app.
 
 The named toolkit (e.g. `slack`, `github`) is not enabled for this app.
 
-**Remediation:** Enable the toolkit via `configure_integration` before invoking its tools.
+**Remediation:** Enable the toolkit via `manage_integrations` (action `configure`) before invoking its tools.
 
 ### Integrations Not Connected
 

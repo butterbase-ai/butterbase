@@ -18,7 +18,7 @@ It plugs into Butterbase the same way [Functions](/core-concepts/functions/) and
 | **Attention rules** | Scheduled rules that run on a snapshot of your substrate and propose actions when their conditions match. |
 | **Outbox targets** | HMAC-signed webhooks that fire when actions execute (e.g. send the email draft to an external system). |
 | **Settings** | Per-user toggles — `yolo_mode` for auto-approval, etc. |
-| **WebSocket stream** | Live push of every ledger / entity / rule / firing change. |
+| **WebSocket stream** | Live push of every entity, ledger, memory (decision / commitment / learning), rule, and firing change — so UIs update without polling. |
 
 ## How agents use it
 
@@ -298,25 +298,70 @@ Every webhook delivery is signed with `X-Butterbase-Signature: sha256=…` using
 
 ### 8. Stream live updates to a UI
 
-Browsers can't put a Bearer token in a WebSocket handshake, so the substrate uses a single-use ticket exchange. Your dashboard (or any browser client) does:
+Every substrate write emits a change over a WebSocket, so your UI updates the instant an agent or another user changes something — no polling, no refresh. The stream carries **envelope-only** frames — `{ org, op, tbl, id }`, no row payload — and you re-fetch the affected row by `id` (the same model as [Realtime](/core-concepts/realtime/)).
+
+What streams today: `entities`, `action_ledger`, `decisions`, `commitments`, `learnings`, `attention_rules`, and `attention_rule_firings`. The stream is **org-scoped** — a connection only receives changes for the org bound to its credential.
+
+There are three ways to connect, depending on what credential the client holds.
+
+**a) Server / script (has a substrate key).** Use the SDK's `bb.substrate.stream` — it handles the WebSocket, reconnects with backoff, and skips the `hello` frame for you:
 
 ```typescript
-// 1. Get a one-shot ticket (60s, single-use). Cookies/Cognito auth here.
+import { createClient } from '@butterbase/sdk';
+const bb = createClient({ apiUrl: 'https://api.butterbase.ai', /* … */ });
+
+const sub = bb.substrate.stream({
+  token: process.env.BUTTERBASE_SUBSTRATE_KEY, // bb_sub_… or bb_sk_…
+  onChange: (evt) => {
+    // evt = { org, op: 'insert' | 'update' | 'delete', tbl, id }
+    if (evt.tbl === 'entities') refetchEntity(evt.id);
+  },
+  onStatus: (s) => console.log('substrate stream', s), // 'connecting' | 'open' | 'closed'
+});
+
+// later
+sub.unsubscribe();
+```
+
+**b) End-user app in the browser (no substrate key).** A browser must never hold a substrate key, so mint a **single-use ticket** through one of your app's functions, then open the stream with it. In the function:
+
+```typescript
+// app function: substrate-proxy
+export async function handler(req, ctx) {
+  const { op } = await req.json();
+  if (op === 'ws_ticket') {
+    return Response.json(await ctx.substrate.wsTicket()); // { ticket, expires_in }
+  }
+  // … other ops
+}
+```
+
+In the browser:
+
+```typescript
+// 1. Ask your function for a 60s single-use ticket.
+const { ticket } = await bb.functions.invoke('substrate-proxy', { op: 'ws_ticket' });
+
+// 2. Open the stream, then re-fetch on each change.
+const ws = new WebSocket(`wss://api.butterbase.ai/v1/me/substrate/stream?ticket=${ticket}`);
+ws.onmessage = (evt) => {
+  const change = JSON.parse(evt.data);
+  if (change.type === 'hello') return;
+  // change = { org, op, tbl, id } — e.g. invalidate your query cache by id
+};
+```
+
+**c) Dashboard / cookie-authenticated browser.** If the browser already has a Cognito session, mint the ticket directly (no proxy function needed):
+
+```typescript
 const { ticket } = await fetch('/v1/me/substrate/ws-ticket', {
   method: 'POST',
   credentials: 'include',
 }).then(r => r.json());
-
-// 2. Open the WS with the ticket in the URL.
 const ws = new WebSocket(`wss://api.butterbase.ai/v1/me/substrate/stream?ticket=${ticket}`);
-
-ws.onmessage = (evt) => {
-  const change = JSON.parse(evt.data);
-  // { tbl: 'action_ledger', op: 'insert', id: 'act_…', user: '…' }
-};
 ```
 
-The server pushes a `{type: 'hello'}` frame on connect, then one message per change. Reconnect with backoff and fetch a fresh ticket on each reconnect — tickets are single-use.
+In every case the server pushes a `{ type: 'hello' }` frame on connect, then one frame per change. **Tickets are single-use and expire after 60s** — mint a fresh one on each (re)connect, and reconnect with backoff (the SDK's `bb.substrate.stream` already does this).
 
 ## See also
 

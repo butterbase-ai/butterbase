@@ -107,12 +107,13 @@ butterbase deploy:edge-ssr --from-source \
 
 ## Environment variables
 
-Environment variables are set via the dashboard or the `set_frontend_env` MCP tool. They take effect on the next deployment and are used at **both build time and runtime**.
+Environment variables are set via the dashboard or `manage_frontend` MCP tool (action `set_env`). They take effect on the next deployment and are used at **both build time and runtime**.
 
 ```bash
-set_frontend_env({
+manage_frontend({
   app_id: "app_abc123",
-  env: {
+  action: "set_env",
+  vars: {
     "NEXT_PUBLIC_API_BASE": "https://api.example.com",
     "DATABASE_URL": "postgresql://...",
     "ANALYTICS_KEY": "secret-key"

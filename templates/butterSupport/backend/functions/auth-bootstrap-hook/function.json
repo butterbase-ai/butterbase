@@ -1,0 +1,21 @@
+{
+  "name": "auth-bootstrap-hook",
+  "description": "Post-auth hook: ensures the user has a memberships row. First-user bootstrap → owner + self-allowlist. Allowlisted user → membership with default_role. Otherwise → audit-log denial.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T03:40:51.185Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

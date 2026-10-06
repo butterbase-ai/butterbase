@@ -234,4 +234,4 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 
 ## AI credits
 
-AI usage (chat completions and embeddings) is billed against your unified credit balance. See [Billing & Plans](/core-concepts/billing/) for current plan allowances, topups, and how credits are consumed.
+AI usage (chat completions and embeddings) is billed against your unified credit balance. See [Plans & Usage](/core-concepts/plans-and-usage/) for plan allowances, topups, spending caps, and how credits are consumed.

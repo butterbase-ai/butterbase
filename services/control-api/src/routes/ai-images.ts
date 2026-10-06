@@ -14,6 +14,7 @@ import {
   RouterError, InsufficientCreditsError,
   type RouteContext,
 } from '../services/ai-router/router.js';
+import type { CostSource } from '../services/ai-router/cost-source.js';
 import { readCatalogEntry } from '../services/ai-router/catalog.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
@@ -23,9 +24,10 @@ import {
   insertImageJob, getImageJob, markImageJobInProgress, markImageJobTerminal,
   type ImageJobRow,
 } from '../services/ai-router/image-jobs.js';
-import { settleAfterCall } from '../services/ai-router/billing-gate.js';
+import { settleAfterCall, insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { readAutoRefillState } from './ai-config.js';
+import { resolveMarkupPct, type MarkupSource } from '../services/ai-router/special-pricing.js';
 
 // Public URLs returned to clients must honor the X-Forwarded-* headers that
 // Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
@@ -134,6 +136,8 @@ export async function aiImageRoutes(app: FastifyInstance) {
     try {
       const body = imageSubmitSchema.parse(request.body);
 
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
+
       const unsupported = validateImageParams(body, adapters);
       if (unsupported) return reply.code(400).send(unsupported);
 
@@ -141,7 +145,7 @@ export async function aiImageRoutes(app: FastifyInstance) {
 
       const submit = await routeImageSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct: config.aiRouter.markupPct,
+          adapters, markupPct, markupSource,
           appId, organizationId, userId: ownerId, region },
         body,
       );
@@ -155,7 +159,8 @@ export async function aiImageRoutes(app: FastifyInstance) {
           upstreamPollingUrl: submit.pollingUrl,
           leaseId: submit.leaseId,
           estimatedCostUsd: submit.estimatedCostUsd,
-          markupPct: config.aiRouter.markupPct,
+          markupPct,
+          markupSource,
         });
       } catch (insertErr) {
         // Upstream job is running but we have no row to track it. Refund the lease
@@ -189,14 +194,17 @@ export async function aiImageRoutes(app: FastifyInstance) {
           unsignedUrls: inline.unsignedUrls,
           contentType: inline.contentType,
           providerCostUsd: cost,
-          chargedCreditsUsd: applyMarkup(cost, config.aiRouter.markupPct),
+          chargedCreditsUsd: applyMarkup(cost, markupPct),
           error: inline.error,
         });
         await settleImageJob(
           { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-            adapters, markupPct: config.aiRouter.markupPct,
+            adapters, markupPct, markupSource,
             appId, organizationId, userId: ownerId, region },
-          { leaseId: submit.leaseId, chosenRouter: submit.chosenRouter, canonicalModel: body.model, providerCostUsd: cost },
+          { leaseId: submit.leaseId, chosenRouter: submit.chosenRouter, canonicalModel: body.model, providerCostUsd: cost,
+            // No catalog fallback on this path — the cost is whatever the
+            // upstream reported inline, else $0.
+            costSource: inline.providerCostUsd !== undefined ? 'upstream' : 'catalog_unpriced' },
         );
       }
 
@@ -238,6 +246,7 @@ export async function aiImageRoutes(app: FastifyInstance) {
       const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
+        markupSource: (job.markup_source ?? 'global') as MarkupSource,
         appId, organizationId, userId: ownerId, region,
       };
       const result = await pollAndSettleImageJob(ctx, job);
@@ -330,6 +339,9 @@ export async function pollAndSettleImageJob(
   //   3) $0 as final guard — only `failed`/`cancelled` paths, where charging
   //      would be wrong anyway.
   let providerCost = poll.providerCostUsd ?? 0;
+  // Provenance for migration 051. Starts as whatever the branch above produced:
+  // an upstream-reported cost, or $0 pending the catalog fallback below.
+  let costSource: CostSource = poll.providerCostUsd !== undefined ? 'upstream' : 'catalog_unpriced';
   if (poll.providerCostUsd === undefined && poll.status === 'completed') {
     const entry = await readCatalogEntry(ctx.redis, job.model);
     if (entry) {
@@ -338,7 +350,7 @@ export async function pollAndSettleImageJob(
         job.request_json as unknown as import('../services/ai-router/adapters/types.js').ImageGenerationRequest,
         job.upstream_router as RouterName,
       );
-      if (billed !== null) providerCost = billed;
+      if (billed !== null) { providerCost = billed; costSource = 'catalog'; }
     }
   }
 
@@ -357,6 +369,7 @@ export async function pollAndSettleImageJob(
       chosenRouter: job.upstream_router as RouterName,
       canonicalModel: job.model,
       providerCostUsd: providerCost,
+      costSource,
     });
   }
   return { status: poll.status, terminal: true };
@@ -446,8 +459,7 @@ export async function handleImageError(app: FastifyInstance, reply: any, organiz
     return reply.code(402).send({
       error: 'insufficient_credits',
       code: 'INSUFFICIENT_CREDITS',
-      required_usd: error.requiredUsd,
-      available_usd: error.availableUsd,
+      ...insufficientCreditsFields(error),
       monthly_allowance_usd: ar.monthlyAllowanceUsd,
       credits_usd: ar.topupUsd,
       auto_refill_enabled: ar.enabled,

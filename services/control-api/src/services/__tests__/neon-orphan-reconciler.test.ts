@@ -28,7 +28,7 @@ vi.mock('../../config.js', () => ({
 }));
 
 // After mocks
-import { reconcileOrphansForRegion, reconcileOrphans } from '../neon-orphan-reconciler.js';
+import { reconcileOrphansForRegion, reconcileOrphans, custDbNameFor } from '../neon-orphan-reconciler.js';
 
 type QueryRow = Record<string, unknown>;
 
@@ -166,6 +166,159 @@ describe('reconcileOrphansForRegion', () => {
 
     expect(res.neonDbCount).toBe(1);
     expect(res.dropped).toEqual(['db_app_orphan']);
+  });
+});
+
+/**
+ * cust_<appId>_<region> — the move-app destination database shape created by
+ * `provisionAppDb`. Before the fix these were invisible to the reconciler.
+ */
+describe('reconcileOrphansForRegion — cust_* databases', () => {
+  const OLD = new Date(nowMs - 48 * 3600 * 1000).toISOString();
+
+  /** Mock pool honouring all four queries the reconciler issues. */
+  function custPool(opts: {
+    regionApps?: string[];      // apps.db_name for this region (db_app_ path)
+    allAppIds?: string[];       // apps.id, any region (cust_ forward match)
+    registered?: string[];      // app_db_connections.neon_database_name
+    inflight?: string[];        // neon_tasks.app_id
+  }) {
+    return makePool((sql) => {
+      if (sql.includes('FROM app_db_connections')) {
+        return { rows: (opts.registered ?? []).map((n) => ({ neon_database_name: n })) };
+      }
+      if (sql.includes('FROM neon_tasks')) {
+        return { rows: (opts.inflight ?? []).map((a) => ({ app_id: a })) };
+      }
+      if (sql.includes('SELECT id FROM apps')) {
+        return { rows: (opts.allAppIds ?? []).map((id) => ({ id })) };
+      }
+      if (sql.includes('FROM apps')) {
+        return { rows: (opts.regionApps ?? []).map((db_name) => ({ db_name })) };
+      }
+      return { rows: [] };
+    });
+  }
+
+  it('custDbNameFor reproduces provisionAppDb exactly', () => {
+    expect(custDbNameFor('app_k3f9x2m1qp0z', 'us-west-2')).toBe('cust_app_k3f9x2m1qp0z_us_west_2');
+    expect(custDbNameFor('app-With-Dashes', 'us-east-1')).toBe('cust_app_with_dashes_us_east_1');
+    expect(custDbNameFor('app_' + 'z'.repeat(80), 'us-west-2').length).toBe(63);
+  });
+
+  it('does NOT consider a cust_* database an orphan while its app is live', async () => {
+    listDatabases.mockResolvedValue([
+      { name: 'cust_app_live1_us_west_2', createdAt: OLD },
+    ]);
+    runtimePoolHolder.value = custPool({ allAppIds: ['app_live1'] });
+
+    const res = await reconcileOrphansForRegion(
+      'us-west-2', controlPoolHolder.value as never, RUNTIME_CFG, silentLogger, DEFAULTS,
+    );
+
+    expect(res.neonDbCount).toBe(1);
+    expect(res.orphanCount).toBe(0);
+    expect(res.dropped).toEqual([]);
+    expect(deleteDatabase).not.toHaveBeenCalled();
+  });
+
+  it('does NOT consider a cust_* database an orphan while app_db_connections still registers it (mid-move)', async () => {
+    listDatabases.mockResolvedValue([
+      { name: 'cust_app_moving_us_west_2', createdAt: OLD },
+    ]);
+    // apps row still lives in the SOURCE region's runtime DB, so no id match —
+    // only the app_db_connections registration protects it.
+    runtimePoolHolder.value = custPool({ registered: ['cust_app_moving_us_west_2'] });
+
+    const res = await reconcileOrphansForRegion(
+      'us-west-2', controlPoolHolder.value as never, RUNTIME_CFG, silentLogger, DEFAULTS,
+    );
+
+    expect(res.dropped).toEqual([]);
+    expect(deleteDatabase).not.toHaveBeenCalled();
+  });
+
+  it('DOES consider a cust_* database with no matching app an orphan', async () => {
+    listDatabases.mockResolvedValue([
+      { name: 'cust_app_ghost_us_west_2', createdAt: OLD },
+    ]);
+    runtimePoolHolder.value = custPool({ allAppIds: ['app_someoneelse'] });
+
+    const res = await reconcileOrphansForRegion(
+      'us-west-2', controlPoolHolder.value as never, RUNTIME_CFG, silentLogger, DEFAULTS,
+    );
+
+    expect(res.orphanCount).toBe(1);
+    expect(res.dropped).toEqual(['cust_app_ghost_us_west_2']);
+    expect(deleteDatabase).toHaveBeenCalledWith('neon-proj-us-west-2', 'cust_app_ghost_us_west_2');
+  });
+
+  it('applies the grace window to cust_* orphans', async () => {
+    listDatabases.mockResolvedValue([
+      { name: 'cust_app_fresh_us_west_2', createdAt: new Date(nowMs - 2 * 3600 * 1000).toISOString() },
+    ]);
+    runtimePoolHolder.value = custPool({});
+
+    const res = await reconcileOrphansForRegion(
+      'us-west-2', controlPoolHolder.value as never, RUNTIME_CFG, silentLogger, DEFAULTS,
+    );
+
+    expect(res.skippedYoung).toBe(1);
+    expect(deleteDatabase).not.toHaveBeenCalled();
+  });
+
+  it('applies the in-flight neon_tasks guard to cust_* orphans', async () => {
+    listDatabases.mockResolvedValue([
+      { name: 'cust_app_busy_us_west_2', createdAt: OLD },
+    ]);
+    runtimePoolHolder.value = custPool({ inflight: ['app_busy'] });
+
+    const res = await reconcileOrphansForRegion(
+      'us-west-2', controlPoolHolder.value as never, RUNTIME_CFG, silentLogger, DEFAULTS,
+    );
+
+    expect(res.skippedInflight).toBe(1);
+    expect(deleteDatabase).not.toHaveBeenCalled();
+  });
+
+  it('never drops a cust_* database whose name is ambiguous', async () => {
+    listDatabases.mockResolvedValue([
+      // At the 63-byte limit: possibly truncated, so the app id is unrecoverable.
+      { name: custDbNameFor('app_' + 'a'.repeat(80), 'us-west-2'), createdAt: OLD },
+      // Region suffix does not belong to the region being scanned.
+      { name: 'cust_app_elsewhere_eu_central_1', createdAt: OLD },
+      // Empty app-id segment.
+      { name: 'cust__us_west_2', createdAt: OLD },
+    ]);
+    runtimePoolHolder.value = custPool({});
+
+    const res = await reconcileOrphansForRegion(
+      'us-west-2', controlPoolHolder.value as never, RUNTIME_CFG, silentLogger, DEFAULTS,
+    );
+
+    expect(res.skippedAmbiguous).toBe(3);
+    expect(res.orphanCount).toBe(0);
+    expect(res.dropped).toEqual([]);
+    expect(deleteDatabase).not.toHaveBeenCalled();
+  });
+
+  it('honours dry-run and the max-drops cap for cust_* orphans too', async () => {
+    listDatabases.mockResolvedValue([
+      { name: 'cust_app_g1_us_west_2', createdAt: new Date(nowMs - 100 * 3600 * 1000).toISOString() },
+      { name: 'cust_app_g2_us_west_2', createdAt: new Date(nowMs - 80 * 3600 * 1000).toISOString() },
+      { name: 'db_app_g3', createdAt: new Date(nowMs - 60 * 3600 * 1000).toISOString() },
+    ]);
+    runtimePoolHolder.value = custPool({});
+
+    const res = await reconcileOrphansForRegion(
+      'us-west-2', controlPoolHolder.value as never, RUNTIME_CFG, silentLogger,
+      { ...DEFAULTS, dryRun: true, maxDropsPerRun: 2 },
+    );
+
+    expect(res.eligibleCount).toBe(3);
+    expect(res.wouldDrop).toEqual(['cust_app_g1_us_west_2', 'cust_app_g2_us_west_2']);
+    expect(res.dropped).toEqual([]);
+    expect(deleteDatabase).not.toHaveBeenCalled();
   });
 });
 

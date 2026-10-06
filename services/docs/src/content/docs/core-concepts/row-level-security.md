@@ -21,22 +21,25 @@ Butterbase has three built-in roles that are **automatically determined** by the
 
 **butterbase_service** — Full access to all data (bypasses RLS). A service bypass policy is auto-created on every RLS-enabled table.
 
-## Three tools for RLS
+## One tool, three common actions
 
-### 1. enable_rls — Foundation
+All RLS operations go through the `manage_rls` MCP tool, selected by its `action` argument (`enable`, `create_policy`, `update_policy`, `create_user_isolation`, `list`, `delete`).
+
+### 1. enable — Foundation
 
 Enable RLS on a table. The service bypass policy is auto-created.
 
 ```
-enable_rls({ app_id: "app_abc123", table_name: "posts" })
+manage_rls({ action: "enable", app_id: "app_abc123", table_name: "posts" })
 ```
 
-### 2. create_user_isolation_policy — Simple
+### 2. create_user_isolation — Simple
 
 One-call setup for the common case: users see only their own data.
 
 ```
-create_user_isolation_policy({
+manage_rls({
+  action: "create_user_isolation",
   app_id: "app_abc123",
   table_name: "posts",
   user_column: "user_id"
@@ -54,7 +57,8 @@ This automatically:
 Full control over USING and WITH CHECK expressions:
 
 ```
-create_policy({
+manage_rls({
+  action: "create_policy",
   app_id: "app_abc123",
   table_name: "products",
   policy_name: "public_read_products",
@@ -79,7 +83,8 @@ create_policy({
 ### Public read access (anonymous users)
 
 ```
-create_policy({
+manage_rls({
+  action: "create_policy",
   policy_name: "public_read_products",
   command: "SELECT",
   role: "anon",
@@ -91,7 +96,8 @@ create_policy({
 
 Quick way:
 ```
-create_user_isolation_policy({
+manage_rls({
+  action: "create_user_isolation",
   table_name: "orders",
   user_column: "user_id"
 })
@@ -99,7 +105,8 @@ create_user_isolation_policy({
 
 Custom way:
 ```
-create_policy({
+manage_rls({
+  action: "create_policy",
   policy_name: "users_own_orders",
   command: "ALL",
   role: "user",
@@ -110,7 +117,8 @@ create_policy({
 ### INSERT policy (user can only insert their own rows)
 
 ```
-create_policy({
+manage_rls({
+  action: "create_policy",
   policy_name: "users_insert_own",
   command: "INSERT",
   role: "user",
@@ -120,9 +128,9 @@ create_policy({
 
 ### Mixed access (public read, user write)
 
-1. Enable RLS: `enable_rls({ table_name: "products" })`
-2. Public read: `create_policy({ command: "SELECT", role: "anon", using_expression: "active = true" })`
-3. Authenticated write: `create_policy({ command: "INSERT", role: "user", with_check_expression: "user_id = current_user_id()" })`
+1. Enable RLS: `manage_rls({ action: "enable", table_name: "products" })`
+2. Public read: `manage_rls({ action: "create_policy", command: "SELECT", role: "anon", using_expression: "active = true" })`
+3. Authenticated write: `manage_rls({ action: "create_policy", command: "INSERT", role: "user", with_check_expression: "user_id = current_user_id()" })`
 
 ## Role scoping
 
@@ -138,7 +146,7 @@ Without role scoping, a policy applies to ALL roles, which can expose data unint
 
 ## Auto-populate trigger
 
-Only `create_user_isolation_policy` and `create_policy` with the `user_column` parameter create a BEFORE INSERT trigger that auto-fills the user column. Without the trigger, clients must include the user column in POST bodies.
+Only the `create_user_isolation` action and the `create_policy` action with the `user_column` parameter create a BEFORE INSERT trigger that auto-fills the user column. Without the trigger, clients must include the user column in POST bodies.
 
 ## Common pitfall: Cross-table subqueries
 
@@ -153,7 +161,8 @@ Once a table has RLS enabled, the `butterbase_user` role sees zero rows unless a
 Fix — expose the rows the subquery needs to see:
 
 ```
-create_policy({
+manage_rls({
+  action: "create_policy",
   table_name: "institutions",
   policy_name: "institutions_user_read",
   command: "SELECT",
@@ -166,7 +175,7 @@ create_policy({
 
 User B tries to comment on User A's public post. The policy on `comments` checks `EXISTS (SELECT 1 FROM posts WHERE id = post_id AND is_public = true)`. But `posts` has user_isolation, so User B can only see their own posts and the insert is blocked.
 
-Fix — use `create_user_isolation_policy` with `public_read_column: "is_public"` on the referenced table, or add a permissive SELECT policy scoped to the public rows.
+Fix — use `manage_rls` action `create_user_isolation` with `public_read_column: "is_public"` on the referenced table, or add a permissive SELECT policy scoped to the public rows.
 
 ### 3. Subquery joins on a column different from the isolation column
 
@@ -175,7 +184,8 @@ Your `users` table is isolated by `id = current_user_id()::uuid`, but the sessio
 Fix — align the referenced table's user_isolation column with the column your session id actually maps to. If your session `sub` is the OAuth `auth_user_id`, run:
 
 ```
-create_user_isolation_policy({
+manage_rls({
+  action: "create_user_isolation",
   table_name: "users",
   user_column: "auth_user_id"   // not "id"
 })

@@ -43,6 +43,40 @@ describe('auditRuntimeTablesForPool — app_id tables', () => {
     const pool = makePool({ appIdTables: ['new_per_app_thing'] });
     await expect(auditRuntimeTablesForPool(pool as any, 'eu-west-1')).rejects.toThrow(/runtime-tables\.ts/);
   });
+
+  it('also scans columns named <something>_app_id, not only bare app_id', async () => {
+    // Regression: app_environments and staging_env_overrides key on
+    // `prod_app_id` / `staging_app_id`. While the audit matched only the exact
+    // name `app_id` it could not see either one, so the check that exists to
+    // stop unclassified per-app tables reaching production was blind to the two
+    // newest ones. The stub cannot run SQL, so assert the emitted query shape —
+    // that IS the behaviour under test.
+    const pool = makePool({ appIdTables: [] });
+    await auditRuntimeTablesForPool(pool as any, 'us-east-1');
+    const scanSql = pool.query.mock.calls.map((c: any[]) => String(c[0]))
+      .find((sql: string) => sql.includes('information_schema.columns'));
+    expect(scanSql).toContain('LIKE');
+    expect(scanSql).toContain('_app');
+
+  });
+
+  it('classifies every %_app_id table that production actually has', async () => {
+    // Widening the scan to `%_app_id` also pulled in apps.template_source_app_id.
+    // `apps` had never needed classifying, so the wider audit would have
+    // crash-looped control-api at boot on the first deploy. This list is the
+    // real set, read off both production runtime DBs.
+    const pool = makePool({
+      appIdTables: ['apps', 'app_environments', 'staging_env_overrides'],
+    });
+    await expect(auditRuntimeTablesForPool(pool as any, 'us-east-1')).resolves.toBeUndefined();
+  });
+
+  it('keeps the staging link tables classified', async () => {
+    // If either is dropped from MOVE_APP_EXCLUDED, the audit now fails at boot
+    // rather than letting a region move silently orphan a staging environment.
+    const pool = makePool({ appIdTables: ['app_environments', 'staging_env_overrides'] });
+    await expect(auditRuntimeTablesForPool(pool as any, 'us-east-1')).resolves.toBeUndefined();
+  });
 });
 
 describe('auditRuntimeTablesForPool — FK child tables', () => {

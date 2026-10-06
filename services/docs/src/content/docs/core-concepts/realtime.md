@@ -8,7 +8,7 @@ Butterbase provides real-time data change notifications via WebSocket connection
 ## Enabling realtime
 
 ```
-configure_realtime({ app_id: "app_abc123", tables: ["messages", "notifications"] })
+manage_realtime({ app_id: "app_abc123", action: "configure", tables: ["messages", "notifications"] })
 ```
 
 This installs database triggers that capture changes and broadcast them via pg_notify.
@@ -141,3 +141,7 @@ The function response is returned:
 - Tables must exist before enabling realtime
 - The full row is sent on each change (no column filtering yet)
 - Events during LISTEN reconnection may be lost — clients should re-fetch state on reconnect
+
+## Substrate changes
+
+This page covers realtime for your app's **database tables**. If your data lives in the [Substrate](/core-concepts/substrate/) (entities, the action ledger, decisions/commitments/learnings), it has a sibling stream — org-scoped, envelope-only frames — documented under [Substrate → Stream live updates to a UI](/core-concepts/substrate/#8-stream-live-updates-to-a-ui) and the SDK's `bb.substrate.stream`.

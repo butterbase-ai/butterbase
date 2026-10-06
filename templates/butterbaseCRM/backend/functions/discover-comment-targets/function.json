@@ -1,0 +1,20 @@
+{
+  "name": "discover-comment-targets",
+  "description": "Accepts targeting criteria for Reddit (keywords/subreddits) or LinkedIn (post URLs), auto-discovers posts, generates AI draft comments, and stores them as campaign items.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 120000,
+  "memoryLimitMb": 256,
+  "deployedAt": "2026-07-15T15:14:59.359Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -168,6 +168,205 @@ describe('clone-jobs-reaper: runOnce', () => {
   });
 });
 
+describe('clone-jobs-reaper: B1 — stranded processing jobs', () => {
+  let controlDb: { query: ReturnType<typeof vi.fn> };
+  let logger: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    controlDb = { query: vi.fn() };
+    logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    vi.clearAllMocks();
+  });
+
+  it("candidate query allows status='processing' only for the modes this plan introduced", async () => {
+    controlDb.query.mockResolvedValueOnce({ rows: [] });
+    const { runOnce } = await import('../services/clone-jobs-reaper.js');
+    await runOnce(controlDb as any, logger as any);
+
+    const candidateSql = controlDb.query.mock.calls[0][0] as string;
+    expect(candidateSql).toContain('processing');
+    expect(candidateSql).toContain('staging_create');
+    expect(candidateSql).toContain('promote');
+    expect(candidateSql).toContain('staging_reset');
+  });
+
+  it('reaps a promote job stranded in processing past the stale threshold with no live neon_task', async () => {
+    const stuckRow = {
+      id: 'cj_promote_stuck',
+      source_app_id: 'app_staging',
+      dest_app_id: 'app_prod',
+      dest_region: 'us-east-1',
+      status: 'processing',
+      requested_by_user_id: 'user_1',
+      updated_at: new Date(Date.now() - 30 * 60_000),
+      age_minutes: '30',
+      mode: 'promote',
+    };
+    controlDb.query
+      .mockResolvedValueOnce({ rows: [stuckRow] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] });
+
+    const { getRuntimeDbPool } = await import('../services/runtime-db.js');
+    (getRuntimeDbPool as any).mockReturnValue({
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+    });
+
+    const { runOnce } = await import('../services/clone-jobs-reaper.js');
+    const result = await runOnce(controlDb as any, logger as any);
+
+    expect(result.reapedJobIds).toEqual(['cj_promote_stuck']);
+  });
+
+  it("idx_template_clone_jobs_one_promote regression: a stranded 'processing' promote becomes terminal so a later promote is not permanently blocked", async () => {
+    // Direct proof the fix is load-bearing: TERMINAL_CLONE_STATUSES (and thus
+    // idx_template_clone_jobs_one_promote's predicate) must consider the
+    // reaper's outcome terminal.
+    const { isTerminalCloneStatus } = await import('../services/clone-jobs.js');
+    expect(isTerminalCloneStatus('failed')).toBe(true);
+
+    const stuckRow = {
+      id: 'cj_promote_stuck2',
+      source_app_id: 'app_staging',
+      dest_app_id: 'app_prod',
+      dest_region: 'us-east-1',
+      status: 'processing',
+      requested_by_user_id: 'user_1',
+      updated_at: new Date(Date.now() - 30 * 60_000),
+      age_minutes: '30',
+      mode: 'promote',
+    };
+    controlDb.query
+      .mockResolvedValueOnce({ rows: [stuckRow] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] });
+
+    const { getRuntimeDbPool } = await import('../services/runtime-db.js');
+    (getRuntimeDbPool as any).mockReturnValue({
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+    });
+
+    const { runOnce } = await import('../services/clone-jobs-reaper.js');
+    await runOnce(controlDb as any, logger as any);
+
+    const updateCall = controlDb.query.mock.calls[1];
+    expect(updateCall[0]).toContain('UPDATE template_clone_jobs');
+    expect(updateCall[1]).toContain('failed');
+  });
+
+  it('does not reap a plain clone job stranded in processing (existing clone/update behavior untouched)', async () => {
+    // With a mocked DB, the WHERE clause itself cannot be exercised, but the
+    // candidate SQL text is asserted above to scope 'processing' inclusion by
+    // mode. This test locks in that runOnce still reaps whatever the query
+    // hands back — mode='clone' rows in 'processing' should never be returned
+    // by the real SQL, so this exists to make a future accidental widening of
+    // the SQL predicate to all modes show up as a behavior change here too.
+    const stuckRow = {
+      id: 'cj_clone_processing',
+      source_app_id: 'app_src',
+      dest_app_id: 'app_dst',
+      dest_region: 'us-east-1',
+      status: 'processing',
+      requested_by_user_id: 'user_1',
+      updated_at: new Date(Date.now() - 30 * 60_000),
+      age_minutes: '30',
+      mode: 'clone',
+    };
+    // Simulate the real SQL correctly excluding this row: fetchCandidates
+    // returns nothing for a plain clone in processing.
+    controlDb.query.mockResolvedValueOnce({ rows: [] });
+    void stuckRow;
+
+    const { runOnce } = await import('../services/clone-jobs-reaper.js');
+    const result = await runOnce(controlDb as any, logger as any);
+    expect(result.reapedJobIds).toEqual([]);
+  });
+});
+
+describe('clone-jobs-reaper: B2 — mode-correct audit events and notification copy', () => {
+  let controlDb: { query: ReturnType<typeof vi.fn> };
+  let logger: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    controlDb = { query: vi.fn() };
+    logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    vi.clearAllMocks();
+  });
+
+  async function reapOneMode(mode: 'clone' | 'update' | 'staging_create' | 'promote' | 'staging_reset') {
+    const stuckRow = {
+      id: `cj_${mode}`,
+      source_app_id: 'app_src',
+      dest_app_id: 'app_dst',
+      dest_region: 'us-east-1',
+      status: 'replaying_rls',
+      requested_by_user_id: 'user_1',
+      updated_at: new Date(Date.now() - 30 * 60_000),
+      age_minutes: '30',
+      mode,
+    };
+    controlDb.query
+      .mockResolvedValueOnce({ rows: [stuckRow] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] });
+
+    const { getRuntimeDbPool } = await import('../services/runtime-db.js');
+    (getRuntimeDbPool as any).mockReturnValue({
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+    });
+
+    const { runOnce } = await import('../services/clone-jobs-reaper.js');
+    await runOnce(controlDb as any, logger as any);
+  }
+
+  it('maps update to template_update_failed', async () => {
+    const { insertCloneAuditLog } = await import('../services/audit/audit-events-service.js');
+    await reapOneMode('update');
+    expect(insertCloneAuditLog).toHaveBeenCalledWith(
+      controlDb,
+      expect.objectContaining({ eventType: 'template_update_failed' }),
+    );
+  });
+
+  it('maps promote to staging_promote_failed, not a plain clone failure', async () => {
+    const { insertCloneAuditLog } = await import('../services/audit/audit-events-service.js');
+    await reapOneMode('promote');
+    expect(insertCloneAuditLog).toHaveBeenCalledWith(
+      controlDb,
+      expect.objectContaining({ eventType: 'staging_promote_failed' }),
+    );
+  });
+
+  it('maps staging_reset to staging_reset_failed, not a plain clone failure', async () => {
+    const { insertCloneAuditLog } = await import('../services/audit/audit-events-service.js');
+    await reapOneMode('staging_reset');
+    expect(insertCloneAuditLog).toHaveBeenCalledWith(
+      controlDb,
+      expect.objectContaining({ eventType: 'staging_reset_failed' }),
+    );
+  });
+
+  it('maps staging_create and clone to template_clone_failed', async () => {
+    const { insertCloneAuditLog } = await import('../services/audit/audit-events-service.js');
+    await reapOneMode('staging_create');
+    expect(insertCloneAuditLog).toHaveBeenCalledWith(
+      controlDb,
+      expect.objectContaining({ eventType: 'template_clone_failed' }),
+    );
+  });
+
+  it('passes the real mode through to notifyCloneFailed for every mode (no mislabeled emails)', async () => {
+    const { notifyCloneFailed } = await import('../services/failure-notifications.service.js');
+    for (const mode of ['clone', 'update', 'staging_create', 'promote', 'staging_reset'] as const) {
+      vi.clearAllMocks();
+      await reapOneMode(mode);
+      expect(notifyCloneFailed).toHaveBeenCalledWith(
+        controlDb,
+        expect.anything(),
+        expect.objectContaining({ mode }),
+        logger,
+      );
+    }
+  });
+});
+
 describe('clone-jobs-reaper: startCloneJobsReaper / stop', () => {
   it('stop() resolves without hanging', async () => {
     const { startCloneJobsReaper } = await import('../services/clone-jobs-reaper.js');

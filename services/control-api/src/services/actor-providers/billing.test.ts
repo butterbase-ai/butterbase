@@ -69,6 +69,7 @@ describe('reserveActorCredits', () => {
   it('throws InsufficientCreditsError on partial grant (settles partial back to 0)', async () => {
     grantLeaseMock.mockResolvedValueOnce({
       leaseId: 'lease_partial', amountGranted: 0.01, expiresAt: NOW,
+      balanceUsd: 0.01, floorUsd: 0,
     });
     settleLeaseMock.mockResolvedValueOnce({ refundedUsd: 0.01 });
     await expect(reserveActorCredits(POOL, {
@@ -82,7 +83,10 @@ describe('reserveActorCredits', () => {
   });
 
   it('throws InsufficientCreditsError when grantLease returns no lease', async () => {
-    grantLeaseMock.mockResolvedValueOnce({ leaseId: null, amountGranted: 0, expiresAt: NOW });
+    grantLeaseMock.mockResolvedValueOnce({
+      leaseId: null, amountGranted: 0, expiresAt: NOW,
+      balanceUsd: 0, floorUsd: 0,
+    });
     await expect(reserveActorCredits(POOL, {
       userId: 'u', region: 'us-east-1',
       recordingUsdPerSecond: 0.0001388,

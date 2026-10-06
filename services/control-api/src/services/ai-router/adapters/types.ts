@@ -4,7 +4,7 @@ import type {
   EmbeddingRequest as SchemaEmbeddingRequest,
 } from '../schemas.js';
 
-export type Modality = 'chat' | 'embedding' | 'image' | 'video' | 'audio';
+export type Modality = 'chat' | 'embedding' | 'image' | 'video' | 'audio' | 'decisions';
 
 export interface UpstreamModel {
   upstreamId: string;
@@ -31,6 +31,14 @@ export interface UpstreamModel {
 export type ChatCompletionRequest = SchemaChatCompletionRequest;
 export type EmbeddingRequest = SchemaEmbeddingRequest;
 
+/** OpenRouter Decisions API body (POST /api/alpha/decisions). Passed through verbatim. */
+export interface DecisionRequest {
+  model: string;
+  state?: unknown;
+  questions: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
 export interface VideoGenerationRequest {
   model: string; // canonical id; adapter translates to upstream id
   prompt: string;
@@ -40,7 +48,14 @@ export interface VideoGenerationRequest {
   generate_audio?: boolean;
   seed?: number;
   input_images?: string[];
-  input_references?: string[];
+  /**
+   * Either flat URL strings (canonical) or upstream-native objects, which are
+   * forwarded verbatim. Adapters that translate should handle only the string
+   * form and pass objects through untouched.
+   */
+  input_references?: Array<string | Record<string, unknown>>;
+  /** Upstream-native seed-frame objects, forwarded verbatim without inspection. */
+  frame_images?: Array<Record<string, unknown>>;
   provider?: Record<string, unknown>;
 }
 
@@ -211,6 +226,8 @@ export interface RouterAdapter {
   listModels(): Promise<UpstreamModel[]>;
   chatCompletion(req: ChatCompletionRequest, upstreamId: string): Promise<AdapterResult>;
   embedding?(req: EmbeddingRequest, upstreamId: string): Promise<AdapterResult>;
+  /** Typed decision call (choice / noul / score). Only OpenRouter implements it. */
+  decisions?(req: DecisionRequest, upstreamId: string): Promise<AdapterResult>;
   submitVideo?(req: VideoGenerationRequest, upstreamId: string): Promise<VideoSubmitResult>;
   pollVideo?(pollingUrl: string): Promise<VideoPollResult>;
   /** Fetch the raw MP4 bytes for a completed job. Pass through to caller as a stream. */

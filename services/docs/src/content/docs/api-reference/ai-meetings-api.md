@@ -283,7 +283,7 @@ OpenAI-shaped: `{ "error": { "message", "type", "code" } }`.
 |---|---|---|---|
 | 400 | `invalid_request_error` | `invalid_request` | Request body failed validation. `error.details` has the zod issues. |
 | 401 | `authentication_error` | `missing_credentials` | No / invalid Authorization header. |
-| 402 | `billing_error` | `insufficient_credits` | AI credits balance can't cover the up-front lease. `error.required_usd` + `error.available_usd` included. |
+| 402 | `billing_error` | `insufficient_credits` | Your credit balance is below the organization's credit floor, so no new call is admitted. `error.balance_usd` (combined monthly allowance + top-up balance) and `error.credit_floor_usd` (the lowest balance at which calls are still accepted — `0` unless credit has been extended to you) are included. |
 | 403 | `permission_error` | `not_authorized` | Authenticated user doesn't own this app. |
 | 404 | `invalid_request_error` | `app_not_found` | `app_id` doesn't exist. |
 | 501 | `api_error` | `provider_unavailable` | Meetings adapter isn't registered on this deployment. |

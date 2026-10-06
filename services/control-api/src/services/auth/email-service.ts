@@ -159,6 +159,7 @@ export type BillingEmailTemplate =
   | 'auto_refill_failed'
   | 'credits_low'
   | 'credits_exhausted'
+  | 'org_balance_low_ops'
   | 'weekly_digest';
 
 const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
@@ -178,6 +179,7 @@ const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   auto_refill_failed: 'Action Required: Auto-Refill Failed',
   credits_low: 'Your AI credits are running low',
   credits_exhausted: 'Your AI credits are exhausted',
+  org_balance_low_ops: '[butterbase] Orgs low on credits',
   weekly_digest: 'Your weekly Butterbase digest',
 };
 
@@ -294,6 +296,57 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       const stageLine = data.stalledStage
         ? `Stalled at stage: ${data.stalledStage}`
         : '';
+      if (data.mode === 'update') {
+        return [
+          `We couldn't finish updating "${data.appName || data.appId}" to the latest release of template ${data.sourceAppId}.`,
+          '',
+          `Job ID: ${data.jobId}`,
+          stageLine,
+          `Error: ${data.errorMessage || '(no message captured)'}`,
+          '',
+          'Your data was not touched — an update never drops or rewrites your rows. The app may be',
+          'part-way between its old code and the new release. You can:',
+          `  • Review the app and undo the update: ${dashboardUrl}/apps/${data.appId}`,
+          `  • Contact support if this keeps happening.`,
+        ].filter(Boolean).join('\n');
+      }
+      // A stranded promote writes onto a LIVE production app, not a fresh
+      // destination — the clone/update copy below is wrong on every count
+      // (there's no "partial app" to delete, and "try again" undersells that
+      // production may be mid-write).
+      if (data.mode === 'promote') {
+        return [
+          `We couldn't finish promoting your staging environment onto "${data.appName || data.appId}", your live production app.`,
+          '',
+          `Job ID: ${data.jobId}`,
+          stageLine,
+          `Error: ${data.errorMessage || '(no message captured)'}`,
+          '',
+          'This app may be part-way between its old state and the promoted staging state. Please review it now:',
+          `  • Review the app: ${dashboardUrl}/apps/${data.appId}`,
+          `  • Contact support if this keeps happening.`,
+        ].filter(Boolean).join('\n');
+      }
+      // A stranded staging_reset touches an existing staging app's code AND
+      // data (it re-seeds from production) — different enough from a fresh
+      // clone that "delete the partial app" and "try cloning again" don't fit.
+      if (data.mode === 'staging_reset') {
+        return [
+          `We couldn't finish resetting your staging environment "${data.appName || data.appId}" from production app ${data.sourceAppId}.`,
+          '',
+          `Job ID: ${data.jobId}`,
+          stageLine,
+          `Error: ${data.errorMessage || '(no message captured)'}`,
+          '',
+          "Your staging app's code and data may be part-way through being replaced from production. You can:",
+          `  • Open the staging app and try the reset again: ${dashboardUrl}/apps/${data.appId}`,
+          `  • Contact support if this keeps happening.`,
+        ].filter(Boolean).join('\n');
+      }
+      // 'clone' and 'staging_create' share this copy: a staging_create job is,
+      // mechanically, a clone onto a fresh app (see executeClone dispatch in
+      // neon-task-worker.ts), so the same "destination was created, code may
+      // be incomplete" framing is accurate for both.
       return [
         `We couldn't finish cloning "${data.appName || data.appId}" from template ${data.sourceAppId}.`,
         '',
@@ -329,10 +382,38 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       return lines.join('\n');
     }
 
+    // Ops-only. Sent to OPS_ALERT_EMAIL by low-balance-notifier, never to a
+    // customer — it names other organizations, so it must never be wired to a
+    // user-facing recipient.
+    case 'org_balance_low_ops': {
+      interface LowOrg { id: string; name: string; planId: string; balanceUsd: number; cutOff: boolean }
+      let orgs: LowOrg[] = [];
+      try {
+        orgs = JSON.parse(data.orgs_json || '[]');
+      } catch {
+        // Fall through with an empty list — the counts below still carry the
+        // alert, and a malformed payload is no reason to drop it.
+      }
+      const cutOff = data.cut_off_count ?? '0';
+      const lines: string[] = [
+        `${data.org_count} organization(s) are below $${data.threshold_usd} in credits.`,
+        `${cutOff} of them are already cut off — the credit floor is refusing their AI calls right now.`,
+        '',
+      ];
+      for (const o of orgs) {
+        const mark = o.cutOff ? '[CUT OFF]' : '[low]    ';
+        lines.push(`${mark} ${o.name} (${o.planId}) — $${Number(o.balanceUsd).toFixed(4)} — ${o.id}`);
+      }
+      lines.push('');
+      lines.push('Recharge with: tsx scripts/grant-credits.ts --org-id <id> --amount <usd>');
+      return lines.join('\n');
+    }
+
     case 'weekly_digest': {
       const items = parseDigestItems(data.itemsJson);
       const deploys = parseDeployItems(data.deployItemsJson);
-      if (items.length === 0 && deploys.length === 0) {
+      const templateUpdates = parseTemplateUpdateItems(data.templateUpdatesJson);
+      if (items.length === 0 && deploys.length === 0 && templateUpdates.length === 0) {
         return [
           'Nothing failed across your apps this week. Quiet weeks count.',
           '',
@@ -357,6 +438,19 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
           lines.push(`• [${d.appName}] ${d.kind} — ${d.failureCount} failed deploy${d.failureCount === 1 ? '' : 's'}`);
           if (d.lastError) lines.push(`    ${truncateError(d.lastError).split('\n')[0]}`);
           lines.push(`    ${dashboardUrl}/apps/${d.appId}`);
+          lines.push('');
+        }
+      }
+      if (templateUpdates.length > 0) {
+        // Informational only — no "action needed" framing. These forks are
+        // unmodified, so there's nothing broken and nothing to fix; this is
+        // just letting the owner know a newer template release exists.
+        lines.push(`Template updates available (${templateUpdates.length}):`);
+        lines.push('');
+        for (const t of templateUpdates) {
+          const label = t.latest_label ? ` (latest: ${t.latest_label})` : '';
+          lines.push(`• App ${t.dest_app_id} is ${t.behind_by} release${t.behind_by === 1 ? '' : 's'} behind its template${label}`);
+          lines.push(`    ${dashboardUrl}/apps/${t.dest_app_id}`);
           lines.push('');
         }
       }
@@ -518,6 +612,67 @@ function truncateError(msg: string): string {
 }
 
 /**
+ * Per-mode copy for the 'clone_failed' template's HTML body. template_clone_jobs
+ * now carries five modes (migration 116); each means something different to the
+ * recipient, so each gets its own heading/verb/CTA. 'staging_create' shares
+ * clone's copy on purpose — it is, mechanically, a clone onto a fresh app (see
+ * executeClone's dispatch fallthrough in neon-task-worker.ts).
+ */
+function cloneFailedHtmlCopy(mode: string | undefined, data: Record<string, string>, dashboardUrl: string): {
+  heading: string;
+  buttonLabel: string;
+  retryUrl: string;
+  intro: string;
+  dataNote: string;
+  preheaderVerb: string;
+} {
+  const appId = escapeHtml(data.appId || '');
+  const appName = escapeHtml(data.appName || data.appId || '');
+  const sourceAppId = escapeHtml(data.sourceAppId || '');
+  const appUrl = `${dashboardUrl}/apps/${appId}`;
+
+  if (mode === 'update') {
+    return {
+      heading: 'Update didn&rsquo;t finish',
+      buttonLabel: 'Open the app',
+      retryUrl: appUrl,
+      intro: `We couldn&rsquo;t finish updating &ldquo;${appName}&rdquo; to the latest release of template <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${sourceAppId}</span>.`,
+      dataNote: `Your data was not touched &mdash; an update never drops or rewrites your rows. The app may be part-way between its old code and the new release; you can undo the update from <a href="${appUrl}" style="color:#525252;text-decoration:underline;">the app page</a>.`,
+      preheaderVerb: 'updating',
+    };
+  }
+  if (mode === 'promote') {
+    return {
+      heading: 'Promote to production didn&rsquo;t finish',
+      buttonLabel: 'Review the app',
+      retryUrl: appUrl,
+      intro: `We couldn&rsquo;t finish promoting your staging environment onto &ldquo;${appName}&rdquo;, your <strong>live production app</strong>.`,
+      dataNote: `This app may be part-way between its old state and the promoted staging state &mdash; please <a href="${appUrl}" style="color:#525252;text-decoration:underline;">review it now</a>.`,
+      preheaderVerb: 'promoting to production',
+    };
+  }
+  if (mode === 'staging_reset') {
+    return {
+      heading: 'Staging reset didn&rsquo;t finish',
+      buttonLabel: 'Open the staging app',
+      retryUrl: appUrl,
+      intro: `We couldn&rsquo;t finish resetting your staging environment &ldquo;${appName}&rdquo; from production app <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${sourceAppId}</span>.`,
+      dataNote: `Your staging app&rsquo;s code and data may be part-way through being replaced from production. It is safe to <a href="${appUrl}" style="color:#525252;text-decoration:underline;">open the staging app and try the reset again</a>.`,
+      preheaderVerb: 'resetting your staging environment',
+    };
+  }
+  // 'clone' and 'staging_create'
+  return {
+    heading: 'Clone didn&rsquo;t finish',
+    buttonLabel: 'Try cloning again',
+    retryUrl: `${dashboardUrl}/templates`,
+    intro: `We couldn&rsquo;t finish cloning &ldquo;${appName}&rdquo; from template <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${sourceAppId}</span>.`,
+    dataNote: `The destination app was created but the code (frontend + functions) may not be fully in place. You can retry the clone from the template gallery, or delete the partial app and start fresh &mdash; <a href="${appUrl}" style="color:#525252;text-decoration:underline;">manage the partial app</a>.`,
+    preheaderVerb: 'cloning',
+  };
+}
+
+/**
  * Optional HTML body for a billing email. Returns null for templates that
  * have not been promoted to HTML yet — SES will send text-only in that case.
  * Add a new template by adding a case here and a matching text case in
@@ -533,10 +688,35 @@ export function buildBillingEmailHtml(
   if (template === 'weekly_digest') {
     const items = parseDigestItems(data.itemsJson);
     const deploys = parseDeployItems(data.deployItemsJson);
+    const templateUpdates = parseTemplateUpdateItems(data.templateUpdatesJson);
     const total = items.length + deploys.length;
 
+    const templateUpdateRows = templateUpdates.map((t) => {
+      const url = `${dashboardUrl}/apps/${escapeHtml(t.dest_app_id)}`;
+      const labelLine = t.latest_label ? ` &middot; latest ${escapeHtml(t.latest_label)}` : '';
+      return `<tr><td style="padding:16px 0;border-bottom:1px solid #f0f0f0;">
+<div style="font-size:14px;font-weight:600;color:#0a0a0a;margin-bottom:2px;">
+<a href="${url}" style="color:#0a0a0a;text-decoration:none;">${escapeHtml(t.dest_app_id)}</a>
+</div>
+<div style="font-size:13px;color:#737373;">
+${escapeHtml(String(t.behind_by))} release${t.behind_by === 1 ? '' : 's'} behind its template${labelLine}
+</div>
+</td></tr>`;
+    }).join('');
+    // Informational only, not an alert — these forks are unmodified so there
+    // is nothing broken to fix, just a newer release available to look at.
+    const templateUpdateSection = templateUpdateRows ? `
+<h2 style="margin:24px 0 0 0;font-size:13px;font-weight:600;color:#737373;text-transform:uppercase;letter-spacing:0.05em;">Template updates available</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">${templateUpdateRows}</table>` : '';
+
     if (total === 0) {
-      const content = `
+      const content = templateUpdateSection
+        ? `
+<h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">Quiet week 🌱</h1>
+<p style="margin:0 0 24px 0;font-size:14px;color:#525252;line-height:1.5;">Nothing failed across your apps in the last 7 days.</p>
+${templateUpdateSection}
+<p style="margin:32px 0 0 0;">${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}</p>`
+        : `
 <h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">Quiet week 🌱</h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#525252;line-height:1.5;">Nothing failed across your apps in the last 7 days.</p>
 ${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}`;
@@ -594,7 +774,7 @@ ${errLine ? `<div style="font-size:12px;color:#737373;font-family:ui-monospace,S
 <h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;color:#0a0a0a;">${escapeHtml(heading)}</h1>
 <p style="margin:0 0 8px 0;font-size:14px;color:#737373;">From the last 7 days, ranked by failure count.</p>
 ${section('Functions', fnRows)}
-${section('Deployments', deployRows)}
+${section('Deployments', deployRows)}${templateUpdateSection}
 <p style="margin:32px 0 0 0;">${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}</p>`;
     return renderEmailLayout({
       preheader: `${total} thing${total === 1 ? '' : 's'} need attention. ${top}`,
@@ -603,30 +783,28 @@ ${section('Deployments', deployRows)}
   }
 
   if (template === 'clone_failed') {
-    const appName = data.appName || data.appId;
     const errorMsg = truncateError(data.errorMessage || '(no message captured)');
-    const retryUrl = `${dashboardUrl}/templates`;
-    const appUrl = `${dashboardUrl}/apps/${escapeHtml(data.appId)}`;
+    const copy = cloneFailedHtmlCopy(data.mode, data, dashboardUrl);
     const stageLine = data.stalledStage
       ? `<p style="margin:0 0 4px 0;font-size:13px;color:#737373;">Stalled at stage <span style="color:#0a0a0a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.stalledStage)}</span></p>`
       : '';
     const content = `
-<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">Clone didn&rsquo;t finish</h1>
+<h1 style="margin:0 0 4px 0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-0.01em;color:#0a0a0a;">${copy.heading}</h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#737373;">
-We couldn&rsquo;t finish cloning &ldquo;${escapeHtml(appName)}&rdquo; from template <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.sourceAppId || '')}</span>.
+${copy.intro}
 </p>
-${renderButton({ href: retryUrl, label: 'Try cloning again' })}
+${renderButton({ href: copy.retryUrl, label: copy.buttonLabel })}
 <p style="margin:32px 0 8px 0;font-size:13px;font-weight:600;color:#0a0a0a;">What happened</p>
 ${stageLine}
 <pre style="margin:0;padding:16px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:#0a0a0a;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;">${escapeHtml(errorMsg)}</pre>
 <p style="margin:24px 0 0 0;font-size:13px;color:#737373;line-height:1.6;">
-The destination app was created but the code (frontend + functions) may not be fully in place. You can retry the clone from the template gallery, or delete the partial app and start fresh — <a href="${appUrl}" style="color:#525252;text-decoration:underline;">manage the partial app</a>.
+${copy.dataNote}
 </p>
 <p style="margin:16px 0 0 0;font-size:12px;color:#a3a3a3;line-height:1.5;">
 Job ID <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${escapeHtml(data.jobId || '')}</span>
 </p>`;
     return renderEmailLayout({
-      preheader: `We couldn't finish cloning "${appName}". Retry from the template gallery.`,
+      preheader: `We couldn't finish ${copy.preheaderVerb} "${data.appName || data.appId || ''}".`,
       content,
     });
   }
@@ -725,6 +903,10 @@ export function buildBillingEmailSubject(
   }
   if (template === 'clone_failed') {
     const app = data.appName || data.appId || 'your app';
+    // Same template, five very different events — see notifyCloneFailed's `mode`.
+    if (data.mode === 'update') return `Update failed: "${app}"`;
+    if (data.mode === 'promote') return `Promote to production failed: "${app}"`;
+    if (data.mode === 'staging_reset') return `Staging reset failed: "${app}"`;
     return `Clone failed: "${app}"`;
   }
   if (template === 'clone_reaper_digest') {
@@ -756,6 +938,13 @@ export interface DigestDeployItem {
   kind: 'frontend' | 'edge-ssr';
 }
 
+export interface DigestTemplateUpdateItem {
+  dest_app_id: string;
+  source_app_id: string;
+  behind_by: number;
+  latest_label: string | null;
+}
+
 function parseDigestItems(json: string | undefined): DigestItem[] {
   if (!json) return [];
   try {
@@ -767,6 +956,16 @@ function parseDigestItems(json: string | undefined): DigestItem[] {
 }
 
 function parseDeployItems(json: string | undefined): DigestDeployItem[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseTemplateUpdateItems(json: string | undefined): DigestTemplateUpdateItem[] {
   if (!json) return [];
   try {
     const parsed = JSON.parse(json);

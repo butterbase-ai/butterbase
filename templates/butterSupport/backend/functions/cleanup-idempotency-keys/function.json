@@ -1,0 +1,21 @@
+{
+  "name": "cleanup-idempotency-keys",
+  "description": "Cron daily 03:00 UTC. Deletes expired entries from the platform's _idempotency_keys system table (runtime never cleans them itself per the functions docs).",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "0 3 * * *"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T13:13:38.207Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

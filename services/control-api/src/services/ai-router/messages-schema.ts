@@ -4,15 +4,26 @@ const textBlock = z.object({ type: z.literal('text'), text: z.string() }).passth
 const toolUseBlock = z.object({
   type: z.literal('tool_use'), id: z.string(), name: z.string(), input: z.record(z.unknown()),
 }).passthrough();
+const imageBlock = z.object({
+  type: z.literal('image'),
+  source: z.union([
+    z.object({ type: z.literal('url'), url: z.string() }).passthrough(),
+    z.object({ type: z.literal('base64'), media_type: z.string(), data: z.string() }).passthrough(),
+  ]),
+}).passthrough();
+// tool_result content can carry text, image, document/PDF, and block types
+// Anthropic has not shipped yet. Accept any typed block and let the translation
+// layer decide what it can represent — see splitToolResultContent().
+const anyToolResultBlock = z.object({ type: z.string() }).passthrough();
 const toolResultBlock = z.object({
   type: z.literal('tool_result'),
   tool_use_id: z.string(),
-  content: z.union([z.string(), z.array(z.union([textBlock, z.object({ type: z.literal('image') }).passthrough()]))]),
+  content: z.union([z.string(), z.array(anyToolResultBlock)]),
   is_error: z.boolean().optional(),
 }).passthrough();
 const thinkingBlock = z.object({ type: z.literal('thinking'), thinking: z.string() }).passthrough();
 
-const contentBlock = z.discriminatedUnion('type', [textBlock, toolUseBlock, toolResultBlock, thinkingBlock]);
+const contentBlock = z.discriminatedUnion('type', [textBlock, toolUseBlock, toolResultBlock, thinkingBlock, imageBlock]);
 
 const message = z.object({
   role: z.enum(['user', 'assistant']),

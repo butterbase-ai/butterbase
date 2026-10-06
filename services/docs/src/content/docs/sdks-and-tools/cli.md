@@ -261,7 +261,7 @@ Most subcommands accept `--app <app-id>` to target a specific app and `--user-id
 
 ## Custom domains
 
-Manage custom hostnames for frontend deployments. Requires Pro plan or above. See the [custom domains setup guide](/core-concepts/frontend-deployment#custom-domains).
+Manage custom hostnames for frontend deployments. Requires the Launch plan or above. See [Custom Domains](/core-concepts/custom-domains/).
 
 ```bash
 # List domains for the current app
@@ -293,7 +293,7 @@ For Butterbase Skills with guided skills, install separately:
 
 ```bash
 claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills
-claude plugin install butterbase
+claude plugin install butterbase-skills@butterbase-skills
 ```
 
 ## Data

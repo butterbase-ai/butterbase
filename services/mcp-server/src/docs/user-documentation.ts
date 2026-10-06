@@ -115,7 +115,7 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 
 | Tool | What it does |
 |------|--------------|
-| **deploy_function** | Deploy a TypeScript/JavaScript function. You provide the code, a name, optional environment variables, and a trigger type (HTTP or cron schedule). The function runs in an isolated environment with database access. |
+| **deploy_function** | Deploy a TypeScript/JavaScript function. You provide the code, a name, optional environment variables, and a trigger type (HTTP or cron schedule). The function runs in an isolated environment with database access. On redeploy, \`envVars\` merge into the existing env (incoming keys win); pass \`envVarsReplace: true\` to replace the whole env instead. |
 | **manage_function** (action: "list") | List all deployed functions for an app with their status and metrics. |
 | **invoke_function** | Test-invoke a deployed function and see its response. |
 | **manage_function** (action: "delete") | Delete a deployed function. Removes the function code and stops it from being invoked. |
@@ -902,7 +902,8 @@ Authorization: Bearer {token}
 
 **Optional fields:**
 - \`description\` — What the function does
-- \`envVars\` — Key-value pairs for environment variables (encrypted at rest, accessible via \`ctx.env\`)
+- \`envVars\` — Key-value pairs for environment variables (encrypted at rest, accessible via \`ctx.env\`). On redeploy they merge into the existing env (incoming keys win; omit \`envVars\` to leave it untouched).
+- \`envVarsReplace\` — Set \`true\` to replace the function's entire env with \`envVars\` instead of merging (default: false)
 - \`timeoutMs\` — Max execution time in milliseconds (default: 30000, max: 300000)
 - \`memoryLimitMb\` — Memory limit in MB (default: 128, range: 64-1024)
 - \`trigger\` — How the function is invoked
@@ -1892,6 +1893,46 @@ Authorization: Bearer {token}
 | Text Embedding Ada 002 | \`openai/text-embedding-ada-002\` | 1536 |
 
 Embedding usage costs count against the same AI credits allowance as chat completions.
+
+### Decision models (typed classification)
+
+Decision models return a **typed answer with probabilities** instead of text. Use them for routing, classification, moderation, verification and scoring, anywhere your code needs a decision it can branch on. Use a chat model when you need prose or explanations. (This is unrelated to substrate decisions.)
+
+**Question types**
+- \`choice\`: pick one option from \`criteria\` (an object of option → description). Returns \`choice\`, \`confidence\`, and \`probabilities\` per option.
+- \`noul\`: yes/no. \`criteria\` is \`{ true, false }\`. Returns \`noul\`, the probability of yes (0–1).
+- \`score\`: position on an ordered scale. \`criteria\` is an array, lowest first. Returns \`score\` (a probability-weighted index), \`confidence\`, \`probabilities\` and \`legend\`.
+
+Every question in one request is answered independently and in parallel against the same \`state\`.
+
+**SDK**
+\`\`\`ts
+const { data, error } = await butterbase.ai.decide({
+  state: { customer_tier: 'enterprise', ticket: 'Checkout is blank after I click Pay.' },
+  questions: {
+    is_bug: { type: 'noul', instructions: 'Is this a software defect?',
+              criteria: { true: 'Broken or unexpected behavior', false: 'Question or feature request' } },
+    team:   { type: 'choice', instructions: 'Which team owns this?',
+              criteria: { payments: 'Checkout/billing', frontend: 'Rendering/browser', account: 'Login/profile' } },
+    urgency:{ type: 'score', instructions: 'How urgent?',
+              criteria: ['Next release', 'This week', 'Blocking revenue now'] },
+  },
+});
+if (error) throw error;
+if (data.answers.is_bug.noul > 0.8) { /* open a bug */ }
+\`\`\`
+
+**HTTP**: \`POST /v1/{app_id}/ai/decide\` with the same body. Platform gateway keys (\`ai:gateway\`) use \`POST /v1/decide\` and must pass \`model\`.
+
+**MCP**: \`manage_ai\` with \`action: "decide"\`, \`questions\`, and optional \`state\`/\`model\`.
+
+**Models**: list them with \`manage_ai list_models modality: "decisions"\` (or \`ai.listModels({ modality: 'decisions' })\`). The default is \`typesafe/jev-1.13\`; set a per-app default with \`update_config { config: { defaultDecisionModel } }\`. Context length varies by model (Jev: 32K tokens). Respan models (\`respan/span-01\`, \`respan/span-01-lite\`) require \`state\` to be a string (or \`{ input: [messages], output: message }\`); Jev, Kev and Solar accept any JSON \`state\`. \`state\` is optional; if you omit it, Butterbase sends \`{}\`.
+
+**Errors**: a malformed request returns 400 \`UPSTREAM_REJECTED\` with the field that failed, e.g. \`questions.q.type: Invalid discriminator value. Expected 'noul' | 'choice' | 'score'\`.
+
+**Pricing**: input tokens only. Output is free. The response's \`usage.cost\` is the amount charged to your credits.
+
+**Reading results**: a \`noul\` of 0.5 means "unsure", not "medium". For low-confidence answers, route to a human or ask a chat model instead. Decision models never return reasoning.
 
 ### Video generation
 

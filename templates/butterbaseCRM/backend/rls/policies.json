@@ -1,0 +1,715 @@
+{
+  "policies": [
+    {
+      "schemaname": "public",
+      "tablename": "activities",
+      "policyname": "activities_insert_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "((actor_user_id = (current_user_id())::uuid) AND (workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "activities",
+      "policyname": "activities_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "activities",
+      "policyname": "activities_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_messages",
+      "policyname": "agent_messages_insert_thread_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "(thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_messages",
+      "policyname": "agent_messages_select_thread_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_messages",
+      "policyname": "agent_messages_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_messages",
+      "policyname": "agent_messages_update_thread_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid)))",
+      "with_check": "(thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_proposals",
+      "policyname": "agent_proposals_insert_thread_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "((thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid))) AND (proposed_by = (current_user_id())::uuid) AND (status = 'pending'::text))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_proposals",
+      "policyname": "agent_proposals_select_thread_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_proposals",
+      "policyname": "agent_proposals_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_proposals",
+      "policyname": "agent_proposals_update_thread_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "((thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid))) AND (status = 'pending'::text))",
+      "with_check": "((thread_id IN ( SELECT agent_threads.id\n   FROM agent_threads\n  WHERE (agent_threads.user_id = (current_user_id())::uuid))) AND (status = ANY (ARRAY['approved'::text, 'rejected'::text])))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_threads",
+      "policyname": "agent_threads_delete_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "(user_id = (current_user_id())::uuid)",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_threads",
+      "policyname": "agent_threads_insert_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "((user_id = (current_user_id())::uuid) AND (workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_threads",
+      "policyname": "agent_threads_select_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "((user_id = (current_user_id())::uuid) AND (workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_threads",
+      "policyname": "agent_threads_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_threads",
+      "policyname": "agent_threads_update_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(user_id = (current_user_id())::uuid)",
+      "with_check": "(user_id = (current_user_id())::uuid)"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "app_allowlist_delete_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "app_allowlist_insert_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "((EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))) AND (created_by = (current_user_id())::uuid))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "app_allowlist_insert_bootstrap",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "((NOT (EXISTS ( SELECT 1\n   FROM app_allowlist app_allowlist_1))) AND (created_by = (current_user_id())::uuid))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "app_allowlist_select_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(current_user_id() IS NOT NULL)",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "app_allowlist_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "app_allowlist_update_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "attachments",
+      "policyname": "attachments_delete_uploader_or_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "((uploaded_by = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = attachments.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "attachments",
+      "policyname": "attachments_insert_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "attachments",
+      "policyname": "attachments_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "attachments",
+      "policyname": "attachments_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "attachments",
+      "policyname": "attachments_update_uploader_or_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "((uploaded_by = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = attachments.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))",
+      "with_check": "((uploaded_by = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = attachments.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "custom_fields",
+      "policyname": "custom_fields_all_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "custom_fields",
+      "policyname": "custom_fields_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "deal_proposals",
+      "policyname": "deal_proposals_delete_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = deal_proposals.workspace_id) AND (m.user_id = (current_user_id())::uuid))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "deal_proposals",
+      "policyname": "deal_proposals_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = deal_proposals.workspace_id) AND (m.user_id = (current_user_id())::uuid))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "deal_proposals",
+      "policyname": "deal_proposals_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "deal_proposals",
+      "policyname": "deal_proposals_update_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = deal_proposals.workspace_id) AND (m.user_id = (current_user_id())::uuid))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = deal_proposals.workspace_id) AND (m.user_id = (current_user_id())::uuid))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "enrichment_settings",
+      "policyname": "enrichment_settings_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "enrichment_settings",
+      "policyname": "enrichment_settings_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "enrichment_settings",
+      "policyname": "enrichment_settings_upsert_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = enrichment_settings.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = enrichment_settings.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "integration_state",
+      "policyname": "integration_state_all_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "integration_state",
+      "policyname": "integration_state_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "memberships_delete_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = memberships.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "memberships_insert_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = memberships.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "memberships_insert_founding_owner",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "((user_id = (current_user_id())::uuid) AND (role = 'owner'::text) AND (EXISTS ( SELECT 1\n   FROM workspaces w\n  WHERE ((w.id = memberships.workspace_id) AND (w.owner_user_id = (current_user_id())::uuid)))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "memberships_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(user_id = (current_user_id())::uuid)",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "memberships_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "memberships_update_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = memberships.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = memberships.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "notes",
+      "policyname": "notes_delete_author_or_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "((created_by = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = notes.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "notes",
+      "policyname": "notes_insert_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "notes",
+      "policyname": "notes_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "notes",
+      "policyname": "notes_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "notes",
+      "policyname": "notes_update_author_or_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "((created_by = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = notes.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))",
+      "with_check": "((created_by = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = notes.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "pending_invites",
+      "policyname": "pending_invites_delete_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = pending_invites.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "pending_invites",
+      "policyname": "pending_invites_insert_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "((invited_by = (current_user_id())::uuid) AND (EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = pending_invites.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "pending_invites",
+      "policyname": "pending_invites_select_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = pending_invites.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "pending_invites",
+      "policyname": "pending_invites_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "saved_views",
+      "policyname": "saved_views_all_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "saved_views",
+      "policyname": "saved_views_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "social_post_sends",
+      "policyname": "social_post_sends_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "social_post_sends",
+      "policyname": "social_post_sends_ws_membership",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "social_posts",
+      "policyname": "social_posts_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "social_posts",
+      "policyname": "social_posts_ws_membership",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "sync_settings",
+      "policyname": "sync_settings_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "sync_settings",
+      "policyname": "sync_settings_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "sync_settings",
+      "policyname": "sync_settings_upsert_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = sync_settings.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = sync_settings.workspace_id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "workspace_integrations",
+      "policyname": "workspace_integrations_all_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid)))",
+      "with_check": "((workspace_id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid))) AND (user_id = (current_user_id())::uuid))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "workspace_integrations",
+      "policyname": "workspace_integrations_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "workspaces",
+      "policyname": "workspaces_delete_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = workspaces.id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "workspaces",
+      "policyname": "workspaces_insert_self",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "(owner_user_id = (current_user_id())::uuid)"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "workspaces",
+      "policyname": "workspaces_select_member",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "((owner_user_id = (current_user_id())::uuid) OR (id IN ( SELECT m.workspace_id\n   FROM memberships m\n  WHERE (m.user_id = (current_user_id())::uuid))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "workspaces",
+      "policyname": "workspaces_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "workspaces",
+      "policyname": "workspaces_update_admin",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = workspaces.id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m\n  WHERE ((m.workspace_id = workspaces.id) AND (m.user_id = (current_user_id())::uuid) AND (m.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    }
+  ],
+  "tables_with_rls": [
+    "activities",
+    "agent_messages",
+    "agent_proposals",
+    "agent_threads",
+    "app_allowlist",
+    "attachments",
+    "custom_fields",
+    "deal_proposals",
+    "enrichment_settings",
+    "integration_state",
+    "memberships",
+    "notes",
+    "pending_invites",
+    "saved_views",
+    "social_post_sends",
+    "social_posts",
+    "sync_settings",
+    "workspace_integrations",
+    "workspaces"
+  ]
+}

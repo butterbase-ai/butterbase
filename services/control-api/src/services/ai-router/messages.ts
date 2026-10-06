@@ -16,6 +16,7 @@ import { estimatePromptTokens } from './tokenizer.js';
 import { settleAfterCall, leaseTtlSeconds } from './billing-gate.js';
 import type { LeaseHandle } from './billing-gate.js';
 import { writeAiUsageRow } from './usage-log.js';
+import { classifyCostSource } from './cost-source.js';
 import { applyMarkup } from './markup.js';
 import { maybeTriggerAutoRefill } from '../auto-refill-service.js';
 
@@ -67,23 +68,27 @@ function wrapNativeAnthropicStreamForSettlement(
     if (settled) return;
     settled = true;
     try {
+      // This path has no upstream-reported cost at all, so it is always an
+      // estimate against `pricing`.
       const providerCost = estimateWorstCaseUsd(pricing, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens);
+      const costSource = classifyCostSource(null, pricing);
       const chargedCredits = applyMarkup(providerCost, ctx.markupPct);
       await settleAfterCall(ctx.platformPool, lease, chargedCredits);
       maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
         .catch(err => console.warn('[messages] auto-refill failed:', err));
-      maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
+      maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId)
         .catch(err => console.warn('[messages] credits-email failed:', err));
       const reasoningTokens = thinkingText.length > 0
         ? estimatePromptTokens([{ role: 'assistant', content: thinkingText }], canonicalId)
         : undefined;
       writeAiUsageRow(ctx.runtimePool, {
+        modality: 'chat',
         appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: canonicalId,
         router: chosenRouter as any,
         promptTokens: inputTokens, completionTokens: outputTokens,
         totalTokens: inputTokens + outputTokens,
         providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-        markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+        markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain: [], leaseId: lease.leaseId,
         keyType: 'platform', chargedToUser: true,
         cacheReadInputTokens: cacheReadTokens,
         cacheCreationInputTokens: cacheCreateTokens,
@@ -99,6 +104,7 @@ function wrapNativeAnthropicStreamForSettlement(
         provider_cost_usd: providerCost,
         charged_credits_usd: chargedCredits,
         markup_pct: ctx.markupPct,
+        markup_source: ctx.markupSource,
         latency_ms: Date.now() - startedAt,
         status: 200,
       }));
@@ -221,6 +227,7 @@ export async function routeMessages(
       };
     })();
 
+    const costSource = classifyCostSource(result.providerCostUsd, native.router);
     const providerCost = result.providerCostUsd
       ?? estimateWorstCaseUsd(
         native.router,
@@ -234,15 +241,16 @@ export async function routeMessages(
     await settleAfterCall(ctx.platformPool, lease, chargedCredits);
     maybeTriggerAutoRefill({ pool: ctx.platformPool, redis: ctx.redis }, ctx.organizationId)
       .catch(err => console.error('[messages] auto-refill failed:', err));
-    maybeFireCreditsEmail(ctx.platformPool, ctx.userId)
+    maybeFireCreditsEmail(ctx.platformPool, ctx.organizationId)
       .catch(err => console.error('[messages] credits-email failed:', err));
     writeAiUsageRow(ctx.runtimePool, {
+      modality: 'chat',
       appId: ctx.appId, organizationId: ctx.organizationId, userId: ctx.userId, model: stripped,
       router: native.router.name as any,
       promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
       totalTokens: usage.promptTokens + usage.completionTokens,
       providerCostUsd: providerCost, chargedCreditsUsd: chargedCredits,
-      markupPct: ctx.markupPct, fallbackChain: [], leaseId: lease.leaseId,
+      markupPct: ctx.markupPct, markupSource: ctx.markupSource, costSource, fallbackChain: [], leaseId: lease.leaseId,
       keyType: 'platform', chargedToUser: true,
       cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
       cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
@@ -258,6 +266,7 @@ export async function routeMessages(
       provider_cost_usd: providerCost,
       charged_credits_usd: chargedCredits,
       markup_pct: ctx.markupPct,
+      markup_source: ctx.markupSource,
       latency_ms: Date.now() - startedAt,
       status: result.status,
     }));

@@ -19,7 +19,7 @@ Use the returned `app_id` in all routes and in `VITE_APP_ID`.
 
 ## Step 2: Apply schema
 
-**Tool:** `apply_schema`
+**Tool:** `manage_schema` (action: `apply`)
 
 **Parameters:**
 
@@ -84,7 +84,7 @@ Use the returned `app_id` in all routes and in `VITE_APP_ID`.
 
 ## Step 3: Row-level security
 
-**Tool:** `create_rls_policy`
+**Tool:** `manage_rls` (action: `create_user_isolation`)
 
 **Parameters:**
 
@@ -92,11 +92,11 @@ Use the returned `app_id` in all routes and in `VITE_APP_ID`.
 - `table_name`: `grocery_items`
 - `user_column`: `user_id`
 
-**Note:** If the tool returns an error but a policy already exists, verify with `get_rls_policies` — the example policy name is `grocery_items_user_isolation`.
+**Note:** If the tool returns an error but a policy already exists, verify with `manage_rls` action `list` — the example policy name is `grocery_items_user_isolation`.
 
 ## Step 4: CORS
 
-**Tool:** `update_cors`
+**Tool:** `manage_app` (action: `update_cors`)
 
 **Parameters:**
 

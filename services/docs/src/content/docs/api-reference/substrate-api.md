@@ -616,18 +616,40 @@ Or as a fallback query string:
 wss://api.butterbase.ai/v1/me/substrate/stream?token=bb_sub_…
 ```
 
+### App-function flow
+
+An app linked to an org can mint a ticket for its own users **without** ever putting a substrate key in the browser. Inside a deployed function, call:
+
+```ts
+const { ticket, expires_in } = await ctx.substrate.wsTicket();
+```
+
+It returns a 60s single-use ticket scoped to the app's linked org (server-to-server, over the internal bridge). Return it to the browser, which opens the stream with `?ticket=`. This is the recommended pattern for end-user-facing apps — see the [browser example](/core-concepts/substrate/#8-stream-live-updates-to-a-ui).
+
 ### Frames
 
 ```json
 // First frame on open:
 { "type": "hello", "ts": 1780198304 }
 
-// Subsequent frames, one per change:
-{ "tbl": "action_ledger",          "op": "insert", "id": "act_…", "user": "…" }
-{ "tbl": "entities",               "op": "update", "id": "ent_…", "user": "…" }
-{ "tbl": "attention_rules",        "op": "update", "id": "rule_…", "user": "…" }
-{ "tbl": "attention_rule_firings", "op": "insert", "id": "fire_…", "user": "…" }
+// Subsequent frames, one per change — envelope only, no row payload:
+{ "tbl": "entities",               "op": "insert", "id": "ent_…",  "org": "…" }
+{ "tbl": "action_ledger",          "op": "insert", "id": "act_…",  "org": "…" }
+{ "tbl": "decisions",              "op": "insert", "id": "dec_…",  "org": "…" }
+{ "tbl": "commitments",            "op": "update", "id": "com_…",  "org": "…" }
+{ "tbl": "learnings",              "op": "insert", "id": "lrn_…",  "org": "…" }
+{ "tbl": "attention_rules",        "op": "update", "id": "rule_…", "org": "…" }
+{ "tbl": "attention_rule_firings", "op": "insert", "id": "fire_…", "org": "…" }
 ```
+
+Each change frame is `{ org, op, tbl, id }`:
+
+| Field | Meaning |
+|---|---|
+| `org` | The substrate organization the change belongs to. The stream is **org-scoped** — a connection only ever receives changes for the org bound to its ticket or key. |
+| `op` | `insert`, `update`, or `delete`. |
+| `tbl` | The physical table that changed (e.g. `entities`, `action_ledger`, `decisions`). |
+| `id` | The changed row's id. |
 
 The stream does not include payloads — clients are expected to re-fetch the affected row by id.
 

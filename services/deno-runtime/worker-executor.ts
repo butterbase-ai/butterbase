@@ -951,6 +951,14 @@ export function buildWorkerCode(
         if (!res.ok) throw new Error('substrate.getEntity failed: ' + res.status);
         return await res.json();
       },
+      async wsTicket() {
+        const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/ws-ticket', {
+          method: 'POST',
+          headers: { 'x-butterbase-internal-secret': ${JSON.stringify(Deno.env.get("BUTTERBASE_INTERNAL_SECRET") || '')} },
+        });
+        if (!res.ok) throw new Error('substrate.wsTicket failed: ' + res.status + ' ' + await res.text());
+        return await res.json();
+      },
       async findEntities(filter) {
         const res = await fetch(${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL") || "http://control-api:4000")} + '/internal/substrate/apps/' + ${JSON.stringify(metadata.app_id)} + '/entities:find', {
           method: 'POST',

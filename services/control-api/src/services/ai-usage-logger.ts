@@ -106,6 +106,7 @@ export async function getAiUsageSummary(
   totalTokens: number;
   totalCost: number;
   byModel: Record<string, { tokens: number; cost: number; requests: number }>;
+  byModality: Record<string, { tokens: number; cost: number; requests: number }>;
   meetings: Array<{ dimension: string; seconds: number; usd: number }>;
 }> {
   const runtimePool = await getRuntimeDbForApp(db, appId);
@@ -139,6 +140,25 @@ export async function getAiUsageSummary(
     totalCost += cost;
   }
 
+  const modalityResult = await runtimePool.query<{ modality: string; requests: string; tokens: string; cost: string }>(
+    `SELECT COALESCE(modality, 'unspecified') AS modality,
+            COUNT(*)::text          AS requests,
+            SUM(total_tokens)::text AS tokens,
+            SUM(cost_usd)::text     AS cost
+       FROM ai_usage_logs
+      WHERE app_id = $1 AND DATE(created_at) >= $2 AND DATE(created_at) <= $3
+      GROUP BY 1`,
+    [appId, start, end]
+  );
+  const byModality: Record<string, { tokens: number; cost: number; requests: number }> = {};
+  for (const row of modalityResult.rows) {
+    byModality[row.modality] = {
+      tokens: parseInt(row.tokens, 10),
+      cost: parseFloat(row.cost),
+      requests: parseInt(row.requests, 10),
+    };
+  }
+
   // actor_usage_logs (meetings) is also runtime-tier.
   const meetingsResult = await runtimePool.query<{ dimension: string; total_seconds: string; total_usd: string }>(
     `SELECT dimension,
@@ -156,5 +176,5 @@ export async function getAiUsageSummary(
     usd: Number(r.total_usd ?? 0),
   }));
 
-  return { totalTokens, totalCost, byModel, meetings };
+  return { totalTokens, totalCost, byModel, byModality, meetings };
 }

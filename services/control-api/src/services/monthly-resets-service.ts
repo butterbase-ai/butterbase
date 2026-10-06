@@ -85,14 +85,15 @@ export async function resetMonthlyAllowanceWithClient(
 
   // Balance was just bumped — clear the credits-email dedup state so the next
   // time the balance drops we re-warn. Inline (not via resetCreditsEmailState)
-  // to stay inside the caller-owned transaction.
+  // to stay inside the caller-owned transaction. Keyed to the org whose
+  // allowance was just reset, matching where the markers live (migration 113).
   await client.query(
-    `UPDATE platform_users
+    `UPDATE organizations
         SET credits_low_emailed_at = NULL,
             credits_exhausted_emailed_at = NULL
       WHERE id = $1
         AND (credits_low_emailed_at IS NOT NULL OR credits_exhausted_emailed_at IS NOT NULL)`,
-    [args.userId]
+    [organizationId]
   );
 
   return { newAmount: grantAmount, previousUnspent };

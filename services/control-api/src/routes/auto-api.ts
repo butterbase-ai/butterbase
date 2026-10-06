@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { getAppPoolForApp } from '../services/app-pool.js';
 import { introspectSchema } from '../services/schema-introspector.js';
 import { buildSelectQuery } from '../services/query-builder.js';
+import { encodeValuesForColumns } from '../services/pg-json-values.js';
 import { AppResolver, AppNotFoundError, AppAuthRequiredError, AppPausedError, assertAppNotPaused } from '../services/app-resolver.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
 import { ApiKeyService } from '../services/api-key-service.js';
@@ -639,6 +640,14 @@ export async function autoApiRoutes(app: FastifyInstance) {
           method: request.method,
           headers: forwardHeaders,
           body: rawBody as BodyInit | undefined,
+          // redirect: 'manual' so a function's 3xx (e.g. an external OAuth/LTI
+          // redirect) is relayed to the client unchanged instead of being
+          // followed here. Undici's default ('follow') would chase the
+          // Location itself, and an unresolvable/external target then
+          // surfaces as a misleading 502 EXTERNAL_NETWORK_ERROR even though
+          // the function completed successfully (see spa-routing-probe.ts
+          // for the same pattern).
+          redirect: 'manual',
         }
       );
       const durationMs = Date.now() - invokeStart;
@@ -1024,7 +1033,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
 
       const columns = entries.map(([k]) => `"${k}"`).join(', ');
       const placeholders = entries.map((_, i) => `$${i + 1}`).join(', ');
-      const values = entries.map(([, v]) => v);
+      const values = encodeValuesForColumns(entries, tableDef.columns);
 
       const result = await executeWithRole(pool, role, userId, async (client) => {
         return client.query(
@@ -1140,7 +1149,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
       }
 
       const setClauses = entries.map(([k], i) => `"${k}" = $${i + 1}`).join(', ');
-      const values = [...entries.map(([, v]) => v), id];
+      const values = [...encodeValuesForColumns(entries, tableDef.columns), id];
 
       const result = await executeWithRole(pool, role, userId, async (client) => {
         return client.query(

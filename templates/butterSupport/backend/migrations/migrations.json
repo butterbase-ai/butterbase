@@ -1,0 +1,337 @@
+{
+  "app_id": "app_0ycj4ad7odud",
+  "migrations": [
+    {
+      "id": 45,
+      "description": "add_topic_tag",
+      "applied_sql": "ALTER TABLE \"support_tickets\" ADD COLUMN \"topic_tag\" text;\nCREATE INDEX \"support_tickets_topic_idx\" ON \"support_tickets\" (\"topic_tag\", \"opened_at\")",
+      "applied_at": "2026-06-23T06:21:16.024Z"
+    },
+    {
+      "id": 44,
+      "description": "widget_v2_visitor_token",
+      "applied_sql": "ALTER TABLE \"support_tickets\" ADD COLUMN \"customer_name\" text;\nALTER TABLE \"support_tickets\" ADD COLUMN \"customer_external_id\" text;\nALTER TABLE \"support_tickets\" ADD COLUMN \"visitor_token\" text;\nALTER TABLE \"support_tickets\" ADD COLUMN \"identity_verified\" boolean NOT NULL DEFAULT false;\nCREATE INDEX \"support_tickets_visitor_idx\" ON \"support_tickets\" (\"visitor_token\", \"last_message_at\")",
+      "applied_at": "2026-06-23T04:06:22.136Z"
+    },
+    {
+      "id": 43,
+      "description": "add_rag_document_ids",
+      "applied_sql": "ALTER TABLE \"docs_sources\" ADD COLUMN \"rag_document_ids\" text[] NOT NULL DEFAULT '{}'::text[]",
+      "applied_at": "2026-06-23T01:48:34.060Z"
+    },
+    {
+      "id": 42,
+      "description": "rls_policy_update_widget_secrets_admin_insert_1781798326365",
+      "applied_sql": "CREATE POLICY \"admin_insert\" ON \"widget_secrets\" FOR INSERT TO butterbase_user WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE memberships.user_id = current_user_id()::uuid AND memberships.role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T15:58:46.361Z"
+    },
+    {
+      "id": 41,
+      "description": "rls_policy_widget_secrets_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"widget_secrets\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE memberships.user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T15:58:26.595Z"
+    },
+    {
+      "id": 40,
+      "description": "rls_policy_update_widget_secrets_admin_insert_1781798289505",
+      "applied_sql": "CREATE POLICY \"admin_insert\" ON \"widget_secrets\" FOR INSERT TO butterbase_user WITH CHECK (current_user_id() IS NOT NULL)",
+      "applied_at": "2026-06-18T15:58:09.501Z"
+    },
+    {
+      "id": 39,
+      "description": "rls_policy_update_widget_secrets_admin_insert_1781798237263",
+      "applied_sql": "CREATE POLICY \"admin_insert\" ON \"widget_secrets\" FOR INSERT TO butterbase_user WITH CHECK (EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = current_user_id()::uuid AND m.role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T15:57:17.259Z"
+    },
+    {
+      "id": 38,
+      "description": "mark support_skill + autonomy_settings _seed:true (rows ride along on clone)",
+      "applied_sql": "ALTER TABLE \"agent_proposals\" ALTER COLUMN \"expires_at\" SET DEFAULT (now() + interval '24 hours')",
+      "applied_at": "2026-06-18T15:33:57.605Z"
+    },
+    {
+      "id": 37,
+      "description": "rls_policy_update_memberships_team_member_select_1781794860587",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"memberships\" FOR SELECT TO butterbase_user USING (user_id = (current_user_id())::uuid)",
+      "applied_at": "2026-06-18T15:01:00.589Z"
+    },
+    {
+      "id": 36,
+      "description": "rls_policy_widget_secrets_admin_delete",
+      "applied_sql": "CREATE POLICY \"admin_delete\" ON \"widget_secrets\" FOR DELETE TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T12:33:51.558Z"
+    },
+    {
+      "id": 35,
+      "description": "rls_policy_widget_secrets_admin_update",
+      "applied_sql": "CREATE POLICY \"admin_update\" ON \"widget_secrets\" FOR UPDATE TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T12:33:51.128Z"
+    },
+    {
+      "id": 34,
+      "description": "rls_policy_widget_secrets_admin_insert",
+      "applied_sql": "CREATE POLICY \"admin_insert\" ON \"widget_secrets\" FOR INSERT TO butterbase_user WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T12:33:47.998Z"
+    },
+    {
+      "id": 33,
+      "description": "rls_policy_widget_secrets_admin_write",
+      "applied_sql": "CREATE POLICY \"admin_write\" ON \"widget_secrets\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T12:33:31.111Z"
+    },
+    {
+      "id": 32,
+      "description": "widget_secrets: rename secret_hash to secret",
+      "applied_sql": "ALTER TABLE \"agent_proposals\" ALTER COLUMN \"expires_at\" SET DEFAULT (now() + interval '24 hours');\nALTER TABLE \"widget_secrets\" DROP COLUMN \"secret_hash\";\nALTER TABLE \"widget_secrets\" ADD COLUMN \"secret\" text NOT NULL",
+      "applied_at": "2026-06-18T12:32:41.168Z"
+    },
+    {
+      "id": 31,
+      "description": "rls_policy_team_integrations_self_or_admin_write",
+      "applied_sql": "CREATE POLICY \"self_or_admin_write\" ON \"team_integrations\" FOR ALL TO butterbase_user USING (user_id = current_user_id()::uuid OR EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (user_id = current_user_id()::uuid OR EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:34.010Z"
+    },
+    {
+      "id": 30,
+      "description": "rls_policy_team_integrations_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"team_integrations\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:10:31.471Z"
+    },
+    {
+      "id": 29,
+      "description": "rls_policy_memberships_delete_admin_or_self",
+      "applied_sql": "CREATE POLICY \"delete_admin_or_self\" ON \"memberships\" FOR DELETE TO butterbase_user USING (user_id = current_user_id()::uuid OR EXISTS (SELECT 1 FROM memberships m2 WHERE m2.user_id = current_user_id()::uuid AND m2.role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:29.376Z"
+    },
+    {
+      "id": 28,
+      "description": "rls_policy_memberships_admin_update",
+      "applied_sql": "CREATE POLICY \"admin_update\" ON \"memberships\" FOR UPDATE TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships m2 WHERE m2.user_id = current_user_id()::uuid AND m2.role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships m2 WHERE m2.user_id = current_user_id()::uuid AND m2.role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:27.346Z"
+    },
+    {
+      "id": 27,
+      "description": "rls_policy_memberships_admin_insert",
+      "applied_sql": "CREATE POLICY \"admin_insert\" ON \"memberships\" FOR INSERT TO butterbase_user WITH CHECK (EXISTS (SELECT 1 FROM memberships m2 WHERE m2.user_id = current_user_id()::uuid AND m2.role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:24.395Z"
+    },
+    {
+      "id": 26,
+      "description": "rls_policy_memberships_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"memberships\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships m2 WHERE m2.user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:10:22.278Z"
+    },
+    {
+      "id": 25,
+      "description": "rls_policy_capability_config_admin_write",
+      "applied_sql": "CREATE POLICY \"admin_write\" ON \"capability_config\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:19.755Z"
+    },
+    {
+      "id": 24,
+      "description": "rls_policy_capability_config_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"capability_config\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:10:17.364Z"
+    },
+    {
+      "id": 23,
+      "description": "rls_policy_docs_sources_admin_write",
+      "applied_sql": "CREATE POLICY \"admin_write\" ON \"docs_sources\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:15.237Z"
+    },
+    {
+      "id": 22,
+      "description": "rls_policy_docs_sources_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"docs_sources\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:10:12.839Z"
+    },
+    {
+      "id": 21,
+      "description": "rls_policy_app_allowlist_admin_write",
+      "applied_sql": "CREATE POLICY \"admin_write\" ON \"app_allowlist\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:10.919Z"
+    },
+    {
+      "id": 20,
+      "description": "rls_policy_app_allowlist_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"app_allowlist\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:10:08.225Z"
+    },
+    {
+      "id": 19,
+      "description": "rls_policy_escalation_targets_admin_write",
+      "applied_sql": "CREATE POLICY \"admin_write\" ON \"escalation_targets\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:06.230Z"
+    },
+    {
+      "id": 18,
+      "description": "rls_policy_escalation_targets_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"escalation_targets\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:10:03.179Z"
+    },
+    {
+      "id": 17,
+      "description": "rls_policy_autonomy_settings_admin_write",
+      "applied_sql": "CREATE POLICY \"admin_write\" ON \"autonomy_settings\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:10:01.234Z"
+    },
+    {
+      "id": 16,
+      "description": "rls_policy_autonomy_settings_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"autonomy_settings\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:58.662Z"
+    },
+    {
+      "id": 15,
+      "description": "rls_policy_support_skill_admin_write",
+      "applied_sql": "CREATE POLICY \"admin_write\" ON \"support_skill\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin'))) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid AND role IN ('owner','admin')))",
+      "applied_at": "2026-06-18T03:09:56.661Z"
+    },
+    {
+      "id": 14,
+      "description": "rls_policy_support_skill_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"support_skill\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:54.199Z"
+    },
+    {
+      "id": 13,
+      "description": "rls_policy_outbound_disclosure_violations_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"outbound_disclosure_violations\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:36.778Z"
+    },
+    {
+      "id": 12,
+      "description": "rls_policy_integration_state_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"integration_state\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:34.907Z"
+    },
+    {
+      "id": 11,
+      "description": "rls_policy_pattern_signals_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"pattern_signals\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:32.910Z"
+    },
+    {
+      "id": 10,
+      "description": "rls_policy_escalations_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"escalations\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:30.939Z"
+    },
+    {
+      "id": 9,
+      "description": "rls_policy_diagnoses_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"diagnoses\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:28.893Z"
+    },
+    {
+      "id": 8,
+      "description": "rls_policy_agent_messages_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"agent_messages\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:27.360Z"
+    },
+    {
+      "id": 7,
+      "description": "rls_policy_agent_threads_team_member_select",
+      "applied_sql": "CREATE POLICY \"team_member_select\" ON \"agent_threads\" FOR SELECT TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:25.359Z"
+    },
+    {
+      "id": 6,
+      "description": "rls_policy_activities_team_member_all",
+      "applied_sql": "CREATE POLICY \"team_member_all\" ON \"activities\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid)) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:23.395Z"
+    },
+    {
+      "id": 5,
+      "description": "rls_policy_agent_proposals_team_member_all",
+      "applied_sql": "CREATE POLICY \"team_member_all\" ON \"agent_proposals\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid)) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:20.830Z"
+    },
+    {
+      "id": 4,
+      "description": "rls_policy_support_messages_team_member_all",
+      "applied_sql": "CREATE POLICY \"team_member_all\" ON \"support_messages\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid)) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:18.317Z"
+    },
+    {
+      "id": 3,
+      "description": "rls_policy_support_tickets_team_member_all",
+      "applied_sql": "CREATE POLICY \"team_member_all\" ON \"support_tickets\" FOR ALL TO butterbase_user USING (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid)) WITH CHECK (EXISTS (SELECT 1 FROM memberships WHERE user_id = current_user_id()::uuid))",
+      "applied_at": "2026-06-18T03:09:15.965Z"
+    },
+    {
+      "id": 2,
+      "description": "rename _sys_widget_secrets to widget_secrets",
+      "applied_sql": "DROP TABLE IF EXISTS \"_sys_widget_secrets\" CASCADE;\nCREATE TABLE \"widget_secrets\" (\"singleton\" boolean PRIMARY KEY DEFAULT true, \"secret_hash\" text NOT NULL, \"created_by\" uuid, \"created_at\" timestamptz NOT NULL DEFAULT now(), \"rotated_at\" timestamptz);\nALTER TABLE \"agent_proposals\" ALTER COLUMN \"expires_at\" SET DEFAULT (now() + interval '24 hours')",
+      "applied_at": "2026-06-18T03:08:29.426Z"
+    },
+    {
+      "id": 1,
+      "description": "v1 initial schema — 20 tables",
+      "applied_sql": "CREATE TABLE \"memberships\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"user_id\" uuid NOT NULL UNIQUE, \"role\" text NOT NULL DEFAULT 'member', \"invited_email\" text, \"added_by\" uuid, \"added_at\" timestamptz NOT NULL DEFAULT now());\nCREATE UNIQUE INDEX \"memberships_user_idx\" ON \"memberships\" (\"user_id\");\nCREATE TABLE \"app_allowlist\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"entry_type\" text NOT NULL, \"value\" text NOT NULL, \"active\" boolean NOT NULL DEFAULT true, \"default_role\" text NOT NULL DEFAULT 'member', \"note\" text, \"created_by\" uuid, \"created_at\" timestamptz NOT NULL DEFAULT now(), \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE UNIQUE INDEX \"app_allowlist_unique\" ON \"app_allowlist\" (\"entry_type\", \"value\");\nCREATE INDEX \"app_allowlist_active_idx\" ON \"app_allowlist\" (\"active\");\nCREATE TABLE \"support_tickets\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"channel\" text NOT NULL DEFAULT 'widget', \"customer_substrate_id\" text, \"customer_email\" text, \"subject\" text, \"status\" text NOT NULL DEFAULT 'open', \"assigned_to\" uuid, \"issue_type\" text, \"priority\" text NOT NULL DEFAULT 'normal', \"opened_at\" timestamptz NOT NULL DEFAULT now(), \"last_message_at\" timestamptz NOT NULL DEFAULT now(), \"created_at\" timestamptz NOT NULL DEFAULT now(), \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE INDEX \"support_tickets_status_idx\" ON \"support_tickets\" (\"status\", \"last_message_at\");\nCREATE INDEX \"support_tickets_customer_idx\" ON \"support_tickets\" (\"customer_substrate_id\", \"opened_at\");\nCREATE TABLE \"support_skill\" (\"singleton\" boolean PRIMARY KEY DEFAULT true, \"dimensions\" jsonb NOT NULL DEFAULT '{}'::jsonb, \"freeform_context\" text, \"version\" integer NOT NULL DEFAULT 1, \"updated_by\" uuid, \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE TABLE \"autonomy_settings\" (\"issue_type\" text PRIMARY KEY, \"mode\" text NOT NULL DEFAULT 'draft_for_approval', \"updated_by\" uuid, \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE TABLE \"escalation_targets\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"channel\" text NOT NULL, \"config\" jsonb NOT NULL DEFAULT '{}'::jsonb, \"is_default\" boolean NOT NULL DEFAULT false, \"active\" boolean NOT NULL DEFAULT true, \"created_by\" uuid, \"created_at\" timestamptz NOT NULL DEFAULT now(), \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE TABLE \"activities\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"actor_user_id\" uuid, \"kind\" text NOT NULL, \"entity_type\" text NOT NULL, \"entity_id\" text, \"payload\" jsonb, \"created_at\" timestamptz NOT NULL DEFAULT now());\nCREATE INDEX \"activities_created_idx\" ON \"activities\" (\"created_at\");\nCREATE INDEX \"activities_entity_idx\" ON \"activities\" (\"entity_type\", \"entity_id\", \"created_at\");\nCREATE TABLE \"pattern_signals\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"signal_kind\" text NOT NULL, \"signal_key\" text NOT NULL, \"count\" integer NOT NULL DEFAULT 1, \"first_seen_at\" timestamptz NOT NULL DEFAULT now(), \"last_seen_at\" timestamptz NOT NULL DEFAULT now(), \"sample_ticket_ids\" uuid[], \"surfaced\" boolean NOT NULL DEFAULT false, \"surfaced_at\" timestamptz);\nCREATE UNIQUE INDEX \"pattern_signals_unique\" ON \"pattern_signals\" (\"signal_kind\", \"signal_key\");\nCREATE INDEX \"pattern_signals_surfaced_idx\" ON \"pattern_signals\" (\"surfaced\", \"last_seen_at\");\nCREATE TABLE \"team_integrations\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"user_id\" uuid NOT NULL, \"toolkit_slug\" text NOT NULL, \"composio_account_id\" text, \"connected_at\" timestamptz NOT NULL DEFAULT now(), \"metadata\" jsonb DEFAULT '{}'::jsonb);\nCREATE UNIQUE INDEX \"team_integrations_unique\" ON \"team_integrations\" (\"user_id\", \"toolkit_slug\");\nCREATE TABLE \"integration_state\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"kind\" text NOT NULL UNIQUE, \"cursor\" text, \"last_synced_at\" timestamptz, \"last_error\" text, \"created_at\" timestamptz NOT NULL DEFAULT now(), \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE TABLE \"_sys_widget_secrets\" (\"singleton\" boolean PRIMARY KEY DEFAULT true, \"secret_hash\" text NOT NULL, \"created_by\" uuid, \"created_at\" timestamptz NOT NULL DEFAULT now(), \"rotated_at\" timestamptz);\nCREATE TABLE \"docs_sources\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"url\" text, \"source_kind\" text NOT NULL, \"display_name\" text, \"rag_collection_id\" text, \"last_crawl_at\" timestamptz, \"last_crawl_status\" text, \"last_crawl_error\" text, \"chunk_count\" integer NOT NULL DEFAULT 0, \"crawl_config\" jsonb DEFAULT '{}'::jsonb, \"created_by\" uuid, \"created_at\" timestamptz NOT NULL DEFAULT now(), \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE INDEX \"docs_sources_kind_idx\" ON \"docs_sources\" (\"source_kind\", \"last_crawl_at\");\nCREATE TABLE \"capability_config\" (\"capability\" text PRIMARY KEY, \"enabled\" boolean NOT NULL DEFAULT false, \"target_webhook_url\" text, \"signing_secret_hash\" text, \"enabled_at\" timestamptz, \"enabled_by\" uuid, \"updated_at\" timestamptz NOT NULL DEFAULT now());\nCREATE TABLE \"support_messages\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"ticket_id\" uuid NOT NULL, \"role\" text NOT NULL, \"body\" text, \"drafted_by_thread_id\" uuid, \"drafted_by_user_id\" uuid, \"parent_message_id\" uuid, \"token_usage\" jsonb, \"created_at\" timestamptz NOT NULL DEFAULT now(), FOREIGN KEY (\"ticket_id\") REFERENCES \"support_tickets\"(\"id\") ON DELETE CASCADE);\nCREATE INDEX \"support_messages_ticket_idx\" ON \"support_messages\" (\"ticket_id\", \"created_at\");\nCREATE TABLE \"agent_threads\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"ticket_id\" uuid NOT NULL, \"do_instance_id\" text NOT NULL, \"status\" text NOT NULL DEFAULT 'idle', \"last_event_at\" timestamptz NOT NULL DEFAULT now(), \"created_at\" timestamptz NOT NULL DEFAULT now(), FOREIGN KEY (\"ticket_id\") REFERENCES \"support_tickets\"(\"id\") ON DELETE CASCADE);\nCREATE INDEX \"agent_threads_status_idx\" ON \"agent_threads\" (\"status\", \"last_event_at\");\nCREATE TABLE \"diagnoses\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"ticket_id\" uuid NOT NULL, \"summary\" text, \"evidence\" jsonb, \"confidence\" text NOT NULL DEFAULT 'med', \"produced_by_thread_id\" uuid, \"produced_at\" timestamptz NOT NULL DEFAULT now(), \"superseded_at\" timestamptz, FOREIGN KEY (\"ticket_id\") REFERENCES \"support_tickets\"(\"id\") ON DELETE CASCADE);\nCREATE INDEX \"diagnoses_ticket_idx\" ON \"diagnoses\" (\"ticket_id\", \"produced_at\");\nCREATE TABLE \"outbound_disclosure_violations\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"ticket_id\" uuid NOT NULL, \"message_id\" uuid, \"attempted_field_path\" text, \"redaction_applied\" text, \"severity\" text NOT NULL DEFAULT 'warn', \"agent_thread_id\" uuid, \"created_at\" timestamptz NOT NULL DEFAULT now(), FOREIGN KEY (\"ticket_id\") REFERENCES \"support_tickets\"(\"id\") ON DELETE CASCADE);\nCREATE INDEX \"outbound_violations_ticket_idx\" ON \"outbound_disclosure_violations\" (\"ticket_id\", \"created_at\");\nCREATE TABLE \"escalations\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"ticket_id\" uuid NOT NULL, \"target_id\" uuid, \"reason\" text, \"context_snapshot\" jsonb, \"substrate_action_id\" text, \"idempotency_key\" text UNIQUE, \"status\" text NOT NULL DEFAULT 'queued', \"error\" text, \"sent_at\" timestamptz, \"created_at\" timestamptz NOT NULL DEFAULT now(), FOREIGN KEY (\"ticket_id\") REFERENCES \"support_tickets\"(\"id\") ON DELETE CASCADE, FOREIGN KEY (\"target_id\") REFERENCES \"escalation_targets\"(\"id\") ON DELETE SET NULL);\nCREATE INDEX \"escalations_status_idx\" ON \"escalations\" (\"status\", \"created_at\");\nCREATE TABLE \"agent_messages\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"thread_id\" uuid NOT NULL, \"role\" text NOT NULL, \"content\" text, \"tool_calls\" jsonb, \"tool_results\" jsonb, \"token_usage\" jsonb, \"created_at\" timestamptz NOT NULL DEFAULT now(), FOREIGN KEY (\"thread_id\") REFERENCES \"agent_threads\"(\"id\") ON DELETE CASCADE);\nCREATE INDEX \"agent_messages_thread_idx\" ON \"agent_messages\" (\"thread_id\", \"created_at\");\nCREATE TABLE \"agent_proposals\" (\"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid(), \"thread_id\" uuid NOT NULL, \"ticket_id\" uuid NOT NULL, \"capability\" text NOT NULL, \"payload\" jsonb NOT NULL, \"rationale\" text, \"status\" text NOT NULL DEFAULT 'pending', \"policy_verdict\" text, \"substrate_action_id\" text, \"resolved_by\" uuid, \"resolved_at\" timestamptz, \"expires_at\" timestamptz NOT NULL DEFAULT (now() + interval '24 hours'), \"created_at\" timestamptz NOT NULL DEFAULT now(), \"updated_at\" timestamptz NOT NULL DEFAULT now(), FOREIGN KEY (\"thread_id\") REFERENCES \"agent_threads\"(\"id\") ON DELETE CASCADE, FOREIGN KEY (\"ticket_id\") REFERENCES \"support_tickets\"(\"id\") ON DELETE CASCADE);\nCREATE INDEX \"agent_proposals_status_idx\" ON \"agent_proposals\" (\"status\", \"created_at\");\nCREATE INDEX \"agent_proposals_ticket_idx\" ON \"agent_proposals\" (\"ticket_id\", \"created_at\")",
+      "applied_at": "2026-06-18T02:59:52.058Z"
+    }
+  ],
+  "template_migrations": [
+    {
+      "id": 1,
+      "filename": "001_data_plane_migration_tracking.sql",
+      "applied_at": "2026-06-18T02:28:38.079Z"
+    },
+    {
+      "id": 2,
+      "filename": "002_init_extensions.sql",
+      "applied_at": "2026-06-18T02:28:38.093Z"
+    },
+    {
+      "id": 3,
+      "filename": "003_migration_tracking.sql",
+      "applied_at": "2026-06-18T02:28:38.139Z"
+    },
+    {
+      "id": 4,
+      "filename": "004_rls_helpers.sql",
+      "applied_at": "2026-06-18T02:28:38.158Z"
+    },
+    {
+      "id": 5,
+      "filename": "005_rls_role_based.sql",
+      "applied_at": "2026-06-18T02:28:38.168Z"
+    },
+    {
+      "id": 6,
+      "filename": "006_rls_roles.sql",
+      "applied_at": "2026-06-18T02:28:38.184Z"
+    },
+    {
+      "id": 7,
+      "filename": "007_realtime.sql",
+      "applied_at": "2026-06-18T02:28:38.248Z"
+    },
+    {
+      "id": 8,
+      "filename": "008_remove_event_trigger_service_policy.sql",
+      "applied_at": "2026-06-18T02:28:38.276Z"
+    },
+    {
+      "id": 9,
+      "filename": "009_fix_realtime_trigger_perms.sql",
+      "applied_at": "2026-06-18T02:28:38.288Z"
+    },
+    {
+      "id": 10,
+      "filename": "010_rag_tables.sql",
+      "applied_at": "2026-06-18T02:28:38.300Z"
+    },
+    {
+      "id": 11,
+      "filename": "011_idempotency_keys.sql",
+      "applied_at": "2026-06-18T02:28:38.342Z"
+    },
+    {
+      "id": 12,
+      "filename": "012_seed_tables.sql",
+      "applied_at": "2026-06-18T02:28:38.357Z"
+    }
+  ]
+}

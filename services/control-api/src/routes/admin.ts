@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { requireAdmin } from './admin-auth.js';
+import { queryPaidConversion } from '../services/paid-conversion.js';
 async function getStripeClient(): Promise<any> {
   // Stripe client lives in the cloud overlay; OSS builds reach an explicit failure.
   // @ts-expect-error — overlay path resolved at runtime
@@ -66,6 +67,7 @@ export async function adminRoutes(app: FastifyInstance) {
       planDist,
       recentSignups,
       aiDailyRows,
+      conversion,
     ] = await Promise.all([
       app.controlDb.query(`SELECT count(*)::int AS c FROM platform_users`),
       fanOutQuery<{ c: number }>(`SELECT count(*)::int AS c FROM apps`),
@@ -106,6 +108,10 @@ export async function adminRoutes(app: FastifyInstance) {
          GROUP BY date(created_at)
          ORDER BY date ASC`
       ),
+      // Paid-conversion metric. Reads the subscriptions table rather than
+      // organizations.plan_id, which disagrees in both directions. See
+      // services/paid-conversion.ts for the full definition.
+      queryPaidConversion(app.controlDb),
     ]);
 
     // Merge daily ai_usage_logs rows by date across regions.
@@ -135,6 +141,7 @@ export async function adminRoutes(app: FastifyInstance) {
       planDistribution: planDist.rows,
       recentSignups: recentSignups.rows,
       aiUsageLast30Days: aiDaily,
+      conversion,
     };
   });
 
@@ -148,6 +155,7 @@ export async function adminRoutes(app: FastifyInstance) {
       search?: string; plan?: string; status?: string; sub_status?: string; has_apps?: string;
       joined_after?: string; joined_before?: string; has_stripe?: string;
       min_spend?: string; max_spend?: string; min_apps?: string; max_apps?: string;
+      utm_source?: string; utm_campaign?: string;
       sort_by?: string; sort_dir?: string; limit?: string; offset?: string;
       all?: string;
     };
@@ -212,6 +220,17 @@ export async function adminRoutes(app: FastifyInstance) {
       controlConditions.push(`o.stripe_customer_id IS NOT NULL`);
     } else if (q.has_stripe === 'no') {
       controlConditions.push(`o.stripe_customer_id IS NULL`);
+    }
+    // signup_source is stored as `utm_source=x&utm_medium=y&utm_campaign=z`, so
+    // extract the one key before matching — a plain ILIKE on the whole string
+    // would let a source filter of "reddit" also match utm_campaign=reddit-q3.
+    for (const key of ['utm_source', 'utm_campaign'] as const) {
+      const value = q[key]?.trim();
+      if (!value) continue;
+      controlConditions.push(
+        `substring(pu.signup_source from '(?:^|&)${key}=([^&]+)') ILIKE $${cidx++}`
+      );
+      controlParams.push(`%${value}%`);
     }
 
     const controlWhere = controlConditions.length > 0 ? `WHERE ${controlConditions.join(' AND ')}` : '';
@@ -333,6 +352,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const q = request.query as {
       search?: string; region?: string; db_status?: string;
+      organization_id?: string; personal_only?: string;
       sort_by?: string; sort_dir?: string; limit?: string; offset?: string;
     };
     const limit = parseIntParam(q.limit, 50, 200);
@@ -361,6 +381,23 @@ export async function adminRoutes(app: FastifyInstance) {
       conditions.push(`a.db_provisioned = true`);
     } else if (q.db_status === 'pending') {
       conditions.push(`a.db_provisioned = false`);
+    }
+
+    // organization_id is a controlDb-side (org_app_index) filter. Resolve
+    // the matching app ids in controlDb first, then constrain the runtime
+    // fanout query with ANY(...) — org_app_index/organizations must never
+    // appear in SQL sent to the runtime pools.
+    if (q.organization_id) {
+      const idxRes = await app.controlDb.query(
+        `SELECT app_id FROM org_app_index WHERE organization_id = $1`,
+        [q.organization_id]
+      );
+      const orgFilterAppIds: string[] = idxRes.rows.map((r: any) => r.app_id);
+      if (orgFilterAppIds.length === 0) {
+        return { data: [], total: 0 };
+      }
+      conditions.push(`a.id = ANY($${idx++}::text[])`);
+      params.push(orgFilterAppIds);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -418,10 +455,10 @@ export async function adminRoutes(app: FastifyInstance) {
       return av < bv ? -sortDir : av > bv ? sortDir : 0;
     });
 
-    const page = mergedRows.slice(offset, offset + limit);
-
-    // Enrich with owner_email from controlDb (platform tier)
-    const ownerIds: string[] = [...new Set(page.map((r: any) => r.owner_id))];
+    // Enrich with owner_email from controlDb (platform tier). Computed over
+    // all merged rows (not just the current page) because personal_only
+    // filtering happens after enrichment and before pagination.
+    const ownerIds: string[] = [...new Set(mergedRows.map((r: any) => r.owner_id))];
     const ownerEmailMap = new Map<string, string>();
     if (ownerIds.length > 0) {
       const ownersResult = await app.controlDb.query(
@@ -433,11 +470,46 @@ export async function adminRoutes(app: FastifyInstance) {
       }
     }
 
+    const enrichedRows = mergedRows.map((r: any) => ({
+      ...r,
+      owner_email: ownerEmailMap.get(r.owner_id) ?? null,
+    }));
+
+    // Enrich all merged rows (not just the current page) with org info from
+    // controlDb in a single query, since personal_only filtering needs to
+    // see organization_personal before pagination is applied.
+    const allAppIds = enrichedRows.map((r: any) => r.id);
+    if (allAppIds.length > 0) {
+      const orgRes = await app.controlDb.query(
+        `SELECT oai.app_id, oai.organization_id, o.name AS organization_name, o.personal AS organization_personal
+           FROM org_app_index oai
+           JOIN organizations o ON o.id = oai.organization_id
+          WHERE oai.app_id = ANY($1::text[])`,
+        [allAppIds]
+      );
+      const byApp = new Map<string, any>(orgRes.rows.map((r: any) => [r.app_id, r]));
+      for (const row of enrichedRows) {
+        const o = byApp.get(row.id);
+        row.organization_id = o?.organization_id ?? null;
+        row.organization_name = o?.organization_name ?? null;
+        row.organization_personal = o?.organization_personal ?? null;
+      }
+    } else {
+      for (const row of enrichedRows) {
+        row.organization_id = null;
+        row.organization_name = null;
+        row.organization_personal = null;
+      }
+    }
+
+    if (q.personal_only === 'yes' || q.personal_only === 'no') {
+      const wantPersonal = q.personal_only === 'yes';
+      const filtered = enrichedRows.filter((r: any) => r.organization_personal === wantPersonal);
+      return { data: filtered.slice(offset, offset + limit), total: filtered.length };
+    }
+
     return {
-      data: page.map((r: any) => ({
-        ...r,
-        owner_email: ownerEmailMap.get(r.owner_id) ?? null,
-      })),
+      data: enrichedRows.slice(offset, offset + limit),
       total: totalCount,
     };
   });
@@ -936,7 +1008,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const { id } = request.params as { id: string };
 
-    const [userResult, suggestionsResult] = await Promise.all([
+    const [userResult, suggestionsResult, orgsRes] = await Promise.all([
       app.controlDb.query(
         `SELECT pu.id, pu.email, pu.display_name, pu.created_at,
                 pu.signup_source, pu.signup_referrer,
@@ -952,6 +1024,14 @@ export async function adminRoutes(app: FastifyInstance) {
          WHERE user_id = $1
          ORDER BY created_at DESC
          LIMIT 10`,
+        [id]
+      ),
+      app.controlDb.query(
+        `SELECT o.id, o.name, o.personal, m.role, o.plan_id, m.joined_at
+         FROM organization_members m
+         JOIN organizations o ON o.id = m.organization_id
+         WHERE m.user_id = $1
+         ORDER BY o.personal DESC, m.joined_at ASC`,
         [id]
       ),
     ]);
@@ -1053,6 +1133,7 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       recentAuditEvents: auditResult.rows,
       recentSuggestions: suggestionsResult.rows,
+      organizations: orgsRes.rows,
     };
   });
 
@@ -1140,6 +1221,16 @@ export async function adminRoutes(app: FastifyInstance) {
     );
     const ownerEmail = ownerResult.rows[0]?.email ?? null;
 
+    // Enrich with org info from controlDb (single app id, no fanout needed).
+    const orgResult = await app.controlDb.query(
+      `SELECT oai.organization_id, o.name AS organization_name, o.personal AS organization_personal
+         FROM org_app_index oai
+         JOIN organizations o ON o.id = oai.organization_id
+        WHERE oai.app_id = $1`,
+      [appRow.id]
+    );
+    const orgInfo = orgResult.rows[0];
+
     const aiTotals = aiByModel.rows.reduce(
       (acc: { requests: number; tokens: number; cost: number }, r: any) => ({
         requests: acc.requests + r.requests,
@@ -1150,7 +1241,13 @@ export async function adminRoutes(app: FastifyInstance) {
     );
 
     return {
-      app: { ...appRow, owner_email: ownerEmail },
+      app: {
+        ...appRow,
+        owner_email: ownerEmail,
+        organization_id: orgInfo?.organization_id ?? null,
+        organization_name: orgInfo?.organization_name ?? null,
+        organization_personal: orgInfo?.organization_personal ?? null,
+      },
       functions: functionsResult.rows.map((r: any) => ({
         ...r,
         trigger_type: r.trigger_types?.[0] ?? null,
@@ -1170,6 +1267,84 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       recentAuditEvents: auditResult.rows,
     };
+  });
+
+  // ───── POST /admin/apps/:id/transfer ─────
+  // Body: { destination_organization_id: string }
+  // Returns: { app_id, from_organization_id, to_organization_id }
+  app.post('/admin/apps/:id/transfer', { config: { public: true } }, async (request, reply) => {
+    const adminUserId = await requireAdmin(app, request, reply);
+    if (!adminUserId) return;
+
+    const { id } = request.params as { id: string };
+    const { destination_organization_id } = request.body as { destination_organization_id?: string };
+
+    if (!destination_organization_id) {
+      return reply.code(400).send({ error: 'destination_organization_id_required' });
+    }
+
+    // Look up the current organization for this app
+    const currentResult = await app.controlDb.query(
+      `SELECT organization_id FROM org_app_index WHERE app_id = $1`,
+      [id]
+    );
+    if (currentResult.rows.length === 0) {
+      return reply.code(404).send({ error: 'app_not_found' });
+    }
+    const fromOrgId = currentResult.rows[0].organization_id;
+
+    // Check if already in destination
+    if (fromOrgId === destination_organization_id) {
+      return reply.code(409).send({ error: 'already_in_destination' });
+    }
+
+    // Verify destination org exists
+    const dstResult = await app.controlDb.query(
+      `SELECT id, personal FROM organizations WHERE id = $1`,
+      [destination_organization_id]
+    );
+    if (dstResult.rows.length === 0) {
+      return reply.code(404).send({ error: 'destination_not_found' });
+    }
+
+    // Reject transfers to personal orgs
+    if (dstResult.rows[0].personal) {
+      return reply.code(400).send({ error: 'destination_is_personal' });
+    }
+
+    // Move the app and emit audit events on both sides of the transfer in a
+    // single transaction, so a crash mid-write can't leave the app moved
+    // without an audit trail (or vice versa).
+    const client = await app.controlDb.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE org_app_index SET organization_id = $1 WHERE app_id = $2`,
+        [destination_organization_id, id]
+      );
+      await client.query(
+        `INSERT INTO billing_events (user_id, organization_id, event_type, metadata, created_at)
+         VALUES ($1, $2, 'app_transferred_in', $3::jsonb, now())`,
+        [adminUserId, destination_organization_id, JSON.stringify({ app_id: id, from: fromOrgId })]
+      );
+      await client.query(
+        `INSERT INTO billing_events (user_id, organization_id, event_type, metadata, created_at)
+         VALUES ($1, $2, 'app_transferred_out', $3::jsonb, now())`,
+        [adminUserId, fromOrgId, JSON.stringify({ app_id: id, to: destination_organization_id })]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    return reply.send({
+      app_id: id,
+      from_organization_id: fromOrgId,
+      to_organization_id: destination_organization_id,
+    });
   });
 
   // ───── GET /admin/functions/:id ─────
@@ -1529,9 +1704,14 @@ export async function adminRoutes(app: FastifyInstance) {
         [id]
       ),
       app.controlDb.query(
-        `SELECT pu.id AS user_id, pu.email, s.created_at AS subscribed_at
+        `SELECT s.organization_id,
+                o.name AS organization_name,
+                o.personal,
+                pu.email AS owner_email,
+                s.created_at AS subscribed_at
          FROM subscriptions s
-         JOIN platform_users pu ON s.user_id = pu.id
+         JOIN organizations o ON o.id = s.organization_id
+         JOIN platform_users pu ON pu.id = o.owner_id
          WHERE s.plan_id = $1 AND s.status = 'active'
          ORDER BY s.created_at DESC`,
         [id]
@@ -1631,6 +1811,14 @@ export async function adminRoutes(app: FastifyInstance) {
       currentStripePrice,
     };
   });
+
+  // NOTE: PATCH /admin/billing/users/:id/plan is provided by
+  // cloud/overlays/billing/routes/admin-enterprise-billing.ts.
+  // Task 6 initially added a personal-org-forwarding shim here, but that
+  // collides with the cloud-overlays registration at boot
+  // (FST_ERR_DUPLICATED_ROUTE). The overlay predates this migration and
+  // already handles user-keyed callers; the new org-keyed route lives at
+  // PATCH /admin/organizations/:id/plan in routes/admin/organizations.ts.
 
   // ───── GET /admin/billing/users/:id/credits ─────
   // Returns split credit pools + auto-refill state for the admin UI.
@@ -1979,12 +2167,14 @@ export async function adminRoutes(app: FastifyInstance) {
       let providerPrimaryAdapter: any = null;
       let providerSecondaryAdapter: any = null;
       let providerTertiaryAdapter: any = null;
+      let providerQuaternaryAdapter: any = null;
       try {
         // @ts-expect-error — overlay path resolved at runtime
         const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
         providerPrimaryAdapter = overlay.providerPrimaryAdapter;
         providerSecondaryAdapter = overlay.providerSecondaryAdapter;
         providerTertiaryAdapter = overlay.providerTertiaryAdapter;
+        providerQuaternaryAdapter = overlay.providerQuaternaryAdapter;
       } catch { /* OSS mode */ }
 
       const adapters = [];
@@ -2008,6 +2198,12 @@ export async function adminRoutes(app: FastifyInstance) {
         adapters.push(providerTertiaryAdapter({
           apiKey: config.aiRouter.providerTertiaryApiKey,
           baseUrl: config.aiRouter.providerTertiaryBaseUrl,
+        }));
+      }
+      if (providerQuaternaryAdapter && config.aiRouter.providerQuaternaryApiKey) {
+        adapters.push(providerQuaternaryAdapter({
+          apiKey: config.aiRouter.providerQuaternaryApiKey,
+          baseUrl: config.aiRouter.providerQuaternaryBaseUrl,
         }));
       }
       if (adapters.length === 0) {
@@ -2042,6 +2238,7 @@ export async function adminRoutes(app: FastifyInstance) {
       { name: 'provider-primary', configured: !!config.aiRouter.providerPrimaryApiKey },
       { name: 'provider-secondary', configured: !!config.aiRouter.providerSecondaryApiKey },
       { name: 'provider-tertiary', configured: !!config.aiRouter.providerTertiaryApiKey },
+      { name: 'provider-quaternary', configured: !!config.aiRouter.providerQuaternaryApiKey },
     ];
     // ai_usage_logs.router exists; rows are written only on settle so every row
     // is a "success". Treat the presence of any fallback_chain entry naming a

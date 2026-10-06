@@ -90,7 +90,7 @@ vi.mock('../config.js', () => ({
 
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { peopleRoutes } from './people.js';
+import { peopleRoutes, EMAIL_DEDUPE_WINDOW_DAYS } from './people.js';
 import { getPeopleAdapter } from '../services/people/registry.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { lookupCachedProfile, writeCachedProfile } from '../services/people/cache.js';
@@ -481,6 +481,180 @@ describe('People routes', () => {
         }),
         { apiKey: PLATFORM_KEY },
       );
+    });
+  });
+
+  // ── Scenario 6b: profile/email dedupe — reuse a recent resolved lookup ─────
+  describe('POST /v1/:appId/people/profile/email — dedupe', () => {
+    /**
+     * Runtime mock whose dedupe SELECT finds a recent resolved lookup for the
+     * same (app_id, normalized_url). Everything else behaves like the default.
+     */
+    function makeMockRuntimeWithResolvedLookup(email = 'jane@acme.com') {
+      const base = makeMockRuntime();
+      const inner = base.query;
+      base.query = vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+        if (typeof sql === 'string' && sql.includes("status = 'resolved'")) {
+          return Promise.resolve({ rows: [{ id: 'lookup-prior', email }], rowCount: 1 });
+        }
+        return inner(sql, params);
+      });
+      return base;
+    }
+
+    it('returns the stored email without calling the provider', async () => {
+      const mockRuntime = makeMockRuntimeWithResolvedLookup();
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.status).toBe('resolved');
+      expect(body.email).toBe('jane@acme.com');
+      expect(body.cached).toBe(true);
+      expect(body.lookupId).toBe('lookup-prior');
+      expect(mockAdapter.queueEmailLookup).not.toHaveBeenCalled();
+    });
+
+    it('charges nothing on a dedupe hit', async () => {
+      const mockRuntime = makeMockRuntimeWithResolvedLookup();
+      // Non-zero queue cost, so the fall-through path WOULD charge. Without the
+      // dedupe branch this test fails on deductCreditsBalance being called.
+      vi.mocked(getPeopleAdapter).mockReturnValue(
+        makeMockAdapter({
+          queueEmailLookup: vi.fn().mockResolvedValue({
+            data: { queued: true }, creditsConsumed: 3, requestId: 'req-4', status: 200,
+          }),
+        }),
+      );
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      expect(res.json().usage.creditsConsumed).toBe(0);
+      expect(deductCreditsBalance).not.toHaveBeenCalled();
+      expect(incrementUsage).not.toHaveBeenCalled();
+      expect(res.headers['x-people-credits-consumed']).toBe('0');
+    });
+
+    it('writes a zero-cost profile_email_cache_hit audit row', async () => {
+      const mockRuntime = makeMockRuntimeWithResolvedLookup();
+      vi.mocked(getPeopleAdapter).mockReturnValue(makeMockAdapter());
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      const auditCall = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).includes('people_usage_logs') &&
+          (c[1] as unknown[])?.includes('profile_email_cache_hit'),
+      );
+      expect(auditCall).toBeDefined();
+      // credits, usd_cost, usd_charged all zero
+      const params = auditCall![1] as unknown[];
+      expect(params[4]).toBe(0);
+      expect(params[5]).toBe(0);
+      expect(params[6]).toBe(0);
+    });
+
+    it('never inserts a new pending row on a dedupe hit', async () => {
+      const mockRuntime = makeMockRuntimeWithResolvedLookup();
+      vi.mocked(getPeopleAdapter).mockReturnValue(makeMockAdapter());
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      const insertPending = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).includes('people_email_lookups') &&
+          (c[0] as string).includes('INSERT'),
+      );
+      expect(insertPending).toBeUndefined();
+    });
+
+    it('scopes the dedupe lookup to the app, the URL and a freshness window', async () => {
+      const mockRuntime = makeMockRuntimeWithResolvedLookup();
+      vi.mocked(getPeopleAdapter).mockReturnValue(makeMockAdapter());
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      const dedupeCall = mockRuntime.query.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes("status = 'resolved'"),
+      );
+      expect(dedupeCall).toBeDefined();
+      const [sql, params] = dedupeCall as [string, unknown[]];
+      expect(sql).toContain('app_id = $1');
+      expect(sql).toContain('normalized_url = $2');
+      expect(sql).toContain('email IS NOT NULL');
+      expect(sql).toContain('resolved_at >');
+      expect(params[0]).toBe(APP_ID);
+      expect(params[1]).toBe('https://www.linkedin.com/in/jane-doe');
+      expect(params[2]).toBe(EMAIL_DEDUPE_WINDOW_DAYS);
+    });
+
+    it('falls through to the provider when no recent resolved lookup exists', async () => {
+      const mockRuntime = makeMockRuntime(); // dedupe SELECT yields pending/email:null
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      expect(res.json().status).toBe('pending');
+      expect(mockAdapter.queueEmailLookup).toHaveBeenCalledOnce();
+    });
+
+    it('does not dedupe off a resolved row whose email is null', async () => {
+      const mockRuntime = makeMockRuntimeWithResolvedLookup(null as unknown as string);
+      const mockAdapter = makeMockAdapter();
+      vi.mocked(getPeopleAdapter).mockReturnValue(mockAdapter);
+      vi.mocked(getRuntimeDbForApp).mockResolvedValue(mockRuntime);
+      vi.mocked(getCreditsBalance).mockResolvedValue({ monthlyAllowanceUsd: 0, topupUsd: 1.0, totalUsd: 1.0 });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/${APP_ID}/people/profile/email`,
+        payload: { linkedinProfileUrl: 'https://www.linkedin.com/in/jane-doe' },
+      });
+
+      expect(res.json().status).toBe('pending');
+      expect(mockAdapter.queueEmailLookup).toHaveBeenCalledOnce();
     });
   });
 

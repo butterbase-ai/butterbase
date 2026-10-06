@@ -1,0 +1,17 @@
+{
+  "name": "ai-chat-completion",
+  "description": "Internal proxy for POST /chat/completions. Exists because BUTTERBASE_INTERNAL_FN_KEY is rejected on AI gateway routes; DOs invoke this wrapper (which auths with its own BUTTERBASE_API_KEY) instead. Loopback/service_key only.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 60000,
+  "memoryLimitMb": 128,
+  "envKeys": ["BUTTERBASE_API_KEY"]
+}

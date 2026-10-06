@@ -11,23 +11,23 @@ const LLMS_TXT_CONTENT = `# Butterbase Control API - Agent Guidance
 When a user asks you to "create a backend" or "set up a database":
 
 1. **Initialize app**: Use \`init_app\` with a descriptive name
-2. **Define schema**: Use \`apply_schema\` with table definitions
-3. **Set up auth** (optional): Use \`configure_oauth_provider\` for user authentication
-4. **Set up RLS** (optional): Use \`create_rls_policy\` for row-level security
+2. **Define schema**: Use \`manage_schema\` (action: "apply") with table definitions
+3. **Set up auth** (optional): Use \`manage_oauth\` (action: "configure") for user authentication
+4. **Set up RLS** (optional): Use \`manage_rls\` for row-level security
 
 ## Common Patterns
 
 ### Creating a Todo App Backend
 \`\`\`
 1. init_app(name: "my-todo-app")
-2. apply_schema with:
+2. manage_schema(action: "apply") with:
    - todos table: id (uuid, pk), user_id (text), title (text), completed (boolean)
-3. create_rls_policy(table: "todos", user_column: "user_id")
+3. manage_rls(action: "create_user_isolation", table_name: "todos", user_column: "user_id")
 \`\`\`
 
 ### Adding File Storage
 \`\`\`
-1. generate_upload_url(filename, contentType, sizeBytes)
+1. manage_storage(action: "upload_url", filename, content_type, size_bytes)
 2. User uploads to presigned URL
 3. File is automatically tracked in storage_objects table
 \`\`\`
@@ -70,9 +70,9 @@ Example:
     },
     "next_actions": [
       {
-        "action": "create_rls_policy",
+        "action": "create_user_isolation",
         "description": "Set up row-level security",
-        "tool": "create_rls_policy",
+        "tool": "manage_rls",
         "when": "After creating tables with user-specific data"
       }
     ]
@@ -83,7 +83,7 @@ Example:
 ## Best Practices
 
 1. **Always check for existing apps** before creating new ones
-   - Use \`list_apps\` to see what exists
+   - Use \`manage_app\` (action: "list") to see what exists
    - Reuse apps when appropriate
 
 2. **Use descriptive names**
@@ -110,34 +110,34 @@ Example:
 ### Full Stack Setup
 \`\`\`
 1. init_app → get app_id and connection details
-2. apply_schema → create tables
-3. create_rls_policy → secure user data
-4. configure_oauth_provider → enable user login
+2. manage_schema (action: "apply") → create tables
+3. manage_rls (action: "create_user_isolation") → secure user data
+4. manage_oauth (action: "configure") → enable user login
 5. Share API endpoint and auth URLs with user
 \`\`\`
 
 ### Schema Evolution
 \`\`\`
-1. get_schema → see current state
-2. apply_schema with dry_run: true → preview changes
+1. manage_schema (action: "get") → see current state
+2. manage_schema (action: "dry_run") → preview changes
 3. Review changes with user
-4. apply_schema → execute migration
+4. manage_schema (action: "apply") → execute migration
 \`\`\`
 
 ### Storage Management
 \`\`\`
-1. generate_upload_url → get presigned URL
+1. manage_storage (action: "upload_url") → get presigned URL
 2. User uploads file
-3. get_storage_objects → list files
-4. generate_download_url → get download link
-5. delete_storage_object → remove file
+3. manage_storage (action: "list") → list files
+4. manage_storage (action: "download_url") → get download link
+5. manage_storage (action: "delete") → remove file
 \`\`\`
 
 ### Custom Domains
 \`\`\`
-1. configure_custom_domain (action: "add") → register hostname
+1. manage_frontend (action: "configure_custom_domain", domain_action: "add") → register hostname
 2. User adds CNAME record at their DNS provider
-3. configure_custom_domain (action: "status") → poll until active
+3. manage_frontend (action: "configure_custom_domain", domain_action: "status") → poll until active
 4. Domain is live with automatic SSL
 \`\`\`
 
@@ -145,7 +145,7 @@ Example:
 
 - Full API docs: https://docs.butterbase.ai
 - Error reference: https://docs.butterbase.ai/errors
-- Schema DSL: https://docs.butterbase.ai/schema
+- Schema DSL: https://docs.butterbase.ai/core-concepts/database/
 - MCP tools: Use \`butterbase_docs\` tool for detailed reference
 
 ## Support
@@ -154,7 +154,7 @@ If you encounter issues:
 1. Check error \`remediation\` field
 2. Review \`butterbase_docs\` for detailed tool documentation
 3. Verify input format matches examples
-4. Check that app_id exists with \`list_apps\`
+4. Check that app_id exists with \`manage_app\` (action: "list")
 
 ---
 

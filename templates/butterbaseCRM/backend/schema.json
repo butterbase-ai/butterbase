@@ -1,0 +1,1838 @@
+{
+  "tables": {
+    "activities": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "actor_user_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "kind": {
+          "type": "text",
+          "nullable": false
+        },
+        "entity_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "payload": {
+          "type": "jsonb"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "entity_id": {
+          "type": "text"
+        }
+      },
+      "indexes": {
+        "activities_ws_created_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        },
+        "activities_ws_entity_idx": {
+          "columns": [
+            "workspace_id",
+            "entity_type",
+            "entity_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "agent_messages": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "thread_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "agent_threads",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "role": {
+          "type": "text",
+          "nullable": false
+        },
+        "content": {
+          "type": "text"
+        },
+        "tool_calls": {
+          "type": "jsonb"
+        },
+        "tool_results": {
+          "type": "jsonb"
+        },
+        "ui_event": {
+          "type": "jsonb"
+        },
+        "token_usage": {
+          "type": "jsonb"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_messages_thread_created_idx": {
+          "columns": [
+            "thread_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "agent_proposals": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "thread_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "agent_threads",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "proposed_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "tool_name": {
+          "type": "text",
+          "nullable": false
+        },
+        "payload": {
+          "type": "jsonb",
+          "nullable": false
+        },
+        "rationale": {
+          "type": "text"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'pending'::text"
+        },
+        "resolution": {
+          "type": "jsonb"
+        },
+        "resolved_at": {
+          "type": "timestamptz"
+        },
+        "expires_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "(now() + '24:00:00'::interval)"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_proposals_thread_idx": {
+          "columns": [
+            "thread_id",
+            "created_at"
+          ]
+        },
+        "agent_proposals_ws_status_idx": {
+          "columns": [
+            "workspace_id",
+            "status",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "agent_threads": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "user_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "title": {
+          "type": "text"
+        },
+        "mode": {
+          "type": "text",
+          "nullable": false,
+          "default": "'copilot'::text"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'active'::text"
+        },
+        "last_message_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_threads_ws_user_idx": {
+          "columns": [
+            "workspace_id",
+            "user_id",
+            "last_message_at"
+          ]
+        }
+      }
+    },
+    "app_allowlist": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "entry_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "value": {
+          "type": "text",
+          "nullable": false
+        },
+        "active": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        "note": {
+          "type": "text"
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "app_allowlist_active_idx": {
+          "columns": [
+            "active"
+          ]
+        },
+        "app_allowlist_type_value_uniq": {
+          "columns": [
+            "entry_type",
+            "value"
+          ],
+          "unique": true
+        }
+      }
+    },
+    "attachments": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "entity_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "entity_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "object_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "filename": {
+          "type": "text",
+          "nullable": false
+        },
+        "content_type": {
+          "type": "text"
+        },
+        "size_bytes": {
+          "type": "bigint"
+        },
+        "uploaded_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "attachments_ws_entity_idx": {
+          "columns": [
+            "workspace_id",
+            "entity_type",
+            "entity_id"
+          ]
+        }
+      }
+    },
+    "campaign_list_members": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "list_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "campaign_lists",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "entity_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "entity_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "email_snapshot": {
+          "type": "text"
+        },
+        "vars_snapshot": {
+          "type": "jsonb"
+        },
+        "added_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "added_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "campaign_list_members_list_idx": {
+          "columns": [
+            "list_id"
+          ]
+        },
+        "campaign_list_members_uniq": {
+          "columns": [
+            "list_id",
+            "entity_type",
+            "entity_id"
+          ],
+          "unique": true
+        },
+        "campaign_list_members_ws_idx": {
+          "columns": [
+            "workspace_id"
+          ]
+        }
+      }
+    },
+    "campaign_lists": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "name": {
+          "type": "text",
+          "nullable": false
+        },
+        "description": {
+          "type": "text"
+        },
+        "entity_type": {
+          "type": "text",
+          "nullable": false,
+          "default": "'people'::text"
+        },
+        "source": {
+          "type": "text",
+          "nullable": false,
+          "default": "'manual'::text"
+        },
+        "source_spec": {
+          "type": "jsonb"
+        },
+        "member_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "campaign_lists_ws_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "campaign_sends": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "campaign_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "campaigns",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "entity_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "entity_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "email": {
+          "type": "text",
+          "nullable": false
+        },
+        "resolved_subject": {
+          "type": "text"
+        },
+        "resolved_body": {
+          "type": "text"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'queued'::text"
+        },
+        "scheduled_for": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "sent_at": {
+          "type": "timestamptz"
+        },
+        "gmail_message_id": {
+          "type": "text"
+        },
+        "error": {
+          "type": "text"
+        },
+        "attempt_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "campaign_sends_campaign_idx": {
+          "columns": [
+            "campaign_id",
+            "status"
+          ]
+        },
+        "campaign_sends_due_idx": {
+          "columns": [
+            "status",
+            "scheduled_for"
+          ]
+        },
+        "campaign_sends_ws_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "campaigns": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "name": {
+          "type": "text",
+          "nullable": false
+        },
+        "list_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "campaign_lists",
+            "column": "id",
+            "onDelete": "RESTRICT"
+          }
+        },
+        "subject": {
+          "type": "text",
+          "nullable": false
+        },
+        "body_template": {
+          "type": "text",
+          "nullable": false
+        },
+        "from_user_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "send_via": {
+          "type": "text",
+          "nullable": false,
+          "default": "'gmail'::text"
+        },
+        "daily_limit": {
+          "type": "integer",
+          "nullable": false,
+          "default": "25"
+        },
+        "throttle_seconds": {
+          "type": "integer",
+          "nullable": false,
+          "default": "180"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'draft'::text"
+        },
+        "sent_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "failed_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "total_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "started_at": {
+          "type": "timestamptz"
+        },
+        "completed_at": {
+          "type": "timestamptz"
+        },
+        "last_sent_at": {
+          "type": "timestamptz"
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "campaigns_ws_status_idx": {
+          "columns": [
+            "workspace_id",
+            "status",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "comment_campaign_items": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "campaign_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "comment_campaigns",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "target_post_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "target_post_url": {
+          "type": "text"
+        },
+        "target_post_title": {
+          "type": "text"
+        },
+        "target_post_body": {
+          "type": "text"
+        },
+        "target_post_meta": {
+          "type": "jsonb",
+          "default": "'{}'::jsonb"
+        },
+        "generated_comment": {
+          "type": "text"
+        },
+        "final_comment": {
+          "type": "text"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'pending'::text"
+        },
+        "social_comment_id": {
+          "type": "uuid"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "comment_campaign_items_campaign_idx": {
+          "columns": [
+            "campaign_id",
+            "status"
+          ]
+        },
+        "comment_campaign_items_ws_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "comment_campaigns": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "name": {
+          "type": "text",
+          "nullable": false
+        },
+        "channel": {
+          "type": "text",
+          "nullable": false
+        },
+        "targeting_spec": {
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'{}'::jsonb"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'draft'::text"
+        },
+        "item_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "posted_count": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "comment_campaigns_ws_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "custom_fields": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "object_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "name": {
+          "type": "text",
+          "nullable": false
+        },
+        "slug": {
+          "type": "text",
+          "nullable": false
+        },
+        "kind": {
+          "type": "text",
+          "nullable": false
+        },
+        "config": {
+          "type": "jsonb"
+        },
+        "position": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "custom_fields_slug_uniq": {
+          "columns": [
+            "workspace_id",
+            "object_type",
+            "slug"
+          ],
+          "unique": true
+        },
+        "custom_fields_ws_obj_idx": {
+          "columns": [
+            "workspace_id",
+            "object_type",
+            "position"
+          ]
+        }
+      }
+    },
+    "deal_proposals": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "suggested_name": {
+          "type": "text",
+          "nullable": false
+        },
+        "suggested_amount_cents": {
+          "type": "bigint"
+        },
+        "suggested_stage": {
+          "type": "text",
+          "default": "'lead'::text"
+        },
+        "source_kind": {
+          "type": "text"
+        },
+        "source_entity_id": {
+          "type": "uuid"
+        },
+        "ai_reasoning": {
+          "type": "text"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'pending'::text"
+        },
+        "decided_by": {
+          "type": "uuid"
+        },
+        "decided_at": {
+          "type": "timestamptz"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "company_substrate_id": {
+          "type": "text"
+        },
+        "person_substrate_id": {
+          "type": "text"
+        },
+        "created_deal_id": {
+          "type": "text"
+        }
+      },
+      "indexes": {
+        "deal_proposals_source_idx": {
+          "columns": [
+            "workspace_id",
+            "source_kind",
+            "source_entity_id"
+          ]
+        },
+        "deal_proposals_ws_status_idx": {
+          "columns": [
+            "workspace_id",
+            "status",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "enrichment_settings": {
+      "columns": {
+        "workspace_id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "enabled": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        "agent_name": {
+          "type": "text"
+        },
+        "target_columns_companies": {
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'[\"industry\", \"description\", \"linkedin_url\"]'::jsonb"
+        },
+        "target_columns_people": {
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'[\"title\", \"linkedin_url\"]'::jsonb"
+        },
+        "batch_size": {
+          "type": "integer",
+          "nullable": false,
+          "default": "25"
+        },
+        "recent_window_minutes": {
+          "type": "integer",
+          "nullable": false,
+          "default": "15"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      }
+    },
+    "integration_state": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "kind": {
+          "type": "text",
+          "nullable": false
+        },
+        "cursor": {
+          "type": "text"
+        },
+        "last_synced_at": {
+          "type": "timestamptz"
+        },
+        "last_error": {
+          "type": "text"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "integration_state_ws_kind_uniq": {
+          "columns": [
+            "workspace_id",
+            "kind"
+          ],
+          "unique": true
+        }
+      }
+    },
+    "memberships": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "user_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "role": {
+          "type": "text",
+          "nullable": false,
+          "default": "'member'::text"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "memberships_user_idx": {
+          "columns": [
+            "user_id"
+          ]
+        },
+        "memberships_workspace_user_uniq": {
+          "columns": [
+            "workspace_id",
+            "user_id"
+          ],
+          "unique": true
+        }
+      }
+    },
+    "notes": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "entity_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "body": {
+          "type": "text",
+          "nullable": false
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "entity_id": {
+          "type": "text"
+        }
+      },
+      "indexes": {
+        "notes_ws_entity_idx": {
+          "columns": [
+            "workspace_id",
+            "entity_type",
+            "entity_id"
+          ]
+        }
+      }
+    },
+    "pending_invites": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "email": {
+          "type": "text",
+          "nullable": false
+        },
+        "role": {
+          "type": "text",
+          "nullable": false,
+          "default": "'member'::text"
+        },
+        "invited_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "token": {
+          "type": "text",
+          "nullable": false,
+          "unique": true
+        },
+        "expires_at": {
+          "type": "timestamptz",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "pending_invites_email_idx": {
+          "columns": [
+            "email"
+          ]
+        },
+        "pending_invites_token_idx": {
+          "columns": [
+            "token"
+          ],
+          "unique": true
+        },
+        "pending_invites_ws_idx": {
+          "columns": [
+            "workspace_id"
+          ]
+        }
+      }
+    },
+    "reconciler_cursor": {
+      "columns": {
+        "kind": {
+          "type": "text",
+          "primaryKey": true
+        },
+        "last_synced_at": {
+          "type": "timestamptz",
+          "nullable": false
+        },
+        "last_error": {
+          "type": "text"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      }
+    },
+    "saved_views": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "object_type": {
+          "type": "text",
+          "nullable": false
+        },
+        "name": {
+          "type": "text",
+          "nullable": false
+        },
+        "filters": {
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'[]'::jsonb"
+        },
+        "sort": {
+          "type": "jsonb"
+        },
+        "visible_fields": {
+          "type": "jsonb"
+        },
+        "is_default": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "saved_views_ws_default_idx": {
+          "columns": [
+            "workspace_id",
+            "object_type",
+            "is_default"
+          ]
+        },
+        "saved_views_ws_obj_idx": {
+          "columns": [
+            "workspace_id",
+            "object_type",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "social_comments": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "channel": {
+          "type": "text",
+          "nullable": false
+        },
+        "target_post_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "target_post_url": {
+          "type": "text"
+        },
+        "body": {
+          "type": "text",
+          "nullable": false
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'pending'::text"
+        },
+        "external_comment_id": {
+          "type": "text"
+        },
+        "external_url": {
+          "type": "text"
+        },
+        "error": {
+          "type": "text"
+        },
+        "entity_type": {
+          "type": "text"
+        },
+        "entity_id": {
+          "type": "text"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "social_comments_entity_idx": {
+          "columns": [
+            "workspace_id",
+            "entity_type",
+            "entity_id"
+          ]
+        },
+        "social_comments_ws_created_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "social_post_sends": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "post_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "social_posts",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "channel": {
+          "type": "text",
+          "nullable": false
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'pending'::text"
+        },
+        "external_post_id": {
+          "type": "text"
+        },
+        "external_url": {
+          "type": "text"
+        },
+        "error": {
+          "type": "text"
+        },
+        "attempts": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "sent_at": {
+          "type": "timestamptz"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "social_post_sends_post_channel_uq": {
+          "columns": [
+            "post_id",
+            "channel"
+          ],
+          "unique": true
+        },
+        "social_post_sends_ws_channel_idx": {
+          "columns": [
+            "workspace_id",
+            "channel",
+            "sent_at"
+          ]
+        }
+      }
+    },
+    "social_posts": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "created_by": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "body": {
+          "type": "text",
+          "nullable": false
+        },
+        "channels": {
+          "type": "text[]",
+          "nullable": false
+        },
+        "channel_overrides": {
+          "type": "jsonb",
+          "default": "'{}'::jsonb"
+        },
+        "link_url": {
+          "type": "text"
+        },
+        "scheduled_at": {
+          "type": "timestamptz"
+        },
+        "status": {
+          "type": "text",
+          "nullable": false,
+          "default": "'draft'::text"
+        },
+        "error": {
+          "type": "text"
+        },
+        "published_at": {
+          "type": "timestamptz"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "media": {
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'[]'::jsonb"
+        }
+      },
+      "indexes": {
+        "social_posts_ws_created_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        },
+        "social_posts_ws_cron_idx": {
+          "columns": [
+            "workspace_id",
+            "status",
+            "scheduled_at"
+          ]
+        }
+      }
+    },
+    "social_reply_inbox": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "send_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "social_post_sends",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "channel": {
+          "type": "text",
+          "nullable": false
+        },
+        "external_reply_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "external_post_id": {
+          "type": "text",
+          "nullable": false
+        },
+        "author_name": {
+          "type": "text"
+        },
+        "body": {
+          "type": "text",
+          "nullable": false
+        },
+        "score": {
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        "external_url": {
+          "type": "text"
+        },
+        "replied_at": {
+          "type": "timestamptz"
+        },
+        "fetched_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "social_reply_inbox_send_idx": {
+          "columns": [
+            "send_id"
+          ]
+        },
+        "social_reply_inbox_unique_idx": {
+          "columns": [
+            "workspace_id",
+            "channel",
+            "external_reply_id"
+          ],
+          "unique": true
+        },
+        "social_reply_inbox_ws_created_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "sync_settings": {
+      "columns": {
+        "workspace_id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "google_autosync_enabled": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        "notetaker_auto_enabled": {
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        "notetaker_name": {
+          "type": "text",
+          "nullable": false,
+          "default": "'Notetaker'::text"
+        }
+      }
+    },
+    "workspace_competitors": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "name": {
+          "type": "text",
+          "nullable": false
+        },
+        "description": {
+          "type": "text"
+        },
+        "keywords": {
+          "type": "text"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "workspace_competitors_ws_idx": {
+          "columns": [
+            "workspace_id",
+            "created_at"
+          ]
+        }
+      }
+    },
+    "workspace_integrations": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "type": "uuid",
+          "nullable": false,
+          "references": {
+            "table": "workspaces",
+            "column": "id",
+            "onDelete": "CASCADE"
+          }
+        },
+        "user_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "toolkit_slug": {
+          "type": "text",
+          "nullable": false
+        },
+        "composio_account_id": {
+          "type": "text"
+        },
+        "connected_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "metadata": {
+          "type": "jsonb",
+          "default": "'{}'::jsonb"
+        }
+      },
+      "indexes": {
+        "workspace_integrations_uniq": {
+          "columns": [
+            "workspace_id",
+            "user_id",
+            "toolkit_slug"
+          ],
+          "unique": true
+        },
+        "workspace_integrations_user_toolkit_idx": {
+          "columns": [
+            "user_id",
+            "toolkit_slug"
+          ]
+        }
+      }
+    },
+    "workspaces": {
+      "columns": {
+        "id": {
+          "type": "uuid",
+          "primaryKey": true,
+          "default": "gen_random_uuid()"
+        },
+        "name": {
+          "type": "text",
+          "nullable": false
+        },
+        "slug": {
+          "type": "text",
+          "nullable": false,
+          "unique": true
+        },
+        "owner_user_id": {
+          "type": "uuid",
+          "nullable": false
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      }
+    }
+  }
+}

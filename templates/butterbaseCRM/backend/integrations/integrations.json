@@ -1,0 +1,80 @@
+{
+  "app_id": "app_md5001nugpan",
+  "integrations": [
+    {
+      "id": "26ec8c19-3aae-49e0-8c88-f758d3f1fa9c",
+      "app_id": "app_md5001nugpan",
+      "toolkit_slug": "googlesuper",
+      "composio_auth_config_id": "ac_REPLACE_WITH_YOUR_OWN",
+      "display_name": null,
+      "enabled": true,
+      "scopes": [],
+      "created_at": "2026-07-13T14:11:38.293Z",
+      "updated_at": "2026-07-13T14:11:38.293Z",
+      "archived_after_move": null,
+      "credentials_encrypted": null,
+      "auth_scheme": null
+    },
+    {
+      "id": "393bb902-d150-4cae-8567-2342bbced30d",
+      "app_id": "app_md5001nugpan",
+      "toolkit_slug": "instagram",
+      "composio_auth_config_id": "ac_REPLACE_WITH_YOUR_OWN",
+      "display_name": null,
+      "enabled": true,
+      "scopes": [],
+      "created_at": "2026-07-13T14:11:38.736Z",
+      "updated_at": "2026-07-13T14:11:38.736Z",
+      "archived_after_move": null,
+      "credentials_encrypted": null,
+      "auth_scheme": null
+    },
+    {
+      "id": "3497905f-bb15-4392-b70b-30af9eaeeed6",
+      "app_id": "app_md5001nugpan",
+      "toolkit_slug": "linkedin",
+      "composio_auth_config_id": "ac_REPLACE_WITH_YOUR_OWN",
+      "display_name": null,
+      "enabled": true,
+      "scopes": [],
+      "created_at": "2026-07-13T14:11:39.355Z",
+      "updated_at": "2026-07-13T14:11:39.355Z",
+      "archived_after_move": null,
+      "credentials_encrypted": null,
+      "auth_scheme": null
+    },
+    {
+      "id": "c24f4b21-d8f5-445d-aa38-482e2f81dc88",
+      "app_id": "app_md5001nugpan",
+      "toolkit_slug": "reddit",
+      "composio_auth_config_id": "ac_REPLACE_WITH_YOUR_OWN",
+      "display_name": null,
+      "enabled": true,
+      "scopes": [],
+      "created_at": "2026-07-13T14:11:39.721Z",
+      "updated_at": "2026-07-13T14:11:39.721Z",
+      "archived_after_move": null,
+      "credentials_encrypted": null,
+      "auth_scheme": null
+    },
+    {
+      "id": "d5c344dc-cf42-4955-bb37-a5a8dac94d21",
+      "app_id": "app_md5001nugpan",
+      "toolkit_slug": "twitter",
+      "composio_auth_config_id": "ac_REPLACE_WITH_YOUR_OWN",
+      "display_name": "Twitter / X",
+      "enabled": true,
+      "scopes": [
+        "tweet.read",
+        "tweet.write",
+        "users.read",
+        "offline.access"
+      ],
+      "created_at": "2026-07-13T14:11:40.143Z",
+      "updated_at": "2026-07-13T14:11:40.143Z",
+      "archived_after_move": null,
+      "credentials_encrypted": "Jrms6XtiFkwGfjP4:qjZSF6xeoDbWeXQCPnYl+ExBsXOmeqculttohSFVJGXzdH1X6JWzn+UbAHiFcwkrjaZU1vfHVUXDGNYC9UHbkMyOuznttnNnabIZu1mZJ8azLOgX5FbdedEl677WBYiHaSxY59PbD+OLW1Rp+lABw94Rux0AaREvx6yL0rognActhbA+D8Lqh+odIEjAD7jXsaCd/kopkRbCs5ICt6QmvjXQO5odzEDJxlCQF41KFCJUtC8JQtFGJFAt26ZIBi8+m9sRH23QeisooIqtInjIsic43RKpTIReWU0KPBBt4VLWRWkHhsAs2HBi+QNAm7u5zIPdDVY=:MU7GkL6sW95kpSUTfO3Xqg==",
+      "auth_scheme": "OAUTH2"
+    }
+  ]
+}

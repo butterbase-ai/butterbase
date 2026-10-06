@@ -4,12 +4,29 @@
 // review the diff against the UX intent: the subject must surface app +
 // function + streak length, and the body must lead with the logs link,
 // not bury it.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   buildBillingEmailSubject,
   buildBillingEmailBody,
   buildBillingEmailHtml,
 } from '../services/auth/email-service.js';
+
+/**
+ * See the identical block in weekly-digest-email.test.ts for the full story.
+ * Short version: these snapshots assume `DASHBOARD_URL` is unset so
+ * `email-service.ts` falls back to the production origin, but the suite runs
+ * `singleFork` and the two oauth specs set that variable at module scope and
+ * never restore it — making the result depend on file scheduling order.
+ */
+let savedDashboardUrl: string | undefined;
+beforeAll(() => {
+  savedDashboardUrl = process.env.DASHBOARD_URL;
+  delete process.env.DASHBOARD_URL;
+});
+afterAll(() => {
+  if (savedDashboardUrl === undefined) delete process.env.DASHBOARD_URL;
+  else process.env.DASHBOARD_URL = savedDashboardUrl;
+});
 
 const baseData = {
   appId: 'app_test001',

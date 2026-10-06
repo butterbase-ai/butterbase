@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { grantLease, settleLease } from '../../services/lease-service.js';
+import { countAgedUnsettled } from '../../services/lease-alerts.js';
 
 interface GrantBody {
   userId?: string;
@@ -30,7 +31,18 @@ const internalLeaseRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: { graceSeconds?: number } }>('/v1/internal/lease/reclaim', async (request) => {
     const { reclaimExpiredLeases } = await import('../../services/lease-reclaim.js');
     const grace = request.body?.graceSeconds ?? 30;
-    return reclaimExpiredLeases(fastify.controlDb, grace);
+    // No flag here on purpose: the sweeper decides per lease (nominal vs real
+    // reservation), which is what makes flipping AI_RESERVE_SMALL_ENABLED safe
+    // in either direction while leases are in flight.
+    const result = await reclaimExpiredLeases(fastify.controlDb, grace);
+
+    const agedUnsettled = await countAgedUnsettled(fastify.controlDb, 3600);
+    if (agedUnsettled > 0) {
+      fastify.log.warn({ event: 'billing.aged_unsettled', count: agedUnsettled },
+        'leases abandoned without settling — unbilled usage');
+    }
+
+    return result;
   });
 
   fastify.post<{ Params: { lease_id: string }; Body: SettleBody }>(

@@ -1,5 +1,6 @@
 import type pg from 'pg';
-import { grantLease, settleLease } from '../lease-service.js';
+import { grantLease, settleLease, type SettleResult } from '../lease-service.js';
+import { config } from '../../config.js';
 
 export interface LeaseHandle {
   leaseId: string;
@@ -7,14 +8,68 @@ export interface LeaseHandle {
   expiresAt: Date;
 }
 
+/** Smallest value satisfying CHECK (amount_usd > 0) on NUMERIC(12,4). */
+export const MIN_LEASE_USD = 0.0001;
+
 export class InsufficientCreditsError extends Error {
-  constructor(
-    public readonly requiredUsd: number,
-    public readonly availableUsd: number
-  ) {
-    super(`insufficient_credits: required ${requiredUsd.toFixed(4)}, available ${availableUsd.toFixed(4)}`);
+  public readonly balanceUsd: number;
+  public readonly floorUsd: number;
+  constructor(args: { balanceUsd: number; floorUsd: number }) {
+    super(`insufficient_credits: balance ${args.balanceUsd.toFixed(4)} is below floor ${args.floorUsd.toFixed(4)}`);
     this.name = 'InsufficientCreditsError';
+    this.balanceUsd = args.balanceUsd;
+    this.floorUsd = args.floorUsd;
   }
+}
+
+/**
+ * Shared field set for every insufficient-credits 402 body. Admission is now
+ * "is your balance below your organization's credit floor" — there is no more
+ * padded worst-case estimate, so `required_usd` has no honest equivalent and
+ * is intentionally NOT emitted.
+ *
+ * `available_usd` is a DEPRECATED ALIAS for `balance_usd`, kept for one
+ * deprecation release so older consumers (e.g. the dashboard agent) don't
+ * silently read `undefined` while they migrate to the new field names.
+ * Remove `available_usd` once all consumers read `balance_usd` directly.
+ */
+export function insufficientCreditsFields(error: InsufficientCreditsError): {
+  balance_usd: number;
+  credit_floor_usd: number;
+  /** @deprecated alias for balance_usd — remove after the deprecation window */
+  available_usd: number;
+} {
+  return {
+    balance_usd: error.balanceUsd,
+    credit_floor_usd: error.floorUsd,
+    available_usd: error.balanceUsd,
+  };
+}
+
+/**
+ * Reserve a nominal amount and admit on the org's credit floor. The reservation
+ * is deliberately not an estimate — the true cost is charged at settle, which
+ * may debit beyond this. See the reserve-small design spec.
+ */
+export async function acquireNominal(
+  platformPool: pg.Pool,
+  userId: string,
+  organizationId: string,
+  region: string,
+  ttlSeconds: number,
+): Promise<LeaseHandle> {
+  const res = await grantLease(platformPool, {
+    userId,
+    organizationId,
+    region,
+    amountUsd: MIN_LEASE_USD,
+    ttlSeconds,
+    allowFloor: true,
+  });
+  if (!res.leaseId) {
+    throw new InsufficientCreditsError({ balanceUsd: res.balanceUsd, floorUsd: res.floorUsd });
+  }
+  return { leaseId: res.leaseId, amountGrantedUsd: res.amountGranted, expiresAt: res.expiresAt };
 }
 
 /**
@@ -35,9 +90,8 @@ export async function acquireForEstimatedCost(
 ): Promise<LeaseHandle> {
   // credit_leases.amount_usd is NUMERIC(12,4) with a CHECK (amount_usd > 0).
   // Any positive value smaller than 0.00005 rounds to 0.0000 and trips the
-  // constraint, so floor at 0.0001 — the smallest representable positive.
+  // constraint, so floor at MIN_LEASE_USD — the smallest representable positive.
   // This also covers the zero-cost estimate edge case (empty embedding etc.).
-  const MIN_LEASE_USD = 0.0001;
   const requested = estimatedUsd < MIN_LEASE_USD ? MIN_LEASE_USD : estimatedUsd;
   const res = await grantLease(platformPool, {
     userId,
@@ -47,12 +101,12 @@ export async function acquireForEstimatedCost(
     ttlSeconds,
   });
   if (!res.leaseId) {
-    throw new InsufficientCreditsError(requested, res.amountGranted);
+    throw new InsufficientCreditsError({ balanceUsd: res.balanceUsd, floorUsd: res.floorUsd });
   }
   if (res.amountGranted < requested) {
     // Partial reservation — refund it and surface the shortfall.
     await settleLease(platformPool, { leaseId: res.leaseId, actualUsd: 0 });
-    throw new InsufficientCreditsError(requested, res.amountGranted);
+    throw new InsufficientCreditsError({ balanceUsd: res.balanceUsd, floorUsd: res.floorUsd });
   }
   return {
     leaseId: res.leaseId,
@@ -64,20 +118,28 @@ export async function acquireForEstimatedCost(
 /**
  * Settle the lease with the actual charged cost. Refunds the unspent portion.
  * Safe to call on a not-found lease — logs and returns refund=0.
+ *
+ * This is the single boundary where the reserve-small flag reaches the settle
+ * side of the money path. With AI_RESERVE_SMALL_ENABLED unset, `allowOverdraft`
+ * is false and settleLease behaves exactly as it did before this branch: the
+ * charge is clamped to the reservation and nothing can debit beyond it.
+ * `allowOverdraft` may be passed explicitly to override the flag (tests only).
  */
 export async function settleAfterCall(
   platformPool: pg.Pool,
   handle: LeaseHandle,
-  actualChargedUsd: number
-): Promise<{ refundedUsd: number }> {
+  actualChargedUsd: number,
+  allowOverdraft: boolean = config.aiRouter.reserveSmallEnabled,
+): Promise<SettleResult> {
   try {
     return await settleLease(platformPool, {
       leaseId: handle.leaseId,
       actualUsd: actualChargedUsd,
+      allowOverdraft,
     });
   } catch (err) {
     console.error(`[billing-gate] settle failed for lease ${handle.leaseId}:`, err);
-    return { refundedUsd: 0 };
+    return { refundedUsd: 0, chargedUsd: 0, additionalDebitUsd: 0 };
   }
 }
 

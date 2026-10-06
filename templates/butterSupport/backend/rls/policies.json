@@ -1,0 +1,556 @@
+{
+  "policies": [
+    {
+      "schemaname": "public",
+      "tablename": "activities",
+      "policyname": "activities_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "activities",
+      "policyname": "team_member_all",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_messages",
+      "policyname": "agent_messages_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_messages",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_proposals",
+      "policyname": "agent_proposals_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_proposals",
+      "policyname": "team_member_all",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_threads",
+      "policyname": "agent_threads_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "agent_threads",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "admin_write",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "app_allowlist_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "app_allowlist",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "autonomy_settings",
+      "policyname": "admin_write",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "autonomy_settings",
+      "policyname": "autonomy_settings_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "autonomy_settings",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "capability_config",
+      "policyname": "admin_write",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "capability_config",
+      "policyname": "capability_config_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "capability_config",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "diagnoses",
+      "policyname": "diagnoses_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "diagnoses",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "docs_sources",
+      "policyname": "admin_write",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "docs_sources",
+      "policyname": "docs_sources_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "docs_sources",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "escalation_targets",
+      "policyname": "admin_write",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "escalation_targets",
+      "policyname": "escalation_targets_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "escalation_targets",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "escalations",
+      "policyname": "escalations_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "escalations",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "integration_state",
+      "policyname": "integration_state_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "integration_state",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "admin_insert",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m2\n  WHERE ((m2.user_id = (current_user_id())::uuid) AND (m2.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "admin_update",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships m2\n  WHERE ((m2.user_id = (current_user_id())::uuid) AND (m2.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships m2\n  WHERE ((m2.user_id = (current_user_id())::uuid) AND (m2.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "delete_admin_or_self",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "((user_id = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships m2\n  WHERE ((m2.user_id = (current_user_id())::uuid) AND (m2.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "memberships_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "memberships",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(user_id = (current_user_id())::uuid)",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "outbound_disclosure_violations",
+      "policyname": "outbound_disclosure_violations_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "outbound_disclosure_violations",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "pattern_signals",
+      "policyname": "pattern_signals_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "pattern_signals",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "support_messages",
+      "policyname": "support_messages_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "support_messages",
+      "policyname": "team_member_all",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "support_skill",
+      "policyname": "admin_write",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "support_skill",
+      "policyname": "support_skill_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "support_skill",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "support_tickets",
+      "policyname": "support_tickets_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "support_tickets",
+      "policyname": "team_member_all",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "team_integrations",
+      "policyname": "self_or_admin_write",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "ALL",
+      "qual": "((user_id = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))",
+      "with_check": "((user_id = (current_user_id())::uuid) OR (EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text]))))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "team_integrations",
+      "policyname": "team_integrations_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "team_integrations",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "widget_secrets",
+      "policyname": "admin_delete",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "DELETE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "widget_secrets",
+      "policyname": "admin_insert",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "INSERT",
+      "qual": null,
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "widget_secrets",
+      "policyname": "admin_update",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "UPDATE",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))",
+      "with_check": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE ((memberships.user_id = (current_user_id())::uuid) AND (memberships.role = ANY (ARRAY['owner'::text, 'admin'::text])))))"
+    },
+    {
+      "schemaname": "public",
+      "tablename": "widget_secrets",
+      "policyname": "team_member_select",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_user}",
+      "cmd": "SELECT",
+      "qual": "(EXISTS ( SELECT 1\n   FROM memberships\n  WHERE (memberships.user_id = (current_user_id())::uuid)))",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "widget_secrets",
+      "policyname": "widget_secrets_service_bypass",
+      "permissive": "PERMISSIVE",
+      "roles": "{butterbase_service}",
+      "cmd": "ALL",
+      "qual": "true",
+      "with_check": "true"
+    }
+  ],
+  "tables_with_rls": [
+    "activities",
+    "agent_messages",
+    "agent_proposals",
+    "agent_threads",
+    "app_allowlist",
+    "autonomy_settings",
+    "capability_config",
+    "diagnoses",
+    "docs_sources",
+    "escalation_targets",
+    "escalations",
+    "integration_state",
+    "memberships",
+    "outbound_disclosure_violations",
+    "pattern_signals",
+    "support_messages",
+    "support_skill",
+    "support_tickets",
+    "team_integrations",
+    "widget_secrets"
+  ]
+}

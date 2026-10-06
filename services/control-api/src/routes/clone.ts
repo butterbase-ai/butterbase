@@ -10,40 +10,33 @@
 import type { FastifyInstance } from 'fastify';
 import { requireUserId } from '../utils/require-auth.js';
 import { rateLimitAllowList } from '../plugins/rate-limit.js';
-import { config } from '../config.js';
-import { getRuntimeDbPool } from '../services/runtime-db.js';
-import { createCloneJob, getCloneJob, incrementRetry } from '../services/clone-jobs.js';
-import { getRuntimeDbForApp } from '../services/region-resolver.js';
-import { AppNotFoundError } from '../services/app-resolver.js';
+import { enqueueCloneTask } from '../services/clone-task-queue.js';
+import {
+  getCloneJob, incrementRetry,
+  canRetryUpdateJob, hasNewerCompletedUpdate, UPDATE_RETRY_MAX_AGE_MS,
+} from '../services/clone-jobs.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
-import { checkProjectQuota } from '../services/project-quota.js';
-import { quotaErrors } from '../utils/quota-errors.js';
+import { startClone, sendStartCloneFailure } from '../services/start-clone.js';
 import {
   VALIDATION_INVALID_SCHEMA,
   RESOURCE_NOT_FOUND,
+  RESOURCE_CONFLICT,
 } from '@butterbase/shared/error-types';
 
 /**
- * Insert a 'clone' row into the source app's region neon_tasks queue.
- *
- * Each clone job gets its own neon_tasks row.  The unique constraint
- * (idx_neon_tasks_active_unique_non_clone) applies only to non-clone task
- * types, so concurrent clone tasks for the same source app coexist safely.
- * The worker claims tasks with FOR UPDATE SKIP LOCKED and processes them
- * sequentially without interfering with sibling clone tasks.
+ * Job modes the generic retry endpoint refuses. Every one of them has a start
+ * route that performs admission checks a retry would skip; see the comment at
+ * the refusal itself. Kept as an explicit list rather than "anything that is
+ * not clone/update" so a future mode has to make the decision consciously.
  */
-async function enqueueCloneTask(
-  sourceAppId: string,
-  sourceRegion: string,
-  jobId: string,
-): Promise<void> {
-  const runtimePool = getRuntimeDbPool(config.runtimeDb, sourceRegion);
-  await runtimePool.query(
-    `INSERT INTO neon_tasks (app_id, task_type, task_meta) VALUES ($1, 'clone', $2)`,
-    [sourceAppId, JSON.stringify({ job_id: jobId })],
-  );
-}
+const RETRY_REFUSED_MODES = ['promote', 'staging_create', 'staging_reset'] as const;
+
+const FRESH_START_ROUTE = {
+  promote: { verb: 'promote', route: 'POST /v1/apps/{prod_app_id}/staging/promote' },
+  staging_create: { verb: 'staging create', route: 'POST /v1/apps/{prod_app_id}/staging' },
+  staging_reset: { verb: 'staging reset', route: 'POST /v1/apps/{prod_app_id}/staging/reset' },
+} as const;
 
 export function cloneRoutes(app: FastifyInstance) {
   // POST /v1/templates/:source_app_id/clone
@@ -86,200 +79,36 @@ export function cloneRoutes(app: FastifyInstance) {
         ?? await resolveOrganizationId(app.controlDb, userId);
     }
 
-    // Enforce project limit against the destination org's plan. Blocks up-front
-    // so a queued clone can't silently push the org over max_projects.
-    const quota = await checkProjectQuota(app.controlDb, destOrgId);
-    if (!quota.ok) {
-      return reply.code(403).send(quotaErrors.projectLimitReached(quota.current, quota.limit));
-    }
-
-    // getRuntimeDbForApp throws AppNotFoundError if the app isn't in
-    // org_app_index. We translate to the same generic 404 we use for the
-    // non-public case below, to avoid leaking existence information.
-    let sourcePool;
-    try {
-      sourcePool = await getRuntimeDbForApp(app.controlDb, source_app_id);
-    } catch (err) {
-      if (err instanceof AppNotFoundError) {
-        return reply.code(404).send(createAgentError({
-          code: RESOURCE_NOT_FOUND,
-          message: 'Source app not found or not public.',
-          remediation: 'Verify the app id and that the source app has visibility=public.',
-          documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
-        }));
-      }
-      throw err;
-    }
-
-    const srcRow = await sourcePool.query<{
-      id: string;
-      visibility: string;
-      region: string;
-      repo_latest_snapshot: string | null;
-    }>(
-      `SELECT id, visibility, region, repo_latest_snapshot FROM apps WHERE id = $1`,
-      [source_app_id],
-    );
-    const src = srcRow.rows[0];
-    if (!src || src.visibility !== 'public') {
-      return reply.code(404).send(createAgentError({
-        code: RESOURCE_NOT_FOUND,
-        message: 'Source app not found or not public.',
-        remediation: 'Only public apps are clonable.',
-        documentation_url: getDocUrl(RESOURCE_NOT_FOUND),
-      }));
-    }
-    if (!src.repo_latest_snapshot) {
-      return reply.code(400).send(createAgentError({
-        code: VALIDATION_INVALID_SCHEMA,
-        message: 'Source app has no repo snapshot yet.',
-        remediation: 'The source must run `butterbase repo push` at least once before it can be cloned.',
-        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-      }));
-    }
-
-    // Reject if ANY user in ANY region already owns an app with the
-    // requested name. org_app_index is the cross-region platform-tier
-    // projection of (organization_id, region, app_name), so a single lookup against
-    // it catches global collisions without fanning out to every regional
-    // runtime DB. We need global uniqueness because the CF Pages project
-    // name is derived from the app name and CF Pages projects share one
-    // account-wide namespace; two apps with the same slug would collide
-    // at frontend-deploy time. Skipped when name is omitted — the worker
-    // will fall back to `Clone of {source}`, which is allowed to repeat
-    // (the source id makes that string globally unique).
-    if (typeof body.name === 'string' && body.name.trim().length > 0) {
-      const requestedName = body.name.trim();
-      const collision = await app.controlDb.query<{ app_id: string }>(
-        `SELECT app_id FROM org_app_index WHERE app_name = $1 LIMIT 1`,
-        [requestedName],
-      );
-      if (collision.rows.length > 0) {
-        return reply.code(409).send(createAgentError({
-          code: VALIDATION_INVALID_SCHEMA,
-          message: `The app name "${requestedName}" is already taken.`,
-          remediation: 'Pick a different name.',
-          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-        }));
-      }
-    }
-
-    // Cap simultaneous non-terminal clone jobs per user at 3.
-    const inflightResult = await app.controlDb.query<{ c: number }>(
-      `SELECT count(*)::int AS c
-         FROM template_clone_jobs
-        WHERE requested_by_user_id = $1
-          AND status NOT IN ('completed', 'failed')`,
-      [userId],
-    );
-    if (inflightResult.rows[0].c >= 3) {
-      return reply.code(429).send({
-        error: {
-          code: 'CLONE_LIMIT_INFLIGHT',
-          message: 'You already have 3 clones in progress. Wait for one to complete or fail.',
-        },
-      });
-    }
-
-    // Validate env_var_values shape: must be plain object whose values are plain
-    // objects with string values. Reject anything else with a 400 — the caller
-    // likely sent a malformed payload and silent acceptance would persist garbage.
-    if (body.env_var_values !== undefined) {
-      if (typeof body.env_var_values !== 'object' || body.env_var_values === null || Array.isArray(body.env_var_values)) {
-        return reply.code(400).send(createAgentError({
-          code: VALIDATION_INVALID_SCHEMA,
-          message: 'env_var_values must be an object mapping function names to {key: value} objects.',
-          remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
-          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-        }));
-      }
-      for (const [fn, vars] of Object.entries(body.env_var_values)) {
-        if (typeof vars !== 'object' || vars === null || Array.isArray(vars)) {
-          return reply.code(400).send(createAgentError({
-            code: VALIDATION_INVALID_SCHEMA,
-            message: `env_var_values["${fn}"] must be an object of {key: value} strings.`,
-            remediation: 'Send env_var_values as { fn_name: { KEY: "value" } }.',
-            documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-          }));
-        }
-        for (const [k, v] of Object.entries(vars)) {
-          if (typeof v !== 'string') {
-            return reply.code(400).send(createAgentError({
-              code: VALIDATION_INVALID_SCHEMA,
-              message: `env_var_values["${fn}"]["${k}"] must be a string.`,
-              remediation: 'Env var values must be strings.',
-              documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-            }));
-          }
-        }
-      }
-    }
-
-    if (body.auto_mint_api_key !== undefined) {
-      if (!Array.isArray(body.auto_mint_api_key)) {
-        return reply.code(400).send(createAgentError({
-          code: VALIDATION_INVALID_SCHEMA,
-          message: 'auto_mint_api_key must be an array of {fn_name, key} objects.',
-          remediation: 'Send auto_mint_api_key as [{ fn_name: "fn", key: "BUTTERBASE_API_KEY" }].',
-          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-        }));
-      }
-      for (const r of body.auto_mint_api_key) {
-        if (typeof r?.fn_name !== 'string' || typeof r?.key !== 'string') {
-          return reply.code(400).send(createAgentError({
-            code: VALIDATION_INVALID_SCHEMA,
-            message: 'auto_mint_api_key entries must have string fn_name and key.',
-            remediation: 'Send auto_mint_api_key as [{ fn_name: "fn", key: "BUTTERBASE_API_KEY" }].',
-            documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
-          }));
-        }
-      }
-    }
-
-    // Accept dest_region (preferred) or the legacy region alias. When neither
-    // is provided, fall back to the operator-configured default before the
-    // source region — the source may be at capacity while the default has
-    // headroom (Neon's 500-databases-per-branch limit).
-    const requestedDestRegion =
-      body.dest_region ??
-      body.region ??
-      process.env.BUTTERBASE_DEFAULT_REGION ??
-      src.region;
-
-    // If the caller pinned a region temporarily closed to new apps (e.g.
-    // dashboard clone form defaults to source.region), silently redirect
-    // to the first open region rather than 400ing. Silent-failing clones
-    // during a hackathon is worse UX than a transparent cross-region
-    // clone. We log the override so operators can audit it.
-    const provisionAllowed = (
-      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
-        ?? process.env.BUTTERBASE_REGIONS
-        ?? ''
-    ).split(',').map((s) => s.trim()).filter(Boolean);
-    let destRegion = requestedDestRegion;
-    if (provisionAllowed.length > 0 && !provisionAllowed.includes(destRegion)) {
-      const fallback = provisionAllowed[0];
-      request.log.warn(
-        { requestedDestRegion, destRegion: fallback, sourceRegion: src.region, allowed: provisionAllowed },
-        '[clone] redirecting new clone to open region',
-      );
-      destRegion = fallback;
-    }
-    const job = await createCloneJob(app.controlDb, {
+    // All clone admission rules live in startClone so the anonymous-redemption
+    // route can reuse them verbatim rather than fork them.
+    const result = await startClone({
+      controlDb: app.controlDb,
       sourceAppId: source_app_id,
-      sourceSnapshotId: src.repo_latest_snapshot,
-      sourceRegion: src.region,
-      destRegion,
-      requestedByUserId: userId,
-      destOrganizationId: destOrgId,
-      destAppName: body.name,
-      pendingEnvVarValues: body.env_var_values,
+      userId,
+      destOrgId,
+      name: body.name,
+      destRegion: body.dest_region ?? body.region,
+      envVarValues: body.env_var_values,
       autoMintRequests: body.auto_mint_api_key,
+      logger: request.log,
     });
+    if (!result.ok) return sendStartCloneFailure(reply, result);
 
-    await enqueueCloneTask(source_app_id, src.region, job.id);
+    // Enqueued only after the control-plane write succeeded: this INSERT lands
+    // in a regional runtime DB, not the control DB.
+    await enqueueCloneTask(source_app_id, result.sourceRegion, result.jobId);
 
-    return reply.send({ job_id: job.id, status: 'pending' });
+    return reply.send({
+      job_id: result.jobId,
+      status: 'pending',
+      dest_region: result.destRegion,
+      ...(result.redirectedFromRegion
+        ? {
+            dest_region_redirected_from: result.redirectedFromRegion,
+            notice: `Region "${result.redirectedFromRegion}" is temporarily closed to new apps; this clone will be created in "${result.destRegion}" instead.`,
+          }
+        : {}),
+    });
   });
 
   // GET /v1/clone-jobs/:job_id
@@ -330,7 +159,94 @@ export function cloneRoutes(app: FastifyInstance) {
         documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
       }));
     }
-    await incrementRetry(app.controlDb, job_id);
+    // This endpoint is mode-agnostic by construction: it takes any job id the
+    // caller owns. Modes added after it was written (Task 3's staging_create /
+    // promote / staging_reset) inherited a retry path that skips EVERY
+    // admission check their own start-route performs, which for promote means
+    // an unreviewed production deploy: a week-old failed promote re-enqueued
+    // here republishes a stale pinned source_snapshot_id and redeploys an old
+    // staging bundle onto a live production frontend, with no
+    // buildPromotePreview, no destructive-DDL preflight and no in-flight
+    // re-check. (executePromote's filterAdditive still blocks destructive DDL,
+    // so it is not data loss — but it is still a deploy nobody reviewed.)
+    //
+    // Refused rather than gated. A retry re-runs a job pinned to the state of
+    // the world when it was created; a fresh operation re-previews against the
+    // state of the world now, which IS the safety the retry path skips. For
+    // these three modes the proper route is cheap and idempotent-ish
+    // (startPromote re-previews, startStaging 409s if staging already exists,
+    // startStagingReset re-checks for an in-flight promote at both admission
+    // and execution time), so there is nothing a retry buys that a fresh call
+    // does not, and plenty it loses. Refusing also makes the 23505 against
+    // idx_template_clone_jobs_one_promote structurally unreachable from here
+    // rather than something to catch after the fact.
+    //
+    // 'clone' and 'update' are deliberately NOT in this set — their retry
+    // behaviour is unchanged.
+    if (RETRY_REFUSED_MODES.includes(job.mode as (typeof RETRY_REFUSED_MODES)[number])) {
+      const { route, verb } = FRESH_START_ROUTE[job.mode as keyof typeof FRESH_START_ROUTE];
+      return reply.code(400).send(createAgentError({
+        code: VALIDATION_INVALID_SCHEMA,
+        message: `Cannot retry a '${job.mode}' job.`,
+        remediation:
+          `Start a fresh ${verb} instead: ${route}. A retry would re-run this job against `
+          + 'the state it was created in, skipping the checks that run when the operation '
+          + 'is started normally.',
+        documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+      }));
+    }
+    // Retrying an update is only safe while the fork is still in the state this
+    // job left it in. A stale retry re-enters the worker's 'republish' path,
+    // which by design skips the divergence gate, so it would overwrite whatever
+    // the owner has done to the fork since. Clone-mode jobs are unaffected:
+    // their destination is an app nobody else can have touched.
+    if (job.mode === 'update' && job.dest_app_id) {
+      const superseded = await hasNewerCompletedUpdate(
+        app.controlDb, job.dest_app_id, job.id, job.created_at,
+      );
+      const { allowed, reason } = canRetryUpdateJob({
+        lastUpdatedAt: job.updated_at,
+        now: new Date(),
+        hasNewerCompletedUpdate: superseded,
+      });
+      if (!allowed) {
+        const detail = reason === 'superseded'
+          ? 'This app has been updated by a newer job since this one failed.'
+          : `This update failed more than ${Math.round(UPDATE_RETRY_MAX_AGE_MS / 60000)} minutes ago.`;
+        return reply.code(400).send(createAgentError({
+          code: VALIDATION_INVALID_SCHEMA,
+          message: `Cannot retry this template update. ${detail}`,
+          remediation:
+            'Start a fresh update instead: POST /v1/:app_id/template/update. A new job ' +
+            're-checks the app against the template, so nothing you have changed since ' +
+            'gets overwritten.',
+          documentation_url: getDocUrl(VALIDATION_INVALID_SCHEMA),
+        }));
+      }
+    }
+
+    // incrementRetry flips status back to 'pending', which re-enters the
+    // partial unique indexes on (dest_app_id) WHERE status NOT IN
+    // ('completed','failed') — idx_template_clone_jobs_one_update (migration
+    // 111) and idx_template_clone_jobs_one_promote (116). Refusing the promote
+    // modes above puts the promote index out of reach from here, but the update
+    // index is still live: the staleness gate only looks for a newer COMPLETED
+    // update, so an update already IN FLIGHT for the same dest app raises a raw
+    // 23505 that used to leak as a 500. It is a conflict, so report it as one.
+    // The success path for clone and update is untouched.
+    try {
+      await incrementRetry(app.controlDb, job_id);
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505') {
+        return reply.code(409).send(createAgentError({
+          code: RESOURCE_CONFLICT,
+          message: 'Another job for this app is already in flight.',
+          remediation: 'Wait for the in-progress job to finish, then retry this one.',
+          documentation_url: getDocUrl(RESOURCE_CONFLICT),
+        }));
+      }
+      throw err;
+    }
     await enqueueCloneTask(job.source_app_id, job.source_region, job.id);
     return reply.send({ job_id: job.id, status: 'pending' });
   });

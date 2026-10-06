@@ -24,6 +24,7 @@ export type TokenAction = 'snooze_function_24h' | 'mute_function' | 'unsubscribe
 export const DIGEST_COVERED_TEMPLATES: ReadonlySet<string> = new Set([
   'function_failed',
   'deployment_failed',
+  'template_updates',
 ]);
 
 const TOKEN_BYTES = 32;

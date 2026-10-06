@@ -1,0 +1,21 @@
+{
+  "name": "auto-sync-google",
+  "description": "Cron (every 5 min) with KV single-flight lock to prevent overlapping ticks. 15-min timeout.",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "*/5 * * * *",
+        "timezone": "UTC"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 900000,
+  "memoryLimitMb": 256,
+  "deployedAt": "2026-07-13T14:11:33.858Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

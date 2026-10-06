@@ -1,0 +1,20 @@
+{
+  "name": "execute-comment-campaign",
+  "description": "Post approved campaign items to Reddit or LinkedIn, respecting edited drafts",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 120000,
+  "memoryLimitMb": 256,
+  "deployedAt": "2026-07-15T14:13:33.616Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

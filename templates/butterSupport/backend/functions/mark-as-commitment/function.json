@@ -1,0 +1,21 @@
+{
+  "name": "mark-as-commitment",
+  "description": "Founder UI affordance: convert a ticket reply into an explicit substrate commitment. AI-generates a single-line title (haiku) capturing who-commits-what-to-whom-by-when. Threads from_entity (founder person, looked up by email decoded from the request JWT), to_entity (customer_substrate_id), and source_artifact_id (caller-supplied — frontend resolves it via substrate-proxy).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-24T12:46:25.816Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

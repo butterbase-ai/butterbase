@@ -106,9 +106,30 @@ export const MOVE_APP_RUNTIME_CHILD_TABLES: readonly MoveAppChildTable[] = [
 
 /**
  * Tables explicitly NOT moved by the saga. The boot audit requires every
- * table with an app_id column to be either here or in MOVE_APP_RUNTIME_TABLES.
+ * table with an `app_id` or `%_app_id` column to be either here or in
+ * MOVE_APP_RUNTIME_TABLES.
  */
 export const MOVE_APP_EXCLUDED: Record<string, string> = {
+  // The app row itself. Surfaced by the audit only once it learned to match
+  // `%_app_id` (apps.template_source_app_id), but it was never a per-app data
+  // table: the saga creates the destination row in step-reserve-dest and edits
+  // region / provisioning_status in step-flip-routing, step-block-writes and
+  // reverse-move. Copying it as data would fight those steps.
+  apps: 'the app row itself; the saga creates and updates it directly (step-reserve-dest, step-flip-routing), never copies it as per-app data',
+
+  // Staging environment link. Both FKs (prod_app_id, staging_app_id) resolve
+  // inside ONE regional runtime DB, so this row cannot follow a single app
+  // across regions — its other end would not exist there. Moving an app that
+  // has a staging environment is refused outright in eligibility.ts rather
+  // than silently orphaning the sibling, so the saga never has to carry it.
+  app_environments:
+    'staging link; both FKs are region-local, so a move with a live link is refused in eligibility.ts instead',
+  // Keyed on the PRODUCTION app (see runtime-plane/053). Same reasoning: a
+  // move is refused while a link exists, and once unlinked these overrides are
+  // the owner's to re-set on the new region's staging app.
+  staging_env_overrides:
+    'staging env var overrides, keyed on the production app; a move with a live staging link is refused in eligibility.ts',
+
   // System-wide / not per-app:
   partner_keys: 'system-wide partner credentials, not per-app',
   partner_pools: 'system-wide partner pool config, not per-app',

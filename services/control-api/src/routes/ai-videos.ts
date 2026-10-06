@@ -14,6 +14,7 @@ import {
   RouterError, InsufficientCreditsError,
   type RouteContext,
 } from '../services/ai-router/router.js';
+import type { CostSource } from '../services/ai-router/cost-source.js';
 import { readCatalogEntry } from '../services/ai-router/catalog.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
@@ -22,9 +23,10 @@ import {
   insertVideoJob, getVideoJob, markVideoJobInProgress, markVideoJobTerminal,
   type VideoJobRow,
 } from '../services/ai-router/video-jobs.js';
-import { settleAfterCall } from '../services/ai-router/billing-gate.js';
+import { settleAfterCall, insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { readAutoRefillState } from './ai-config.js';
+import { resolveMarkupPct, type MarkupSource } from '../services/ai-router/special-pricing.js';
 
 // Public URLs returned to clients must honor the X-Forwarded-* headers that
 // Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
@@ -87,6 +89,34 @@ const IMAGE_ALIAS_KEYS = [
   'starting_image',
 ] as const;
 
+/**
+ * Mirror canonical `input_images` URL strings onto `frame_images`, the object
+ * shape some upstreams require for image-to-video:
+ *   `{ type: 'image_url', image_url: { url }, frame_type }`
+ *
+ * Why this lives in normalization and not in an adapter: adapters forward the
+ * body verbatim, so an upstream that only understands `frame_images` silently
+ * ignored `input_images` and returned a text-to-video result — no error, full
+ * charge, wrong video. Deriving the mirror here means the canonical shape keeps
+ * working for every router while adapters stay pure passthrough.
+ *
+ * `input_images` is deliberately left in place: routers that consume the
+ * canonical form still read it, and routers that don't ignore unknown keys.
+ *
+ * Positional mapping only — first URL is the opening frame, second is the
+ * closing frame. Three or more frames have no unambiguous positional reading,
+ * so no mirror is derived; such callers must send `frame_images` (or
+ * `input_references`) explicitly.
+ */
+function deriveFrameImages(urls: string[]): Array<Record<string, unknown>> | null {
+  if (urls.length === 0 || urls.length > 2) return null;
+  return urls.map((url, i) => ({
+    type: 'image_url',
+    image_url: { url },
+    frame_type: i === 0 ? 'first_frame' : 'last_frame',
+  }));
+}
+
 export const videoSubmitSchema = z.preprocess((raw) => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
   const src = raw as Record<string, unknown>;
@@ -96,11 +126,19 @@ export const videoSubmitSchema = z.preprocess((raw) => {
     if (typeof v === 'string' && v.length > 0) aliased.push(v);
     else if (Array.isArray(v)) for (const item of v) if (typeof item === 'string' && item.length > 0) aliased.push(item);
   }
-  if (aliased.length === 0) return raw;
   const next = { ...src };
-  for (const key of IMAGE_ALIAS_KEYS) delete next[key];
-  const existing = Array.isArray(next.input_images) ? (next.input_images as unknown[]).filter((x): x is string => typeof x === 'string') : [];
-  next.input_images = [...existing, ...aliased];
+  if (aliased.length > 0) {
+    for (const key of IMAGE_ALIAS_KEYS) delete next[key];
+    const existing = Array.isArray(next.input_images) ? (next.input_images as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+    next.input_images = [...existing, ...aliased];
+  }
+
+  // An explicit frame_images from the caller always wins — never overwrite it.
+  if (next.frame_images === undefined && Array.isArray(next.input_images)) {
+    const urls = (next.input_images as unknown[]).filter((x): x is string => typeof x === 'string');
+    const derived = deriveFrameImages(urls);
+    if (derived) next.frame_images = derived;
+  }
   return next;
 }, z.object({
   model: z.string(),
@@ -111,7 +149,13 @@ export const videoSubmitSchema = z.preprocess((raw) => {
   generate_audio: z.boolean().optional(),
   seed: z.number().int().optional(),
   input_images: z.array(z.string().url()).optional(),
-  input_references: z.array(z.string().url()).optional(),
+  // Seed imagery may be supplied either as flat URL strings (canonical shape,
+  // translated by adapters that need it) or in the upstream's own object shape
+  // — `{ type: 'image_url', image_url: { url }, frame_type? }`. Object entries
+  // are forwarded verbatim without inspection, so callers targeting a specific
+  // upstream can use its native vocabulary.
+  input_references: z.array(z.union([z.string().url(), z.record(z.unknown())])).optional(),
+  frame_images: z.array(z.record(z.unknown())).optional(),
   provider: z.record(z.unknown()).optional(),
 }).strict());
 
@@ -131,11 +175,12 @@ export async function aiVideoRoutes(app: FastifyInstance) {
 
     try {
       const body = videoSubmitSchema.parse(request.body);
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const region = await resolveAppHomeRegion(app.controlDb, appId);
 
       const submit = await routeVideoSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
-          adapters, markupPct: config.aiRouter.markupPct,
+          adapters, markupPct, markupSource,
           appId, organizationId, userId: ownerId, region },
         body,
       );
@@ -149,7 +194,8 @@ export async function aiVideoRoutes(app: FastifyInstance) {
           upstreamPollingUrl: submit.pollingUrl,
           leaseId: submit.leaseId,
           estimatedCostUsd: submit.estimatedCostUsd,
-          markupPct: config.aiRouter.markupPct,
+          markupPct,
+          markupSource,
         });
       } catch (insertErr) {
         // Upstream job is running but we have no row to track it. Refund the lease
@@ -209,6 +255,7 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       const ctx: RouteContext = {
         platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
         adapters, markupPct: parseFloat(job.markup_pct),
+        markupSource: (job.markup_source ?? 'global') as MarkupSource,
         appId, organizationId, userId: ownerId, region,
       };
       const result = await pollAndSettleVideoJob(ctx, job);
@@ -298,6 +345,9 @@ export async function pollAndSettleVideoJob(
   //   3) $0 as final guard — only `failed`/`cancelled` paths, where
   //      charging would be wrong anyway.
   let providerCost = poll.providerCostUsd ?? 0;
+  // Provenance for migration 051. Starts as whatever the branch above produced:
+  // an upstream-reported cost, or $0 pending the catalog fallback below.
+  let costSource: CostSource = poll.providerCostUsd !== undefined ? 'upstream' : 'catalog_unpriced';
   if (poll.providerCostUsd === undefined && poll.status === 'completed') {
     const entry = await readCatalogEntry(ctx.redis, job.model);
     if (entry) {
@@ -306,7 +356,7 @@ export async function pollAndSettleVideoJob(
         job.request_json as unknown as import('../services/ai-router/adapters/types.js').VideoGenerationRequest,
         job.upstream_router as RouterName,
       );
-      if (billed !== null) providerCost = billed;
+      if (billed !== null) { providerCost = billed; costSource = 'catalog'; }
     }
   }
 
@@ -324,6 +374,7 @@ export async function pollAndSettleVideoJob(
       chosenRouter: job.upstream_router as RouterName,
       canonicalModel: job.model,
       providerCostUsd: providerCost,
+      costSource,
     });
   }
   return { status: poll.status, terminal: true };
@@ -355,8 +406,7 @@ export async function handleVideoError(app: FastifyInstance, reply: any, organiz
     return reply.code(402).send({
       error: 'insufficient_credits',
       code: 'INSUFFICIENT_CREDITS',
-      required_usd: error.requiredUsd,
-      available_usd: error.availableUsd,
+      ...insufficientCreditsFields(error),
       monthly_allowance_usd: ar.monthlyAllowanceUsd,
       credits_usd: ar.topupUsd,
       auto_refill_enabled: ar.enabled,

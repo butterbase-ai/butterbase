@@ -28,6 +28,40 @@ export function pickEncodingForModel(canonicalId: string): Encoding {
 
 const IMAGE_URL_TOKEN_ALLOWANCE = 85;
 
+/**
+ * Tokenizer work is bounded per request.
+ *
+ * js-tiktoken's merge loop is quadratic on repetitive input: 16 KB of a single
+ * repeated character takes ~20s to encode, and a two-character cycle ("abab…")
+ * is just as slow — so no cheap "looks repetitive" check can protect us.
+ * Encoding is synchronous, so one oversized message would stall the event loop
+ * and take the whole process down, not merely its own request.
+ *
+ * Rather than encode everything, we encode at most SAMPLE_CHARS of each string
+ * and extrapolate by length, and cap how many samples one request may take.
+ * Past that budget we fall back to a flat characters-per-token ratio. Worst
+ * case is ~24 samples of 256 pathological characters, a few hundred
+ * milliseconds, instead of unbounded.
+ *
+ * The result only sizes a credit lease; real billing comes from the provider's
+ * returned usage at settle. A coarse estimate is therefore cheap, and an
+ * unbounded encode is not.
+ */
+const SAMPLE_CHARS = 256;
+const MAX_SAMPLES_PER_REQUEST = 24;
+const FALLBACK_CHARS_PER_TOKEN = 4;
+
+interface SampleBudget { left: number }
+
+function countTokens(enc: Tiktoken, text: string, budget: SampleBudget): number {
+  if (text.length === 0) return 0;
+  if (budget.left <= 0) return Math.ceil(text.length / FALLBACK_CHARS_PER_TOKEN);
+  budget.left -= 1;
+  if (text.length <= SAMPLE_CHARS) return enc.encode(text).length;
+  const sampleTokens = enc.encode(text.slice(0, SAMPLE_CHARS)).length;
+  return Math.ceil(text.length * (sampleTokens / SAMPLE_CHARS));
+}
+
 type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string; detail?: string } }
@@ -46,16 +80,21 @@ export function estimatePromptTokens(messages: ChatMessage[], canonicalModelId: 
   if (messages.length === 0) return 0;
   const enc = getEnc(pickEncodingForModel(canonicalModelId));
 
+  const budget: SampleBudget = { left: MAX_SAMPLES_PER_REQUEST };
+
   let total = 0;
   for (const msg of messages) {
-    total += enc.encode(msg.role).length;
+    // Roles are a fixed, tiny vocabulary ('user', 'assistant', 'system',
+    // 'tool') — one token each. Encoding them per message would be unbounded
+    // work on a request carrying very many short messages.
+    total += 1;
     total += 4; // per-message framing overhead, OpenAI cookbook approximation
     if (typeof msg.content === 'string') {
-      total += enc.encode(msg.content).length;
+      total += countTokens(enc, msg.content, budget);
     } else if (Array.isArray(msg.content)) {
       for (const part of msg.content) {
         if (part.type === 'text' && typeof (part as { text?: unknown }).text === 'string') {
-          total += enc.encode((part as { text: string }).text).length;
+          total += countTokens(enc, (part as { text: string }).text, budget);
         } else if (part.type === 'image_url') {
           total += IMAGE_URL_TOKEN_ALLOWANCE;
         }

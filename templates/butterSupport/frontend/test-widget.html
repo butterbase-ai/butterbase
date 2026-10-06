@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Widget bundle test</title>
+  </head>
+  <body>
+    <h1>Widget test page</h1>
+    <p>
+      Build the bundle first (<code>npm run build:widget</code> -> <code>dist/widget.js</code>),
+      replace <code>app_replace_me</code> below with your clone's app id, and serve this
+      folder over http (for example <code>npx serve .</code>). The launcher should appear
+      in the bottom-right corner.
+    </p>
+    <p>
+      The widget needs no server-side signing. It mints an anonymous visitor token
+      (stored in <code>localStorage</code> on this origin), sends it as
+      <code>visitor_token</code> to <code>api.butterbase.ai/v1/&lt;app_id&gt;/fn/widget-*</code>,
+      and opens a ticket when you send a message. With a real app id the ticket shows up
+      in your console inbox. Identity is client-supplied via
+      <code>window.ButterSupport.identify()</code> (not signature-verified).
+    </p>
+
+    <!-- Queue identify() before the bundle loads; the widget flushes ButterSupport.q on mount. -->
+    <script>
+      window.ButterSupport = window.ButterSupport || { q: [] };
+      window.ButterSupport.q.push([
+        'identify',
+        { user_id: 'demo-user-1', email: 'demo@example.com', name: 'Demo User' },
+      ]);
+    </script>
+    <!-- Same embed shape as the Setup wizard; production uses
+         https://<your-subdomain>.butterbase.dev/widget.js -->
+    <script async src="./dist/widget.js" data-app-id="app_replace_me"></script>
+
+    <p>
+      Console helpers: <code>ButterSupport.open()</code>, <code>.close()</code>,
+      <code>.toggle()</code>, <code>.reset()</code>.
+    </p>
+  </body>
+</html>

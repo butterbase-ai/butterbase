@@ -55,7 +55,7 @@ butterbase config get
 butterbase config set endpoint https://api.butterbase.ai
 
 # Set API key
-butterbase config set apiKey bb_key_...
+butterbase config set apiKey bb_sk_...
 ```
 
 Configuration is stored in `~/.butterbase/config.json`.
@@ -216,7 +216,9 @@ butterbase app-billing orders get order_abc
 ### Scoped API keys + integrations
 
 ```bash
-butterbase keys generate ci-key --scope schema:read --scope functions:invoke
+butterbase keys generate ci-key --scope app --app app_abc123 --extra-scope ai:gateway   # --scope: account (default) | app
+butterbase keys list
+butterbase keys revoke <key-id>
 butterbase integrations configure github --scope repo --scope read:user
 butterbase integrations connect github --redirect-url https://app.example/cb --scope repo
 ```
@@ -240,6 +242,17 @@ butterbase rls create --table posts --policy-name posts_own \
 butterbase rls delete posts                 # delete all policies on table
 butterbase rls delete posts --policy posts_own
 ```
+
+### More commands
+
+Other top-level commands (run `butterbase <command> --help` for flags):
+
+- `init [template]`, `clone`, `templates`, `visibility <mode>`, `status`, `open`
+- `deploy [directory]` (frontend; `--from-source` builds remotely), `deploy:edge-ssr`, `domains`, `env`
+- `data query|insert`, `realtime enable|config|disable`, `kv`, `rag`, `do` (Durable Objects)
+- `agents list|get|create|update|delete`, `substrate`, `people`, `partners`, `preview`, `repo`
+- `billing` (platform billing), `mcp install`, `plugin setup`
+- `apps pause|resume`, `functions get|delete|invoke|env|metrics`, `rls list|enable`, `ai meetings`
 
 ## Global Options
 
@@ -270,10 +283,7 @@ Project config takes precedence over global config.
 
 ## Environment Variables
 
-You can also configure the CLI using environment variables:
-
-- `BUTTERBASE_API_KEY` - API key
-- `BUTTERBASE_ENDPOINT` - API endpoint URL
+The CLI reads its API key and endpoint from the config files above, not from environment variables. `BUTTERBASE_API_KEY` is only referenced by the MCP client config that `butterbase plugin setup` / `butterbase mcp install` write (`Authorization: Bearer ${BUTTERBASE_API_KEY}`), and `butterbase integrations configure|rotate` fall back to `<TOOLKIT>_CLIENT_ID` / `<TOOLKIT>_CLIENT_SECRET`.
 
 ## Examples
 
@@ -404,4 +414,4 @@ the SDK README for the full list.
 
 ## License
 
-MIT
+Apache-2.0

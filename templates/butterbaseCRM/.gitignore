@@ -1,0 +1,35 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ── Dependencies / build output ──────────────────────────────────────────────
+node_modules/
+dist/
+build/
+out/
+.vite/
+*.tsbuildinfo
+
+# ── Archives & backups ───────────────────────────────────────────────────────
+*.zip
+*.bak
+*.tar
+*.tar.gz
+frontend.bak/
+
+# ── Agent / tooling scratch ──────────────────────────────────────────────────
+.superpowers/
+.playwright-mcp/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

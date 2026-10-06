@@ -1,0 +1,20 @@
+{
+  "name": "migrate-meetings-to-substrate",
+  "description": "One-shot idempotent migration: copy meetings + meeting_attendees + custom_field_values rows for the caller's workspace into substrate event entities. Skip rows already migrated (tracked via attrs.migrated_from_crm_id).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 60000,
+  "memoryLimitMb": 256,
+  "deployedAt": "2026-07-13T14:11:29.047Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -4,7 +4,8 @@ import { config, assertRegionConfig, assertRuntimeDbConfig } from '../config.js'
 import { getRuntimeDbPool } from './runtime-db.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import * as neonClient from './neon-client.js';
-import { getDataProjectIdForRegion } from './neon-projects.js';
+import { getDataProjectIdForRegion, isProjectPerTenantForRegion } from './neon-projects.js';
+import { provisionNeonDbForApp } from './app-db-provision.js';
 import {
   APP_ID_PREFIX,
   APP_ID_LENGTH,
@@ -19,6 +20,24 @@ const generateId = customAlphabet(APP_ID_ALPHABET, APP_ID_LENGTH);
 /** Generate a new app ID. Exported so callers can create the ID before calling provisionApp(). */
 export function generateAppId(): string {
   return `${APP_ID_PREFIX}${generateId()}`;
+}
+
+/** Postgres `datname` limit. `custDbNameFor` truncates to this. */
+export const PG_MAX_DATNAME = 63;
+
+/**
+ * The `cust_<appId>_<region>` move-app destination database name used by the
+ * legacy (non-project-per-tenant) branch of `provisionAppDb` below.
+ *
+ * Exported so `neon-orphan-reconciler.ts` can reproduce it EXACTLY when
+ * deciding which `cust_*` databases belong to live apps — any drift here
+ * silently reclassifies live customer databases as orphans and deletes them.
+ * Keep this the single source of truth for the naming; do not fork a copy.
+ */
+export function custDbNameFor(appId: string, region: string): string {
+  return `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
+    .toLowerCase()
+    .slice(0, PG_MAX_DATNAME);
 }
 
 /**
@@ -58,6 +77,33 @@ export async function runMigrationsWithRetry(connectionString: string, maxAttemp
  * Returns immediately. If an app with the same name+owner already exists,
  * returns it (idempotency).
  */
+export interface InsertAppRowOptions {
+  /**
+   * Skip the name+owner idempotency lookup. Clones are allowed to share a
+   * name — executeClone differentiates them by subdomain — so the clone path
+   * must always insert its own generated appId. Leaving this off there made
+   * insertAppRow return early without inserting while executeClone carried on
+   * with an appId that had no row: provisioning then failed the
+   * app_db_connections -> apps foreign key and waitForDestReady blocked for
+   * its full 5-minute timeout.
+   */
+  allowDuplicateName?: boolean;
+}
+
+/**
+ * Whether a same-name+owner match should be reused instead of inserting.
+ * Exported and unit-tested in isolation because insertAppRow itself is
+ * effectful (two pools, KV credential writes) and impractical to exercise
+ * end to end — this is the one branch that actually needed coverage.
+ */
+export function shouldReuseExistingApp(
+  existing: unknown[],
+  opts: InsertAppRowOptions | undefined,
+): boolean {
+  if (opts?.allowDuplicateName) return false;
+  return existing.length > 0;
+}
+
 export async function insertAppRow(
   region: string,
   controlDb: pg.Pool,
@@ -65,6 +111,7 @@ export async function insertAppRow(
   ownerId: string,
   appId: string,
   targetOrganizationId?: string,
+  opts?: InsertAppRowOptions,
 ): Promise<{ app: App; isExisting: boolean }> {
   // Write the apps row into the TARGET region's runtime DB (where the app
   // is homed), not the local machine's runtime DB. Previously this used
@@ -78,7 +125,7 @@ export async function insertAppRow(
     [name, ownerId]
   );
 
-  if (existing.rows.length > 0) {
+  if (shouldReuseExistingApp(existing.rows, opts)) {
     return { app: existing.rows[0], isExisting: true };
   }
 
@@ -141,40 +188,30 @@ export async function provisionAppBackground(
 
   try {
     if (config.neon.enabled) {
-      const dataProjectId = getDataProjectIdForRegion(region);
-      const neonDbName = `db_${appId}`;
-      const owner = config.neon.databaseOwner;
-
-      // Serialize mutating Neon API calls; read-only getConnectionString runs outside the lock.
-      await neonClient.withNeonProjectLock(dataProjectId, async () => {
-        await neonClient.ensureRoleExists(dataProjectId, owner);
-        await neonClient.createDatabase(dataProjectId, neonDbName, owner);
-      });
-
-      const { connectionUri, poolerHost, pooledConnectionUri } =
-        await neonClient.getConnectionString(dataProjectId, neonDbName, owner);
-
-      // PG 15+ revokes CREATE on public schema by default; grant it to the app role
-      await neonClient.grantSchemaPrivileges(dataProjectId, neonDbName, owner);
-
-      let poolerConnectionString: string | null = null;
-      if (pooledConnectionUri) {
-        poolerConnectionString = pooledConnectionUri;
-      } else if (poolerHost) {
-        const url = new URL(connectionUri);
-        url.hostname = poolerHost;
-        url.port = '6543';
-        poolerConnectionString = url.toString();
-      }
+      const provisioned = await provisionNeonDbForApp(region, appId);
 
       await runtimeDb.query(
+        // DO UPDATE, not DO NOTHING: a re-provision (e.g. clone-resume) can
+        // create a fresh Neon project, and dropping the row would leave the app
+        // pointing at the old database while the new project bills unrecorded.
+        // With project-per-tenant off this rewrites identical values.
         `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (app_id) DO NOTHING`,
-        [appId, connectionUri, poolerConnectionString, dataProjectId, neonDbName]
+         ON CONFLICT (app_id) DO UPDATE
+           SET connection_string = EXCLUDED.connection_string,
+               pooler_connection_string = EXCLUDED.pooler_connection_string,
+               neon_project_id = EXCLUDED.neon_project_id,
+               neon_database_name = EXCLUDED.neon_database_name`,
+        [
+          appId,
+          provisioned.connectionUri,
+          provisioned.poolerConnectionString,
+          provisioned.neonProjectId,
+          provisioned.neonDatabaseName,
+        ]
       );
 
-      await runMigrationsWithRetry(connectionUri);
+      await runMigrationsWithRetry(provisioned.connectionUri);
     } else {
       const client = await dataPlaneDb.connect();
       try {
@@ -297,9 +334,10 @@ export async function provisionApp(
     if (pooledConnectionUri) {
       poolerConnectionString = pooledConnectionUri;
     } else if (poolerHost) {
+      // Host swap only — Neon's pooled host carries no explicit port. (The
+      // obsolete `:6543` convention used to be injected here.)
       const url = new URL(connectionUri);
       url.hostname = poolerHost;
-      url.port = '6543';
       poolerConnectionString = url.toString();
     }
 
@@ -431,9 +469,18 @@ async function formatResponse(app: App, runtimeDb: pg.Pool): Promise<InitRespons
 }
 
 /**
- * Phase 5 / E2E: create the customer DB in the region's data plane and return
- * the connection URI. Does NOT write app_db_connections or run customer
- * migrations — the move-app saga's reserving_dest step does that separately.
+ * Phase 5 / E2E: create the customer DB in the region's data plane, write the
+ * `app_db_connections` row for it, and return the connection URI. Does NOT run
+ * customer migrations — the move-app saga's restoring_data step does that.
+ *
+ * Two shapes, selected by `isProjectPerTenantForRegion(region)` — the
+ * per-region override `BUTTERBASE_PROJECT_PER_TENANT_<REGION>` when set,
+ * otherwise the global `config.neon.projectPerTenant`:
+ *
+ *   tenant — delegates to `provisionNeonDbForApp`, which creates a dedicated
+ *            Neon project per app (adopt-before-create on retry).
+ *   legacy — a `cust_<appId>_<region>` database inside the region's shared
+ *            project. Byte-for-byte unchanged; this is the deployed path.
  *
  * Idempotent: returns the same name + URI on re-run; CREATE DATABASE is
  * guarded by an existence check.
@@ -448,6 +495,35 @@ export async function provisionAppDb(
   // plugin). Idempotent guard handles the first case.
   assertRuntimeDbConfig();
 
+  if (isProjectPerTenantForRegion(region)) {
+    // One Neon project per app. The shared helper owns adopt-before-create,
+    // the queryability wait and the pooled-URI lookup; all this branch adds is
+    // the app_db_connections row, which step-restore-data reads in the dest
+    // region to find its restore target.
+    const provisioned = await provisionNeonDbForApp(region, appId);
+    const tenantPool = getRuntimeDbPool(config.runtimeDb, region);
+    await tenantPool.query(
+      `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (app_id) DO UPDATE
+         SET connection_string = EXCLUDED.connection_string,
+             pooler_connection_string = EXCLUDED.pooler_connection_string,
+             neon_project_id = EXCLUDED.neon_project_id,
+             neon_database_name = EXCLUDED.neon_database_name`,
+      [
+        appId,
+        provisioned.connectionUri,
+        provisioned.poolerConnectionString,
+        provisioned.neonProjectId,
+        provisioned.neonDatabaseName,
+      ],
+    );
+    return {
+      neonDbName: provisioned.neonDatabaseName,
+      connectionUri: provisioned.connectionUri,
+    };
+  }
+
   // NEON_DATA_PROJECT_ID_<REGION> holds a Neon project ID (e.g.
   // "silent-cake-48449293"), NOT a postgres connection string. Use the
   // Neon Management API to create the database, mirroring the pattern
@@ -456,10 +532,7 @@ export async function provisionAppDb(
   if (!dataProjectId) throw new Error(`No data project for region ${region}`);
 
   const owner = config.neon.databaseOwner;
-  // Postgres datname max length = 63 bytes
-  const neonDbName = `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
-    .toLowerCase()
-    .slice(0, 63);
+  const neonDbName = custDbNameFor(appId, region);
 
   // Serialize Neon API calls per project; idempotent on "already exists".
   await neonClient.withNeonProjectLock(dataProjectId, async () => {
@@ -484,9 +557,10 @@ export async function provisionAppDb(
   if (pooledConnectionUri) {
     poolerConnectionString = pooledConnectionUri;
   } else if (poolerHost) {
+    // Host swap only — Neon's pooled host carries no explicit port. (The
+    // obsolete `:6543` convention used to be injected here.)
     const url = new URL(connectionUri);
     url.hostname = poolerHost;
-    url.port = '6543';
     poolerConnectionString = url.toString();
   }
   const runtimePool = getRuntimeDbPool(config.runtimeDb, region);

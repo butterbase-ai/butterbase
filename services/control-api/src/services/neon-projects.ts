@@ -1,3 +1,5 @@
+import { config } from '../config.js';
+
 const dataCache = new Map<string, string>();
 const runtimeCache = new Map<string, string>();
 
@@ -31,6 +33,67 @@ export function getRuntimeProjectIdForRegion(region: string): string {
   if (!value) throw new Error(`Missing env var ${key} for region ${region}`);
   runtimeCache.set(region, value);
   return value;
+}
+
+/**
+ * Butterbase region → Neon `region_id` for project creation.
+ * Neon ids look like `aws-us-east-1`; our regions look like `us-east-1`,
+ * so the default is a prefix. Override per-region when a region lives on
+ * a different cloud.
+ */
+export function getNeonRegionIdForRegion(region: string): string {
+  const explicit = process.env[envKey('NEON_REGION', region)];
+  if (explicit) return explicit;
+  return `aws-${region}`;
+}
+
+/**
+ * Postgres major version to use when creating a tenant project in `region`.
+ * Regions can run different major versions on their shared data project
+ * (e.g. us-east-1 is on PG 17, us-west-2 is on PG 18); a new tenant project
+ * MUST match its region's neighbours, not a single global default. Reads
+ * env directly on every call — no caching, matching getNeonRegionIdForRegion.
+ */
+export function getNeonPgVersionForRegion(region: string): number {
+  const raw = process.env[envKey('NEON_PG_VERSION', region)];
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return config.neon.pgVersion;
+}
+
+/**
+ * Is project-per-app provisioning enabled for `region`?
+ *
+ * Staged rollout: the regions are not equivalent (different Neon PG majors,
+ * and one may be closed to new provisioning), so the flag must be flippable
+ * one region at a time rather than globally.
+ *
+ * `BUTTERBASE_PROJECT_PER_TENANT_<REGION>` — when set to a non-empty,
+ * non-whitespace value — DECIDES, in both directions: `'true'` enables, any
+ * other non-empty value disables even if the global flag is on. It is an
+ * override, not an OR. When unset, OR set to `''`/whitespace-only, we fall
+ * back to the global `config.neon.projectPerTenant`.
+ *
+ * The empty-string case matters operationally: a Fly secret declared as
+ * `BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1=` (no value), or a bare
+ * `- BUTTERBASE_PROJECT_PER_TENANT_US_EAST_1` line in docker-compose, is
+ * "set" from the shell's point of view but passes through as `''`. Unlike
+ * the sibling resolvers below (which use truthiness and therefore already
+ * treat `''` as unset), this one cannot use plain truthiness — truthiness
+ * can't express an explicit `false` override. So it special-cases blank
+ * strings to fall back instead of silently resolving to `false` and
+ * disabling a region the global flag had enabled.
+ *
+ * Reads env on every call — no caching, matching getNeonRegionIdForRegion.
+ *
+ * Provisioning paths only. Teardown deliberately discriminates on the app's
+ * stored `neon_project_id`, because the flag can change between an app's
+ * provision and its deletion.
+ */
+export function isProjectPerTenantForRegion(region: string): boolean {
+  const raw = process.env[envKey('BUTTERBASE_PROJECT_PER_TENANT', region)];
+  if (raw !== undefined && raw.trim() !== '') return raw === 'true';
+  return config.neon.projectPerTenant;
 }
 
 export function assertNeonProjectsConfig(): void {

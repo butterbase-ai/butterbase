@@ -1,0 +1,17 @@
+{
+  "name": "auto-reply-worker",
+  "description": "Internal worker. Routes incoming customer messages: precheck → classify every turn → autonomy lookup → if force_escalate, dispatch + reassure customer; else single LLM reply. Syncs the substrate ticket artifact after every state change. Pushes to widget via ctx.invokeDO.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "none",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "envKeys": ["BUTTERBASE_API_KEY", "SUBSTRATE_OUTBOX_SECRET"]
+}

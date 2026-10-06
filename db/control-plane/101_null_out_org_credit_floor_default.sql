@@ -1,0 +1,27 @@
+-- @scope: platform
+-- 101: SUPERSEDED — intentionally a no-op. Do not add statements to this file.
+--
+-- This file used to hold the post-deploy half of the credit_floor_usd split:
+-- `ALTER TABLE organizations ALTER COLUMN credit_floor_usd DROP DEFAULT` plus
+-- the whole-table `UPDATE organizations SET credit_floor_usd = NULL WHERE
+-- credit_floor_usd = 0`. It was neutralised for two reasons:
+--
+-- 1. It had already been recorded in `_migrations` in at least one
+--    environment (local dev). The runner skips by FILENAME, so any further
+--    edit to this file can never reach those environments — its content is
+--    unreachable and therefore untrustworthy as a description of what a DB
+--    actually contains. The post-deploy work now lives in 103 and 104, two
+--    filenames that have never been recorded anywhere.
+-- 2. Leaving destructive post-deploy SQL under a number that sorts BEFORE the
+--    102 repair meant a fresh DB would null the column out and then have it
+--    repaired, churning a whole-table UPDATE for nothing.
+--
+-- Kept as a file (rather than deleted) so environments that have NOT recorded
+-- it still get a `_migrations` row, keeping the applied-migration sequence
+-- contiguous and comparable across environments.
+--
+-- Current ordering: 098 → 099 → 100 → 101 (this no-op) → 102, then DEPLOY the
+-- COALESCE-reading code, then 103 → 104. See 104's header for the rollback
+-- procedure.
+
+SELECT 1 WHERE false;

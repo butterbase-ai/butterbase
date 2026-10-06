@@ -1,0 +1,23 @@
+{
+  "name": "admin-autonomy",
+  "description": "Authenticated admin CRUD for autonomy_settings (PK is text, not UUID, so the auto-REST PATCH route can't handle it).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required",
+        "path": "/admin-autonomy",
+        "method": "POST"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-23T17:08:46.581Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

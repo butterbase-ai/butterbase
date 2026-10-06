@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="butterbase CRM">
+  <title>butterbase CRM</title>
+
+  <!-- Seal: charcoal ink rounded square -->
+  <rect x="0" y="0" width="64" height="64" rx="14" fill="#18181b"/>
+
+  <!-- Lowercase serif 'b' in paper cream — matches the 'butter' word in the sidebar wordmark -->
+  <text
+    x="32" y="50"
+    text-anchor="middle"
+    font-family="'Fraunces', 'Cormorant Garamond', Georgia, 'Times New Roman', serif"
+    font-weight="600"
+    font-size="50"
+    fill="#F6F2EA"
+    style="font-feature-settings:'kern' on;"
+  >b</text>
+
+  <!-- Butter-gold ledger line: nods to 'customer ledger' tagline -->
+  <rect x="16" y="54" width="32" height="2" rx="1" fill="#E8A93C"/>
+</svg>

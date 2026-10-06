@@ -12,18 +12,25 @@ import { requireUserId } from '../utils/require-auth.js';
 import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
+import { resolveMarkupPct } from '../services/ai-router/special-pricing.js';
+import { applyMarkup } from '../services/ai-router/markup.js';
 import {
   chatCompletionRequestSchema,
   embeddingRequestSchema,
+  decisionRequestSchema,
 } from '../services/ai-router/schemas.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { getRedisClient } from '../services/redis.js';
-import { routeChatCompletion, routeEmbedding, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
+import { routeChatCompletion, routeEmbedding, routeDecision, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
+import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
+import { AdapterError } from '../services/ai-router/adapters/types.js';
+import { upstreamReason } from '../services/ai-router/upstream-reason.js';
+import { AI_BODY_LIMIT_BYTES } from '../services/ai-router/body-limit.js';
 import type { RouterAdapter } from '../services/ai-router/adapters/types.js';
 import type { RouterName } from '../services/ai-router/normalize.js';
 
@@ -67,9 +74,17 @@ async function getAppDefaultModel(runtimePool: pg.Pool, appId: string): Promise<
   return r.rows[0].ai_config?.defaultModel ?? null;
 }
 
+async function getAppDecisionModel(runtimePool: pg.Pool, appId: string): Promise<string | null> {
+  const r = await runtimePool.query<{ ai_config: { defaultDecisionModel?: string } | null }>(
+    `SELECT ai_config FROM apps WHERE id = $1`,
+    [appId]
+  );
+  return r.rows[0]?.ai_config?.defaultDecisionModel ?? null;
+}
+
 async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
   const m = new Map<RouterName, RouterAdapter>();
-  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey }));
+  if (config.aiRouter.openrouterApiKey) m.set('openrouter', openrouterAdapter({ apiKey: config.aiRouter.openrouterApiKey, decisionsUrl: config.aiRouter.openrouterDecisionsUrl }));
   try {
     // @ts-expect-error — overlay path resolved at runtime
     const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
@@ -86,6 +101,10 @@ async function buildAdapters(): Promise<Map<RouterName, RouterAdapter>> {
       apiKey: config.aiRouter.providerTertiaryApiKey,
       baseUrl: config.aiRouter.providerTertiaryBaseUrl,
     }));
+    if (config.aiRouter.providerQuaternaryApiKey) m.set('provider-quaternary', overlay.providerQuaternaryAdapter({
+      apiKey: config.aiRouter.providerQuaternaryApiKey,
+      baseUrl: config.aiRouter.providerQuaternaryBaseUrl,
+    }));
   } catch { /* OSS mode: only openrouter is available */ }
   return m;
 }
@@ -95,6 +114,7 @@ const aiConfigSchema = z.object({
   byokKey: z.string().optional(),
   maxTokensPerRequest: z.number().int().min(1).max(100000).optional(),
   allowedModels: z.array(z.string()).optional(),
+  defaultDecisionModel: z.string().optional(),
 });
 
 // App-scoped routes default `model` from app config / platform default; loosen
@@ -105,6 +125,10 @@ const chatCompletionSchema = chatCompletionRequestSchema.extend({
 const embeddingSchema = embeddingRequestSchema.extend({
   model: z.string().optional(),
 });
+
+const decideSchema = decisionRequestSchema.extend({ model: z.string().optional() });
+
+const MODALITIES = ['chat', 'embedding', 'image', 'video', 'audio', 'decisions'] as const;
 
 export async function aiConfigRoutes(app: FastifyInstance) {
   const adapters = await buildAdapters();
@@ -278,13 +302,16 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         }
 
 
+        const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
+
         const result = await routeChatCompletion(
           {
             platformPool: app.controlDb,
             runtimePool,
             redis: getRedisClient(),
             adapters,
-            markupPct: config.aiRouter.markupPct,
+            markupPct,
+            markupSource,
             appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
@@ -340,8 +367,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         return reply.code(402).send({
           error: 'insufficient_credits',
           code: 'INSUFFICIENT_CREDITS',
-          required_usd: error.requiredUsd,
-          available_usd: error.availableUsd,
+          ...insufficientCreditsFields(error),
           monthly_allowance_usd: ar.monthlyAllowanceUsd,
           credits_usd: ar.topupUsd,
           auto_refill_enabled: ar.enabled,
@@ -353,7 +379,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         // Public response uses a generic code/message so we don't reveal which
         // upstream providers we use or that we run a fan-out router.
         app.log.warn({ err: error, attempted: error.attempted, internalCode: error.code }, 'Model request failed');
-        const publicCode = error.code === 'MODEL_NOT_FOUND' ? 'MODEL_NOT_FOUND' : 'MODEL_UNAVAILABLE';
+        const publicCode = error.code === 'MODEL_NOT_FOUND' || error.code === 'WRONG_MODALITY' ? error.code : 'MODEL_UNAVAILABLE';
         return reply.code(error.statusCode).send({
           error: error.message,
           code: publicCode,
@@ -403,13 +429,16 @@ export async function aiConfigRoutes(app: FastifyInstance) {
           });
         }
 
+        const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
+
         const result = await routeEmbedding(
           {
             platformPool: app.controlDb,
             runtimePool,
             redis: getRedisClient(),
             adapters,
-            markupPct: config.aiRouter.markupPct,
+            markupPct,
+            markupSource,
             appId, organizationId, userId: ownerId, region,
           },
           { ...body, model: modelResolved }
@@ -435,7 +464,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         }));
         return reply.code(402).send({
           error: 'insufficient_credits', code: 'INSUFFICIENT_CREDITS',
-          required_usd: error.requiredUsd, available_usd: error.availableUsd,
+          ...insufficientCreditsFields(error),
           monthly_allowance_usd: ar.monthlyAllowanceUsd,
           credits_usd: ar.topupUsd,
           auto_refill_enabled: ar.enabled,
@@ -444,7 +473,7 @@ export async function aiConfigRoutes(app: FastifyInstance) {
       }
       if (error instanceof RouterError) {
         app.log.warn({ err: error, attempted: error.attempted, internalCode: error.code }, 'Model request failed');
-        const publicCode = error.code === 'MODEL_NOT_FOUND' ? 'MODEL_NOT_FOUND' : 'MODEL_UNAVAILABLE';
+        const publicCode = error.code === 'MODEL_NOT_FOUND' || error.code === 'WRONG_MODALITY' ? error.code : 'MODEL_UNAVAILABLE';
         return reply.code(error.statusCode).send({
           error: error.message, code: publicCode,
         });
@@ -461,30 +490,117 @@ export async function aiConfigRoutes(app: FastifyInstance) {
     }
   });
 
+  // Decision models (typed choice / noul / score) — OpenRouter Decisions API pass-through.
+  app.post('/v1/:appId/ai/decide', { bodyLimit: AI_BODY_LIMIT_BYTES }, async (request, reply) => {
+    const { appId } = request.params as { appId: string };
+    const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+    if (!authz.ok) return reply.code(authz.status).send(authz.body);
+    const ownerId = authz.ownerId;
+
+    const runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+    const organizationId = await resolveOrgFromApp(runtimePool, appId);
+
+    try {
+      if (!config.aiRouter.enabled) {
+        return reply.code(501).send({ error: 'Decision models require the AI router', code: 'NOT_SUPPORTED' });
+      }
+      const body = decideSchema.parse(request.body);
+      const region = await resolveAppHomeRegion(app.controlDb, appId);
+      const modelResolved = body.model
+        || (await getAppDecisionModel(runtimePool, appId))
+        || config.aiRouter.platformDefaultDecisionModel;
+
+      const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, modelResolved);
+      const result = await routeDecision(
+        {
+          platformPool: app.controlDb, runtimePool, redis: getRedisClient(), adapters,
+          markupPct, markupSource, appId, organizationId, userId: ownerId, region,
+        },
+        { ...body, model: modelResolved },
+      );
+      return reply.code(result.status).send(result.body);
+    } catch (error) {
+      if (error instanceof InsufficientCreditsError) {
+        const ar = await readAutoRefillState(app.controlDb, organizationId).catch(() => ({
+          enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
+        }));
+        return reply.code(402).send({
+          error: 'insufficient_credits', code: 'INSUFFICIENT_CREDITS',
+          ...insufficientCreditsFields(error),
+          monthly_allowance_usd: ar.monthlyAllowanceUsd, credits_usd: ar.topupUsd,
+          auto_refill_enabled: ar.enabled, auto_refill_amount_usd: ar.amountUsd,
+        });
+      }
+      if (error instanceof RouterError) {
+        app.log.warn({ err: error, attempted: error.attempted, internalCode: error.code }, 'Decision request failed');
+        const publicCode = error.code === 'MODEL_NOT_FOUND' || error.code === 'WRONG_MODALITY' ? error.code : 'MODEL_UNAVAILABLE';
+        return reply.code(error.statusCode).send({ error: error.message, code: publicCode });
+      }
+      if (error instanceof AdapterError && error.kind === 'bad_request') {
+        return reply.code(400).send({ error: upstreamReason(error.message), code: 'UPSTREAM_REJECTED' });
+      }
+      if (error instanceof AdapterError) {
+        app.log.warn({ err: error, kind: error.kind }, 'Decision upstream error');
+        return reply.code(502).send({ error: 'Model is temporarily unavailable. Please try again.', code: 'MODEL_UNAVAILABLE' });
+      }
+      if (error instanceof z.ZodError) {
+        return reply.code(400).send({ error: 'Invalid request', details: error.errors });
+      }
+      if (isHttpError(error)) throw error;
+      app.log.error({ err: error }, 'Failed to process decision request');
+      return reply.code(500).send(apiError(error, 'Failed to process decision request'));
+    }
+  });
+
   // List available AI models
   app.get('/v1/:appId/ai/models', async (request, reply) => {
     try {
       // ---- v2 path: multi-router catalog ----
       if (config.aiRouter.enabled) {
+        const { appId } = request.params as { appId: string };
+        const authz = await authorizeAppAiCall(app.controlDb, appId, request);
+        if (!authz.ok) return reply.code(authz.status).send(authz.body);
+        let runtimePool;
+        try {
+          runtimePool = await getRuntimeDbForApp(app.controlDb, appId);
+        } catch (err) {
+          if (err instanceof AppNotFoundError) return reply.code(404).send({ error: 'app_not_found' });
+          throw err;
+        }
+        const organizationId = await resolveOrgFromApp(runtimePool, appId);
+        const { modality: modalityFilter } = request.query as { modality?: string };
+        if (modalityFilter !== undefined && !(MODALITIES as readonly string[]).includes(modalityFilter)) {
+          return reply.code(400).send({
+            error: `Unknown modality "${modalityFilter}". Use one of: ${MODALITIES.join(', ')}.`,
+            code: 'INVALID_MODALITY',
+          });
+        }
+
         const redis = getRedisClient();
         const ids = await listCatalogModels(redis);
         const entries = await Promise.all(ids.map(id => readCatalogEntry(redis, id)));
-        const models = entries.filter(Boolean).map(e => {
+        // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
+        const modalityOf = (e: NonNullable<(typeof entries)[number]>) => e.routers[0]?.modality ?? 'chat';
+        // Filter before pricing so a filtered request doesn't do a markup lookup per catalog model.
+        const selected = entries.filter(Boolean).filter(e => !modalityFilter || modalityOf(e!) === modalityFilter);
+        const models = await Promise.all(selected.map(async e => {
           const firstRouter = e!.routers.length > 0 ? e!.routers[0] : null;
-          // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
-          const modality = firstRouter?.modality ?? 'chat';
+          const modality = modalityOf(e!);
           // For token-priced modalities (chat, embedding), expose token pricing
-          const isTokenPriced = modality === 'chat' || modality === 'embedding';
+          const isTokenPriced = modality === 'chat' || modality === 'embedding' || modality === 'decisions';
+          const { pct } = await resolveMarkupPct(app.controlDb, organizationId, e!.canonicalId);
           return {
             id: e!.canonicalId,
             name: e!.displayName,
             context_length: e!.routers.length > 0 ? Math.max(...e!.routers.map(r => r.contextLength)) : 0,
             modality,
-            prompt_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.promptPricePerMtok : null,
-            completion_price_per_mtok: isTokenPriced && firstRouter ? firstRouter.completionPricePerMtok : null,
+            prompt_price_per_mtok: isTokenPriced && firstRouter
+              ? applyMarkup(firstRouter.promptPricePerMtok, pct) : null,
+            completion_price_per_mtok: isTokenPriced && firstRouter
+              ? applyMarkup(firstRouter.completionPricePerMtok, pct) : null,
             raw_pricing: !isTokenPriced && firstRouter ? firstRouter.rawPricing ?? null : null,
           };
-        });
+        }));
         return { models };
       }
 

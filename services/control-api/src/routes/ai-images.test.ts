@@ -146,15 +146,18 @@ describe('handleImageError', () => {
     const app = makeApp({ rows: [dbRow] });
     const reply = makeReply();
 
-    const error = new InsufficientCreditsError(0.05, 0.01);
+    const error = new InsufficientCreditsError({ balanceUsd: 0.01, floorUsd: 0.05 });
     await handleImageError(app, reply, 'org-1', error);
 
     expect(reply._sent.code).toBe(402);
     const body = reply._sent.body as Record<string, unknown>;
     expect(body.error).toBe('insufficient_credits');
     expect(body.code).toBe('INSUFFICIENT_CREDITS');
-    expect(body.required_usd).toBe(0.05);
+    expect(body.credit_floor_usd).toBe(0.05);
+    expect(body.balance_usd).toBe(0.01);
+    // Deprecated alias for balance_usd, kept for one release for old consumers.
     expect(body.available_usd).toBe(0.01);
+    expect(body).not.toHaveProperty('required_usd');
     expect(body.monthly_allowance_usd).toBe(50);
     expect(body.credits_usd).toBe(5.5);
     expect(body.auto_refill_enabled).toBe(true);

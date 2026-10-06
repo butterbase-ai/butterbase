@@ -100,25 +100,31 @@ export class AppResolver {
     }
     const row = result.rows[0];
 
-    // STRICT PATH: when the caller's active org is known (bb_sk_* keys always
-    // supply it; JWT sessions may set x-organization-id), the app MUST live
-    // in that exact org. This blocks the cross-org membership escalation
-    // where a personal-org key could reach team-org apps the user happens to
-    // belong to. Only exception is legacy apps with NULL organization_id
-    // (pre-backfill), which fall through to the ownership check.
-    if (activeOrganizationId && row.organization_id) {
-      if (row.organization_id !== activeOrganizationId) {
-        throw new AppNotFoundError(appId);
-      }
-      // App is in caller's active org — access granted.
+    // Auth resolves in this order:
+    //   1. app in caller's active org  → allow (fast path for bb_sk_* keys)
+    //   2. caller is the app's owner   → allow
+    //   3. caller is a member of the app's org → allow
+    //   4. otherwise → 404
+    //
+    // Rationale for step 3 even when activeOrganizationId is set: an unscoped
+    // JWT session (no x-organization-id) already sees every app in every org
+    // the user belongs to via steps 2/3. Denying the same user when they call
+    // with a personal-org bb_sk_* key or a JWT with x-organization-id set to a
+    // different org creates an inconsistency where credential type — not
+    // identity — decides access. It also creates chicken-and-egg pain: an
+    // MCP session cannot discover team-org app ids without switching org
+    // context, but the strict-scoped list can't return them either.
+    //
+    // Scoped API keys (bb_sk_* with a restricted scope) still gate WRITES
+    // through the org_scoping model documented in the api-key service; this
+    // resolver decides which app a caller can address, not what they can do.
+
+    if (activeOrganizationId && row.organization_id && row.organization_id === activeOrganizationId) {
       return row;
     }
 
-    // LEGACY / FALLBACK PATH — no active-org signal on the request.
-    // Owner always passes.
     if (row.owner_id === userId) return row;
 
-    // Non-owner: must be a member of the app's org (control plane).
     if (row.organization_id) {
       const member = await controlPool.query(
         `SELECT 1 FROM organization_members

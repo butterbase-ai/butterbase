@@ -1,0 +1,26 @@
+{
+  "name": "delete-docs-source",
+  "description": "Admin-only. Deletes a docs_sources row AND its corresponding RAG documents (tracked via rag_document_ids — F2). No more orphaned chunks.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-23T01:49:18.077Z",
+  "envKeys": [
+    "BUTTERBASE_APP_ID",
+    "BUTTERBASE_API_URL",
+    "RAG_COLLECTION",
+    "BUTTERBASE_API_KEY"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

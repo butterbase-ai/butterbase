@@ -1,0 +1,20 @@
+{
+  "name": "run-comment-discovery",
+  "description": "Cron-driven comment discovery for Reddit and X: searches posts mentioning workspace competitors, AI-verifies, queues drafts for review every 6 hours.",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "0 */6 * * *"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 120000,
+  "memoryLimitMb": 256,
+  "deployedAt": "2026-07-15T15:11:02.683Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

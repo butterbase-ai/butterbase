@@ -1,0 +1,15 @@
+# Patterns here ADD to the defaults (.git/, node_modules/, dist/, .next/, .turbo/, .DS_Store, .butterbase/).
+# .gitignore patterns also apply. Use `!path` to un-ignore.
+
+# Personal env files (clones get .env.example only)
+.env.local
+.env.*.local
+frontend/.env.local
+
+# Build artifacts that escape the default ignore (zip at project root)
+frontend.zip
+*.zip
+
+# OS / editor noise
+.vscode/
+.idea/

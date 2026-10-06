@@ -73,7 +73,7 @@ This command:
 - Uploads to your app on Butterbase
 - Starts the deployment automatically
 
-Environment variables are set via the dashboard or the `set_frontend_env` MCP tool and take effect on the next deploy. There is no `--env` flag on the CLI.
+Environment variables are set via the dashboard or `manage_frontend` MCP tool (action `set_env`) and take effect on the next deploy. There is no `--env` flag on the CLI.
 
 ### Option 2: MCP
 
@@ -244,7 +244,7 @@ module.exports = nextConfig;
 
 ## Environment variables
 
-Set environment variables via the dashboard or the `set_frontend_env` MCP tool — they take effect on the next deploy. There is no `--env` flag on the CLI.
+Set environment variables via the dashboard or `manage_frontend` MCP tool (action `set_env`) — they take effect on the next deploy. There is no `--env` flag on the CLI.
 
 Alternatively, use the REST API directly:
 

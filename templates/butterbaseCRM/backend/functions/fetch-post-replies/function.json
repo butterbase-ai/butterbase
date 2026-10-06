@@ -1,0 +1,20 @@
+{
+  "name": "fetch-post-replies",
+  "description": "Cron: fetches replies/comments on Reddit posts sent via the app and upserts them into social_reply_inbox.",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "*/30 * * * *"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 120000,
+  "memoryLimitMb": 256,
+  "deployedAt": "2026-07-16T02:47:03.676Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "invite-teammate",
+  "description": "Admin-only. Adds an email (or domain) to app_allowlist with the specified default_role. Optionally sends invite email via Composio Gmail if the inviter has Gmail connected (best-effort, fire-and-forget).",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T12:46:13.622Z",
+  "envKeys": [],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

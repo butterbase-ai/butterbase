@@ -1,0 +1,228 @@
+{
+  "app_id": "app_md5001nugpan",
+  "tables": [
+    {
+      "table_name": "activities",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:36.717Z",
+      "updated_at": "2026-07-13T14:11:36.717Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "agent_messages",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.206Z",
+      "updated_at": "2026-07-13T14:11:37.206Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "agent_proposals",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.275Z",
+      "updated_at": "2026-07-13T14:11:37.275Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "attachments",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:36.787Z",
+      "updated_at": "2026-07-13T14:11:36.787Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "campaign_lists",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.481Z",
+      "updated_at": "2026-07-13T14:11:37.481Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "campaign_sends",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.412Z",
+      "updated_at": "2026-07-13T14:11:37.412Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "campaigns",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.344Z",
+      "updated_at": "2026-07-13T14:11:37.344Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "companies",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:36.856Z",
+      "updated_at": "2026-07-13T14:11:36.856Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "custom_field_values",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.688Z",
+      "updated_at": "2026-07-13T14:11:37.688Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "custom_fields",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.619Z",
+      "updated_at": "2026-07-13T14:11:37.619Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "deals",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:36.926Z",
+      "updated_at": "2026-07-13T14:11:36.926Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "meetings",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.000Z",
+      "updated_at": "2026-07-13T14:11:37.000Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "notes",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.068Z",
+      "updated_at": "2026-07-13T14:11:37.068Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "people",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.137Z",
+      "updated_at": "2026-07-13T14:11:37.137Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "saved_views",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.550Z",
+      "updated_at": "2026-07-13T14:11:37.550Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "social_post_sends",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.826Z",
+      "updated_at": "2026-07-13T14:11:37.826Z",
+      "trigger_installed": false,
+      "drift": true
+    },
+    {
+      "table_name": "social_posts",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-07-13T14:11:37.757Z",
+      "updated_at": "2026-07-13T14:11:37.757Z",
+      "trigger_installed": false,
+      "drift": true
+    }
+  ],
+  "active_connection": true,
+  "websocket_url": "wss://api.butterbase.ai/v1/app_md5001nugpan/realtime"
+}

@@ -1,0 +1,306 @@
+@import url('@fontsource-variable/geist/index.css');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ──────────────────────────────────────────────────────────────
+   Butterbase CRM — Editorial Warm-Paper theme
+   ────────────────────────────────────────────────────────────── */
+
+@layer base {
+  :root {
+    /* shadcn tokens — warm cream paper */
+    --background: 38 38% 96%;        /* #F6F2EA paper */
+    --foreground: 240 10% 10%;       /* ink */
+
+    --card: 36 33% 98%;              /* slightly brighter card */
+    --card-foreground: 240 10% 10%;
+
+    --popover: 36 33% 98%;
+    --popover-foreground: 240 10% 10%;
+
+    --primary: 240 10% 10%;          /* ink */
+    --primary-foreground: 38 38% 96%;
+
+    --secondary: 36 25% 90%;
+    --secondary-foreground: 240 10% 18%;
+
+    --muted: 36 22% 92%;
+    --muted-foreground: 240 4% 42%;
+
+    --accent: 38 78% 56%;            /* butter yellow */
+    --accent-foreground: 240 10% 10%;
+
+    --destructive: 6 76% 52%;        /* coral */
+    --destructive-foreground: 38 38% 96%;
+
+    --border: 36 18% 84%;
+    --input: 36 18% 84%;
+    --ring: 38 78% 56%;
+
+    --radius: 0.5rem;
+
+    /* extended palette */
+    --butter: 38 78% 56%;
+    --butter-soft: 38 88% 88%;
+    --coral: 6 76% 52%;
+    --sage: 145 22% 42%;
+    --ink: 240 10% 10%;
+    --paper: 38 38% 96%;
+    --rule: 36 14% 78%;
+
+    /* type stack */
+    --font-display: 'Fraunces', 'Instrument Serif', ui-serif, Georgia, serif;
+    --font-editorial: 'Instrument Serif', 'Fraunces', ui-serif, Georgia, serif;
+    --font-sans: 'Geist Variable', 'Geist', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  .dark {
+    --background: 240 10% 6%;        /* near-black ink */
+    --foreground: 38 30% 92%;
+
+    --card: 240 10% 9%;
+    --card-foreground: 38 30% 92%;
+
+    --popover: 240 10% 9%;
+    --popover-foreground: 38 30% 92%;
+
+    --primary: 38 30% 92%;
+    --primary-foreground: 240 10% 6%;
+
+    --secondary: 240 8% 14%;
+    --secondary-foreground: 38 30% 92%;
+
+    --muted: 240 8% 12%;
+    --muted-foreground: 240 6% 60%;
+
+    --accent: 38 88% 62%;
+    --accent-foreground: 240 10% 6%;
+
+    --destructive: 6 80% 60%;
+    --destructive-foreground: 240 10% 6%;
+
+    --border: 240 6% 18%;
+    --input: 240 6% 18%;
+    --ring: 38 88% 62%;
+
+    --butter: 38 88% 62%;
+    --butter-soft: 38 60% 22%;
+    --coral: 6 80% 60%;
+    --sage: 145 28% 60%;
+    --ink: 38 30% 92%;
+    --paper: 240 10% 6%;
+    --rule: 240 6% 22%;
+  }
+
+  /* clear out legacy tokens & root constraints */
+  html, body {
+    margin: 0;
+    padding: 0;
+  }
+
+  #root {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    text-align: left;
+    border-inline: 0;
+    min-height: 100svh;
+    display: block;
+    box-sizing: border-box;
+  }
+
+  * { @apply border-border; }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    letter-spacing: -0.005em;
+  }
+
+  /* Reset legacy heading sizes */
+  h1, h2, h3, h4 {
+    font-family: inherit;
+    font-weight: inherit;
+    color: inherit;
+    margin: 0;
+    letter-spacing: normal;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: hsl(var(--muted));
+    color: hsl(var(--foreground));
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Editorial primitives
+   ────────────────────────────────────────────────────────────── */
+
+@layer components {
+  .font-display {
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
+    font-variation-settings: 'opsz' 144, 'SOFT' 30;
+    letter-spacing: -0.02em;
+  }
+
+  .font-editorial {
+    font-family: var(--font-editorial);
+    font-style: italic;
+    letter-spacing: -0.01em;
+  }
+
+  .font-mono { font-family: var(--font-mono); }
+
+  /* uppercase eyebrow label */
+  .eyebrow {
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+
+  /* dotted page rule */
+  .rule-dotted {
+    background-image: radial-gradient(circle, hsl(var(--rule)) 1px, transparent 1.2px);
+    background-size: 8px 1px;
+    background-repeat: repeat-x;
+    background-position: left center;
+    height: 1px;
+  }
+
+  /* warm paper grain (very subtle) */
+  .paper-grain {
+    position: relative;
+    isolation: isolate;
+  }
+  .paper-grain::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    opacity: 0.5;
+    background-image:
+      radial-gradient(hsl(var(--ink) / 0.025) 1px, transparent 1px);
+    background-size: 3px 3px;
+    mix-blend-mode: multiply;
+  }
+  .dark .paper-grain::before {
+    opacity: 0.6;
+    background-image:
+      radial-gradient(hsl(0 0% 100% / 0.025) 1px, transparent 1px);
+    mix-blend-mode: screen;
+  }
+
+  /* subtle butter underline-on-hover for nav etc. */
+  .butter-mark {
+    background-image: linear-gradient(
+      to right,
+      hsl(var(--butter)) 0%,
+      hsl(var(--butter)) 100%
+    );
+    background-position: 0 100%;
+    background-size: 100% 2px;
+    background-repeat: no-repeat;
+  }
+
+  /* number ticker — tabular nums */
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* bordered "no-shadow" card */
+  .card-flat {
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+  }
+
+  /* stage pill (kanban) */
+  .stage-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px 3px 7px;
+    border-radius: 999px;
+    background: hsl(var(--secondary));
+    color: hsl(var(--secondary-foreground));
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .stage-pill::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.55;
+  }
+
+  /* asymmetric page header */
+  .page-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 1.5rem;
+    padding: 28px 32px 18px;
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  .page-title {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: clamp(34px, 4.2vw, 52px);
+    line-height: 0.95;
+    letter-spacing: -0.035em;
+    color: hsl(var(--foreground));
+  }
+  .page-title em {
+    font-family: var(--font-editorial);
+    font-style: italic;
+    font-weight: 400;
+    color: hsl(var(--butter));
+  }
+}
+
+/* selection */
+::selection {
+  background: hsl(var(--butter) / 0.45);
+  color: hsl(var(--ink));
+}
+
+/* scrollbars (webkit) */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 999px;
+  border: 2px solid hsl(var(--background));
+}
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); }
+
+/* ──────────────────────────────────────────────────────────────
+   Animations
+   ────────────────────────────────────────────────────────────── */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-rise { animation: rise 480ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}

@@ -17,20 +17,18 @@ butterbase functions deploy ./lookup_account.ts \
   --agent-tool-mode read_only \
   --agent-tool-exposed-to developer_only
 
-# 2. Create the agent.
-butterbase agents create \
-  --name support-readonly \
-  --display-name "Support (read-only)" \
-  --default-model anthropic/claude-3.5-haiku \
-  --spec ./agent-spec.json
+# 2. Create the agent (MCP tool manage_agents).
+#    { action: "create", app_id, name: "support-readonly", display_name: "Support (read-only)",
+#      default_model: "anthropic/claude-3.5-haiku", graph_spec: <contents of ./agent-spec.json> }
 ```
 
 ## Run
 
 ```bash
-butterbase agents run support-readonly \
-  --input '{"message": "Why was I charged twice last month?", "email": "user@example.com"}' \
-  --stream
+curl -X POST https://api.butterbase.ai/v1/<app_id>/agents/support-readonly/runs \
+  -H "Authorization: Bearer $BUTTERBASE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"input": {"message": "Why was I charged twice last month?", "email": "user@example.com"}}'
+# Returns 202 {run_id, status}. Poll GET /v1/<app_id>/agents/support-readonly/runs/<run_id>/events.json
 ```
 
 ## What you should see

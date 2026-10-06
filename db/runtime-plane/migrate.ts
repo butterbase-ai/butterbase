@@ -1,7 +1,7 @@
 import pg from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -136,7 +136,10 @@ async function migrate(): Promise<void> {
   console.log('Runtime migrations complete across all regions.');
 }
 
-const isDirectInvocation = import.meta.url === `file://${process.argv[1]}`;
+// pathToFileURL: `file://${argv[1]}` never matches on Windows, so this runner
+// silently applied nothing there.
+const isDirectInvocation =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectInvocation) {
   migrate().catch((err) => {
     console.error('Migration error:', err);

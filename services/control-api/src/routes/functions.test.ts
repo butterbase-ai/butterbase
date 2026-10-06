@@ -48,6 +48,7 @@ import Fastify from 'fastify';
 import { registerFunctionRoutes } from './functions.js';
 import { registerAppEnvRoutes } from './app-env.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
+import { decrypt } from '../services/crypto.js';
 
 const appId = 'app_123';
 const authHeaders = { authorization: 'Bearer test-token' };
@@ -137,6 +138,13 @@ describe('app-level env vars', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('PATCH accepts BUTTERBASE_API_KEY (user-supplied convention key)', async () => {
+    const res = await app.inject({ method: 'PATCH', url: `/v1/${appId}/env`, headers: authHeaders,
+      payload: { envVars: { BUTTERBASE_API_KEY: 'bb_sk_x' } } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().updatedKeys).toEqual(['BUTTERBASE_API_KEY']);
+  });
+
   it('PATCH rejects empty envVars body', async () => {
     const res = await app.inject({ method: 'PATCH', url: `/v1/${appId}/env`, headers: authHeaders,
       payload: { envVars: {} } });
@@ -157,6 +165,236 @@ describe('app-level env vars', () => {
     const res = await app.inject({ method: 'GET', url: `/v1/${appId}/env`, headers: authHeaders });
     expect(JSON.stringify(res.json())).not.toContain('plaintext-should-never-leak');
     expect(res.json().keys).toContain('SECRET');
+  });
+});
+
+describe('POST /v1/:appId/functions — envVars merge semantics', () => {
+  let app: FastifyInstance;
+  // In-memory store simulating app_functions rows, keyed by function name.
+  // deleted_at mirrors the real column: pg hands back a Date or null.
+  let functionsStore: Record<string, { id: string; encrypted_env_vars: string | null; deleted_at: Date | null }>;
+  // Every SQL statement issued via `client.query`, in order — lets tests
+  // assert on locking/query shape without re-parsing the store.
+  let queryLog: string[];
+
+  const validCode = 'export async function handler(req, ctx) { return new Response("ok"); }';
+
+  beforeEach(async () => {
+    vi.stubEnv('AUTH_ENCRYPTION_KEY', '00'.repeat(32));
+    functionsStore = {};
+    queryLog = [];
+    app = Fastify();
+    app.decorate('controlDb', {});
+
+    (getRuntimeDbForApp as any).mockImplementation(() => {
+      const clientQuery = vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+        const normalised = sql.replace(/\s+/g, ' ').trim();
+        queryLog.push(normalised);
+        if (normalised === 'BEGIN' || normalised === 'COMMIT' || normalised === 'ROLLBACK') {
+          return Promise.resolve({ rows: [] });
+        }
+        if (normalised.startsWith('SELECT encrypted_env_vars, deleted_at FROM app_functions')) {
+          // Deploy merge read (locks soft-deleted rows too).
+          const name = params[1] as string;
+          const row = functionsStore[name];
+          return Promise.resolve({
+            rows: row ? [{ encrypted_env_vars: row.encrypted_env_vars, deleted_at: row.deleted_at }] : [],
+          });
+        }
+        if (normalised.startsWith('SELECT encrypted_env_vars FROM app_functions')) {
+          // Honour the SQL's own filter, as Postgres would: only a query that
+          // says `deleted_at IS NULL` (PATCH .../env) skips soft-deleted rows.
+          const name = params[1] as string;
+          const row = functionsStore[name];
+          const visible = row && (!normalised.includes('deleted_at IS NULL') || !row.deleted_at);
+          return Promise.resolve({ rows: visible ? [{ encrypted_env_vars: row.encrypted_env_vars }] : [] });
+        }
+        if (normalised.startsWith('UPDATE app_functions SET encrypted_env_vars')) {
+          const name = params[2] as string;
+          functionsStore[name] = { ...functionsStore[name], encrypted_env_vars: params[0] as string };
+          return Promise.resolve({ rows: [{ id: functionsStore[name].id, name, updated_at: new Date() }] });
+        }
+        if (normalised.startsWith('INSERT INTO app_functions')) {
+          const name = params[1] as string;
+          const encVal = (params[4] as string | null) ?? null;
+          const prev = functionsStore[name];
+          const encrypted_env_vars = encVal !== null ? encVal : (prev ? prev.encrypted_env_vars : null);
+          const id = prev?.id ?? `fn_${name}`;
+          functionsStore[name] = { id, encrypted_env_vars, deleted_at: null };
+          return Promise.resolve({ rows: [{ id, name, deployed_at: new Date() }] });
+        }
+        if (normalised.startsWith('DELETE FROM function_triggers')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (normalised.startsWith('INSERT INTO function_triggers')) {
+          return Promise.resolve({ rows: [] });
+        }
+        // GET single function reads via f.* — not exercised here directly.
+        return Promise.resolve({ rows: [] });
+      });
+      return Promise.resolve({
+        connect: () => Promise.resolve({ query: clientQuery, release: vi.fn() }),
+        query: clientQuery,
+      });
+    });
+
+    app.register(registerFunctionRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await app.close();
+  });
+
+  it('merges incoming envVars into existing env by default (incoming keys win)', async () => {
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'merge-test', code: validCode, envVars: { A: '1' } },
+    });
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'merge-test', code: validCode, envVars: { B: '2' } },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const stored = JSON.parse(
+      functionsStore['merge-test'].encrypted_env_vars!.replace('encrypted_', '')
+    );
+    expect(stored).toEqual({ A: '1', B: '2' });
+  });
+
+  it('locks the existing row with FOR UPDATE before merging (prevents lost updates on concurrent redeploys)', async () => {
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'lock-test', code: validCode, envVars: { A: '1' } },
+    });
+    queryLog = [];
+
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'lock-test', code: validCode, envVars: { B: '2' } },
+    });
+
+    const selectQueries = queryLog.filter((q) => q.startsWith('SELECT encrypted_env_vars'));
+    expect(selectQueries).toHaveLength(1);
+    expect(selectQueries[0]).toMatch(/FOR UPDATE$/);
+  });
+
+  it('envVarsReplace:true keeps the old full-replace behavior', async () => {
+    await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'replace-test', code: validCode, envVars: { A: '1' } },
+    });
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'replace-test', code: validCode, envVars: { B: '2' }, envVarsReplace: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const stored = JSON.parse(
+      functionsStore['replace-test'].encrypted_env_vars!.replace('encrypted_', '')
+    );
+    expect(stored).toEqual({ B: '2' });
+  });
+
+  it('rejects reserved BUTTERBASE_* keys on deploy and writes nothing', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'reserved-test', code: validCode, envVars: { BUTTERBASE_FOO: 'x' } },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('BUTTERBASE_FOO');
+    expect(functionsStore['reserved-test']).toBeUndefined();
+  });
+
+  it('recreating a soft-deleted function does not inherit its old env (row still locked)', async () => {
+    functionsStore['gone'] = {
+      id: 'fn_gone',
+      encrypted_env_vars: 'encrypted_{"OLD_SECRET":"s3cret"}',
+      deleted_at: new Date('2026-09-01T00:00:00Z'),
+    };
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'gone', code: validCode, envVars: { NEW_KEY: '1' } },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const stored = JSON.parse(functionsStore['gone'].encrypted_env_vars!.replace('encrypted_', ''));
+    expect(stored).toEqual({ NEW_KEY: '1' });
+    const selectQueries = queryLog.filter((q) => q.startsWith('SELECT encrypted_env_vars'));
+    expect(selectQueries[0]).toMatch(/FOR UPDATE$/);
+  });
+
+  it('logs (ids only, never values) when the existing env blob cannot be decrypted on deploy merge', async () => {
+    functionsStore['bad-blob'] = { id: 'fn_bad', encrypted_env_vars: 'encrypted_corrupt', deleted_at: null };
+    vi.mocked(decrypt).mockImplementationOnce(() => { throw new Error('bad auth tag s3cret'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await app.inject({
+        method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+        payload: { name: 'bad-blob', code: validCode, envVars: { NEW_KEY: 'v4lue' } },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const msg = String(warn.mock.calls[0][0]);
+      expect(msg).toContain(`app_id=${appId}`);
+      expect(msg).toContain('function=bad-blob');
+      expect(msg).not.toContain('v4lue');
+      expect(msg).not.toContain('s3cret');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('logs when the existing env blob cannot be decrypted on PATCH .../env', async () => {
+    functionsStore['bad-patch'] = { id: 'fn_bp', encrypted_env_vars: 'encrypted_corrupt', deleted_at: null };
+    vi.mocked(decrypt).mockImplementationOnce(() => { throw new Error('bad auth tag'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await app.inject({
+        method: 'PATCH', url: `/v1/${appId}/functions/bad-patch/env`, headers: authHeaders,
+        payload: { envVars: { NEW_KEY: 'v4lue' } },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const msg = String(warn.mock.calls[0][0]);
+      expect(msg).toContain(`app_id=${appId}`);
+      expect(msg).toContain('function=bad-patch');
+      expect(msg).not.toContain('v4lue');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('accepts and stores BUTTERBASE_API_KEY on deploy (docs tell users to set it; the runtime never injects it)', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'api-key-test', code: validCode, envVars: { BUTTERBASE_API_KEY: 'bb_sk_x' } },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const stored = JSON.parse(
+      functionsStore['api-key-test'].encrypted_env_vars!.replace('encrypted_', '')
+    );
+    expect(stored).toEqual({ BUTTERBASE_API_KEY: 'bb_sk_x' });
+  });
+
+  it('still rejects runtime-injected BUTTERBASE_APP_ID on deploy', async () => {
+    const res = await app.inject({
+      method: 'POST', url: `/v1/${appId}/functions`, headers: authHeaders,
+      payload: { name: 'app-id-test', code: validCode, envVars: { BUTTERBASE_APP_ID: 'x' } },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('BUTTERBASE_APP_ID');
+    expect(functionsStore['app-id-test']).toBeUndefined();
   });
 });
 

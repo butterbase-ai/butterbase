@@ -1,0 +1,85 @@
+{
+  "app_id": "app_0ycj4ad7odud",
+  "tables": [
+    {
+      "table_name": "agent_proposals",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-06-18T13:21:30.922Z",
+      "updated_at": "2026-06-18T13:21:30.922Z",
+      "trigger_installed": true,
+      "drift": false
+    },
+    {
+      "table_name": "diagnoses",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-06-18T13:21:30.934Z",
+      "updated_at": "2026-06-18T13:21:30.934Z",
+      "trigger_installed": true,
+      "drift": false
+    },
+    {
+      "table_name": "escalations",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-06-18T13:21:30.943Z",
+      "updated_at": "2026-06-18T13:21:30.943Z",
+      "trigger_installed": true,
+      "drift": false
+    },
+    {
+      "table_name": "pattern_signals",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-06-18T13:21:30.953Z",
+      "updated_at": "2026-06-18T13:21:30.953Z",
+      "trigger_installed": true,
+      "drift": false
+    },
+    {
+      "table_name": "support_messages",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-06-18T13:21:30.904Z",
+      "updated_at": "2026-06-18T13:21:30.904Z",
+      "trigger_installed": true,
+      "drift": false
+    },
+    {
+      "table_name": "support_tickets",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "enabled": true,
+      "created_at": "2026-06-18T13:21:30.881Z",
+      "updated_at": "2026-06-18T13:21:30.881Z",
+      "trigger_installed": true,
+      "drift": false
+    }
+  ],
+  "active_connection": true,
+  "websocket_url": "wss://api.butterbase.ai/v1/app_0ycj4ad7odud/realtime"
+}

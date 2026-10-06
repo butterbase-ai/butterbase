@@ -45,6 +45,14 @@ export { AdminPlatformBillingClient } from './admin/platform-billing-client.js';
 // Realtime client
 export { RealtimeClient } from './realtime/realtime-client.js';
 
+// Substrate stream client
+export type {
+  SubstrateChangeEvent,
+  SubstrateStreamOptions,
+  SubstrateStreamSubscription,
+} from './substrate/types.js';
+export { buildSubstrateStreamUrl } from './substrate/substrate-client.js';
+
 // Error types
 export {
   ButterbaseError,
@@ -114,6 +122,7 @@ export type {
   // AI types
   ChatMessage, ChatOptions, ChatCompletion, ChatStreamChunk, AiConfig, AiUsage,
   EmbeddingRequest, EmbeddingResponse, EmbeddingVector, AiModel,
+  AiModality, DecisionQuestion, DecisionAnswer, DecisionRequest, DecisionResponse,
 
   // Billing types
   Plan, CreatePlanParams, Product, CreateProductParams,

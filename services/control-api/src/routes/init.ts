@@ -7,10 +7,17 @@ import { requireUserId } from '../utils/require-auth.js';
 import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { getDataProjectIdForRegion } from '../services/neon-projects.js';
-import { addOrgAppIndex, removeOrgAppIndex, listUserApps } from '../services/org-app-index.js';
+import {
+  parseRegionList,
+  getProvisionAllowedRegions,
+  resolveProvisionRegion,
+} from '../services/provision-region.js';
+import { addOrgAppIndex, removeOrgAppIndex, listAppsForUserAcrossOrgs } from '../services/org-app-index.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { checkProjectQuota } from '../services/project-quota.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
+import { teardownAppStorage } from '../services/app-storage-teardown.js';
+import { deleteObject as deleteStorageObject } from '../services/s3.js';
 
 const initSchema = {
   body: {
@@ -45,23 +52,25 @@ const initSchema = {
 export async function initRoutes(app: FastifyInstance) {
   app.get('/apps', async (request) => {
     const ownerId = requireUserId(request);
-    // Scope to the caller's active org (Plan 07 org-scoped auth):
-    //   - bb_sk_* API keys carry their own organization_id → that's the scope.
-    //   - JWT callers may set x-organization-id (populated on request.auth) to
-    //     pick an org they belong to; otherwise fall back to the personal org.
-    // Cross-org apps are only visible with a key/session scoped to that org —
-    // this preserves the per-key strict scoping model.
-    const activeOrgId = request.auth?.organizationId
-      ?? await resolveOrganizationId(app.controlDb, ownerId);
-    const indexRows = await listUserApps(app.controlDb, activeOrgId);
+    // List always fans out over EVERY org the user is a member of, regardless
+    // of the credential's active-org signal (bb_sk_* key's own org, or the
+    // JWT session's x-organization-id). Two reasons:
+    //   1. AppResolver.resolveApp lets any member reach any app in that org
+    //      anyway, so pretending the app doesn't exist here creates a
+    //      chicken-and-egg where the caller has to already know the app_id to
+    //      hit get_config to learn it exists.
+    //   2. Every list row carries organization_id so callers can group/filter
+    //      client-side; strict scoping at list time only obscured that.
+    const indexRows = await listAppsForUserAcrossOrgs(app.controlDb, ownerId);
     if (indexRows.length === 0) return { apps: [] };
 
-
-    // Fetch runtime rows for the exact app-ids resolved by the org-scoped
-    // org_app_index — do NOT re-filter by owner_id, since org-shared apps
-    // are owned by the org's owner, not the caller. Group by region.
+    // Fetch runtime rows for the exact app-ids resolved above — do NOT re-filter
+    // by owner_id, since org-shared apps are owned by the org's owner, not the
+    // caller. Group by region.
+    const orgByAppId = new Map<string, string>();
     const idsByRegion = new Map<string, string[]>();
     for (const r of indexRows) {
+      orgByAppId.set(r.app_id, r.organization_id);
       const list = idsByRegion.get(r.region) ?? [];
       list.push(r.app_id);
       idsByRegion.set(r.region, list);
@@ -72,7 +81,13 @@ export async function initRoutes(app: FastifyInstance) {
         'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_organization_id, substrate_autopropagate, created_at FROM apps WHERE id = ANY($1::text[]) ORDER BY created_at DESC',
         [appIds]
       );
-      allRows.push(...rows);
+      for (const row of rows) {
+        // Surface the owning org so callers can group/filter without a second
+        // round-trip. Runtime apps.organization_id may lag behind the control
+        // index during backfill; org_app_index is the authoritative pointer.
+        row.organization_id = orgByAppId.get(row.id) ?? row.organization_id ?? null;
+        allRows.push(row);
+      }
     }
     allRows.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
     return { apps: allRows };
@@ -139,18 +154,9 @@ export async function initRoutes(app: FastifyInstance) {
     // geographically nearest, so a user in California silently got their
     // app provisioned in us-west-2 even when they didn't pick a region.
     // The default needs to be deterministic across machines.
-    const allowedRegions = (process.env.BUTTERBASE_REGIONS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    // Regions that accept NEW app provisioning. Defaults to allowedRegions
-    // (BUTTERBASE_REGIONS gates both serving and provisioning). Setting
-    // BUTTERBASE_PROVISION_ALLOWED_REGIONS to a subset (e.g. "us-west-2")
-    // lets operators temporarily close a region to new writes without
-    // breaking traffic to apps already homed there — needed when one
-    // region has hit an infra ceiling (Neon's 500 databases-per-branch).
-    const provisionAllowed = (
-      process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS
-        ?? process.env.BUTTERBASE_REGIONS
-        ?? ''
-    ).split(',').map((s) => s.trim()).filter(Boolean);
+    const allowedRegions = parseRegionList(process.env.BUTTERBASE_REGIONS);
+    // Regions that accept NEW app provisioning — see services/provision-region.ts.
+    const provisionAllowed = getProvisionAllowedRegions();
     const bodyRegion = (request.body as { region?: string } | undefined)?.region;
     const requestedRegion =
       bodyRegion ??
@@ -165,20 +171,18 @@ export async function initRoutes(app: FastifyInstance) {
         allowed: allowedRegions,
       });
     }
-    // If the caller asked for a region that's temporarily closed to new
-    // apps, silently redirect to the first open region rather than 400ing.
-    // Dashboard/CLI flows often pin a region from the template's source and
-    // failing them mid-hackathon is worse UX than a transparent move. The
-    // response body doesn't currently expose region, so callers see nothing
-    // surprising; we log the override so operators can audit it.
-    let provisionRegion = requestedRegion;
-    if (provisionAllowed.length > 0 && !provisionAllowed.includes(requestedRegion)) {
-      const fallback = provisionAllowed[0];
+    // If the caller asked for a region that's temporarily closed to new apps,
+    // redirect to the first open region rather than 400ing — a working app in
+    // another region beats a failed request. The redirect is reported back to
+    // the caller (`region` / `region_redirected_from` below) so it is never a
+    // silent relocation of their data.
+    const placement = resolveProvisionRegion(requestedRegion, provisionAllowed);
+    const provisionRegion = placement.region;
+    if (placement.redirected) {
       request.log.warn(
-        { requestedRegion, provisionRegion: fallback, allowed: provisionAllowed },
+        { requestedRegion, provisionRegion, allowed: provisionAllowed },
         '[init] redirecting new app to open region',
       );
-      provisionRegion = fallback;
     }
     try {
       getDataProjectIdForRegion(provisionRegion);
@@ -266,6 +270,9 @@ export async function initRoutes(app: FastifyInstance) {
         api_url: `${config.apiBaseUrl}/v1/${appRow.id}`,
         subdomain: existingSubdomain,
         url: `https://${existingSubdomain}.${config.subdomain.baseDomain}`,
+        // The app already existed, so its home region is whatever it was
+        // provisioned into originally — not this request's placement.
+        region: (appRow as any).region ?? provisionRegion,
         created_at: appRow.created_at.toISOString(),
       });
     }
@@ -335,8 +342,17 @@ export async function initRoutes(app: FastifyInstance) {
       api_url: `${config.apiBaseUrl}/v1/${appId}`,
       subdomain,
       url: `https://${subdomain}.${config.subdomain.baseDomain}`,
+      region: provisionRegion,
+      // Only present when the app did NOT land in the requested region, so
+      // clients can branch on its presence alone.
+      ...(placement.redirected ? { region_redirected_from: placement.requestedRegion } : {}),
       created_at: new Date().toISOString(),
       _meta: {
+        ...(placement.redirected
+          ? {
+              notice: `Region "${placement.requestedRegion}" is temporarily closed to new apps; this app was provisioned in "${provisionRegion}" instead.`,
+            }
+          : {}),
         next_actions: [
           { action: 'poll_status', description: 'Poll GET /apps/:app_id/status until provisioning_status is "ready"', recommended: true },
           { action: 'apply_schema', description: 'Define your database tables (after provisioning completes)', recommended: true },
@@ -470,6 +486,24 @@ export async function initRoutes(app: FastifyInstance) {
     // Local dev: delete inline (fast, no contention)
     const dbName = appData.db_name;
     await app.dataPlaneDb.query(`DROP DATABASE IF EXISTS "${dbName}"`).catch(() => {});
+
+    // The same object-byte teardown `executeDeprovision` runs on the Neon
+    // path, because this branch is a SECOND, complete deletion path — not a
+    // shortcut into the first. Without it, deleting an app here removes every
+    // `storage_objects` row by cascade and leaves the files themselves in the
+    // bucket forever; for a staging app those files are a second copy of a
+    // customer's uploads. Runs BEFORE the row delete, which is what destroys
+    // the only record of which keys belonged to this app.
+    const storageTeardown = await teardownAppStorage({
+      runtimeDb: app.runtimeDb(region), appId: app_id, deleteObject: deleteStorageObject,
+    });
+    if (storageTeardown.failed > 0) {
+      app.log.warn(
+        { app_id, failed: storageTeardown.failed, total: storageTeardown.total },
+        'some storage objects could not be deleted; bytes remain in the bucket',
+      );
+    }
+
     await app.runtimeDb(region).query('DELETE FROM apps WHERE id = $1', [app_id]);
 
     logFromRequest(request, {

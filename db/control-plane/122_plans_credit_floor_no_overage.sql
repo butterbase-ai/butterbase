@@ -1,0 +1,25 @@
+-- @scope: platform
+-- Stop self-serve plans running up an AI bill past their allowance.
+--
+-- credit_floor_usd is a BALANCE THRESHOLD, not an amount: grantLease admits a
+-- request while (monthly_allowance_usd + credits_usd) >= floor, so a negative
+-- floor is how much red an org may run. Launch sat at -10 and Certified at -25,
+-- which is real money spent past the included allowance.
+--
+-- -0.5 leaves just enough headroom for a request that is already in flight to
+-- settle rather than being cut off mid-call — the AI router reserves a nominal
+-- amount and charges the true cost at settle, which can overshoot the
+-- reservation. Anything tighter (0) would turn that normal overshoot into a
+-- hard failure.
+--
+-- Enterprise is deliberately left at -50. There is no unlimited-plan bypass in
+-- the ai-router credit path (acquireNominal passes allowFloor: true for every
+-- org), so that floor is what actually implements "unlimited" for the plan.
+-- Dropping it to -0.5 would have cut off a live Enterprise org sitting at
+-- -$10.69 the moment it applied.
+--
+-- Already applied to production directly on 2026-09-14; this file exists so
+-- fresh and local environments match rather than keeping -10/-25. The UPDATE is
+-- idempotent, so re-running it there is a no-op.
+UPDATE plans SET credit_floor_usd = -0.5
+ WHERE id IN ('playground', 'launch', 'certified');

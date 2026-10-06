@@ -21,6 +21,14 @@ export interface RoadmapItem {
  */
 export const changelog: RoadmapItem[] = [
   {
+    date: '2026-09-09',
+    category: 'deploy',
+    title: 'Preview deployments',
+    description: 'Give any app a preview deployment: a full copy — your tables, your functions, and your real live data, including signed-up accounts and uploaded files — that you can break without touching the app your users are on. A preview never inherits your secret values (the key names are created empty so anything that needs one fails loudly instead of quietly spending your money), connected accounts are disconnected, and scheduled jobs and integrations are switched off, so a preview copy of a nightly job cannot fire. Set test values per key with preview secrets. When the change is ready, push it live: your tables, access rules, functions, Durable Objects, settings and code are applied to your live app and the frontend is deployed. Data is never pushed, and anything that would throw away live data is refused outright — the refusal names the exact change that is stuck so you can make it yourself if you mean it. Reset copies the preview fresh from your live app whenever it wanders. One per app, on Launch and above, in the same region as your live app, from `manage_preview` / `promote_preview`, the REST API, or the new Preview page in the dashboard.',
+    href: '/core-concepts/preview-deployments/',
+    icon: '🧪',
+  },
+  {
     date: '2026-07-05',
     category: 'functions',
     title: 'App-level environment variables',
@@ -260,8 +268,8 @@ export const changelog: RoadmapItem[] = [
     date: '2026-04-22',
     category: 'ops',
     title: 'Plan Quotas + Limit Notifications',
-    description: 'Free / Pro / Enterprise tiers with usage metering. Email alerts at 80% and at the hard limit.',
-    href: '/core-concepts/billing',
+    description: 'Tiered plans with usage metering. Email alerts at 80% and at the hard limit.',
+    href: '/core-concepts/plans-and-usage',
     icon: '📊',
   },
   {

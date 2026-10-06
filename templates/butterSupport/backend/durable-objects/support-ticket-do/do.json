@@ -1,0 +1,14 @@
+{
+  "id": "25ae86cf-85dd-4675-9c9f-a3c65acb7fe0",
+  "name": "support-ticket-do",
+  "class_name": "SupportTicketDO",
+  "status": "READY",
+  "access_mode": "public",
+  "last_deployed_at": "2026-06-24T18:04:20.356Z",
+  "error_message": null,
+  "sql_migrations": null,
+  "agent_tool": null,
+  "agent_tool_description": null,
+  "agent_tool_mode": null,
+  "agent_tool_exposed_to": null
+}

@@ -10,10 +10,15 @@
 import type pg from 'pg';
 import { randomBytes } from 'node:crypto';
 import { introspectSchema } from './schema-introspector.js';
-import { diffSchema } from './schema-differ.js';
-import { applyMigration } from './schema-applier.js';
+import { diffSchema, type DDLStatement } from './schema-differ.js';
+import { applyMigration, installRealtimeTrigger } from './schema-applier.js';
 import type { SchemaDSL } from './schema-validator.js';
-import { introspectRls } from './rls-introspector.js';
+import {
+  introspectRls,
+  introspectRlsTables,
+  mapPolicyCommand,
+  type RlsTableState,
+} from './rls-introspector.js';
 import AdmZip from 'adm-zip';
 import * as R2 from './r2.js';
 import * as DeploymentService from './deployment.service.js';
@@ -41,6 +46,109 @@ export interface ReplayFunctionsEnvVarOpts {
    *  the value is layered into `merged` AFTER user-supplied pendingEnvVarValues
    *  and CONVENTIONS auto-mint (both win), BEFORE static fills. */
   appOverrides?: Record<string, string>;
+  /** When true, replay upserts into pre-existing functions/triggers (template
+   *  update) instead of leaving them untouched (clone). Defaults to false —
+   *  clone behaviour is unaffected. */
+  overwriteExisting?: boolean;
+  /**
+   * When true, an upsert onto a trigger the destination ALREADY HAS updates
+   * `trigger_config` but leaves the destination's `enabled` flag alone.
+   * Only meaningful alongside `overwriteExisting`. Defaults to false, so
+   * clone / staging_create / template-update behaviour is byte-identical.
+   *
+   * Set by the PROMOTE path, and it is not a nicety there. Staging apps have
+   * their cron triggers deliberately switched off by isolateStagingApp
+   * (staging-isolation.ts) so a staging environment does not fire scheduled
+   * work against real integrations. Without this flag, promoting from staging
+   * copies that `enabled = false` straight onto the customer's LIVE production
+   * app and silently stops every nightly billing, cleanup and digest job —
+   * our own isolation mechanism transported into production as damage.
+   *
+   * The template-update path must NOT set this: its source is a template app
+   * whose triggers were never deliberately disabled, and a release that turns
+   * a trigger off is a real intent that should reach forks.
+   */
+  preserveDestinationTriggerEnabled?: boolean;
+}
+
+/**
+ * Builds the INSERT INTO app_functions statement used by replayFunctions.
+ * Column list, placeholders, and literal id/deployed_at handling are copied
+ * verbatim from the original inline query; only the ON CONFLICT clause
+ * varies with `overwriteExisting`.
+ */
+export function buildFunctionInsertSql(overwriteExisting: boolean): string {
+  const conflict = overwriteExisting
+    ? `ON CONFLICT (app_id, name) DO UPDATE SET
+         code = EXCLUDED.code,
+         description = EXCLUDED.description,
+         timeout_ms = EXCLUDED.timeout_ms,
+         memory_limit_mb = EXCLUDED.memory_limit_mb,
+         agent_tool = EXCLUDED.agent_tool,
+         agent_tool_description = EXCLUDED.agent_tool_description,
+         agent_tool_mode = EXCLUDED.agent_tool_mode,
+         agent_tool_exposed_to = EXCLUDED.agent_tool_exposed_to,
+         deployed_at = now()`
+    : `ON CONFLICT (app_id, name) DO NOTHING`;
+  return `INSERT INTO app_functions (
+           id, app_id,
+           name, code, description,
+           timeout_ms, memory_limit_mb,
+           agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
+           encrypted_env_vars,
+           deployed_by, deployed_at
+         ) VALUES (
+           gen_random_uuid(), $1,
+           $2, $3, $4,
+           $5, $6,
+           $7, $8, $9, $10,
+           NULL,
+           $11, now()
+         )
+         ${conflict}
+         RETURNING id, (xmax = 0) AS inserted`;
+}
+
+/**
+ * Builds the INSERT INTO function_triggers statement used by replayFunctions.
+ * Column list and placeholders are copied verbatim from the original inline
+ * query; only the ON CONFLICT clause varies with `overwriteExisting`.
+ *
+ * `preserveDestinationEnabled` drops `enabled` from the DO UPDATE SET list so
+ * the destination keeps its own on/off state while still picking up the new
+ * schedule. See ReplayFunctionsEnvVarOpts.preserveDestinationTriggerEnabled for
+ * why promote needs it and why nothing else may set it. Defaults to false, so
+ * every existing caller produces byte-identical SQL.
+ *
+ * NOTE: this governs the CONFLICT branch only. A trigger the destination does
+ * NOT have yet is INSERTed with the source's `enabled` value, because there is
+ * no destination state to preserve. For promote that means a cron trigger added
+ * in staging lands on production switched off, since isolation disabled it
+ * there. That is the deliberately conservative choice — force-enabling it would
+ * start a recurring job firing at real production data that the user never
+ * enabled in production — but it must not be silent, which is why the RETURNING
+ * clause below reports it. See replayFunctions' `disabledTriggersInserted`.
+ *
+ * `RETURNING (xmax = 0) AS inserted, enabled` is the standard Postgres idiom for
+ * "this row came from the INSERT, not the DO UPDATE branch" (the same one
+ * buildFunctionInsertSql uses). It is pure reporting: under DO NOTHING a
+ * conflicting row returns nothing at all, and no caller's writes change.
+ */
+export function buildTriggerInsertSql(
+  overwriteExisting: boolean,
+  preserveDestinationEnabled = false,
+): string {
+  const conflict = overwriteExisting
+    ? `ON CONFLICT (function_id, trigger_type) DO UPDATE SET
+         trigger_config = EXCLUDED.trigger_config${
+           preserveDestinationEnabled ? '' : `,
+         enabled = EXCLUDED.enabled`
+         }`
+    : `ON CONFLICT (function_id, trigger_type) DO NOTHING`;
+  return `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
+             VALUES ($1, $2, $3, $4, $5)
+             ${conflict}
+             RETURNING (xmax = 0) AS inserted, enabled`;
 }
 
 /**
@@ -49,7 +157,7 @@ export interface ReplayFunctionsEnvVarOpts {
  * in HTML (<meta>), JSON config, source maps, etc. Everything else (images,
  * fonts, wasm, .br/.gz precompressed assets) is copied through untouched.
  */
-const REWRITEABLE_EXTENSIONS = new Set([
+export const REWRITEABLE_EXTENSIONS = new Set([
   '.js', '.mjs', '.cjs', '.jsx',
   '.ts', '.tsx',
   '.html', '.htm',
@@ -114,6 +222,52 @@ export interface ReplayLogger {
   warn(obj: unknown, msg?: string): void;
 }
 
+export interface ReplayConfigOpts {
+  /**
+   * Insert-only mode: add config rows the destination does not have yet, and
+   * never overwrite one it does. Set by the template-update path.
+   *
+   * Config replay was written for clone, where the destination is empty and
+   * "overwrite" is meaningless. Pointed at a live fork it is destructive in
+   * ways nothing can undo: it NULLs `app_oauth_configs.client_secret_encrypted`
+   * (breaking sign-in on a running app), mints a fresh Composio auth config
+   * over `credentials_encrypted` (orphaning every connected end-user account),
+   * and replaces `allowed_origins` (dropping the fork's custom domain). The
+   * spec lists secrets as untouched by an update; a template's new OAuth
+   * provider failing to appear on forks is visible and fixable, whereas
+   * destroyed credentials are not.
+   */
+  insertOnly?: boolean;
+  /**
+   * Skip the app_integration_configs subsystem entirely.
+   *
+   * Set by PROMOTE, where replay-registry.ts declares `integrations` as
+   * `promotable: false` — "staging integrations are deliberately disabled by
+   * isolateStagingApp, so promoting them would disable production
+   * integrations." replayNonSecretConfig calls replayIntegrations internally,
+   * so without this flag the registry's stated policy and the executed
+   * behaviour were only coincidentally aligned: the integrations replay reads
+   * `WHERE enabled = true`, and staging's rows are disabled, so nothing moved
+   * BY ACCIDENT. A user who re-enabled an integration on staging would, on
+   * promote, mint a fresh Composio auth config against PRODUCTION. Nobody
+   * decided that.
+   *
+   * Defaults to false, so clone / staging_create / template-update are
+   * unaffected.
+   */
+  skipIntegrations?: boolean;
+}
+
+export interface ReplaySchemaOpts {
+  /**
+   * Optional gate applied to the computed diff before it is executed. Returns
+   * the statements to run plus the ones withheld. Used by the template-update
+   * path to admit additive DDL only; clone passes nothing and applies the diff
+   * verbatim.
+   */
+  filter?: (s: DDLStatement[]) => { kept: DDLStatement[]; rejected: DDLStatement[] };
+}
+
 /**
  * Replay the source app's schema onto the dest app's database.
  *
@@ -127,6 +281,7 @@ export async function replaySchema(
   destAppPool: pg.Pool,
   destAppId: string,
   logger: ReplayLogger,
+  opts: ReplaySchemaOpts = {},
 ): Promise<void> {
   // 1. Introspect the source app's current schema.
   const sourceDsl = await introspectSchema(sourceAppPool);
@@ -149,11 +304,20 @@ export async function replaySchema(
     return;
   }
 
-  // 3. Apply the statements to the dest DB.
-  await applyMigration(destAppPool, statements, 'clone-replay-schema');
+  // 3. Apply the statements to the dest DB. A template update passes an
+  //    additive-only filter here so no statement can drop or narrow a column
+  //    the fork's rows depend on. Every rejection is logged individually — an
+  //    attempted drop is exactly the thing an operator needs to see.
+  const { kept, rejected } = opts.filter
+    ? opts.filter(statements)
+    : { kept: statements, rejected: [] as DDLStatement[] };
+  for (const r of rejected) {
+    logger.info({ destAppId, sql: r.sql }, '[update] rejected non-additive statement');
+  }
+  await applyMigration(destAppPool, kept, 'clone-replay-schema');
 
   logger.info(
-    { destAppId, tableCount, statementCount: statements.length },
+    { destAppId, tableCount, statementCount: kept.length, rejectedCount: rejected.length },
     '[clone] schema replayed',
   );
 }
@@ -165,13 +329,36 @@ export async function replaySchema(
 const SEED_BATCH_SIZE = 500;
 
 /**
+ * The `_seed_tables` registry names every table a schema author flagged
+ * `_seed: true` (see schema-applier.ts). This is the single place that reads
+ * it, so every caller that needs "which tables carry seed data" — a seed
+ * copy (below), or a reset's pre-copy truncation (staging-reset.ts) — agrees
+ * on the same list rather than each re-deriving (or hardcoding) it.
+ *
+ * Forward-compat: apps pre-dating the `_seed_tables` bootstrap (data-plane
+ * migration 012) don't have the table at all. That is not an error — it
+ * means the app was provisioned before seed-flagged tables existed — so this
+ * returns an empty list rather than throwing.
+ */
+export async function getSeedTableNames(pool: pg.Pool, logger: ReplayLogger): Promise<string[]> {
+  try {
+    const flagged = await pool.query<{ name: string }>(`SELECT name FROM _seed_tables`);
+    return flagged.rows.map((r) => r.name);
+  } catch (err) {
+    logger.warn({ err }, '[clone] _seed_tables missing; no seed tables to report');
+    return [];
+  }
+}
+
+/**
  * Copy rows from every seed-flagged table on the source DB into the matching
  * table on the dest DB.
  *
- * Seed-flagged tables are recorded in the source's `_seed_tables` registry
- * (populated by Phase 4d's schema-applier when `_seed: true` is set on a
- * table).  Apps that pre-date the bootstrap won't have `_seed_tables` at all;
- * in that case the function returns immediately with an empty result
+ * Seed-flagged tables come from getSeedTableNames (the source's
+ * `_seed_tables` registry, populated by Phase 4d's schema-applier when
+ * `_seed: true` is set on a table). Apps that pre-date the bootstrap won't
+ * have `_seed_tables` at all; in that case getSeedTableNames returns an empty
+ * list and this function returns immediately with an empty result
  * (forward-compat / soft-fail).
  *
  * Per-table soft-fail: a constraint / column-mismatch error on INSERT is
@@ -188,19 +375,14 @@ export async function replaySeedData(
   destAppPool: pg.Pool,
   logger: ReplayLogger,
 ): Promise<{ tables: string[]; rows: number; warnings: string[] }> {
-  let flagged;
-  try {
-    flagged = await sourceAppPool.query<{ name: string }>(`SELECT name FROM _seed_tables`);
-  } catch (err) {
-    // Forward-compat: apps pre-dating the _seed_tables bootstrap don't have it.
-    logger.warn({ err }, '[clone] _seed_tables missing on source; no seed copy');
+  const seedTableNames = await getSeedTableNames(sourceAppPool, logger);
+  if (seedTableNames.length === 0) {
     return { tables: [], rows: 0, warnings: [] };
   }
   const warnings: string[] = [];
   let totalRows = 0;
   const tablesCopied: string[] = [];
-  for (const row of flagged.rows) {
-    const table = row.name;
+  for (const table of seedTableNames) {
     const cols = await sourceAppPool.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`,
@@ -246,20 +428,34 @@ export async function replaySeedData(
 // replayRls helpers
 // ---------------------------------------------------------------------------
 
-const CMD_MAP: Record<string, string> = {
-  r: 'SELECT',
-  a: 'INSERT',
-  w: 'UPDATE',
-  d: 'DELETE',
-  '*': 'ALL',
-};
-
 /**
- * Replay RLS policies from the source app's database onto the dest app's database.
+ * Replay RLS from the source app's database onto the dest app's database.
  *
- * Soft-fails per-policy: if a policy fails to apply (e.g. due to a missing
- * column or function reference), the error is recorded as a warning and the
- * clone continues. The caller is responsible for persisting the warnings.
+ * Two halves, and BOTH are load-bearing:
+ *
+ *  1. the policies themselves, and
+ *  2. the per-table `relrowsecurity` / `relforcerowsecurity` toggles.
+ *
+ * Only (1) used to happen. Postgres does not enforce a policy until RLS is
+ * enabled on its table, so every clone and every template update produced a
+ * destination whose policies were decorative: a table the source protected
+ * came out fully readable, with `GRANT ... TO butterbase_anon` already applied
+ * by the schema applier. Replaying (2) is what makes the policies mean
+ * anything.
+ *
+ * Order is policies first, then enable. An update runs against a LIVE fork, and
+ * flipping RLS on before its policies exist opens a window where every
+ * non-owner read returns zero rows.
+ *
+ * Enabling is one-way: this never issues DISABLE or NO FORCE. A template that
+ * has RLS off must not be able to switch it off on a fork that turned it on —
+ * that is the only direction that loosens security, and update is additive by
+ * contract.
+ *
+ * Soft-fails per statement: a policy or toggle that fails is recorded as a
+ * warning and the replay continues. The caller persists the warnings. A failed
+ * ENABLE is reported in the same channel but is a security failure, not a
+ * cosmetic one — the table stays readable.
  *
  * @param sourceAppPool - Connected pool for the source app's per-app DB.
  * @param destAppPool   - Connected pool for the dest app's per-app DB.
@@ -277,7 +473,7 @@ export async function replayRls(
   let replayed = 0;
 
   for (const p of policies) {
-    const cmd = CMD_MAP[p.command] ?? 'ALL';
+    const cmd = mapPolicyCommand(p.command);
     const roles =
       p.roles.length === 0 || p.roles.includes('public')
         ? 'PUBLIC'
@@ -306,6 +502,70 @@ export async function replayRls(
         { table: p.table, policy: p.name, err },
         '[clone] RLS policy replay failed; continuing',
       );
+    }
+  }
+
+  // Toggles last — see the ordering note above.
+  let tableStates: RlsTableState[] = [];
+  try {
+    tableStates = await introspectRlsTables(sourceAppPool);
+  } catch (err) {
+    const msg = `RLS table state introspection failed: ${(err as Error).message}`;
+    warnings.push(msg);
+    logger.warn({ err }, '[clone] could not read source RLS table state; policies may be inert');
+  }
+
+  for (const t of tableStates) {
+    try {
+      await destAppPool.query(`ALTER TABLE "${t.table}" ENABLE ROW LEVEL SECURITY`);
+    } catch (err) {
+      const msg =
+        `RLS enable for ${t.table} failed: ${(err as Error).message} — ` +
+        `its policies will NOT be enforced on this app`;
+      warnings.push(msg);
+      logger.warn({ table: t.table, err }, '[clone] ENABLE ROW LEVEL SECURITY failed; table left unprotected');
+      continue;
+    }
+    if (t.forced) {
+      try {
+        await destAppPool.query(`ALTER TABLE "${t.table}" FORCE ROW LEVEL SECURITY`);
+      } catch (err) {
+        const msg = `RLS force for ${t.table} failed: ${(err as Error).message}`;
+        warnings.push(msg);
+        logger.warn({ table: t.table, err }, '[clone] FORCE ROW LEVEL SECURITY failed; continuing');
+      }
+    }
+
+    // Enabling RLS is not the same as being protected. Permissive policies OR
+    // together, so a single `TO PUBLIC USING (true)` policy makes the table
+    // readable by everyone no matter what else is on it. Forks cloned before
+    // the roles bug was fixed can carry exactly that: the old replay turned
+    // every `TO butterbase_service USING (true)` bypass policy public. Leaving
+    // such a table looking protected is worse than leaving it obviously open,
+    // so say so. Detection only -- dropping a policy the owner may have written
+    // deliberately is not this function's call to make.
+    try {
+      const neutered = await destAppPool.query<{ policyname: string }>(
+        `SELECT policyname FROM pg_policies
+          WHERE schemaname = 'public' AND tablename = $1
+            AND permissive = 'PERMISSIVE'
+            AND (roles::text[] @> ARRAY['public'] OR roles::text = '{0}')
+            AND coalesce(btrim(qual), 'true') = 'true'`,
+        [t.table],
+      );
+      for (const row of neutered.rows) {
+        const msg =
+          `RLS is enabled on ${t.table} but policy "${row.policyname}" is PERMISSIVE ` +
+          `TO PUBLIC USING (true), so row filtering is NOT enforced on that table. ` +
+          `Review and scope or drop that policy.`;
+        warnings.push(msg);
+        logger.warn(
+          { table: t.table, policy: row.policyname },
+          '[clone] RLS enabled but a public allow-all policy neutralises it',
+        );
+      }
+    } catch (err) {
+      logger.warn({ table: t.table, err }, '[clone] could not audit policies for public allow-all');
     }
   }
 
@@ -354,6 +614,33 @@ export async function replayRls(
  *          auto-mint, and a map of function name → keys that were filled from
  *          `opts.appOverrides` (non-empty entries only).
  */
+/**
+ * Keys currently present in a dest function's `encrypted_env_vars`. Soft-fails
+ * to the empty set: reporting a key as unfilled raises a visible banner, whereas
+ * wrongly reporting it as filled hides a function that cannot run.
+ */
+async function readExistingEnvVarKeys(
+  destRuntimePool: pg.Pool,
+  destFnId: string,
+  fnName: string,
+  logger: ReplayLogger,
+): Promise<Set<string>> {
+  try {
+    const encKey = process.env.AUTH_ENCRYPTION_KEY;
+    if (!encKey) return new Set();
+    const row = await destRuntimePool.query<{ encrypted_env_vars: string | null }>(
+      `SELECT encrypted_env_vars FROM app_functions WHERE id = $1`,
+      [destFnId],
+    );
+    const blob = row.rows[0]?.encrypted_env_vars;
+    if (!blob) return new Set();
+    return new Set(Object.keys(JSON.parse(decrypt(blob, encKey)) as Record<string, unknown>));
+  } catch (err) {
+    logger.warn({ err, fn: fnName }, '[update] could not read existing env var keys; treating as unfilled');
+    return new Set();
+  }
+}
+
 export async function replayFunctions(
   sourceRuntimePool: pg.Pool,
   destRuntimePool: pg.Pool,
@@ -367,6 +654,19 @@ export async function replayFunctions(
   warnings: string[];
   unfilledEnvVars: Record<string, string[]>;
   overrideFilledFunctions: Record<string, string[]>;
+  /**
+   * Triggers this replay CREATED on the destination in a disabled state, as
+   * `<function name>.<trigger type>`. Additive and purely informational — no
+   * existing caller has to read it.
+   *
+   * It exists for promote. A cron trigger added in staging has no counterpart
+   * on production, so it is INSERTed rather than upserted, and it carries the
+   * source's `enabled = false` that isolateStagingApp set. The trigger is
+   * created but never fires. Leaving that undisclosed is the silent-surprise
+   * failure mode this pipeline keeps closing, so executePromote turns this list
+   * into a job warning naming each one.
+   */
+  disabledTriggersInserted: string[];
 }> {
   const src = await sourceRuntimePool.query<{
     id: string;
@@ -392,6 +692,7 @@ export async function replayFunctions(
   let inserted = 0;
   const unfilledEnvVars: Record<string, string[]> = {};
   const overrideFilledFunctions: Record<string, string[]> = {};
+  const disabledTriggersInserted: string[] = [];
 
   // Pre-compute "what env vars does each source function need" — we use this
   // to subtract filled (provided + auto-minted) keys and surface the rest.
@@ -457,26 +758,13 @@ export async function replayFunctions(
     }
   }
 
+  const overwriteExisting = opts?.overwriteExisting ?? false;
+  const preserveDestTriggerEnabled = opts?.preserveDestinationTriggerEnabled ?? false;
+
   for (const f of src.rows) {
     try {
-      const ins = await destRuntimePool.query<{ id: string }>(
-        `INSERT INTO app_functions (
-           id, app_id,
-           name, code, description,
-           timeout_ms, memory_limit_mb,
-           agent_tool, agent_tool_description, agent_tool_mode, agent_tool_exposed_to,
-           encrypted_env_vars,
-           deployed_by, deployed_at
-         ) VALUES (
-           gen_random_uuid(), $1,
-           $2, $3, $4,
-           $5, $6,
-           $7, $8, $9, $10,
-           NULL,
-           $11, now()
-         )
-         ON CONFLICT (app_id, name) DO NOTHING
-         RETURNING id`,
+      const ins = await destRuntimePool.query<{ id: string; inserted: boolean }>(
+        buildFunctionInsertSql(overwriteExisting),
         [
           destAppId,
           f.name, f.code, f.description,
@@ -489,6 +777,23 @@ export async function replayFunctions(
       // ON CONFLICT DO NOTHING returns no rows when a row already existed —
       // leave its triggers alone in that case.
       const destFnId = ins.rows[0]?.id;
+      // `(xmax = 0)` is the standard Postgres idiom for "this RETURNING row came
+      // from the INSERT, not from the DO UPDATE branch". Under DO NOTHING (clone)
+      // every returned row is an insert, so this is always true there; under
+      // DO UPDATE (template update) it distinguishes a function the template is
+      // adding from one the fork already had. See the env-var guard below.
+      //
+      // Strict `=== true` after an explicit presence check: "absent" would mean
+      // the upsert no longer returns the flag, and the branch it guards is the
+      // one that overwrites a fork's secrets. Fail loudly rather than default to
+      // the destructive side.
+      if (destFnId !== undefined && typeof ins.rows[0]?.inserted !== 'boolean') {
+        throw new Error(
+          `function upsert did not return the 'inserted' flag for ${f.name}; ` +
+            'refusing to guess whether the row is new (env vars would be at risk)',
+        );
+      }
+      const wasInserted = ins.rows[0]?.inserted === true;
       if (destFnId) {
         // Copy function_triggers from source to dest.  Source rows reference
         // the source function id; rewrite to the dest function + dest app id.
@@ -502,94 +807,125 @@ export async function replayFunctions(
           [f.id],
         );
         for (const t of trigSrc.rows) {
-          await destRuntimePool.query(
-            `INSERT INTO function_triggers (function_id, app_id, trigger_type, trigger_config, enabled)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (function_id, trigger_type) DO NOTHING`,
+          const trigRes = await destRuntimePool.query<{ inserted: boolean; enabled: boolean }>(
+            buildTriggerInsertSql(overwriteExisting, preserveDestTriggerEnabled),
             [destFnId, destAppId, t.trigger_type, t.trigger_config, t.enabled],
           );
-        }
-
-        // --- new: apply env vars ---
-        const provided = opts?.pendingEnvVarValues?.[f.name] ?? {};
-        const merged: Record<string, string> = { ...provided };
-
-        // Explicit per-function mint requests + implicit convention mints.
-        // Skip any key the caller already supplied via pendingEnvVarValues.
-        // All target keys for all functions receive the SAME app-wide minted
-        // bb_sk_* (sharedMintedKey, minted once above the loop).
-        const explicit = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
-        const conventionMintTargets = (sourceKeysMap.get(f.name) ? [...sourceKeysMap.get(f.name)!] : [])
-          .filter(k => AUTO_MINT_CONVENTION_KEYS.includes(k) && !(k in merged));
-        const explicitKeys = explicit.map(r => r.key);
-        const mintTargets = Array.from(new Set([...explicitKeys, ...conventionMintTargets]));
-
-        if (mintTargets.length > 0) {
-          if (sharedMintedKey) {
-            for (const k of mintTargets) merged[k] = sharedMintedKey;
-          } else {
-            // Shared mint either wasn't attempted (no credentials) or failed —
-            // surface per-fn so the dashboard banner shows what's unfilled.
-            // `sharedMintError` is already warned + (when it failed at mint
-            // time) pushed to top-level warnings, so don't double-record.
-            logger.warn(
-              { fn: f.name, keys: mintTargets, sharedMintError },
-              '[clone] shared key unavailable; mint targets will remain unfilled',
-            );
+          // A trigger the destination did not have, created switched off. Under
+          // DO NOTHING a conflicting row returns nothing, so this is only ever
+          // true for a genuine insert. Recorded, never acted on here — the
+          // caller decides whether it is worth telling the user about.
+          const trigRow = trigRes.rows[0];
+          if (trigRow?.inserted === true && trigRow.enabled === false) {
+            disabledTriggersInserted.push(`${f.name}.${t.trigger_type}`);
           }
         }
 
-        const srcKeysForFn = sourceKeysMap.get(f.name);
-
-        // appOverrides layer (below user-supplied + convention mint, above static fills).
-        if (opts?.appOverrides && srcKeysForFn) {
-          for (const [k, v] of Object.entries(opts.appOverrides)) {
-            if (!srcKeysForFn.has(k)) continue;
-            if (k in merged) continue; // user or convention already covered it
-            merged[k] = v;
-            (overrideFilledFunctions[f.name] ??= []).push(k);
-          }
-        }
-
-        // Static fills: deterministic values the platform already knows. Only
-        // applied when the source function actually used the key and the
-        // caller didn't supply one explicitly.
-        const staticFills = resolveStaticFills({ destAppId, apiBaseUrl: config.apiBaseUrl });
-        if (srcKeysForFn) {
-          for (const [k, v] of Object.entries(staticFills)) {
-            if (srcKeysForFn.has(k) && !(k in merged)) merged[k] = v;
-          }
-        }
-
-        // `filled` tracks keys that actually made it into the dest function row.
-        // Default empty — only populated after a successful UPDATE so a failed
-        // write (missing AUTH_ENCRYPTION_KEY, DB error, failed auto-mint) leaves
-        // its keys in `unfilledEnvVars` for the dashboard banner.
+        // --- apply env vars ---
+        //
+        // Only for rows this replay actually INSERTED. The write below replaces
+        // `encrypted_env_vars` wholesale, so running it against a fork's
+        // pre-existing function would destroy that fork's own secrets — the one
+        // thing a template update is specified never to touch. Clone mode is
+        // unaffected: DO NOTHING means every row reaching here is an insert.
+        // `filled` tracks which of the source function's env var keys the dest
+        // row actually carries. Declared out here because the unfilled-keys
+        // bookkeeping below must run for updated rows too, not just inserts.
         let filled = new Set<string>();
-        if (Object.keys(merged).length > 0) {
-          const encKey = process.env.AUTH_ENCRYPTION_KEY;
-          if (!encKey) {
-            warnings.push(`Cannot write env vars for ${f.name}: AUTH_ENCRYPTION_KEY not configured`);
-            logger.warn({ fn: f.name }, '[clone] AUTH_ENCRYPTION_KEY missing; skipping env var write');
-          } else {
-            try {
-              const enc = encrypt(JSON.stringify(merged), encKey);
-              await destRuntimePool.query(
-                `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
-                [enc, destFnId],
+
+        if (!wasInserted) {
+          logger.info(
+            { fn: f.name, destAppId },
+            '[update] existing function updated; leaving its env vars untouched',
+          );
+          // The fork's own values stand — but `inserted` is per-statement, not
+          // per-job. A retried update re-runs over a function a PRIOR attempt
+          // inserted, which reports inserted=false even though that row's env
+          // vars were never written. Reading the row's current keys tells the
+          // two apart: a fork function with its own secrets reports nothing
+          // unfilled, while a half-provisioned one still raises the banner.
+          filled = await readExistingEnvVarKeys(destRuntimePool, destFnId, f.name, logger);
+        } else {
+          const provided = opts?.pendingEnvVarValues?.[f.name] ?? {};
+          const merged: Record<string, string> = { ...provided };
+
+          // Explicit per-function mint requests + implicit convention mints.
+          // Skip any key the caller already supplied via pendingEnvVarValues.
+          // All target keys for all functions receive the SAME app-wide minted
+          // bb_sk_* (sharedMintedKey, minted once above the loop).
+          const explicit = opts?.autoMintRequests?.filter(r => r.fn_name === f.name) ?? [];
+          const conventionMintTargets = (sourceKeysMap.get(f.name) ? [...sourceKeysMap.get(f.name)!] : [])
+            .filter(k => AUTO_MINT_CONVENTION_KEYS.includes(k) && !(k in merged));
+          const explicitKeys = explicit.map(r => r.key);
+          const mintTargets = Array.from(new Set([...explicitKeys, ...conventionMintTargets]));
+
+          if (mintTargets.length > 0) {
+            if (sharedMintedKey) {
+              for (const k of mintTargets) merged[k] = sharedMintedKey;
+            } else {
+              // Shared mint either wasn't attempted (no credentials) or failed —
+              // surface per-fn so the dashboard banner shows what's unfilled.
+              // `sharedMintError` is already warned + (when it failed at mint
+              // time) pushed to top-level warnings, so don't double-record.
+              logger.warn(
+                { fn: f.name, keys: mintTargets, sharedMintError },
+                '[clone] shared key unavailable; mint targets will remain unfilled',
               );
-              filled = new Set(Object.keys(merged));
-            } catch (writeErr) {
-              warnings.push(`Failed to write env vars for ${f.name}: ${(writeErr as Error).message}`);
-              logger.warn({ err: writeErr, fn: f.name }, '[clone] env var write failed; keys will remain unfilled');
             }
           }
-        }
 
-        // --- new: track unfilled ---
-        // Derive filled from what we actually wrote, NOT from `merged` or
-        // `autoFor` — a failed auto-mint, missing encryption key, or DB write
-        // failure must leave the key in the unfilled set.
+          const srcKeysForFn = sourceKeysMap.get(f.name);
+
+          // appOverrides layer (below user-supplied + convention mint, above static fills).
+          if (opts?.appOverrides && srcKeysForFn) {
+            for (const [k, v] of Object.entries(opts.appOverrides)) {
+              if (!srcKeysForFn.has(k)) continue;
+              if (k in merged) continue; // user or convention already covered it
+              merged[k] = v;
+              (overrideFilledFunctions[f.name] ??= []).push(k);
+            }
+          }
+
+          // Static fills: deterministic values the platform already knows. Only
+          // applied when the source function actually used the key and the
+          // caller didn't supply one explicitly.
+          const staticFills = resolveStaticFills({ destAppId, apiBaseUrl: config.apiBaseUrl });
+          if (srcKeysForFn) {
+            for (const [k, v] of Object.entries(staticFills)) {
+              if (srcKeysForFn.has(k) && !(k in merged)) merged[k] = v;
+            }
+          }
+
+          // Only populated after a successful UPDATE, so a failed write (missing
+          // AUTH_ENCRYPTION_KEY, DB error, failed auto-mint) leaves its keys in
+          // `unfilledEnvVars` for the dashboard banner.
+          if (Object.keys(merged).length > 0) {
+            const encKey = process.env.AUTH_ENCRYPTION_KEY;
+            if (!encKey) {
+              warnings.push(`Cannot write env vars for ${f.name}: AUTH_ENCRYPTION_KEY not configured`);
+              logger.warn({ fn: f.name }, '[clone] AUTH_ENCRYPTION_KEY missing; skipping env var write');
+            } else {
+              try {
+                const enc = encrypt(JSON.stringify(merged), encKey);
+                await destRuntimePool.query(
+                  `UPDATE app_functions SET encrypted_env_vars = $1, updated_at = now() WHERE id = $2`,
+                  [enc, destFnId],
+                );
+                filled = new Set(Object.keys(merged));
+              } catch (writeErr) {
+                warnings.push(`Failed to write env vars for ${f.name}: ${(writeErr as Error).message}`);
+                logger.warn({ err: writeErr, fn: f.name }, '[clone] env var write failed; keys will remain unfilled');
+              }
+            }
+          }
+
+        } // end: env var WRITES happen only for newly inserted rows
+
+        // --- track unfilled ---
+        // Runs for inserted and updated rows alike. Derive `filled` from what the
+        // dest row actually carries, NOT from `merged` — a failed auto-mint,
+        // missing encryption key, or DB write failure must leave the key in the
+        // unfilled set so the dashboard banner asks for it.
         const srcKeys = sourceKeysMap.get(f.name);
         if (srcKeys) {
           const unfilled = [...srcKeys].filter(k => !filled.has(k));
@@ -605,7 +941,10 @@ export async function replayFunctions(
     }
   }
 
-  return { count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions };
+  return {
+    count: inserted, warnings, unfilledEnvVars, overrideFilledFunctions,
+    disabledTriggersInserted,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +973,73 @@ export async function replayFunctions(
 //                                      redirect_uris, provider_metadata
 //                                      unique: (app_id, provider)
 
+/**
+ * The three config-replay upserts whose ON CONFLICT clause varies with
+ * `insertOnly` are built here rather than inline, for the same reason
+ * buildFunctionInsertSql is: an interpolated conflict clause that no test ever
+ * looks at would first announce a stray brace or a missing space as a runtime
+ * `syntax error at or near` on a real customer's first update. Extracted, they
+ * can be string-asserted for free.
+ *
+ * Column lists and placeholders are copied verbatim from the original inline
+ * queries; only the conflict clause differs between modes.
+ */
+export function buildRealtimeConfigInsertSql(insertOnly: boolean): string {
+  const conflict = insertOnly
+    ? 'ON CONFLICT (app_id, table_name) DO NOTHING'
+    : `ON CONFLICT (app_id, table_name) DO UPDATE
+         SET events = EXCLUDED.events, enabled = EXCLUDED.enabled, updated_at = now()`;
+  return `INSERT INTO app_realtime_config (id, app_id, table_name, events, enabled)
+          VALUES (gen_random_uuid(), $1, $2, $3, $4)
+          ${conflict}
+          RETURNING enabled`;
+}
+
+export function buildOauthConfigInsertSql(insertOnly: boolean): string {
+  const conflict = insertOnly
+    ? 'ON CONFLICT (app_id, provider) DO NOTHING'
+    : `ON CONFLICT (app_id, provider) DO UPDATE
+         SET client_id               = NULL,
+             client_secret_encrypted = NULL,
+             scopes                  = EXCLUDED.scopes,
+             authorization_url       = EXCLUDED.authorization_url,
+             token_url               = EXCLUDED.token_url,
+             userinfo_url            = EXCLUDED.userinfo_url,
+             enabled                 = EXCLUDED.enabled,
+             redirect_uris           = EXCLUDED.redirect_uris,
+             provider_metadata       = EXCLUDED.provider_metadata`;
+  return `INSERT INTO app_oauth_configs (
+            id, app_id, provider,
+            client_id, client_secret_encrypted,
+            scopes, authorization_url, token_url, userinfo_url,
+            enabled, redirect_uris, provider_metadata
+          ) VALUES (
+            gen_random_uuid(), $1, $2,
+            NULL, NULL,
+            $3, $4, $5, $6,
+            $7, $8, $9
+          )
+          ${conflict}`;
+}
+
+export function buildIntegrationConfigInsertSql(insertOnly: boolean): string {
+  const conflict = insertOnly
+    ? 'ON CONFLICT (app_id, toolkit_slug) DO NOTHING'
+    : `ON CONFLICT (app_id, toolkit_slug) DO UPDATE
+         SET composio_auth_config_id = EXCLUDED.composio_auth_config_id,
+             display_name            = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
+             scopes                  = EXCLUDED.scopes,
+             credentials_encrypted   = EXCLUDED.credentials_encrypted,
+             auth_scheme             = EXCLUDED.auth_scheme,
+             enabled                 = true,
+             updated_at              = now()`;
+  return `INSERT INTO app_integration_configs
+            (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes,
+             credentials_encrypted, auth_scheme)
+          VALUES ($1, $2, $3, $4, true, $5::jsonb, $6, $7)
+          ${conflict}`;
+}
+
 async function replayStorageConfig(
   sourceRuntimePool: pg.Pool,
   destRuntimePool: pg.Pool,
@@ -641,7 +1047,15 @@ async function replayStorageConfig(
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
+  insertOnly: boolean,
 ): Promise<void> {
+  // `storage_config` is a column on an app row that already exists, so there is no
+  // "insert" here — every write is an overwrite of the fork's own setting.
+  // Under insertOnly (template update) the only safe move is not to write.
+  if (insertOnly) {
+    logger.info({ destAppId }, '[update] storage_config left as the fork configured it');
+    return;
+  }
   try {
     const src = await sourceRuntimePool.query<{ storage_config: unknown }>(
       `SELECT storage_config FROM apps WHERE id = $1`,
@@ -670,7 +1084,15 @@ async function replayJwtConfig(
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
+  insertOnly: boolean,
 ): Promise<void> {
+  // `jwt_config` is a column on an app row that already exists, so there is no
+  // "insert" here — every write is an overwrite of the fork's own setting.
+  // Under insertOnly (template update) the only safe move is not to write.
+  if (insertOnly) {
+    logger.info({ destAppId }, '[update] jwt_config left as the fork configured it');
+    return;
+  }
   try {
     const src = await sourceRuntimePool.query<{ jwt_config: unknown }>(
       `SELECT jwt_config FROM apps WHERE id = $1`,
@@ -699,7 +1121,15 @@ async function replayAllowedOrigins(
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
+  insertOnly: boolean,
 ): Promise<void> {
+  // `allowed_origins` is a column on an app row that already exists, so there is no
+  // "insert" here — every write is an overwrite of the fork's own setting.
+  // Under insertOnly (template update) the only safe move is not to write.
+  if (insertOnly) {
+    logger.info({ destAppId }, '[update] allowed_origins left as the fork configured it');
+    return;
+  }
   try {
     const src = await sourceRuntimePool.query<{ allowed_origins: string[] }>(
       `SELECT allowed_origins FROM apps WHERE id = $1`,
@@ -728,7 +1158,15 @@ async function replayAiConfig(
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
+  insertOnly: boolean,
 ): Promise<void> {
+  // `ai_config` is a column on an app row that already exists, so there is no
+  // "insert" here — every write is an overwrite of the fork's own setting.
+  // Under insertOnly (template update) the only safe move is not to write.
+  if (insertOnly) {
+    logger.info({ destAppId }, '[update] ai_config left as the fork configured it');
+    return;
+  }
   try {
     const src = await sourceRuntimePool.query<{ ai_config: Record<string, unknown> | null }>(
       `SELECT ai_config FROM apps WHERE id = $1`,
@@ -754,13 +1192,15 @@ async function replayAiConfig(
   }
 }
 
-async function replayRealtimeConfig(
+export async function replayRealtimeConfig(
   sourceRuntimePool: pg.Pool,
   destRuntimePool: pg.Pool,
+  destAppPool: pg.Pool,
   sourceAppId: string,
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
+  insertOnly: boolean,
 ): Promise<void> {
   try {
     const src = await sourceRuntimePool.query<{
@@ -775,20 +1215,46 @@ async function replayRealtimeConfig(
       logger.info({ destAppId }, '[clone] no realtime config to replay');
       return;
     }
+    // Config rows are runtime-plane metadata only. The Postgres trigger that
+    // actually emits change events lives in the DEST APP'S OWN per-app DB and
+    // has to be installed separately — same code path manage_realtime
+    // action=configure uses (installRealtimeTrigger) — or every cloned table
+    // with realtime enabled lands with trigger_installed:false, drift:true
+    // and events silently never fire (U18).
+    //
+    // Install only when the DEST row this statement actually wrote is
+    // enabled (RETURNING enabled). Under insertOnly, ON CONFLICT DO NOTHING
+    // returns no row when the fork/prod already has one — including an
+    // enabled=false row its owner set via DELETE /realtime/:table — and the
+    // source's `enabled` must not re-arm a trigger the destination disabled.
+    const driftedTables: string[] = [];
     for (const row of src.rows) {
+      let written: { enabled: boolean } | undefined;
       try {
-        await destRuntimePool.query(
-          `INSERT INTO app_realtime_config (id, app_id, table_name, events, enabled)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4)
-           ON CONFLICT (app_id, table_name) DO UPDATE
-             SET events = EXCLUDED.events, enabled = EXCLUDED.enabled, updated_at = now()`,
+        const res = await destRuntimePool.query<{ enabled: boolean }>(
+          buildRealtimeConfigInsertSql(insertOnly),
           [destAppId, row.table_name, row.events, row.enabled],
         );
+        written = res.rows[0];
       } catch (err) {
         const msg = `app_realtime_config row ${row.table_name} failed: ${(err as Error).message}`;
         warnings.push(msg);
         logger.warn({ table: row.table_name, err }, '[clone] realtime config row failed; continuing');
+        continue;
       }
+      if (!written?.enabled) continue;
+      try {
+        await installRealtimeTrigger(destAppPool, row.table_name);
+      } catch (err) {
+        driftedTables.push(row.table_name);
+        logger.warn({ table: row.table_name, err }, '[clone] realtime trigger install failed; continuing');
+      }
+    }
+    if (driftedTables.length > 0) {
+      warnings.push(
+        `realtime trigger install failed for: ${driftedTables.join(', ')}; `
+          + 'these tables will show drift:true until reconfigured (manage_realtime action=configure)',
+      );
     }
     logger.info({ destAppId, count: src.rows.length }, '[clone] realtime config replayed');
   } catch (err) {
@@ -805,6 +1271,7 @@ async function replayOauthConfigs(
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
+  insertOnly: boolean,
 ): Promise<void> {
   try {
     const src = await sourceRuntimePool.query<{
@@ -831,27 +1298,7 @@ async function replayOauthConfigs(
     for (const row of src.rows) {
       try {
         await destRuntimePool.query(
-          `INSERT INTO app_oauth_configs (
-             id, app_id, provider,
-             client_id, client_secret_encrypted,
-             scopes, authorization_url, token_url, userinfo_url,
-             enabled, redirect_uris, provider_metadata
-           ) VALUES (
-             gen_random_uuid(), $1, $2,
-             NULL, NULL,
-             $3, $4, $5, $6,
-             $7, $8, $9
-           )
-           ON CONFLICT (app_id, provider) DO UPDATE
-             SET client_id              = NULL,
-                 client_secret_encrypted = NULL,
-                 scopes                 = EXCLUDED.scopes,
-                 authorization_url      = EXCLUDED.authorization_url,
-                 token_url              = EXCLUDED.token_url,
-                 userinfo_url           = EXCLUDED.userinfo_url,
-                 enabled                = EXCLUDED.enabled,
-                 redirect_uris          = EXCLUDED.redirect_uris,
-                 provider_metadata      = EXCLUDED.provider_metadata`,
+          buildOauthConfigInsertSql(insertOnly),
           [
             destAppId, row.provider,
             row.scopes, row.authorization_url, row.token_url, row.userinfo_url,
@@ -906,6 +1353,11 @@ export async function replayIntegrations(
   destAppId: string,
   warnings: string[],
   logger: ReplayLogger,
+  // Defaulted so a caller that omits it inherits CLONE semantics rather than
+  // silently picking up `undefined` and landing in whichever branch that
+  // happens to be. tsconfig excludes *.test.ts, so tsc will not catch an
+  // out-of-date call site here.
+  insertOnly = false,
 ): Promise<void> {
   let src: {
     rows: Array<{
@@ -952,12 +1404,28 @@ export async function replayIntegrations(
       // Idempotency: clone jobs retry on transient failure. If a previous run
       // already minted a Composio auth config for this (dest, toolkit), reuse
       // it instead of orphaning the old one on Composio's side.
+      //
+      // Under insertOnly (template update) the check widens to ANY existing row
+      // for this toolkit, enabled or not: the write below replaces
+      // `credentials_encrypted` and the Composio auth config id, which would
+      // orphan every end-user account already connected through the fork's own
+      // integration. Skipping BEFORE the mint also avoids creating a Composio
+      // auth config we would then throw away.
       const existing = await destRuntimePool.query<{ composio_auth_config_id: string }>(
-        `SELECT composio_auth_config_id FROM app_integration_configs
-          WHERE app_id = $1 AND toolkit_slug = $2 AND enabled = true`,
+        insertOnly
+          ? `SELECT composio_auth_config_id FROM app_integration_configs
+              WHERE app_id = $1 AND toolkit_slug = $2`
+          : `SELECT composio_auth_config_id FROM app_integration_configs
+              WHERE app_id = $1 AND toolkit_slug = $2 AND enabled = true`,
         [destAppId, row.toolkit_slug],
       );
-      if (existing.rows.length > 0 && existing.rows[0].composio_auth_config_id) {
+      if (existing.rows.length > 0 && (insertOnly || existing.rows[0].composio_auth_config_id)) {
+        if (insertOnly) {
+          logger.info(
+            { destAppId, toolkit: row.toolkit_slug },
+            '[update] integration already configured on the fork; leaving its credentials alone',
+          );
+        }
         succeeded += 1;
         continue;
       }
@@ -992,18 +1460,7 @@ export async function replayIntegrations(
       const scopesJson = JSON.stringify(row.scopes ?? []);
 
       await destRuntimePool.query(
-        `INSERT INTO app_integration_configs
-           (app_id, toolkit_slug, composio_auth_config_id, display_name, enabled, scopes,
-            credentials_encrypted, auth_scheme)
-         VALUES ($1, $2, $3, $4, true, $5::jsonb, $6, $7)
-         ON CONFLICT (app_id, toolkit_slug) DO UPDATE
-           SET composio_auth_config_id = EXCLUDED.composio_auth_config_id,
-               display_name            = COALESCE(EXCLUDED.display_name, app_integration_configs.display_name),
-               scopes                  = EXCLUDED.scopes,
-               credentials_encrypted   = EXCLUDED.credentials_encrypted,
-               auth_scheme             = EXCLUDED.auth_scheme,
-               enabled                 = true,
-               updated_at              = now()`,
+        buildIntegrationConfigInsertSql(insertOnly),
         [
           destAppId, row.toolkit_slug, newAuthConfigId, row.display_name, scopesJson,
           row.credentials_encrypted, row.auth_scheme,
@@ -1168,12 +1625,20 @@ export async function replaySubstrateLink(
  *   - jwt_config (apps.jwt_config)                   — verbatim
  *   - allowed_origins (apps.allowed_origins)         — verbatim
  *   - ai_config (apps.ai_config)                     — byokKey BLANKED; rest verbatim
- *   - app_realtime_config (table)                    — verbatim
+ *   - app_realtime_config (table)                    — verbatim; enabled tables' change
+ *                                                       triggers are (re)installed on the
+ *                                                       dest app's own per-app DB (destAppPool)
  *   - app_oauth_configs (table)                      — client_id + client_secret_encrypted BLANKED
  *   - app_integration_configs (table)                — composio_auth_config_id re-minted per dest app
  *
  * Each subsystem soft-fails independently: an error is pushed to `warnings`
  * and the function continues with the next subsystem.
+ *
+ * @param destAppPool - Connected pool for the dest app's per-app (data-plane)
+ *   DB, distinct from destRuntimePool. Only used by the realtime subsystem,
+ *   which has to run `realtime.enable_table_trigger` against the app's own
+ *   database — the same DB replaySchema/replayRls target — not the runtime
+ *   DB that `app_realtime_config` rows live in.
  */
 export async function replayNonSecretConfig(
   sourceRuntimePool: pg.Pool,
@@ -1181,15 +1646,27 @@ export async function replayNonSecretConfig(
   sourceAppId: string,
   destAppId: string,
   logger: ReplayLogger,
+  opts: ReplayConfigOpts = {},
+  destAppPool: pg.Pool,
 ): Promise<{ warnings: string[] }> {
+  const insertOnly = opts.insertOnly ?? false;
   const warnings: string[] = [];
-  await replayStorageConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
-  await replayJwtConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
-  await replayAllowedOrigins(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
-  await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
-  await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
-  await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
-  await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger);
+  await replayStorageConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  await replayJwtConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  await replayAllowedOrigins(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  await replayAiConfig(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  await replayRealtimeConfig(sourceRuntimePool, destRuntimePool, destAppPool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  await replayOauthConfigs(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  // Opt-out, not opt-in: every existing caller keeps replaying integrations.
+  // Only promote skips them — see ReplayConfigOpts.skipIntegrations.
+  if (opts.skipIntegrations) {
+    logger.info(
+      { destAppId },
+      '[clone] integrations replay skipped by caller (non-promotable primitive)',
+    );
+  } else {
+    await replayIntegrations(sourceRuntimePool, destRuntimePool, sourceAppId, destAppId, warnings, logger, insertOnly);
+  }
   return { warnings };
 }
 
@@ -1362,10 +1839,36 @@ export async function replayMeetingsWebhook(
  * provisioned lazily inside deployViaPages on first publish, so no separate
  * project-create step is needed here.
  *
- * Soft-fails: errors are recorded as warnings and the broader clone job
- * is allowed to complete (the schema/RLS/functions/etc. are already done;
- * the user can re-publish their frontend manually).
+ * Soft-fails BY DEFAULT: errors are recorded as warnings and the broader
+ * clone/update job is allowed to complete (the schema/RLS/functions/etc. are
+ * already done; the user can re-publish their frontend manually).
+ *
+ * `opts.throwOnFailure` is the opt-in override promote (Task 14) needs: a
+ * promote's deploy step is not best-effort, it IS the job, so a failure here
+ * must fail the whole promote rather than complete with a stale production
+ * bundle and a buried warning. Same pattern Task 13 used for
+ * `preserveDestinationTriggerEnabled` / `skipIntegrations` — additive, opt-in,
+ * default (clone, update) callers are byte-for-byte unaffected.
+ *
+ * `opts.warnOnZeroRewrite` is the same additive-opt-in shape for a second
+ * gap (Task 14 fix round 2): by default, a bundle with zero occurrences of
+ * `sourceAppId` only ever gets a `logger.warn` — it never reaches the
+ * `warnings` this function returns, so it never reaches the job via
+ * `appendCloneJobWarnings`. On promote that is dangerous, not cosmetic: it
+ * means production is silently serving a bundle whose baked-in
+ * `VITE_APP_ID` still points at the STAGING app, reported as a successful
+ * promote. Left off by default because filesRewritten === 0 is genuinely
+ * ambiguous (it also happens for a legitimate bundle with no baked-in app id
+ * at all — runtime-injected config, a static site with no API calls) and
+ * clone/update must stay byte-identical; promote opts in because it is the
+ * one caller where "might be nothing, might be a live app pointed at the
+ * wrong backend" is worth surfacing every time.
  */
+export interface ReplayFrontendOpts {
+  throwOnFailure?: boolean;
+  warnOnZeroRewrite?: boolean;
+}
+
 export async function replayFrontend(
   controlDb: pg.Pool,
   destRuntimePool: pg.Pool,
@@ -1373,6 +1876,7 @@ export async function replayFrontend(
   destAppId: string,
   userId: string,
   logger: ReplayLogger,
+  opts?: ReplayFrontendOpts,
 ): Promise<{ warnings: string[] }> {
   const warnings: string[] = [];
 
@@ -1416,6 +1920,15 @@ export async function replayFrontend(
         { sourceAppId, destAppId },
         '[clone] frontend artifact had no occurrences of source app id; cloned frontend may still target the source app',
       );
+      if (opts?.warnOnZeroRewrite) {
+        warnings.push(
+          `The deployed frontend bundle had no occurrences of the source app id (${sourceAppId}) to `
+            + `rewrite. This is expected for a bundle with no baked-in app id (runtime-injected config, `
+            + `a static site with no API calls) — but if this bundle DOES call the Butterbase API, the `
+            + `deployed bundle may still point at app ${sourceAppId} instead of ${destAppId}. Verify the `
+            + 'deployed site before relying on it.',
+        );
+      }
     }
 
     // Persist the rewritten artifact back to the dest's R2 slot so future
@@ -1433,6 +1946,14 @@ export async function replayFrontend(
   } catch (err) {
     const msg = `frontend replay failed: ${(err as Error).message}`;
     warnings.push(msg);
+    if (opts?.throwOnFailure) {
+      // Promote path: do not swallow. Log the same as the default path (so
+      // the failure is still visible in the warnings this function would
+      // otherwise have returned) and then rethrow so the caller's job fails
+      // instead of reporting a completed promote with a stale bundle live.
+      logger.warn({ err }, '[clone] frontend replay failed; rethrowing (throwOnFailure)');
+      throw err instanceof Error ? err : new Error(msg);
+    }
     logger.warn({ err }, '[clone] frontend replay failed; continuing');
   }
 

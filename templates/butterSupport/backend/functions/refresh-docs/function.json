@@ -1,0 +1,26 @@
+{
+  "name": "refresh-docs",
+  "description": "Cron weekly Sun 04:00 UTC. Re-crawls each docs_sources row where source_kind='web', diffs content hash against the previous, and re-ingests changed pages. Updates docs_sources.last_crawl_at and last_crawl_status.",
+  "triggers": [
+    {
+      "type": "cron",
+      "config": {
+        "schedule": "0 4 * * 0"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 30000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-06-18T13:14:01.132Z",
+  "envKeys": [
+    "BUTTERBASE_APP_ID",
+    "BUTTERBASE_API_URL",
+    "BUTTERBASE_API_KEY",
+    "RAG_COLLECTION"
+  ],
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": "read_only",
+  "agent_tool_exposed_to": "developer_only"
+}

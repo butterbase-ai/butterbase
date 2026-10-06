@@ -21,11 +21,28 @@ service-token channel; it has no public ingress.
 
 ## Tests
 
-`pytest`. Use `pytest -k <fragment>` to scope. Integration tests need a
-running Postgres; the `Makefile` `test-integration` target boots one.
+Run from `services/agent-runtime/` after `pip install -e '.[dev]'` (pytest
+config lives in `pyproject.toml`: `asyncio_mode = "auto"`, `testpaths = ["tests"]`,
+`pythonpath = ["src"]`). There is no Makefile target for this service.
+
+- `pytest` runs the unit suite. Use `pytest -k <fragment>` to scope.
+- Tests that need Postgres or Redis (`tests/conftest.py` fixtures `pg_pool` /
+  `redis_pool`) connect to `TEST_CONTROL_DB_URL` (default
+  `postgresql://butterbase:butterbase_dev@localhost:5433/butterbase_control`) and
+  `TEST_REDIS_URL` (default `redis://localhost:6379`). Those match the
+  `control-plane-db` (5433) and `redis` services in the repo-root
+  `docker-compose.local.yml`; start them yourself, e.g.
+  `docker compose -f docker-compose.local.yml up -d control-plane-db redis`.
+- `tests/test_e2e_smoke.py` is skipped unless `RUN_DB_TESTS=1` and
+  `CONTROL_PLANE_URL` points at a control-plane DB with the agent migrations applied.
+- `tests/live/e2e_*.py` are standalone scripts, not pytest tests; they need a
+  running agent-runtime plus `tests/live/fake_openrouter.py` (see README).
 
 ## Local boot
 
-Use the docker-compose service rather than running uvicorn by hand —
-the compose file already wires every required env var, including the
-ones you will forget.
+There is no agent-runtime service in `docker-compose.local.yml`. Run it by
+hand with uvicorn, using the env vars and command in `README.md` ("Local
+development"): `CONTROL_PLANE_URL`, `OPENROUTER_API_KEY`, `AUTH_ENCRYPTION_KEY`,
+`INTERNAL_SERVICE_TOKEN`, `CONTROL_API_URL`, `REDIS_URL`, then
+`uvicorn agent_runtime.app:app --reload --port 7140`. The `Dockerfile` runs the
+same app on port 7140 for deploys (`fly.toml`).

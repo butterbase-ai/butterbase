@@ -53,3 +53,28 @@ describe('parseApiError — fallback', () => {
     expect(e.details).toEqual({ field: 'name' });
   });
 });
+
+describe('parseApiError — quota bodies carry a code AND a sentence', () => {
+  // control-api's quotaErrors.featureNotAvailable() shape.
+  const quotaBody = {
+    error: 'feature_not_available',
+    feature: 'staging',
+    message: 'This feature requires the Launch plan or above. Upgrade to unlock it.',
+    upgradeUrl: 'https://butterbase.ai/billing',
+  };
+
+  it('shows the sentence, not the machine code', () => {
+    const e = parseApiError(403, quotaBody);
+    expect(e.message).toBe(quotaBody.message);
+    expect(e.message).not.toBe('feature_not_available');
+  });
+
+  it('keeps the upgrade URL as remediation', () => {
+    expect(parseApiError(403, quotaBody).remediation).toBe('https://butterbase.ai/billing');
+  });
+
+  it('still falls back to the code when that is all the backend sent', () => {
+    expect(parseApiError(400, { error: 'oops' }).message).toBe('oops');
+  });
+});
+

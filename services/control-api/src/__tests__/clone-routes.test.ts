@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 describe('GET /v1/clone-jobs/:job_id — warnings field', () => {
   it('round-trips warnings from the JSONB column', async () => {
@@ -83,6 +83,12 @@ vi.mock('../config.js', () => ({
     devOwnerId: 'usr_dev',
     cognito: {},
     ses: { region: 'us-east-1' },
+    // Mirrors production (DEPLOYMENT_DEFAULT_BACKEND=wfp). startClone reads
+    // this to decide whether app-name uniqueness matters: it only does on the
+    // legacy 'pages' backend, where the CF Pages project name is derived from
+    // the app name. On 'wfp' the subdomain is the namespace and duplicate
+    // names are expected. Omitting the key throws on the property read.
+    deployment: { defaultBackend: 'wfp' as const },
   },
   assertRegionConfig: vi.fn(),
 }));
@@ -93,6 +99,19 @@ vi.mock('../plugins/quota-enforcement.js', () => ({ default: { name: 'quota-enfo
 vi.mock('../services/auth/email-service.js', () => ({ sendBillingEmail: vi.fn() }));
 vi.mock('../services/redis.js', () => ({ getRedisClient: vi.fn(() => null) }));
 vi.mock('../services/app-plan-resolver.js', () => ({ getLimitsForApp: vi.fn(async () => ({ maxRequestsPerMin: 100 })) }));
+
+// The route gained org resolution and a project-quota check after this suite was
+// written. Both read the control DB, and the stub below returns `{ rows: [] }`
+// for everything, so unmocked they throw and every case 500s regardless of what
+// it was asserting. Mock them to the "allowed" answer so the assertions test what
+// they claim to.
+vi.mock('../services/org-resolver.js', () => ({
+  resolveOrganizationId: vi.fn(async () => 'org_test'),
+  assertOrgMember: vi.fn(async () => undefined),
+}));
+vi.mock('../services/project-quota.js', () => ({
+  checkProjectQuota: vi.fn(async () => ({ ok: true, current: 0, limit: 100 })),
+}));
 
 // A fixed "good" source app row returned by the runtime pool query.
 const GOOD_SRC_ROW = {
@@ -259,5 +278,407 @@ describe('POST /v1/templates/:source_app_id/clone — new fields', () => {
     );
 
     await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Region placement — a redirect must be visible to the caller
+// ---------------------------------------------------------------------------
+
+describe('POST /v1/templates/:source_app_id/clone — region placement', () => {
+  const saved = {
+    allowed: process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS,
+    regions: process.env.BUTTERBASE_REGIONS,
+    dflt: process.env.BUTTERBASE_DEFAULT_REGION,
+  };
+
+  afterEach(() => {
+    const restore = (k: string, v: string | undefined) => {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    };
+    restore('BUTTERBASE_PROVISION_ALLOWED_REGIONS', saved.allowed);
+    restore('BUTTERBASE_REGIONS', saved.regions);
+    restore('BUTTERBASE_DEFAULT_REGION', saved.dflt);
+  });
+
+  it('reports dest_region and no redirect marker when the region is open', async () => {
+    process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS = 'us-east-1,us-west-2';
+    delete process.env.BUTTERBASE_DEFAULT_REGION;
+
+    const app = await buildCloneApp();
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+    mockCreateCloneJob.mockResolvedValueOnce({ id: 'cj_open', status: 'pending' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: { dest_region: 'us-east-1' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dest_region).toBe('us-east-1');
+    expect(res.json().dest_region_redirected_from).toBeUndefined();
+    expect(res.json().notice).toBeUndefined();
+
+    await app.close();
+  });
+
+  it('tells the caller when the clone was redirected to another region', async () => {
+    // The point of the fix: a closed region still yields a working clone, but
+    // the caller is told it moved rather than discovering it later — or never.
+    process.env.BUTTERBASE_PROVISION_ALLOWED_REGIONS = 'us-west-2';
+    delete process.env.BUTTERBASE_DEFAULT_REGION;
+
+    const app = await buildCloneApp();
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+    mockCreateCloneJob.mockResolvedValueOnce({ id: 'cj_moved', status: 'pending' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: { dest_region: 'us-east-1' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dest_region).toBe('us-west-2');
+    expect(res.json().dest_region_redirected_from).toBe('us-east-1');
+    expect(res.json().notice).toMatch(/us-east-1.*closed.*us-west-2/);
+
+    // The job must actually be created in the region we reported, not the one
+    // that was asked for — a mismatch would make the response a lie.
+    expect(mockCreateCloneJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ destRegion: 'us-west-2' }),
+    );
+
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/templates/:source_app_id/clone — per-user inflight cap must not
+// count update-mode rows
+// ---------------------------------------------------------------------------
+//
+// `template_clone_jobs` now holds both clone rows and template-update rows,
+// discriminated by a `mode` column (migration 110). The inflight-cap query at
+// clone.ts:171 counts non-terminal rows for the requesting user and 429s at 3.
+// It must scope to `mode = 'clone'` — otherwise a user's in-flight template
+// *updates* would consume their *clone* quota. This test simulates a real
+// filtered dataset (3 non-terminal update-mode rows, 0 clone-mode rows) behind
+// the mocked controlDb and asserts on the resulting HTTP status, not on SQL
+// text, so it fails/passes based on actual scoping behaviour.
+describe('POST /v1/templates/:source_app_id/clone — inflight cap mode scoping', () => {
+  it('does not count in-flight update-mode jobs toward the clone concurrency cap', async () => {
+    const app = Fastify({ logger: false });
+
+    // Simulated rows for this user: 3 non-terminal *update* jobs, 0 clone jobs.
+    // A correctly scoped query (mode = 'clone') must see count 0 here and let
+    // the clone through; an unscoped query sees count 3 and wrongly 429s.
+    const simulatedRows = [
+      { mode: 'update', status: 'running' },
+      { mode: 'update', status: 'pending' },
+      { mode: 'update', status: 'running' },
+    ];
+
+    const controlDbStub = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('template_clone_jobs') && sql.toLowerCase().includes('count')) {
+          const scopedToClone = /mode\s*=\s*'clone'/.test(sql);
+          const c = simulatedRows.filter((r) => !scopedToClone || r.mode === 'clone').length;
+          return { rows: [{ c }] };
+        }
+        if (sql.includes('org_app_index')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.auth = { userId: 'usr_requester', authMethod: 'api_key', scopes: ['*'] } as any;
+      done();
+    });
+    app.register(cloneRoutes);
+    await app.ready();
+
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+    mockCreateCloneJob.mockResolvedValueOnce({ id: 'cj_scoped', status: 'pending' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: {},
+    });
+
+    // With 3 update-mode rows in flight but 0 clone-mode rows, this clone
+    // request must succeed — the update rows must not count toward the cap.
+    expect(res.statusCode).toBe(200);
+    expect(res.json().job_id).toBe('cj_scoped');
+
+    await app.close();
+  });
+
+  it('still 429s at 3 in-flight clone-mode jobs (existing contract preserved)', async () => {
+    const app = Fastify({ logger: false });
+
+    const simulatedRows = [
+      { mode: 'clone', status: 'running' },
+      { mode: 'clone', status: 'pending' },
+      { mode: 'clone', status: 'running' },
+    ];
+
+    const controlDbStub = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('template_clone_jobs') && sql.toLowerCase().includes('count')) {
+          const scopedToClone = /mode\s*=\s*'clone'/.test(sql);
+          const c = simulatedRows.filter((r) => !scopedToClone || r.mode === 'clone').length;
+          return { rows: [{ c }] };
+        }
+        if (sql.includes('org_app_index')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.auth = { userId: 'usr_requester', authMethod: 'api_key', scopes: ['*'] } as any;
+      done();
+    });
+    app.register(cloneRoutes);
+    await app.ready();
+
+    mockRuntimePoolQuery.mockResolvedValueOnce({ rows: [GOOD_SRC_ROW] });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/templates/app_src/clone',
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(429);
+    expect(res.json().error.code).toBe('CLONE_LIMIT_INFLIGHT');
+
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/clone-jobs/:job_id/retry — update-mode staleness guard
+//
+// Retrying an update re-enters the worker's 'republish' path, which by design
+// skips the divergence gate. That is only safe while the fork is still in the
+// state the job left it in, so the route refuses a retry that has been
+// overtaken by another update or has simply gone cold.
+// ---------------------------------------------------------------------------
+
+describe('POST /v1/clone-jobs/:job_id/retry', () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
+
+  const failedJob = (over: Record<string, unknown> = {}) => ({
+    id: 'cj_r1', mode: 'update', status: 'failed',
+    source_app_id: 'app_src', source_region: 'us-east-1',
+    dest_app_id: 'app_fork', dest_region: 'us-east-1',
+    requested_by_user_id: 'usr_requester',
+    retry_count: 0, error_message: 'boom', warnings: null,
+    created_at: minutesAgo(30), updated_at: minutesAgo(5),
+    completed_at: null,
+    ...over,
+  });
+
+  async function buildRetryApp(
+    job: Record<string, unknown>,
+    newerCompleted: boolean,
+    incrementRetryError?: Error & { code?: string },
+  ) {
+    const app = Fastify({ logger: false });
+    const enqueued: unknown[] = [];
+    mockRuntimePoolQuery.mockResolvedValue({ rows: [] });
+
+    const controlDbStub = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('SELECT * FROM template_clone_jobs')) return { rows: [job] };
+        if (sql.includes("status = 'completed'") && sql.includes("mode = 'update'")) {
+          return { rows: newerCompleted ? [{ '?column?': 1 }] : [], rowCount: newerCompleted ? 1 : 0 };
+        }
+        if (sql.includes('retry_count = retry_count + 1')) {
+          enqueued.push('incrementRetry');
+          if (incrementRetryError) throw incrementRetryError;
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+    app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.auth = { userId: 'usr_requester', authMethod: 'api_key', scopes: ['*'] } as any;
+      done();
+    });
+    app.register(cloneRoutes);
+    await app.ready();
+    return { app, enqueued };
+  }
+
+  const retry = (app: Awaited<ReturnType<typeof buildRetryApp>>['app']) =>
+    app.inject({ method: 'POST', url: '/v1/clone-jobs/cj_r1/retry' });
+
+  it('retries a freshly failed update', async () => {
+    const { app, enqueued } = await buildRetryApp(failedJob(), false);
+    const res = await retry(app);
+    expect(res.statusCode).toBe(200);
+    expect(enqueued).toContain('incrementRetry');
+  });
+
+  it('refuses when a newer update has already completed on the fork', async () => {
+    const { app, enqueued } = await buildRetryApp(failedJob(), true);
+    const res = await retry(app);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toMatch(/newer job/i);
+    expect(res.json().error.remediation).toMatch(/template\/update/);
+    expect(enqueued).not.toContain('incrementRetry');
+  });
+
+  it('refuses a cold retry even when nothing superseded it', async () => {
+    const { app, enqueued } = await buildRetryApp(
+      failedJob({ updated_at: minutesAgo(60 * 24 * 14) }), false,
+    );
+    const res = await retry(app);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toMatch(/more than \d+ minutes ago/);
+    expect(enqueued).not.toContain('incrementRetry');
+  });
+
+  it('leaves clone-mode retries alone however old they are', async () => {
+    const { app, enqueued } = await buildRetryApp(
+      failedJob({ mode: 'clone', updated_at: minutesAgo(60 * 24 * 30) }), false,
+    );
+    const res = await retry(app);
+    expect(res.statusCode).toBe(200);
+    expect(enqueued).toContain('incrementRetry');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/clone-jobs/:job_id/retry — the staging job modes
+//
+// This endpoint is mode-agnostic: it takes any job id the caller owns. The
+// modes added in Task 3 (staging_create / promote / staging_reset) therefore
+// inherited a retry path that skips every admission check their own start
+// route performs. For promote that meant a week-old failed job could be
+// re-enqueued into an unreviewed production deploy — a stale pinned
+// source_snapshot_id republished and an old staging bundle redeployed over a
+// live production frontend, with no preview, no destructive-DDL preflight and
+// no in-flight re-check.
+//
+// An earlier ledger note called this "harmless today (no retry endpoint for
+// the new modes)". There is one, and it takes any mode.
+// ---------------------------------------------------------------------------
+
+describe('POST /v1/clone-jobs/:job_id/retry — new job modes are refused', () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
+  const failedJob = (over: Record<string, unknown> = {}) => ({
+    id: 'cj_r1', mode: 'update', status: 'failed',
+    source_app_id: 'app_src', source_region: 'us-east-1',
+    dest_app_id: 'app_fork', dest_region: 'us-east-1',
+    requested_by_user_id: 'usr_requester',
+    retry_count: 0, error_message: 'boom', warnings: null,
+    created_at: minutesAgo(30), updated_at: minutesAgo(5), completed_at: null,
+    ...over,
+  });
+
+  async function build(job: Record<string, unknown>, incrementRetryError?: Error & { code?: string }) {
+    const app = Fastify({ logger: false });
+    const calls: string[] = [];
+    mockRuntimePoolQuery.mockResolvedValue({ rows: [] });
+    const controlDbStub = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('SELECT * FROM template_clone_jobs')) return { rows: [job] };
+        if (sql.includes('retry_count = retry_count + 1')) {
+          calls.push('incrementRetry');
+          if (incrementRetryError) throw incrementRetryError;
+          return { rows: [] };
+        }
+        return { rows: [], rowCount: 0 };
+      }),
+    };
+    app.register(fp(async (fastify) => { fastify.decorate('controlDb', controlDbStub); }));
+    app.addHook('onRequest', (req, _reply, done) => {
+      req.auth = { userId: 'usr_requester', authMethod: 'api_key', scopes: ['*'] } as any;
+      done();
+    });
+    app.register(cloneRoutes);
+    await app.ready();
+    return { app, calls };
+  }
+
+  const retry = (app: any) => app.inject({ method: 'POST', url: '/v1/clone-jobs/cj_r1/retry' });
+
+  it.each([
+    ['promote', /staging\/promote/],
+    ['staging_create', /apps\/\{prod_app_id\}\/staging/],
+    ['staging_reset', /staging\/reset/],
+  ])('refuses a failed %s and points at the fresh-start route', async (mode, routeHint) => {
+    // Deliberately "fresh" (updated 5 minutes ago) — the refusal is about the
+    // MODE, not staleness, so an age gate would not have caught this.
+    const { app, calls } = await build(failedJob({ mode }));
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toBe(`Cannot retry a '${mode}' job.`);
+    expect(res.json().error.remediation).toMatch(routeHint);
+    // Nothing was re-enqueued and the job stays 'failed'.
+    expect(calls).not.toContain('incrementRetry');
+  });
+
+  it('refuses a stale promote — the unreviewed-production-deploy case', async () => {
+    const { app, calls } = await build(failedJob({
+      mode: 'promote', updated_at: minutesAgo(60 * 24 * 7), created_at: minutesAgo(60 * 24 * 7),
+    }));
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(400);
+    expect(calls).not.toContain('incrementRetry');
+  });
+
+  it.each(['clone', 'update'])(
+    'still retries a failed %s — shipped behaviour is unchanged', async (mode) => {
+      const { app, calls } = await build(failedJob({ mode }));
+
+      const res = await retry(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ job_id: 'cj_r1', status: 'pending' });
+      expect(calls).toContain('incrementRetry');
+    },
+  );
+
+  it('turns a 23505 from incrementRetry into a 409 instead of leaking a 500', async () => {
+    // incrementRetry flips status back to 'pending', re-entering the partial
+    // unique index on (dest_app_id) WHERE status NOT IN ('completed','failed').
+    // The staleness gate only looks for a newer COMPLETED update, so an update
+    // already IN FLIGHT for the same dest app raised a raw 23505.
+    const dup = Object.assign(new Error('duplicate key value'), { code: '23505' });
+    const { app } = await build(failedJob({ mode: 'update' }), dup);
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('RESOURCE_CONFLICT');
+    expect(res.json().error.message).toMatch(/already in flight/i);
+  });
+
+  it('still propagates a non-23505 failure rather than masking it as a conflict', async () => {
+    const boom = Object.assign(new Error('connection terminated'), { code: '08006' });
+    const { app } = await build(failedJob({ mode: 'clone' }), boom);
+
+    const res = await retry(app);
+
+    expect(res.statusCode).toBe(500);
   });
 });

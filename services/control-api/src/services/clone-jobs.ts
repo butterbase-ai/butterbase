@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { randomBytes } from 'crypto';
 import { encrypt } from './crypto.js';
+import type { AppStateManifest } from './app-state-capture.js';
 
 export type CloneJobStatus =
   | 'pending'
@@ -12,6 +13,7 @@ export type CloneJobStatus =
   | 'replaying_config'
   | 'copying_repo'
   | 'seeding_data'
+  | 'copying_data'
   | 'completed'
   | 'failed';
 
@@ -31,7 +33,15 @@ export function isTerminalCloneStatus(status: CloneJobStatus): boolean {
 export interface CloneJob {
   id: string;
   source_app_id: string;
-  source_snapshot_id: string;
+  /**
+   * NULL only for mode='promote' jobs whose staging app had no repo snapshot
+   * yet at request time (see startPromote in promote-jobs.ts). Every other
+   * mode requires a real, pinned-at-create-time snapshot id: start-clone.ts
+   * refuses with NO_SNAPSHOT before creating a clone job, and
+   * template-releases.ts's NoRepoSnapshotError makes the same guarantee for
+   * update jobs (created from a published release's snapshot_id).
+   */
+  source_snapshot_id: string | null;
   source_region: string;
   dest_app_id: string | null;
   dest_region: string;
@@ -39,6 +49,23 @@ export interface CloneJob {
   dest_organization_id: string | null;
   dest_app_name: string | null;
   status: CloneJobStatus;
+  /**
+   * The `app_copy_jobs` row a staging_create/staging_reset job is waiting on
+   * while `status = 'copying_data'`. NULL for every other mode, and for a
+   * staging job on a deployment with no app-copy engine (see
+   * staging-data-copy.ts). Added by control-plane migration 118.
+   */
+  data_copy_job_id: string | null;
+  /**
+   * Staging only: the subdomain allocated at request time by
+   * `allocateStagingSubdomain` and reported to the caller in the
+   * `POST /v1/apps/:id/staging` response. The clone worker applies it verbatim
+   * for `mode = 'staging_create'` rather than deriving its own from the
+   * destination name, so the value the API promised is the value that lands.
+   * NULL for every other mode, which keeps the worker's pre-existing
+   * derive-from-name path byte-identical. Added by control-plane migration 119.
+   */
+  dest_subdomain: string | null;
   retry_count: number;
   error_message: string | null;
   warnings: string[] | null;
@@ -48,6 +75,27 @@ export interface CloneJob {
   pending_env_vars: string | null;       // encrypted JSON blob (AUTH_ENCRYPTION_KEY)
   auto_mint_requests: { fn_name: string; key: string }[] | null;
   unfilled_env_vars: Record<string, string[]> | null;
+  mode: 'clone' | 'update' | 'staging_create' | 'promote' | 'staging_reset';
+  target_release_id: string | null;
+  pre_sync_snapshot_id: string | null;
+  pre_sync_lineage: PreSyncLineage | null;
+}
+
+/**
+ * Everything about the fork that an update overwrites and undo must put back.
+ *
+ * The repo pointer alone is not enough: executeUpdate's final step advances
+ * app_lineage to the new release, and computeDivergence compares
+ * apps.repo_latest_snapshot against app_lineage.base_snapshot_id. Restoring one
+ * without the other leaves the fork reading as user-modified forever. The
+ * manifest is the fork's pre-update captureAppState output, which carries
+ * function bodies, so undo can restore those too.
+ */
+export interface PreSyncLineage {
+  base_release_id: string | null;
+  base_fingerprint: AppStateManifest | null;
+  base_snapshot_id: string | null;
+  manifest: AppStateManifest | null;
 }
 
 function generateJobId(): string {
@@ -59,7 +107,8 @@ export async function createCloneJob(
   controlDb: pg.Pool,
   args: {
     sourceAppId: string;
-    sourceSnapshotId: string;
+    /** See CloneJob.source_snapshot_id — null only for a promote whose staging app has no repo yet. */
+    sourceSnapshotId: string | null;
     sourceRegion: string;
     destRegion: string;
     requestedByUserId: string;
@@ -111,15 +160,71 @@ export async function getCloneJob(controlDb: pg.Pool, jobId: string): Promise<Cl
   return res.rows[0] ?? null;
 }
 
+export interface LatestStagingJobPointer {
+  job_id: string;
+  mode: 'staging_create' | 'promote' | 'staging_reset';
+  status: CloneJobStatus;
+  created_at: Date;
+}
+
+/**
+ * The most recent staging-related job for a PRODUCTION app id — i.e. the job
+ * the staging dashboard should poll (via GET /v1/clone-jobs/:job_id) to
+ * recover warnings from an operation nobody's tab is still open for.
+ *
+ * The three staging modes do not key the same way (see 116_staging_job_modes.sql
+ * and start-staging.ts / promote-jobs.ts / staging-reset.ts):
+ *   - staging_create, staging_reset: source_app_id = production, dest_app_id = staging
+ *   - promote:                       source_app_id = staging,     dest_app_id = production
+ * So "for this production app" means source_app_id = prodAppId for the first
+ * two modes, OR dest_app_id = prodAppId for promote — never the same column
+ * for all three. The mode filter also excludes ordinary 'clone'/'update' jobs
+ * that happen to share an app id (e.g. this app was itself cloned from a
+ * template, or updated from a release) — those are not staging operations on
+ * this prod/staging pair and must not be surfaced here.
+ */
+export async function getLatestStagingJob(
+  controlDb: pg.Pool, prodAppId: string,
+): Promise<LatestStagingJobPointer | null> {
+  const res = await controlDb.query<LatestStagingJobPointer>(
+    `SELECT id AS job_id, mode, status, created_at
+       FROM template_clone_jobs
+      WHERE (mode IN ('staging_create', 'staging_reset') AND source_app_id = $1)
+         OR (mode = 'promote' AND dest_app_id = $1)
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [prodAppId],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function setCloneJobStatus(
   controlDb: pg.Pool,
   jobId: string,
-  patch: Partial<Pick<CloneJob, 'status' | 'dest_app_id' | 'error_message' | 'completed_at'>>,
+  patch: Partial<Pick<
+    CloneJob,
+    'status' | 'dest_app_id' | 'error_message' | 'completed_at' | 'data_copy_job_id'
+    | 'dest_subdomain'
+  >>,
 ): Promise<void> {
+  // A completion patch that doesn't explicitly say otherwise clears
+  // error_message. Every 'failed' transition in this codebase sets
+  // error_message alongside status in the same patch (see execute-promote.ts,
+  // neon-task-worker.ts, staging-reset.ts), so this only fires for genuine
+  // completions. Without it, a job that hit an internal error on an earlier
+  // attempt and then succeeded on retry keeps carrying that stale message —
+  // a caller polling the job sees status: 'completed' with an error_message
+  // still attached, and a naive truthiness check on error_message reads a
+  // successful job as failed.
+  const effectivePatch =
+    patch.status === 'completed' && patch.error_message === undefined
+      ? { ...patch, error_message: null }
+      : patch;
+
   const fields: string[] = ['updated_at = now()'];
   const values: unknown[] = [];
   let i = 1;
-  for (const [k, v] of Object.entries(patch)) {
+  for (const [k, v] of Object.entries(effectivePatch)) {
     fields.push(`${k} = $${i++}`);
     values.push(v);
   }
@@ -127,6 +232,42 @@ export async function setCloneJobStatus(
   await controlDb.query(
     `UPDATE template_clone_jobs SET ${fields.join(', ')} WHERE id = $${i}`,
     values,
+  );
+}
+
+/**
+ * Dispose of a clone job row that will never be worked on.
+ *
+ * The clone-intent redeem route can create a job and then lose the atomic claim
+ * on the intent to a concurrent redemption. Its job row is a duplicate: it is
+ * never enqueued, so no worker ever picks it up. Nothing in the background
+ * retires it either — clone-jobs-reaper.ts skips rows still in 'pending', and
+ * clone-jobs-pruner.ts only deletes rows already 'completed'/'failed'. Left
+ * alone the row leaks permanently: it counts against startClone's per-user cap
+ * of 3 non-terminal clone jobs, and its pending_env_vars blob keeps the
+ * caller's SECRETS indefinitely — exactly what markIntentRedeemed NULLs the
+ * intent's copy to prevent.
+ *
+ * So the loser of the race disposes of its own duplicate, explicitly, rather
+ * than relying on a background process that does not cover this case. One
+ * statement, not a status update followed by a separate scrub: a crash between
+ * two statements would leave the secrets behind, which is the failure this
+ * exists to avoid.
+ */
+export async function abandonDuplicateCloneJob(
+  controlDb: pg.Pool,
+  jobId: string,
+  errorMessage: string,
+): Promise<void> {
+  await controlDb.query(
+    `UPDATE template_clone_jobs
+        SET status = 'failed',
+            error_message = $2,
+            pending_env_vars = NULL,
+            completed_at = now(),
+            updated_at = now()
+      WHERE id = $1`,
+    [jobId, errorMessage],
   );
 }
 
@@ -153,15 +294,204 @@ export async function appendCloneJobWarnings(
   );
 }
 
-/** Snapshot ids that an in-flight clone is reading from — caller adds them to planRetention's pinned set. */
+/**
+ * Raised when the partial unique index idx_template_clone_jobs_one_update
+ * rejects an insert because this fork already has an update in flight.
+ *
+ * The route's getActiveUpdateJob pre-check is a read-then-write, so two
+ * concurrent requests can both clear it and race to the INSERT. The index is
+ * what actually enforces "at most one in-flight update per fork" — but a raw
+ * 23505 propagating out of here reaches the owner as a 500 INTERNAL_ERROR,
+ * which reads as "Butterbase is broken" rather than "you clicked twice".
+ * Translating it here lets the route answer with the same 409 the pre-check
+ * would have given.
+ */
+export class UpdateJobConflictError extends Error {
+  constructor(public readonly forkAppId: string) {
+    super(`An update is already in progress for ${forkAppId}`);
+    this.name = 'UpdateJobConflictError';
+  }
+}
+
+/**
+ * `preSyncSnapshotId` MUST be null at creation time.
+ *
+ * The worker writes it after the execution-time eligibility gate passes and
+ * immediately before the first write the fork can observe, and then reads its
+ * presence as "a prior attempt of this job already got past the gate"
+ * (classifyUpdateResume in neon-task-worker.ts). A route that pre-fills it with
+ * the fork's current snapshot would make every job look resumed on its very
+ * first attempt, and the execution-time gate would never run for any job.
+ *
+ * The parameter exists only so a caller reconstructing a job row (a backfill,
+ * a test) can supply the marker deliberately.
+ */
+export async function createUpdateJob(
+  controlDb: pg.Pool,
+  args: {
+    forkAppId: string; forkRegion: string;
+    sourceAppId: string; sourceRegion: string;
+    targetReleaseId: string; sourceSnapshotId: string;
+    requestedByUserId: string; preSyncSnapshotId: string | null;
+  },
+): Promise<CloneJob> {
+  // dest_app_id must always be set on an update row: the partial unique index
+  // idx_template_clone_jobs_one_update (dest_app_id, mode='update', status IN
+  // ('pending','processing')) cannot enforce "at most one in-flight update per
+  // fork" if dest_app_id is NULL — Postgres treats NULLs as distinct for
+  // uniqueness. Reject here rather than let a NULL silently escape that guard.
+  if (!args.forkAppId) {
+    throw new Error('createUpdateJob requires a non-empty forkAppId (written to dest_app_id)');
+  }
+
+  const id = generateJobId();
+  let res;
+  try {
+    res = await controlDb.query<CloneJob>(
+      `INSERT INTO template_clone_jobs (
+         id, mode, source_app_id, source_snapshot_id, source_region,
+         dest_app_id, dest_region, requested_by_user_id,
+         target_release_id, pre_sync_snapshot_id, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+       RETURNING *`,
+      [id, 'update', args.sourceAppId, args.sourceSnapshotId, args.sourceRegion,
+       args.forkAppId, args.forkRegion, args.requestedByUserId,
+       args.targetReleaseId, args.preSyncSnapshotId],
+    );
+  } catch (err) {
+    // 23505 on this specific index means a concurrent request won the race.
+    // Any other unique violation is a real bug and must keep propagating.
+    if (
+      (err as { code?: string })?.code === '23505' &&
+      (err as { constraint?: string })?.constraint === 'idx_template_clone_jobs_one_update'
+    ) {
+      throw new UpdateJobConflictError(args.forkAppId);
+    }
+    throw err;
+  }
+  return res.rows[0];
+}
+
+/**
+ * How long after an update job fails a retry still means "try that again".
+ *
+ * Retry is only safe while the fork is still in the state the job left it in.
+ * There is no upper bound on how long an owner may keep working on a fork after
+ * an update fails, and the execution-time gate cannot always tell their edits
+ * from a prior attempt's writes (see classifyUpdateResume's 'republish' branch,
+ * which by design skips divergence checks). A time bound is the cheap way to
+ * keep the retry path inside the window where that assumption holds.
+ */
+export const UPDATE_RETRY_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+export type UpdateRetryRefusal = 'superseded' | 'stale';
+
+/**
+ * May this failed update job be retried?
+ *
+ * Snapshot ids are content hashes, so two jobs targeting the same release on the
+ * same fork compute the SAME target snapshot. That makes a stale retry
+ * dangerous: job A fails after publishing the repo, job B completes the update,
+ * the owner then edits a function body — which leaves the repo HEAD untouched,
+ * still equal to the target — and a retry of job A classifies as 'republish',
+ * skips the divergence gate, and overwrites the edited function.
+ *
+ * Two independent guards, because either alone leaves a hole:
+ *   - `superseded`: another update job for this fork has since completed, so
+ *     this job is not the fork's current state and cannot be resumed into it.
+ *   - `stale`: too much time has passed since the job last moved. Covers the
+ *     case with no job B at all — an owner who edits functions in the weeks
+ *     after a failed update, where nothing but the clock reveals the risk.
+ *
+ * Pure so both conditions are testable without a queue or a fork.
+ */
+export function canRetryUpdateJob(args: {
+  lastUpdatedAt: Date;
+  now: Date;
+  hasNewerCompletedUpdate: boolean;
+}): { allowed: boolean; reason: UpdateRetryRefusal | 'ok' } {
+  if (args.hasNewerCompletedUpdate) return { allowed: false, reason: 'superseded' };
+  if (args.now.getTime() - args.lastUpdatedAt.getTime() > UPDATE_RETRY_MAX_AGE_MS) {
+    return { allowed: false, reason: 'stale' };
+  }
+  return { allowed: true, reason: 'ok' };
+}
+
+/** Has another update job for this fork completed since the given one was created? */
+export async function hasNewerCompletedUpdate(
+  controlDb: pg.Pool, forkAppId: string, jobId: string, createdAt: Date,
+): Promise<boolean> {
+  const res = await controlDb.query(
+    `SELECT 1 FROM template_clone_jobs
+      WHERE dest_app_id = $1 AND mode = 'update' AND id <> $2
+        AND status = 'completed' AND created_at > $3
+      LIMIT 1`,
+    [forkAppId, jobId, createdAt],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+/**
+ * The in-flight update for this fork, if any.
+ *
+ * "In flight" is everything that is NOT terminal, not just pending/processing.
+ * executeUpdate moves the job to 'copying_repo' before any gate and before a
+ * long S3 copy; a narrower predicate let a second POST /update slip through
+ * that window and run a second worker against the same fork, whose
+ * pre_sync_snapshot_id then captured the first one's POST-update HEAD and made
+ * its undo a no-op. Kept in lockstep with idx_template_clone_jobs_one_update
+ * (migration 111), which uses the same set.
+ */
+export async function getActiveUpdateJob(
+  controlDb: pg.Pool, forkAppId: string,
+): Promise<CloneJob | null> {
+  const res = await controlDb.query<CloneJob>(
+    `SELECT * FROM template_clone_jobs
+      WHERE dest_app_id = $1 AND mode = 'update'
+        AND NOT (status = ANY($2::text[]))
+      LIMIT 1`,
+    [forkAppId, TERMINAL_CLONE_STATUSES],
+  );
+  return res.rows[0] ?? null;
+}
+
+/**
+ * Snapshot ids that an in-flight clone is reading from — caller adds them to
+ * planRetention's pinned set.
+ *
+ * "In flight" is everything NOT terminal, not just pending/processing. A clone
+ * moves through copying_repo, replaying_schema, replaying_rls, seeding_data,
+ * replaying_functions, replaying_config and replaying_durable_objects, and the
+ * repo copy happens in the middle of that. Keying the pin on the two earliest
+ * statuses left the source snapshot unpinned for most of the clone's life, so a
+ * repo push on the template mid-clone could delete the very snapshot being
+ * copied. Same predicate mistake migration 111 fixed for the update mutex.
+ *
+ * A promote job's source_snapshot_id can be NULL (staging app had no repo at
+ * request time — see startPromote) — filtered out here rather than pinning
+ * the literal string "null" or similar. Nothing to protect means nothing to
+ * pin, not a bug.
+ */
 export async function listActiveCloneSnapshotIdsForApp(
   controlDb: pg.Pool,
   sourceAppId: string,
 ): Promise<Set<string>> {
-  const res = await controlDb.query<{ source_snapshot_id: string }>(
+  const res = await controlDb.query<{ source_snapshot_id: string | null }>(
     `SELECT source_snapshot_id FROM template_clone_jobs
-     WHERE source_app_id = $1 AND status IN ('pending', 'processing')`,
-    [sourceAppId],
+      WHERE source_app_id = $1 AND NOT (status = ANY($2::text[]))`,
+    [sourceAppId, TERMINAL_CLONE_STATUSES],
   );
-  return new Set(res.rows.map(r => r.source_snapshot_id));
+  return new Set(
+    res.rows.map(r => r.source_snapshot_id).filter((id): id is string => id !== null),
+  );
+}
+
+/**
+ * Delete a job row outright. Compensation only, for a job that failed to
+ * enqueue and therefore has never been observed by a worker — an un-enqueued
+ * 'pending' update row is worse than no row, because getActiveUpdateJob reads
+ * it as in flight and 409s every future update of that fork forever.
+ */
+export async function deleteCloneJob(controlDb: pg.Pool, jobId: string): Promise<void> {
+  await controlDb.query(`DELETE FROM template_clone_jobs WHERE id = $1`, [jobId]);
 }

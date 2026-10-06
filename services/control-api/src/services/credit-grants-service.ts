@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { resetCreditsEmailState } from './credits-email.js';
+import { resetCreditsEmailState, resetCreditsEmailStateForUserPersonalOrg } from './credits-email.js';
 import { NotFoundError } from './api-errors.js';
 
 export interface SignupGrantArgs {
@@ -67,7 +67,9 @@ export async function grantSignupCredits(
     );
 
     await client.query('COMMIT');
-    await resetCreditsEmailState(pool, args.userId);
+    // Debounce markers live on the org that was credited (migration 113), and
+    // signup credit always lands on the user's personal org.
+    await resetCreditsEmailStateForUserPersonalOrg(pool, args.userId);
     return { granted: amount };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -131,14 +133,16 @@ export async function grantAutoRefillCredits(
       await client.query('COMMIT');
       return { granted: 0 };
     }
-    const ownerId = ins.rows[0].owner_id as string;
     await client.query(
       `UPDATE organizations SET credits_usd = credits_usd + $1 WHERE id = $2`,
       [args.amountUsd, args.organizationId]
     );
     await client.query('COMMIT');
-    // Reset the credits-email debounce for the org owner (who was charged).
-    await resetCreditsEmailState(pool, ownerId);
+    // Reset the credits-email debounce on the org that was credited, so the
+    // next time this org runs low its owners get warned again. Previously this
+    // reset the OWNER's personal-org marker, which for a team org cleared a
+    // marker belonging to a different balance entirely.
+    await resetCreditsEmailState(pool, args.organizationId);
     return { granted: args.amountUsd };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

@@ -3,8 +3,10 @@ import { Redis } from 'ioredis';
 import {
   readCatalogEntry, listCatalogModels, writeCatalog, readEnabledRouters,
   tryAcquireRefreshLock, releaseRefreshLock, recordUnknownId,
+  inheritMissingChatPrices,
   type CatalogEntry,
 } from './catalog.js';
+import type { CatalogRouter } from './select.js';
 
 const RUN_REDIS_TESTS = process.env.RUN_REDIS_TESTS === '1' || process.env.RUN_DB_TESTS === '1';
 const describeRedis = RUN_REDIS_TESTS ? describe : describe.skip;
@@ -76,5 +78,109 @@ describeRedis('catalog', () => {
     await recordUnknownId(redis, 'provider-primary', 'weird-model-2');
     const members = await redis.smembers('ai_catalog:unknown');
     expect(members.sort()).toEqual(['provider-primary:weird-model-1', 'provider-primary:weird-model-2']);
+  });
+});
+
+
+// Pure — no Redis, so these always run.
+describe('inheritMissingChatPrices', () => {
+  const chat = (over: Partial<CatalogRouter>): CatalogRouter => ({
+    name: 'openrouter', upstreamId: 'u', promptPricePerMtok: 0,
+    completionPricePerMtok: 0, contextLength: 0, modality: 'chat', ...over,
+  } as CatalogRouter);
+
+  it('fills an unpriced chat route from a priced sibling', () => {
+    const out = inheritMissingChatPrices([
+      chat({ name: 'openrouter', promptPricePerMtok: 0.15, completionPricePerMtok: 0.47 }),
+      chat({ name: 'provider-tertiary' }),
+    ]);
+    const t = out.find(r => r.name === 'provider-tertiary')!;
+    expect(t.promptPricePerMtok).toBe(0.15);
+    expect(t.completionPricePerMtok).toBe(0.47);
+    expect(t.priceInheritedFrom).toBe('openrouter');
+  });
+
+  it('leaves the donor untouched', () => {
+    const out = inheritMissingChatPrices([
+      chat({ name: 'openrouter', promptPricePerMtok: 0.15, completionPricePerMtok: 0.47 }),
+      chat({ name: 'provider-tertiary' }),
+    ]);
+    const d = out.find(r => r.name === 'openrouter')!;
+    expect(d.priceInheritedFrom).toBeUndefined();
+    expect(d.promptPricePerMtok).toBe(0.15);
+  });
+
+  it('prefers openrouter as donor even when a cheaper sibling exists', () => {
+    const out = inheritMissingChatPrices([
+      chat({ name: 'provider-secondary', promptPricePerMtok: 0.01, completionPricePerMtok: 0.02 }),
+      chat({ name: 'openrouter', promptPricePerMtok: 0.15, completionPricePerMtok: 0.47 }),
+      chat({ name: 'provider-tertiary' }),
+    ]);
+    expect(out.find(r => r.name === 'provider-tertiary')!.priceInheritedFrom).toBe('openrouter');
+    expect(out.find(r => r.name === 'provider-tertiary')!.promptPricePerMtok).toBe(0.15);
+  });
+
+  it('falls back to the CHEAPEST sibling when openrouter is absent', () => {
+    const out = inheritMissingChatPrices([
+      chat({ name: 'provider-quaternary', promptPricePerMtok: 2, completionPricePerMtok: 6 }),
+      chat({ name: 'provider-secondary', promptPricePerMtok: 0.5, completionPricePerMtok: 1 }),
+      chat({ name: 'provider-tertiary' }),
+    ]);
+    const t = out.find(r => r.name === 'provider-tertiary')!;
+    // cheapest by prompt + 3*completion: secondary 3.5 vs quaternary 20
+    expect(t.priceInheritedFrom).toBe('provider-secondary');
+    expect(t.promptPricePerMtok).toBe(0.5);
+  });
+
+  it('never touches video rows — 0/0 there is by design, priced via rawPricing', () => {
+    const video: CatalogRouter = {
+      name: 'provider-tertiary', upstreamId: 'seedance-2.0', promptPricePerMtok: 0,
+      completionPricePerMtok: 0, contextLength: 0, modality: 'video',
+      rawPricing: { unit: 'second', variants: [] },
+    } as CatalogRouter;
+    const out = inheritMissingChatPrices([
+      chat({ name: 'openrouter', promptPricePerMtok: 0.15, completionPricePerMtok: 0.47 }),
+      video,
+    ]);
+    const v = out.find(r => r.modality === 'video')!;
+    expect(v.promptPricePerMtok).toBe(0);
+    expect(v.completionPricePerMtok).toBe(0);
+    expect(v.priceInheritedFrom).toBeUndefined();
+  });
+
+  it('skips rows carrying rawPricing even when modality says chat', () => {
+    const out = inheritMissingChatPrices([
+      chat({ name: 'openrouter', promptPricePerMtok: 0.15, completionPricePerMtok: 0.47 }),
+      chat({ name: 'provider-secondary', rawPricing: { unit: 'image' } }),
+    ]);
+    expect(out.find(r => r.name === 'provider-secondary')!.priceInheritedFrom).toBeUndefined();
+  });
+
+  it('treats a missing modality as chat (legacy rows)', () => {
+    const legacy = { name: 'provider-tertiary', upstreamId: 'u', promptPricePerMtok: 0,
+      completionPricePerMtok: 0, contextLength: 0 } as CatalogRouter;
+    const out = inheritMissingChatPrices([
+      chat({ name: 'openrouter', promptPricePerMtok: 1, completionPricePerMtok: 2 }),
+      legacy,
+    ]);
+    expect(out.find(r => r.name === 'provider-tertiary')!.priceInheritedFrom).toBe('openrouter');
+  });
+
+  it('is a no-op when no sibling has a price', () => {
+    const input = [chat({ name: 'openrouter' }), chat({ name: 'provider-tertiary' })];
+    expect(inheritMissingChatPrices(input)).toEqual(input);
+  });
+
+  it('is a no-op for a single priced router', () => {
+    const input = [chat({ name: 'openrouter', promptPricePerMtok: 1, completionPricePerMtok: 2 })];
+    expect(inheritMissingChatPrices(input)).toEqual(input);
+  });
+
+  it('inherits when only the completion price is non-zero', () => {
+    const out = inheritMissingChatPrices([
+      chat({ name: 'openrouter', promptPricePerMtok: 0, completionPricePerMtok: 0.47 }),
+      chat({ name: 'provider-tertiary' }),
+    ]);
+    expect(out.find(r => r.name === 'provider-tertiary')!.completionPricePerMtok).toBe(0.47);
   });
 });

@@ -1,0 +1,20 @@
+{
+  "name": "ai-search",
+  "description": "Natural-language CRM search. AI emits a strict filter spec against whitelisted tables/columns/ops; server validates and executes.",
+  "triggers": [
+    {
+      "type": "http",
+      "config": {
+        "auth": "required"
+      },
+      "enabled": true
+    }
+  ],
+  "timeoutMs": 15000,
+  "memoryLimitMb": 128,
+  "deployedAt": "2026-07-13T14:11:28.830Z",
+  "agent_tool": false,
+  "agent_tool_description": null,
+  "agent_tool_mode": null,
+  "agent_tool_exposed_to": null
+}

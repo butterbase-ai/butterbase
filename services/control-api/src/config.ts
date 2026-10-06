@@ -21,6 +21,17 @@ function resolveSesRegion(): string {
   return 'us-east-1';
 }
 
+/**
+ * Parse a strictly-positive integer env var, falling back to `fallback` for
+ * unset, non-numeric (NaN) or non-positive values. Used for the Neon rate
+ * limiter, where a 0 would throw inside the TokenBucket constructor at import
+ * time (control-api never boots) and a NaN would busy-loop every Neon call.
+ */
+export function positiveIntOr(raw: string | undefined, fallback: number): number {
+  const parsed = parseInt(raw ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export const config = {
   port: parseInt(process.env.CONTROL_API_PORT ?? '4000', 10),
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -72,10 +83,18 @@ export const config = {
       // Slot-cooldown TTL: how long to skip a slot after a fallback-kind failure.
       // Auto-expires — no manual intervention needed to unstick a recovered provider.
       slotCooldownSeconds: parseInt(process.env.AI_ROUTER_SLOT_COOLDOWN_SEC ?? '300', 10),
+      // Reserve-small credit holds: when true, AI calls reserve a nominal
+      // MIN_LEASE_USD instead of a predicted worst-case cost, admission is
+      // gated on organizations.credit_floor_usd, and settle charges the true
+      // cost (debiting beyond the reservation). Default false — the legacy
+      // estimate-and-pre-debit path stays until this is proven in production.
+      reserveSmallEnabled: process.env.AI_RESERVE_SMALL_ENABLED === 'true',
       v2EndpointsEnabled: process.env.AI_GATEWAY_V2_ENDPOINTS_ENABLED === 'true',
       defaultRegion: process.env.AI_ROUTER_DEFAULT_REGION ?? 'us-east-1',
       markupPct,
       platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-sonnet-4.6',
+      platformDefaultDecisionModel: process.env.PLATFORM_DEFAULT_DECISION_MODEL ?? 'typesafe/jev-1.13',
+      openrouterDecisionsUrl: process.env.OPENROUTER_DECISIONS_URL || undefined,
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
       providerPrimaryApiKey: process.env.AI_PROVIDER_PRIMARY_API_KEY ?? '',
       providerPrimaryBaseUrl: process.env.AI_PROVIDER_PRIMARY_BASE_URL || undefined,
@@ -84,6 +103,11 @@ export const config = {
       providerSecondaryCatalogUrl: process.env.AI_PROVIDER_SECONDARY_CATALOG_URL || undefined,
       providerTertiaryApiKey: process.env.AI_PROVIDER_TERTIARY_API_KEY ?? '',
       providerTertiaryBaseUrl: process.env.AI_PROVIDER_TERTIARY_BASE_URL || undefined,
+      // Quaternary has no default base URL on purpose: the upstream's endpoint,
+      // API key and model must all belong to the same region, so guessing a
+      // default would silently send traffic to the wrong one.
+      providerQuaternaryApiKey: process.env.AI_PROVIDER_QUATERNARY_API_KEY ?? '',
+      providerQuaternaryBaseUrl: process.env.AI_PROVIDER_QUATERNARY_BASE_URL || undefined,
       catalogRefreshLockTtlSec: parseInt(process.env.AI_CATALOG_LOCK_TTL_SEC ?? '600', 10),
     } as const;
   })(),
@@ -174,6 +198,16 @@ export const config = {
     /** Postgres role that owns per-app DBs; created via Neon API if missing on the branch */
     databaseOwner: process.env.NEON_DATA_DATABASE_OWNER ?? 'butterbase',
     enabled: process.env.NEON_API_KEY !== undefined && process.env.NEON_API_KEY !== '',
+    /** Neon organization id. Required by GET /projects. */
+    orgId: process.env.NEON_ORG_ID ?? '',
+    /** Provision each app into its own Neon project instead of a shared one. */
+    projectPerTenant: process.env.BUTTERBASE_PROJECT_PER_TENANT === 'true',
+    /** Sustained Neon API call rate. Account budget is 700/min ≈ 11.6/s. */
+    rateLimitRps: positiveIntOr(process.env.NEON_API_RATE_LIMIT_RPS, 10),
+    /** Burst allowance. Neon documents 40/s per route. */
+    rateLimitBurst: positiveIntOr(process.env.NEON_API_RATE_LIMIT_BURST, 20),
+    /** Postgres major version for newly created tenant projects. */
+    pgVersion: parseInt(process.env.NEON_PG_VERSION ?? '17', 10),
     orphanReconciler: {
       // Off by default. Flip to true only after inspecting a dry-run cycle.
       enabled: process.env.NEON_ORPHAN_RECONCILER_ENABLED === 'true',
@@ -188,6 +222,23 @@ export const config = {
       maxDropsPerRun: parseInt(process.env.NEON_ORPHAN_MAX_DROPS_PER_RUN ?? '10', 10),
       // Cadence between runs. Default 6h — orphans accrue slowly.
       runIntervalHours: parseInt(process.env.NEON_ORPHAN_RUN_INTERVAL_HOURS ?? '6', 10),
+    },
+    /**
+     * Tenant-PROJECT reconciler (project-per-app Phase 4).
+     *
+     * Deliberately has its OWN enable and dry-run flags rather than sharing
+     * `orphanReconciler`'s. Dropping a database inside a shared project is
+     * recoverable-ish; deleting a Neon project destroys the database, its
+     * branches, history and backups in one irreversible call. Setting
+     * NEON_ORPHAN_DRY_RUN=false to arm the database reconciler must never
+     * silently arm this one too.
+     */
+    tenantReconciler: {
+      enabled: process.env.NEON_TENANT_RECONCILER_ENABLED === 'true',
+      dryRun: process.env.NEON_TENANT_DRY_RUN !== 'false',
+      graceHours: parseInt(process.env.NEON_TENANT_GRACE_HOURS ?? '24', 10),
+      maxDeletesPerRun: parseInt(process.env.NEON_TENANT_MAX_DELETES_PER_RUN ?? '5', 10),
+      runIntervalHours: parseInt(process.env.NEON_TENANT_RUN_INTERVAL_HOURS ?? '6', 10),
     },
   },
 
@@ -209,6 +260,8 @@ export const config = {
   dashboardUrl: process.env.DASHBOARD_URL ?? 'http://localhost:3000',
   adminDashboardUrl: process.env.ADMIN_DASHBOARD_URL ?? 'http://localhost:3001',
   submissionsDashboardUrl: process.env.SUBMISSIONS_DASHBOARD_URL ?? 'http://localhost:5173',
+  officeUrl: process.env.OFFICE_URL ?? 'http://localhost:3100',
+  templatesUrl: process.env.TEMPLATES_URL ?? 'http://localhost:5174',
 
   subdomain: {
     baseDomain: process.env.BASE_DOMAIN ?? 'butterbase.dev',

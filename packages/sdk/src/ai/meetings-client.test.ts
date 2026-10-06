@@ -7,7 +7,7 @@ function fakeClient(impl: any) {
 }
 
 describe('MeetingsClient', () => {
-  it('start POSTs to /v1/ai/meetings and returns the bot', async () => {
+  it('start POSTs to /v1/:appId/ai/meetings and returns the bot', async () => {
     const client = fakeClient(async () => ({
       id: 'bot_1', status: 'joining', startedAt: null, completedAt: null,
       durationSeconds: null, recordingUrl: null, transcriptUrl: null, metadata: {},
@@ -16,23 +16,23 @@ describe('MeetingsClient', () => {
     const { data, error } = await meet.start({ meetingUrl: 'https://meet.google.com/abc' });
     expect(error).toBeNull();
     expect(data?.id).toBe('bot_1');
-    expect(client.request).toHaveBeenCalledWith('POST', '/v1/ai/meetings',
+    expect(client.request).toHaveBeenCalledWith('POST', '/v1/app_1/ai/meetings',
       expect.objectContaining({ meetingUrl: 'https://meet.google.com/abc' }));
   });
 
-  it('get GETs /v1/ai/meetings/:id', async () => {
+  it('get GETs /v1/:appId/ai/meetings/:id', async () => {
     const client = fakeClient(async () => ({ id: 'bot_1', status: 'done' }));
     const meet = new MeetingsClient(client);
     await meet.get('bot_1');
-    expect(client.request).toHaveBeenCalledWith('GET', '/v1/ai/meetings/bot_1');
+    expect(client.request).toHaveBeenCalledWith('GET', '/v1/app_1/ai/meetings/bot_1');
   });
 
-  it('stop DELETEs /v1/ai/meetings/:id', async () => {
+  it('stop DELETEs /v1/:appId/ai/meetings/:id', async () => {
     const client = fakeClient(async () => null);
     const meet = new MeetingsClient(client);
     const out = await meet.stop('bot_1');
     expect(out.error).toBeNull();
-    expect(client.request).toHaveBeenCalledWith('DELETE', '/v1/ai/meetings/bot_1');
+    expect(client.request).toHaveBeenCalledWith('DELETE', '/v1/app_1/ai/meetings/bot_1');
   });
 
   it('list builds the query string', async () => {
@@ -40,7 +40,7 @@ describe('MeetingsClient', () => {
     const meet = new MeetingsClient(client);
     await meet.list({ status: 'done', limit: 50, cursor: 'c1' });
     expect(client.request).toHaveBeenCalledWith('GET',
-      '/v1/ai/meetings?status=done&limit=50&cursor=c1');
+      '/v1/app_1/ai/meetings?status=done&limit=50&cursor=c1');
   });
 
   it('surfaces errors via {data:null, error}', async () => {
