@@ -148,6 +148,45 @@ export async function consumeActionToken(
 }
 
 /**
+ * Look a token up WITHOUT consuming it. Backs the GET confirmation page for
+ * email action links: link scanners (Outlook Safe Links, corporate proxies)
+ * pre-fetch every URL in a message, so GET must never perform the action.
+ * Returns null for unknown / expired / already-used tokens.
+ */
+export async function peekActionToken(
+  controlPool: Pool,
+  token: string,
+): Promise<ConsumedToken | null> {
+  const r = await controlPool.query<{ user_id: string; action: TokenAction; payload: Record<string, unknown> }>(
+    `SELECT user_id, action, payload
+       FROM notification_action_tokens
+      WHERE token = $1
+        AND consumed_at IS NULL
+        AND expires_at > now()`,
+    [token],
+  );
+  if (r.rows.length === 0) return null;
+  const row = r.rows[0];
+  return { userId: row.user_id, action: row.action, payload: row.payload };
+}
+
+/**
+ * Turn the weekly digest off. Used for digest unsubscribes instead of adding
+ * 'weekly_digest' to unsubscribed_templates: while digest_enabled stays true,
+ * isSilenced keeps suppressing the per-event emails the digest covers, so a
+ * template-level unsubscribe would leave the user with no failure mail at all.
+ */
+export async function disableDigest(controlPool: Pool, userId: string): Promise<void> {
+  await controlPool.query(
+    `INSERT INTO notification_preferences (user_id, digest_enabled, updated_at)
+     VALUES ($1, false, now())
+     ON CONFLICT (user_id)
+       DO UPDATE SET digest_enabled = false, updated_at = now()`,
+    [userId],
+  );
+}
+
+/**
  * Apply a snooze (24h window). Idempotent via primary-key UPSERT — calling
  * twice extends the snooze to a fresh 24h from the second call.
  */

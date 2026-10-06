@@ -20,6 +20,7 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { sendBillingEmail } from './auth/email-service.js';
 import type { DigestItem, DigestDeployItem } from './auth/email-service.js';
 import { resolveOrganizationId } from './org-resolver.js';
+import { createActionToken } from './notification-prefs.service.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 
 const TICK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -293,17 +294,31 @@ export async function sendDigestForUser(
     // failing-function / failed-deploy alerts the rest of the digest carries.
     collectTemplateUpdates(controlPool, organizationId).catch(() => [] as TemplateUpdateItem[]),
   ]);
-  await sendBillingEmail(user.email, 'weekly_digest', {
+  // One-click unsubscribe token (List-Unsubscribe header + footer link).
+  // Non-fatal: without it the digest still goes out, just without the header.
+  let unsubscribeTemplate: string | undefined;
+  try {
+    unsubscribeTemplate = await createActionToken(controlPool, {
+      userId: user.user_id,
+      action: 'unsubscribe_template',
+      payload: { template: 'weekly_digest' },
+    });
+  } catch (err) {
+    log?.warn({ err, userId: user.user_id }, 'digest-notifier: unsubscribe token mint failed (sending without it)');
+  }
+  const result = await sendBillingEmail(user.email, 'weekly_digest', {
     itemsJson: JSON.stringify(items),
     deployItemsJson: JSON.stringify(deploys),
     templateUpdatesJson: JSON.stringify(templateUpdates),
   }, {
     controlPool,
     userId: user.user_id,
-  }).catch((err) => {
-    log?.warn({ err, userId: user.user_id }, 'digest-notifier: send failed');
+    actionTokens: unsubscribeTemplate ? { unsubscribeTemplate } : undefined,
   });
-  return { sent: true, itemCount: items.length, deployCount: deploys.length };
+  if (result === 'failed') {
+    log?.warn({ userId: user.user_id }, 'digest-notifier: send failed');
+  }
+  return { sent: result !== 'failed', itemCount: items.length, deployCount: deploys.length };
 }
 
 async function scanOnce(controlPool: Pool, log: Log): Promise<void> {
@@ -326,10 +341,16 @@ async function scanOnce(controlPool: Pool, log: Log): Promise<void> {
     if (!wasSet) continue;
 
     try {
-      const { itemCount, deployCount } = await sendDigestForUser(controlPool, user, log);
-      log.info({ userId: user.user_id, itemCount, deployCount, week }, 'digest-notifier: sent');
+      const { sent, itemCount, deployCount } = await sendDigestForUser(controlPool, user, log);
+      if (sent) {
+        log.info({ userId: user.user_id, itemCount, deployCount, week }, 'digest-notifier: sent');
+      } else {
+        // Release the week's claim so the next tick within the digest hour retries.
+        await redis.del(dedupKey).catch(() => 0);
+      }
     } catch (err) {
       log.warn({ err, userId: user.user_id }, 'digest-notifier: send threw');
+      await redis.del(dedupKey).catch(() => 0);
     }
   }
 }

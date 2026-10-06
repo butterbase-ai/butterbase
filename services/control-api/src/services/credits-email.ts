@@ -33,7 +33,7 @@ export interface MaybeSendArgs {
    * sendBillingEmail from auth/email-service, which has the signature:
    *   sendBillingEmail(to: string, template: string, data: Record<string, string>)
    */
-  sendBillingEmail: (to: string, template: string, data: Record<string, string>) => Promise<void>;
+  sendBillingEmail: (to: string, template: string, data: Record<string, string>) => Promise<unknown>;
   dashboardUrl?: string;
   resetDate?: string | null;
 }

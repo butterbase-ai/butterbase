@@ -1,4 +1,5 @@
-import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
+import { SESClient, SendEmailCommand, SendRawEmailCommand } from '@aws-sdk/client-ses';
+import { randomBytes } from 'node:crypto';
 import type { Pool } from 'pg';
 import { config } from '../../config.js';
 import { escapeHtml, renderEmailLayout, renderButton, renderAppEmailLayout, renderCodeBox, renderNotice } from './email-layout.js';
@@ -25,6 +26,22 @@ export interface BillingEmailOptions {
   };
 }
 
+/**
+ * Outcome of sendBillingEmail. It never throws (billing emails must not block
+ * webhook processing), so callers that hold a dedup key check for 'failed'
+ * and release the key so the next attempt can retry.
+ *   - sent:     handed to SES
+ *   - silenced: the recipient's snooze/unsubscribe suppressed it (not an error)
+ *   - logged:   SES failed and the dev console fallback printed it instead
+ *   - failed:   SES rejected or errored
+ */
+export type BillingEmailResult = 'sent' | 'silenced' | 'logged' | 'failed';
+
+function notifActionUrl(token: string): string {
+  const apiBase = process.env.PUBLIC_API_URL || 'https://api.butterbase.ai';
+  return `${apiBase}/v1/notif/action/${token}`;
+}
+
 function createSesClient(): SESClient {
   const region = config.ses.region;
   if (config.ses.accessKeyId && config.ses.secretAccessKey) {
@@ -40,6 +57,88 @@ function createSesClient(): SESClient {
 }
 
 const sesClient = createSesClient();
+
+/** Attach SES_CONFIGURATION_SET (when configured) to a send request. */
+function withConfigurationSet<T extends object>(input: T): T & { ConfigurationSetName?: string } {
+  return config.ses.configurationSet
+    ? { ...input, ConfigurationSetName: config.ses.configurationSet }
+    : input;
+}
+
+// ---- Raw MIME (only for sends that need custom headers) ----
+//
+// SES v1 SendEmailCommand cannot set arbitrary headers, and List-Unsubscribe
+// needs them. Rather than add @aws-sdk/client-sesv2 (a new dependency in two
+// lockfiles) we build the small multipart/alternative message ourselves and
+// send it with SendRawEmailCommand from the client we already have. Only
+// emails that carry custom headers take this path.
+
+function stripCrlf(v: string): string {
+  return v.replace(/[\r\n]+/g, ' ');
+}
+
+/** RFC 2047 encode a header value when it has non-ASCII characters. */
+function encodeHeaderValue(v: string): string {
+  const clean = stripCrlf(v);
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x20-\x7e]*$/.test(clean)) return clean;
+  // Chunk by code point so no encoded-word splits a UTF-8 sequence; ~40 chars
+  // keeps each encoded-word under the 75-char limit.
+  const chars = Array.from(clean);
+  const words: string[] = [];
+  for (let i = 0; i < chars.length; i += 40) {
+    words.push(`=?UTF-8?B?${Buffer.from(chars.slice(i, i + 40).join(''), 'utf8').toString('base64')}?=`);
+  }
+  return words.join('\r\n ');
+}
+
+/** `"Display Name" <addr>` with the display name encoded if needed. */
+function encodeAddress(source: string): string {
+  const m = source.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+  if (!m) return stripCrlf(source);
+  const name = m[1].trim();
+  return name ? `${encodeHeaderValue(name.includes(',') ? `"${name}"` : name)} <${stripCrlf(m[2])}>` : `<${stripCrlf(m[2])}>`;
+}
+
+function base64Body(s: string): string {
+  return (Buffer.from(s, 'utf8').toString('base64').match(/.{1,76}/g) ?? ['']).join('\r\n');
+}
+
+export function buildRawMimeMessage(msg: {
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  html: string | null;
+  headers?: Record<string, string>;
+}): string {
+  const head = [
+    `From: ${encodeAddress(msg.from)}`,
+    `To: ${stripCrlf(msg.to)}`,
+    `Subject: ${encodeHeaderValue(msg.subject)}`,
+    'MIME-Version: 1.0',
+    ...Object.entries(msg.headers ?? {}).map(([k, v]) => `${stripCrlf(k)}: ${stripCrlf(v)}`),
+  ];
+  const textPart = ['Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', base64Body(msg.text)];
+  if (!msg.html) {
+    return [...head, ...textPart, ''].join('\r\n');
+  }
+  const boundary = `bb_${randomBytes(12).toString('hex')}`;
+  return [
+    ...head,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    ...textPart,
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    base64Body(msg.html),
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
+}
 
 /**
  * Turn a stored app name into something fit to show an end user. The apps
@@ -169,7 +268,7 @@ async function sendAuthCodeEmail(
 ): Promise<void> {
   try {
     const { subject, text, html } = buildAuthCodeEmail(kind, code, appName);
-    const command = new SendEmailCommand({
+    const command = new SendEmailCommand(withConfigurationSet({
       Source: buildSource(formatAppDisplayName(appName)),
       Destination: { ToAddresses: [email] },
       Message: {
@@ -179,13 +278,13 @@ async function sendAuthCodeEmail(
           Text: { Data: text, Charset: 'UTF-8' },
         },
       },
-    });
+    }));
 
     await sesClient.send(command);
     console.log(`[EMAIL] ${logLabel} sent to ${email}`);
   } catch (error) {
     // In development, fall back to console logging if AWS credentials not configured
-    if (config.nodeEnv === 'development') {
+    if (config.ses.devConsoleFallback) {
       console.log(`[EMAIL] ${logLabel} for ${email}: ${code}`);
     } else {
       throw error;
@@ -785,19 +884,19 @@ export async function sendSuggestionNotification(
   });
 
   try {
-    const command = new SendEmailCommand({
+    const command = new SendEmailCommand(withConfigurationSet({
       Source: `${config.ses.fromName} <${config.ses.fromEmail}>`,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject },
         Body: { Text: { Data: body }, Html: { Data: html } },
       },
-    });
+    }));
 
     await sesClient.send(command);
     console.log(`[EMAIL] Suggestion notification sent to ${to} (suggestion ${suggestion.id})`);
   } catch (error) {
-    if (config.nodeEnv === 'development') {
+    if (config.ses.devConsoleFallback) {
       console.log(`[EMAIL] Suggestion notification for ${to}:\n${body}`);
     } else {
       console.error(`Failed to send suggestion notification to ${to}:`, error);
@@ -890,6 +989,9 @@ export function buildBillingEmailHtml(
     const deploys = parseDeployItems(data.deployItemsJson);
     const templateUpdates = parseTemplateUpdateItems(data.templateUpdatesJson);
     const total = items.length + deploys.length;
+    const unsubscribe = opts.actionTokens?.unsubscribeTemplate
+      ? `<p style="margin:24px 0 0 0;font-size:12px;color:#a3a3a3;"><a href="${escapeHtml(notifActionUrl(opts.actionTokens.unsubscribeTemplate))}" style="color:#a3a3a3;text-decoration:underline;">Unsubscribe from the weekly digest</a></p>`
+      : '';
 
     const templateUpdateRows = templateUpdates.map((t) => {
       const url = `${dashboardUrl}/apps/${escapeHtml(t.dest_app_id)}`;
@@ -922,7 +1024,7 @@ ${templateUpdateSection}
 ${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}`;
       return renderEmailLayout({
         preheader: 'Nothing failed across your apps this week.',
-        content,
+        content: content + unsubscribe,
       });
     }
 
@@ -978,7 +1080,7 @@ ${section('Deployments', deployRows)}${templateUpdateSection}
 <p style="margin:32px 0 0 0;">${renderButton({ href: dashboardUrl, label: 'Open dashboard' })}</p>`;
     return renderEmailLayout({
       preheader: `${total} thing${total === 1 ? '' : 's'} need attention. ${top}`,
-      content,
+      content: content + unsubscribe,
     });
   }
 
@@ -1474,15 +1576,16 @@ function digestTotalCount(data: Record<string, string>): number {
 }
 
 /**
- * Send a billing-related email notification.
- * Falls back to console logging in development.
+ * Send a billing-related email notification. Never throws; see
+ * BillingEmailResult. Falls back to console logging when
+ * config.ses.devConsoleFallback is on.
  */
 export async function sendBillingEmail(
   to: string,
   template: BillingEmailTemplate,
   data: Record<string, string> = {},
   opts: BillingEmailOptions = {},
-): Promise<void> {
+): Promise<BillingEmailResult> {
   // Silence gate. Opt-in: callers that pass userId + controlPool get the
   // user's snoozes and unsubscribes applied. Existing callers that don't
   // pass these (most billing paths) keep current always-send behavior.
@@ -1490,38 +1593,62 @@ export async function sendBillingEmail(
     const silenced = await isSilenced(opts.controlPool, opts.userId, template, opts.scope);
     if (silenced) {
       console.log(`[EMAIL] Skipped ${template} for ${to} (user has active silence)`);
-      return;
+      return 'silenced';
     }
   }
 
   const subject = buildBillingEmailSubject(template, data);
   const body = buildBillingEmailBody(template, data);
   const html = buildBillingEmailHtml(template, data, { actionTokens: opts.actionTokens });
+  const source = `${config.ses.fromName} <${config.ses.fromEmail}>`;
+
+  // RFC 8058 one-click unsubscribe, when the caller minted a token for it.
+  // POST to the same URL performs the unsubscribe with no confirmation page.
+  const unsubscribeToken = opts.actionTokens?.unsubscribeTemplate;
 
   try {
-    const command = new SendEmailCommand({
-      Source: `${config.ses.fromName} <${config.ses.fromEmail}>`,
-      Destination: { ToAddresses: [to] },
-      Message: {
-        Subject: { Data: subject },
-        // Dual-body when an HTML variant exists — clients that prefer text
-        // (Apple Mail "Load Remote Content" off, etc.) still get the text
-        // version. SES handles multipart/alternative selection.
-        Body: html
-          ? { Text: { Data: body }, Html: { Data: html } }
-          : { Text: { Data: body } },
-      },
-    });
-
-    await sesClient.send(command);
-    console.log(`[EMAIL] Billing email (${template}) sent to ${to}`);
-  } catch (error) {
-    if (config.nodeEnv === 'development') {
-      console.log(`[EMAIL] Billing email (${template}) for ${to}:\n${body}`);
+    if (unsubscribeToken) {
+      const raw = buildRawMimeMessage({
+        from: source,
+        to,
+        subject,
+        text: body,
+        html,
+        headers: {
+          'List-Unsubscribe': `<${notifActionUrl(unsubscribeToken)}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
+      });
+      await sesClient.send(new SendRawEmailCommand(withConfigurationSet({
+        Source: source,
+        Destinations: [to],
+        RawMessage: { Data: Buffer.from(raw, 'utf8') },
+      })));
     } else {
-      console.error(`Failed to send billing email (${template}) to ${to}:`, error);
-      // Don't throw — billing emails should not block webhook processing
+      await sesClient.send(new SendEmailCommand(withConfigurationSet({
+        Source: source,
+        Destination: { ToAddresses: [to] },
+        Message: {
+          Subject: { Data: subject, Charset: 'UTF-8' },
+          // Dual-body when an HTML variant exists — clients that prefer text
+          // (Apple Mail "Load Remote Content" off, etc.) still get the text
+          // version. SES handles multipart/alternative selection.
+          Body: html
+            ? { Text: { Data: body, Charset: 'UTF-8' }, Html: { Data: html, Charset: 'UTF-8' } }
+            : { Text: { Data: body, Charset: 'UTF-8' } },
+        },
+      })));
     }
+    console.log(`[EMAIL] Billing email (${template}) sent to ${to}`);
+    return 'sent';
+  } catch (error) {
+    if (config.ses.devConsoleFallback) {
+      console.log(`[EMAIL] Billing email (${template}) for ${to}:\n${body}`);
+      return 'logged';
+    }
+    console.error(`Failed to send billing email (${template}) to ${to}:`, error);
+    // Don't throw — billing emails should not block webhook processing.
+    return 'failed';
   }
 }
 
@@ -1556,17 +1683,17 @@ ${renderButton({ href: input.inviteUrl, label: 'Accept invite' })}
   const text = `${inviterDisplay} invited you to ${input.orgName} on Butterbase.\n\nAccept: ${input.inviteUrl}\n\nExpires: ${expiresStr}`;
 
   try {
-    await sesClient.send(new SendEmailCommand({
+    await sesClient.send(new SendEmailCommand(withConfigurationSet({
       Source: `${config.ses.fromName} <${config.ses.fromEmail}>`,
       Destination: { ToAddresses: [input.toEmail] },
       Message: {
         Subject: { Data: subject },
         Body: { Html: { Data: html }, Text: { Data: text } },
       },
-    }));
+    })));
     console.log(`[EMAIL] Invite email sent to ${input.toEmail}`);
   } catch (error) {
-    if (config.nodeEnv === 'development') {
+    if (config.ses.devConsoleFallback) {
       console.log(`[Invite email (dev)] to=${input.toEmail} url=${input.inviteUrl}`);
     } else {
       console.warn('[sendInviteEmail] failed', error);
@@ -1626,19 +1753,19 @@ export async function sendSuggestionStatusUpdateEmail(
   ].join('\n');
 
   try {
-    const command = new SendEmailCommand({
+    const command = new SendEmailCommand(withConfigurationSet({
       Source: `${config.ses.fromName} <${config.ses.fromEmail}>`,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject },
         Body: { Text: { Data: body }, Html: { Data: html } },
       },
-    });
+    }));
 
     await sesClient.send(command);
     console.log(`[EMAIL] Suggestion status update sent to ${to} (suggestion ${suggestion.id}, status: ${suggestion.status})`);
   } catch (error) {
-    if (config.nodeEnv === 'development') {
+    if (config.ses.devConsoleFallback) {
       console.log(`[EMAIL] Suggestion status update for ${to} (${suggestion.id}):\n${body}`);
     } else {
       console.error(`Failed to send suggestion status update to ${to}:`, error);

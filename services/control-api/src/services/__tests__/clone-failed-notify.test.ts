@@ -37,6 +37,20 @@ describe('notifyCloneFailed', () => {
     expect(sendBillingEmail.mock.calls[1][0]).toBe('owner@example.com');
   });
 
+  it('releases the dedup keys when SES fails so the next attempt retries', async () => {
+    sendBillingEmail.mockResolvedValue('failed');
+    const { controlPool, runtimePool } = pools({ owner_id: 'u1', app_name: 'Pantry', organization_id: 'org_9' }, 'owner@example.com');
+    await notifyCloneFailed(controlPool, runtimePool, args);
+    const released = redis.del.mock.calls.map((c) => c[0]);
+    expect(released).toEqual(expect.arrayContaining(['failure_notif:clone:ops:job_1', 'failure_notif:clone:job_1']));
+  });
+
+  it('keeps the dedup keys when the email was sent', async () => {
+    const { controlPool, runtimePool } = pools({ owner_id: 'u1', app_name: 'Pantry', organization_id: 'org_9' }, 'owner@example.com');
+    await notifyCloneFailed(controlPool, runtimePool, args);
+    expect(redis.del).not.toHaveBeenCalled();
+  });
+
   it('still alerts ops when the app has no owner', async () => {
     const { controlPool, runtimePool } = pools(null, null);
     await notifyCloneFailed(controlPool, runtimePool, args);
