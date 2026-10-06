@@ -1,7 +1,7 @@
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import type { Pool } from 'pg';
 import { config } from '../../config.js';
-import { escapeHtml, renderEmailLayout, renderButton } from './email-layout.js';
+import { escapeHtml, renderEmailLayout, renderButton, renderAppEmailLayout, renderCodeBox } from './email-layout.js';
 import { isSilenced } from '../notification-prefs.service.js';
 
 /**
@@ -42,6 +42,28 @@ function createSesClient(): SESClient {
 const sesClient = createSesClient();
 
 /**
+ * Turn a stored app name into something fit to show an end user. The apps
+ * table has only `name` (no separate display name or logo), and in practice
+ * it is often a slug like `acme-notes`. Slug-shaped names (lowercase
+ * alphanumerics joined by `-`/`_`) are title-cased (`Acme Notes`);
+ * anything else (e.g. `My App`, `myApp`) is kept as the developer wrote it.
+ * Control characters are stripped. Returns null when nothing usable remains.
+ */
+export function formatAppDisplayName(appName?: string | null): string | null {
+  if (!appName) return null;
+  // eslint-disable-next-line no-control-regex
+  const cleaned = appName.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return null;
+  if (/^[a-z0-9]+(?:[-_]+[a-z0-9]+)*$/.test(cleaned)) {
+    return cleaned
+      .split(/[-_]+/)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+  }
+  return cleaned;
+}
+
+/**
  * Build the SES `Source` header. When an app name is provided, use it as the
  * display name so end users see the app's branding rather than "Butterbase".
  * Sanitizes characters that would break RFC 5322 address parsing.
@@ -54,90 +76,142 @@ function buildSource(appName?: string | null): string {
   return `"${safeName}" <${fromEmail}>`;
 }
 
-export async function sendVerificationEmail(email: string, code: string, appName?: string | null): Promise<void> {
+type AuthCodeKind = 'verification' | 'magic_link' | 'password_reset';
+
+interface AuthCodeCopy {
+  /** Noun phrase used in the subject, e.g. "sign-in code". */
+  codeLabel: string;
+  heading: string;
+  /** Sentence fragment, completed with " {introJoin} {App}." or "." */
+  intro: string;
+  introJoin: 'to' | 'for';
+  expiry: string;
+}
+
+const AUTH_CODE_COPY: Record<AuthCodeKind, AuthCodeCopy> = {
+  verification: {
+    codeLabel: 'verification code',
+    heading: 'Verify your email',
+    intro: 'Use this code to verify your email address',
+    introJoin: 'for',
+    expiry: '24 hours',
+  },
+  magic_link: {
+    codeLabel: 'sign-in code',
+    heading: 'Your sign-in code',
+    intro: 'Use this code to sign in',
+    introJoin: 'to',
+    expiry: '15 minutes',
+  },
+  password_reset: {
+    codeLabel: 'password reset code',
+    heading: 'Reset your password',
+    intro: 'Use this code to reset your password',
+    introJoin: 'for',
+    expiry: '1 hour',
+  },
+};
+
+export interface AuthCodeEmail {
+  subject: string;
+  text: string;
+  html: string;
+}
+
+/**
+ * Build subject / text / HTML for an end-user auth code email. The code is in
+ * the subject ("Your Acme Notes sign-in code is 558817"): that is what
+ * lets Gmail show its "Copy code" card and keeps successive codes from
+ * threading into one conversation.
+ */
+export function buildAuthCodeEmail(kind: AuthCodeKind, code: string, appName?: string | null): AuthCodeEmail {
+  const copy = AUTH_CODE_COPY[kind];
+  const name = formatAppDisplayName(appName);
+  const codeLabel = name ? `${name} ${copy.codeLabel}` : copy.codeLabel;
+  const subject = `Your ${codeLabel} is ${code}`;
+  const intro = name ? `${copy.intro} ${copy.introJoin} ${name}.` : `${copy.intro}.`;
+  const expiryLine = `This code expires in ${copy.expiry}.`;
+  const ignoreLine = "If you didn't request this, you can safely ignore this email.";
+
+  const text = [
+    `Your ${codeLabel} is: ${code}`,
+    '',
+    intro,
+    '',
+    expiryLine,
+    '',
+    ignoreLine,
+  ].join('\n');
+
+  const content = [
+    `<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;line-height:1.3;color:#0a0a0a;">${escapeHtml(copy.heading)}</h1>`,
+    `<p style="margin:0;font-size:15px;line-height:1.6;color:#404040;">${escapeHtml(intro)}</p>`,
+    renderCodeBox(code),
+    `<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#404040;">${escapeHtml(expiryLine)}</p>`,
+    `<p style="margin:0;font-size:13px;line-height:1.6;color:#737373;">${escapeHtml(ignoreLine)}</p>`,
+  ].join('\n');
+
+  const html = renderAppEmailLayout({
+    appName: name,
+    preheader: `${subject}. ${expiryLine}`,
+    content,
+  });
+
+  return { subject, text, html };
+}
+
+async function sendAuthCodeEmail(
+  kind: AuthCodeKind,
+  email: string,
+  code: string,
+  appName: string | null | undefined,
+  logLabel: string,
+): Promise<void> {
   try {
+    const { subject, text, html } = buildAuthCodeEmail(kind, code, appName);
     const command = new SendEmailCommand({
-      Source: buildSource(appName),
+      Source: buildSource(formatAppDisplayName(appName)),
       Destination: { ToAddresses: [email] },
       Message: {
-        Subject: { Data: 'Verify your email' },
+        Subject: { Data: subject, Charset: 'UTF-8' },
         Body: {
-          Text: {
-            Data: `Your verification code is: ${code}\n\nThis code expires in 24 hours.\n\nIf you didn't request this, please ignore this email.`
-          }
-        }
-      }
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
     });
 
     await sesClient.send(command);
-    console.log(`[EMAIL] Verification email sent to ${email}`);
+    console.log(`[EMAIL] ${logLabel} sent to ${email}`);
   } catch (error) {
     // In development, fall back to console logging if AWS credentials not configured
     if (config.nodeEnv === 'development') {
-      console.log(`[EMAIL] Verification code for ${email}: ${code}`);
+      console.log(`[EMAIL] ${logLabel} for ${email}: ${code}`);
     } else {
       throw error;
     }
   }
+}
+
+/**
+ * Sends email-verification code
+ */
+export async function sendVerificationEmail(email: string, code: string, appName?: string | null): Promise<void> {
+  await sendAuthCodeEmail('verification', email, code, appName, 'Verification code');
 }
 
 /**
  * Sends magic-link sign-in email with code
  */
 export async function sendMagicLinkEmail(email: string, code: string, appName?: string | null): Promise<void> {
-  try {
-    const command = new SendEmailCommand({
-      Source: buildSource(appName),
-      Destination: { ToAddresses: [email] },
-      Message: {
-        Subject: { Data: 'Your sign-in code' },
-        Body: {
-          Text: {
-            Data: `Your sign-in code is: ${code}\n\nThis code expires in 15 minutes.\n\nIf you didn't request this, please ignore this email.`
-          }
-        }
-      }
-    });
-
-    await sesClient.send(command);
-    console.log(`[EMAIL] Magic-link sign-in code sent to ${email}`);
-  } catch (error) {
-    if (config.nodeEnv === 'development') {
-      console.log(`[EMAIL] Magic-link sign-in code for ${email}: ${code}`);
-    } else {
-      throw error;
-    }
-  }
+  await sendAuthCodeEmail('magic_link', email, code, appName, 'Magic-link sign-in code');
 }
 
 /**
  * Sends password reset email with code
  */
 export async function sendPasswordResetEmail(email: string, code: string, appName?: string | null): Promise<void> {
-  try {
-    const command = new SendEmailCommand({
-      Source: buildSource(appName),
-      Destination: { ToAddresses: [email] },
-      Message: {
-        Subject: { Data: 'Reset your password' },
-        Body: {
-          Text: {
-            Data: `Your password reset code is: ${code}\n\nThis code expires in 1 hour.\n\nIf you didn't request this, please ignore this email.`
-          }
-        }
-      }
-    });
-
-    await sesClient.send(command);
-    console.log(`[EMAIL] Password reset email sent to ${email}`);
-  } catch (error) {
-    // In development, fall back to console logging if AWS credentials not configured
-    if (config.nodeEnv === 'development') {
-      console.log(`[EMAIL] Password reset code for ${email}: ${code}`);
-    } else {
-      throw error;
-    }
-  }
+  await sendAuthCodeEmail('password_reset', email, code, appName, 'Password reset code');
 }
 
 // ---- Billing email notifications ----

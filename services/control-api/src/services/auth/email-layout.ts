@@ -82,3 +82,62 @@ export function renderButton({ href, label }: ButtonOptions): string {
 <a href="${escapeHtml(href)}" style="display:inline-block;padding:12px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">${escapeHtml(label)}</a>
 </td></tr></table>`;
 }
+
+interface AppLayoutOptions {
+  /**
+   * Human-readable app name shown as the header and in the footer. Optional:
+   * when absent, the header is omitted and the footer is generic. Raw value;
+   * this function escapes it.
+   */
+  appName?: string | null;
+  /** Plain-text preview shown in inbox list before the body. ~90 chars max. Raw value. */
+  preheader: string;
+  /** Inner HTML for the card body. Caller is responsible for escaping. */
+  content: string;
+}
+
+/**
+ * Email shell for messages sent to an app's END USERS (sign-in codes,
+ * verification, password reset). Unlike `renderEmailLayout`, it carries no
+ * Butterbase logo and no "you own a Butterbase app" footer: the recipient is
+ * a user of the developer's app, not a Butterbase customer. Branding is the
+ * app's name as text (the platform stores no per-app logo), plus a small
+ * "Sent via Butterbase" line in the footer.
+ */
+export function renderAppEmailLayout({ appName, preheader, content }: AppLayoutOptions): string {
+  const name = appName && appName.trim() ? appName.trim() : null;
+  const escapedName = name ? escapeHtml(name) : '';
+  const header = name
+    ? `<tr><td style="padding:24px 32px;border-bottom:1px solid #f0f0f0;font-size:18px;font-weight:700;color:#0a0a0a;letter-spacing:-0.01em;line-height:1.3;">${escapedName}</td></tr>`
+    : '';
+  const footerLine = name
+    ? `This is an automated message from ${escapedName}. Please don't reply to this email.`
+    : `This is an automated message. Please don't reply to this email.`;
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapedName}</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0a0a0a;">
+<div style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;overflow:hidden;opacity:0;color:transparent;">${escapeHtml(preheader)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;">
+<tr><td align="center" style="padding:32px 16px;">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;">
+${header}
+<tr><td style="padding:32px;">${content}</td></tr>
+<tr><td style="padding:20px 32px;background:#fafafa;border-top:1px solid #f0f0f0;font-size:12px;color:#737373;line-height:1.5;">
+${footerLine}
+<div style="margin-top:8px;font-size:11px;color:#a3a3a3;">Sent via Butterbase</div>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>`;
+}
+
+/**
+ * One-time code rendered large, monospaced and letter-spaced inside a light
+ * rounded box. Easy to read and to select/copy on mobile.
+ */
+export function renderCodeBox(code: string): string {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;"><tr>
+<td style="background:#f4f4f5;border:1px solid #e4e4e7;border-radius:10px;padding:16px 28px;font-family:'SFMono-Regular',Menlo,Consolas,'Liberation Mono','Courier New',monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#0a0a0a;line-height:1.2;">${escapeHtml(code)}</td>
+</tr></table>`;
+}
