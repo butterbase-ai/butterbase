@@ -218,6 +218,7 @@ export async function sendPasswordResetEmail(email: string, code: string, appNam
 
 export type BillingEmailTemplate =
   | 'payment_failed'
+  | 'plan_downgraded'
   | 'soft_locked'
   | 'account_suspended'
   | 'overage_warning'
@@ -227,6 +228,7 @@ export type BillingEmailTemplate =
   | 'deployment_failed'
   | 'provisioning_failed'
   | 'clone_failed'
+  | 'clone_failed_ops'
   | 'clone_reaper_digest'
   | 'function_failed'
   | 'auth_hook_failed'
@@ -238,6 +240,7 @@ export type BillingEmailTemplate =
 
 const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   payment_failed: 'Action Required: Payment Failed',
+  plan_downgraded: 'Your Butterbase plan was downgraded',
   soft_locked: 'Account Limited: Free Plan Limits Exceeded',
   account_suspended: 'Account Suspended: Payment Required',
   overage_warning: 'Usage Alert: You Have Exceeded Your Plan Limits',
@@ -247,6 +250,7 @@ const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   deployment_failed: 'Deployment failed',
   provisioning_failed: 'App setup failed',
   clone_failed: 'Clone failed',
+  clone_failed_ops: '[butterbase] Clone failed',
   clone_reaper_digest: '[butterbase] Clone reaper flipped stuck jobs to failed',
   function_failed: 'A function in your app is failing',
   auth_hook_failed: 'Your auth hook is failing',
@@ -257,6 +261,21 @@ const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   weekly_digest: 'Your weekly Butterbase digest',
 };
 
+/**
+ * Render a date for humans ("October 13, 2026"). Accepts a Date or an
+ * ISO-8601 string; anything else is returned unchanged, so a caller that
+ * already formatted the value ("May 31") is not mangled — `new Date('May 31')`
+ * would happily invent a year. Always UTC: the server has no idea where the
+ * recipient is, and a fixed zone keeps the date stable across hosts.
+ */
+export function formatEmailDate(value: string | Date | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '';
+  if (!(value instanceof Date) && !/^\d{4}-\d{2}-\d{2}/.test(value)) return value;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+}
+
 export function buildBillingEmailBody(template: BillingEmailTemplate, data: Record<string, string>): string {
   const dashboardUrl = process.env.DASHBOARD_URL || 'https://dashboard.butterbase.ai';
 
@@ -265,10 +284,27 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       return [
         'We were unable to process your payment.',
         '',
-        `Your account will remain active until ${data.gracePeriodEndsAt || 'the end of the grace period'}.`,
+        `Your account will remain active until ${formatEmailDate(data.gracePeriodEndsAt) || 'the end of the grace period'}.`,
         'Please update your payment method to avoid service interruption.',
         '',
         `Update payment method: ${dashboardUrl}/billing`,
+        '',
+        'If you believe this is an error, please contact support.',
+      ].join('\n');
+
+    // Grace period ran out on a past_due subscription: the subscription was
+    // canceled and the account moved to the free plan. Distinct from
+    // payment_failed, which is sent while the account is still active.
+    case 'plan_downgraded':
+      return [
+        'We still could not collect payment for your Butterbase subscription, and the grace period'
+          + (data.gracePeriodEndedAt ? ` ended on ${formatEmailDate(data.gracePeriodEndedAt)}.` : ' has ended.'),
+        '',
+        'Your subscription has been canceled and your account is now on the free Playground plan.',
+        'Your apps and data are still there, but Playground plan limits now apply, and anything',
+        'over those limits may be restricted.',
+        '',
+        `To restore your plan, update your payment method and resubscribe: ${dashboardUrl}/billing`,
         '',
         'If you believe this is an error, please contact support.',
       ].join('\n');
@@ -435,6 +471,28 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       ].filter(Boolean).join('\n');
     }
 
+    // Ops-only twin of clone_failed. Sent to OPS_ALERT_EMAIL; carries the
+    // identifiers an operator needs and none of the customer's CTAs.
+    case 'clone_failed_ops':
+      return [
+        `A ${data.mode || 'clone'} job failed.`,
+        '',
+        `Job ID: ${data.jobId || '(unknown)'}`,
+        `Mode: ${data.mode || 'clone'}`,
+        `App: ${data.appName ? `${data.appName} (${data.appId})` : data.appId || '(unknown)'}`,
+        `Source app: ${data.sourceAppId || '(unknown)'}`,
+        `Organization: ${data.organizationId || '(unknown)'}`,
+        `Owner: ${data.ownerEmail || '(no owner email on file)'}`,
+        data.stalledStage ? `Stalled at stage: ${data.stalledStage}` : null,
+        '',
+        'Error:',
+        truncateError(data.errorMessage || '(no message captured)'),
+        '',
+        data.ownerEmail
+          ? 'The owner has been sent a clone_failed email (unless they have silenced it).'
+          : 'No owner email on file, so nobody outside ops has been told.',
+      ].filter((line): line is string => line !== null).join('\n');
+
     case 'clone_reaper_digest': {
       let details: Array<{ jobId: string; destAppId: string | null; stalledStage: string; ageMinutes: number }> = [];
       try {
@@ -577,7 +635,7 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
         '2. Update your payment method or top up manually',
         '3. Re-enable auto-refill once your payment method is current',
         '',
-        'If you have any questions, reply to this email.',
+        `If you have any questions, contact support from your dashboard: ${dashboardUrl}`,
         '',
         '— The Butterbase team',
       ].join('\n');
@@ -586,7 +644,7 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       const total = data.total_usd ?? '0.00';
       const monthly = data.monthly_allowance_usd ?? '0.00';
       const topup = data.topup_usd ?? '0.00';
-      const resetDate = data.reset_date ?? '';
+      const resetDate = formatEmailDate(data.reset_date);
       const creditsLowDashboardUrl = data.dashboard_url ?? dashboardUrl;
       return [
         'Your AI credit balance is running low.',
@@ -982,6 +1040,10 @@ export function buildBillingEmailSubject(
     if (data.mode === 'promote') return `Promote to production failed: "${app}"`;
     if (data.mode === 'staging_reset') return `Staging reset failed: "${app}"`;
     return `Clone failed: "${app}"`;
+  }
+  if (template === 'clone_failed_ops') {
+    const mode = data.mode && data.mode !== 'clone' ? ` (${data.mode})` : '';
+    return `[butterbase] Clone failed: ${data.appId || 'unknown app'}${mode} job ${data.jobId || '?'}`;
   }
   if (template === 'clone_reaper_digest') {
     const n = data.reapedCount || '?';

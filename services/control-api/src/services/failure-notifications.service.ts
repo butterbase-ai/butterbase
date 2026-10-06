@@ -21,6 +21,7 @@ interface OwnerInfo {
   email: string;
   appName: string;
   userId: string;
+  organizationId: string | null;
 }
 
 /**
@@ -34,11 +35,11 @@ async function getOwnerEmailAndAppName(
 ): Promise<OwnerInfo | null> {
   // 1. Fetch app name + owner_id from runtime DB
   const appRow = await runtimePool.query(
-    `SELECT owner_id, name AS app_name FROM apps WHERE id = $1`,
+    `SELECT owner_id, name AS app_name, organization_id FROM apps WHERE id = $1`,
     [appId],
   );
   if (appRow.rows.length === 0) return null;
-  const { owner_id, app_name } = appRow.rows[0];
+  const { owner_id, app_name, organization_id } = appRow.rows[0];
 
   // 2. Fetch owner email from control DB
   const userRow = await controlPool.query(
@@ -48,7 +49,7 @@ async function getOwnerEmailAndAppName(
   if (userRow.rows.length === 0) return null;
   const { email } = userRow.rows[0];
   if (!email) return null;
-  return { email, appName: app_name ?? appId, userId: owner_id };
+  return { email, appName: app_name ?? appId, userId: owner_id, organizationId: organization_id ?? null };
 }
 
 /**
@@ -126,22 +127,35 @@ export async function notifyCloneFailed(
   },
   log?: { warn: (payload: Record<string, unknown>, message: string) => void }
 ): Promise<void> {
+  // Owner lookup up front so the ops alert can name the org and owner. A
+  // failed lookup (deleted app, region blip) must not suppress the ops alert.
+  let owner: OwnerInfo | null = null;
+  try {
+    owner = await getOwnerEmailAndAppName(controlPool, runtimePool, args.appId);
+  } catch {
+    owner = null;
+  }
+
   // Ops alert: fire independently of the user email so operators still see the
   // failure when the dest app has no owner, is deleted, or has silences on.
+  // Its own template — the customer copy carries a "Try cloning again" CTA and
+  // an owner footer that make no sense in the ops inbox.
   const opsRecipient = process.env.OPS_ALERT_EMAIL || 'ken@butterbase.ai';
   const mode = args.mode ?? 'clone';
   const opsKey = `failure_notif:clone:ops:${args.jobId}`;
   try {
     const opsSet = await getRedisClient().set(opsKey, '1', 'EX', NOTIF_TTL_SECONDS, 'NX');
     if (opsSet) {
-      await sendBillingEmail(opsRecipient, 'clone_failed', {
+      await sendBillingEmail(opsRecipient, 'clone_failed_ops', {
         appId: args.appId,
-        appName: args.appId,
+        appName: owner?.appName ?? '',
         sourceAppId: args.sourceAppId,
         jobId: args.jobId,
         errorMessage: args.errorMessage,
         stalledStage: args.stalledStage || '',
         mode,
+        organizationId: owner?.organizationId ?? '',
+        ownerEmail: owner?.email ?? '',
       }).catch((err) => {
         log?.warn({ err, jobId: args.jobId }, 'failure-notifications: clone ops send failed');
       });
@@ -155,7 +169,6 @@ export async function notifyCloneFailed(
     const wasSet = await getRedisClient().set(key, '1', 'EX', NOTIF_TTL_SECONDS, 'NX');
     if (!wasSet) return;
 
-    const owner = await getOwnerEmailAndAppName(controlPool, runtimePool, args.appId);
     if (!owner) {
       log?.warn({ appId: args.appId, jobId: args.jobId }, 'failure-notifications: clone skipped (no owner email)');
       await getRedisClient().del(key).catch(() => {});

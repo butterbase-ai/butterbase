@@ -358,7 +358,7 @@ export async function enforceExpiredGracePeriods(db: Pool): Promise<void> {
 
     // Find platform subscriptions past grace period (subscriptions is platform-tier)
     const result = await db.query(
-      `SELECT s.user_id, s.stripe_subscription_id
+      `SELECT s.user_id, s.stripe_subscription_id, s.grace_period_ends_at
        FROM subscriptions s
        WHERE s.status = 'past_due'
          AND s.grace_period_ends_at IS NOT NULL
@@ -379,14 +379,21 @@ export async function enforceExpiredGracePeriods(db: Pool): Promise<void> {
       await writeUserStateChange(db, row.user_id, { plan_id: 'playground', spending_cap_usd: null });
       await invalidateUserAppLimits(db, row.user_id);
 
-      // Best-effort: notify the user the payment failed and they were downgraded.
+      // Best-effort: tell the user they were downgraded. Not payment_failed —
+      // that template promises the account "will remain active", which is no
+      // longer true at this point.
       try {
         const emailResult = await db.query(
           'SELECT email FROM platform_users WHERE id = $1',
           [row.user_id]
         );
         if (emailResult.rows.length > 0) {
-          await sendBillingEmail(emailResult.rows[0].email, 'payment_failed', {}).catch((err) =>
+          const endedAt = row.grace_period_ends_at instanceof Date
+            ? row.grace_period_ends_at.toISOString()
+            : String(row.grace_period_ends_at ?? '');
+          await sendBillingEmail(emailResult.rows[0].email, 'plan_downgraded', {
+            gracePeriodEndedAt: endedAt,
+          }).catch((err) =>
             console.error('Failed to send downgrade email:', err),
           );
         }
