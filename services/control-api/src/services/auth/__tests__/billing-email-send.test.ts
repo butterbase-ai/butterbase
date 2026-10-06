@@ -99,3 +99,21 @@ describe('sendBillingEmail', () => {
     expect(raw).toContain('Subject: [Pantry] "f" failed 3 times in a row');
   });
 });
+
+describe('sendBillingEmail app display name', () => {
+  beforeEach(() => mockSend.mockReset().mockResolvedValue({}));
+
+  it('title-cases slug app names in owner-facing subjects', async () => {
+    await sendBillingEmail('o@example.com', 'deployment_failed', { appName: 'acme-notes', appId: 'app_1' });
+    const cmd = mockSend.mock.calls[0][0];
+    expect(cmd.input.Message.Subject.Data).toContain('Acme Notes');
+    expect(cmd.input.Message.Subject.Data).not.toContain('acme-notes');
+  });
+
+  it('keeps the raw slug in ops alerts', async () => {
+    await sendBillingEmail('ops@example.com', 'clone_failed_ops', { appName: 'acme-notes', appId: 'app_1', jobId: 'j1' });
+    const cmd = mockSend.mock.calls[0][0];
+    const all = JSON.stringify(cmd.input);
+    expect(all).not.toContain('Acme Notes');
+  });
+});

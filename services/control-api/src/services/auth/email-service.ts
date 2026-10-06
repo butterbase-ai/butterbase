@@ -1580,6 +1580,12 @@ function digestTotalCount(data: Record<string, string>): number {
  * BillingEmailResult. Falls back to console logging when
  * config.ses.devConsoleFallback is on.
  */
+const OPS_BILLING_TEMPLATES: ReadonlySet<BillingEmailTemplate> = new Set<BillingEmailTemplate>([
+  'clone_failed_ops',
+  'clone_reaper_digest',
+  'org_balance_low_ops',
+]);
+
 export async function sendBillingEmail(
   to: string,
   template: BillingEmailTemplate,
@@ -1595,6 +1601,13 @@ export async function sendBillingEmail(
       console.log(`[EMAIL] Skipped ${template} for ${to} (user has active silence)`);
       return 'silenced';
     }
+  }
+
+  // Owner-facing copy shows a readable app name ("acme-notes" →
+  // "Acme Notes"), matching the auth emails. Ops alerts keep the raw
+  // slug so it can be grepped.
+  if (data.appName && !OPS_BILLING_TEMPLATES.has(template)) {
+    data = { ...data, appName: formatAppDisplayName(data.appName) ?? data.appName };
   }
 
   const subject = buildBillingEmailSubject(template, data);
