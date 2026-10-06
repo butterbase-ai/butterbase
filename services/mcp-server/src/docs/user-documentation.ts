@@ -2274,7 +2274,7 @@ Returns:
 
 #### Auto-leave timers
 
-Tell the bot when to give up and leave the call on its own. All sub-fields are optional positive integers in **seconds** (max \`86400\` = 24h); omitted ones inherit the provider default.
+Tell the bot when to give up and leave the call on its own. All sub-fields are optional positive integers in **seconds** (max \`86400\` = 24h); omitted ones inherit the platform default. On Butterbase Cloud \`waitingRoomTimeoutSec\` defaults to \`300\` (5 minutes) — time in the waiting room is billed, so raise it only if hosts are slow to admit the bot.
 
 | Sub-field | Triggers when… |
 |---|---|
@@ -2552,7 +2552,12 @@ GET /v1/{app_id}/ai/meetings/usage
 
 Returns the last 100 \`actor_usage_logs\` rows for the app — one row per dimension (\`recording\` and, when transcript was enabled, \`transcription\`) per completed session.
 
-Meetings credits are drawn from the same AI credits pool as chat and embeddings. The cost is computed at terminal events (\`bot.done\` / \`bot.fatal\` for recording, \`transcript.done\` for transcription) from actual measured duration, not from the up-front estimate. Up-front, the platform reserves a small lease against your balance and refunds the unused portion on settle — so a failed join refunds in full.
+Meetings credits are drawn from the same AI credits pool as chat and embeddings. The cost is computed once, when the bot finishes (\`bot.done\` / \`bot.fatal\`), from actual measured durations rather than the up-front estimate:
+
+- **\`recording\`** — the bot's full time on the call, from when it starts joining until it leaves, **including time in the waiting room** and time in the call before recording starts.
+- **\`transcription\`** (when \`transcript\` is enabled) — the recorded duration.
+
+Up-front, the platform places a small hold (about five minutes' worth) against your balance; the true cost is charged when the bot finishes, even if the meeting runs long. A bot that is never admitted is billed for the time it waited — use \`automaticLeave.waitingRoomTimeoutSec\` to cap it.
 
 Free / Pro / Enterprise allowances are the same as documented under the \`ai\` topic.
 
