@@ -99,7 +99,7 @@ async function scanOnce(
       }
       if (!wasSet) continue; // already emailed for this streak
 
-      await notifyFunctionFailed(
+      const result = await notifyFunctionFailed(
         controlPool,
         runtimePool,
         {
@@ -110,7 +110,14 @@ async function scanOnce(
           streakLen: g.streak_len,
         },
         log,
-      ).catch((err) => log.warn({ err, appId: g.app_id, functionId: g.function_id, streakLen: g.streak_len }, 'failure-notifier: notify failed'));
+      ).catch((err) => {
+        log.warn({ err, appId: g.app_id, functionId: g.function_id, streakLen: g.streak_len }, 'failure-notifier: notify failed');
+        return null;
+      });
+      // SES failed: release the streak key so the next scan retries.
+      if (result === 'failed') {
+        await redis.del(key).catch(() => 0);
+      }
     }
   }
 }

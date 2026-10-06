@@ -126,6 +126,23 @@ describe('scanLowBalanceOnce', () => {
     expect(sendEmail.mock.calls[0][1]).toBe('org_balance_low_ops');
   });
 
+  it('releases the dedup claims when neither email nor chat got through', async () => {
+    const pool = mockPool([row({ id: 'a' })]);
+    const redis = { ...mockRedis(), del: vi.fn(async () => 1) };
+    sendEmail.mockRejectedValueOnce(new Error('SES send failed'));
+    sendChat.mockResolvedValueOnce(false);
+    await scanLowBalanceOnce({ pool: pool as never, redis: redis as never, sendEmail, sendChat, log });
+    expect(redis.del).toHaveBeenCalledWith('ops_low_balance:a');
+  });
+
+  it('keeps the dedup claims when at least one channel delivered', async () => {
+    const pool = mockPool([row({ id: 'a' })]);
+    const redis = { ...mockRedis(), del: vi.fn(async () => 1) };
+    sendEmail.mockRejectedValueOnce(new Error('SES send failed'));
+    await scanLowBalanceOnce({ pool: pool as never, redis: redis as never, sendEmail, sendChat, log });
+    expect(redis.del).not.toHaveBeenCalled();
+  });
+
   it('skips an org already alerted within the dedup window', async () => {
     const pool = mockPool([row({ id: 'a' }), row({ id: 'b' })]);
     const redis = mockRedis(['ops_low_balance:a']);

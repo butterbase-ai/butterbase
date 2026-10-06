@@ -61,8 +61,9 @@ interface Logger {
 
 export interface ScanDeps {
   pool: Pool;
-  redis: Pick<Redis, 'set'>;
-  sendEmail: (to: string, template: string, data: Record<string, string>) => Promise<void>;
+  redis: Pick<Redis, 'set'> & Partial<Pick<Redis, 'del'>>;
+  /** Rejects when the email was not delivered to SES. */
+  sendEmail: (to: string, template: string, data: Record<string, string>) => Promise<unknown>;
   sendChat: (text: string) => Promise<boolean>;
   log: Logger;
 }
@@ -150,19 +151,27 @@ export async function scanLowBalanceOnce(deps: ScanDeps): Promise<{ alerted: Low
 
   // Email and chat are independent on purpose: a broken SES identity or a
   // rotated webhook must not take the other channel down with it.
-  await Promise.allSettled([
+  const [emailOk, chatOk] = await Promise.all([
     sendEmail(process.env.OPS_ALERT_EMAIL || 'ken@butterbase.ai', 'org_balance_low_ops', {
       threshold_usd: limit.toFixed(2),
       org_count: String(alerted.length),
       cut_off_count: String(cutOffCount),
       orgs_json: JSON.stringify(alerted),
-    }).catch((err) => {
+    }).then(() => true, (err) => {
       log.warn({ err }, 'low-balance-notifier: ops email failed');
+      return false;
     }),
-    sendChat(formatChatMessage(alerted, limit, cutOffCount)).catch((err) => {
+    sendChat(formatChatMessage(alerted, limit, cutOffCount)).then((ok) => ok !== false, (err) => {
       log.warn({ err }, 'low-balance-notifier: ops chat failed');
+      return false;
     }),
   ]);
+
+  // Nobody was told: release the dedup claims so the next sweep retries
+  // instead of staying silent for the whole dedup window.
+  if (!emailOk && !chatOk && redis.del) {
+    await Promise.all(alerted.map((o) => redis.del!(`ops_low_balance:${o.id}`).catch(() => 0)));
+  }
 
   return { alerted };
 }
@@ -190,7 +199,11 @@ export function startLowBalanceNotifier(pool: Pool, log: Logger): NodeJS.Timeout
     scanLowBalanceOnce({
       pool,
       redis: getRedisClient(),
-      sendEmail: (to, template, data) => sendBillingEmail(to, template as never, data),
+      sendEmail: async (to, template, data) => {
+        if (await sendBillingEmail(to, template as never, data) === 'failed') {
+          throw new Error('SES send failed');
+        }
+      },
       sendChat: (text) => sendOpsChatMessage(text),
       log,
     }).catch((err) => log.error({ err }, 'low-balance-notifier: scan threw'));

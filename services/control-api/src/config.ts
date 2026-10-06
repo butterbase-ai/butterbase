@@ -301,6 +301,14 @@ export const config = {
     secretAccessKey: process.env.SES_AWS_SECRET_ACCESS_KEY,
     fromEmail: process.env.SES_FROM_EMAIL ?? 'noreply@butterbase.com',
     fromName: process.env.SES_FROM_NAME ?? 'Butterbase',
+    // Optional SES configuration set, attached to every send so bounces and
+    // complaints can be routed (SNS/EventBridge) once processing exists.
+    configurationSet: process.env.SES_CONFIGURATION_SET?.trim() || undefined,
+    // When SES fails, log the email (including OTP codes) to stdout instead of
+    // surfacing the error. Only on an EXPLICIT NODE_ENV=development or opt-in:
+    // `nodeEnv` above defaults to 'development' when NODE_ENV is unset, and a
+    // deploy that forgot NODE_ENV must not swallow SES errors and print codes.
+    devConsoleFallback: process.env.NODE_ENV === 'development' || process.env.EMAIL_DEV_CONSOLE_FALLBACK === 'true',
   },
 
   cloudflare: {

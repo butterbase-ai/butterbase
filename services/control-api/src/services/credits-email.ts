@@ -33,14 +33,14 @@ export interface MaybeSendArgs {
    * sendBillingEmail from auth/email-service, which has the signature:
    *   sendBillingEmail(to: string, template: string, data: Record<string, string>)
    */
-  sendBillingEmail: (to: string, template: string, data: Record<string, string>) => Promise<void>;
+  sendBillingEmail: (to: string, template: string, data: Record<string, string>) => Promise<unknown>;
   dashboardUrl?: string;
   resetDate?: string | null;
 }
 
 export async function maybeSendCreditsEmail(args: MaybeSendArgs): Promise<void> {
   const { db, organizationId, postBalance, sendBillingEmail } = args;
-  const dashboardUrl = args.dashboardUrl ?? process.env.DASHBOARD_URL ?? '';
+  const dashboardUrl = args.dashboardUrl || process.env.DASHBOARD_URL || '';
 
   // Balance, auto-refill config and the dedup markers all live on
   // `organizations` as of migration 113 — one row, no join through

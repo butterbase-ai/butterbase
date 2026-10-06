@@ -10,17 +10,28 @@
 
 import type { Pool } from 'pg';
 import { getRedisClient } from './redis.js';
-import { sendBillingEmail } from './auth/email-service.js';
+import { sendBillingEmail, type BillingEmailResult } from './auth/email-service.js';
 import { createActionToken } from './notification-prefs.service.js';
 
 const NOTIF_TTL_SECONDS = 35 * 24 * 60 * 60; // 35 days, mirrors quota notifs
 
 export const FUNCTION_FAILURE_STREAK_THRESHOLD = 3;
 
+/**
+ * The dedup key is claimed before sending (so concurrent callers can't both
+ * send). When SES then fails, release it — otherwise the failure is
+ * swallowed for the whole dedup window and the email is never retried.
+ */
+async function releaseOnFailure(result: BillingEmailResult, key: string): Promise<void> {
+  if (result !== 'failed') return;
+  await getRedisClient().del(key).catch(() => {});
+}
+
 interface OwnerInfo {
   email: string;
   appName: string;
   userId: string;
+  organizationId: string | null;
 }
 
 /**
@@ -34,11 +45,11 @@ async function getOwnerEmailAndAppName(
 ): Promise<OwnerInfo | null> {
   // 1. Fetch app name + owner_id from runtime DB
   const appRow = await runtimePool.query(
-    `SELECT owner_id, name AS app_name FROM apps WHERE id = $1`,
+    `SELECT owner_id, name AS app_name, organization_id FROM apps WHERE id = $1`,
     [appId],
   );
   if (appRow.rows.length === 0) return null;
-  const { owner_id, app_name } = appRow.rows[0];
+  const { owner_id, app_name, organization_id } = appRow.rows[0];
 
   // 2. Fetch owner email from control DB
   const userRow = await controlPool.query(
@@ -48,7 +59,7 @@ async function getOwnerEmailAndAppName(
   if (userRow.rows.length === 0) return null;
   const { email } = userRow.rows[0];
   if (!email) return null;
-  return { email, appName: app_name ?? appId, userId: owner_id };
+  return { email, appName: app_name ?? appId, userId: owner_id, organizationId: organization_id ?? null };
 }
 
 /**
@@ -74,7 +85,7 @@ export async function notifyDeploymentFailed(
       return;
     }
 
-    await sendBillingEmail(owner.email, 'deployment_failed', {
+    const result = await sendBillingEmail(owner.email, 'deployment_failed', {
       appId: args.appId,
       appName: owner.appName,
       deploymentId: args.deploymentId,
@@ -83,9 +94,11 @@ export async function notifyDeploymentFailed(
       controlPool,
       userId: owner.userId,
       scope: { appId: args.appId },
-    }).catch((err) => {
-      log?.warn({ err, appId: args.appId, deploymentId: args.deploymentId }, 'failure-notifications: send failed');
     });
+    if (result === 'failed') {
+      log?.warn({ appId: args.appId, deploymentId: args.deploymentId }, 'failure-notifications: send failed');
+    }
+    await releaseOnFailure(result, key);
   } catch {
     // Notifications must never block their callers
   }
@@ -126,25 +139,40 @@ export async function notifyCloneFailed(
   },
   log?: { warn: (payload: Record<string, unknown>, message: string) => void }
 ): Promise<void> {
+  // Owner lookup up front so the ops alert can name the org and owner. A
+  // failed lookup (deleted app, region blip) must not suppress the ops alert.
+  let owner: OwnerInfo | null = null;
+  try {
+    owner = await getOwnerEmailAndAppName(controlPool, runtimePool, args.appId);
+  } catch {
+    owner = null;
+  }
+
   // Ops alert: fire independently of the user email so operators still see the
   // failure when the dest app has no owner, is deleted, or has silences on.
+  // Its own template — the customer copy carries a "Try cloning again" CTA and
+  // an owner footer that make no sense in the ops inbox.
   const opsRecipient = process.env.OPS_ALERT_EMAIL || 'ken@butterbase.ai';
   const mode = args.mode ?? 'clone';
   const opsKey = `failure_notif:clone:ops:${args.jobId}`;
   try {
     const opsSet = await getRedisClient().set(opsKey, '1', 'EX', NOTIF_TTL_SECONDS, 'NX');
     if (opsSet) {
-      await sendBillingEmail(opsRecipient, 'clone_failed', {
+      const opsResult = await sendBillingEmail(opsRecipient, 'clone_failed_ops', {
         appId: args.appId,
-        appName: args.appId,
+        appName: owner?.appName ?? '',
         sourceAppId: args.sourceAppId,
         jobId: args.jobId,
         errorMessage: args.errorMessage,
         stalledStage: args.stalledStage || '',
         mode,
-      }).catch((err) => {
-        log?.warn({ err, jobId: args.jobId }, 'failure-notifications: clone ops send failed');
+        organizationId: owner?.organizationId ?? '',
+        ownerEmail: owner?.email ?? '',
       });
+      if (opsResult === 'failed') {
+        log?.warn({ jobId: args.jobId }, 'failure-notifications: clone ops send failed');
+      }
+      await releaseOnFailure(opsResult, opsKey);
     }
   } catch {
     // Don't let ops-alert plumbing break the user email path below.
@@ -155,14 +183,13 @@ export async function notifyCloneFailed(
     const wasSet = await getRedisClient().set(key, '1', 'EX', NOTIF_TTL_SECONDS, 'NX');
     if (!wasSet) return;
 
-    const owner = await getOwnerEmailAndAppName(controlPool, runtimePool, args.appId);
     if (!owner) {
       log?.warn({ appId: args.appId, jobId: args.jobId }, 'failure-notifications: clone skipped (no owner email)');
       await getRedisClient().del(key).catch(() => {});
       return;
     }
 
-    await sendBillingEmail(owner.email, 'clone_failed', {
+    const result = await sendBillingEmail(owner.email, 'clone_failed', {
       appId: args.appId,
       appName: owner.appName,
       sourceAppId: args.sourceAppId,
@@ -174,9 +201,11 @@ export async function notifyCloneFailed(
       controlPool,
       userId: owner.userId,
       scope: { appId: args.appId },
-    }).catch((err) => {
-      log?.warn({ err, appId: args.appId, jobId: args.jobId }, 'failure-notifications: clone send failed');
     });
+    if (result === 'failed') {
+      log?.warn({ appId: args.appId, jobId: args.jobId }, 'failure-notifications: clone send failed');
+    }
+    await releaseOnFailure(result, key);
   } catch {
     // Notifications must never block their callers.
   }
@@ -232,13 +261,19 @@ export async function notifyProvisioningFailed(
       return;
     }
 
-    await sendBillingEmail(owner.email, 'provisioning_failed', {
+    const result = await sendBillingEmail(owner.email, 'provisioning_failed', {
       appId: args.appId,
       appName: owner.appName,
       provisioningError: args.provisioningError,
-    }).catch((err) => {
-      log?.warn({ err, appId: args.appId }, 'failure-notifications: provisioning send failed');
+    }, {
+      controlPool,
+      userId: owner.userId,
+      scope: { appId: args.appId },
     });
+    if (result === 'failed') {
+      log?.warn({ appId: args.appId }, 'failure-notifications: provisioning send failed');
+    }
+    await releaseOnFailure(result, key);
   } catch {
     // Swallow
   }
@@ -262,12 +297,12 @@ export async function notifyFunctionFailed(
     streakLen: number;
   },
   log?: { warn: (payload: Record<string, unknown>, message: string) => void }
-): Promise<void> {
+): Promise<BillingEmailResult | null> {
   try {
     const owner = await getOwnerEmailAndAppName(controlPool, runtimePool, args.appId);
     if (!owner) {
       log?.warn({ appId: args.appId, functionId: args.functionId }, 'failure-notifications: function skipped (no owner email)');
-      return;
+      return null;
     }
 
     // Mint one-shot action tokens for the inline buttons. Failures here
@@ -297,7 +332,7 @@ export async function notifyFunctionFailed(
       log?.warn({ err, appId: args.appId, functionId: args.functionId }, 'failure-notifications: token mint failed (sending without action buttons)');
     }
 
-    await sendBillingEmail(owner.email, 'function_failed', {
+    const result = await sendBillingEmail(owner.email, 'function_failed', {
       appId: args.appId,
       appName: owner.appName,
       functionName: args.functionName,
@@ -308,11 +343,15 @@ export async function notifyFunctionFailed(
       userId: owner.userId,
       scope: { appId: args.appId, functionId: args.functionId },
       actionTokens,
-    }).catch((err) => {
-      log?.warn({ err, appId: args.appId, functionId: args.functionId }, 'failure-notifications: function send failed');
     });
+    if (result === 'failed') {
+      log?.warn({ appId: args.appId, functionId: args.functionId }, 'failure-notifications: function send failed');
+    }
+    // The scanner owns this email's dedup key; it releases it on 'failed'.
+    return result;
   } catch {
     // Swallow
+    return null;
   }
 }
 
@@ -346,15 +385,21 @@ export async function notifyAuthHookFailed(
       return;
     }
 
-    await sendBillingEmail(owner.email, 'auth_hook_failed', {
+    const result = await sendBillingEmail(owner.email, 'auth_hook_failed', {
       appId: args.appId,
       appName: owner.appName,
       hookFunction: args.hookFunction,
       event: args.event,
       errorMessage: args.errorMessage,
-    }).catch((err) => {
-      log?.warn({ err, appId: args.appId, hookFunction: args.hookFunction }, 'failure-notifications: auth hook send failed');
+    }, {
+      controlPool,
+      userId: owner.userId,
+      scope: { appId: args.appId },
     });
+    if (result === 'failed') {
+      log?.warn({ appId: args.appId, hookFunction: args.hookFunction }, 'failure-notifications: auth hook send failed');
+    }
+    await releaseOnFailure(result, key);
   } catch {
     // Swallow
   }

@@ -391,15 +391,18 @@ async function notifyLimitOnce(
     if (emailResult.rows.length === 0) return;
 
     const isCurrency = meter === 'ai_credits';
-    await sendBillingEmail(emailResult.rows[0].email, template, {
+    const result = await sendBillingEmail(emailResult.rows[0].email, template, {
       meter,
       threshold,
       percentage: threshold,
       current: isCurrency ? `$${current.toFixed(2)}` : String(current),
       limit: isCurrency ? `$${limit.toFixed(2)}` : String(limit),
-    }).catch((err) => {
-      console.error('Failed to send limit notification email:', err);
     });
+    // Release the claim when SES failed so a later request retries, rather
+    // than staying silent for the rest of the billing period.
+    if (result === 'failed') {
+      await getRedisClient().del(notifKey).catch(() => {});
+    }
   } catch {
     // Don't block on notification failure
   }
