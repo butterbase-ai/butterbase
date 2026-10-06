@@ -335,6 +335,7 @@ export type BillingEmailTemplate =
   | 'credits_low'
   | 'credits_exhausted'
   | 'org_balance_low_ops'
+  | 'meetings_webhook_missed_ops'
   | 'weekly_digest';
 
 const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
@@ -357,6 +358,7 @@ const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   credits_low: 'Your AI credits are running low',
   credits_exhausted: 'Your AI credits are exhausted',
   org_balance_low_ops: '[butterbase] Orgs low on credits',
+  meetings_webhook_missed_ops: '[butterbase] Meeting bots missed by the webhook',
   weekly_digest: 'Your weekly Butterbase digest',
 };
 
@@ -686,6 +688,24 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       }
       lines.push('');
       lines.push('Recharge with: tsx scripts/grant-credits.ts --org-id <id> --amount <usd>');
+      return lines.join('\n');
+    }
+
+    // Ops-only. Sent by the cloud meetings sweeper when it bills finished
+    // bots the provider webhook never delivered — the webhook endpoint is
+    // probably disabled or failing.
+    case 'meetings_webhook_missed_ops': {
+      const ids = (data.bot_ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const lines: string[] = [
+        `The meetings sweeper billed ${data.bot_count || '?'} bot(s) ($${data.usd || '?'}) that the provider webhook never delivered.`,
+        '',
+        'Billing is covered, but customer apps did not receive those events either.',
+        'Check the meetings provider webhook endpoint is enabled and returning 2xx.',
+      ];
+      if (ids.length > 0) {
+        lines.push('', 'Bots:');
+        for (const id of ids) lines.push(`  ${id}`);
+      }
       return lines.join('\n');
     }
 
@@ -1413,6 +1433,19 @@ ${e(o.name)} <span style="color:#737373;">(${e(o.planId)})</span> &middot; $${e(
         }) + (rows ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;border-collapse:collapse;">${rows}</table>` : ''),
       );
     }
+    case 'meetings_webhook_missed_ops': {
+      const ids = (data.bot_ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+      return ops(
+        `${data.bot_count || '?'} meeting bot(s) billed by the sweeper.`,
+        renderNotice({
+          heading: `Webhook missed ${data.bot_count || '?'} meeting bot${data.bot_count === '1' ? '' : 's'}`,
+          intro: `<p style="margin:0;">The meetings sweeper billed them ($${e(data.usd || '?')}), but the provider webhook never delivered — so customer apps did not get those events either. Check the meetings provider webhook endpoint is enabled and returning 2xx.</p>`,
+          ...(ids.length > 0
+            ? { detail: { label: 'Bots', text: ids.join('\n') } }
+            : {}),
+        }),
+      );
+    }
     default:
       return null;
   }
@@ -1503,6 +1536,10 @@ export function buildBillingEmailSubject(
       return data.total_usd
         ? `Your AI credits are running low ($${data.total_usd} left)`
         : BILLING_EMAIL_SUBJECTS.credits_low;
+    case 'meetings_webhook_missed_ops': {
+      const n = data.bot_count || '?';
+      return `[butterbase] Webhook missed ${n} meeting bot${n === '1' ? '' : 's'} ($${data.usd || '?'})`;
+    }
     case 'org_balance_low_ops': {
       const n = data.org_count || '?';
       const cut = data.cut_off_count && data.cut_off_count !== '0' ? `, ${data.cut_off_count} cut off` : '';
@@ -1584,6 +1621,7 @@ const OPS_BILLING_TEMPLATES: ReadonlySet<BillingEmailTemplate> = new Set<Billing
   'clone_failed_ops',
   'clone_reaper_digest',
   'org_balance_low_ops',
+  'meetings_webhook_missed_ops',
 ]);
 
 export async function sendBillingEmail(
