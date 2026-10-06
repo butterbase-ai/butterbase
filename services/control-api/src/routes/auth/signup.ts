@@ -89,7 +89,7 @@ export async function signupRoutes(app: FastifyInstance) {
       );
 
       // Generate 6-digit verification code
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const code = crypto.randomInt(100000, 1000000).toString();
       const codeHash = crypto.createHash('sha256').update(code).digest('hex');
 
       // Store verification code (expires in 24 hours)
