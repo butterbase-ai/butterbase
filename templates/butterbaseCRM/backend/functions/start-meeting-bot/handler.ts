@@ -1,6 +1,15 @@
 const MEETING_URL_RE =
   /https?:\/\/(?:[a-z0-9-]+\.)*(?:zoom\.us|meet\.google\.com|teams\.microsoft\.com|webex\.com)\/[^\s<>"')]+/i;
 
+// Every minute a bot spends on a call is billed, admitted or not. Calendar
+// auto-dispatch sends bots to meetings where nobody lets them in or nobody
+// shows up, and the provider defaults keep them there for up to 20 minutes.
+const AUTOMATIC_LEAVE = {
+  waitingRoomTimeoutSec: 300,   // not admitted within 5 minutes
+  noOneJoinedTimeoutSec: 300,   // in the call, but nobody else arrived
+  everyoneLeftTimeoutSec: 60,   // the meeting is over
+};
+
 function jsonResponse(status, body) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
@@ -32,6 +41,7 @@ async function dispatchBot(ctx, meetingUrl, botName, metadata) {
       transcript: true,
       recording: 'mp4',
       botName,
+      automaticLeave: AUTOMATIC_LEAVE,
       metadata: { ...metadata, bot_name: botName },
     }),
   });
