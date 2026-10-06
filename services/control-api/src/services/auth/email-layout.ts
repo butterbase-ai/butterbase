@@ -136,8 +136,10 @@ ${footerLine}
  * One-time code rendered large, monospaced and letter-spaced inside a light
  * rounded box. Easy to read and to select/copy on mobile.
  */
+// user-select:all makes one tap/click select the whole code (no JS in email,
+// so a real copy button is impossible; Gmail adds its own Copy-code card).
 export function renderCodeBox(code: string): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;"><tr>
-<td style="background:#f4f4f5;border:1px solid #e4e4e7;border-radius:10px;padding:16px 28px;font-family:'SFMono-Regular',Menlo,Consolas,'Liberation Mono','Courier New',monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#0a0a0a;line-height:1.2;">${escapeHtml(code)}</td>
+<td style="background:#f4f4f5;border:1px solid #e4e4e7;border-radius:10px;padding:16px 28px;font-family:'SFMono-Regular',Menlo,Consolas,'Liberation Mono','Courier New',monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#0a0a0a;line-height:1.2;"><span style="-webkit-user-select:all;user-select:all;">${escapeHtml(code)}</span></td>
 </tr></table>`;
 }

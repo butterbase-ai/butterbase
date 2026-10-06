@@ -61,7 +61,7 @@ describe.each(cases)('$name', ({ fn, label, expiry }) => {
     const command = mockSend.mock.calls[0][0];
     const html: string = command.Message.Body.Html.Data;
     const text: string = command.Message.Body.Text.Data;
-    expect(html).toContain('558817');
+    expect(html).toContain('user-select:all;">558817</span>');
     expect(html).toContain('Acme Notes');
     expect(html).toContain(expiry);
     expect(html).toContain('Sent via Butterbase');
