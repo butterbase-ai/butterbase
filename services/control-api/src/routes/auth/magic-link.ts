@@ -12,6 +12,7 @@ import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
 import { resolveOrgFromApp } from '../../services/app-org-resolver.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 const sendSchema = z.object({
   email: z.string().email(),
@@ -131,6 +132,7 @@ export async function magicLinkRoutes(app: FastifyInstance) {
         message: 'If an account exists with that email, a sign-in code has been sent',
       });
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'Magic-link send failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }
@@ -292,6 +294,7 @@ export async function magicLinkRoutes(app: FastifyInstance) {
         },
       });
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'Magic-link verify failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }

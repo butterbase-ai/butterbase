@@ -8,6 +8,7 @@ import { logAuditEvent } from '../../services/auth/audit-service.js';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 const refreshSchema = z.object({
   refresh_token: z.string(),
@@ -133,6 +134,7 @@ export async function refreshRoutes(app: FastifyInstance) {
         token_type: 'Bearer',
       });
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'Token refresh failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }

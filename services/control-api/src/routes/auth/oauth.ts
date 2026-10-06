@@ -17,6 +17,7 @@ import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
 import { logAuditEvent } from '../../services/auth/audit-service.js';
 import { fireAuthHook } from '../../services/auth/auth-hook-service.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 export async function oauthRoutes(app: FastifyInstance) {
   // Register content type parser for application/x-www-form-urlencoded
@@ -103,6 +104,7 @@ export async function oauthRoutes(app: FastifyInstance) {
 
       return reply.redirect(authUrl);
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'OAuth initiation failed');
       return reply.code(500).send(apiError(error, 'Failed to initiate OAuth flow'));
     }
@@ -395,6 +397,7 @@ async function handleOAuthCallback(
       },
     });
   } catch (error) {
+    rethrowAppResolverError(error);
     logFailure((error as Error).message ?? 'unknown');
     app.log.error({ error }, 'OAuth callback failed');
     return reply.code(500).send(apiError(error, 'OAuth authentication failed'));

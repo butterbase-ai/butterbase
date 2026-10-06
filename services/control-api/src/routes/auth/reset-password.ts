@@ -9,6 +9,7 @@ import { logAuditEvent } from '../../services/auth/audit-service.js';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 const resetPasswordSchema = z.object({
   email: z.string().email(),
@@ -106,6 +107,7 @@ export async function resetPasswordRoutes(app: FastifyInstance) {
 
       return reply.send({ message: 'Password reset successfully' });
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'Password reset failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }
