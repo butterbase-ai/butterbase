@@ -232,8 +232,8 @@ describe('ctx.kv (shim)', () => {
 
   // ─── expire ───────────────────────────────────────────────────────────────
 
-  it('expire posts {ttl:null} and returns ok', async () => {
-    const { f, last } = makeSpy(200, { ok: true });
+  it('expire posts {ttl:null} and returns applied', async () => {
+    const { f, last } = makeSpy(200, { applied: true });
     const kv = makeKv({ appId: 'app_a', apiKey: 'k', baseUrl: BASE, fetch: f as any });
     const result = await kv.expire('k', null);
     expect(last().url).toBe(`${ROOT}/k/expire`);
