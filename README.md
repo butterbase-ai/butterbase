@@ -2,7 +2,7 @@
   <img src=".github/assets/logo.png" alt="Butterbase" width="420" />
 </p>
 
-<p align="center"><strong>AI-native, open-source backend-as-a-service.</strong><br/>Postgres · Auth · Storage · Functions · AI Gateway · MCP server</p>
+<p align="center"><strong>AI-native, open-source backend-as-a-service.</strong><br/>Apache 2.0 · Self-hostable with Docker Compose · A Postgres database per app<br/>Auth · Storage · Functions · Realtime · AI Gateway · RAG · MCP server</p>
 
 <p align="center">
   <a href="./LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
@@ -34,6 +34,11 @@
 -->
 
 Butterbase gives you the building blocks for AI-driven applications without lock-in: a Postgres-backed backend with row-level security, serverless functions, an LLM gateway, realtime subscriptions, key-value store, file storage, RAG, durable per-key actors, and a built-in **Model Context Protocol (MCP) server** so agents can operate your backend with tools instead of glue code.
+
+- **Open source, Apache 2.0.** The full runtime data plane is in this repo — no feature-gated "community edition".
+- **Self-host in one command.** `docker compose -f docker-compose.local.yml up -d` brings up the whole stack on your machine or your cloud; see [Quickstart (self-host)](#quickstart-self-host) and [`SETUP.md`](./SETUP.md).
+- **Real Postgres underneath.** Every app gets its own Postgres database with declarative schema, migrations, row-level security, and auto-generated REST. No proprietary datastore, no lock-in.
+- **Or use the managed cloud.** [butterbase.ai](https://butterbase.ai) runs the same data plane multi-region, with a free tier to start.
 
 ## Features
 
