@@ -233,12 +233,19 @@ Public runs respect the agent's per-IP rate limits, daily budget, and max concur
 
 ```http
 POST /v1/{app_id}/mcp-servers
+Authorization: Bearer {token}
+Content-Type: application/json
+
 {
-  "name": "Stripe docs",
+  "name": "stripe_docs",
+  "transport": "streamable_http",
   "url": "https://mcp.stripe.com",
-  "auth": { "type": "bearer", "token": "sk_..." }
+  "auth_header": "Bearer <stripe-token>"
 }
 ```
+
+`Authorization` authenticates the request to Butterbase. `auth_header` is
+optional and, when set, is forwarded to the remote MCP server.
 
 Once registered, an agent can reference any of the server's advertised tools by listing them in `graph_spec.tools.mcp_servers`.
 
