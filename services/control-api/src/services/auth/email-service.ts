@@ -1,7 +1,7 @@
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import type { Pool } from 'pg';
 import { config } from '../../config.js';
-import { escapeHtml, renderEmailLayout, renderButton, renderAppEmailLayout, renderCodeBox } from './email-layout.js';
+import { escapeHtml, renderEmailLayout, renderButton, renderAppEmailLayout, renderCodeBox, renderNotice } from './email-layout.js';
 import { isSilenced } from '../notification-prefs.service.js';
 
 /**
@@ -276,6 +276,55 @@ export function formatEmailDate(value: string | Date | null | undefined): string
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
 }
 
+/**
+ * Human labels for the raw meter keys quota-enforcement passes in `data.meter`.
+ * Lower-case so they read naturally mid-sentence; `capitalize` for subjects.
+ */
+const METER_LABELS: Record<string, string> = {
+  ai_credits: 'AI credits',
+  ai_tokens: 'AI tokens',
+  api_calls: 'API calls',
+  storage_bytes: 'storage',
+  bandwidth_bytes: 'bandwidth',
+  lambda_invocations: 'function invocations',
+  mau: 'monthly active users',
+  do_requests: 'Durable Object requests',
+  do_cpu_ms: 'Durable Object CPU time',
+  do_storage_gb_seconds: 'Durable Object storage',
+  kv_ops: 'KV operations',
+  kv_storage_bytes: 'KV storage',
+  people_credits: 'People credits',
+};
+
+export function meterLabel(meter: string | undefined): string {
+  if (!meter) return 'usage';
+  return METER_LABELS[meter] ?? meter.replace(/_/g, ' ');
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Byte meters arrive as raw integers ("5368709120"); show them as "5 GB". */
+function formatMeterValue(meter: string | undefined, value: string | undefined): string {
+  if (value === undefined || value === '') return '';
+  if (meter && /_bytes$/.test(meter) && /^\d+(\.\d+)?$/.test(value)) {
+    const n = Number(value);
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${Number.isInteger(v) ? v : v.toFixed(2)} ${units[i]}`;
+  }
+  return value;
+}
+
+/** Meter keys named in a soft_locked violations string ("mau: 50/10, bandwidth: 2GB/1GB"). */
+function violationMeters(violations: string | undefined): string[] {
+  if (!violations) return [];
+  return violations.split(',').map((v) => v.split(':')[0].trim()).filter(Boolean);
+}
+
 export function buildBillingEmailBody(template: BillingEmailTemplate, data: Record<string, string>): string {
   const dashboardUrl = process.env.DASHBOARD_URL || 'https://dashboard.butterbase.ai';
 
@@ -335,10 +384,10 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
 
     case 'overage_warning':
       return [
-        `Your ${data.meter || 'usage'} has exceeded the limit included in your plan.`,
+        `Your ${meterLabel(data.meter)} usage has exceeded the limit included in your plan.`,
         '',
-        `Current usage: ${data.current}`,
-        `Plan limit: ${data.limit}`,
+        `Current usage: ${formatMeterValue(data.meter, data.current)}`,
+        `Plan limit: ${formatMeterValue(data.meter, data.limit)}`,
         '',
         'Your service is not interrupted — overage usage will be billed at the end of your billing period at your plan\'s overage rate.',
         '',
@@ -347,10 +396,10 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
 
     case 'soft_limit_warning':
       return [
-        `You\'re at ${data.percentage || '80'}% of your included ${data.meter || 'usage'}.`,
+        `You\'re at ${data.percentage || '80'}% of your included ${meterLabel(data.meter)}.`,
         '',
-        `Current usage: ${data.current}`,
-        `Plan limit: ${data.limit}`,
+        `Current usage: ${formatMeterValue(data.meter, data.current)}`,
+        `Plan limit: ${formatMeterValue(data.meter, data.limit)}`,
         '',
         'Once you cross 100%, your service will continue without interruption — overage usage will be billed at your plan\'s overage rate at the end of the billing period.',
         '',
@@ -359,10 +408,10 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
 
     case 'hard_limit_warning':
       return [
-        `You\'re at ${data.percentage || '80'}% of your ${data.meter || 'usage'} plan limit.`,
+        `You\'re at ${data.percentage || '80'}% of your ${meterLabel(data.meter)} plan limit.`,
         '',
-        `Current usage: ${data.current}`,
-        `Plan limit: ${data.limit}`,
+        `Current usage: ${formatMeterValue(data.meter, data.current)}`,
+        `Plan limit: ${formatMeterValue(data.meter, data.limit)}`,
         '',
         'Once you reach 100%, this resource will be blocked until you upgrade your plan or reduce usage.',
         '',
@@ -371,10 +420,10 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
 
     case 'hard_limit_exceeded':
       return [
-        `You\'ve reached your ${data.meter || 'usage'} plan limit.`,
+        `You\'ve reached your ${meterLabel(data.meter)} plan limit.`,
         '',
-        `Current usage: ${data.current}`,
-        `Plan limit: ${data.limit}`,
+        `Current usage: ${formatMeterValue(data.meter, data.current)}`,
+        `Plan limit: ${formatMeterValue(data.meter, data.limit)}`,
         '',
         'Further use of this resource is blocked until you upgrade your plan or reduce usage. Other resources on your account are unaffected.',
         '',
@@ -645,7 +694,9 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
       const monthly = data.monthly_allowance_usd ?? '0.00';
       const topup = data.topup_usd ?? '0.00';
       const resetDate = formatEmailDate(data.reset_date);
-      const creditsLowDashboardUrl = data.dashboard_url ?? dashboardUrl;
+      // `||`, not `??`: credits-email passes '' when DASHBOARD_URL is unset,
+      // and an empty string would produce relative links.
+      const creditsLowDashboardUrl = data.dashboard_url || dashboardUrl;
       return [
         'Your AI credit balance is running low.',
         '',
@@ -659,7 +710,7 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
     }
 
     case 'credits_exhausted': {
-      const creditsExhaustedDashboardUrl = data.dashboard_url ?? dashboardUrl;
+      const creditsExhaustedDashboardUrl = data.dashboard_url || dashboardUrl;
       return [
         'Your AI credit balance has reached $0. AI requests from your apps will fail until you add more credits.',
         '',
@@ -715,6 +766,23 @@ export async function sendSuggestionNotification(
     '',
     `View: ${adminUrl}/suggestions/${suggestion.id}`,
   ].filter((line): line is string => line !== null).join('\n');
+  const html = renderEmailLayout({
+    preheader: `${suggestion.category}: ${snippet}`,
+    audience: 'ops',
+    content: renderNotice({
+      heading: `New ${suggestion.category} suggestion`,
+      intro: `<p style="margin:0;white-space:pre-wrap;">${escapeHtml(suggestion.description)}</p>`,
+      facts: [
+        ['Severity', suggestion.severity || 'n/a'],
+        ['Source', suggestion.source],
+        ['Affected tool', suggestion.affected_tool || ''],
+        ['User', suggestion.user_email ? `${suggestion.user_email} (${suggestion.user_id})` : suggestion.user_id || ''],
+        ['App', suggestion.app_name ? `${suggestion.app_name} (${suggestion.app_id})` : suggestion.app_id || ''],
+      ],
+      cta: { href: `${adminUrl}/suggestions/${encodeURIComponent(suggestion.id)}`, label: 'Open in admin' },
+      detail: suggestion.proposed_solution ? { label: 'Proposed solution', text: suggestion.proposed_solution } : undefined,
+    }),
+  });
 
   try {
     const command = new SendEmailCommand({
@@ -722,7 +790,7 @@ export async function sendSuggestionNotification(
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject },
-        Body: { Text: { Data: body } },
+        Body: { Text: { Data: body }, Html: { Data: html } },
       },
     });
 
@@ -969,6 +1037,7 @@ Users of each app have been notified individually via clone_failed emails.
     return renderEmailLayout({
       preheader: `${data.reapedCount} stuck clone job${data.reapedCount === '1' ? '' : 's'} flipped to failed.`,
       content,
+      audience: 'ops',
     });
   }
 
@@ -1015,7 +1084,236 @@ ${renderButton({ href: logsUrl, label: 'Open function logs' })}
     });
   }
 
+  const notice = buildNoticeHtml(template, data, dashboardUrl);
+  if (notice) return notice;
+
   return null;
+}
+
+/**
+ * HTML for the single-event templates (billing, limits, failures, ops). Same
+ * data and message as the matching buildBillingEmailBody case. Every
+ * interpolated value is escaped — app names, hook names and error messages
+ * are user-controlled.
+ */
+function buildNoticeHtml(
+  template: BillingEmailTemplate,
+  data: Record<string, string>,
+  dashboardUrl: string,
+): string | null {
+  const e = escapeHtml;
+  const app = data.appName || data.appId || '';
+  const label = meterLabel(data.meter);
+  const current = formatMeterValue(data.meter, data.current);
+  const limit = formatMeterValue(data.meter, data.limit);
+  const usageFacts: Array<[string, string]> = [['Current usage', current], ['Plan limit', limit]];
+  const owner = (preheader: string, content: string) => renderEmailLayout({ preheader, content });
+  const ops = (preheader: string, content: string) => renderEmailLayout({ preheader, content, audience: 'ops' });
+
+  switch (template) {
+    case 'payment_failed': {
+      const by = formatEmailDate(data.gracePeriodEndsAt);
+      return owner(
+        by ? `Update your payment method by ${by} to avoid interruption.` : 'Update your payment method to avoid interruption.',
+        renderNotice({
+          heading: 'Your payment failed',
+          intro: `<p style="margin:0;">We were unable to process your payment. Your account will remain active until <strong>${e(by || 'the end of the grace period')}</strong>. Please update your payment method to avoid service interruption.</p>`,
+          cta: { href: `${dashboardUrl}/billing`, label: 'Update payment method' },
+          note: 'If you believe this is an error, please contact support.',
+        }),
+      );
+    }
+    case 'plan_downgraded': {
+      const ended = formatEmailDate(data.gracePeriodEndedAt);
+      return owner(
+        'Your subscription was canceled and your account moved to the free Playground plan.',
+        renderNotice({
+          heading: 'Your plan was downgraded',
+          intro: `<p style="margin:0 0 12px 0;">We still could not collect payment for your Butterbase subscription, and the grace period ${ended ? `ended on <strong>${e(ended)}</strong>` : 'has ended'}.</p>
+<p style="margin:0;">Your subscription has been canceled and your account is now on the free <strong>Playground</strong> plan. Your apps and data are still there, but Playground limits now apply, and anything over those limits may be restricted.</p>`,
+          cta: { href: `${dashboardUrl}/billing`, label: 'Restore your plan' },
+          note: 'Update your payment method and resubscribe to restore your previous plan. If you believe this is an error, please contact support.',
+        }),
+      );
+    }
+    case 'soft_locked':
+      return owner(
+        'Your account is read-only until you upgrade or reduce usage.',
+        renderNotice({
+          heading: 'Your account is in read-only mode',
+          intro: `<p style="margin:0;">You have exceeded your free plan limits. You can still read and delete data, but can't create or update until you upgrade or bring usage back under the limits.</p>`,
+          facts: [['Over the limit', data.violations || 'See dashboard for details']],
+          cta: { href: `${dashboardUrl}/billing/upgrade`, label: 'Upgrade your plan' },
+        }),
+      );
+    case 'account_suspended':
+      return owner(
+        'Update your payment method to reactivate your account.',
+        renderNotice({
+          heading: 'Your account has been suspended',
+          intro: `<p style="margin:0;">Your account was suspended because a payment failure was not resolved within the grace period.</p>`,
+          facts: [['Reason', data.reason || 'Payment failure']],
+          cta: { href: `${dashboardUrl}/billing`, label: 'Update payment method' },
+          note: 'If you need assistance, please contact support.',
+        }),
+      );
+    case 'overage_warning':
+      return owner(
+        `Your ${label} usage is over your plan limit. Service continues; overage is billed.`,
+        renderNotice({
+          heading: `${capitalize(label)} is over your plan limit`,
+          intro: `<p style="margin:0;">Your service is not interrupted. Overage usage will be billed at the end of your billing period at your plan's overage rate.</p>`,
+          facts: usageFacts,
+          cta: { href: `${dashboardUrl}/billing`, label: 'View usage' },
+        }),
+      );
+    case 'soft_limit_warning':
+      return owner(
+        `You're at ${data.percentage || '80'}% of your included ${label}.`,
+        renderNotice({
+          heading: `You're at ${data.percentage || '80'}% of your included ${label}`,
+          intro: `<p style="margin:0;">Once you cross 100%, your service continues without interruption. Overage usage is billed at your plan's overage rate at the end of the billing period.</p>`,
+          facts: usageFacts,
+          cta: { href: `${dashboardUrl}/billing`, label: 'Review usage' },
+        }),
+      );
+    case 'hard_limit_warning':
+      return owner(
+        `You're at ${data.percentage || '80'}% of your ${label} limit. It will be blocked at 100%.`,
+        renderNotice({
+          heading: `You're at ${data.percentage || '80'}% of your ${label} limit`,
+          intro: `<p style="margin:0;">Once you reach 100%, this resource will be <strong>blocked</strong> until you upgrade your plan or reduce usage.</p>`,
+          facts: usageFacts,
+          cta: { href: `${dashboardUrl}/billing/upgrade`, label: 'Upgrade now' },
+        }),
+      );
+    case 'hard_limit_exceeded':
+      return owner(
+        `Your ${label} limit is reached and further use is blocked.`,
+        renderNotice({
+          heading: `You've reached your ${label} limit`,
+          intro: `<p style="margin:0;">Further use of this resource is blocked until you upgrade your plan or reduce usage. Other resources on your account are unaffected.</p>`,
+          facts: usageFacts,
+          cta: { href: `${dashboardUrl}/billing/upgrade`, label: 'Upgrade your plan' },
+        }),
+      );
+    case 'deployment_failed':
+      return owner(
+        `A deployment for ${app} failed.`,
+        renderNotice({
+          heading: 'Deployment failed',
+          intro: `<p style="margin:0;">A deployment for your app <strong>${e(app)}</strong> failed.</p>`,
+          facts: [['Deployment ID', data.deploymentId || '']],
+          cta: { href: `${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}/deployments/${encodeURIComponent(data.deploymentId || '')}`, label: 'View deployment' },
+          detail: { label: 'Error', text: truncateError(data.errorMessage || 'See dashboard for details') },
+        }),
+      );
+    case 'provisioning_failed':
+      return owner(
+        `Setup for ${app} failed.`,
+        renderNotice({
+          heading: 'App setup failed',
+          intro: `<p style="margin:0;">Setup for your app <strong>${e(app)}</strong> failed.</p>`,
+          cta: { href: `${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}`, label: 'View app' },
+          detail: { label: 'Reason', text: truncateError(data.provisioningError || 'Unknown error') },
+          note: 'You may need to delete and recreate this app, or contact support if the problem persists.',
+        }),
+      );
+    case 'auth_hook_failed':
+      return owner(
+        `Your auth hook "${data.hookFunction}" in ${app} failed during a "${data.event}" event.`,
+        renderNotice({
+          heading: 'Your auth hook is failing',
+          intro: `<p style="margin:0;">Your auth hook <strong>${e(data.hookFunction || '')}</strong> in <strong>${e(app)}</strong> failed during a <strong>${e(data.event || '')}</strong> event. Sign-ins still succeed, but any post-auth side effects you wired into the hook (creating profile rows, syncing to external systems, etc.) did not run for the affected users.</p>`,
+          cta: { href: `${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}/functions/${encodeURIComponent(data.hookFunction || '')}`, label: 'View function logs' },
+          detail: { label: 'Error', text: truncateError(data.errorMessage || '(no message)') },
+          note: 'You will receive at most one email per hook function per day for this app.',
+        }),
+      );
+    case 'auto_refill_failed':
+      return owner(
+        'Auto-refill is now off. Update your payment method to keep using AI features.',
+        renderNotice({
+          heading: 'Auto-refill failed',
+          intro: `<p style="margin:0;">We tried to auto-refill your Butterbase AI credits and the charge did not go through. Auto-refill has been <strong>disabled</strong> on your account. Update your payment method or top up manually, then re-enable auto-refill.</p>`,
+          facts: [['Amount attempted', `$${data.amount_usd || '?'}`], ['Reason', data.failure_reason || 'Your payment method was declined']],
+          cta: { href: `${dashboardUrl}/billing`, label: 'Open billing settings' },
+          note: `Questions? Contact support from <a href="${e(dashboardUrl)}" style="color:#525252;text-decoration:underline;">your dashboard</a>.`,
+        }),
+      );
+    case 'credits_low': {
+      const base = data.dashboard_url || dashboardUrl;
+      const reset = formatEmailDate(data.reset_date);
+      return owner(
+        `$${data.total_usd ?? '0.00'} of AI credits left. AI requests fail at $0.`,
+        renderNotice({
+          heading: 'Your AI credits are running low',
+          intro: `<p style="margin:0;">AI requests will start failing once you reach $0. Buy credits or turn on auto-refill to keep going.</p>`,
+          facts: [
+            ['Available', `$${data.total_usd ?? '0.00'}`],
+            ['Monthly allowance', `$${data.monthly_allowance_usd ?? '0.00'}${reset ? ` (resets ${reset})` : ''}`],
+            ['Top-up balance', `$${data.topup_usd ?? '0.00'}`],
+          ],
+          cta: { href: `${base}/billing?topup=open`, label: 'Buy credits' },
+          note: `Or <a href="${e(`${base}/billing?autoRefill=focus`)}" style="color:#525252;text-decoration:underline;">enable auto-refill</a> so this doesn't happen again.`,
+        }),
+      );
+    }
+    case 'credits_exhausted': {
+      const base = data.dashboard_url || dashboardUrl;
+      return owner(
+        'Your AI credit balance is $0. AI requests from your apps are failing.',
+        renderNotice({
+          heading: 'Your AI credits are used up',
+          intro: `<p style="margin:0;">Your AI credit balance has reached $0. AI requests from your apps will fail until you add more credits.</p>`,
+          cta: { href: `${base}/billing?topup=open`, label: 'Buy credits' },
+          note: `<a href="${e(`${base}/billing?autoRefill=focus`)}" style="color:#525252;text-decoration:underline;">Enable auto-refill</a> to prevent this in the future. We'll charge your card automatically when your balance gets low.`,
+        }),
+      );
+    }
+    case 'clone_failed_ops':
+      return ops(
+        `${data.mode || 'clone'} job ${data.jobId} failed for ${data.appId}.`,
+        renderNotice({
+          heading: `Clone job failed${data.mode && data.mode !== 'clone' ? ` (${data.mode})` : ''}`,
+          intro: `<p style="margin:0;">${data.ownerEmail ? 'The owner has been sent a clone_failed email (unless they have silenced it).' : 'No owner email on file, so nobody outside ops has been told.'}</p>`,
+          facts: [
+            ['Job ID', data.jobId || '(unknown)'],
+            ['Mode', data.mode || 'clone'],
+            ['App', data.appName ? `${data.appName} (${data.appId})` : data.appId || '(unknown)'],
+            ['Source app', data.sourceAppId || '(unknown)'],
+            ['Organization', data.organizationId || '(unknown)'],
+            ['Owner', data.ownerEmail || '(no owner email on file)'],
+            ['Stalled at', data.stalledStage || ''],
+          ],
+          detail: { label: 'Error', text: truncateError(data.errorMessage || '(no message captured)') },
+        }),
+      );
+    case 'org_balance_low_ops': {
+      interface LowOrg { id: string; name: string; planId: string; balanceUsd: number; cutOff: boolean }
+      let orgs: LowOrg[] = [];
+      try {
+        orgs = JSON.parse(data.orgs_json || '[]');
+      } catch {
+        // Counts below still carry the alert.
+      }
+      const rows = orgs.map((o) => `<tr><td style="padding:10px 0;border-bottom:1px solid #f0f0f0;font-size:13px;">
+<span style="display:inline-block;min-width:64px;font-weight:600;color:${o.cutOff ? '#b91c1c' : '#737373'};">${o.cutOff ? 'CUT OFF' : 'low'}</span>
+${e(o.name)} <span style="color:#737373;">(${e(o.planId)})</span> &middot; $${e(Number(o.balanceUsd).toFixed(4))}
+<div style="font-size:11px;color:#a3a3a3;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${e(o.id)}</div>
+</td></tr>`).join('');
+      return ops(
+        `${data.org_count} org(s) below $${data.threshold_usd}; ${data.cut_off_count ?? '0'} cut off.`,
+        renderNotice({
+          heading: `${data.org_count} organization${data.org_count === '1' ? '' : 's'} low on credits`,
+          intro: `<p style="margin:0;">Below $${e(data.threshold_usd)} in credits. <strong>${e(data.cut_off_count ?? '0')}</strong> already cut off: the credit floor is refusing their AI calls right now.</p>`,
+          note: 'Recharge with: <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">tsx scripts/grant-credits.ts --org-id &lt;id&gt; --amount &lt;usd&gt;</span>',
+        }) + (rows ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;border-collapse:collapse;">${rows}</table>` : ''),
+      );
+    }
+    default:
+      return null;
+  }
 }
 
 /**
@@ -1051,11 +1349,66 @@ export function buildBillingEmailSubject(
   }
   if (template === 'weekly_digest') {
     const total = digestTotalCount(data);
-    if (total === 0) return 'Your weekly Butterbase digest';
+    if (total === 0) {
+      // Template updates are informational, not "needs attention" — but a
+      // generic subject over a body that lists them undersold the email.
+      const updates = parseTemplateUpdateItems(data.templateUpdatesJson).length;
+      if (updates === 1) return 'Your weekly digest: 1 template update available';
+      if (updates > 1) return `Your weekly digest: ${updates} template updates available`;
+      return 'Your weekly Butterbase digest';
+    }
     if (total === 1) return 'Your weekly digest: 1 thing needs attention';
     return `Your weekly digest: ${total} things need attention`;
   }
-  return BILLING_EMAIL_SUBJECTS[template];
+  // Everything below: put the distinguishing detail (app, meter, amount, date)
+  // in the subject. Gmail threads on identical subjects from the same sender,
+  // so a fixed subject collapses unrelated alerts into one conversation.
+  const app = data.appName || data.appId;
+  switch (template) {
+    case 'payment_failed': {
+      const by = formatEmailDate(data.gracePeriodEndsAt);
+      return by ? `Action required: payment failed, update by ${by}` : 'Action required: your payment failed';
+    }
+    case 'plan_downgraded':
+      return 'Your Butterbase plan was downgraded to Playground';
+    case 'soft_locked': {
+      const meters = violationMeters(data.violations).map(meterLabel);
+      return meters.length
+        ? `Account limited: over the free plan limit for ${meters.join(', ')}`
+        : BILLING_EMAIL_SUBJECTS.soft_locked;
+    }
+    case 'overage_warning':
+      return `${capitalize(meterLabel(data.meter))} is over your plan limit (overage will be billed)`;
+    case 'soft_limit_warning':
+      return `Heads up: ${meterLabel(data.meter)} at ${data.percentage || '80'}% of your plan limit`;
+    case 'hard_limit_warning':
+      return `Heads up: ${meterLabel(data.meter)} at ${data.percentage || '80'}% of your plan limit (blocked at 100%)`;
+    case 'hard_limit_exceeded':
+      return `Action required: ${meterLabel(data.meter)} plan limit reached`;
+    case 'deployment_failed':
+      return app ? `[${app}] Deployment failed` : BILLING_EMAIL_SUBJECTS.deployment_failed;
+    case 'provisioning_failed':
+      return app ? `[${app}] App setup failed` : BILLING_EMAIL_SUBJECTS.provisioning_failed;
+    case 'auth_hook_failed':
+      return app
+        ? `[${app}] Auth hook${data.hookFunction ? ` "${data.hookFunction}"` : ''} is failing`
+        : BILLING_EMAIL_SUBJECTS.auth_hook_failed;
+    case 'auto_refill_failed':
+      return data.amount_usd
+        ? `Action required: $${data.amount_usd} auto-refill failed`
+        : BILLING_EMAIL_SUBJECTS.auto_refill_failed;
+    case 'credits_low':
+      return data.total_usd
+        ? `Your AI credits are running low ($${data.total_usd} left)`
+        : BILLING_EMAIL_SUBJECTS.credits_low;
+    case 'org_balance_low_ops': {
+      const n = data.org_count || '?';
+      const cut = data.cut_off_count && data.cut_off_count !== '0' ? `, ${data.cut_off_count} cut off` : '';
+      return `[butterbase] ${n} org${n === '1' ? '' : 's'} low on credits${cut}`;
+    }
+    default:
+      return BILLING_EMAIL_SUBJECTS[template];
+  }
 }
 
 export interface DigestItem {
@@ -1185,7 +1538,7 @@ export async function sendInviteEmail(input: {
 }): Promise<void> {
   const inviterDisplay = input.inviterEmail || 'A Butterbase organization owner';
   const subject = `${inviterDisplay} invited you to ${input.orgName} on Butterbase`;
-  const expiresStr = input.expiresAt.toUTCString();
+  const expiresStr = formatEmailDate(input.expiresAt);
   const content = `
 <h1 style="margin:0 0 8px 0;font-size:20px;font-weight:600;color:#0a0a0a;">You have an invite</h1>
 <p style="margin:0 0 24px 0;font-size:14px;color:#525252;line-height:1.5;">
@@ -1197,6 +1550,8 @@ ${renderButton({ href: input.inviteUrl, label: 'Accept invite' })}
   const html = renderEmailLayout({
     preheader: `${inviterDisplay} invited you to join ${input.orgName} on Butterbase.`,
     content,
+    // The invitee may not have a Butterbase account, let alone own an app.
+    audience: 'invitee',
   });
   const text = `${inviterDisplay} invited you to ${input.orgName} on Butterbase.\n\nAccept: ${input.inviteUrl}\n\nExpires: ${expiresStr}`;
 
@@ -1243,7 +1598,20 @@ export async function sendSuggestionStatusUpdateEmail(
   const snippet = suggestion.description.length > 60
     ? `${suggestion.description.slice(0, 60)}…`
     : suggestion.description;
-  const subject = `Your suggestion has been updated: ${label}`;
+  // Name the suggestion so updates to different suggestions don't thread together.
+  const shortSnippet = suggestion.description.length > 40
+    ? `${suggestion.description.slice(0, 40).trimEnd()}…`
+    : suggestion.description;
+  const subject = `Your suggestion "${shortSnippet}" is now ${label}`;
+  const html = renderEmailLayout({
+    preheader: `Status updated to ${label}.`,
+    content: renderNotice({
+      heading: `Your suggestion is now ${label}`,
+      intro: `<p style="margin:0;">Thank you for helping improve Butterbase. We've updated the status of your suggestion.</p>`,
+      facts: [['Status', label]],
+      detail: { label: 'Your suggestion', text: snippet },
+    }),
+  });
   const body = [
     `Your suggestion status has been updated to: ${label}`,
     '',
@@ -1263,7 +1631,7 @@ export async function sendSuggestionStatusUpdateEmail(
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject },
-        Body: { Text: { Data: body } },
+        Body: { Text: { Data: body }, Html: { Data: html } },
       },
     });
 

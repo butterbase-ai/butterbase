@@ -33,6 +33,19 @@ describe('sendInviteEmail', () => {
     expect(command.Message.Body.Text.Data).toContain('https://dash.butterbase.ai/invite/abc');
   });
 
+  it('uses the invitee footer and a human expiry date', async () => {
+    await sendInviteEmail({
+      toEmail: 'alice@example.com',
+      orgName: 'Acme',
+      inviterEmail: 'bob@example.com',
+      inviteUrl: 'https://dash.butterbase.ai/invite/abc',
+      expiresAt: new Date('2026-08-01T00:00:00Z'),
+    });
+    const html = mockSend.mock.calls[0][0].Message.Body.Html.Data;
+    expect(html).not.toContain('you own a Butterbase app');
+    expect(html).toContain('August 1, 2026');
+  });
+
   it('never throws when SES fails — fire-and-forget contract', async () => {
     mockSend.mockRejectedValueOnce(new Error('SES unavailable'));
     await expect(sendInviteEmail({

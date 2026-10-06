@@ -93,8 +93,8 @@ describe('function_failed email', () => {
     expect(subject).toContain('[app_test001]');
   });
 
-  it('other templates still use the static subject map', () => {
-    expect(buildBillingEmailSubject('payment_failed', {})).toBe('Action Required: Payment Failed');
+  it('other templates fall back to the static subject map when data lacks detail', () => {
+    expect(buildBillingEmailSubject('account_suspended', {})).toBe('Account Suspended: Payment Required');
     expect(buildBillingEmailSubject('deployment_failed', {})).toBe('Deployment failed');
   });
 });
@@ -134,10 +134,10 @@ describe('function_failed HTML body', () => {
     expect(html).toContain('fn&quot;&amp;&lt;&gt;');
   });
 
-  it('returns null for templates without an HTML variant (text-only fallback)', () => {
-    expect(buildBillingEmailHtml('payment_failed', {})).toBeNull();
-    expect(buildBillingEmailHtml('deployment_failed', {})).toBeNull();
-    expect(buildBillingEmailHtml('auth_hook_failed', {})).toBeNull();
+  it('every billing template now has an HTML variant', () => {
+    expect(buildBillingEmailHtml('payment_failed', {})).toContain('<!DOCTYPE html>');
+    expect(buildBillingEmailHtml('deployment_failed', {})).toContain('<!DOCTYPE html>');
+    expect(buildBillingEmailHtml('auth_hook_failed', {})).toContain('<!DOCTYPE html>');
   });
 
   it('embeds the same logs URL the text body uses', () => {

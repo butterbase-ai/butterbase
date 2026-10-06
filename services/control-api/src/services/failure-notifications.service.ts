@@ -249,6 +249,10 @@ export async function notifyProvisioningFailed(
       appId: args.appId,
       appName: owner.appName,
       provisioningError: args.provisioningError,
+    }, {
+      controlPool,
+      userId: owner.userId,
+      scope: { appId: args.appId },
     }).catch((err) => {
       log?.warn({ err, appId: args.appId }, 'failure-notifications: provisioning send failed');
     });
@@ -365,6 +369,10 @@ export async function notifyAuthHookFailed(
       hookFunction: args.hookFunction,
       event: args.event,
       errorMessage: args.errorMessage,
+    }, {
+      controlPool,
+      userId: owner.userId,
+      scope: { appId: args.appId },
     }).catch((err) => {
       log?.warn({ err, appId: args.appId, hookFunction: args.hookFunction }, 'failure-notifications: auth hook send failed');
     });

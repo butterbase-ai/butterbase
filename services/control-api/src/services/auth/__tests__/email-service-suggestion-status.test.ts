@@ -29,6 +29,8 @@ describe('sendSuggestionStatusUpdateEmail', () => {
     expect(command.Message.Subject.Data).toContain('Implemented');
     expect(command.Message.Body.Text.Data).toContain('Add dark mode support');
     expect(command.Message.Body.Text.Data).toContain('Implemented');
+    expect(command.Message.Subject.Data).toContain('Add dark mode support');
+    expect(command.Message.Body.Html.Data).toContain('Add dark mode support');
   });
 
   it("uses \"Won't Fix\" label for wont_fix status", async () => {
