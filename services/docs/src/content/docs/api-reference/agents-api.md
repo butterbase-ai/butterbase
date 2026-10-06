@@ -247,25 +247,6 @@ Content-Type: application/json
 `Authorization` authenticates the request to Butterbase. `auth_header` is
 optional and, when set, is forwarded to the remote MCP server.
 
-For example, Parallel Search MCP needs no separate Parallel account, API key,
-OAuth flow, or `auth_header`:
-
-```http
-POST /v1/{app_id}/mcp-servers
-Authorization: Bearer {token}
-Content-Type: application/json
-
-{
-  "name": "parallel_search",
-  "transport": "streamable_http",
-  "url": "https://search.parallel.ai/mcp"
-}
-```
-
-Probe the returned server ID to load its advertised tools. An agent can then
-expose `web_search` for current web search and `web_fetch` for extracting clean
-Markdown from a URL.
-
 Once registered, an agent can reference any of the server's advertised tools by listing them in `graph_spec.tools.mcp_servers`.
 
 ## Errors
