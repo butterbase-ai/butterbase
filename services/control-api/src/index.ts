@@ -1021,12 +1021,33 @@ Promise.resolve(app.ready())
             // and per-region runtime DBs (auth + per-app writes), so prune both.
             const retentionDeletes: Array<{ sql: string; label: string }> = [
               { sql: `DELETE FROM function_invocations WHERE started_at < now() - interval '7 days'`, label: 'function_invocations' },
-              { sql: `DELETE FROM audit_events WHERE created_at < now() - interval '180 days'`, label: 'audit_events' },
             ];
             for (const { sql, label } of retentionDeletes) {
               await app.controlDb.query(sql).catch((err) => {
                 app.log.error({ err, table: label, scope: 'control-plane' }, 'Retention prune failed');
               });
+            }
+
+            // audit_events: plan-tiered purge via SECURITY DEFINER function (F-05).
+            // Direct DELETE is revoked from the app role; purge_audit_events() is
+            // owned by the schema owner and applies 365-day retention for enterprise
+            // orgs, 180-day floor for all others.
+            await app.controlDb.query(`SELECT purge_audit_events()`).catch((err) => {
+              app.log.error({ err, table: 'audit_events', scope: 'control-plane' }, 'Audit retention prune failed');
+            });
+
+            // Collect enterprise org IDs so the runtime-plane purge function can
+            // apply 12-month retention to their rows (runtime has no plan lookup).
+            let enterpriseOrgIds: string[] = [];
+            try {
+              const result = await app.controlDb.query<{ id: string }>(
+                `SELECT o.id FROM organizations o
+                 JOIN plans p ON p.id = COALESCE(o.plan_id, 'free')
+                 WHERE p.audit_retention_days > 180`,
+              );
+              enterpriseOrgIds = result.rows.map((r) => r.id);
+            } catch (err) {
+              app.log.error({ err }, 'Failed to query enterprise org IDs for audit retention');
             }
 
             const runtimeDeletes: Array<{ sql: string; label: string }> = [
@@ -1048,6 +1069,9 @@ Promise.resolve(app.ready())
                   app.log.error({ err, table: label, region, scope: 'runtime-plane' }, 'Retention prune failed');
                 });
               }
+              await pool.query(`SELECT purge_audit_events($1::uuid[])`, [enterpriseOrgIds]).catch((err) => {
+                app.log.error({ err, region, table: 'audit_events', scope: 'runtime-plane' }, 'Audit retention prune failed');
+              });
             }
             // Daily paid-conversion snapshot. Subscription rows carry no
             // status history, so a day not captured here is a day of the
