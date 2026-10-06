@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { apiError } from '../../utils/api-error.js';
 import { getPublicKeysForJwks } from '../../services/auth/signing-key-service.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 export async function jwksRoutes(app: FastifyInstance) {
   app.get('/auth/:app_id/.well-known/jwks.json', {
@@ -16,6 +17,7 @@ export async function jwksRoutes(app: FastifyInstance) {
 
       return { keys };
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'JWKS fetch failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }

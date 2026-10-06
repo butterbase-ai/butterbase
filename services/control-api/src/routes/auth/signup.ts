@@ -11,6 +11,7 @@ import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
 import { resolveOrgFromApp } from '../../services/app-org-resolver.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 const signupSchema = z.object({
   email: z.string().email(),
@@ -158,6 +159,7 @@ export async function signupRoutes(app: FastifyInstance) {
         message: 'Verification email sent',
       });
     } catch (error) {
+      rethrowAppResolverError(error);
       // Log failed signup (non-blocking). If runtimeDb wasn't resolved
       // (the home-region lookup itself threw), skip the audit write.
       if (runtimeDb) {

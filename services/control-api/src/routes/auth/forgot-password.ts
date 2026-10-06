@@ -9,6 +9,7 @@ import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
 import { resolveOrgFromApp } from '../../services/app-org-resolver.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 const forgotPasswordSchema = z.object({
   email: z.string().email(),
@@ -86,6 +87,7 @@ export async function forgotPasswordRoutes(app: FastifyInstance) {
         message: 'If an account exists with that email, a password reset code has been sent',
       });
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'Forgot password failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }

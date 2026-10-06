@@ -10,6 +10,7 @@ import { fireAuthHook } from '../../services/auth/auth-hook-service.js';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -163,6 +164,7 @@ export async function loginRoutes(app: FastifyInstance) {
         },
       });
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'Login failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }

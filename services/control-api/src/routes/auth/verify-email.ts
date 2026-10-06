@@ -7,6 +7,7 @@ import { logAuditEvent } from '../../services/auth/audit-service.js';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../../services/region-resolver.js';
 import { getRuntimeDbPool } from '../../services/runtime-db.js';
+import { rethrowAppResolverError } from '../../services/app-resolver.js';
 
 const verifyEmailSchema = z.object({
   email: z.string().email(),
@@ -95,6 +96,7 @@ export async function verifyEmailRoutes(app: FastifyInstance) {
 
       return reply.send({ message: 'Email verified successfully' });
     } catch (error) {
+      rethrowAppResolverError(error);
       app.log.error({ error }, 'Email verification failed');
       return reply.code(500).send(apiError(error, 'Internal server error'));
     }

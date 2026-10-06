@@ -38,6 +38,21 @@ export class AppPausedError extends Error {
   }
 }
 
+/**
+ * Call first in a route's catch-all `catch`. Rethrows the typed app-resolver
+ * errors so the global error handler (index.ts) answers 404 / 401 / 503
+ * instead of the route's generic 500. Other errors are left to the caller.
+ */
+export function rethrowAppResolverError(error: unknown): void {
+  if (
+    error instanceof AppNotFoundError ||
+    error instanceof AppAuthRequiredError ||
+    error instanceof AppPausedError
+  ) {
+    throw error;
+  }
+}
+
 interface PausableApp {
   id: string;
   paused?: boolean;
