@@ -66,9 +66,11 @@
 - **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
 - **MCP**: `manage_auth_config:generate_service_key` accepts `key_scope` and `additional_scopes`; requires `app_id` when `key_scope === 'app'`.
 - **Dashboard**: "Generate API key" dialog: scope radio (account / this app) + app picker + advanced scopes disclosure + scope summary on success.
+- **MCP**: `manage_app` action `resume`. `GET /v1/:app_id/config` and the pause endpoint now return `paused_by`; `APP_PAUSED` 503s include `details.paused_by` and explain automatic idle pauses without attributing them to the owner.
 
 ### Fixed
 
+- **Move app**: moving an app to another region now copies the whole app record. Previously a move reset the pause state, organization, frontend backend, anon key and access/AI/JWT settings.
 - `AUTH_IMPERSONATION_FORBIDDEN` is now reachable from public surfaces: users can mint the app-scoped service keys needed to call functions with `auth: required` via `X-Butterbase-As-User`, instead of needing to re-run `journey-deploy`.
 
 ---

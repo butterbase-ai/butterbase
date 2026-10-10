@@ -5,12 +5,13 @@ import { apiGet, apiDelete, apiPatch, apiPost, apiPut } from '../api-client.js';
 export function registerManageApp(server: McpServer) {
   server.tool(
     'manage_app',
-    `Manage app lifecycle: list, delete, pause/resume, get config, update access mode, secure, update CORS, clone, find templates, and migrate regions.
+    `Manage app lifecycle: list, delete, pause, resume, get config, update access mode, secure, update CORS, clone, find templates, and migrate regions.
 
 Actions:
   - "list":                    List all backend apps with basic metadata (no app_id needed)
   - "delete":                  Delete an app and ALL its resources permanently (IRREVERSIBLE)
-  - "pause":                   Pause or resume all data-plane traffic for an app (kill-switch)
+  - "pause":                   Pause all data-plane traffic for an app (kill-switch). Pass paused:false to resume (prefer "resume").
+  - "resume":                  Resume a paused app — including one paused automatically after inactivity
   - "get_config":              Get detailed configuration for an app including CORS, storage settings, and metadata
   - "set_visibility":          Toggle the app's template visibility between "public" and "private"
   - "update_access_mode":      Toggle an app's access mode between "public" and "authenticated"
@@ -39,6 +40,7 @@ Parameters by action:
   list:                    { action: "list" }
   delete:                  { action: "delete", app_id }
   pause:                   { action: "pause", app_id, paused, reason? }
+  resume:                  { action: "resume", app_id }
   get_config:              { action: "get_config", app_id }
   set_visibility:          { action: "set_visibility", app_id, visibility, listed? }
   update_access_mode:      { action: "update_access_mode", app_id, access_mode }
@@ -67,7 +69,7 @@ Common errors:
   - RESOURCE_NOT_FOUND: App doesn't exist, verify app_id with action: "list"
   - AUTH_INVALID_API_KEY: Check your API key is set correctly`,
     {
-      action: z.enum(['list', 'delete', 'pause', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica', 'get_env', 'update_env', 'publish_template_release', 'list_template_releases', 'get_template_release', 'check_template_updates', 'update_from_template'])
+      action: z.enum(['list', 'delete', 'pause', 'resume', 'get_config', 'update_access_mode', 'secure', 'update_cors', 'set_visibility', 'preview_clone_env_vars', 'clone', 'get_clone_job', 'find_templates', 'set_clone_webhook', 'link_substrate', 'unlink_substrate', 'set_substrate_autopropagate', 'move', 'move_status', 'teardown_source_replica', 'get_env', 'update_env', 'publish_template_release', 'list_template_releases', 'get_template_release', 'check_template_updates', 'update_from_template'])
         .describe('The action to perform'),
       app_id: z.string().optional().describe('The app ID (e.g. app_abc123def456). Required for all actions except "list".'),
       // pause params
@@ -150,6 +152,12 @@ Common errors:
           const err2 = need(args.paused !== undefined, '"paused" is required for the "pause" action.');
           if (err2) return err2;
           const result = await apiPatch(`/v1/${args.app_id}/config/pause`, { paused: args.paused, reason: args.reason });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        }
+        case 'resume': {
+          const err = need(args.app_id, '"app_id" is required for this action.');
+          if (err) return err;
+          const result = await apiPatch(`/v1/${args.app_id}/config/pause`, { paused: false });
           return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
         }
         case 'get_config': {
