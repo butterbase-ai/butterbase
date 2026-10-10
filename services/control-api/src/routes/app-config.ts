@@ -9,6 +9,7 @@ import { config } from '../config.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { getLimitsForApp } from '../services/app-plan-resolver.js';
+import { setPausedState } from '../services/app-pause.js';
 
 const updateCorsSchema = z.object({
   allowed_origins: z.array(z.string().url()).min(1),
@@ -71,6 +72,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
         `SELECT id, name, db_name, db_provisioned, region, allowed_origins, storage_config, auth_hook_function, access_mode,
                 visibility, listed, template_source_app_id, repo_latest_snapshot, fork_count,
                 substrate_organization_id,
+                paused, paused_at, paused_reason, paused_by,
                 created_at, updated_at
          FROM apps
          WHERE id = $1`,
@@ -621,25 +623,19 @@ export async function appConfigRoutes(app: FastifyInstance) {
       const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
       const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
 
-      const result = await runtimeDb.query(
-        `UPDATE apps
-         SET paused = $1,
-             paused_at = CASE WHEN $1 THEN now() ELSE NULL END,
-             paused_reason = CASE WHEN $1 THEN $2 ELSE NULL END,
-             updated_at = now()
-         WHERE id = $3
-         RETURNING paused, paused_at, paused_reason`,
-        [paused, reason ?? null, resolvedApp.id]
-      );
+      const state = paused
+        ? await setPausedState(runtimeDb, resolvedApp.id, { paused: true, by: 'owner', reason: reason ?? null }, app.log)
+        : await setPausedState(runtimeDb, resolvedApp.id, { paused: false, by: 'owner' }, app.log);
+      if (!state) throw new AppNotFoundError(resolvedApp.id);
 
       logFromRequest(request, {
         appId: resolvedApp.id,
         category: 'admin',
-        eventType: 'app.config.paused',
+        eventType: paused ? 'app.config.paused' : 'app.config.resumed',
         action: 'update',
         resourceType: 'app_config',
         resourceId: 'paused',
-        eventData: { paused, reason: reason ?? null },
+        eventData: { paused, reason: reason ?? null, by: 'owner' },
         success: true,
       });
 
@@ -647,10 +643,11 @@ export async function appConfigRoutes(app: FastifyInstance) {
         message: paused
           ? `App paused${reason ? ` (${reason})` : ''}. Data-plane traffic will return 503 until resumed.`
           : 'App resumed. Data-plane traffic restored.',
-        app_id: resolvedApp.id,
-        paused: result.rows[0].paused,
-        paused_at: result.rows[0].paused_at,
-        paused_reason: result.rows[0].paused_reason,
+        app_id: state.app_id,
+        paused: state.paused,
+        paused_at: state.paused_at,
+        paused_reason: state.paused_reason,
+        paused_by: state.paused_by,
       });
     } catch (error) {
       if (error instanceof AppNotFoundError) {
