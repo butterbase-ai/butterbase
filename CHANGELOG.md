@@ -6,6 +6,8 @@
 
 - **CLI**: `bb keys generate --scope` now takes `account|app` (was an arbitrary string array). Use `--extra-scope <token>` for additional allowlisted scope tokens (`ai:gateway`, `substrate`). Migration: `bb keys generate foo --scope ai:gateway` → `bb keys generate foo --scope account --extra-scope ai:gateway`.
 
+- **Upgrade order**: self-hosters must run `npm run migrate:runtime` (runtime migration 056) **before** upgrading control-api, because the new image selects `apps.paused_by`.
+
 ### Added
 
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs

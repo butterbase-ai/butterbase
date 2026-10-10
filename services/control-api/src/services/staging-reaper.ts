@@ -86,6 +86,7 @@ export async function runOnce(
     `UPDATE apps SET paused = true, paused_at = now(),
             paused_reason = $2, paused_by = 'staging_reaper', updated_at = now()
       WHERE id = ANY($1)
+        AND paused = false
         AND id IN (SELECT staging_app_id FROM app_environments)
       RETURNING id`,
     [ids, `Automatically paused after ${idleDays} days of inactivity.`],

@@ -36,7 +36,10 @@ export const executeReserveDest: StepHandler = async (ctx, m) => {
     // and new columns are carried automatically. Only the move-specific fields
     // are overridden. Columns the destination region lacks are dropped by
     // json_populate_record; runtime migrations run on every region, so the
-    // shapes match in practice.
+    // shapes match in practice. Columns the SOURCE lacks (migration skew) come
+    // out of json_populate_record as explicit NULLs, which bypass column
+    // defaults, so a future NOT NULL DEFAULT column would make the insert fail
+    // until every region has the migration.
     const row = {
       ...src.rows[0].row,
       db_name: String(src.rows[0].row.db_name) + '__pending',
@@ -46,11 +49,23 @@ export const executeReserveDest: StepHandler = async (ctx, m) => {
       db_provisioned: false,
       provisioning_error: null,
     };
+    // A move never deletes the source row unless replication teardown ran, so
+    // a move back into a region hits the conflict branch. Overwrite every
+    // copied column from EXCLUDED so a stale row can't keep old paused*,
+    // organization_id, deployment_backend or config. Column names come from
+    // the destination's catalog (trusted) and are still shape-checked.
+    const cols = await destPool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'apps'`,
+    );
+    const destCols = new Set(cols.rows.map((r) => r.column_name));
+    const setCols = Object.keys(row).filter((c) => c !== 'id' && destCols.has(c));
+    for (const c of setCols) {
+      if (!/^[a-z_][a-z0-9_]*$/.test(c)) throw new Error(`unsafe apps column name: ${c}`);
+    }
+    const setClause = setCols.map((c) => `"${c}" = EXCLUDED."${c}"`).join(', ');
     await destPool.query(
       `INSERT INTO apps SELECT * FROM json_populate_record(NULL::apps, $1::json)
-       ON CONFLICT (id) DO UPDATE
-         SET region = EXCLUDED.region,
-             provisioning_status = 'migration_target_reserved'`,
+       ON CONFLICT (id) DO UPDATE SET ${setClause}`,
       [JSON.stringify(row)],
     );
   }

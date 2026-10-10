@@ -22,7 +22,10 @@ describe('setPausedState: pause', () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).toMatch(/paused_at = CASE WHEN paused THEN paused_at ELSE now\(\) END/);
     expect(sql).toMatch(/paused_by = \$3/);
-    expect(sql).not.toMatch(/WHERE[^]*paused = false/); // re-pausing must update paused_by
+    // The WHERE clause (up to RETURNING, which legitimately names `paused`) must
+    // reference only id; re-pausing must update paused_by.
+    const where = /WHERE([^]*?)RETURNING/.exec(sql)![1];
+    expect(where).not.toMatch(/paused/);
     expect(params).toEqual(['app_1', 'r', 'owner']);
   });
 

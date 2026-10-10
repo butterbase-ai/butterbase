@@ -11,6 +11,11 @@
 // transaction, and never throw into the caller: a failed side effect is
 // logged and the pause still stands.
 //
+// Listeners (onPauseStateChanged) are awaited one at a time in the caller's
+// path (the owner's PATCH, the reaper loops), so they must be fast or
+// fire-and-forget internally. Register them once at process startup, never
+// per request.
+//
 // Spec: docs/superpowers/specs/2026-10-10-idle-free-app-pause-design.md §5.1
 
 import type pg from 'pg';

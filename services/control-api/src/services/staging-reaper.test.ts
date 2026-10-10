@@ -47,6 +47,13 @@ describe('staging reaper', () => {
     expect(update).toContain('RETURNING id');
   });
 
+  it('never relabels an owner pause (WHERE paused = false)', async () => {
+    const { pool, query } = fakeDb([{ staging_app_id: 'app_a' }]);
+    await runOnce(pool, 30, logger);
+    const update = query.mock.calls[1][0] as string;
+    expect(update).toMatch(/WHERE[^]*paused = false/);
+  });
+
   it('notifies pause listeners for each app actually paused', async () => {
     const seen: string[] = [];
     const off = onPauseStateChanged((c) => { seen.push(`${c.appId}:${c.by}`); });
