@@ -5,7 +5,7 @@ import { getAppPoolForApp } from '../services/app-pool.js';
 import { introspectSchema } from '../services/schema-introspector.js';
 import { buildSelectQuery } from '../services/query-builder.js';
 import { encodeValuesForColumns } from '../services/pg-json-values.js';
-import { AppResolver, AppNotFoundError, AppAuthRequiredError, AppPausedError, assertAppNotPaused } from '../services/app-resolver.js';
+import { AppResolver, AppNotFoundError, AppAuthRequiredError, AppPausedError, assertAppNotPaused, pausedRemediation, type PausedBy } from '../services/app-resolver.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
 import { ApiKeyService } from '../services/api-key-service.js';
 import type { EndUserClaims } from '@butterbase/shared/types';
@@ -244,11 +244,9 @@ function pausedReply(reply: any, error: AppPausedError) {
     .send(createAgentError({
       code: APP_PAUSED,
       message: 'App is paused',
-      remediation: error.reason
-        ? `The app owner paused this app: "${error.reason}". Wait for it to be resumed, or contact the owner.`
-        : 'The app owner paused this app. Wait for it to be resumed, or contact the owner.',
+      remediation: pausedRemediation(error.pausedBy, error.reason),
       documentation_url: getDocUrl(APP_PAUSED),
-      details: { paused_reason: error.reason },
+      details: { paused_reason: error.reason, paused_by: error.pausedBy },
     }));
 }
 
@@ -273,6 +271,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
       const lookup = await runtimeDb.query<{
         paused: boolean;
         paused_reason: string | null;
+        paused_by: PausedBy | null;
         function_id: string | null;
         trigger_config: {
           provider: 'stripe' | 'github' | 'custom';
@@ -282,7 +281,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
           idempotency_key_header?: string;
         } | null;
       }>(
-        `SELECT a.paused, a.paused_reason,
+        `SELECT a.paused, a.paused_reason, a.paused_by,
                 f.id AS function_id,
                 ft.trigger_config
          FROM apps a
@@ -294,7 +293,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
       );
       const meta = lookup.rows[0];
       if (meta?.paused) {
-        return pausedReply(reply, new AppPausedError(appId, meta.paused_reason ?? null));
+        return pausedReply(reply, new AppPausedError(appId, meta.paused_reason ?? null, meta.paused_by ?? null));
       }
       if (!meta?.function_id || !meta.trigger_config) {
         return reply.status(404).send(createAgentError({
@@ -443,10 +442,11 @@ export async function autoApiRoutes(app: FastifyInstance) {
       const metaCheck = await runtimeDb.query<{
         paused: boolean;
         paused_reason: string | null;
+        paused_by: PausedBy | null;
         trigger_config: { auth?: 'required' | 'optional' | 'none' } | null;
         allow_service_key_impersonation: boolean | null;
       }>(
-        `SELECT a.paused, a.paused_reason, ft.trigger_config,
+        `SELECT a.paused, a.paused_reason, a.paused_by, ft.trigger_config,
                 f.allow_service_key_impersonation
          FROM apps a
          LEFT JOIN app_functions f
@@ -458,7 +458,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
       );
       const meta = metaCheck.rows[0];
       if (meta?.paused) {
-        throw new AppPausedError(app_id, meta.paused_reason ?? null);
+        throw new AppPausedError(app_id, meta.paused_reason ?? null, meta.paused_by ?? null);
       }
 
       // Extract caller identity. Two paths:

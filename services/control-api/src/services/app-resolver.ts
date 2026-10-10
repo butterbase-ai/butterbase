@@ -29,13 +29,35 @@ export class AppAuthRequiredError extends Error {
   }
 }
 
+export type PausedBy = 'owner' | 'admin' | 'idle_reaper' | 'staging_reaper';
+
 export class AppPausedError extends Error {
   reason: string | null;
-  constructor(appId: string, reason: string | null) {
+  pausedBy: PausedBy | null;
+  constructor(appId: string, reason: string | null, pausedBy: PausedBy | null = null) {
     super(`App ${appId} is paused${reason ? `: ${reason}` : ''}`);
     this.name = 'AppPausedError';
     this.reason = reason;
+    this.pausedBy = pausedBy;
   }
+}
+
+/**
+ * The remediation line every APP_PAUSED response shows. Callers of a paused
+ * app are usually the app's end users, not its owner, so idle and admin
+ * pauses must not read as "the owner did this". NULL paused_by (rows paused
+ * before runtime migration 056) reads as an owner pause.
+ */
+export function pausedRemediation(pausedBy: PausedBy | null, reason: string | null): string {
+  if (pausedBy === 'idle_reaper' || pausedBy === 'staging_reaper') {
+    return 'This app was paused after a period without activity. The owner can resume it from the Butterbase dashboard.';
+  }
+  if (pausedBy === 'admin') {
+    return 'This app is paused. Contact the app owner.';
+  }
+  return reason
+    ? `The app owner paused this app: "${reason}". Wait for it to be resumed, or contact the owner.`
+    : 'The app owner paused this app. Wait for it to be resumed, or contact the owner.';
 }
 
 /**
@@ -57,6 +79,7 @@ interface PausableApp {
   id: string;
   paused?: boolean;
   paused_reason?: string | null;
+  paused_by?: PausedBy | null;
 }
 
 /**
@@ -67,7 +90,7 @@ interface PausableApp {
  */
 export function assertAppNotPaused(app: PausableApp): void {
   if (app.paused) {
-    throw new AppPausedError(app.id, app.paused_reason ?? null);
+    throw new AppPausedError(app.id, app.paused_reason ?? null, app.paused_by ?? null);
   }
 }
 
@@ -91,7 +114,7 @@ export class AppResolver {
      * back to the membership-enumeration check for backwards compatibility.
      */
     activeOrganizationId?: string | null,
-  ): Promise<{ id: string; name: string; owner_id: string; db_name: string; paused: boolean; paused_reason: string | null }> {
+  ): Promise<{ id: string; name: string; owner_id: string; db_name: string; paused: boolean; paused_reason: string | null; paused_by: PausedBy | null }> {
     const region = await resolveHomeRegion(controlPool, appId);
     if (!region) throw new AppNotFoundError(appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
@@ -103,8 +126,9 @@ export class AppResolver {
       db_name: string;
       paused: boolean;
       paused_reason: string | null;
+      paused_by: PausedBy | null;
     }>(
-      `SELECT id, name, owner_id, organization_id, db_name, paused, paused_reason
+      `SELECT id, name, owner_id, organization_id, db_name, paused, paused_reason, paused_by
        FROM apps
        WHERE id = $1`,
       [appId]
@@ -160,12 +184,12 @@ export class AppResolver {
   static async resolveAppPublic(
     controlPool: Pool,
     appId: string
-  ): Promise<{ id: string; db_name: string; access_mode: string; paused: boolean; paused_reason: string | null }> {
+  ): Promise<{ id: string; db_name: string; access_mode: string; paused: boolean; paused_reason: string | null; paused_by: PausedBy | null }> {
     const region = await resolveHomeRegion(controlPool, appId);
     if (!region) throw new AppNotFoundError(appId);
     const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
     const result = await runtimeDb.query(
-      `SELECT id, db_name, access_mode, paused, paused_reason
+      `SELECT id, db_name, access_mode, paused, paused_reason, paused_by
        FROM apps
        WHERE id = $1 AND db_provisioned = true`,
       [appId]
