@@ -42,6 +42,9 @@ export const executeReserveDest: StepHandler = async (ctx, m) => {
       db_name: String(src.rows[0].row.db_name) + '__pending',
       region: m.dest_region,
       provisioning_status: 'migration_target_reserved',
+      // Reset: the destination DB is not ready until step-flip-routing.
+      db_provisioned: false,
+      provisioning_error: null,
     };
     await destPool.query(
       `INSERT INTO apps SELECT * FROM json_populate_record(NULL::apps, $1::json)

@@ -7,6 +7,7 @@ const SOURCE_ROW = {
   region: 'us-east-1', provisioning_status: 'ready', paused: true, paused_by: 'idle_reaper',
   paused_reason: 'Paused after 28 days without activity.', organization_id: 'org-1',
   deployment_backend: 'wfp', anon_key: 'anon-abc', access_mode: 'authenticated',
+  db_provisioned: true, provisioning_error: 'old',
 };
 
 describe('executeReserveDest', () => {
@@ -92,6 +93,8 @@ describe('executeReserveDest', () => {
       db_name: 'cust_app_x__pending',
       region: 'eu-west-1',
       provisioning_status: 'migration_target_reserved',
+      db_provisioned: false,
+      provisioning_error: null,
     });
     expect(copied.owner_id).toBe('owner-1'); // not the mover
   });
