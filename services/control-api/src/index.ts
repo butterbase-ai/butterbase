@@ -1215,6 +1215,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
       if ((app as any).orphanReconcilerInterval) clearInterval((app as any).orphanReconcilerInterval);
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
+      if ((app as any).stagingReaperStop) (app as any).stagingReaperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});
       if ((app as any).peopleEmailSweeperHandle) await (app as any).peopleEmailSweeperHandle.stop().catch(() => {});

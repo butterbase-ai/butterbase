@@ -23,6 +23,7 @@
 // first to add it, not a continuation of an existing precedent.
 
 import type pg from 'pg';
+import { notifyPauseStateChanged } from './app-pause.js';
 
 const DEFAULT_IDLE_DAYS = 30;
 const INTERVAL_MS = 6 * 60 * 60 * 1000; // four times a day is plenty for a days-scale threshold
@@ -81,14 +82,21 @@ export async function runOnce(
   const ids = await findIdleStagingApps(runtimeDb, idleDays);
   if (ids.length === 0) return { paused: 0 };
 
-  const res = await runtimeDb.query(
+  const res = await runtimeDb.query<{ id: string }>(
     `UPDATE apps SET paused = true, paused_at = now(),
-            paused_reason = $2, updated_at = now()
+            paused_reason = $2, paused_by = 'staging_reaper', updated_at = now()
       WHERE id = ANY($1)
-        AND id IN (SELECT staging_app_id FROM app_environments)`,
+        AND id IN (SELECT staging_app_id FROM app_environments)
+      RETURNING id`,
     [ids, `Automatically paused after ${idleDays} days of inactivity.`],
   );
   logger.info({ paused: res.rowCount, ids }, '[staging-reaper] paused idle staging apps');
+  // The scoped batch UPDATE stays here (it is the safety property — see the
+  // doc comment above); app-pause supplies the side effects so a reaper
+  // pause is as complete as an owner pause.
+  for (const row of res.rows) {
+    await notifyPauseStateChanged({ appId: row.id, paused: true, by: 'staging_reaper' }, logger);
+  }
   return { paused: res.rowCount ?? 0 };
 }
 
