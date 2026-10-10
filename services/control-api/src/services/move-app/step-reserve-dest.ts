@@ -27,18 +27,28 @@ export const executeReserveDest: StepHandler = async (ctx, m) => {
 
   if (!m.dest_resources.dest_app_id) {
     const sourcePool = ctx.runtimePoolFor(m.source_region);
-    const src = await sourcePool.query<{ name: string; db_name: string; subdomain: string | null }>(
-      `SELECT name, db_name, subdomain FROM apps WHERE id = $1`, [m.app_id],
+    const src = await sourcePool.query<{ row: Record<string, unknown> }>(
+      `SELECT row_to_json(a) AS row FROM apps a WHERE id = $1`, [m.app_id],
     );
     if (src.rows.length === 0) throw new Error(`source apps row ${m.app_id} not found in ${m.source_region}`);
-    const row = src.rows[0];
+    // Copy the whole row by column name so app state (paused*, organization_id,
+    // deployment_backend, anon_key, access/AI/JWT config, ...) survives the move
+    // and new columns are carried automatically. Only the move-specific fields
+    // are overridden. Columns the destination region lacks are dropped by
+    // json_populate_record; runtime migrations run on every region, so the
+    // shapes match in practice.
+    const row = {
+      ...src.rows[0].row,
+      db_name: String(src.rows[0].row.db_name) + '__pending',
+      region: m.dest_region,
+      provisioning_status: 'migration_target_reserved',
+    };
     await destPool.query(
-      `INSERT INTO apps (id, name, owner_id, db_name, subdomain, region, provisioning_status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'migration_target_reserved')
+      `INSERT INTO apps SELECT * FROM json_populate_record(NULL::apps, $1::json)
        ON CONFLICT (id) DO UPDATE
          SET region = EXCLUDED.region,
              provisioning_status = 'migration_target_reserved'`,
-      [m.app_id, row.name, m.user_id, row.db_name + '__pending', row.subdomain, m.dest_region],
+      [JSON.stringify(row)],
     );
   }
 
