@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import { cloneApi } from '../lib/repo-api.js';
 
@@ -20,7 +21,7 @@ export async function templatesCommand(opts: {
   json?: boolean;
 }): Promise<void> {
   if (opts.sort && !VALID_SORT.has(opts.sort)) {
-    console.error(`error: --sort must be 'recent' or 'popular', got '${opts.sort}'`);
+    console.error(msg`error: --sort must be 'recent' or 'popular', got '${opts.sort}'`);
     process.exit(1);
     return;
   }
@@ -35,7 +36,7 @@ export async function templatesCommand(opts: {
       offset: opts.offset,
     });
   } catch (e) {
-    console.error(`error: ${(e as Error).message}`);
+    console.error(msg`error: ${(e as Error).message}`);
     process.exit(1);
     return;
   }
@@ -46,7 +47,7 @@ export async function templatesCommand(opts: {
   }
 
   if (!result.items.length) {
-    console.log(chalk.gray('No templates found.'));
+    console.log(chalk.gray(text('No templates found.')));
     return;
   }
 
@@ -74,7 +75,7 @@ export async function templatesCommand(opts: {
   for (const item of result.items) {
     const ownerCell = item.owner_display_name
       ? pad(truncate(item.owner_display_name, 24), COL_OWNER)
-      : chalk.dim(pad('anonymous', COL_OWNER));
+      : chalk.dim(pad(text('anonymous'), COL_OWNER));
     const row = [
       pad(item.app_id, COL_APP_ID),
       pad(truncate(item.name, 24), COL_NAME),
@@ -87,5 +88,5 @@ export async function templatesCommand(opts: {
     console.log(row);
   }
 
-  console.log(chalk.gray('Clone with: butterbase clone <APP_ID> [target_dir]'));
+  console.log(chalk.gray(text('Clone with: butterbase clone <APP_ID> [target_dir]')));
 }

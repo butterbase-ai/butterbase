@@ -1,5 +1,7 @@
 # @butterbase/cli
 
+English | [日本語](README.ja.md)
+
 Command-line tool for Butterbase project scaffolding and backend management.
 
 ## Installation
@@ -253,6 +255,10 @@ Other top-level commands (run `butterbase <command> --help` for flags):
 - `agents list|get|create|update|delete`, `substrate`, `people`, `partners`, `preview`, `repo`
 - `billing` (platform billing), `mcp install`, `plugin setup`
 - `apps pause|resume`, `functions get|delete|invoke|env|metrics`, `rls list|enable`, `ai meetings`
+
+## Display language
+
+Use `--lang ja` or `BUTTERBASE_LANG=ja` for Japanese help, prompts and status messages. English is the default; `--lang` overrides the environment. Commands, API values, JSON, source dumps and user/backend/external-tool text stay unchanged. See [the Japanese guide](README.ja.md).
 
 ## Global Options
 

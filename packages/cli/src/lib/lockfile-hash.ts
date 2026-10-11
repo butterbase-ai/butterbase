@@ -1,3 +1,4 @@
+import { text } from './i18n.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -19,7 +20,7 @@ export function detectPackageManagerAndLockfile(projectDir: string): {
     }
   }
   const pkg = path.join(projectDir, 'package.json');
-  if (!existsSync(pkg)) throw new Error('No lockfile or package.json found');
+  if (!existsSync(pkg)) throw new Error(text('No lockfile or package.json found'));
   const h = createHash('sha256').update(readFileSync(pkg)).digest('hex').slice(0, 32);
   return { packageManager: 'npm', lockfileHash: h };
 }
