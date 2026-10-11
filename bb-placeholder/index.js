@@ -18,16 +18,36 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
-function render(subdomain) {
+const COPY = {
+  en: {
+    powered: 'Powered by', title: 'Powered by Butterbase', api: 'Your API',
+    quickStart: 'Quick Start', nextSteps: 'Next Steps',
+    schema: 'Define your database schema', auth: 'Set up authentication',
+    deploy: 'Deploy your frontend to replace this page',
+    footer: 'This is a placeholder page. Deploy your own frontend to replace it.',
+    language: 'Language',
+  },
+  ja: {
+    powered: '構築基盤：', title: 'Butterbaseで構築', api: 'アプリのAPI',
+    quickStart: 'はじめる', nextSteps: '次の手順',
+    schema: 'データベースのスキーマを定義する', auth: '認証を設定する',
+    deploy: 'フロントエンドをデプロイして、このページを置き換える',
+    footer: 'これは初期表示ページです。自分のフロントエンドをデプロイすると置き換わります。',
+    language: '表示言語',
+  },
+};
+
+function render(subdomain, language) {
+  const copy = COPY[language];
   const safeSubdomain = escapeHtml(subdomain);
   const appName = safeSubdomain; // we don't know the friendly name in-worker
   const apiUrl = `https://${safeSubdomain}.butterbase.dev/v1/&lt;your-app-id&gt;`;
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${language}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${appName} — Powered by Butterbase</title>
+  <title>${appName} — ${copy.title}</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root { --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --accent: #f59e0b; --card: #fff; --border: #e7e5e4; --code-bg: #f5f5f4; }
@@ -35,11 +55,15 @@ function render(subdomain) {
       :root { --bg: #1c1917; --fg: #fafaf9; --muted: #a8a29e; --card: #292524; --border: #44403c; --code-bg: #292524; }
     }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--fg); min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 3rem 1.5rem; }
-    .container { max-width: 640px; width: 100%; }
-    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .container { max-width: 640px; width: 100%; min-width: 0; }
+    h1 { overflow-wrap: anywhere; font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; }
     .badge { display: inline-flex; align-items: center; gap: 0.375rem; font-size: 0.8rem; color: var(--muted); margin-bottom: 2rem; }
     .badge a { color: var(--accent); text-decoration: none; font-weight: 600; }
     .badge a:hover { text-decoration: underline; }
+    .languages { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem; font-size: 0.875rem; }
+    .languages a { color: var(--fg); text-underline-offset: 0.2em; }
+    .languages a[aria-current="page"] { font-weight: 700; }
+    .languages a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
     .section { background: var(--card); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; margin-bottom: 1.25rem; }
     .section h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.75rem; }
     .api-url { display: flex; align-items: center; gap: 0.5rem; }
@@ -54,18 +78,22 @@ function render(subdomain) {
 </head>
 <body>
   <div class="container">
+    <nav class="languages" aria-label="${copy.language}">
+      <a href="?lang=en" lang="en" hreflang="en"${language === 'en' ? ' aria-current="page"' : ''}>English</a>
+      <a href="?lang=ja" lang="ja" hreflang="ja"${language === 'ja' ? ' aria-current="page"' : ''}>日本語</a>
+    </nav>
     <h1>${appName}</h1>
-    <div class="badge">Powered by <a href="https://butterbase.ai" target="_blank">Butterbase</a></div>
+    <div class="badge">${copy.powered} <a href="https://butterbase.ai" target="_blank">Butterbase</a></div>
 
     <div class="section">
-      <h2>Your API</h2>
+      <h2>${copy.api}</h2>
       <div class="api-url">
         <code>${apiUrl}</code>
       </div>
     </div>
 
     <div class="section">
-      <h2>Quick Start</h2>
+      <h2>${copy.quickStart}</h2>
       <pre><code>// Fetch data from your app
 const res = await fetch('${apiUrl}/your_table');
 const data = await res.json();
@@ -73,15 +101,15 @@ console.log(data);</code></pre>
     </div>
 
     <div class="section">
-      <h2>Next Steps</h2>
+      <h2>${copy.nextSteps}</h2>
       <ul class="steps">
-        <li data-step="1">Define your database schema</li>
-        <li data-step="2">Set up authentication</li>
-        <li data-step="3">Deploy your frontend to replace this page</li>
+        <li data-step="1">${copy.schema}</li>
+        <li data-step="2">${copy.auth}</li>
+        <li data-step="3">${copy.deploy}</li>
       </ul>
     </div>
 
-    <p class="footer">This is a placeholder page. Deploy your own frontend to replace it.</p>
+    <p class="footer">${copy.footer}</p>
   </div>
 </body>
 </html>`;
@@ -91,7 +119,8 @@ export default {
   async fetch(request) {
     const host = request.headers.get('host') || '';
     const subdomain = host.split('.')[0] || 'your-app';
-    return new Response(render(subdomain), {
+    const language = new URL(request.url).searchParams.get('lang') === 'ja' ? 'ja' : 'en';
+    return new Response(render(subdomain, language), {
       status: 200,
       headers: {
         'content-type': 'text/html; charset=utf-8',
