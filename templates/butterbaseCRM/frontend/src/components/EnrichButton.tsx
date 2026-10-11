@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useState } from 'react';
 import { Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -27,6 +28,7 @@ interface Props {
 }
 
 export function EnrichButton({ kind, entityId }: Props) {
+  useUiLocale();
   const [busy, setBusy] = useState(false);
   const qc = useQueryClient();
   const ws = useCurrentWorkspaceId();
@@ -42,17 +44,17 @@ export function EnrichButton({ kind, entityId }: Props) {
       const status = data?.status;
       if (status === 'people_api_ok') {
         const n = data?.patched_fields?.length ?? 0;
-        toast.success(n ? `Filled ${n} field${n === 1 ? '' : 's'} from LinkedIn` : 'Enriched');
+        toast.success(n ? uiMessage`Filled ${n} field${n === 1 ? '' : 's'} from LinkedIn` : uiText('Enriched'));
       } else if (status === 'no_signal') {
         toast.info(data?.reason ?? (kind === 'company'
-          ? 'Add a person with a LinkedIn URL to this company, then re-enrich'
-          : 'Add a LinkedIn URL or name + company to enrich this person'));
+          ? uiText('Add a person with a LinkedIn URL to this company, then re-enrich')
+          : uiText('Add a LinkedIn URL or name + company to enrich this person')));
       } else if (status === 'no_match') {
-        toast.info('No match found in the People API');
+        toast.info(uiText('No match found in the People API'));
       } else if (status === 'error') {
-        toast.error(data?.error ?? 'Enrichment failed');
+        toast.error(data?.error ?? uiText('Enrichment failed'));
       } else {
-        toast.info(`Enrichment returned: ${status ?? 'unknown'}`);
+        toast.info(uiMessage`Enrichment returned: ${status ?? 'unknown'}`);
       }
       // Refresh caches — the enrich functions write via ctx.substrate.propose,
       // which lands on the entity but doesn't (yet) push through the WS stream.
@@ -66,7 +68,7 @@ export function EnrichButton({ kind, entityId }: Props) {
         if (ws) qc.invalidateQueries({ queryKey: qk.people(ws) });
       }
     } catch (e: any) {
-      toast.error(e?.message ?? 'Enrichment failed');
+      toast.error(e?.message ?? uiText('Enrichment failed'));
     } finally {
       setBusy(false);
     }
@@ -75,7 +77,7 @@ export function EnrichButton({ kind, entityId }: Props) {
   return (
     <Button size="sm" variant="outline" onClick={run} disabled={busy} className="gap-1.5">
       {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-      {busy ? 'Enriching…' : 'Enrich with AI'}
+      {busy ? uiText('Enriching…') : uiText('Enrich with AI')}
     </Button>
   );
 }

@@ -1,7 +1,8 @@
+import { uiMessage, uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { ListPlus, Trash2 } from 'lucide-react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -27,6 +28,7 @@ function fullName(first?: string | null, last?: string | null): string {
 }
 
 export default function PeopleList() {
+  useUiLocale();
   const { data: people, isLoading } = usePeople();
   const updateMut = useUpdatePerson();
   const deleteMut = useDeletePerson();
@@ -90,7 +92,7 @@ export default function PeopleList() {
       const patch: Partial<Person> = { [field]: value === '' ? null : value } as Partial<Person>;
       await updateMut.mutateAsync({ id, patch });
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Update failed');
+      toast.error(e instanceof Error ? e.message : uiText('Update failed'));
       throw e;
     }
   }
@@ -107,11 +109,11 @@ export default function PeopleList() {
     const failed = results.filter((r) => r.status === 'rejected').length;
     const ok = results.length - failed;
     if (failed === 0) {
-      toast.success(`Deleted ${ok} ${ok === 1 ? 'person' : 'people'}`);
+      toast.success(uiMessage`Deleted ${ok} ${ok === 1 ? uiText('person') : uiText('people')}`);
     } else if (ok === 0) {
-      toast.error('Delete failed');
+      toast.error(uiText('Delete failed'));
     } else {
-      toast.warning(`Deleted ${ok}, ${failed} failed`);
+      toast.warning(uiMessage`Deleted ${ok}, ${failed} failed`);
     }
     setSelected(new Set());
   }
@@ -120,19 +122,18 @@ export default function PeopleList() {
     <div className="flex h-full flex-col">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Section 02 · Humans</p>
+          <p className="eyebrow mb-3">{uiText("Section 02 · Humans")}</p>
           <h1 className="page-title">
-            People <em>worth knowing</em>
+            {uiText("People ")}<em>{uiText("worth knowing")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            The faces behind the accounts — every contact, every conversation, in one place.
-          </p>
+            {uiText("The faces behind the accounts — every contact, every conversation, in one place.")}</p>
         </div>
         <div className="flex items-center gap-3 self-end">
           {roleAccountCount > 0 && (
             <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
               <Switch checked={showRoleAccounts} onCheckedChange={setShowRoleAccounts} />
-              <span>Show role mailboxes ({roleAccountCount})</span>
+              <span>{uiText("Show role mailboxes (")}{roleAccountCount})</span>
             </label>
           )}
           <NewPersonDialog />
@@ -144,20 +145,17 @@ export default function PeopleList() {
       {selected.size > 0 && (
         <div className="flex items-center justify-between border-b bg-butter/[0.06] px-8 py-2 text-sm">
           <div>
-            <span className="font-medium">{selected.size}</span> selected
-            <button
+            <span className="font-medium">{selected.size}</span> {uiText(" selected")}<button
               type="button"
               onClick={() => setSelected(new Set())}
               className="ml-3 text-xs text-muted-foreground hover:text-foreground underline"
             >
-              Clear
-            </button>
+              {uiText("Clear")}</button>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => setAddToListOpen(true)}>
               <ListPlus className="h-3.5 w-3.5 mr-1.5" />
-              Add to list…
-            </Button>
+              {uiText("Add to list…")}</Button>
             <Button
               variant="outline"
               size="sm"
@@ -166,8 +164,7 @@ export default function PeopleList() {
               className="text-destructive hover:text-destructive"
             >
               <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-              Delete
-            </Button>
+              {uiText("Delete")}</Button>
           </div>
         </div>
       )}
@@ -177,9 +174,9 @@ export default function PeopleList() {
           <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12" />)}</div>
         ) : rows.length === 0 ? (
           <div className="rounded-lg border border-dashed p-12 text-center">
-            <h3 className="font-medium">{(people ?? []).length === 0 ? 'No people yet' : 'No matches'}</h3>
+            <h3 className="font-medium">{(people ?? []).length === 0 ? uiText('No people yet') : uiText('No matches')}</h3>
             <p className="mt-1 text-sm text-muted-foreground">
-              {(people ?? []).length === 0 ? 'Add your first contact to get started.' : 'Loosen filters or clear them to see everyone.'}
+              {(people ?? []).length === 0 ? uiText('Add your first contact to get started.') : uiText('Loosen filters or clear them to see everyone.')}
             </p>
           </div>
         ) : (
@@ -189,7 +186,7 @@ export default function PeopleList() {
                 <TableHead className="w-8">
                   <input
                     type="checkbox"
-                    aria-label="Select all"
+                    aria-label={uiText("Select all")}
                     checked={allSelected}
                     ref={(el) => { if (el) el.indeterminate = someSelected; }}
                     onChange={toggleAll}
@@ -218,7 +215,7 @@ export default function PeopleList() {
                     <TableCell onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
-                        aria-label={`Select ${name}`}
+                        aria-label={uiMessage`Select ${name}`}
                         checked={isSelected}
                         onChange={() => toggleOne(p.id)}
                       />
@@ -283,20 +280,19 @@ function renderBuiltin(
       <div className="flex items-center gap-1">
         <InlineEditCell
           value={p.first_name}
-          placeholder={name === 'Unnamed' ? 'First' : '—'}
+          placeholder={name === 'Unnamed' ? uiText('First') : '—'}
           onSave={(v) => save(p.id, 'first_name', v)}
           className="font-medium"
         />
         <InlineEditCell
           value={p.last_name}
-          placeholder="Last"
+          placeholder={uiText("Last")}
           onSave={(v) => save(p.id, 'last_name', v)}
           className="font-medium"
         />
         {p.is_role_account && (
           <Badge variant="outline" className="ml-1 text-[10px] font-normal text-muted-foreground">
-            role
-          </Badge>
+            {uiText("role")}</Badge>
         )}
       </div>
     );
@@ -307,10 +303,10 @@ function renderBuiltin(
   if (slug === 'email') {
     const status = p.email_status;
     if (!p.email && status === 'pending') {
-      return <span className="text-muted-foreground italic text-xs">pending…</span>;
+      return <span className="text-muted-foreground italic text-xs">{uiText("pending…")}</span>;
     }
     if (!p.email && status === 'failed') {
-      return <span className="text-muted-foreground italic text-xs" title="Email lookup failed">unavailable</span>;
+      return <span className="text-muted-foreground italic text-xs" title={uiText("Email lookup failed")}>{uiText("unavailable")}</span>;
     }
     return <InlineEditCell value={p.email} placeholder="—" onSave={(v) => save(p.id, 'email', v)} />;
   }

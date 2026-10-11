@@ -1,5 +1,6 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useQuery } from '@tanstack/react-query';
-import { format, formatDistanceToNowStrict } from 'date-fns';
+import { format, formatDistanceToNowStrict } from '@/i18n/date';
 import {
   Dialog,
   DialogContent,
@@ -43,6 +44,7 @@ function activitySnippet(a: Activity): string | null {
 }
 
 export function PersonDialog({ person, open, onOpenChange }: Props) {
+  useUiLocale();
   const personId = person?.id;
   const companyId = person?.company_id;
 
@@ -159,8 +161,7 @@ export function PersonDialog({ person, open, onOpenChange }: Props) {
             )}
             {!person.email && !person.phone && !company && !person.linkedin_url && !person.title && (
               <p className="font-editorial italic text-[13px] text-muted-foreground">
-                No contact details on file yet.
-              </p>
+                {uiText("No contact details on file yet.")}</p>
             )}
           </section>
 
@@ -169,7 +170,7 @@ export function PersonDialog({ person, open, onOpenChange }: Props) {
             <section>
               <div className="flex items-center gap-2 mb-2">
                 <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                <p className="eyebrow">Recent meetings · {meetings.length}</p>
+                <p className="eyebrow">{uiText("Recent meetings · ")}{meetings.length}</p>
               </div>
               <ul className="space-y-1.5">
                 {meetings.map((m) => (
@@ -188,14 +189,13 @@ export function PersonDialog({ person, open, onOpenChange }: Props) {
           <section>
             <div className="flex items-center gap-2 mb-2">
               <ActivityIcon className="h-3.5 w-3.5 text-muted-foreground" />
-              <p className="eyebrow">Recent activity</p>
+              <p className="eyebrow">{uiText("Recent activity")}</p>
             </div>
             {actLoading ? (
               <Skeleton className="h-20" />
             ) : activities.length === 0 ? (
               <p className="font-editorial italic text-[13px] text-muted-foreground">
-                No activity logged yet.
-              </p>
+                {uiText("No activity logged yet.")}</p>
             ) : (
               <ul className="space-y-1.5">
                 {activities.map((a) => {

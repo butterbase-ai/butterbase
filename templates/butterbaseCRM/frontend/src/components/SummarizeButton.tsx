@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export function SummarizeButton({ companyId }: Props) {
+  useUiLocale();
   const [loading, setLoading] = useState(false);
   const qc = useQueryClient();
 
@@ -23,16 +25,16 @@ export function SummarizeButton({ companyId }: Props) {
       if (response.error) {
         const status = (response.error as any).status;
         if (status === 402) {
-          toast.error('Insufficient credits. Please upgrade your plan.');
+          toast.error(uiText('Insufficient credits. Please upgrade your plan.'));
         } else {
-          toast.error((response.error as any).message || 'Failed to regenerate summary');
+          toast.error((response.error as any).message || uiText('Failed to regenerate summary'));
         }
       } else {
         qc.invalidateQueries({ queryKey: qk.company(companyId) });
-        toast.success('Summary regenerated');
+        toast.success(uiText('Summary regenerated'));
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to regenerate summary');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to regenerate summary'));
     } finally {
       setLoading(false);
     }
@@ -41,7 +43,6 @@ export function SummarizeButton({ companyId }: Props) {
   return (
     <Button onClick={handleClick} disabled={loading} size="sm" variant="outline">
       {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-      Regenerate AI summary
-    </Button>
+      {uiText("Regenerate AI summary")}</Button>
   );
 }

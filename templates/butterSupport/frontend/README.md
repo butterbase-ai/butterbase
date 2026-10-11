@@ -1,5 +1,7 @@
 # Butter Support — Frontend
 
+[English](README.md) | [日本語](README.ja.md)
+
 Vite + React + TypeScript frontend for the **butter-support** recipe. Builds two artifacts from a single project:
 
 1. **Console SPA** (`index.html` → `dist/index.html` + `dist/assets/*`) — the support team's workspace.

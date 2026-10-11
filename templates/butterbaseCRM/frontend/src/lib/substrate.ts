@@ -1,3 +1,4 @@
+import { uiMessage } from "../i18n";
 // Substrate access from the browser. All calls route through the substrate-proxy
 // backend function, which holds the substrate identity (ctx.substrate) — the
 // browser never sees a bb_sub_ key.
@@ -68,7 +69,7 @@ export interface ProposeVerdict {
 async function call<T>(op: string, args: Record<string, any> = {}): Promise<T> {
   const { data, error } = await bbInvoke<T>('substrate-proxy', { op, ...args });
   if (error) throw error;
-  if (data == null) throw new Error(`substrate-proxy ${op}: empty response`);
+  if (data == null) throw new Error(uiMessage`substrate-proxy ${op}: empty response`);
   return data;
 }
 
@@ -131,7 +132,7 @@ export async function updateEntityMerge(
   opts: { display_name?: string } = {},
 ): Promise<ProposeVerdict> {
   const current = await getEntity(id);
-  if (!current) throw new Error(`updateEntityMerge: entity ${id} not found`);
+  if (!current) throw new Error(uiMessage`updateEntityMerge: entity ${id} not found`);
   const merged = { ...(current.attrs ?? {}) };
   for (const [k, v] of Object.entries(attrPatch)) {
     if (v === undefined || v === null) delete merged[k];
