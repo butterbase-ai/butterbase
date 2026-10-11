@@ -373,12 +373,12 @@ await butterbase.kv.set(`session:${sessionId}`, sessionData, { ttl: 3600 });
 export async function handler(req: Request, ctx: FunctionContext) {
   const key = 'request_count';
   const count = await ctx.kv.incr(key);
-  
+
   // Set up role-based access (admin only)
   if (ctx.user?.role === 'admin') {
     await ctx.kv.expose('secret:*', { read: 'owner', write: 'owner' });
   }
-  
+
   return new Response(JSON.stringify({ count }));
 }
 ```

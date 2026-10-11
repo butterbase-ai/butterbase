@@ -2,3 +2,7 @@ public/llms.txt
 public/llms-full.txt
 dist/
 node_modules/
+
+public/ja/llms.txt
+public/ja/llms-full.txt
+.astro/
