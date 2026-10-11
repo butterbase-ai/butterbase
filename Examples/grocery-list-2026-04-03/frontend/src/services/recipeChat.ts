@@ -1,3 +1,4 @@
+import { UiError } from '../i18n';
 import { butterbase } from '../lib/butterbase';
 import type { RecipeChatMessage, RecipeChatResponse } from '../types';
 
@@ -10,6 +11,6 @@ export async function sendRecipeChat(
     'grocery-recipe-chat',
     { body: { messages } }
   );
-  if (error || !data) throw error || new Error('Recipe chat request failed');
+  if (error || !data) throw error || new UiError("Recipe chat request failed");
   return data;
 }

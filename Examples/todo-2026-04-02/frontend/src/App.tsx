@@ -1,3 +1,6 @@
+import { LocalePicker } from './components/LocalePicker';
+import { useLocale, text } from './i18n';
+import './i18n.css';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { LoginPage } from './pages/LoginPage';
@@ -5,10 +8,11 @@ import { SignupPage } from './pages/SignupPage';
 import { TodosPage } from './pages/TodosPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  useLocale();
   const { user, loading } = useAuth();
 
   if (loading) {
-    return <div style={{ textAlign: 'center', padding: '50px' }}>Loading...</div>;
+    return <div style={{ textAlign: 'center', padding: '50px' }}>{text("Loading...")}</div>;
   }
 
   if (!user) {
@@ -19,10 +23,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
+  useLocale();
   const { user, loading } = useAuth();
 
   if (loading) {
-    return <div style={{ textAlign: 'center', padding: '50px' }}>Loading...</div>;
+    return <div style={{ textAlign: 'center', padding: '50px' }}>{text("Loading...")}</div>;
   }
 
   if (user) {
@@ -33,6 +38,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 }
 
 function AppRoutes() {
+  useLocale();
   return (
     <Routes>
       <Route
@@ -65,9 +71,11 @@ function AppRoutes() {
 }
 
 function App() {
+  useLocale();
   return (
     <BrowserRouter>
       <AuthProvider>
+        <LocalePicker title="Todo App" />
         <AppRoutes />
       </AuthProvider>
     </BrowserRouter>

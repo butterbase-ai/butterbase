@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { useLocale, text, errorMessage } from '../i18n';
 import { useState, type FormEvent } from 'react';
 import { ImageUpload } from './ImageUpload';
 import { uploadImage } from '../services/storage';
@@ -10,11 +12,12 @@ interface GroceryFormProps {
 }
 
 export function GroceryForm({ onItemCreated }: GroceryFormProps) {
+  useLocale();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ReactNode>('');
   const { token } = useAuth();
 
   const handleSubmit = async (e: FormEvent) => {
@@ -50,7 +53,7 @@ export function GroceryForm({ onItemCreated }: GroceryFormProps) {
       setImageFile(null);
       onItemCreated();
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to add item';
+      const message = errorMessage(err, "Failed to add item");
       setError(message);
     } finally {
       setLoading(false);
@@ -62,11 +65,9 @@ export function GroceryForm({ onItemCreated }: GroceryFormProps) {
       onSubmit={handleSubmit}
       style={{ marginBottom: '30px', padding: '20px', border: '1px solid #ccc' }}
     >
-      <h2>Add item</h2>
+      <h2>{text("Add item")}</h2>
       <div style={{ marginBottom: '15px' }}>
-        <label htmlFor="title" style={{ display: 'block', marginBottom: '5px' }}>
-          Item name *
-        </label>
+        <label htmlFor="title" style={{ display: 'block', marginBottom: '5px' }}>{text("Item name *")}</label>
         <input
           id="title"
           type="text"
@@ -77,9 +78,7 @@ export function GroceryForm({ onItemCreated }: GroceryFormProps) {
         />
       </div>
       <div style={{ marginBottom: '15px' }}>
-        <label htmlFor="description" style={{ display: 'block', marginBottom: '5px' }}>
-          Notes (brand, quantity, aisle…)
-        </label>
+        <label htmlFor="description" style={{ display: 'block', marginBottom: '5px' }}>{text("Notes (brand, quantity, aisle…)")}</label>
         <textarea
           id="description"
           value={description}
@@ -97,7 +96,7 @@ export function GroceryForm({ onItemCreated }: GroceryFormProps) {
         disabled={loading}
         style={{ padding: '10px 20px', cursor: loading ? 'not-allowed' : 'pointer' }}
       >
-        {loading ? 'Adding…' : 'Add to list'}
+        {loading ? text("Adding…") : text("Add to list")}
       </button>
     </form>
   );
