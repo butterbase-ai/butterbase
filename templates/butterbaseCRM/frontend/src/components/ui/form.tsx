@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 "use client"
 
 import * as React from "react"
@@ -32,6 +33,7 @@ const FormField = <
 >({
   ...props
 }: ControllerProps<TFieldValues, TName>) => {
+  useUiLocale();
   return (
     <FormFieldContext.Provider value={{ name: props.name }}>
       <Controller {...props} />
@@ -45,11 +47,11 @@ const useFormField = () => {
   const { getFieldState, formState } = useFormContext()
 
   if (!fieldContext) {
-    throw new Error("useFormField should be used within <FormField>")
+    throw new Error(uiText("useFormField should be used within <FormField>"))
   }
 
   if (!itemContext) {
-    throw new Error("useFormField should be used within <FormItem>")
+    throw new Error(uiText("useFormField should be used within <FormItem>"))
   }
 
   const fieldState = getFieldState(fieldContext.name, formState)

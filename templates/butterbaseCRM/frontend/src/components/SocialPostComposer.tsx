@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useEffect, useMemo, useState } from 'react'
 import { Loader2, ChevronDown, ChevronRight, Tag, X, ImagePlus } from 'lucide-react'
 import { toast } from 'sonner'
@@ -76,6 +77,7 @@ interface Props {
 }
 
 export function SocialPostComposer({ open, onOpenChange, post, initialContent }: Props) {
+  useUiLocale();
   const ws = useCurrentWorkspaceId()
   const { data: connections = [] } = useSocialConnections(ws ?? null)
   const qc = useQueryClient()
@@ -170,7 +172,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
       }
       setMedia((cur) => [...cur, ...uploaded])
     } catch (e: any) {
-      toast.error(e?.message ?? 'Upload failed')
+      toast.error(e?.message ?? uiText('Upload failed'))
     } finally {
       setUploading(false)
     }
@@ -197,15 +199,15 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
   async function loadFlairs() {
     if (!ws) return
     const sub = redditSubreddit.trim().replace(/^\/?r\//i, '').replace(/\//g, '')
-    if (!sub) { toast.error('Enter a subreddit first'); return }
+    if (!sub) { toast.error(uiText('Enter a subreddit first')); return }
     setFlairLoading(true)
     try {
       const { data, error } = await getSubredditFlairs(ws, sub)
       if (error) throw new Error(typeof error === 'string' ? error : (error?.error ?? 'Failed to load flairs'))
       setFlairs(data?.flairs ?? [])
-      if (!data?.flairs?.length) toast.info(`r/${sub} has no selectable flairs`)
+      if (!data?.flairs?.length) toast.info(uiMessage`r/${sub} has no selectable flairs`)
     } catch (e: any) {
-      toast.error(e?.message ?? 'Failed to load flairs')
+      toast.error(e?.message ?? uiText('Failed to load flairs'))
     } finally {
       setFlairLoading(false)
     }
@@ -242,19 +244,19 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
 
   function scheduledIso(): string | undefined | null {
     if (!isScheduled) return null
-    if (!scheduleDate || !scheduleTime) { toast.error('Pick a date and time'); throw new Error('schedule') }
+    if (!scheduleDate || !scheduleTime) { toast.error(uiText('Pick a date and time')); throw new Error(uiText('schedule')) }
     const dt = new Date(`${scheduleDate}T${scheduleTime}`)
-    if (Number.isNaN(dt.getTime())) { toast.error('Invalid date/time'); throw new Error('schedule') }
-    if (dt.getTime() < Date.now() + 30_000) { toast.error('Pick a time at least 30s from now'); throw new Error('schedule') }
+    if (Number.isNaN(dt.getTime())) { toast.error(uiText('Invalid date/time')); throw new Error(uiText('schedule')) }
+    if (dt.getTime() < Date.now() + 30_000) { toast.error(uiText('Pick a time at least 30s from now')); throw new Error(uiText('schedule')) }
     return dt.toISOString()
   }
 
   function validateForSend(): boolean {
-    if (selectedChannels.length === 0) { toast.error('Pick at least one channel'); return false }
-    if (!body.trim()) { toast.error('Write a body'); return false }
+    if (selectedChannels.length === 0) { toast.error(uiText('Pick at least one channel')); return false }
+    if (!body.trim()) { toast.error(uiText('Write a body')); return false }
     if (selectedChannels.includes('reddit')) {
-      if (!redditSubreddit.trim()) { toast.error('Reddit needs a subreddit'); return false }
-      if (!redditTitle.trim()) { toast.error('Reddit needs a title'); return false }
+      if (!redditSubreddit.trim()) { toast.error(uiText('Reddit needs a subreddit')); return false }
+      if (!redditTitle.trim()) { toast.error(uiText('Reddit needs a title')); return false }
     }
     return true
   }
@@ -268,8 +270,8 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
   // ---- Actions ----
 
   async function saveDraft() {
-    if (!ws) { toast.error('No workspace'); return }
-    if (!body.trim()) { toast.error('Write a body'); return }
+    if (!ws) { toast.error(uiText('No workspace')); return }
+    if (!body.trim()) { toast.error(uiText('Write a body')); return }
     setBusy(true)
     try {
       if (isEdit) {
@@ -296,14 +298,14 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
         done('Draft saved')
       }
     } catch (e: any) {
-      if (e?.message !== 'schedule') toast.error(e?.message ?? 'Failed to save draft')
+      if (e?.message !== 'schedule') toast.error(e?.message ?? uiText('Failed to save draft'))
     } finally {
       setBusy(false)
     }
   }
 
   async function publishOrSchedule() {
-    if (!ws) { toast.error('No workspace'); return }
+    if (!ws) { toast.error(uiText('No workspace')); return }
     if (!validateForSend()) return
     setBusy(true)
     try {
@@ -336,7 +338,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
         done(sched ? 'Post scheduled' : 'Publishing…')
       }
     } catch (e: any) {
-      if (e?.message !== 'schedule') toast.error(e?.message ?? 'Failed to publish')
+      if (e?.message !== 'schedule') toast.error(e?.message ?? uiText('Failed to publish'))
     } finally {
       setBusy(false)
     }
@@ -344,7 +346,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
 
   // Edit a post that's already published: save CRM copy + optionally push body to the platform.
   async function saveEditPublished() {
-    if (!body.trim()) { toast.error('Write a body'); return }
+    if (!body.trim()) { toast.error(uiText('Write a body')); return }
     setBusy(true)
     try {
       const { data, error } = await editSocialPost(
@@ -355,7 +357,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
       if (error) throw new Error(errMsg(error))
       const failed = (data?.platform ?? []).filter((p) => !p.ok)
       if (pushToPlatform && failed.length) {
-        toast.warning(`Saved, but couldn't update on: ${failed.map((f) => f.channel).join(', ')}`, {
+        toast.warning(uiMessage`Saved, but couldn't update on: ${failed.map((f) => f.channel).join(', ')}`, {
           description: failed[0]?.error ?? undefined,
         })
         qc.invalidateQueries({ queryKey: ['social-posts'] })
@@ -364,7 +366,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
         done(pushToPlatform ? 'Saved & updated on platform' : 'Changes saved')
       }
     } catch (e: any) {
-      toast.error(e?.message ?? 'Failed to save')
+      toast.error(e?.message ?? uiText('Failed to save'))
     } finally {
       setBusy(false)
     }
@@ -381,14 +383,12 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
 
         {isPublished && (
           <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-            This post is already published. Reddit self-post bodies can be updated on-platform; titles, link posts,
-            LinkedIn and X can't be edited after posting.
-          </div>
+            {uiText("This post is already published. Reddit self-post bodies can be updated on-platform; titles, link posts, LinkedIn and X can't be edited after posting.")}</div>
         )}
 
         <div className="space-y-4">
           <div>
-            <Label className="eyebrow !text-[10px]">Channels</Label>
+            <Label className="eyebrow !text-[10px]">{uiText("Channels")}</Label>
             <div className="mt-1 flex flex-wrap gap-2">
               {(Object.keys(META) as SocialChannel[]).map((slug) => {
                 const isOn = selectedChannels.includes(slug)
@@ -403,7 +403,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
                     key={slug}
                     type="button"
                     disabled={disabled}
-                    title={isUpcoming ? `${META[slug].name} — coming soon` : lockedChannels ? 'Channels are locked for a published post' : (!isConnected ? 'Connect in Settings →' : (compat.reason ?? undefined))}
+                    title={isUpcoming ? uiMessage`${META[slug].name} — coming soon` : lockedChannels ? uiText('Channels are locked for a published post') : (!isConnected ? uiText('Connect in Settings →') : (compat.reason ?? undefined))}
                     onClick={() => toggleChannel(slug)}
                     className={`flex items-center gap-1.5 rounded border px-3 py-1.5 text-sm transition ${
                       isOn ? 'border-blue-500 bg-blue-50 text-blue-800 font-medium' : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
@@ -413,8 +413,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
                     <span>{META[slug].name}</span>
                     {isUpcoming && (
                       <span className="ml-1 rounded-full border border-gray-200 bg-gray-50 px-1.5 py-[1px] text-[9px] font-medium uppercase tracking-wide text-gray-500">
-                        Soon
-                      </span>
+                        {uiText("Soon")}</span>
                     )}
                   </button>
                 )
@@ -423,8 +422,8 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           </div>
 
           <div>
-            <Label className="eyebrow !text-[10px]">Body</Label>
-            <Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="What's the news?" rows={4} className="mt-1" />
+            <Label className="eyebrow !text-[10px]">{uiText("Body")}</Label>
+            <Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder={uiText("What's the news?")} rows={4} className="mt-1" />
             <div className="mt-1 flex gap-3 text-[11px] text-gray-500">
               {selectedChannels.includes('twitter') && (() => {
                 const len = eff(body, twOverride).length
@@ -440,17 +439,17 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           </div>
 
           <div>
-            <Label className="eyebrow !text-[10px]">Link (optional)</Label>
-            <Input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} placeholder="https://…" className="mt-1" />
+            <Label className="eyebrow !text-[10px]">{uiText("Link (optional)")}</Label>
+            <Input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} placeholder={uiText("https://…")} className="mt-1" />
           </div>
 
           <div>
-            <Label className="eyebrow !text-[10px]">Media</Label>
+            <Label className="eyebrow !text-[10px]">{uiText("Media")}</Label>
             <div className="mt-1 space-y-2">
               <div className="flex items-center gap-2">
                 <label className="inline-flex items-center gap-1.5 cursor-pointer rounded border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 hover:border-gray-300">
                   <ImagePlus className="h-4 w-4" />
-                  {uploading ? 'Uploading…' : 'Add images / videos'}
+                  {uploading ? uiText('Uploading…') : uiText('Add images / videos')}
                   <input
                     type="file"
                     multiple
@@ -460,7 +459,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
                     className="hidden"
                   />
                 </label>
-                {media.length > 0 && <span className="text-[11px] text-gray-500">{media.length} item{media.length === 1 ? '' : 's'}</span>}
+                {media.length > 0 && <span className="text-[11px] text-gray-500">{media.length} {uiText(" item")}{media.length === 1 ? '' : 's'}</span>}
               </div>
               {media.length > 0 && (
                 <div className="flex gap-2 overflow-x-auto">
@@ -488,10 +487,9 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           {selectedChannels.includes('twitter') && (
             <div className="rounded border border-gray-200 bg-gray-50 p-2">
               <button type="button" onClick={() => setTwExpanded((v) => !v)} className="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-900">
-                {twExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />} Customize for Twitter
-              </button>
+                {twExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />} {uiText(" Customize for Twitter")}</button>
               {twExpanded && (
-                <Textarea value={twOverride} onChange={(e) => setTwOverride(e.target.value)} placeholder="Twitter-specific body (≤ 280 chars). Empty = use shared body." rows={3} className="mt-2 text-sm" />
+                <Textarea value={twOverride} onChange={(e) => setTwOverride(e.target.value)} placeholder={uiText("Twitter-specific body (≤ 280 chars). Empty = use shared body.")} rows={3} className="mt-2 text-sm" />
               )}
             </div>
           )}
@@ -499,10 +497,9 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           {selectedChannels.includes('linkedin') && (
             <div className="rounded border border-gray-200 bg-gray-50 p-2">
               <button type="button" onClick={() => setLiExpanded((v) => !v)} className="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-900">
-                {liExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />} Customize for LinkedIn
-              </button>
+                {liExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />} {uiText(" Customize for LinkedIn")}</button>
               {liExpanded && (
-                <Textarea value={liOverride} onChange={(e) => setLiOverride(e.target.value)} placeholder="LinkedIn-specific body. Empty = use shared body." rows={3} className="mt-2 text-sm" />
+                <Textarea value={liOverride} onChange={(e) => setLiOverride(e.target.value)} placeholder={uiText("LinkedIn-specific body. Empty = use shared body.")} rows={3} className="mt-2 text-sm" />
               )}
             </div>
           )}
@@ -510,10 +507,9 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           {selectedChannels.includes('instagram') && (
             <div className="rounded border border-pink-200 bg-pink-50 p-3 space-y-2">
               <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-pink-900 uppercase tracking-wide">
-                <InstagramIcon className="h-3.5 w-3.5" /> Instagram
-              </div>
+                <InstagramIcon className="h-3.5 w-3.5" /> {uiText(" Instagram")}</div>
               <div>
-                <Label className="text-xs">Post type</Label>
+                <Label className="text-xs">{uiText("Post type")}</Label>
                 <div className="mt-1 flex gap-2 text-sm">
                   {(['feed','reel','story','carousel'] as const).map(t => (
                     <label key={t} className="flex items-center gap-1 cursor-pointer">
@@ -526,8 +522,8 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
                 </div>
               </div>
               <div>
-                <Label className="text-xs">Caption override (optional)</Label>
-                <Textarea value={igCaption} onChange={(e) => setIgCaption(e.target.value)} rows={2} placeholder="Empty = use shared body" className="mt-1 text-sm" />
+                <Label className="text-xs">{uiText("Caption override (optional)")}</Label>
+                <Textarea value={igCaption} onChange={(e) => setIgCaption(e.target.value)} rows={2} placeholder={uiText("Empty = use shared body")} className="mt-1 text-sm" />
                 <div className={`mt-0.5 text-[10px] ${igCaption.length > 2200 ? 'text-amber-600 font-medium' : 'text-gray-500'}`}>{eff(body, igCaption).length}/2200</div>
               </div>
             </div>
@@ -536,34 +532,31 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           {selectedChannels.includes('tiktok') && (
             <div className="rounded border border-neutral-200 bg-neutral-50 p-3 space-y-2">
               <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-neutral-900 uppercase tracking-wide">
-                <TikTokIcon className="h-3.5 w-3.5" /> TikTok
-              </div>
+                <TikTokIcon className="h-3.5 w-3.5" /> {uiText(" TikTok")}</div>
               <div>
-                <Label className="text-xs">Post type</Label>
+                <Label className="text-xs">{uiText("Post type")}</Label>
                 <div className="mt-1 flex gap-2 text-sm">
                   <label className="flex items-center gap-1 cursor-pointer">
-                    <input type="radio" checked={ttPostType === 'video'} onChange={() => setTtPostType('video')} disabled={media[0]?.kind !== 'video'} /> video
-                  </label>
+                    <input type="radio" checked={ttPostType === 'video'} onChange={() => setTtPostType('video')} disabled={media[0]?.kind !== 'video'} /> {uiText(" video")}</label>
                   <label className="flex items-center gap-1 cursor-pointer">
-                    <input type="radio" checked={ttPostType === 'photo'} onChange={() => setTtPostType('photo')} disabled={media[0]?.kind !== 'image'} /> photo
-                  </label>
+                    <input type="radio" checked={ttPostType === 'photo'} onChange={() => setTtPostType('photo')} disabled={media[0]?.kind !== 'image'} /> {uiText(" photo")}</label>
                 </div>
               </div>
               <div>
-                <Label className="text-xs">Title (optional)</Label>
+                <Label className="text-xs">{uiText("Title (optional)")}</Label>
                 <Input value={ttTitle} onChange={(e) => setTtTitle(e.target.value)} className="mt-1 text-sm" />
               </div>
               <div>
-                <Label className="text-xs">Privacy</Label>
+                <Label className="text-xs">{uiText("Privacy")}</Label>
                 <select value={ttPrivacy} onChange={(e) => setTtPrivacy(e.target.value as any)} className="mt-1 w-full rounded border border-gray-200 bg-white px-2 py-1.5 text-sm">
-                  <option value="PUBLIC_TO_EVERYONE">Public</option>
-                  <option value="MUTUAL_FOLLOW_FRIENDS">Friends</option>
-                  <option value="SELF_ONLY">Only me</option>
+                  <option value="PUBLIC_TO_EVERYONE">{uiText("Public")}</option>
+                  <option value="MUTUAL_FOLLOW_FRIENDS">{uiText("Friends")}</option>
+                  <option value="SELF_ONLY">{uiText("Only me")}</option>
                 </select>
               </div>
               <div>
-                <Label className="text-xs">Caption override (optional)</Label>
-                <Textarea value={ttCaption} onChange={(e) => setTtCaption(e.target.value)} rows={2} placeholder="Empty = use shared body" className="mt-1 text-sm" />
+                <Label className="text-xs">{uiText("Caption override (optional)")}</Label>
+                <Textarea value={ttCaption} onChange={(e) => setTtCaption(e.target.value)} rows={2} placeholder={uiText("Empty = use shared body")} className="mt-1 text-sm" />
                 <div className={`mt-0.5 text-[10px] ${ttCaption.length > 2200 ? 'text-amber-600 font-medium' : 'text-gray-500'}`}>{eff(body, ttCaption).length}/2200</div>
               </div>
             </div>
@@ -572,20 +565,19 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           {selectedChannels.includes('reddit') && (
             <div className="rounded border border-orange-200 bg-orange-50 p-3 space-y-2">
               <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-900 uppercase tracking-wide">
-                <RedditIcon className="h-3.5 w-3.5" /> Reddit (required fields)
+                <RedditIcon className="h-3.5 w-3.5" /> {uiText(" Reddit (required fields)")}</div>
+              <div>
+                <Label className="text-xs">{uiText("Subreddit")}</Label>
+                <Input value={redditSubreddit} onChange={(e) => setRedditSubreddit(e.target.value)} placeholder={uiText("r/startups (without slash)")} className="mt-1 text-sm" />
               </div>
               <div>
-                <Label className="text-xs">Subreddit</Label>
-                <Input value={redditSubreddit} onChange={(e) => setRedditSubreddit(e.target.value)} placeholder="r/startups (without slash)" className="mt-1 text-sm" />
-              </div>
-              <div>
-                <Label className="text-xs">Title (≤ 300 chars)</Label>
+                <Label className="text-xs">{uiText("Title (≤ 300 chars)")}</Label>
                 <Input value={redditTitle} onChange={(e) => setRedditTitle(e.target.value)} className="mt-1 text-sm" />
                 <div className={`mt-0.5 text-[10px] ${redditTitle.length > 300 ? 'text-amber-600 font-medium' : 'text-gray-500'}`}>{redditTitle.length}/300</div>
               </div>
               <div>
                 <div className="flex items-center justify-between">
-                  <Label className="text-xs">Flair</Label>
+                  <Label className="text-xs">{uiText("Flair")}</Label>
                   <button
                     type="button"
                     onClick={loadFlairs}
@@ -593,8 +585,7 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
                     className="inline-flex items-center gap-1 text-[11px] text-orange-800 hover:underline disabled:opacity-40"
                   >
                     {flairLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Tag className="h-3 w-3" />}
-                    Load flairs
-                  </button>
+                    {uiText("Load flairs")}</button>
                 </div>
                 {flairs.length > 0 ? (
                   <select
@@ -602,36 +593,34 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
                     onChange={(e) => setRedditFlairId(e.target.value)}
                     className="mt-1 w-full rounded border border-gray-200 bg-white px-2 py-1.5 text-sm"
                   >
-                    <option value="">No flair</option>
+                    <option value="">{uiText("No flair")}</option>
                     {flairs.map((f) => <option key={f.id} value={f.id}>{f.text || f.css_class || f.id}</option>)}
                   </select>
                 ) : (
-                  <Input value={redditFlairId} onChange={(e) => setRedditFlairId(e.target.value)} placeholder="Flair ID — click 'Load flairs' to pick" className="mt-1 text-sm" />
+                  <Input value={redditFlairId} onChange={(e) => setRedditFlairId(e.target.value)} placeholder={uiText("Flair ID — click 'Load flairs' to pick")} className="mt-1 text-sm" />
                 )}
               </div>
               <div>
-                <Label className="text-xs">Body override (optional)</Label>
-                <Textarea value={redditBody} onChange={(e) => setRedditBody(e.target.value)} placeholder="Empty = use shared body" rows={2} className="mt-1 text-sm" />
+                <Label className="text-xs">{uiText("Body override (optional)")}</Label>
+                <Textarea value={redditBody} onChange={(e) => setRedditBody(e.target.value)} placeholder={uiText("Empty = use shared body")} rows={2} className="mt-1 text-sm" />
               </div>
             </div>
           )}
 
           {!isPublished && (
             <div>
-              <Label className="eyebrow !text-[10px]">Schedule</Label>
+              <Label className="eyebrow !text-[10px]">{uiText("Schedule")}</Label>
               <div className="mt-1 flex gap-4 text-sm">
                 <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input type="radio" checked={!isScheduled} onChange={() => setIsScheduled(false)} /> Publish now
-                </label>
+                  <input type="radio" checked={!isScheduled} onChange={() => setIsScheduled(false)} /> {uiText(" Publish now")}</label>
                 <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input type="radio" checked={isScheduled} onChange={() => setIsScheduled(true)} /> Schedule for
-                </label>
+                  <input type="radio" checked={isScheduled} onChange={() => setIsScheduled(true)} /> {uiText(" Schedule for")}</label>
               </div>
               {isScheduled && (
                 <div className="mt-2 flex gap-2">
                   <Input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} className="text-sm" />
                   <Input type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="text-sm" />
-                  <span className="self-center text-[11px] text-gray-500">local TZ</span>
+                  <span className="self-center text-[11px] text-gray-500">{uiText("local TZ")}</span>
                 </div>
               )}
             </div>
@@ -640,24 +629,21 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
           {isPublished && (
             <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
               <input type="checkbox" checked={pushToPlatform} onChange={(e) => setPushToPlatform(e.target.checked)} />
-              Also update the live post on the platform (Reddit body only)
-            </label>
+              {uiText("Also update the live post on the platform (Reddit body only)")}</label>
           )}
         </div>
 
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>Cancel</Button>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>{uiText("Cancel")}</Button>
           {isPublished ? (
             <Button onClick={saveEditPublished} disabled={busy}>
-              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Save changes
-            </Button>
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} {uiText(" Save changes")}</Button>
           ) : (
             <>
               <Button variant="outline" onClick={saveDraft} disabled={busy}>
-                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Save draft
-              </Button>
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} {uiText(" Save draft")}</Button>
               <Button onClick={publishOrSchedule} disabled={busy}>
-                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} {isScheduled ? 'Schedule' : 'Publish'}
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} {isScheduled ? uiText('Schedule') : uiText('Publish')}
               </Button>
             </>
           )}

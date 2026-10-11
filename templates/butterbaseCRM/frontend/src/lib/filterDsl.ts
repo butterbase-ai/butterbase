@@ -1,3 +1,4 @@
+import { uiText } from '../i18n/core';
 // Filter DSL — the shared shape used by the toolbar, saved views, and AI search.
 //
 // A Filter targets either a built-in column on the object's row, or a custom
@@ -217,10 +218,16 @@ export function rowMatches(row: any, f: Filter, customValueResolver?: (row: any,
 
 export function formatFilterChip(f: Filter, fields: FieldSpec[]): string {
   const fs = fields.find((x) => x.slug === f.field);
-  const label = fs?.label ?? f.field;
-  const opLabel = OP_LABEL[f.op] ?? f.op;
+  const label = fs ? fieldDisplayLabel(fs) : f.field;
+  const opLabel = uiText(OP_LABEL[f.op] ?? f.op);
   if (f.op === 'is_null' || f.op === 'not_null') return `${label} ${opLabel}`;
   if (f.op === 'between' && Array.isArray(f.value)) return `${label} ${opLabel} ${f.value[0]} – ${f.value[1]}`;
   if (f.op === 'in' && Array.isArray(f.value)) return `${label} ${opLabel} ${f.value.join(', ')}`;
   return `${label} ${opLabel} ${String(f.value ?? '')}`;
+}
+
+export function fieldDisplayLabel(field: Pick<FieldSpec, 'label' | 'builtIn'>): string {
+  if (!field.builtIn) return field.label;
+  const jobTitle = BUILTIN_FIELDS.people.find(candidate => candidate.slug === 'title');
+  return field === jobTitle ? uiText(field.label, 'Job title') : uiText(field.label);
 }

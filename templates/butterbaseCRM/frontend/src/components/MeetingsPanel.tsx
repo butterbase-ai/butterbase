@@ -1,5 +1,6 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useState } from 'react';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,6 +16,7 @@ interface Props {
 }
 
 export function MeetingsPanel({ companyId }: Props) {
+  useUiLocale();
   const { data: meetings } = useMeetingsByEntity({ companyId });
   const createMut = useCreateMeeting();
   const deleteMut = useDeleteMeeting();
@@ -27,7 +29,7 @@ export function MeetingsPanel({ companyId }: Props) {
 
   async function handleSubmit() {
     if (!title.trim() || !startsAt) {
-      toast.error('Title and start time are required');
+      toast.error(uiText('Title and start time are required'));
       return;
     }
     try {
@@ -39,7 +41,7 @@ export function MeetingsPanel({ companyId }: Props) {
         notes: notes.trim() || null,
         company_id: companyId,
       });
-      toast.success('Meeting created');
+      toast.success(uiText('Meeting created'));
       setTitle('');
       setStartsAt('');
       setEndsAt('');
@@ -47,16 +49,16 @@ export function MeetingsPanel({ companyId }: Props) {
       setNotes('');
       setDialogOpen(false);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to create meeting');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to create meeting'));
     }
   }
 
   async function handleDelete(id: string) {
     try {
       await deleteMut.mutateAsync(id);
-      toast.success('Meeting deleted');
+      toast.success(uiText('Meeting deleted'));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to delete meeting');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to delete meeting'));
     }
   }
 
@@ -64,50 +66,50 @@ export function MeetingsPanel({ companyId }: Props) {
     <div className="space-y-4">
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogTrigger asChild>
-          <Button><Plus className="mr-2 h-4 w-4" />New meeting</Button>
+          <Button><Plus className="mr-2 h-4 w-4" />{uiText("New meeting")}</Button>
         </DialogTrigger>
         <DialogContent>
-          <DialogHeader><DialogTitle>New meeting</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{uiText("New meeting")}</DialogTitle></DialogHeader>
           <div className="space-y-4">
             <div>
-              <label className="text-sm font-medium">Title</label>
-              <Input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder="Meeting title" />
+              <label className="text-sm font-medium">{uiText("Title")}</label>
+              <Input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder={uiText("Meeting title")} />
             </div>
             <div>
-              <label className="text-sm font-medium">Start time</label>
+              <label className="text-sm font-medium">{uiText("Start time")}</label>
               <Input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} />
             </div>
             <div>
-              <label className="text-sm font-medium">End time (optional)</label>
+              <label className="text-sm font-medium">{uiText("End time (optional)")}</label>
               <Input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} />
             </div>
             <div>
-              <label className="text-sm font-medium">Location (optional)</label>
-              <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="In-person or video link" />
+              <label className="text-sm font-medium">{uiText("Location (optional)")}</label>
+              <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder={uiText("In-person or video link")} />
             </div>
             <div>
-              <label className="text-sm font-medium">Notes (optional)</label>
+              <label className="text-sm font-medium">{uiText("Notes (optional)")}</label>
               <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
             </div>
           </div>
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleSubmit} disabled={createMut.isPending}>Create</Button>
+            <Button type="button" variant="ghost" onClick={() => setDialogOpen(false)}>{uiText("Cancel")}</Button>
+            <Button onClick={handleSubmit} disabled={createMut.isPending}>{uiText("Create")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {!meetings || meetings.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
-          <p className="text-sm text-muted-foreground">No meetings yet</p>
+          <p className="text-sm text-muted-foreground">{uiText("No meetings yet")}</p>
         </div>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Title</TableHead>
-              <TableHead>Start time</TableHead>
-              <TableHead>Location</TableHead>
+              <TableHead>{uiText("Title")}</TableHead>
+              <TableHead>{uiText("Start time")}</TableHead>
+              <TableHead>{uiText("Location")}</TableHead>
               <TableHead className="w-12" />
             </TableRow>
           </TableHeader>
@@ -132,8 +134,7 @@ export function MeetingsPanel({ companyId }: Props) {
                         disabled={deleteMut.isPending}
                         className="text-destructive"
                       >
-                        Delete
-                      </DropdownMenuItem>
+                        {uiText("Delete")}</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </TableCell>

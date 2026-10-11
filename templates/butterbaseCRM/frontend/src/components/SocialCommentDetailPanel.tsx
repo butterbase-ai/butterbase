@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useState } from 'react'
 import { formatDistanceToNowStrict } from 'date-fns'
 import { ExternalLink, Loader2, RotateCw, Trash2 } from 'lucide-react'
@@ -29,6 +30,7 @@ interface Props {
 }
 
 export function SocialCommentDetailPanel({ comment, onClose }: Props) {
+  useUiLocale();
   const qc = useQueryClient()
   const Icon = SOCIAL_ICONS[comment.channel as SocialChannel]
   const when = comment.created_at
@@ -38,23 +40,23 @@ export function SocialCommentDetailPanel({ comment, onClose }: Props) {
   const retry = useMutation({
     mutationFn: () => retrySocialComment(comment.id),
     onSuccess: () => {
-      toast.success('Retrying comment…')
+      toast.success(uiText('Retrying comment…'))
       qc.invalidateQueries({ queryKey: ['social-comments'] })
     },
-    onError: (e: any) => toast.error(e?.message ?? 'Retry failed'),
+    onError: (e: any) => toast.error(e?.message ?? uiText('Retry failed')),
   })
 
   const [deleting, setDeleting] = useState(false)
   async function handleDelete() {
-    if (!confirm('Delete this comment record? This only removes the local record; the comment stays on the platform if it was posted.')) return
+    if (!confirm(uiText('Delete this comment record? This only removes the local record; the comment stays on the platform if it was posted.'))) return
     setDeleting(true)
     try {
       await deleteSocialComment(comment.id)
-      toast.success('Comment deleted')
+      toast.success(uiText('Comment deleted'))
       onClose?.()
       qc.invalidateQueries({ queryKey: ['social-comments'] })
     } catch (e: any) {
-      toast.error(e?.message ?? 'Delete failed')
+      toast.error(e?.message ?? uiText('Delete failed'))
     } finally {
       setDeleting(false)
     }
@@ -70,7 +72,7 @@ export function SocialCommentDetailPanel({ comment, onClose }: Props) {
               type="button"
               onClick={onClose}
               className="text-gray-400 hover:text-gray-600"
-              aria-label="Close panel"
+              aria-label={uiText("Close panel")}
             >
               ✕
             </button>
@@ -86,7 +88,7 @@ export function SocialCommentDetailPanel({ comment, onClose }: Props) {
 
       {comment.target_post_url && (
         <div>
-          <div className="eyebrow !text-[10px] mb-1">Target post</div>
+          <div className="eyebrow !text-[10px] mb-1">{uiText("Target post")}</div>
           <a
             href={comment.target_post_url}
             target="_blank"
@@ -105,14 +107,14 @@ export function SocialCommentDetailPanel({ comment, onClose }: Props) {
 
       {comment.status === 'failed' && comment.error && (
         <div className="rounded bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
-          <div className="font-semibold mb-0.5">Error</div>
+          <div className="font-semibold mb-0.5">{uiText("Error")}</div>
           {comment.error}
         </div>
       )}
 
       {(comment.external_url || comment.external_comment_id) && (
         <div>
-          <div className="eyebrow !text-[10px] mb-1">Live comment</div>
+          <div className="eyebrow !text-[10px] mb-1">{uiText("Live comment")}</div>
           <div className="rounded border border-gray-200 bg-white p-2 space-y-1">
             <div className="flex items-center gap-2 text-xs">
               <Icon className="h-4 w-4 shrink-0" />
@@ -125,12 +127,12 @@ export function SocialCommentDetailPanel({ comment, onClose }: Props) {
                   rel="noopener noreferrer"
                   className="text-blue-600 hover:underline flex items-center gap-0.5"
                 >
-                  view <ExternalLink className="h-3 w-3" />
+                  {uiText("view ")}<ExternalLink className="h-3 w-3" />
                 </a>
               )}
             </div>
             {comment.external_comment_id && (
-              <div className="text-[10px] text-gray-400">ID: {comment.external_comment_id}</div>
+              <div className="text-[10px] text-gray-400">{uiText("ID: ")}{comment.external_comment_id}</div>
             )}
           </div>
         </div>
@@ -146,8 +148,7 @@ export function SocialCommentDetailPanel({ comment, onClose }: Props) {
             className="text-xs"
           >
             {retry.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCw className="h-3 w-3" />}
-            Retry
-          </Button>
+            {uiText("Retry")}</Button>
         )}
         <Button
           size="sm"
@@ -157,8 +158,7 @@ export function SocialCommentDetailPanel({ comment, onClose }: Props) {
           className="text-xs text-red-600"
         >
           {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-          Delete
-        </Button>
+          {uiText("Delete")}</Button>
       </div>
     </aside>
   )

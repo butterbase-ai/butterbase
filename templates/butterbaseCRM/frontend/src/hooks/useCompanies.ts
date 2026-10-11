@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { qk } from '@/lib/queryKeys';
 import { useCurrentWorkspaceId } from '@/lib/workspace';
@@ -45,7 +46,7 @@ export function useCreateCompany() {
       });
       const newId: string | undefined =
         verdict.result?.entity_id ?? verdict.result?.id ?? verdict.result?.entity?.id;
-      if (!newId) throw new Error('substrate upsert_entity returned no entity id');
+      if (!newId) throw new Error(uiText('substrate upsert_entity returned no entity id'));
       await logActivity('company.created', 'company', newId, { name: input.name });
       const created = await listEntities('company', { limit: 1 });
       return entityToCompany(created.find((e) => e.id === newId) ?? { id: newId, attrs } as any);

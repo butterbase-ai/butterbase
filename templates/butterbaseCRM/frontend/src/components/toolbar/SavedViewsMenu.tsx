@@ -1,3 +1,4 @@
+import { uiMessage, uiText, useUiLocale } from "../../i18n";
 import { useEffect, useState } from 'react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -21,6 +22,7 @@ interface Props {
 }
 
 export function SavedViewsMenu({ objectType, activeView, filters, sort, visibleFields, onSelect }: Props) {
+  useUiLocale();
   const { data: views } = useSavedViews(objectType);
   const create = useCreateSavedView();
   const del = useDeleteSavedView();
@@ -46,11 +48,11 @@ export function SavedViewsMenu({ objectType, activeView, filters, sort, visibleF
         is_default: false,
         created_by: userId,
       });
-      toast.success(`Saved view “${v.name}”`);
+      toast.success(uiMessage`Saved view “${v.name}”`);
       setSaveOpen(false); setName('');
       onSelect(v);
     } catch (e: any) {
-      toast.error(e?.message ?? 'Failed to save');
+      toast.error(e?.message ?? uiText('Failed to save'));
     }
   }
 
@@ -66,7 +68,7 @@ export function SavedViewsMenu({ objectType, activeView, filters, sort, visibleF
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-60">
           <DropdownMenuItem onClick={() => onSelect(null)} className="text-[12.5px]">
-            All {objectType}
+            {uiText("All ")}{objectType}
           </DropdownMenuItem>
           {(views ?? []).map((v) => (
             <DropdownMenuItem key={v.id} className="text-[12.5px] flex items-center justify-between gap-2">
@@ -75,9 +77,9 @@ export function SavedViewsMenu({ objectType, activeView, filters, sort, visibleF
                 className="text-muted-foreground hover:text-coral"
                 onClick={async (e) => {
                   e.stopPropagation();
-                  if (!confirm(`Delete view “${v.name}”?`)) return;
-                  try { await del.mutateAsync(v.id); toast.success('View deleted'); if (activeView?.id === v.id) onSelect(null); }
-                  catch (err: any) { toast.error(err?.message ?? 'Failed'); }
+                  if (!confirm(uiMessage`Delete view “${v.name}”?`)) return;
+                  try { await del.mutateAsync(v.id); toast.success(uiText('View deleted')); if (activeView?.id === v.id) onSelect(null); }
+                  catch (err: any) { toast.error(err?.message ?? uiText('Failed')); }
                 }}
               >
                 <Trash2 className="h-3 w-3" />
@@ -86,25 +88,24 @@ export function SavedViewsMenu({ objectType, activeView, filters, sort, visibleF
           ))}
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => setSaveOpen(true)} className="text-[12.5px] gap-1.5">
-            <Plus className="h-3.5 w-3.5" /> Save current as view…
-          </DropdownMenuItem>
+            <Plus className="h-3.5 w-3.5" /> {uiText(" Save current as view…")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
       <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
         <DialogContent className="max-w-sm">
-          <DialogHeader><DialogTitle className="font-display tracking-tight">Save view</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle className="font-display tracking-tight">{uiText("Save view")}</DialogTitle></DialogHeader>
           <div className="space-y-3">
             <div>
-              <Label className="eyebrow !text-[10px]">Name</Label>
-              <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Founders in fintech" className="mt-1" />
+              <Label className="eyebrow !text-[10px]">{uiText("Name")}</Label>
+              <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={uiText("e.g. Founders in fintech")} className="mt-1" />
             </div>
             <p className="text-[12px] text-muted-foreground">
-              Snapshots {filters.length} filter{filters.length === 1 ? '' : 's'}, {visibleFields.length} visible field{visibleFields.length === 1 ? '' : 's'}{sort ? `, sorted by ${sort.field}` : ''}.
+              {uiText("Snapshots ")}{filters.length} {uiText(" filter")}{filters.length === 1 ? '' : 's'}, {visibleFields.length} {uiText(" visible field")}{visibleFields.length === 1 ? '' : 's'}{sort ? uiMessage`, sorted by ${sort.field}` : ''}.
             </p>
             <div className="flex justify-end gap-2 pt-2">
-              <Button variant="ghost" onClick={() => setSaveOpen(false)}>Cancel</Button>
-              <Button onClick={saveCurrent} disabled={!name.trim() || create.isPending} className="bg-foreground text-background hover:bg-foreground/85">Save view</Button>
+              <Button variant="ghost" onClick={() => setSaveOpen(false)}>{uiText("Cancel")}</Button>
+              <Button onClick={saveCurrent} disabled={!name.trim() || create.isPending} className="bg-foreground text-background hover:bg-foreground/85">{uiText("Save view")}</Button>
             </div>
           </div>
         </DialogContent>

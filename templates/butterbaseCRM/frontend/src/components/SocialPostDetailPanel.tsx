@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useState } from 'react'
 import { formatDistanceToNowStrict } from 'date-fns'
 import { Loader2, ExternalLink, Trash2, RotateCw, XCircle, Pencil, Copy } from 'lucide-react'
@@ -38,6 +39,7 @@ interface Props {
 }
 
 export function SocialPostDetailPanel({ post, onClose }: Props) {
+  useUiLocale();
   const retry = useRetrySocialPost()
   const cancel = useCancelSocialPost()
   const del = useDeleteSocialPost()
@@ -66,9 +68,9 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
       // Open the fresh draft (same content, new id) for tweaking + publishing.
       setComposerPost({ ...post, id: data!.id, status: 'draft', scheduled_at: null, published_at: null })
       setComposerOpen(true)
-      toast.success('Cloned to a draft — edit & publish')
+      toast.success(uiText('Cloned to a draft — edit & publish'))
     } catch (e: any) {
-      toast.error(e?.message ?? 'Repost failed')
+      toast.error(e?.message ?? uiText('Repost failed'))
     } finally {
       setReposting(false)
     }
@@ -77,37 +79,37 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
   async function handleRetry() {
     try {
       await retry.mutateAsync(post.id)
-      toast.success('Retrying failed channels…')
+      toast.success(uiText('Retrying failed channels…'))
     } catch (e: any) {
-      toast.error(e?.message ?? 'Retry failed')
+      toast.error(e?.message ?? uiText('Retry failed'))
     }
   }
 
   async function handleCancel() {
     try {
       await cancel.mutateAsync(post.id)
-      toast.success('Scheduled post canceled')
+      toast.success(uiText('Scheduled post canceled'))
     } catch (e: any) {
-      toast.error(e?.message ?? 'Cancel failed')
+      toast.error(e?.message ?? uiText('Cancel failed'))
     }
   }
 
   async function handleDelete() {
-    if (!confirm('Delete this post? This only removes the local record; published posts stay on each platform.')) return
+    if (!confirm(uiText('Delete this post? This only removes the local record; published posts stay on each platform.'))) return
     try {
       await del.mutateAsync(post.id)
-      toast.success('Post deleted')
+      toast.success(uiText('Post deleted'))
       onClose?.()
     } catch (e: any) {
-      toast.error(e?.message ?? 'Delete failed')
+      toast.error(e?.message ?? uiText('Delete failed'))
     }
   }
 
   const when = post.published_at
-    ? `Published ${formatDistanceToNowStrict(new Date(post.published_at), { addSuffix: true })}`
+    ? uiMessage`Published ${formatDistanceToNowStrict(new Date(post.published_at), { addSuffix: true })}`
     : post.scheduled_at
-      ? `Scheduled for ${new Date(post.scheduled_at).toLocaleString()}`
-      : `Created ${formatDistanceToNowStrict(new Date(post.created_at), { addSuffix: true })}`
+      ? uiMessage`Scheduled for ${new Date(post.scheduled_at).toLocaleString()}`
+      : uiMessage`Created ${formatDistanceToNowStrict(new Date(post.created_at), { addSuffix: true })}`
 
   return (
     <>
@@ -120,7 +122,7 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
               type="button"
               onClick={onClose}
               className="text-gray-400 hover:text-gray-600"
-              aria-label="Close panel"
+              aria-label={uiText("Close panel")}
             >
               ✕
             </button>
@@ -135,10 +137,10 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
       </div>
 
       <div>
-        <div className="eyebrow !text-[10px] mb-2">Per-channel results</div>
+        <div className="eyebrow !text-[10px] mb-2">{uiText("Per-channel results")}</div>
         <div className="space-y-1">
           {post.sends.length === 0 && (
-            <div className="text-xs text-gray-500">No sends recorded yet.</div>
+            <div className="text-xs text-gray-500">{uiText("No sends recorded yet.")}</div>
           )}
           {post.sends.map((send) => <SendRow key={send.id} send={send} />)}
         </div>
@@ -148,13 +150,12 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
         {canEdit && (
           <Button size="sm" variant="outline" onClick={handleEdit} className="text-xs">
             <Pencil className="h-3 w-3" />
-            {isDraft ? 'Edit & publish' : 'Edit'}
+            {isDraft ? uiText('Edit & publish') : uiText('Edit')}
           </Button>
         )}
         <Button size="sm" variant="outline" onClick={handleRepost} disabled={reposting} className="text-xs">
           {reposting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Copy className="h-3 w-3" />}
-          Repost
-        </Button>
+          {uiText("Repost")}</Button>
         {hasFailed && (
           <Button
             size="sm"
@@ -164,8 +165,7 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
             className="text-xs"
           >
             {retry.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCw className="h-3 w-3" />}
-            Retry failed
-          </Button>
+            {uiText("Retry failed")}</Button>
         )}
         {canCancel && (
           <Button
@@ -176,8 +176,7 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
             className="text-xs text-amber-700"
           >
             {cancel.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <XCircle className="h-3 w-3" />}
-            Cancel schedule
-          </Button>
+            {uiText("Cancel schedule")}</Button>
         )}
         <Button
           size="sm"
@@ -187,8 +186,7 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
           className="text-xs text-red-600"
         >
           {del.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-          Delete
-        </Button>
+          {uiText("Delete")}</Button>
       </div>
     </aside>
     <SocialPostComposer open={composerOpen} onOpenChange={setComposerOpen} post={composerPost} />
@@ -197,17 +195,18 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
 }
 
 function SendRow({ send }: { send: SocialPostSend }) {
+  useUiLocale();
   const qc = useQueryClient()
   const [removing, setRemoving] = useState(false)
 
   async function handleRemoveFromPlatform() {
     if (!send.external_post_id) return
-    if (!confirm(`Delete this post from ${send.channel}? This removes it from the platform (irreversible).`)) return
+    if (!confirm(uiMessage`Delete this post from ${send.channel}? This removes it from the platform (irreversible).`)) return
     setRemoving(true)
     try {
       const { data, error } = await deleteFromPlatform(send.id)
       if (error) {
-        toast.error(typeof error === 'string' ? error : (error?.error ?? error?.message ?? 'Failed'))
+        toast.error(typeof error === 'string' ? error : (error?.error ?? error?.message ?? uiText('Failed')))
       } else if (data?.note) {
         toast.info(data.note)
         qc.invalidateQueries({ queryKey: ['social-posts'] })
@@ -215,11 +214,11 @@ function SendRow({ send }: { send: SocialPostSend }) {
         toast.info(data.error)
         qc.invalidateQueries({ queryKey: ['social-posts'] })
       } else {
-        toast.success(`Removed from ${send.channel}`)
+        toast.success(uiMessage`Removed from ${send.channel}`)
         qc.invalidateQueries({ queryKey: ['social-posts'] })
       }
     } catch (e: any) {
-      toast.error(e?.message ?? 'Remove failed')
+      toast.error(e?.message ?? uiText('Remove failed'))
     } finally {
       setRemoving(false)
     }
@@ -238,17 +237,17 @@ function SendRow({ send }: { send: SocialPostSend }) {
             rel="noopener noreferrer"
             className="text-blue-600 hover:underline flex items-center gap-0.5"
           >
-            view <ExternalLink className="h-3 w-3" />
+            {uiText("view ")}<ExternalLink className="h-3 w-3" />
           </a>
         )}
       </div>
       {send.error && (
         <div className="rounded bg-red-50 border border-red-200 px-2 py-1 text-[11px] text-red-700">
-          <b>Error:</b> {send.error}
+          <b>{uiText("Error:")}</b> {send.error}
         </div>
       )}
       <div className="flex items-center gap-2 text-[10px] text-gray-400">
-        {send.attempts > 0 && <span>Attempts: {send.attempts}</span>}
+        {send.attempts > 0 && <span>{uiText("Attempts: ")}{send.attempts}</span>}
         {send.external_post_id && (
           <button
             type="button"
@@ -256,7 +255,7 @@ function SendRow({ send }: { send: SocialPostSend }) {
             disabled={removing}
             className="ml-auto text-gray-500 hover:text-red-600 underline decoration-dotted disabled:opacity-50"
           >
-            {removing ? 'removing…' : 'remove from platform'}
+            {removing ? uiText('removing…') : uiText('remove from platform')}
           </button>
         )}
       </div>

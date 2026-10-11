@@ -1,9 +1,11 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useState } from 'react'
 import { Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { SocialPostComposer } from '@/components/SocialPostComposer'
 
 export function NewSocialPostDialog() {
+  useUiLocale();
   const [open, setOpen] = useState(false)
   return (
     <>
@@ -13,8 +15,7 @@ export function NewSocialPostDialog() {
         onClick={() => setOpen(true)}
       >
         <Plus className="h-3.5 w-3.5" />
-        New post
-      </Button>
+        {uiText("New post")}</Button>
       <SocialPostComposer open={open} onOpenChange={setOpen} />
     </>
   )

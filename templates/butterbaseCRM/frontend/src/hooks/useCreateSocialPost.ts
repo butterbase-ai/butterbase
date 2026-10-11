@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { createSocialPost, type CreatePayload, type CreateResult } from '../lib/socialApi'
 
@@ -14,7 +15,7 @@ export function useCreateSocialPost() {
         ;(wrapped as any).cause = error
         throw wrapped
       }
-      if (!data) throw new Error('No response from create-social-post')
+      if (!data) throw new Error(uiText('No response from create-social-post'))
       return data
     },
     onSuccess: () => {
