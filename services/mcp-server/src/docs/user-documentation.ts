@@ -1,3 +1,4 @@
+import { JAPANESE_SECTIONS } from './japanese-documentation.js';
 /**
  * User-facing documentation only — product behavior and public surfaces,
  * not internal implementation.
@@ -27,6 +28,7 @@ export const DOC_TOPICS = [
 ] as const;
 
 export type DocTopic = (typeof DOC_TOPICS)[number];
+export type DocLanguage = 'en' | 'ja';
 
 const SECTIONS: Record<Exclude<DocTopic, 'all'>, string> = {
   overview: `## Butterbase
@@ -4116,7 +4118,12 @@ Example:
 
 };
 
-export function getUserDocumentation(topic: DocTopic): string {
+export function getUserDocumentation(topic: DocTopic, language: DocLanguage = 'en'): string {
+  if (language === 'ja') {
+    if (topic !== 'all') return JAPANESE_SECTIONS[topic];
+    const order: Exclude<DocTopic, 'all'>[] = ['overview', 'mcp', 'rest', 'auth', 'storage', 'functions', 'frontend', 'ai', 'meetings', 'rag', 'billing', 'platform', 'regions', 'schema', 'sdk', 'cli', 'realtime', 'integrations', 'substrate'];
+    return order.map(section => JAPANESE_SECTIONS[section]).join('\n\n');
+  }
   if (topic === 'all') {
     return [
       SECTIONS.overview,
@@ -4157,12 +4164,16 @@ export interface DocSearchHit {
  * and returns the highest-scoring sections. No external index — the corpus is
  * already in memory.
  */
-export function searchUserDocumentation(query: string, maxHits = 5): DocSearchHit[] {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+export function searchUserDocumentation(query: string, maxHits = 5, language: DocLanguage = 'en'): DocSearchHit[] {
+  const normalized = query.toLowerCase();
+  const stopwords = new Set(['の', 'を', 'に', 'で', 'は', 'が', 'と', 'も', 'へ', 'や', 'から', 'まで', 'です', 'ます', 'する', 'した', 'して', 'ください', 'こと', '方法']);
+  const terms = language === 'ja' && /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(normalized)
+    ? [...new Set([...new Intl.Segmenter('ja', { granularity: 'word' }).segment(normalized)].filter(part => part.isWordLike && !stopwords.has(part.segment)).map(part => part.segment))]
+    : normalized.split(/\s+/).filter(Boolean);
   if (terms.length === 0) return [];
 
   const hits: DocSearchHit[] = [];
-  for (const [topic, text] of Object.entries(SECTIONS) as [Exclude<DocTopic, 'all'>, string][]) {
+  for (const [topic, text] of Object.entries(language === 'ja' ? JAPANESE_SECTIONS : SECTIONS) as [Exclude<DocTopic, 'all'>, string][]) {
     const lower = text.toLowerCase();
     let score = 0;
     let firstPos = Infinity;
