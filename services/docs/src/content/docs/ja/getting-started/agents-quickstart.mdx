@@ -1,0 +1,206 @@
+---
+title: エージェント入門
+description: 最初のButterbaseエージェントを10分で作成し、実行する。
+---
+
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+受け取った依頼を分類し、自分でデプロイした関数を使って答えるエージェントを作ります。実際のリクエストに応答し、実行イベントをストリームで確認できます。
+
+Butterbaseアプリと、CLI（`npm i -g @butterbase/cli`）またはAIアシスタントに接続したMCPサーバーを用意してください。アプリがない場合は [クイックスタート](/ja/getting-started/quickstart/)から始めます。
+
+<Steps>
+
+1. **関数をデプロイし、エージェントのツールにする**
+
+   次のコードを `lookup_account.ts` に保存します。
+
+   ```ts
+   export default async function handler(req: Request, ctx: { db: any }) {
+     const { email } = await req.json();
+     const { rows } = await ctx.db.query(
+       'SELECT id, plan, status FROM accounts WHERE email = $1 LIMIT 1',
+       [email],
+     );
+     return Response.json(rows[0] ?? { error: 'not_found' });
+   }
+   ```
+
+   `agent_tool` を有効にしてデプロイします。
+
+   <Tabs>
+     <TabItem label="CLI">
+     ```bash
+     butterbase functions deploy ./lookup_account.ts \
+       --agent-tool \
+       --agent-tool-description "Look up a customer account by email. Returns id, plan, status." \
+       --agent-tool-mode read_only \
+       --agent-tool-exposed-to developer_only
+     ```
+     </TabItem>
+     <TabItem label="MCP">
+     ```
+     Use deploy_function with:
+       name: "lookup_account"
+       code: "...source above..."
+       agent_tool: true
+       agent_tool_description: "Look up a customer account by email."
+       agent_tool_mode: "read_only"
+       agent_tool_exposed_to: "developer_only"
+     ```
+     </TabItem>
+     <TabItem label="REST">
+     ```http
+     POST /v1/{app_id}/functions
+     Authorization: Bearer {token}
+
+     {
+       "name": "lookup_account",
+       "code": "...source above...",
+       "agent_tool": true,
+       "agent_tool_description": "Look up a customer account by email.",
+       "agent_tool_mode": "read_only",
+       "agent_tool_exposed_to": "developer_only"
+     }
+     ```
+     </TabItem>
+   </Tabs>
+
+2. **エージェントを作る**
+
+   グラフ定義には2つのLLMノードを用意します。triageでメッセージを分類し、answerで先ほどの関数を呼び出して答えます。
+
+   ```json title="agent-spec.json"
+   {
+     "spec_version": "1",
+     "entry": "triage",
+     "nodes": {
+       "triage": {
+         "type": "llm",
+         "model": "anthropic/claude-3.5-haiku",
+         "system_prompt": "Classify the user's message as 'billing' or 'other'. Respond with just the category.",
+         "input_template": "{{ input.message }}",
+         "output_key": "category",
+         "tools": []
+       },
+       "answer": {
+         "type": "llm",
+         "model": "anthropic/claude-3.5-sonnet",
+         "system_prompt": "You are a {{ state.category }} agent. Use lookup_account to find the user before answering.",
+         "input_template": "{{ input.message }}",
+         "output_key": "reply",
+         "tools": [
+           { "source": "function", "name": "lookup_account" }
+         ]
+       },
+       "done": { "type": "end", "output_template": "{{ state.reply }}" }
+     },
+     "edges": [
+       { "from": "triage", "to": "answer" },
+       { "from": "answer", "to": "done" }
+     ],
+     "tools": {
+       "builtin": [],
+       "mcp_servers": [],
+       "functions": ["lookup_account"]
+     },
+     "limits": {
+       "max_steps": 10,
+       "max_tool_calls": 5,
+       "max_parallel_tools": 2,
+       "timeout_seconds": 120,
+       "human_timeout_seconds": 86400
+     }
+   }
+   ```
+
+   <Tabs>
+     <TabItem label="CLI">
+     ```bash
+     butterbase agents create \
+       --name billing-triage \
+       --display-name "Billing triage" \
+       --default-model anthropic/claude-3.5-haiku \
+       --spec ./agent-spec.json
+     ```
+     </TabItem>
+     <TabItem label="MCP">
+     ```
+     Use manage_agents with:
+       action: "create"
+       name: "billing-triage"
+       display_name: "Billing triage"
+       default_model: "anthropic/claude-3.5-haiku"
+       graph_spec: <contents of agent-spec.json>
+     ```
+     </TabItem>
+     <TabItem label="REST">
+     ```http
+     POST /v1/{app_id}/agents
+     Authorization: Bearer {token}
+
+     {
+       "name": "billing-triage",
+       "display_name": "Billing triage",
+       "default_model": "anthropic/claude-3.5-haiku",
+       "graph_spec": { ... }
+     }
+     ```
+     </TabItem>
+   </Tabs>
+
+3. **実行する**
+
+   <Tabs>
+     <TabItem label="CLI">
+     ```bash
+     butterbase agents run billing-triage \
+       --input '{"message": "Why was I charged twice?"}' \
+       --stream
+     ```
+     </TabItem>
+     <TabItem label="REST">
+     ```http
+     POST /v1/{app_id}/agents/billing-triage/runs
+     Authorization: Bearer {token}
+
+     { "input": { "message": "Why was I charged twice?" } }
+     ```
+
+     続いてSSEのイベントストリームへ接続します。
+
+     ```http
+     GET /v1/{app_id}/agents/billing-triage/runs/{run_id}/events
+     Accept: text/event-stream
+     ```
+     </TabItem>
+   </Tabs>
+
+   次のようなイベントが流れます。
+
+   ```
+   event: run_start
+   event: node_start    {"node_id": "triage", "step": 1}
+   event: llm_token_usage  {"input_tokens": 412, "output_tokens": 4}
+   event: node_end      {"node_id": "triage", "step": 1}
+   event: node_start    {"node_id": "answer", "step": 2}
+   event: tool_call_start {"tool_name": "lookup_account", "args": {...}}
+   event: tool_call_end   {"tool_name": "lookup_account", "result": {...}}
+   event: llm_token_usage {"input_tokens": 891, "output_tokens": 142}
+   event: node_end      {"node_id": "answer", "step": 2}
+   event: run_end       {"output": "Hi! I found your account..."}
+   ```
+
+4. **ダッシュボードで実行を確認する**
+
+   ダッシュボードで **Agents → billing-triage → Runs** を開くと、イベントの時系列、ツールの入出力、累計トークン数と費用を確認できます。
+
+</Steps>
+
+<span id="next-steps"></span>
+
+## 次に読む
+
+- [エージェントの基本機能](/ja/core-concepts/agents/)で、ノード、エッジ、ツールの関係を確認します。
+- [エージェントAPI](/ja/api-reference/agents-api/)で、各エンドポイントとイベントの形式を確認します。
+- [Examples/agents/](https://github.com/butterbase-ai/butterbase/tree/main/Examples/agents)に、`approval-hitl`、`mcp-docs`、`support-readonly` の例があります。
