@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import { readFileSync } from 'node:fs';
 import { apiGet, apiPost, apiPut, apiDelete, type ApiError } from '../lib/api-client.js';
@@ -11,18 +12,18 @@ function fail(msg: string): never {
 
 function handleAuthError(err: unknown): never {
   const e = err as ApiError & { status?: number };
-  if (e?.status === 401) fail('your key is invalid or expired — run `butterbase login`');
+  if (e?.status === 401) fail(text('your key is invalid or expired — run `butterbase login`'));
   if (e?.status === 403 && /scope/i.test(e?.error ?? '')) {
-    fail('your active key is app-scoped — run `butterbase keys generate --substrate` and re-export BUTTERBASE_API_KEY');
+    fail(text('your active key is app-scoped — run `butterbase keys generate --substrate` and re-export BUTTERBASE_API_KEY'));
   }
   fail(e?.error ?? String(err));
 }
 
 function readJsonFile(p: string): unknown {
-  if (!p.startsWith('@')) fail(`expected @path, got '${p}'`);
+  if (!p.startsWith('@')) fail(msg`expected @path, got '${p}'`);
   const path = p.slice(1);
   try { return JSON.parse(readFileSync(path, 'utf8')); }
-  catch (e) { fail(`could not read ${path}: ${(e as Error).message}`); }
+  catch (e) { fail(msg`could not read ${path}: ${(e as Error).message}`); }
 }
 
 function print(json: boolean, value: unknown) {
@@ -126,7 +127,7 @@ export async function substrateOutboxListCommand(opts: { state?: string; json?: 
     const q = qs({ state: opts.state });
     const res = await apiGet<{ outbox: any[] }>(`/v1/me/substrate/outbox${q}`);
     if (opts.json) { console.log(JSON.stringify(res, null, 2)); return; }
-    for (const o of res.outbox ?? []) console.log(`${o.id.padEnd(26)} ${o.state.padEnd(10)} ${o.target.padEnd(24)} attempts=${o.attempts}`);
+    for (const o of res.outbox ?? []) console.log(msg`${o.id.padEnd(26)} ${o.state.padEnd(10)} ${o.target.padEnd(24)} attempts=${o.attempts}`);
   } catch (e) { handleAuthError(e); }
 }
 
@@ -151,7 +152,7 @@ export async function substrateRulesFiringsCommand(id: string, opts: { limit?: s
     const q = qs({ limit: opts.limit });
     const res = await apiGet<{ firings: any[] }>(`/v1/me/substrate/attention-rules/${encodeURIComponent(id)}/firings${q}`);
     if (opts.json) { console.log(JSON.stringify(res, null, 2)); return; }
-    for (const f of res.firings ?? []) console.log(`${f.id.padEnd(26)} ${f.status.padEnd(16)} bindings=${f.binding_count} ${f.fired_at}`);
+    for (const f of res.firings ?? []) console.log(msg`${f.id.padEnd(26)} ${f.status.padEnd(16)} bindings=${f.binding_count} ${f.fired_at}`);
   } catch (e) { handleAuthError(e); }
 }
 
@@ -160,7 +161,7 @@ export async function substrateSnapshotsCommand(opts: { days?: string; json?: bo
     const q = qs({ days: opts.days });
     const res = await apiGet<{ snapshots: any[] }>(`/v1/me/substrate/snapshots${q}`);
     if (opts.json) { console.log(JSON.stringify(res, null, 2)); return; }
-    for (const s of res.snapshots ?? []) console.log(`${s.snapshot_date}  entities=${s.entity_count}  decisions24h=${s.decision_count_24h}`);
+    for (const s of res.snapshots ?? []) console.log(msg`${s.snapshot_date}  entities=${s.entity_count}  decisions24h=${s.decision_count_24h}`);
   } catch (e) { handleAuthError(e); }
 }
 
@@ -182,7 +183,7 @@ export async function substrateProposeCommand(
   capability: string,
   opts: { payload?: string; idempotencyKey?: string; json?: boolean },
 ) {
-  if (!opts.payload) fail('missing --payload @path/to/file.json');
+  if (!opts.payload) fail(text('missing --payload @path/to/file.json'));
   const payload = readJsonFile(opts.payload);
   const body: Record<string, unknown> = { capability, payload };
   if (opts.idempotencyKey) body.idempotency_key = opts.idempotencyKey;
@@ -209,7 +210,7 @@ export async function substrateRejectCommand(actionId: string, opts: { reason?: 
 }
 
 export async function substrateEntitiesUpdateCommand(id: string, opts: { patch?: string; json?: boolean }) {
-  if (!opts.patch) fail('missing --patch @path/to/file.json');
+  if (!opts.patch) fail(text('missing --patch @path/to/file.json'));
   const patch = readJsonFile(opts.patch) as Record<string, unknown>;
   // Entity mutations flow through the substrate action ledger for auditability —
   // there is no direct PUT route. We propose an `update_entity` capability action.
@@ -235,7 +236,7 @@ export async function substrateOutboxRetryCommand(id: string, opts: { json?: boo
 }
 
 export async function substrateRulesCreateCommand(opts: { file?: string; json?: boolean }) {
-  if (!opts.file) fail('missing --file @path/to/rule.json');
+  if (!opts.file) fail(text('missing --file @path/to/rule.json'));
   const body = readJsonFile(opts.file) as Record<string, unknown>;
   try {
     const res = await apiPost<unknown>('/v1/me/substrate/attention-rules', body);
@@ -244,7 +245,7 @@ export async function substrateRulesCreateCommand(opts: { file?: string; json?: 
 }
 
 export async function substrateRulesUpdateCommand(id: string, opts: { file?: string; json?: boolean }) {
-  if (!opts.file) fail('missing --file @path/to/rule.json');
+  if (!opts.file) fail(text('missing --file @path/to/rule.json'));
   const body = readJsonFile(opts.file) as Record<string, unknown>;
   try {
     const res = await apiPut<unknown>(`/v1/me/substrate/attention-rules/${encodeURIComponent(id)}`, body);
@@ -275,7 +276,7 @@ export async function substrateRulesDisableCommand(id: string, opts: { json?: bo
 
 export async function substrateSettingsYoloCommand(state: string, opts: { json?: boolean }) {
   const normalized = state.toLowerCase();
-  if (normalized !== 'on' && normalized !== 'off') fail(`expected 'on' or 'off', got '${state}'`);
+  if (normalized !== 'on' && normalized !== 'off') fail(msg`expected 'on' or 'off', got '${state}'`);
   try {
     const res = await apiPut<unknown>(`/v1/me/substrate/settings/yolo`, { yolo_mode: normalized === 'on' });
     console.log(JSON.stringify(res, null, 2));

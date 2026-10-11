@@ -1,3 +1,4 @@
+import { msg } from './i18n.js';
 import fs from 'fs-extra';
 import { createHash } from 'crypto';
 import type { FileEntry } from './repo-api.js';
@@ -19,7 +20,7 @@ export async function buildManifest(files: WalkedFile[]): Promise<FileEntry[]> {
     if (buf.byteLength !== f.size) {
       // The stat said one thing, the read returned another — likely a concurrent writer.
       // Surface this rather than committing inconsistent metadata.
-      throw new Error(`File size changed during read: ${f.relPath} (stat=${f.size}, read=${buf.byteLength})`);
+      throw new Error(msg`File size changed during read: ${f.relPath} (stat=${f.size}, read=${buf.byteLength})`);
     }
     out.push({ path: f.relPath, sha256, size: buf.byteLength });
   }

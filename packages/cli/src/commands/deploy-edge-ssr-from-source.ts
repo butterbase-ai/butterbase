@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs-extra';
@@ -20,8 +21,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const currentAppId = await getCurrentAppId();
   if (!currentAppId) {
-    console.error(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.error(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return currentAppId;
@@ -45,7 +46,7 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
   const projectDir = path.resolve(opts.fromPath ?? process.cwd());
 
   if (!fs.existsSync(projectDir) || !fs.statSync(projectDir).isDirectory()) {
-    console.error(chalk.red(`${projectDir} is not a directory`));
+    console.error(chalk.red(msg`${projectDir} is not a directory`));
     process.exit(1);
   }
 
@@ -55,12 +56,12 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
   const apiKey = config.apiKey;
 
   if (!apiKey) {
-    console.error(chalk.red('Not authenticated. Run: butterbase login'));
+    console.error(chalk.red(text('Not authenticated. Run: butterbase login')));
     process.exit(1);
   }
 
   const framework = opts.framework ?? 'nextjs-edge';
-  const spinner = ora('Zipping source...').start();
+  const spinner = ora(text('Zipping source...')).start();
 
   try {
     // 1. Zip the project
@@ -69,13 +70,13 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
     const zipBuf = zip.toBuffer();
 
     if (zipBuf.length > 50 * 1024 * 1024) {
-      spinner.fail('Source too large');
-      console.error(chalk.red('Zipped source exceeds 50 MB limit'));
+      spinner.fail(text('Source too large'));
+      console.error(chalk.red(text('Zipped source exceeds 50 MB limit')));
       process.exit(1);
     }
 
     // 2. Create deployment
-    spinner.text = 'Creating deployment...';
+    spinner.text = text('Creating deployment...');
     const createRes = await fetch(`${apiBase}/v1/${appId}/edge-ssr/deployments/from-source`, {
       method: 'POST',
       headers: {
@@ -87,7 +88,7 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
 
     if (!createRes.ok) {
       const text = await createRes.text();
-      throw new Error(`create failed: ${createRes.status} ${text}`);
+      throw new Error(msg`create failed: ${createRes.status} ${text}`);
     }
 
     const created = (await createRes.json()) as {
@@ -98,7 +99,7 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
     };
 
     // 3. Upload zip to presigned URL
-    spinner.text = `Uploading source (${(zipBuf.length / 1024 / 1024).toFixed(1)} MB)...`;
+    spinner.text = msg`Uploading source (${(zipBuf.length / 1024 / 1024).toFixed(1)} MB)...`;
     const putRes = await fetch(created.upload_url, {
       method: 'PUT',
       body: new Uint8Array(zipBuf),
@@ -106,14 +107,14 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
     });
 
     if (!putRes.ok) {
-      throw new Error(`upload failed: ${putRes.status}`);
+      throw new Error(msg`upload failed: ${putRes.status}`);
     }
 
     // 4. Detect package manager + lockfile hash
     const { packageManager, lockfileHash } = detectPackageManagerAndLockfile(projectDir);
 
     // 5. Start build
-    spinner.text = 'Starting build...';
+    spinner.text = text('Starting build...');
     const startRes = await fetch(
       `${apiBase}/v1/${appId}/edge-ssr/deployments/from-source/${created.deployment_id}/start`,
       {
@@ -134,10 +135,10 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
 
     if (!startRes.ok) {
       const text = await startRes.text();
-      throw new Error(`start failed: ${startRes.status} ${text}`);
+      throw new Error(msg`start failed: ${startRes.status} ${text}`);
     }
 
-    spinner.succeed('Build started — streaming logs...');
+    spinner.succeed(text('Build started — streaming logs...'));
     console.log('');
 
     // 6. Tail SSE logs
@@ -163,14 +164,14 @@ export async function deployEdgeSsrFromSource(opts: Options): Promise<void> {
     console.log('');
     if (!final || final.status !== 'READY') {
       process.stderr.write(
-        `\n✗ Deploy failed: ${final?.status ?? 'unknown'}${final?.error ? ` (${final.error})` : ''}\n`,
+        msg`\n✗ Deploy failed: ${final?.status ?? 'unknown'}${final?.error ? ` (${final.error})` : ''}\n`,
       );
       process.exitCode = 1;
       return;
     }
     process.stdout.write(`\n✓ Deployed: ${final.url}\n`);
   } catch (error) {
-    spinner.fail('Deployment failed');
+    spinner.fail(text('Deployment failed'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
