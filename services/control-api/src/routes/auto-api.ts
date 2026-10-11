@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { Readable } from 'node:stream';
-import type { Pool, PoolClient } from 'pg';
+import type { Pool } from 'pg';
 import { getAppPoolForApp } from '../services/app-pool.js';
+import { executeWithRole } from '../services/rls-context.js';
 import { introspectSchema } from '../services/schema-introspector.js';
 import { buildSelectQuery } from '../services/query-builder.js';
 import { encodeValuesForColumns } from '../services/pg-json-values.js';
@@ -141,41 +142,6 @@ async function getCachedSchema(appId: string, pool: Pool) {
   return schema;
 }
 
-/**
- * Executes a query with role-based RLS context
- */
-async function executeWithRole<T>(
-  pool: Pool,
-  role: 'butterbase_anon' | 'butterbase_user' | 'butterbase_service',
-  userId: string | null,
-  queryFn: (client: PoolClient) => Promise<T>
-): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Switch to non-privileged role so RLS is enforced
-    // (connection role has BYPASSRLS on Neon, so RLS is skipped without this)
-    await client.query(`SET LOCAL ROLE ${role}`);
-
-    // Set GUC variables — policies and current_user_id() read from these
-    await client.query(`SET LOCAL app.role = '${role}'`);
-
-    // Set user ID for butterbase_user role
-    if (role === 'butterbase_user' && userId) {
-      await client.query(`SET LOCAL request.jwt.claim.sub = '${userId.replace(/'/g, "''")}'`);
-    }
-
-    const result = await queryFn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 
 /**
  * Resolves app, pool, and role based on auth method
