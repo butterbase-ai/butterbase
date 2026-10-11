@@ -1,5 +1,7 @@
 # Build runner e2e
 
+English | [日本語](README.ja.md)
+
 Runs against a fully-configured Butterbase environment. The test does NOT
 auto-stub a control-api or Cloudflare account — it drives a live pipeline
 end-to-end:

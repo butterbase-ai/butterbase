@@ -1,5 +1,7 @@
 # @butterbase/sdk
 
+English | [日本語](README.ja.md)
+
 Universal TypeScript SDK for Butterbase - works in browser, Node.js, and Deno environments.
 
 ## Installation
