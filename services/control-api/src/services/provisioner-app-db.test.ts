@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+const localQuery = vi.fn();
+const localEnd = vi.fn();
+const localPool = vi.fn(() => ({ query: localQuery, end: localEnd }));
+vi.mock('pg', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('pg')>();
+  return { ...actual, default: { ...actual.default, Pool: localPool } };
+});
+
 const provisionNeonDbForApp = vi.fn();
 const runtimeQuery = vi.fn().mockResolvedValue({ rows: [] });
 
@@ -185,5 +193,93 @@ describe('provisionAppDb — per-region override', () => {
 
     expect(provisionNeonDbForApp).not.toHaveBeenCalled();
     expect(out.neonDbName).toBe(custDbNameFor(APP_ID, REGION));
+  });
+});
+
+// Dummy connection details, never a live database or Neon account.
+describe('provisionAppDb — explicit local mode (#42)', () => {
+  const adminUrl = 'postgresql://local_user:local_password@localhost:5542/postgres';
+
+  beforeEach(() => {
+    vi.stubEnv('BUTTERBASE_LOCAL', 'true');
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('LOCAL_DATA_PLANE_URL_US_WEST_2', adminUrl);
+    localQuery.mockReset().mockResolvedValue({ rows: [] });
+    localEnd.mockReset().mockResolvedValue(undefined);
+    localPool.mockClear();
+    runtimeQuery.mockClear();
+    getRuntimeDbPool.mockClear();
+    provisionNeonDbForApp.mockClear();
+  });
+
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('creates a real local destination and registers the URI used by restore', async () => {
+    const out = await provisionAppDb(REGION, APP_ID, 'owner');
+    const name = custDbNameFor(APP_ID, REGION);
+    expect(out).toEqual({ neonDbName: name, connectionUri: adminUrl.replace('/postgres', '/' + name) });
+    expect(localPool).toHaveBeenCalledWith(expect.objectContaining({ connectionString: adminUrl }));
+    expect(localQuery).toHaveBeenCalledWith('SELECT 1 FROM pg_database WHERE datname = $1', [name]);
+    expect(localQuery).toHaveBeenCalledWith(`CREATE DATABASE "${name}"`);
+    expect(localEnd).toHaveBeenCalledOnce();
+    expect(getRuntimeDbPool).toHaveBeenCalledWith(expect.anything(), REGION);
+    expect(runtimeQuery).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO app_db_connections'), [APP_ID, out.connectionUri, null, null, name]);
+    expect(provisionNeonDbForApp).not.toHaveBeenCalled();
+  });
+
+  it('removes libpq database overrides from the destination URI', async () => {
+    vi.stubEnv('LOCAL_DATA_PLANE_URL_US_WEST_2', adminUrl + '?dbname=postgres&application_name=move-smoke');
+    const out = await provisionAppDb(REGION, APP_ID, 'owner');
+    expect(new URL(out.connectionUri).searchParams.has('dbname')).toBe(false);
+    expect(new URL(out.connectionUri).searchParams.get('application_name')).toBe('move-smoke');
+  });
+
+  it('adopts an existing destination on retry', async () => {
+    localQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+    await provisionAppDb(REGION, APP_ID, 'owner');
+    expect(localQuery).toHaveBeenCalledTimes(1);
+    expect(runtimeQuery).toHaveBeenCalledOnce();
+  });
+
+  it('tolerates a concurrent CREATE DATABASE winning the race', async () => {
+    localQuery.mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(Object.assign(new Error('duplicate_database'), { code: '42P04' }));
+    await expect(provisionAppDb(REGION, APP_ID, 'owner')).resolves.toHaveProperty('neonDbName');
+    expect(localEnd).toHaveBeenCalledOnce();
+  });
+
+  it('closes the admin pool and leaves no connection row on failure', async () => {
+    localQuery.mockRejectedValueOnce(new Error('local database unavailable'));
+    await expect(provisionAppDb(REGION, APP_ID, 'owner')).rejects.toThrow('local database unavailable');
+    expect(localEnd).toHaveBeenCalledOnce();
+    expect(runtimeQuery).not.toHaveBeenCalled();
+  });
+
+  it('refuses local mode in production before touching Postgres', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    await expect(provisionAppDb(REGION, APP_ID, 'owner')).rejects.toThrow(/BUTTERBASE_LOCAL.*production/);
+    expect(localPool).not.toHaveBeenCalled();
+    expect(runtimeQuery).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit data-plane URL for the destination region', async () => {
+    vi.stubEnv('LOCAL_DATA_PLANE_URL_US_WEST_2', '');
+    await expect(provisionAppDb(REGION, APP_ID, 'owner')).rejects.toThrow(/LOCAL_DATA_PLANE_URL_US_WEST_2/);
+    expect(localPool).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-Postgres URL without disclosing its contents', async () => {
+    vi.stubEnv('LOCAL_DATA_PLANE_URL_US_WEST_2', 'https://dummy-secret.invalid');
+    await expect(provisionAppDb(REGION, APP_ID, 'owner')).rejects.toThrow('must be a PostgreSQL connection URL');
+    expect(localPool).not.toHaveBeenCalled();
+  });
+
+  it('takes the existing Neon path unless local mode is exactly true', async () => {
+    vi.stubEnv('BUTTERBASE_LOCAL', 'false');
+    const original = config.neon.projectPerTenant;
+    config.neon.projectPerTenant = false;
+    try {
+      await expect(provisionAppDb(REGION, APP_ID, 'owner')).resolves.toHaveProperty('neonDbName', custDbNameFor(APP_ID, REGION));
+      expect(localPool).not.toHaveBeenCalled();
+    } finally { config.neon.projectPerTenant = original; }
   });
 });

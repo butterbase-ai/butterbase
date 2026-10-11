@@ -81,7 +81,7 @@ export const executeAbort: StepHandler = async (ctx, m) => {
   //     inside the shared one; teardownAppDb picks the shape from destConn's
   //     stored neon_project_id (see its docs for why the flag is not the test).
   //     Best-effort: teardown failures warn and continue, never abort the abort.
-  const neonDbName = m.dest_resources.neon_db_name as string | undefined;
+  const neonDbName = (m.dest_resources.neon_db_name as string | undefined) ?? destConn?.neon_database_name;
   try {
     const result = await teardownAppDb({
       region: m.dest_region,
