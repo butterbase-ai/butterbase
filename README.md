@@ -1,3 +1,5 @@
+[English](./README.md) · [日本語](./README.ja.md)
+
 <p align="center">
   <img src=".github/assets/logo.png" alt="Butterbase" width="420" />
 </p>
