@@ -144,7 +144,7 @@ Response shape is identical to the login response. Failure responses are HTTP 40
 | GET | /v1/\{app_id}/config | Read full app config |
 | PATCH | /v1/\{app_id}/config/cors | Update CORS origins |
 | PATCH | /v1/\{app_id}/config/jwt | Update token lifetimes |
-| PATCH | /v1/\{app_id}/config/pause | Pause / resume the app (kill-switch). Body: `{ paused: boolean, reason?: string }`. While paused, all data-plane traffic returns 503 with `code: APP_PAUSED`. Auth and control-plane endpoints stay reachable. |
+| PATCH | /v1/\{app_id}/config/pause | Pause / resume the app (kill-switch). Body: `{ paused: boolean, reason?: string }`. While paused, every app-scoped API returns 503 with `code: APP_PAUSED` for everyone except the app's owners and org members (dashboard session or API key, non-public routes). |
 
 ## Audit logs
 

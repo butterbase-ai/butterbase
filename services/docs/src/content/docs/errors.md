@@ -332,7 +332,7 @@ A prerequisite resource or configuration is missing for the action (e.g. deployi
 **Code:** `APP_PAUSED`
 **Status:** 423
 
-The app is paused; data and runtime endpoints are unavailable until it is resumed.
+The app is paused; every app-scoped API is unavailable until it is resumed, except to the app's owners and org members (dashboard session or API key, non-public routes).
 
 **Remediation:** Call the unpause/resume action on the app, or reactivate it from the dashboard. Paused apps still incur storage but reject new traffic.
 

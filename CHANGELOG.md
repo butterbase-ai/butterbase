@@ -70,6 +70,10 @@
 - **Dashboard**: "Generate API key" dialog: scope radio (account / this app) + app picker + advanced scopes disclosure + scope summary on success.
 - **MCP**: `manage_app` action `resume`. `GET /v1/:app_id/config` and the pause endpoint now return `paused_by`; `APP_PAUSED` 503s include `details.paused_by` and explain automatic idle pauses without attributing them to the owner. Resuming an automatic idle pause on a free plan returns 402 `APP_RESUME_REQUIRES_UPGRADE`, and an owner pause over it keeps the idle label.
 
+### Changed
+
+- **Pause now stops everything.** A paused app returns 503 `APP_PAUSED` on every app-scoped API (data, auth, KV, functions, agents, RAG, people, durable objects, edge SSR, storage, realtime) for everyone except the app's owners and org members using a dashboard session or API key on non-public routes. Realtime sockets are closed, websocket triggers and auth hooks don't run, the function runtime refuses the app's functions, and queued RAG ingestion waits. Template listing and cloning are unaffected. This is what the kill-switch always claimed; previously only some routes honoured it.
+
 ### Fixed
 
 - **Move app**: moving an app to another region now copies the whole app record. Previously a move reset the pause state, organization, frontend backend, anon key and access/AI/JWT settings.

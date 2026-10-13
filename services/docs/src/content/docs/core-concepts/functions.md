@@ -537,9 +537,9 @@ While paused:
 - Storage uploads / downloads return 503.
 - Realtime websockets close with code `1013` ("Try again later").
 
-What stays available so you can recover:
-- All control-plane endpoints (`manage_app` `list` and `get_config`, schema, RLS, env vars, the `manage_app` `pause` toggle itself).
-- Auth (login / signup) — operators may need to re-authenticate while paused.
+Auth (login / signup), KV, agents, RAG, people, durable objects and edge SSR return 503 too, and the function runtime refuses the app's functions.
+
+What stays available so you can recover: the app's owners and org members, using a dashboard session or API key, keep management and data access on non-public routes (`manage_app` `list` and `get_config`, schema, RLS, env vars, the `manage_app` `pause` toggle itself). Template listing and cloning are unaffected.
 
 **MCP:**
 
