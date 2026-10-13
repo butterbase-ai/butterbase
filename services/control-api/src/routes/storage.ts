@@ -27,7 +27,7 @@ const uploadRequestSchema = z.object({
 /**
  * Resolves app and user based on auth method
  */
-async function resolveAppAndUser(
+export async function resolveAppAndUser(
   controlDb: Pool,
   runtimeDb: Pool,
   appId: string,
@@ -56,7 +56,10 @@ async function resolveAppAndUser(
     // Platform auth — use org-aware AppResolver
     try {
       const resolved = await AppResolver.resolveApp(controlDb, appId, auth.userId, auth.organizationId ?? null);
-      if (resolved.paused) {
+      // Owners (jwt / api_key that resolveApp accepted) keep storage access
+      // to a paused app; function keys and anonymous callers don't.
+      const isOwner = auth.authMethod === 'jwt' || auth.authMethod === 'api_key';
+      if (resolved.paused && !isOwner) {
         throw new AppPausedError(appId, resolved.paused_reason ?? null, resolved.paused_by ?? null);
       }
       return { appExists: true, userId: auth.userId };

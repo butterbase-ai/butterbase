@@ -180,7 +180,7 @@ async function executeWithRole<T>(
 /**
  * Resolves app, pool, and role based on auth method
  */
-async function resolveAppAndPool(
+export async function resolveAppAndPool(
   controlDb: Pool,
   appId: string,
   auth: any,
@@ -202,7 +202,9 @@ async function resolveAppAndPool(
   } else if (auth.authMethod === 'api_key' || auth.authMethod === 'jwt') {
     // Platform auth (API key or platform JWT)
     const resolvedApp = await AppResolver.resolveApp(controlDb, appId, auth.userId!, auth.organizationId ?? null);
-    assertAppNotPaused(resolvedApp);
+    // No paused check: resolveApp just confirmed this caller owns (or is a
+    // member of) the app, and owners keep data access to a paused app.
+    // The pause gate (plugins/pause-gate.ts) applies the same rule.
     const pool = await getAppPoolForApp(controlDb, resolvedApp.id, resolvedApp.db_name);
 
     // Role simulation: only allowed from platform auth (api_key/jwt)
