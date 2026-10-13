@@ -27,7 +27,7 @@ vi.mock('../services/app-resolver.js', async (orig) => {
   return { ...actual, AppResolver: { resolveApp } };
 });
 
-const { default: pauseGatePlugin, isGateSkipped, appIdFromParams, readPausedState, invalidatePausedState } =
+const { default: pauseGatePlugin, isGateSkipped, appIdFromParams, readPausedState, invalidatePausedState, assertAppIdNotPaused } =
   await import('./pause-gate.js');
 const { AppPausedError, AppNotFoundError } = await import('../services/app-resolver.js');
 
@@ -202,6 +202,26 @@ describe('pause gate', () => {
     (getRuntimeDbForApp as any).mockRejectedValueOnce(new AppNotFoundError('app_x'));
     const app = await build(null);
     expect((await app.inject({ method: 'GET', url: '/v1/app_x/config' })).statusCode).toBe(200);
+  });
+
+  it('Redis get rejecting is a cache miss: a paused app still gets 503', async () => {
+    runtimeQuery.mockResolvedValue({ rows: [PAUSED] });
+    localRedis.get.mockRejectedValueOnce(new Error('redis down'));
+    const app = await build({ userId: null, authMethod: 'anonymous' });
+    expect((await app.inject({ method: 'GET', url: '/v1/app_1/config' })).statusCode).toBe(503);
+  });
+
+  it('Redis setex rejecting still returns the state: a paused app gets 503', async () => {
+    runtimeQuery.mockResolvedValue({ rows: [PAUSED] });
+    localRedis.setex.mockRejectedValueOnce(new Error('redis down'));
+    const app = await build({ userId: null, authMethod: 'anonymous' });
+    expect((await app.inject({ method: 'GET', url: '/v1/app_1/config' })).statusCode).toBe(503);
+  });
+
+  it('assertAppIdNotPaused resolves for a running app when Redis get rejects', async () => {
+    runtimeQuery.mockResolvedValue({ rows: [{ paused: false, paused_reason: null, paused_by: null }] });
+    localRedis.get.mockRejectedValueOnce(new Error('redis down'));
+    await expect(assertAppIdNotPaused({} as never, 'app_1')).resolves.toBeUndefined();
   });
 
   it('lookup error fails open and logs (Review Focus #4)', async () => {

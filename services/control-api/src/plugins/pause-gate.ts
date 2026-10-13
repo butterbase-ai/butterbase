@@ -23,6 +23,7 @@ import { listRuntimeRegions } from '../services/runtime-pool-registry.js';
 import { onPauseStateChanged } from '../services/app-pause.js';
 
 const TTL_SECONDS = 30;
+// A request racing a resume can re-cache a stale paused=true for up to TTL_SECONDS.
 const cacheKey = (appId: string) => `app-paused:${appId}`;
 
 // /v1/templates/: discovery, releases and the :source_app_id clone routes —
@@ -50,7 +51,13 @@ export function appIdFromParams(params: unknown): string | null {
 /** Paused state of an app, or null when the app doesn't exist. */
 export async function readPausedState(controlDb: Pool, appId: string): Promise<CachedPausedState | null> {
   const redis = getRedisClient();
-  const hit = await redis.get(cacheKey(appId));
+  // A Redis failure is a cache miss, never an error: only DB errors propagate.
+  let hit: string | null = null;
+  try {
+    hit = await redis.get(cacheKey(appId));
+  } catch (err) {
+    console.warn(`[pause-gate] redis get failed for ${appId}; treating as cache miss: ${(err as Error).message}`);
+  }
   if (hit !== null) return JSON.parse(hit) as CachedPausedState;
 
   let runtimeDb;
@@ -70,7 +77,11 @@ export async function readPausedState(controlDb: Pool, appId: string): Promise<C
     reason: r.rows[0].paused_reason ?? null,
     by: r.rows[0].paused_by ?? null,
   };
-  await redis.setex(cacheKey(appId), TTL_SECONDS, JSON.stringify(state));
+  try {
+    await redis.setex(cacheKey(appId), TTL_SECONDS, JSON.stringify(state));
+  } catch (err) {
+    console.warn(`[pause-gate] redis setex failed for ${appId}; returning uncached state: ${(err as Error).message}`);
+  }
   return state;
 }
 
@@ -82,7 +93,10 @@ export async function assertAppIdNotPaused(controlDb: Pool, appId: string): Prom
 
 export async function invalidatePausedState(appId: string): Promise<void> {
   await Promise.all(
-    listRuntimeRegions().map((region) => redisFor(region).del(cacheKey(appId)).catch(() => 0)),
+    listRuntimeRegions().map((region) => redisFor(region).del(cacheKey(appId)).catch((err) => {
+      console.warn(`[pause-gate] failed to invalidate paused state for ${appId} in ${region}: ${(err as Error).message}`);
+      return 0;
+    })),
   );
 }
 

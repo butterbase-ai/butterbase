@@ -15,7 +15,10 @@ export const REALTIME_CONTROL_CHANNEL = 'realtime:control';
 export async function broadcastCloseApp(appId: string): Promise<void> {
   const msg = JSON.stringify({ type: 'close_app', appId });
   await Promise.all(
-    listRuntimeRegions().map((r) => redisFor(r).publish(REALTIME_CONTROL_CHANNEL, msg).catch(() => 0)),
+    listRuntimeRegions().map((r) => redisFor(r).publish(REALTIME_CONTROL_CHANNEL, msg).catch((err) => {
+      console.warn(`[realtime] close_app publish failed for ${appId} in ${r}: ${(err as Error).message}`);
+      return 0;
+    })),
   );
 }
 

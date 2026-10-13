@@ -572,6 +572,9 @@ app.register(kvResolveJwtRoutes);
 app.register(visitBeaconRoutes);
 app.register(internalEmailRoutes);
 // Pause gate: before kv-quota so a paused app is refused before quota work.
+// Route plugins registered BEFORE this line do not get the gate (encapsulated
+// plugins copy parent hooks at load), so app-scoped route plugins must be
+// registered after it.
 app.register(pauseGatePlugin);
 // kv-quota MUST be registered before kv-data/expose/admin routes so the
 // preHandler hook and kvAccount decoration are available when those routes mount.
