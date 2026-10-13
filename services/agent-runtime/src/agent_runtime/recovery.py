@@ -42,6 +42,7 @@ async def recover_stale_runs(pool: asyncpg.Pool, *, stale_after_seconds: int = 3
     Returns:
         List of run IDs that were recovered (as strings).
     """
+    # A paused app's stale runs wait for the first restart after it's resumed.
     async with pool.acquire() as c:
         rows = await c.fetch(
             """
@@ -52,6 +53,7 @@ async def recover_stale_runs(pool: asyncpg.Pool, *, stale_after_seconds: int = 3
              WHERE status IN ('running', 'cancelling')
                AND (last_heartbeat IS NULL
                     OR last_heartbeat < now() - ($1 || ' seconds')::interval)
+               AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.id = agent_runs.app_id AND a.paused)
             RETURNING id, cancel_requested
             """,
             str(stale_after_seconds),
