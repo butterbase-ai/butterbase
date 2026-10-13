@@ -31,7 +31,18 @@ export interface PausedState {
 
 export type PauseInput =
   | { paused: true; by: PausedBy; reason?: string | null }
-  | { paused: false; by: PausedBy | 'system' };
+  // idlePausePlan: the caller looked up the app's org and found it on a plan
+  // the idle reaper targets. Such an org can't undo an idle pause for free;
+  // upgrading is the way back (the upgrade hook resumes with by: 'system').
+  | { paused: false; by: PausedBy | 'system'; idlePausePlan?: boolean };
+
+/** An idle-reaper pause on a free plan; resuming requires an upgrade. */
+export class ResumeRequiresUpgradeError extends Error {
+  constructor(appId: string) {
+    super(`App ${appId} was paused for inactivity; upgrade the plan to resume it`);
+    this.name = 'ResumeRequiresUpgradeError';
+  }
+}
 
 export interface PauseStateChange {
   appId: string;
@@ -73,15 +84,20 @@ export async function setPausedState(
   log?: PauseLogger,
 ): Promise<PausedState | null> {
   // Pause deliberately has no `WHERE paused = false`: re-pausing an already
-  // paused app must relabel paused_by (an owner pause over an idle pause
+  // paused app relabels paused_by (e.g. an admin pause over an idle pause
   // must not be auto-resumed on upgrade), while keeping the first paused_at.
+  // The one exception: an owner pause over an idle-reaper pause keeps the
+  // reaper's label and reason, or relabelling to 'owner' would let a free
+  // owner resume without upgrading.
+  const keepIdle = `paused AND paused_by = 'idle_reaper' AND $3 = 'owner'`;
+  const idlePausePlan = !input.paused && input.idlePausePlan === true;
   const result = input.paused
     ? await runtimeDb.query(
         `UPDATE apps
             SET paused = true,
                 paused_at = CASE WHEN paused THEN paused_at ELSE now() END,
-                paused_reason = $2,
-                paused_by = $3,
+                paused_reason = CASE WHEN ${keepIdle} THEN paused_reason ELSE $2 END,
+                paused_by = CASE WHEN ${keepIdle} THEN paused_by ELSE $3 END,
                 updated_at = now()
           WHERE id = $1
           ${RETURNING}`,
@@ -95,13 +111,23 @@ export async function setPausedState(
                 paused_by = NULL,
                 last_active_at = now(),
                 idle_warned_at = NULL,
+                idle_pause_notified_at = NULL,
                 updated_at = now()
           WHERE id = $1
+            AND NOT ($2 AND paused_by IS NOT DISTINCT FROM 'idle_reaper')
           ${RETURNING}`,
-        [appId],
+        [appId, idlePausePlan],
       );
 
-  if (result.rows.length === 0) return null;
+  if (result.rows.length === 0) {
+    // The guard lives in the UPDATE so a concurrent reaper pause can't slip
+    // past a separate read; only on a miss do we ask which case it was.
+    if (idlePausePlan) {
+      const exists = await runtimeDb.query('SELECT id FROM apps WHERE id = $1', [appId]);
+      if (exists.rows.length > 0) throw new ResumeRequiresUpgradeError(appId);
+    }
+    return null;
+  }
   await notifyPauseStateChanged({ appId, paused: input.paused, by: input.by }, log);
   return result.rows[0] as PausedState;
 }

@@ -8,11 +8,16 @@
 --   inserts (provisioner, move-app) without code changes.
 -- idle_warned_at: set when the idle-warning email goes out; any activity or a
 --   resume clears it.
+-- idle_pause_notified_at: set when the "your project has been paused" email
+--   goes out. The real pause happens a grace period later (unannounced), so
+--   an owner who replies at once can be told it's already back; activity in
+--   that window clears it, like idle_warned_at.
 -- paused_by: who set apps.paused. NULL whenever the app is not paused.
 --
--- Additive and nullable: the previous control-api image ignores all three.
+-- Additive and nullable: the previous control-api image ignores all four.
 ALTER TABLE apps ADD COLUMN IF NOT EXISTS last_active_at timestamptz DEFAULT now();
 ALTER TABLE apps ADD COLUMN IF NOT EXISTS idle_warned_at timestamptz;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS idle_pause_notified_at timestamptz;
 ALTER TABLE apps ADD COLUMN IF NOT EXISTS paused_by text;
 
 -- Label pauses that already exist. The staging reaper's text is fixed in

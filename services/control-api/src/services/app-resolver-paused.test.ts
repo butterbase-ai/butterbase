@@ -16,9 +16,11 @@ describe('pausedRemediation', () => {
   });
 
   it('explains an idle pause without blaming the owner', () => {
-    const idle = 'This app was paused after a period without activity. The owner can resume it from the Butterbase dashboard.';
+    const idle = 'This app was paused after a period without activity. The owner can upgrade to a paid plan to resume it.';
     expect(pausedRemediation('idle_reaper', 'Paused after 28 days without activity.')).toBe(idle);
-    expect(pausedRemediation('staging_reaper', null)).toBe(idle);
+    const staging = 'This app was paused after a period without activity. The owner can resume it from the Butterbase dashboard.';
+    expect(pausedRemediation('staging_reaper', 'Automatically paused after 7 days of inactivity.')).toBe(staging);
+    expect(pausedRemediation('staging_reaper', null)).toBe(staging);
   });
 
   it('keeps admin pauses neutral', () => {

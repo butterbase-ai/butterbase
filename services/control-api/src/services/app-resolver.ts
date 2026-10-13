@@ -49,7 +49,10 @@ export class AppPausedError extends Error {
  * before runtime migration 056) reads as an owner pause.
  */
 export function pausedRemediation(pausedBy: PausedBy | null, reason: string | null): string {
-  if (pausedBy === 'idle_reaper' || pausedBy === 'staging_reaper') {
+  if (pausedBy === 'idle_reaper') {
+    return 'This app was paused after a period without activity. The owner can upgrade to a paid plan to resume it.';
+  }
+  if (pausedBy === 'staging_reaper') {
     return 'This app was paused after a period without activity. The owner can resume it from the Butterbase dashboard.';
   }
   if (pausedBy === 'admin') {

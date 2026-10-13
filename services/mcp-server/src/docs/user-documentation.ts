@@ -77,7 +77,7 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 | **manage_app** (action: "move") | Move an existing app to another region. Pass \`dest_region\`; returns a \`migration_id\`. The app stays available for reads during the move. |
 | **manage_app** (action: "move_status") | Check the progress of a move in flight. Pass \`migration_id\` (returned by action: "move"). |
 | **manage_app** (action: "teardown_source_replica") | After a completed move, decommission the retained source-region replica. Pass \`migration_id\`. |
-| **manage_app** (action: "resume") | Resume a paused app. Use action "resume" to bring a paused app back. 503 APP_PAUSED responses include details.paused_by ("owner", "admin", "idle_reaper", "staging_reaper"). |
+| **manage_app** (action: "resume") | Resume a paused app. Use action "resume" to bring a paused app back. 503 APP_PAUSED responses include details.paused_by ("owner", "admin", "idle_reaper", "staging_reaper"). An "idle_reaper" pause on a free plan can't be resumed directly (402 APP_RESUME_REQUIRES_UPGRADE); upgrading the plan resumes it. |
 | **manage_app** (action: "list") | List all apps you have access to with their metadata. |
 | **manage_app** (action: "delete") | Permanently delete an app and its database. This is irreversible. |
 | **manage_app** (action: "get_config") | Read an app's current configuration (CORS origins, JWT settings, storage limits). |

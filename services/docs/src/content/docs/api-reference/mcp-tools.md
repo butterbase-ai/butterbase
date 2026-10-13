@@ -24,7 +24,7 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 | `list` | List all apps with metadata. |
 | `delete` | Permanently delete an app. Irreversible. |
 | `pause` | Kill-switch — pause/resume all data-plane traffic. Returns 503 (`APP_PAUSED`) on data-plane endpoints while paused. |
-| `resume` | Resume a paused app (owner pause or automatic idle pause). Equivalent to `pause` with `paused: false`. |
+| `resume` | Resume a paused app. Equivalent to `pause` with `paused: false`. An automatic idle pause on a free plan returns 402 (`APP_RESUME_REQUIRES_UPGRADE`); upgrading the plan resumes it. |
 | `get_config` | Read app configuration (CORS, JWT, storage limits). |
 | `secure` | Set `access_mode = "authenticated"` and create user-isolation RLS policies on the listed `tables` in one call. |
 | `update_cors` | Set allowed CORS origins. |

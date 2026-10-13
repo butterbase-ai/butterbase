@@ -11,7 +11,7 @@ Actions:
   - "list":                    List all backend apps with basic metadata (no app_id needed)
   - "delete":                  Delete an app and ALL its resources permanently (IRREVERSIBLE)
   - "pause":                   Pause all data-plane traffic for an app (kill-switch). Pass paused:false to resume (prefer "resume").
-  - "resume":                  Resume a paused app — including one paused automatically after inactivity
+  - "resume":                  Resume a paused app. An app paused automatically after inactivity on a free plan returns 402 APP_RESUME_REQUIRES_UPGRADE; upgrading resumes it
   - "get_config":              Get detailed configuration for an app including CORS, storage settings, and metadata
   - "set_visibility":          Toggle the app's template visibility between "public" and "private"
   - "update_access_mode":      Toggle an app's access mode between "public" and "authenticated"

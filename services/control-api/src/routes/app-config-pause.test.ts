@@ -8,6 +8,8 @@ vi.mock('../services/region-resolver.js', () => ({ resolveAppHomeRegion: vi.fn()
 vi.mock('../services/runtime-db.js', () => ({ getRuntimeDbPool: () => ({ query: runtimeQuery }) }));
 vi.mock('../services/audit/with-audit.js', () => ({ logFromRequest: vi.fn() }));
 vi.mock('../services/app-plan-resolver.js', () => ({ getLimitsForApp: vi.fn() }));
+const isOnIdlePausePlan = vi.fn();
+vi.mock('../services/idle-pause-config.js', () => ({ isOnIdlePausePlan }));
 vi.mock('../services/app-resolver.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/app-resolver.js')>();
   return { ...actual, AppResolver: { resolveApp: vi.fn().mockResolvedValue({ id: 'app_1' }) } };
@@ -26,7 +28,7 @@ async function build() {
   return app;
 }
 
-beforeEach(() => runtimeQuery.mockReset());
+beforeEach(() => { runtimeQuery.mockReset(); isOnIdlePausePlan.mockReset().mockResolvedValue(false); });
 
 describe('PATCH /v1/:app_id/config/pause', () => {
   it('pauses as owner and returns paused_by', async () => {
@@ -45,6 +47,35 @@ describe('PATCH /v1/:app_id/config/pause', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ paused: false, paused_by: null });
     expect(runtimeQuery.mock.calls[0][0]).toContain('last_active_at = now()');
+  });
+
+  it('resume on a paid plan passes idlePausePlan=false to the guarded UPDATE', async () => {
+    runtimeQuery.mockResolvedValue({ rows: [{ app_id: 'app_1', paused: false, paused_at: null, paused_reason: null, paused_by: null }] });
+    const app = await build();
+    const res = await app.inject({ method: 'PATCH', url: '/v1/app_1/config/pause', payload: { paused: false } });
+    expect(res.statusCode).toBe(200);
+    expect(isOnIdlePausePlan).toHaveBeenCalledWith(expect.anything(), 'app_1');
+    expect(runtimeQuery.mock.calls[0][1]).toEqual(['app_1', false]);
+  });
+
+  it('resume of an idle-paused app on a free plan is a 402 telling the owner to upgrade', async () => {
+    isOnIdlePausePlan.mockResolvedValue(true);
+    runtimeQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: 'app_1' }] });
+    const app = await build();
+    const res = await app.inject({ method: 'PATCH', url: '/v1/app_1/config/pause', payload: { paused: false } });
+    expect(res.statusCode).toBe(402);
+    expect(res.json().error).toMatchObject({ code: 'APP_RESUME_REQUIRES_UPGRADE' });
+    expect(res.json().error.remediation).toMatch(/upgrade/i);
+    expect(runtimeQuery.mock.calls[0][1]).toEqual(['app_1', true]);
+  });
+
+  it('pausing does not look up the plan', async () => {
+    runtimeQuery.mockResolvedValue({ rows: [{ app_id: 'app_1', paused: true, paused_at: 't', paused_reason: null, paused_by: 'owner' }] });
+    const app = await build();
+    await app.inject({ method: 'PATCH', url: '/v1/app_1/config/pause', payload: { paused: true } });
+    expect(isOnIdlePausePlan).not.toHaveBeenCalled();
   });
 
   it('404s when the row vanished between resolve and update', async () => {

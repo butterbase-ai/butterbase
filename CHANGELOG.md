@@ -68,7 +68,7 @@
 - **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
 - **MCP**: `manage_auth_config:generate_service_key` accepts `key_scope` and `additional_scopes`; requires `app_id` when `key_scope === 'app'`.
 - **Dashboard**: "Generate API key" dialog: scope radio (account / this app) + app picker + advanced scopes disclosure + scope summary on success.
-- **MCP**: `manage_app` action `resume`. `GET /v1/:app_id/config` and the pause endpoint now return `paused_by`; `APP_PAUSED` 503s include `details.paused_by` and explain automatic idle pauses without attributing them to the owner.
+- **MCP**: `manage_app` action `resume`. `GET /v1/:app_id/config` and the pause endpoint now return `paused_by`; `APP_PAUSED` 503s include `details.paused_by` and explain automatic idle pauses without attributing them to the owner. Resuming an automatic idle pause on a free plan returns 402 `APP_RESUME_REQUIRES_UPGRADE`, and an owner pause over it keeps the idle label.
 
 ### Fixed
 

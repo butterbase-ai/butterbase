@@ -2,14 +2,15 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { createAgentError, getDocUrl, isHttpError } from '../services/error-handler.js';
-import { RESOURCE_NOT_FOUND, VALIDATION_INVALID_SCHEMA, EXTERNAL_DB_ERROR } from '@butterbase/shared/error-types';
+import { RESOURCE_NOT_FOUND, VALIDATION_INVALID_SCHEMA, EXTERNAL_DB_ERROR, APP_RESUME_REQUIRES_UPGRADE } from '@butterbase/shared/error-types';
 import { requireUserId } from '../utils/require-auth.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { getLimitsForApp } from '../services/app-plan-resolver.js';
-import { setPausedState } from '../services/app-pause.js';
+import { setPausedState, ResumeRequiresUpgradeError } from '../services/app-pause.js';
+import { isOnIdlePausePlan } from '../services/idle-pause-config.js';
 
 const updateCorsSchema = z.object({
   allowed_origins: z.array(z.string().url()).min(1),
@@ -625,7 +626,11 @@ export async function appConfigRoutes(app: FastifyInstance) {
 
       const state = paused
         ? await setPausedState(runtimeDb, resolvedApp.id, { paused: true, by: 'owner', reason: reason ?? null }, app.log)
-        : await setPausedState(runtimeDb, resolvedApp.id, { paused: false, by: 'owner' }, app.log);
+        : await setPausedState(runtimeDb, resolvedApp.id, {
+            paused: false,
+            by: 'owner',
+            idlePausePlan: await isOnIdlePausePlan(app.controlDb, resolvedApp.id),
+          }, app.log);
       if (!state) throw new AppNotFoundError(resolvedApp.id);
 
       logFromRequest(request, {
@@ -650,6 +655,14 @@ export async function appConfigRoutes(app: FastifyInstance) {
         paused_by: state.paused_by,
       });
     } catch (error) {
+      if (error instanceof ResumeRequiresUpgradeError) {
+        return reply.code(402).send(createAgentError({
+          code: APP_RESUME_REQUIRES_UPGRADE,
+          message: 'This app was paused after a period without activity and can only be resumed on a paid plan',
+          remediation: `Upgrade the plan at ${config.dashboardUrl}/billing. Upgrading resumes apps that were paused for inactivity.`,
+          documentation_url: getDocUrl(APP_RESUME_REQUIRES_UPGRADE),
+        }));
+      }
       if (error instanceof AppNotFoundError) {
         return reply.code(404).send(createAgentError({
           code: RESOURCE_NOT_FOUND,
