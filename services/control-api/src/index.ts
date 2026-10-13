@@ -31,6 +31,7 @@ import rateLimitPlugin from './plugins/rate-limit.js';
 import quotaEnforcementPlugin from './plugins/quota-enforcement.js';
 import flyReplayPlugin from './plugins/fly-replay.js';
 import migrationGuardPlugin from './plugins/migration-guard.js';
+import pauseGatePlugin from './plugins/pause-gate.js';
 import { healthRoutes } from './routes/health.js';
 import { initRoutes } from './routes/init.js';
 import { schemaRoutes } from './routes/schema.js';
@@ -570,6 +571,8 @@ app.register(kvCredentialsRoutes);
 app.register(kvResolveJwtRoutes);
 app.register(visitBeaconRoutes);
 app.register(internalEmailRoutes);
+// Pause gate: before kv-quota so a paused app is refused before quota work.
+app.register(pauseGatePlugin);
 // kv-quota MUST be registered before kv-data/expose/admin routes so the
 // preHandler hook and kvAccount decoration are available when those routes mount.
 app.register(kvQuotaPlugin);
