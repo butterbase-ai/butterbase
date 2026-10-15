@@ -236,6 +236,14 @@ describe('stagingCopyWarnings', () => {
     expect(w[0]).toContain('gmail, slack');
     expect(w[0]).toContain('cleared by staging isolation');
   });
+
+  it('passes the engine\'s own warnings through verbatim', () => {
+    const w = stagingCopyWarnings(snap({
+      reconnect: [],
+      warnings: ['1 file(s) were not copied because their contents were already missing ...'],
+    }));
+    expect(w).toEqual(['1 file(s) were not copied because their contents were already missing ...']);
+  });
 });
 
 describe('STAGING_COPY_OPTIONS', () => {
