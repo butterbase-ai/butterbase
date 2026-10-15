@@ -10,6 +10,10 @@ role must be allowed to create/drop databases. Use disposable development
 clusters only. Customer databases use the existing `cust_<appId>_<region>`
 naming convention. Their connection rows are stored in the destination runtime
 DB with no Neon project ID. Retries adopt an existing database; abort removes it.
+If connection registration fails before the saga records its resource patch,
+abort can recover the owned pending reservation and its local database. This
+fallback requires the matching owner/region and reservation status; it does
+not infer cleanup for ready apps or reservations with a stored Neon project.
 A URI `dbname` query override is removed from the customer connection URL so
 Node and libpq both connect to the destination database.
 

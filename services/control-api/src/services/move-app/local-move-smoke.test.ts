@@ -39,6 +39,8 @@ describe.skipIf(!enabled)('local move saga — real Postgres/Redis smoke (#42)',
   const salt = randomUUID().replace(/-/g, '').slice(0, 10);
   const appId = `app_smoke_${salt}`;
   const abortAppId = `app_abort_${salt}`;
+  const failedAppId = `app_failed_${salt}`;
+  const extraDatabases = new Set<string>();
   const ownerId = randomUUID();
   const migrationId = randomUUID();
   const sourceRegion = 'us-east-1';
@@ -113,7 +115,7 @@ describe.skipIf(!enabled)('local move saga — real Postgres/Redis smoke (#42)',
       CREATE TABLE agent_runs (id uuid PRIMARY KEY, app_id text, status text, archived_after_move uuid);
       CREATE TABLE agent_checkpoints (id uuid PRIMARY KEY, run_id uuid REFERENCES agent_runs(id), payload jsonb, archived_after_move uuid);`);
     await sourceData.query("CREATE TABLE local_move_probe (id integer PRIMARY KEY, note text); INSERT INTO local_move_probe VALUES (1, '移行確認'), (2, 'retained data')");
-    for (const id of [appId, abortAppId]) {
+    for (const id of [appId, abortAppId, failedAppId]) {
       await source.query("INSERT INTO apps (id,name,owner_id,db_name,region,provisioning_status,db_provisioned) VALUES ($1,'smoke',$2,$3,$4,'ready',true)", [id, ownerId, names[3], sourceRegion]);
       await source.query('INSERT INTO app_db_connections (app_id,connection_string,neon_database_name) VALUES ($1,$2,$3)', [id, sourceDataUrl, names[3]]);
       await control.query('INSERT INTO org_app_index VALUES ($1,$2)', [id, sourceRegion]);
@@ -134,7 +136,7 @@ describe.skipIf(!enabled)('local move saga — real Postgres/Redis smoke (#42)',
     await Promise.all(ownedPools.map(pool => pool.end()));
     _resetRuntimeDbPools();
     if (admin) {
-      for (const name of [...names, custDbNameFor(appId, destRegion), custDbNameFor(abortAppId, destRegion)]) {
+      for (const name of [...names, custDbNameFor(appId, destRegion), custDbNameFor(abortAppId, destRegion), ...extraDatabases]) {
         // pg-pool.end() can resolve before the server observes socket closure.
         // Do not FORCE-kill those closing clients (57P01 becomes unhandled).
         for (let attempt = 0; ; attempt++) {
@@ -187,4 +189,68 @@ describe.skipIf(!enabled)('local move saga — real Postgres/Redis smoke (#42)',
     expect((await source.query('SELECT provisioning_status FROM apps WHERE id=$1', [abortAppId])).rows[0].provisioning_status).toBe('ready');
     expect(await sourceRedis.get(`{${abortAppId}}:_meta:migration`)).toBeNull();
   }, 30000);
+
+
+  it('cleans up after connection persistence exhausts reserve retries', async () => {
+    const failedId = randomUUID();
+    const databaseName = custDbNameFor(failedAppId, destRegion);
+    extraDatabases.add(databaseName);
+    await dest.query(`
+      CREATE FUNCTION reject_move_connection() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'fixture connection persistence failure'; END; $$;
+      CREATE TRIGGER reject_move_connection BEFORE INSERT ON app_db_connections
+      FOR EACH ROW WHEN (NEW.app_id = '${failedAppId}') EXECUTE FUNCTION reject_move_connection();`);
+    try {
+      await control.query("INSERT INTO app_migrations (id,app_id,user_id,source_region,dest_region,current_step) VALUES ($1,$2,$3,$4,$5,'requested')", [failedId, failedAppId, ownerId, sourceRegion, destRegion]);
+      await driveOnce(ctx, stepHandlers);
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        await driveOnce(ctx, stepHandlers);
+        const row = (await control.query<MigrationRow>('SELECT * FROM app_migrations WHERE id=$1', [failedId])).rows[0];
+        expect(row.current_step).toBe('reserving_dest');
+        expect(row.retry_count).toBe(attempt);
+        expect(row.last_error).toContain('fixture connection persistence failure');
+        expect(row.dest_resources).toEqual({});
+      }
+      expect((await admin.query('SELECT 1 FROM pg_database WHERE datname=$1', [databaseName])).rowCount).toBe(1);
+      expect((await dest.query('SELECT 1 FROM app_db_connections WHERE app_id=$1', [failedAppId])).rowCount).toBe(0);
+      await driveOnce(ctx, stepHandlers);
+      expect((await control.query('SELECT current_step FROM app_migrations WHERE id=$1', [failedId])).rows[0].current_step).toBe('aborting');
+      await driveOnce(ctx, stepHandlers);
+      expect((await control.query('SELECT current_step FROM app_migrations WHERE id=$1', [failedId])).rows[0].current_step).toBe('aborted');
+      expect((await admin.query('SELECT 1 FROM pg_database WHERE datname=$1', [databaseName])).rows).toEqual([]);
+      expect((await dest.query('SELECT 1 FROM apps WHERE id=$1', [failedAppId])).rows).toEqual([]);
+      expect((await source.query('SELECT provisioning_status FROM apps WHERE id=$1', [failedAppId])).rows[0].provisioning_status).toBe('ready');
+      expect((await control.query('SELECT region FROM org_app_index WHERE app_id=$1', [failedAppId])).rows[0].region).toBe(sourceRegion);
+      expect((await sourceData.query('SELECT count(*)::int AS count FROM local_move_probe')).rows[0].count).toBe(2);
+    } finally {
+      await dest.query('DROP TRIGGER reject_move_connection ON app_db_connections; DROP FUNCTION reject_move_connection()');
+    }
+  }, 30000);
+
+  it.each(['missing reservation', 'ready app', 'different owner', 'different region', 'non-reservation name', 'stored Neon project'])('does not infer a database for %s', async (scenario) => {
+    const id = `app_guard_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    const databaseName = custDbNameFor(id, destRegion);
+    extraDatabases.add(databaseName);
+    await admin.query(`CREATE DATABASE "${databaseName}"`);
+    if (scenario !== 'missing reservation') {
+      await dest.query('INSERT INTO apps (id,name,owner_id,db_name,region,provisioning_status) VALUES ($1,$2,$3,$4,$5,$6)', [
+        id, 'guard', scenario === 'different owner' ? randomUUID() : ownerId,
+        scenario === 'non-reservation name' ? names[3] : `${names[3]}__pending`,
+        scenario === 'different region' ? sourceRegion : destRegion,
+        scenario === 'ready app' ? 'ready' : 'migration_target_reserved',
+      ]);
+      if (scenario === 'stored Neon project') {
+        await dest.query('INSERT INTO app_db_connections (app_id,connection_string,neon_project_id,neon_database_name) VALUES ($1,$2,$3,$4)', [id, databaseUrl(databaseName), 'existing-neon-project', databaseName]);
+      }
+    }
+    const idMigration = randomUUID();
+    await control.query("INSERT INTO app_migrations (id,app_id,user_id,source_region,dest_region,current_step) VALUES ($1,$2,$3,$4,$5,'aborting')", [idMigration, id, ownerId, sourceRegion, destRegion]);
+    await driveOnce(ctx, stepHandlers);
+    expect((await control.query('SELECT current_step FROM app_migrations WHERE id=$1', [idMigration])).rows[0].current_step).toBe('aborted');
+    expect((await admin.query('SELECT 1 FROM pg_database WHERE datname=$1', [databaseName])).rowCount).toBe(1);
+    expect((await dest.query('SELECT 1 FROM apps WHERE id=$1', [id])).rowCount).toBe(scenario === 'missing reservation' ? 0 : 1);
+    if (scenario === 'stored Neon project') {
+      expect((await dest.query('SELECT neon_project_id FROM app_db_connections WHERE app_id=$1', [id])).rows[0].neon_project_id).toBe('existing-neon-project');
+    }
+  });
 });

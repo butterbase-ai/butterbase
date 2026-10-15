@@ -5,6 +5,8 @@ import { getRuntimeDbPool } from './runtime-db.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import * as neonClient from './neon-client.js';
 import { localDataPlaneUrlForRegion } from './local-data-plane.js';
+import { custDbNameFor } from './app-db-name.js';
+export { custDbNameFor, PG_MAX_DATNAME } from './app-db-name.js';
 import { getDataProjectIdForRegion, isProjectPerTenantForRegion } from './neon-projects.js';
 import { provisionNeonDbForApp } from './app-db-provision.js';
 import {
@@ -21,24 +23,6 @@ const generateId = customAlphabet(APP_ID_ALPHABET, APP_ID_LENGTH);
 /** Generate a new app ID. Exported so callers can create the ID before calling provisionApp(). */
 export function generateAppId(): string {
   return `${APP_ID_PREFIX}${generateId()}`;
-}
-
-/** Postgres `datname` limit. `custDbNameFor` truncates to this. */
-export const PG_MAX_DATNAME = 63;
-
-/**
- * The `cust_<appId>_<region>` move-app destination database name used by the
- * legacy (non-project-per-tenant) branch of `provisionAppDb` below.
- *
- * Exported so `neon-orphan-reconciler.ts` can reproduce it EXACTLY when
- * deciding which `cust_*` databases belong to live apps — any drift here
- * silently reclassifies live customer databases as orphans and deletes them.
- * Keep this the single source of truth for the naming; do not fork a copy.
- */
-export function custDbNameFor(appId: string, region: string): string {
-  return `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
-    .toLowerCase()
-    .slice(0, PG_MAX_DATNAME);
 }
 
 /**
