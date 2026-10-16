@@ -2,11 +2,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 import organizationsRoutes from './organizations.js';
 import { fanOutQuery } from '../../services/region-resolver.js';
+import { resumeIdlePausedAppsForOrg } from '../../services/idle-pause-upgrade.js';
 
 vi.mock('../../services/region-resolver.js', () => ({
   fanOutQuery: vi.fn(),
   fanOutRuntimeRegions: vi.fn(),
   getRuntimeDbForApp: vi.fn(),
+}));
+
+vi.mock('../../services/idle-pause-upgrade.js', () => ({
+  resumeIdlePausedAppsForOrg: vi.fn().mockResolvedValue([]),
 }));
 
 function makeControlDbMock(handlers: (sql: string, params: unknown[]) => { rows: any[] } | null) {
@@ -711,6 +716,31 @@ describe('PATCH /admin/organizations/:id/plan', () => {
     expect(body.subscription_ids).toEqual(['sub_a', 'sub_b']);
   });
 
+  it('resumes idle-paused apps after a successful plan change, on the pool', async () => {
+    const controlDb = makeControlDbMock((sql) => {
+      if (sql.includes('SELECT id FROM plans WHERE id = $1')) return { rows: [{ id: 'launch' }] };
+      if (sql.includes('SELECT id, owner_id, plan_id, stripe_customer_id, account_status')) {
+        return { rows: [{ id: 'org-1', owner_id: 'owner-uid', plan_id: 'playground', stripe_customer_id: null, account_status: 'active' }] };
+      }
+      if (sql.includes('FROM subscriptions') && sql.includes('WHERE organization_id')) return { rows: [] };
+      if (sql.includes('UPDATE organizations') && sql.includes('RETURNING')) {
+        return { rows: [{ id: 'org-1', plan_id: 'launch', account_status: 'active' }] };
+      }
+      if (sql.includes('INSERT INTO user_state_outbox')) return { rows: [{ version: 1 }] };
+      return null;
+    });
+    const app = await makeApp(controlDb, true);
+    const r = await app.inject({
+      method: 'PATCH',
+      url: '/admin/organizations/org-1/plan',
+      headers: { authorization: 'Bearer ok' },
+      payload: { plan_id: 'launch' },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(resumeIdlePausedAppsForOrg).toHaveBeenCalledTimes(1);
+    expect(resumeIdlePausedAppsForOrg).toHaveBeenCalledWith(controlDb, 'org-1', 'launch', expect.anything());
+  });
+
   it('400s with plan_id_required when body is empty', async () => {
     const controlDb = makeControlDbMock(() => null);
     const app = await makeApp(controlDb, true);
@@ -721,6 +751,7 @@ describe('PATCH /admin/organizations/:id/plan', () => {
       payload: {},
     });
     expect(r.statusCode).toBe(400);
+    expect(resumeIdlePausedAppsForOrg).not.toHaveBeenCalled();
     expect(JSON.parse(r.body)).toEqual({ error: 'plan_id_required' });
   });
 

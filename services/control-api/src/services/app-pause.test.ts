@@ -60,10 +60,25 @@ describe('setPausedState: resume', () => {
     expect(await setPausedState(db, 'nope', { paused: false, by: 'owner' })).toBeNull();
   });
 
+  it('onlyIfPausedBy adds a paused_by condition and passes the label', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const r = await setPausedState({ query }, 'app_1', { paused: false, by: 'system', onlyIfPausedBy: 'idle_reaper' });
+    expect(r).toBeNull();
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toMatch(/\$3::text IS NULL OR \(paused AND paused_by = \$3\)/);
+    expect(params).toEqual(['app_1', false, 'idle_reaper']);
+  });
+
+  it('without onlyIfPausedBy the third param is null', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ app_id: 'app_1', paused: false }] });
+    await setPausedState({ query }, 'app_1', { paused: false, by: 'owner' });
+    expect(query.mock.calls[0][1]).toEqual(['app_1', false, null]);
+  });
+
   it('without idlePausePlan, an idle-reaper pause resumes like any other', async () => {
     const { db, query } = fakeDb([row({ paused: false, paused_by: null })]);
     await setPausedState(db, 'app_1', { paused: false, by: 'system' });
-    expect(query.mock.calls[0][1]).toEqual(['app_1', false]);
+    expect(query.mock.calls[0][1]).toEqual(['app_1', false, null]);
   });
 
   it('on an idle-pause plan, the UPDATE refuses idle-reaper pauses (NULL-safe)', async () => {
@@ -71,7 +86,7 @@ describe('setPausedState: resume', () => {
     await setPausedState(db, 'app_1', { paused: false, by: 'owner', idlePausePlan: true });
     const [sql, params] = query.mock.calls[0];
     expect(sql).toMatch(/AND NOT \(\$2 AND paused_by IS NOT DISTINCT FROM 'idle_reaper'\)/);
-    expect(params).toEqual(['app_1', true]);
+    expect(params).toEqual(['app_1', true, null]);
   });
 
   it('on an idle-pause plan, an idle-paused app throws ResumeRequiresUpgradeError and notifies nobody', async () => {

@@ -34,7 +34,7 @@ export type PauseInput =
   // idlePausePlan: the caller looked up the app's org and found it on a plan
   // the idle reaper targets. Such an org can't undo an idle pause for free;
   // upgrading is the way back (the upgrade hook resumes with by: 'system').
-  | { paused: false; by: PausedBy | 'system'; idlePausePlan?: boolean };
+  | { paused: false; by: PausedBy | 'system'; idlePausePlan?: boolean; onlyIfPausedBy?: PausedBy };
 
 /** An idle-reaper pause on a free plan; resuming requires an upgrade. */
 export class ResumeRequiresUpgradeError extends Error {
@@ -115,8 +115,9 @@ export async function setPausedState(
                 updated_at = now()
           WHERE id = $1
             AND NOT ($2 AND paused_by IS NOT DISTINCT FROM 'idle_reaper')
+            AND ($3::text IS NULL OR (paused AND paused_by = $3))
           ${RETURNING}`,
-        [appId, idlePausePlan],
+        [appId, idlePausePlan, input.onlyIfPausedBy ?? null],
       );
 
   if (result.rows.length === 0) {

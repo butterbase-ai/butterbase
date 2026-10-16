@@ -6,6 +6,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { requireAdmin } from '../../lib/admin-guard.js';
 import { fanOutQuery } from '../../services/region-resolver.js';
+import { resumeIdlePausedAppsForOrg } from '../../services/idle-pause-upgrade.js';
 
 // Stripe client lives in the cloud overlay; OSS builds reach an explicit
 // failure. Kept here rather than at module scope so a bad build in overlays
@@ -779,6 +780,8 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       );
 
       await client.query('COMMIT');
+      // Post-COMMIT, on the Pool: an upgrade brings back idle-paused apps.
+      await resumeIdlePausedAppsForOrg(ctrl, id, plan_id, fastify.log);
       reply.send({ organization: updOrg.rows[0] });
     } catch (err) {
       await client.query('ROLLBACK');

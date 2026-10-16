@@ -10,6 +10,7 @@
 
 ### Added
 
+- **Idle pause**: Upgrading a free organization to a paid plan resumes the projects that were paused for inactivity. Projects you or Butterbase support paused stay paused.
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
   `BUTTERBASE_INTERNAL_FN_KEY` (in addition to `DO_INVOKER_URL` /
   `DO_INVOKER_TOKEN`). The platform still injects the key into DO env so
