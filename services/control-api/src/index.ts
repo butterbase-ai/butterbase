@@ -32,6 +32,7 @@ import quotaEnforcementPlugin from './plugins/quota-enforcement.js';
 import flyReplayPlugin from './plugins/fly-replay.js';
 import migrationGuardPlugin from './plugins/migration-guard.js';
 import pauseGatePlugin from './plugins/pause-gate.js';
+import { registerFrontendPauseSync } from './services/frontend-pause-sync.js';
 import { healthRoutes } from './routes/health.js';
 import { initRoutes } from './routes/init.js';
 import { schemaRoutes } from './routes/schema.js';
@@ -576,6 +577,9 @@ app.register(internalEmailRoutes);
 // plugins copy parent hooks at load), so app-scoped route plugins must be
 // registered after it.
 app.register(pauseGatePlugin);
+// Paused page (spec §5.6): keep dispatch-worker KV in step with apps.paused.
+// Registered as a plugin so app.controlDb (decorated by the database plugin) exists.
+app.register(async (instance) => { registerFrontendPauseSync(instance.controlDb); });
 // kv-quota MUST be registered before kv-data/expose/admin routes so the
 // preHandler hook and kvAccount decoration are available when those routes mount.
 app.register(kvQuotaPlugin);

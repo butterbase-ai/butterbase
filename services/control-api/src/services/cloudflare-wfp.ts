@@ -153,25 +153,49 @@ export async function deleteUserWorker(scriptName: string): Promise<void> {
   });
 }
 
+export function kvMappingValue(appId: string, region: string, paused = false): string {
+  // `paused` is only written when true so running apps' values stay
+  // byte-identical to what the dispatch worker has always read.
+  return JSON.stringify(paused ? { appId, region, paused: true } : { appId, region });
+}
+
 export async function writeSubdomainMapping(
   subdomain: string,
   appId: string,
   region: string,
+  paused = false,
 ): Promise<void> {
+  const value = kvMappingValue(appId, region, paused);
   if (process.env.KV_LOCAL_FILE) {
     // Dynamic import path string prevents tsc from resolving the out-of-rootDir
     // test helper at compile time (it is only loaded in E2E / local runs).
     const mockKvPath = '../../../../tests/e2e/helpers/mock-kv.js';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { mockKv } = await (import(mockKvPath) as Promise<any>);
-    await mockKv.put(`sub:${subdomain}`, JSON.stringify({ appId, region }));
+    await mockKv.put(`sub:${subdomain}`, value);
     return;
   }
   await cfFetch(`/storage/kv/namespaces/${KV_ID}/values/sub:${subdomain}`, {
     method: 'PUT',
-    body: JSON.stringify({ appId, region }),
+    body: value,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+/** Raw KV value, or null when the key doesn't exist. KV GET returns the raw body, not the CF envelope, so this can't use cfFetch. */
+export async function readKvMapping(key: string): Promise<string | null> {
+  if (process.env.KV_LOCAL_FILE) {
+    const mockKvPath = '../../../../tests/e2e/helpers/mock-kv.js';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { mockKv } = await (import(mockKvPath) as Promise<any>);
+    return mockKv.get(key);
+  }
+  const res = await fetch(`${CF_BASE}/storage/kv/namespaces/${KV_ID}/values/${key}`, {
+    headers: { Authorization: `Bearer ${config.cloudflare.apiToken}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`CF KV read failed (${res.status}) ${key}`);
+  return res.text();
 }
 
 export async function deleteSubdomainMapping(subdomain: string): Promise<void> {
@@ -184,17 +208,19 @@ export async function writeDomainMapping(
   hostname: string,
   appId: string,
   region: string,
+  paused = false,
 ): Promise<void> {
+  const value = kvMappingValue(appId, region, paused);
   if (process.env.KV_LOCAL_FILE) {
     const mockKvPath = '../../../../tests/e2e/helpers/mock-kv.js';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { mockKv } = await (import(mockKvPath) as Promise<any>);
-    await mockKv.put(`domain:${hostname}`, JSON.stringify({ appId, region }));
+    await mockKv.put(`domain:${hostname}`, value);
     return;
   }
   await cfFetch(`/storage/kv/namespaces/${KV_ID}/values/domain:${hostname}`, {
     method: 'PUT',
-    body: JSON.stringify({ appId, region }),
+    body: value,
     headers: { 'Content-Type': 'application/json' },
   });
 }
