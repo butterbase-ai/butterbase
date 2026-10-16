@@ -72,7 +72,8 @@
 
 ### Changed
 
-- **Pause now covers every app-scoped API.** A paused app returns 503 `APP_PAUSED` on every app-scoped API (data, auth, KV, functions, agents, RAG, people, the durable objects and edge SSR management APIs, storage, realtime) for everyone except the app's owners and org members using a dashboard session or API key on non-public routes. Realtime sockets are closed, websocket triggers and auth hooks don't run, the function runtime refuses the app's functions, and queued RAG ingestion waits. Template listing and cloning are unaffected. The deployed frontend, edge SSR and Durable Object code keep serving for now. This is what the kill-switch always claimed; previously only some routes honoured it.
+- **Paused apps show a paused page; visit counts are human-only.** A paused app's frontend now shows a neutral "This project is paused." page (HTTP 503, not indexed) instead of the site; Durable Object paths keep working. Frontend visit counts now include only human page loads: crawlers, link previews, HTTP libraries, prefetches and asset requests are no longer counted.
+- **Pause now covers every app-scoped API.** A paused app returns 503 `APP_PAUSED` on every app-scoped API (data, auth, KV, functions, agents, RAG, people, the durable objects and edge SSR management APIs, storage, realtime) for everyone except the app's owners and org members using a dashboard session or API key on non-public routes. Realtime sockets are closed, websocket triggers and auth hooks don't run, the function runtime refuses the app's functions, and queued RAG ingestion waits. Template listing and cloning are unaffected. Visitors to a paused app's site see the paused page (see below); Durable Object paths keep serving. This is what the kill-switch always claimed; previously only some routes honoured it.
 
 ### Fixed
 

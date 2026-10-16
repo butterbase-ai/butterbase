@@ -86,12 +86,48 @@ export function parseKvValue(raw, env) {
   if (raw.startsWith('{')) {
     try {
       const parsed = JSON.parse(raw);
-      if (parsed.appId) return { appId: parsed.appId, region: parsed.region ?? env.BUTTERBASE_REGION };
+      if (parsed.appId) {
+        const route = { appId: parsed.appId, region: parsed.region ?? env.BUTTERBASE_REGION };
+        if (parsed.paused === true) route.paused = true;
+        return route;
+      }
     } catch {
       // fall through
     }
   }
   return { appId: raw, region: env.BUTTERBASE_REGION };
+}
+
+// Crawlers, link unfurlers, uptime checks and HTTP libraries. Cloudflare's
+// per-request bot score needs Enterprise Bot Management, so we filter by UA
+// ourselves (spec §5.6a). Better to under-count a human than to let a bot
+// keep an abandoned app alive.
+const BOT_UA = /bot|crawl|spider|slurp|facebookexternalhit|gptbot|chatgpt-user|claude-web|perplexity|bytespider|curl|wget|python-requests|python-urllib|httpx|aiohttp|go-http-client|java\/|okhttp|axios|node-fetch|undici|headlesschrome|phantomjs|lighthouse|pingdom|uptimerobot|statuscake/i;
+
+export function isHumanPageLoad(request) {
+  if (request.method !== 'GET') return false;
+  const ua = request.headers.get('user-agent');
+  if (!ua || BOT_UA.test(ua)) return false;
+  if ((request.headers.get('sec-purpose') || '').includes('prefetch')) return false;
+  const dest = request.headers.get('sec-fetch-dest');
+  if (dest) return dest === 'document';
+  return (request.headers.get('accept') || '').includes('text/html');
+}
+
+const DEFAULT_DASHBOARD_URL = 'https://dashboard.butterbase.ai';
+
+export function pausedResponse(env) {
+  const dashboard = env.DASHBOARD_URL || DEFAULT_DASHBOARD_URL;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>This project is paused.</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;color:#222}@media (prefers-color-scheme:dark){body{background:#111;color:#eee}a{color:#9cf}}main{max-width:32rem;padding:2rem;text-align:center}h1{font-size:1.5rem;font-weight:600;margin:0 0 .75rem}p{margin:0;color:#666}@media (prefers-color-scheme:dark){p{color:#aaa}}</style></head><body><main><h1>This project is paused.</h1><p>Are you the owner? <a href="${dashboard}">Open the Butterbase dashboard.</a></p></main></body></html>`;
+  return new Response(html, {
+    status: 503,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'retry-after': '3600',
+      'cache-control': 'no-store',
+      'x-robots-tag': 'noindex',
+    },
+  });
 }
 
 export async function handleRequest(request, env, ctx) {
@@ -148,6 +184,9 @@ export async function handleRequest(request, env, ctx) {
     // Object, so apps without DOs simply won't have it — surface a clear 404
     // for that case.
     const isDo = url.pathname.startsWith('/_do/');
+    // Paused app (spec §5.6): visitors get a neutral page; DO traffic passes
+    // through (its function calls hit the gated /fn anyway). No beacon.
+    if (route.paused && !isDo) return pausedResponse(env);
     const targetScript = isDo ? `${appId}_do` : appId;
 
     let worker;
@@ -164,8 +203,8 @@ export async function handleRequest(request, env, ctx) {
       const res = await worker.fetch(request);
       if (res.status === 101) return res;
 
-      // Fire-and-forget visit beacon — only for successful, non-DO page views.
-      if (!isDo && res.status < 400 && ctx?.waitUntil) {
+      // Fire-and-forget visit beacon — only human page loads (spec §5.6a).
+      if (!isDo && res.status < 400 && ctx?.waitUntil && isHumanPageLoad(request)) {
         const ip = request.headers.get('cf-connecting-ip');
         const ua = request.headers.get('user-agent');
         ctx.waitUntil(beaconVisit(env, appId, ip, ua));
