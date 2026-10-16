@@ -152,6 +152,30 @@ afterEach(() => {
 });
 
 describe('runDeploymentPipeline (WfP branch)', () => {
+  it('keeps a paused app paused: passes paused=true to the subdomain KV write', async () => {
+    const zipBuffer = makeZipBuffer({ 'index.html': '<html>hi</html>' });
+    (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
+
+    const db = makeDb({
+      name: 'My App',
+      subdomain: 'myapp',
+      cloudflare_project_name: null,
+      deployment_backend: 'wfp',
+      region: 'local',
+      paused: true,
+    });
+
+    wireRuntimeDb(db);
+    await runDeploymentPipeline(
+      db as unknown as import('pg').Pool,
+      'app_abc',
+      'dep_1',
+      { r2_object_key: 'r2/key', framework: 'react-vite' }
+    );
+
+    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local', true);
+  });
+
   it('deploys via WfP when app.deployment_backend=wfp', async () => {
     const zipBuffer = makeZipBuffer({
       'index.html': '<html>hi</html>',
@@ -192,7 +216,7 @@ describe('runDeploymentPipeline (WfP branch)', () => {
     expect(call.envVars).toEqual({ VITE_API_URL: 'https://api.example.com' });
 
     // Subdomain mapping written
-    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local');
+    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local', false);
 
     // Pages NOT called
     expect(CloudflarePages.createDeployment).not.toHaveBeenCalled();

@@ -1,8 +1,8 @@
 import type { StepHandler } from './saga-executor.js';
 
 export interface FlipCtx {
-  writeSubdomainMapping?: (subdomain: string, appId: string, region: string) => Promise<void>;
-  writeDomainMapping?: (hostname: string, appId: string, region: string) => Promise<void>;
+  writeSubdomainMapping?: (subdomain: string, appId: string, region: string, paused?: boolean) => Promise<void>;
+  writeDomainMapping?: (hostname: string, appId: string, region: string, paused?: boolean) => Promise<void>;
   listCustomDomains?: (region: string, appId: string) => Promise<Array<{ hostname: string }>>;
   invalidateCacheAllRegions?: (appId: string) => Promise<void>;
   updateOrgAppIndexRegion?: (controlPool: any, appId: string, region: string) => Promise<void>;
@@ -21,17 +21,18 @@ export const executeFlipRouting: StepHandler = async (ctx, m) => {
   await cx.updateOrgAppIndexRegion(ctx.controlPool, m.app_id, m.dest_region);
 
   // (3) Update Cloudflare KV
-  const subRes = await destPool.query<{ subdomain: string }>(
-    `SELECT subdomain FROM apps WHERE id = $1`, [m.app_id],
+  const subRes = await destPool.query<{ subdomain: string; paused: boolean }>(
+    `SELECT subdomain, paused FROM apps WHERE id = $1`, [m.app_id],
   );
   const subdomain = subRes.rows[0]?.subdomain;
+  const paused = subRes.rows[0]?.paused === true;
   if (subdomain && cx.writeSubdomainMapping) {
-    await cx.writeSubdomainMapping(subdomain, m.app_id, m.dest_region);
+    await cx.writeSubdomainMapping(subdomain, m.app_id, m.dest_region, paused);
   }
   if (cx.listCustomDomains && cx.writeDomainMapping) {
     const domains = await cx.listCustomDomains(m.dest_region, m.app_id);
     for (const d of domains) {
-      await cx.writeDomainMapping(d.hostname, m.app_id, m.dest_region);
+      await cx.writeDomainMapping(d.hostname, m.app_id, m.dest_region, paused);
     }
   }
 

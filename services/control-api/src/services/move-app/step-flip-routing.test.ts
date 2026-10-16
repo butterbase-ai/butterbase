@@ -2,11 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { executeFlipRouting } from './step-flip-routing.js';
 
 describe('executeFlipRouting', () => {
-  it('updates apps.region, index, KV, invalidates cache, marks dest ready', async () => {
+  it.each([[false], [true]])('updates apps.region, index, KV, invalidates cache, marks dest ready (paused=%s)', async (paused) => {
     const sourcePool = { query: vi.fn() };
     const destPool = {
       query: vi.fn().mockImplementation(async (sql: string) => {
-        if (sql.includes('subdomain')) return { rows: [{ subdomain: 'demo' }] };
+        if (sql.includes('subdomain')) return { rows: [{ subdomain: 'demo', paused }] };
         return { rows: [] };
       }),
     };
@@ -28,8 +28,8 @@ describe('executeFlipRouting', () => {
     const res = await executeFlipRouting(ctx, m);
     expect(res.next).toBe('setting_up_reverse_replication');
     expect(updateOrgAppIndexRegion).toHaveBeenCalledWith(platform, 'app-x', 'eu-west-1');
-    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'eu-west-1');
-    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'eu-west-1');
+    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'eu-west-1', paused);
+    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'eu-west-1', paused);
     expect(invalidateCacheAllRegions).toHaveBeenCalledWith('app-x');
   });
 });

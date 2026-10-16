@@ -154,6 +154,28 @@ afterEach(() => {
 });
 
 describe('runEdgeSsrPipeline — _worker.js detection', () => {
+  it('keeps a paused app paused: passes paused=true to the subdomain KV write', async () => {
+    const zipBuffer = makeZipBuffer({
+      '_worker.js': "export default { fetch() { return new Response('hi'); } };",
+      'index.html': '<html>root</html>',
+    });
+    (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
+
+    const db = makeDb({
+      appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local', paused: true },
+    });
+
+    wireRuntimeDb(db);
+    await runEdgeSsrPipeline(
+      db as unknown as import('pg').Pool,
+      'app_abc',
+      'edge_dep_1',
+      { r2_object_key: 'r2/key', framework: 'other-edge' }
+    );
+
+    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local', true);
+  });
+
   it('handles single-file _worker.js layout (deploys worker + 2 static assets)', async () => {
     const workerSrc = "export default { fetch() { return new Response('hi'); } };";
     const zipBuffer = makeZipBuffer({
@@ -193,7 +215,7 @@ describe('runEdgeSsrPipeline — _worker.js detection', () => {
     expect(compatFlags).toEqual(['nodejs_compat']);
     expect(htmlHandling).toBe('auto-trailing-slash');
 
-    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local');
+    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local', false);
 
     // DB row reaches READY with deployment_url
     const readyUpdate = db.allQueries.find(

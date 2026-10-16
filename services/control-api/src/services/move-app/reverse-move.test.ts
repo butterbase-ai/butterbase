@@ -14,7 +14,7 @@ describe('runReverseMove', () => {
     vi.clearAllMocks();
   });
 
-  it('promotes source replica, flips routing back, unarchives rows', async () => {
+  it.each([[false], [true]])('promotes source replica, flips routing back, unarchives rows (paused=%s)', async (paused) => {
     (getMigration as any).mockResolvedValue({
       id: 'fwd-1',
       app_id: 'app-x',
@@ -29,7 +29,7 @@ describe('runReverseMove', () => {
 
     const sourcePool = {
       query: vi.fn().mockImplementation(async (sql: string) => {
-        if (sql.includes('SELECT subdomain')) return { rows: [{ subdomain: 'demo' }] };
+        if (sql.includes('SELECT subdomain')) return { rows: [{ subdomain: 'demo', paused }] };
         return { rows: [] };
       }),
     };
@@ -66,8 +66,8 @@ describe('runReverseMove', () => {
     expect(waitForReplicationCaughtUp).toHaveBeenCalledWith('us-east-1', 'app-x', 'fwd-1');
     expect(promoteSourceToPrimary).toHaveBeenCalledWith('us-east-1', 'app-x', 'fwd-1');
     expect(updateOrgAppIndexRegion).toHaveBeenCalledWith(controlPool, 'app-x', 'us-east-1');
-    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'us-east-1');
-    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'us-east-1');
+    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'us-east-1', paused);
+    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'us-east-1', paused);
     expect(invalidateCacheAllRegions).toHaveBeenCalledWith('app-x');
     expect(markCompleted).toHaveBeenCalledWith(controlPool, 'rev-1');
 

@@ -9,8 +9,8 @@ import { clearKvScope as defaultClearKvScope } from '../kv/kv-scope.js';
 export interface ReverseMoveCtx {
   controlPool: pg.Pool;
   runtimePoolFor: (region: string) => pg.Pool;
-  writeSubdomainMapping: (subdomain: string, appId: string, region: string) => Promise<void>;
-  writeDomainMapping: (hostname: string, appId: string, region: string) => Promise<void>;
+  writeSubdomainMapping: (subdomain: string, appId: string, region: string, paused?: boolean) => Promise<void>;
+  writeDomainMapping: (hostname: string, appId: string, region: string, paused?: boolean) => Promise<void>;
   listCustomDomains: (region: string, appId: string) => Promise<Array<{ hostname: string }>>;
   invalidateCacheAllRegions: (appId: string) => Promise<void>;
   updateOrgAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
@@ -98,14 +98,15 @@ export async function runReverseMove(
   }
 
   await ctx.updateOrgAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
-  const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string }>(
-    `SELECT subdomain FROM apps WHERE id = $1`, [forward.app_id],
+  const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string; paused: boolean }>(
+    `SELECT subdomain, paused FROM apps WHERE id = $1`, [forward.app_id],
   );
   const sub = subRes.rows[0]?.subdomain;
-  if (sub) await ctx.writeSubdomainMapping(sub, forward.app_id, forward.source_region);
+  const paused = subRes.rows[0]?.paused === true;
+  if (sub) await ctx.writeSubdomainMapping(sub, forward.app_id, forward.source_region, paused);
   const doms = await ctx.listCustomDomains(forward.source_region, forward.app_id);
   for (const d of doms) {
-    await ctx.writeDomainMapping(d.hostname, forward.app_id, forward.source_region);
+    await ctx.writeDomainMapping(d.hostname, forward.app_id, forward.source_region, paused);
   }
   await ctx.invalidateCacheAllRegions(forward.app_id);
 

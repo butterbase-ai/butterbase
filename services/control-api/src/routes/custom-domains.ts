@@ -68,9 +68,10 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
 
     // WfP backend required — apps is a runtime table
     const backendResult = await runtimeDb.query(
-      'SELECT deployment_backend FROM apps WHERE id = $1',
+      'SELECT deployment_backend, paused FROM apps WHERE id = $1',
       [appId],
     );
+    const paused = backendResult.rows[0]?.paused === true;
     if (backendResult.rows[0]?.deployment_backend !== 'wfp') {
       return reply.status(400).send(
         createAgentError({
@@ -150,7 +151,7 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
 
     // Write KV mapping so the dispatch worker can route to this app
     try {
-      await writeDomainMapping(hostname, appId, region);
+      await writeDomainMapping(hostname, appId, region, paused);
     } catch (error) {
       if (isHttpError(error)) throw error;
       // Non-fatal: domain is registered but won't route until KV is written.

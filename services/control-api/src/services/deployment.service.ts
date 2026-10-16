@@ -415,6 +415,7 @@ interface PipelineCtx {
     cloudflare_project_name: string | null;
     deployment_backend: 'pages' | 'wfp';
     region: string;
+    paused: boolean;
   };
 }
 
@@ -594,7 +595,7 @@ async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
 
   console.log(`${tag} Step 4/5: Writing subdomain mapping ${app.subdomain} -> ${appId}…`);
   try {
-    await CloudflareWfp.writeSubdomainMapping(app.subdomain, appId, app.region);
+    await CloudflareWfp.writeSubdomainMapping(app.subdomain, appId, app.region, app.paused);
   } catch (err) {
     // Compensate: remove the worker we just uploaded so state stays consistent.
     // Without the KV mapping, the dispatch worker is unreachable — an orphan.
@@ -758,7 +759,7 @@ export async function deployArtifact(
 
     // --- Load app row, including deployment_backend selector (apps is runtime-tier) ---
     const appResult = await runtimePool.query(
-      `SELECT name, subdomain, cloudflare_project_name, deployment_backend, region FROM apps WHERE id = $1`,
+      `SELECT name, subdomain, cloudflare_project_name, deployment_backend, region, paused FROM apps WHERE id = $1`,
       [appId]
     );
 
@@ -773,6 +774,7 @@ export async function deployArtifact(
       deployment_backend: (appResult.rows[0].deployment_backend as 'pages' | 'wfp' | undefined) ?? 'pages',
       // apps.region is NOT NULL post-Phase 1, but keep a defensive default.
       region: (appResult.rows[0].region as string | null) ?? 'us-east-1',
+      paused: appResult.rows[0].paused === true,
     };
 
     const ctx: PipelineCtx = {
