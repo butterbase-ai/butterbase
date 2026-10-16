@@ -17,6 +17,7 @@ import { config } from '../config.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { decrypt } from './crypto.js';
 import { notifyDeploymentFailed } from './failure-notifications.service.js';
+import { syncFrontendPausedState } from './frontend-pause-sync.js';
 
 export class DeploymentError extends Error {
   constructor(message: string, public readonly code?: string) {
@@ -639,6 +640,13 @@ export async function deployArtifact(
         /* best-effort */
       }
       throw err;
+    }
+
+    // Re-sync paused from the DB: it was read before the long upload above.
+    try {
+      await syncFrontendPausedState(db, appId);
+    } catch (err) {
+      console.warn(`${tag} [pause] post-write KV re-sync failed:`, err);
     }
 
     const url = `https://${app.subdomain}.${config.subdomain.baseDomain}`;

@@ -62,7 +62,13 @@ vi.mock('../region-resolver.js', () => ({
   resolveAppHomeRegion: vi.fn(async () => 'local'),
 }));
 
+// Post-write paused re-sync (F1): mocked so tests assert the call and its failure isolation.
+vi.mock('../frontend-pause-sync.js', () => ({
+  syncFrontendPausedState: vi.fn().mockResolvedValue({ rewritten: [] }),
+}));
+
 import * as R2 from '../r2.js';
+import { syncFrontendPausedState } from '../frontend-pause-sync.js';
 import * as CloudflareWfp from '../cloudflare-wfp.js';
 import * as FailureNotifs from '../failure-notifications.service.js';
 import * as RuntimeDb from '../runtime-db.js';
@@ -148,12 +154,42 @@ beforeEach(() => {
   (CloudflareWfp.writeSubdomainMapping as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
   (CloudflareWfp.deleteUserWorker as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
   (R2.deleteObject as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+  (syncFrontendPausedState as ReturnType<typeof vi.fn>).mockResolvedValue({ rewritten: [] });
 });
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe('runEdgeSsrPipeline — _worker.js detection', () => {
+  const run = async () => {
+    (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(makeZipBuffer({
+      '_worker.js': "export default { fetch() { return new Response('hi'); } };",
+      'index.html': '<html>root</html>',
+    }));
+    const db = makeDb({ appRow: { name: 'My App', subdomain: 'myapp', deployment_backend: 'wfp', region: 'local' } });
+    wireRuntimeDb(db);
+    await runEdgeSsrPipeline(db as unknown as import('pg').Pool, 'app_abc', 'edge_dep_1', { r2_object_key: 'r2/key', framework: 'other-edge' });
+    return db;
+  };
+
+  it('re-syncs paused state from the DB right after the KV write', async () => {
+    const order: string[] = [];
+    (CloudflareWfp.writeSubdomainMapping as ReturnType<typeof vi.fn>).mockImplementation(async () => { order.push('write'); });
+    (syncFrontendPausedState as ReturnType<typeof vi.fn>).mockImplementation(async () => { order.push('sync'); return { rewritten: [] }; });
+    const db = await run();
+    expect(syncFrontendPausedState).toHaveBeenCalledWith(db, 'app_abc');
+    expect(order).toEqual(['write', 'sync']);
+  });
+
+  it('does not fail the deploy when the post-write re-sync rejects', async () => {
+    (syncFrontendPausedState as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cf down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = await run();
+    expect(warn).toHaveBeenCalled();
+    expect(CloudflareWfp.deleteUserWorker).not.toHaveBeenCalled();
+    expect(db.allQueries.some((q) => /deployment_url/i.test(q.sql))).toBe(true);
+  });
+
   it('keeps a paused app paused: passes paused=true to the subdomain KV write', async () => {
     const zipBuffer = makeZipBuffer({
       '_worker.js': "export default { fetch() { return new Response('hi'); } };",

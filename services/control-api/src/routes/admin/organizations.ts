@@ -705,6 +705,7 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     // either all land or none. user_state_outbox is written inside the same
     // transaction so plan_id propagation stays paired with the plan change.
     const client = await ctrl.connect();
+    let updatedOrg: unknown;
     try {
       await client.query('BEGIN');
 
@@ -780,15 +781,18 @@ const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
       );
 
       await client.query('COMMIT');
-      // Post-COMMIT, on the Pool: an upgrade brings back idle-paused apps.
-      await resumeIdlePausedAppsForOrg(ctrl, id, plan_id, fastify.log);
-      reply.send({ organization: updOrg.rows[0] });
+      updatedOrg = updOrg.rows[0];
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
     } finally {
       client.release();
     }
+
+    // After COMMIT and outside the ROLLBACK try/catch, on the Pool: an upgrade
+    // brings back idle-paused apps.
+    await resumeIdlePausedAppsForOrg(ctrl, id, plan_id, fastify.log);
+    reply.send({ organization: updatedOrg });
   });
 };
 

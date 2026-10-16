@@ -102,7 +102,7 @@ export function parseKvValue(raw, env) {
 // per-request bot score needs Enterprise Bot Management, so we filter by UA
 // ourselves (spec §5.6a). Better to under-count a human than to let a bot
 // keep an abandoned app alive.
-const BOT_UA = /bot|crawl|spider|slurp|facebookexternalhit|gptbot|chatgpt-user|claude-web|perplexity|bytespider|curl|wget|python-requests|python-urllib|httpx|aiohttp|go-http-client|java\/|okhttp|axios|node-fetch|undici|headlesschrome|phantomjs|lighthouse|pingdom|uptimerobot|statuscake/i;
+const BOT_UA = /bot|crawl|spider|slurp|facebookexternalhit|gptbot|chatgpt-user|claude-web|perplexity|bytespider|curl|wget|python-requests|python-urllib|httpx|aiohttp|go-http-client|java\/|okhttp|axios|node-fetch|undici|headlesschrome|phantomjs|lighthouse|pingdom|uptimerobot|statuscake|meta-externalagent|meta-externalfetcher|google-inspectiontool|claude-user|anthropic-ai|whatsapp|scrapy|censysinspect/i;
 
 export function isHumanPageLoad(request) {
   if (request.method !== 'GET') return false;
@@ -110,7 +110,7 @@ export function isHumanPageLoad(request) {
   if (!ua || BOT_UA.test(ua)) return false;
   if ((request.headers.get('sec-purpose') || '').includes('prefetch')) return false;
   const dest = request.headers.get('sec-fetch-dest');
-  if (dest) return dest === 'document';
+  if (dest) return dest === 'document' || dest === 'iframe' || dest === 'frame';
   return (request.headers.get('accept') || '').includes('text/html');
 }
 

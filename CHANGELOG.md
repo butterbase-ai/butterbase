@@ -10,6 +10,7 @@
 
 ### Added
 
+- **Ops**: `scripts/sync-paused-frontends.ts` -- run once after the dispatch worker deploy so apps paused before it show the paused page (rewrites their existing KV routes with `paused`). Idempotent; `--dry-run` lists the apps without writing.
 - **Idle pause**: Upgrading a free organization to a paid plan resumes the projects that were paused for inactivity. Projects you or Butterbase support paused stay paused.
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
   `BUTTERBASE_INTERNAL_FN_KEY` (in addition to `DO_INVOKER_URL` /

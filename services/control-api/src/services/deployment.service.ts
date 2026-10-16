@@ -14,6 +14,7 @@ import { decrypt } from './crypto.js';
 import { notifyDeploymentFailed } from './failure-notifications.service.js';
 import { probeSpaRouting } from './spa-routing-probe.js';
 import { parseRedirects } from '@butterbase/static-frontend-worker';
+import { syncFrontendPausedState } from './frontend-pause-sync.js';
 
 export class DeploymentError extends Error {
   constructor(message: string, public readonly code?: string) {
@@ -515,7 +516,7 @@ async function deployViaPages(ctx: PipelineCtx): Promise<DeployResult> {
  * in-worker rewrite to /index.html (see WORKER_JS in cloudflare-wfp.ts).
  */
 async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
-  const { runtimePool, appId, tag, files, app } = ctx;
+  const { db, runtimePool, appId, tag, files, app } = ctx;
 
   if (!app.subdomain) {
     throw new DeploymentError('WfP deploy requires app.subdomain', 'NO_SUBDOMAIN');
@@ -605,6 +606,14 @@ async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
       /* best-effort */
     }
     throw err;
+  }
+
+  // The paused flag above was read before a long upload; a pause/resume that
+  // landed meanwhile would be overwritten by this stale write. Re-sync from the DB.
+  try {
+    await syncFrontendPausedState(db, appId);
+  } catch (err) {
+    console.warn(`${tag} [pause] post-write KV re-sync failed:`, err);
   }
 
   const url = `https://${app.subdomain}.${config.subdomain.baseDomain}`;
