@@ -3,6 +3,7 @@ import { z, ZodError } from 'zod';
 import { requireInternalServiceToken } from '../services/agent-tool-callback-auth.js';
 import { dispatchBuiltin } from '../services/agent-tools/builtin-dispatcher.js';
 import { invokeFunction } from '../services/function-invoke.js';
+import { assertAppIdNotPaused } from '../plugins/pause-gate.js';
 
 const builtinBody = z.object({
   app_id: z.string(),
@@ -39,6 +40,9 @@ export const internalAgentToolsRoutes: FastifyPluginAsync = async (app) => {
       throw err;
     }
 
+    // The pause gate skips /internal/; the app id here is in the body.
+    await assertAppIdNotPaused(app.controlDb, body.app_id);
+
     const result = await dispatchBuiltin(
       params.tool_name,
       body.args,
@@ -71,6 +75,9 @@ export const internalAgentToolsRoutes: FastifyPluginAsync = async (app) => {
       }
       throw err;
     }
+
+    // The pause gate skips /internal/; the app id here is in the body.
+    await assertAppIdNotPaused(app.controlDb, body.app_id);
 
     const r = await invokeFunction({
       appId: body.app_id,

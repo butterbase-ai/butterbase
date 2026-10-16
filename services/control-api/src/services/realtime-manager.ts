@@ -6,6 +6,21 @@ import { getRuntimeDbForApp } from './region-resolver.js';
 import { getAppPoolForApp } from './app-pool.js';
 import { getRedisPubClient, getRedisSubClient, onRedisMessage, getRedisClient } from './redis.js';
 import { getLimitsForApp } from './app-plan-resolver.js';
+import { redisFor } from './redis-registry.js';
+import { listRuntimeRegions } from './runtime-pool-registry.js';
+
+export const REALTIME_CONTROL_CHANNEL = 'realtime:control';
+
+/** Tell every control-api instance, in every region, to drop an app's sockets. */
+export async function broadcastCloseApp(appId: string): Promise<void> {
+  const msg = JSON.stringify({ type: 'close_app', appId });
+  await Promise.all(
+    listRuntimeRegions().map((r) => redisFor(r).publish(REALTIME_CONTROL_CHANNEL, msg).catch((err) => {
+      console.warn(`[realtime] close_app publish failed for ${appId} in ${r}: ${(err as Error).message}`);
+      return 0;
+    })),
+  );
+}
 
 // ============================================================================
 // Types
@@ -112,7 +127,19 @@ export class RealtimeManager {
     }, RealtimeManager.PRESENCE_REFRESH_MS);
 
     // Cross-instance realtime via Redis pub/sub
+    getRedisSubClient().subscribe(REALTIME_CONTROL_CHANNEL).catch((err) => {
+      this.log.error({ err }, '[Realtime] failed to subscribe to control channel');
+    });
     onRedisMessage((channel, message) => {
+      if (channel === REALTIME_CONTROL_CHANNEL) {
+        try {
+          const msg = JSON.parse(message) as { type?: string; appId?: string };
+          if (msg.type === 'close_app' && msg.appId) this.closeApp(msg.appId);
+        } catch (err) {
+          this.log.warn({ err }, '[Realtime] bad control message');
+        }
+        return;
+      }
       if (channel.startsWith('realtime:changes:')) {
         const appId = channel.slice('realtime:changes:'.length);
         this.handleRedisChange(appId, message).catch((err) => {
@@ -657,6 +684,17 @@ export class RealtimeManager {
       }
       this.teardownListener(listener.appId);
     }
+  }
+
+  /** Close every socket for an app (1013, like the connect-time paused check) and drop its LISTEN. */
+  closeApp(appId: string): void {
+    const listener = this.listeners.get(appId);
+    if (!listener) return;
+    for (const wsClient of listener.subscribers) {
+      this.send(wsClient.socket, { type: 'error', message: 'App paused' });
+      wsClient.socket.close(1013, 'App paused');
+    }
+    this.teardownListener(appId);
   }
 
   private teardownListener(appId: string): void {

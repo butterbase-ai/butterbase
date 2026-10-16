@@ -6,6 +6,8 @@
 
 - **CLI**: `bb keys generate --scope` now takes `account|app` (was an arbitrary string array). Use `--extra-scope <token>` for additional allowlisted scope tokens (`ai:gateway`, `substrate`). Migration: `bb keys generate foo --scope ai:gateway` → `bb keys generate foo --scope account --extra-scope ai:gateway`.
 
+- **Upgrade order**: self-hosters must run `npm run migrate:runtime` (runtime migration 056) **before** upgrading control-api, because the new image selects `apps.paused_by`.
+
 ### Added
 
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
@@ -66,9 +68,15 @@
 - **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
 - **MCP**: `manage_auth_config:generate_service_key` accepts `key_scope` and `additional_scopes`; requires `app_id` when `key_scope === 'app'`.
 - **Dashboard**: "Generate API key" dialog: scope radio (account / this app) + app picker + advanced scopes disclosure + scope summary on success.
+- **MCP**: `manage_app` action `resume`. `GET /v1/:app_id/config` and the pause endpoint now return `paused_by`; `APP_PAUSED` 503s include `details.paused_by` and explain automatic idle pauses without attributing them to the owner. Resuming an automatic idle pause on a free plan returns 402 `APP_RESUME_REQUIRES_UPGRADE`, and an owner pause over it keeps the idle label.
+
+### Changed
+
+- **Pause now covers every app-scoped API.** A paused app returns 503 `APP_PAUSED` on every app-scoped API (data, auth, KV, functions, agents, RAG, people, the durable objects and edge SSR management APIs, storage, realtime) for everyone except the app's owners and org members using a dashboard session or API key on non-public routes. Realtime sockets are closed, websocket triggers and auth hooks don't run, the function runtime refuses the app's functions, and queued RAG ingestion waits. Template listing and cloning are unaffected. The deployed frontend, edge SSR and Durable Object code keep serving for now. This is what the kill-switch always claimed; previously only some routes honoured it.
 
 ### Fixed
 
+- **Move app**: moving an app to another region now copies the whole app record. Previously a move reset the pause state, organization, frontend backend, anon key and access/AI/JWT settings.
 - `AUTH_IMPERSONATION_FORBIDDEN` is now reachable from public surfaces: users can mint the app-scoped service keys needed to call functions with `auth: required` via `X-Butterbase-As-User`, instead of needing to re-run `journey-deploy`.
 
 ---
