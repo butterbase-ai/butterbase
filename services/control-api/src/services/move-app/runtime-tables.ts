@@ -59,6 +59,9 @@ export const MOVE_APP_RUNTIME_TABLES = [
   // skipped by copy; reverse paths tolerate missing future tables.
   // These rows have app_id without cascading apps FKs so deletion retains
   // unsettled attempts and durable provider cleanup tombstones.
+  // Lifecycle migration058 fences app admission/claims at blocking_writes.
+  // Settled mappings keep their exact credential namespace across the move;
+  // archived source copies never perform cleanup or provider operations.
   'ai_video_preparations',
   'ai_video_attempts',
   'ai_reference_asset_groups',

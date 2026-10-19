@@ -20,7 +20,7 @@ describe.skipIf(!dbUrl)('video preparation persistence (real PostgreSQL)', () =>
     if (parsed.hostname !== '127.0.0.1' || parsed.port !== '15439' || parsed.pathname !== '/portrait_test') throw new Error('Requires isolated portrait_test database');
     pool = new pg.Pool({ connectionString: dbUrl, options: `-c search_path=${schema},public`, max: 8 });
     await pool.query(`CREATE SCHEMA ${schema}`);
-    await pool.query(await readFile(new URL('../../../../../db/runtime-plane/056_ai_video_preparations.sql', import.meta.url), 'utf8'));
+    for (const name of ['056_ai_video_preparations.sql','057_ai_video_preparation_schedule.sql']) await pool.query(await readFile(new URL(`../../../../../db/runtime-plane/${name}`, import.meta.url), 'utf8'));
   });
   afterAll(async () => { if (pool) { await pool.query(`DROP SCHEMA ${schema} CASCADE`); await pool.end(); } });
   beforeEach(async () => { await pool.query('TRUNCATE ai_video_attempts, ai_video_preparations, ai_reference_assets, ai_reference_asset_groups CASCADE'); });
@@ -119,7 +119,7 @@ describe.skipIf(!dbUrl)('video preparation persistence (real PostgreSQL)', () =>
     expect((await p.getPreparation(pool, prep.id))?.status).toBe('cancelled');
     const tombstones = await a.listReferenceCleanup(pool, 20); expect(tombstones.map(x => x.id)).toContain(asset.id); expect(tombstones.map(x => x.id)).toContain(group.id);
     expect(await a.acknowledgeReferenceCleanup(pool, 'asset', asset.id)).toBe(true);
-    expect((await a.getReferenceAsset(pool, scope, asset.id))?.provider_id).toBeNull();
+    expect((await a.getReferenceAsset(pool, scope, asset.id))?.provider_id).toBe('asset-1');
   });
   it('settles before finishing public jobs; archived jobs and mappings are hidden', async () => {
     const row = await job(); const lease = await claim(row.id); const first = await attempt(row.id, lease.fence); const sub = (await p.claimAttempt(pool, first.id, row.id, lease.fence, 'submitter', 60_000))!;

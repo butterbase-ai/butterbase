@@ -20,6 +20,8 @@ export type PreparationProviderResult =
  * retryPaths is permitted ONLY for a verified structured input-face/privacy failure.
  */
 export interface VideoPreparationHooks {
+ /** Bounded provider cleanup/reconciliation and local source retention. */
+ maintainReferences?(ctx: PreparationContext): Promise<void>;
  quote(ctx: PreparationContext, scope: PreparationScope, request: Record<string, unknown>): Promise<PreparationSelection | null>;
  authorize(ctx: PreparationContext, job: PreparationRow): Promise<'allowed' | 'cancelled' | 'region_mismatch'>;
  loadImage?(scope: AssetScope, source: string): Promise<LoadedReferenceImage>;

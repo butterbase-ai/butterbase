@@ -177,8 +177,8 @@ export async function hasBlockingPreparationWork(db: PreparationDb, appId: strin
   const r = await db.query<{ blocked: boolean }>(`SELECT
     EXISTS (SELECT 1 FROM ai_video_preparations WHERE app_id=$1 AND ${live} AND status IN ('pending','in_progress'))
     OR EXISTS (SELECT 1 FROM ai_video_attempts WHERE app_id=$1 AND ${live} AND settlement_status!='acknowledged')
-    OR EXISTS (SELECT 1 FROM ai_reference_assets WHERE app_id=$1 AND ${live} AND (cleanup_pending OR status IN ('registering','pending','uncertain')))
-    OR EXISTS (SELECT 1 FROM ai_reference_asset_groups WHERE app_id=$1 AND ${live} AND (cleanup_pending OR status IN ('registering','pending','uncertain'))) AS blocked`, [appId]);
+    OR EXISTS (SELECT 1 FROM ai_reference_assets WHERE app_id=$1 AND ${live} AND (cleanup_pending OR status IN ('registering','pending','uncertain') OR lease_expires_at>now()))
+    OR EXISTS (SELECT 1 FROM ai_reference_asset_groups WHERE app_id=$1 AND ${live} AND (cleanup_pending OR status IN ('registering','pending','uncertain') OR lease_expires_at>now())) AS blocked`, [appId]);
   return r.rows[0].blocked;
 }
 /** Background recovery includes expired jobs so workers can explicitly expire them. */

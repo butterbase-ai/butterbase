@@ -78,6 +78,9 @@ CREATE TABLE ai_reference_asset_groups (
   cleanup_pending boolean NOT NULL DEFAULT false,
   deleted_at timestamptz,
   cleaned_at timestamptz,
+  retired_at timestamptz,
+  cleanup_next_at timestamptz NOT NULL DEFAULT now(),
+  cleanup_attempts integer NOT NULL DEFAULT 0,
   lease_owner text,
   lease_expires_at timestamptz,
   fence integer NOT NULL DEFAULT 0,
@@ -86,8 +89,8 @@ CREATE TABLE ai_reference_asset_groups (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 -- Two partial indexes preserve NULL-vs-empty subject isolation on older PG too.
-CREATE UNIQUE INDEX ai_reference_groups_owner ON ai_reference_asset_groups (organization_id, app_id, end_user_sub, provider_slot, credential_namespace) WHERE end_user_sub IS NOT NULL;
-CREATE UNIQUE INDEX ai_reference_groups_no_subject ON ai_reference_asset_groups (organization_id, app_id, provider_slot, credential_namespace) WHERE end_user_sub IS NULL;
+CREATE UNIQUE INDEX ai_reference_groups_owner ON ai_reference_asset_groups (organization_id, app_id, end_user_sub, provider_slot, credential_namespace) WHERE end_user_sub IS NOT NULL AND retired_at IS NULL;
+CREATE UNIQUE INDEX ai_reference_groups_no_subject ON ai_reference_asset_groups (organization_id, app_id, provider_slot, credential_namespace) WHERE end_user_sub IS NULL AND retired_at IS NULL;
 
 CREATE TABLE ai_reference_assets (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -96,6 +99,8 @@ CREATE TABLE ai_reference_assets (
   end_user_sub text,
   provider_slot text NOT NULL,
   credential_namespace text NOT NULL,
+  replacement_count integer NOT NULL DEFAULT 0 CHECK (replacement_count BETWEEN 0 AND 1),
+  source_bytes bigint NOT NULL DEFAULT 0 CHECK (source_bytes >= 0),
   sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
   provider_id text,
   group_id uuid REFERENCES ai_reference_asset_groups(id),
@@ -104,6 +109,9 @@ CREATE TABLE ai_reference_assets (
   cleanup_pending boolean NOT NULL DEFAULT false,
   deleted_at timestamptz,
   cleaned_at timestamptz,
+  retired_at timestamptz,
+  cleanup_next_at timestamptz NOT NULL DEFAULT now(),
+  cleanup_attempts integer NOT NULL DEFAULT 0,
   lease_owner text,
   lease_expires_at timestamptz,
   fence integer NOT NULL DEFAULT 0,
@@ -111,8 +119,8 @@ CREATE TABLE ai_reference_assets (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX ai_reference_assets_owner_hash ON ai_reference_assets (organization_id, app_id, end_user_sub, provider_slot, credential_namespace, sha256) WHERE end_user_sub IS NOT NULL;
-CREATE UNIQUE INDEX ai_reference_assets_no_subject_hash ON ai_reference_assets (organization_id, app_id, provider_slot, credential_namespace, sha256) WHERE end_user_sub IS NULL;
+CREATE UNIQUE INDEX ai_reference_assets_owner_hash ON ai_reference_assets (organization_id, app_id, end_user_sub, provider_slot, credential_namespace, sha256) WHERE end_user_sub IS NOT NULL AND retired_at IS NULL;
+CREATE UNIQUE INDEX ai_reference_assets_no_subject_hash ON ai_reference_assets (organization_id, app_id, provider_slot, credential_namespace, sha256) WHERE end_user_sub IS NULL AND retired_at IS NULL;
 CREATE INDEX ai_reference_assets_cleanup ON ai_reference_assets (updated_at) WHERE cleanup_pending AND archived_after_move IS NULL;
 CREATE INDEX ai_reference_groups_cleanup ON ai_reference_asset_groups (updated_at) WHERE cleanup_pending AND archived_after_move IS NULL;
 

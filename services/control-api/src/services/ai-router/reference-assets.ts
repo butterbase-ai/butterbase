@@ -1,3 +1,4 @@
+import { retainedAssetSql } from './reference-lifecycle.js';
 import type { PreparationDb } from './video-preparations.js';
 
 /** Opaque credential namespace changes on credential/ownership rotation. */
@@ -10,7 +11,7 @@ export interface ReferenceRow {
   cleanup_pending: boolean; deleted_at: Date | null; cleaned_at: Date | null;
   fence: number; lease_owner: string | null; lease_expires_at: Date | null;
 }
-export interface ReferenceAssetRow extends ReferenceRow { sha256: string; group_id: string | null }
+export interface ReferenceAssetRow extends ReferenceRow { source_bytes: string; replacement_count: number; sha256: string; group_id: string | null }
 export interface ReferenceState { status: 'pending' | 'active' | 'uncertain' | 'failed'; providerId?: string; diagnostic?: Record<string, unknown> }
 type Kind = 'group' | 'asset';
 const tableFor = (kind: Kind) => kind === 'asset' ? 'ai_reference_assets' : 'ai_reference_asset_groups';
@@ -24,7 +25,7 @@ async function ensure(db: PreparationDb, kind: Kind, scope: AssetScope, sha256?:
   const columns = `organization_id,app_id,end_user_sub,provider_slot,credential_namespace${kind === 'asset' ? ',sha256' : ''}`;
   const conflict = `organization_id,app_id,${scope.endUserSub === null ? '' : 'end_user_sub,'}provider_slot,credential_namespace${kind === 'asset' ? ',sha256' : ''}`;
   const result = await db.query<ReferenceRow | ReferenceAssetRow>(`INSERT INTO ${table} (${columns}) VALUES (${values.map((_,i) => `$${i+1}`).join(',')})
-    ON CONFLICT (${conflict}) WHERE end_user_sub IS ${scope.endUserSub === null ? '' : 'NOT '}NULL
+    ON CONFLICT (${conflict}) WHERE end_user_sub IS ${scope.endUserSub === null ? '' : 'NOT '}NULL AND retired_at IS NULL
     DO UPDATE SET updated_at=${table}.updated_at WHERE ${table}.archived_after_move IS NULL
       AND NOT ${table}.cleanup_pending AND ${table}.deleted_at IS NULL RETURNING *`, values);
   if (!result.rows[0]) throw new Error('reference mapping unavailable (archived or deleted)');
@@ -107,8 +108,9 @@ export async function listReferenceCleanup(db: PreparationDb, limit = 100): Prom
 }
 /** After idempotent provider DELETE. No-handle uncertain POSTs cannot be acked. */
 export async function acknowledgeReferenceCleanup(db: PreparationDb, kind: Kind, id: string): Promise<boolean> {
-  return (await db.query(`UPDATE ${tableFor(kind)} SET cleanup_pending=false,cleaned_at=now(),provider_id=NULL,status='deleted',updated_at=now()
+  return (await db.query(`UPDATE ${tableFor(kind)} r SET cleanup_pending=false,cleaned_at=now(),retired_at=COALESCE(retired_at,now()),status='deleted',updated_at=now()
     WHERE id=$1 AND cleanup_pending AND ${live} AND status NOT IN ('registering','uncertain')
+    ${kind === 'asset' ? `AND NOT ${retainedAssetSql()}` : ''}
     ${kind === 'group' ? `AND NOT EXISTS (SELECT 1 FROM ai_reference_assets WHERE group_id=$1 AND (cleanup_pending OR status!='deleted'))` : ''}`, [id])).rowCount === 1;
 }
 
