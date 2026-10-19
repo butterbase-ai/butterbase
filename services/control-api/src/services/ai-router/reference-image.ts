@@ -74,7 +74,12 @@ export function createReferenceImageLoader(dependencies: ReferenceImageDependenc
   return async function loadReferenceImage(_scope: AssetScope, source: string, callerSignal?: AbortSignal): Promise<LoadedReferenceImage> {
     if (activeLoads >= 2) throw new ReferenceImageCapacityError();
     activeLoads++;
-    let pendingNative: Promise<unknown> | undefined;
+    const pendingUncancellable = new Set<Promise<unknown>>();
+    const trackUncancellable = <T>(operation: Promise<T>): Promise<T> => {
+      pendingUncancellable.add(operation);
+      void operation.then(() => pendingUncancellable.delete(operation), () => pendingUncancellable.delete(operation));
+      return operation;
+    };
     const controller = new AbortController();
     const abortCaller = () => controller.abort(new Error('Reference image download aborted'));
     callerSignal?.addEventListener('abort', abortCaller, { once: true });
@@ -94,7 +99,7 @@ export function createReferenceImageLoader(dependencies: ReferenceImageDependenc
         signal.throwIfAborted();
         const hostname = url.hostname.replace(/^\[|\]$/g, '');
         const literalFamily = isIP(hostname);
-        const addresses = literalFamily ? [{ address: hostname, family: literalFamily }] : await bounded(dependencies.lookup(hostname));
+        const addresses = literalFamily ? [{ address: hostname, family: literalFamily }] : await bounded(trackUncancellable(dependencies.lookup(hostname)));
         if (addresses.length === 0) throw new Error('Reference image hostname has no public addresses');
         for (const entry of addresses) {
           assertGlobal(entry.address);
@@ -160,13 +165,13 @@ export function createReferenceImageLoader(dependencies: ReferenceImageDependenc
           const stopDecoder = () => decoder.destroy();
           signal.addEventListener('abort', stopDecoder, { once: true });
           try {
-            const metadata = await bounded(pendingNative = decoder.metadata());
+            const metadata = await bounded(trackUncancellable(decoder.metadata()));
             if (metadata.format !== mimeFormats[mimeType] || !metadata.width || !metadata.height || metadata.width * metadata.height > MAX_PIXELS || (metadata.pages ?? 1) !== 1) {
               throw new Error('Invalid reference image format, dimensions or animation');
             }
             // Metadata alone accepts truncated files. Force decode, without
             // re-encoding or replacing the bytes subsequently uploaded.
-            await bounded(pendingNative = decoder.stats());
+            await bounded(trackUncancellable(decoder.stats()));
           } catch {
             signal.throwIfAborted();
             throw new Error('Invalid reference image bytes or pixel dimensions');
@@ -178,9 +183,9 @@ export function createReferenceImageLoader(dependencies: ReferenceImageDependenc
       }
     } finally {
       clearTimeout(timer); callerSignal?.removeEventListener('abort', abortCaller);
-      // Native codecs may finish after destroy(). Keep their concurrency slot
-      // until completion even when the caller's time budget has expired.
-      if (pendingNative) void pendingNative.then(() => { activeLoads--; }, () => { activeLoads--; });
+      // Both DNS and native codecs can outlive cancellation. Keep this load's
+      // slot until every such operation settles, while rejecting callers promptly.
+      if (pendingUncancellable.size) void Promise.allSettled(pendingUncancellable).then(() => { activeLoads--; });
       else activeLoads--;
     }
   };

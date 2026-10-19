@@ -194,6 +194,33 @@ describe('reference image SSRF and lifecycle policy', () => {
     try { await expect(f.load(scope, 'https://one.example/c')).rejects.toMatchObject({ code: 'REFERENCE_IMAGE_CAPACITY_EXCEEDED', retryable: true }); }
     finally { controller.abort(); await Promise.all([first, second]); }
   });
+  it.each(['resolve', 'reject'])('retains capacity for aborted DNS until the lookup settles by %s', async settlement => {
+    const deferred: Array<{ resolve: (addresses: typeof publicAddress[]) => void; reject: (error: Error) => void }> = [];
+    const f = fixture([], () => new Promise((resolve, reject) => { deferred.push({ resolve, reject }); }));
+    for (let index = 0; index < 2; index++) {
+      const controller = new AbortController();
+      const rejected = expect(f.load(scope, 'https://one.example/a', controller.signal)).rejects.toThrow(/abort/i);
+      await vi.waitFor(() => expect(deferred).toHaveLength(index + 1));
+      controller.abort();
+      await rejected;
+    }
+    for (let index = 0; index < 4; index++) {
+      await expect(f.load(scope, 'https://one.example/a')).rejects.toMatchObject({ code: 'REFERENCE_IMAGE_CAPACITY_EXCEEDED', retryable: true });
+    }
+    expect(deferred).toHaveLength(2);
+    if (settlement === 'resolve') deferred[0].resolve([publicAddress]);
+    else deferred[0].reject(new Error('DNS failed after abort'));
+    // Allow uncancellable work and its capacity-release handlers to settle.
+    await new Promise(resolve => setImmediate(resolve));
+    const controller = new AbortController();
+    const rejected = expect(f.load(scope, 'https://one.example/a', controller.signal)).rejects.toThrow(/abort/i);
+    await vi.waitFor(() => expect(deferred).toHaveLength(3));
+    controller.abort(); await rejected;
+    await expect(f.load(scope, 'https://one.example/a')).rejects.toMatchObject({ code: 'REFERENCE_IMAGE_CAPACITY_EXCEEDED' });
+    expect(f.options).toHaveLength(0);
+    for (const pending of deferred) pending.resolve([publicAddress]);
+    await new Promise(resolve => setImmediate(resolve));
+  });
   it('rejects an already aborted caller before opening a request', async () => {
     const f = fixture([]);
     const controller = new AbortController(); controller.abort();
