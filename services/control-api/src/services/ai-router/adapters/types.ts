@@ -70,6 +70,8 @@ export interface VideoPollResult {
   unsignedUrls?: string[];
   providerCostUsd?: number;
   error?: string;
+  /** Optional structured upstream rejection details for provider-specific policy. */
+  failure?: Record<string, unknown>;
 }
 
 export interface ImageGenerationRequest {
