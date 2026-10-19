@@ -200,4 +200,43 @@ describe.skipIf(!dbUrl)('video preparation persistence (real PostgreSQL)', () =>
     expect(await p.acknowledgeAttemptSettlement(pool, first.id, { reservationReleased: true })).toBe(true);
   });
 
+  it.each([
+    ['group', false], ['asset', false], ['group', true], ['asset', true],
+  ] as const)('recovers %s registrations with fenced reconciliation-only leases (deleted=%s)', async (kind, deleted) => {
+    const ensure = kind === 'group' ? () => a.ensureReferenceGroup(pool, scope) : () => a.ensureReferenceAsset(pool, scope, 'a'.repeat(64));
+    const initialClaim = kind === 'group' ? a.claimReferenceGroup : a.claimReferenceAsset;
+    const recoveryClaim = kind === 'group' ? a.claimReferenceGroupRecovery : a.claimReferenceAssetRecovery;
+    const persist = kind === 'group' ? a.persistReferenceGroup : a.persistReferenceAsset;
+    const row = await ensure(); const original = (await initialClaim(pool, scope, row.id, 'original', 60_000))!;
+    if (deleted) {
+      expect(await persist(pool, scope, row.id, original.fence, { status: 'uncertain' })).toBe(true);
+      await a.tombstoneAppReferences(pool, scope.appId);
+    }
+    // Neither discovery nor recovery can steal an unexpired registration.
+    expect((await a.listReferenceRecovery(pool)).map(x => x.id)).not.toContain(row.id);
+    expect(await recoveryClaim(pool, scope, row.id, 'early', 60_000)).toBeNull();
+    const table = kind === 'group' ? 'ai_reference_asset_groups' : 'ai_reference_assets';
+    await pool.query(`UPDATE ${table} SET lease_expires_at=now()-interval '1 second' WHERE id=$1`, [row.id]);
+    const discovered = (await a.listReferenceRecovery(pool)).find(x => x.id === row.id)!;
+    expect(discovered).toMatchObject({ id: row.id, kind, mode: 'reconcile_only', registration_operation_id: row.id, cleanup_pending: deleted });
+    expect(await recoveryClaim(pool, { ...scope, endUserSub: 'other' }, row.id, 'intruder', 60_000)).toBeNull();
+    const x = await pool.connect(); const y = await pool.connect();
+    try {
+      const claims = await Promise.all([recoveryClaim(x, scope, row.id, 'one', 60_000), recoveryClaim(y, scope, row.id, 'two', 60_000)]);
+      expect(claims.filter(Boolean)).toHaveLength(1); const recovery = claims.find(Boolean)!;
+      expect(recovery).toMatchObject({ id: row.id, status: 'uncertain', mode: 'reconcile_only', registration_operation_id: row.id });
+      expect(recovery.fence).toBe(original.fence + 1);
+      expect(await initialClaim(pool, scope, row.id, 'post-again', 60_000)).toBeNull();
+      expect(await persist(pool, scope, row.id, original.fence, { status: 'active', providerId: 'stale' })).toBe(false);
+      expect(await persist(pool, scope, row.id, recovery.fence, { status: 'active', providerId: 'reconciled' })).toBe(true);
+    } finally { x.release(); y.release(); }
+    const result = kind === 'group' ? await a.getReferenceGroup(pool, scope, row.id) : await a.getReferenceAsset(pool, scope, row.id);
+    expect(result).toMatchObject({ provider_id: 'reconciled', status: 'active', cleanup_pending: deleted });
+    expect((await a.listReferenceRecovery(pool)).map(x => x.id)).not.toContain(row.id);
+    if (deleted) {
+      expect((await a.listReferenceCleanup(pool)).map(x => x.id)).toContain(row.id);
+      expect(await a.acknowledgeReferenceCleanup(pool, kind, row.id)).toBe(true);
+    }
+  });
+
 });

@@ -100,3 +100,45 @@ export async function acknowledgeReferenceCleanup(db: PreparationDb, kind: Kind,
     WHERE id=$1 AND cleanup_pending AND ${live} AND status NOT IN ('registering','uncertain')
     ${kind === 'group' ? `AND NOT EXISTS (SELECT 1 FROM ai_reference_assets WHERE group_id=$1 AND (cleanup_pending OR status!='deleted'))` : ''}`, [id])).rowCount === 1;
 }
+
+export interface ReferenceRecoveryRow extends ReferenceRow {
+  kind: Kind;
+  /** This lease grants provider lookup/reconciliation only, NEVER registration POST. */
+  mode: 'reconcile_only';
+  /** Original UUID remains the stable registration operation identity. */
+  registration_operation_id: string;
+}
+const interruptedRegistration = `status IN ('registering','uncertain')
+  AND (lease_expires_at IS NULL OR lease_expires_at<=now())`;
+
+/**
+ * Discover interrupted creation in all scopes, including deletion tombstones.
+ * This internal scan does not grant ownership; claim a recovery lease before
+ * provider lookup or persistence. Archived source-region copies stay excluded.
+ */
+export async function listReferenceRecovery(db: PreparationDb, limit = 100): Promise<ReferenceRecoveryRow[]> {
+  const columns = `id,organization_id,app_id,end_user_sub,provider_slot,credential_namespace,provider_id,status,
+    cleanup_pending,deleted_at,cleaned_at,fence,lease_owner,lease_expires_at,
+    'reconcile_only'::text AS mode,id AS registration_operation_id`;
+  return (await db.query<ReferenceRecoveryRow>(`SELECT ${columns},'asset'::text AS kind
+    FROM ai_reference_assets WHERE ${live} AND ${interruptedRegistration}
+    UNION ALL SELECT ${columns},'group'::text AS kind
+    FROM ai_reference_asset_groups WHERE ${live} AND ${interruptedRegistration}
+    ORDER BY kind,id LIMIT $1`, [limit])).rows;
+}
+async function claimRecovery(db: PreparationDb, kind: Kind, scope: AssetScope, id: string, worker: string, leaseMs: number): Promise<ReferenceRecoveryRow | null> {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('lease duration must be positive milliseconds');
+  return (await db.query<ReferenceRecoveryRow>(`UPDATE ${tableFor(kind)} SET fence=fence+1,
+    lease_owner=$7,lease_expires_at=now()+$8*interval '1 millisecond',status='uncertain',updated_at=now()
+    WHERE ${scopeSql} AND id=$6 AND ${live} AND ${interruptedRegistration}
+    RETURNING *,'${kind}'::text AS kind,'reconcile_only'::text AS mode,id AS registration_operation_id`,
+  [...scopeValues(scope),id,worker,leaseMs])).rows[0] ?? null;
+}
+/** Reconciliation-only takeover fences the original worker; preserves tombstones and operation UUID. */
+export async function claimReferenceGroupRecovery(db: PreparationDb, scope: AssetScope, id: string, worker: string, leaseMs: number): Promise<ReferenceRecoveryRow | null> {
+  return claimRecovery(db,'group',scope,id,worker,leaseMs);
+}
+/** Reconciliation-only: a recovered uncertain state never authorizes a new registration POST. */
+export async function claimReferenceAssetRecovery(db: PreparationDb, scope: AssetScope, id: string, worker: string, leaseMs: number): Promise<ReferenceRecoveryRow | null> {
+  return claimRecovery(db,'asset',scope,id,worker,leaseMs);
+}
