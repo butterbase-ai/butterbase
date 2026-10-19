@@ -76,6 +76,7 @@ import { peopleRoutes } from './routes/people.js';
 import { peopleWebhookRoutes } from './routes/people-webhook.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
 import { aiImageRoutes } from './routes/ai-images.js';
+import { startVideoPreparationWorker } from './services/ai-router/video-preparation-worker.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
 import { startEmailLookupSweeper } from './services/people/email-lookup-sweeper.js';
@@ -1089,6 +1090,8 @@ Promise.resolve(app.ready())
         });
     }
 
+    if (process.env.SKIP_VIDEO_PREPARATION_WORKER !== '1') (app as any).videoPreparationStop = startVideoPreparationWorker(app);
+
     // Fork-count sweeper: processes cross-region fork_count_decrements outbox
     // rows that the runtime DELETE trigger cannot handle (different-region source).
     // Skip in tests (SKIP_FORK_SWEEPER=1) or when no runtime DBs are configured.
@@ -1214,6 +1217,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
       if ((app as any).orphanReconcilerInterval) clearInterval((app as any).orphanReconcilerInterval);
+      if ((app as any).videoPreparationStop) (app as any).videoPreparationStop();
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});

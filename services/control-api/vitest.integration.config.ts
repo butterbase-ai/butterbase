@@ -35,6 +35,7 @@ export default defineConfig({
       'src/services/fork-count-sweeper.test.ts',
       'src/services/paid-conversion.db.test.ts',
       'src/services/ai-router/video-preparations.db.test.ts',
+      'src/services/ai-router/video-preparation.test.ts',
       'src/services/kv/kv-scope.test.ts',
     ],
   },

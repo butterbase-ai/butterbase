@@ -15,6 +15,8 @@ export interface GrantArgs {
    *  FULL amount rather than partial-granting down to the balance. Overdraft
    *  lands in credits_usd, which may go negative. */
   allowFloor?: boolean;
+  /** Optional durable caller identity. Replays never debit twice. */
+  reservationId?: string;
 }
 
 export interface GrantResult {
@@ -69,6 +71,23 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     const totalAvailable = monthly + topup;
     const expires = new Date(Date.now() + args.ttlSeconds * 1000);
 
+    if (args.reservationId) {
+      const existing = await client.query<{ lease_id: string; organization_id: string; user_id: string; region: string; amount_usd: string; expires_at: Date; status: string }>(
+        'SELECT lease_id,organization_id,user_id,region,amount_usd,expires_at,status FROM credit_leases WHERE lease_id=$1', [args.reservationId]);
+      const row = existing.rows[0];
+      if (row) {
+        if (row.organization_id !== organizationId || row.user_id !== args.userId || row.region !== args.region || Number(row.amount_usd) !== Number(args.amountUsd.toFixed(4))) throw new Error('Reservation identity mismatch');
+        if (row.status !== 'active' || row.expires_at <= new Date()) throw new Error('Reservation is no longer active');
+        // Reauthorization on replay excludes this reservation's own draw.
+        if (args.allowFloor && totalAvailable + Number(row.amount_usd) < floor) {
+          await client.query('COMMIT');
+          return { leaseId: null, amountGranted: 0, expiresAt: row.expires_at, balanceUsd: totalAvailable, floorUsd: floor };
+        }
+        await client.query('COMMIT');
+        return { leaseId: row.lease_id, amountGranted: Number(row.amount_usd), expiresAt: row.expires_at, balanceUsd: totalAvailable, floorUsd: floor };
+      }
+    }
+
     let granted: number;
     if (args.allowFloor) {
       // Admission is the floor check; the amount is then granted in full.
@@ -118,10 +137,10 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     }
 
     const ins = await client.query<{ lease_id: string }>(
-      `INSERT INTO credit_leases (user_id, organization_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd)
-       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
+      `INSERT INTO credit_leases (user_id, organization_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd, lease_id)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, COALESCE($8::uuid,gen_random_uuid()))
        RETURNING lease_id`,
-      [args.userId, organizationId, args.region, granted, expires, sourcePool, topupAmountColumn]
+      [args.userId, organizationId, args.region, granted, expires, sourcePool, topupAmountColumn, args.reservationId ?? null]
     );
 
     await client.query('COMMIT');

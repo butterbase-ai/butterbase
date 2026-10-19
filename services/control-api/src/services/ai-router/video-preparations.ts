@@ -18,6 +18,8 @@ export interface PreparationRow {
   model: string;
   request_json: Record<string, unknown>;
   input_identity: InputIdentity | null;
+  next_action_at: Date;
+  reference_progress: Record<string, import('./video-preparation-hooks.js').ReferenceProgress>;
   status: 'pending' | 'in_progress' | TerminalOutcome['status'];
   stage: 'preparing_references' | 'submitting' | 'polling' | 'settling' | null;
   terminal_outcome: TerminalOutcome | null;
@@ -37,6 +39,7 @@ export interface AttemptRow {
   organization_id: string;
   attempt_number: 1 | 2;
   reservation_id: string;
+  next_action_at: Date;
   provider_slot: string;
   credential_namespace: string;
   billing_context: Record<string, unknown>;
@@ -93,7 +96,7 @@ export async function captureInputIdentity(db: PreparationDb, id: string, fence:
     WHERE id=$1 AND ${leased} AND ${mutable} AND (input_identity IS NULL OR input_identity=$3::jsonb)`, [id,fence,JSON.stringify(identity)])).rowCount === 1;
 }
 export async function setPreparationStage(db: PreparationDb, id: string, fence: number, stage: PreparationRow['stage']): Promise<boolean> {
-  return (await db.query(`UPDATE ai_video_preparations SET stage=$3,updated_at=now() WHERE id=$1 AND ${leased} AND ${mutable}`, [id,fence,stage])).rowCount === 1;
+  return (await db.query(`UPDATE ai_video_preparations SET stage=$3,status='in_progress',updated_at=now() WHERE id=$1 AND ${leased} AND ${mutable}`, [id,fence,stage])).rowCount === 1;
 }
 
 /** Locks the public job and atomically creates/reuses its current attempt. */
@@ -143,7 +146,7 @@ export async function markAttemptTerminal(db: PreparationDb, id: string, fence: 
   validateOutcome(outcome);
   return (await db.query(`UPDATE ai_video_attempts SET submission_state='terminal',terminal_outcome=$3,terminal_at=now(),
     settlement_status='pending',updated_at=now() WHERE id=$1 AND fence=$2 AND ${live}
-      AND submission_state IN ('submitting','accepted','uncertain')`, [id,fence,outcome])).rowCount === 1;
+      AND submission_state IN ('created','submitting','accepted','uncertain')`, [id,fence,outcome])).rowCount === 1;
 }
 /** Caller settles idempotently by reservation_id first. Receipt + ack commit together. */
 export async function acknowledgeAttemptSettlement(db: PreparationDb, id: string, receipt: Record<string, unknown>): Promise<boolean> {
