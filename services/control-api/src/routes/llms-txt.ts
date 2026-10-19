@@ -32,6 +32,12 @@ When a user asks you to "create a backend" or "set up a database":
 3. File is automatically tracked in storage_objects table
 \`\`\`
 
+### Fictional character video references
+
+For eligible video requests, explicitly declare known AI-generated fictional images with \`reference_declarations: [{path: "/input_images/0", kind: "ai_generated_fictional_character"}]\`.
+Use \`prepare_references: "on_rejection"\` (default, at most one eligible retry) or \`"upfront"\`. Never infer fictional provenance or consent from an image. Preparation sends declared images to an external provider for storage and validation.
+Keep the returned job ID and poll through preparing_references/submitting/polling/settling. Unsupported combinations return UNSUPPORTED_REFERENCE_PREPARATION; an uncertain submission needs reconciliation, not another POST. Source URLs are erased after24hours; provider copies wait for retained jobs and retryable cleanup. Registration is not separately charged; generation uses normal credits. See butterbase_docs topic ai for the full contract.
+
 ## Error Handling
 
 All errors follow this structure:
