@@ -46,7 +46,15 @@ export function referenceSource(request: Record<string, unknown>, path: string):
  throw new PreparationOptionError('Declaration must identify an image reference');
 }
 function safeOutcome(outcome: p.TerminalOutcome): p.TerminalOutcome {
- if (outcome.status === 'completed' && (!outcome.output?.length || !outcome.output.every(value => { try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password; } catch { return false; } }))) return { status: 'failed', error: 'invalid_provider_output' };
+ if (outcome.status === 'completed' && (!outcome.output?.length || !outcome.output.every(value => {
+  try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password; }
+  catch { return false; }
+ }))) {
+  // Preserve known expenditure and upstream completion even when no public output is valid.
+  const cost = outcome.providerCostUsd;
+  return { status: 'failed', error: 'invalid_provider_output', providerStatus: 'completed',
+   ...(typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? { providerCostUsd: cost } : {}) };
+ }
  return outcome;
 }
 function eligibleRetry(job: p.PreparationRow, outcome: p.TerminalOutcome): boolean {
@@ -84,6 +92,7 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
    else await p.markAttemptAccepted(db, attempt.id, attempt.fence, result.handle);
   } else if (result.status === 'terminal') await p.markAttemptTerminal(db, attempt.id, attempt.fence, safeOutcome(result.outcome));
   else if (attempt.submission_state === 'submitting') await p.markAttemptUncertain(db, attempt.id, attempt.fence, { code: 'acceptance_unknown' });
+  await p.syncPreparationAttemptStage(db, attempt.id, attempt.fence);
   await db.query(`UPDATE ai_video_attempts SET next_action_at=$3,lease_owner=NULL,lease_expires_at=NULL WHERE id=$1 AND fence=$2 AND submission_state!='submitting'`, [attempt.id, attempt.fence, result.status === 'pending' ? result.nextPollAt ?? later() : later()]);
  }
  async function settleAttempt(attempt: p.AttemptRow): Promise<void> {
@@ -117,7 +126,7 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
   try {
    await scheduleJob(job);
    const attempts = await p.listPreparationAttempts(db, job.id); const current = attempts.at(-1);
-   if (current?.settlement_status === 'pending') { await settleAttempt(current); return; }
+   if (current?.settlement_status === 'pending') { await p.setPreparationStage(db, job.id, job.fence, 'settling'); await settleAttempt(current); return; }
    if (current?.submission_state === 'accepted' || current?.submission_state === 'uncertain' || current?.submission_state === 'submitting') { await recoverAttempt(current); return; }
    if (current?.submission_state === 'terminal' && !(job.retry_consumed && current.attempt_number === 1)) {
     if (!job.retry_consumed && eligibleRetry(job, current.terminal_outcome!) && await p.consumePreparationRetry(db, job.id, job.fence)) { await p.setPreparationStage(db, job.id, job.fence, 'preparing_references'); return; }
@@ -133,6 +142,7 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
    }
    const { request, selection } = preparationEnvelope(job); const paths = declaredReferencePaths(request);
    const progress: Record<string, ReferenceProgress> = { ...job.reference_progress };
+   if (request.prepare_references === 'upfront' && !current) await p.setPreparationStage(db, job.id, job.fence, 'preparing_references');
    const uncaptured = paths.find(path => !progress[path]?.sha256);
    if (uncaptured) {
     if (!await freshAuthority(job)) return;

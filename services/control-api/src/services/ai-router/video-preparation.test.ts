@@ -40,6 +40,34 @@ describe.skipIf(!url)('durable video lifecycle with real local PostgreSQL', () =
   expect(await admitVideoPreparation(ctx(), hooks, scope, { model: 'test', prompt: 'plain' })).toBeNull(); const job = await makeJob();
   expect(job.status).toBe('pending'); expect(await repository.getPreparation(db, job.id)).toBeTruthy(); expect(hooks.loadImage).not.toHaveBeenCalled(); expect(hooks.reserve).not.toHaveBeenCalled(); expect(hooks.submit).not.toHaveBeenCalled();
  });
+ it.each(['upfront','on_rejection'])('keeps registration pending then transitions accepted, polling and terminal (%s)', async mode => {
+  if (mode === 'on_rejection') vi.mocked(hooks.submit).mockResolvedValueOnce({status:'terminal',outcome:{status:'failed',error:'input_face_privacy',retryPaths:['/input_images/0']}});
+  vi.mocked(hooks.prepareReference).mockResolvedValueOnce({status:'processing',referenceId:'ref',nextAction:'poll',nextPollAt:new Date(0)});
+  vi.mocked(hooks.poll).mockResolvedValueOnce({status:'pending',nextPollAt:new Date(0)});
+  const job=await makeJob({prepare_references:mode});
+  for(let i=0;i<12 && !vi.mocked(hooks.prepareReference).mock.calls.length;i++) await advance(job.id);
+  expect(hooks.prepareReference).toHaveBeenCalledTimes(1);
+  expect(await repository.getPreparation(db,job.id)).toMatchObject({status:'pending',stage:'preparing_references'});
+  if (mode==='on_rejection') {
+   const first=(await repository.listPreparationAttempts(db,job.id))[0];
+   await repository.syncPreparationAttemptStage(db,first.id,first.fence);
+   expect(await repository.getPreparation(db,job.id)).toMatchObject({status:'pending',stage:'preparing_references'});
+  }
+  const expectedSubmits=mode==='upfront'?1:2;
+  for(let i=0;i<12 && vi.mocked(hooks.submit).mock.calls.length<expectedSubmits;i++) await advance(job.id);
+  expect(await repository.getPreparation(db,job.id)).toMatchObject({status:'in_progress',stage:'polling'});
+  await advance(job.id);
+  expect(await repository.getPreparation(db,job.id)).toMatchObject({status:'in_progress',stage:'polling'});
+  await advance(job.id);
+  expect(await repository.getPreparation(db,job.id)).toMatchObject({status:'in_progress',stage:'settling'});
+  await advance(job.id,7);
+  expect(await repository.getPreparation(db,job.id)).toMatchObject({status:'completed',stage:null});
+ });
+ it('retains validated completion cost when generic output validation fails', async()=>{
+  vi.mocked(hooks.submit).mockResolvedValue({status:'terminal',outcome:{status:'completed',output:[],providerCostUsd:0.4}});
+  const job=await makeJob();await advance(job.id,12);
+  expect((await repository.listPreparationAttempts(db,job.id))[0].terminal_outcome).toEqual({status:'failed',error:'invalid_provider_output',providerStatus:'completed',providerCostUsd:0.4});
+ });
  it('finishes without customer polling across restart and duplicate workers', async () => {
   const job = await makeJob(); await advance(job.id, 3); await Promise.all([fresh().advanceVideoPreparation(job.id), fresh().advanceVideoPreparation(job.id)]); await advance(job.id, 12);
   expect(hooks.submit).toHaveBeenCalledTimes(1); expect(hooks.prepareReference).not.toHaveBeenCalled(); expect((await repository.getPreparation(db, job.id))?.status).toBe('completed'); expect((await db.query('SELECT * FROM test_usage')).rowCount).toBe(1);

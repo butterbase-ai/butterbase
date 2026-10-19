@@ -26,6 +26,14 @@ describe('durable preparation HTTP seam', () => {
   expect(response.statusCode).toBe(202); expect(response.json().job_id).toBe('job');
   expect(f.create.mock.calls[0][1]).toMatchObject({appId:'app',organizationId:'org',userId:'owner',endUserSub:'alice'}); expect(hooks.submit).not.toHaveBeenCalled(); expect(hooks.prepareReference).not.toHaveBeenCalled(); expect(f.legacySubmit).not.toHaveBeenCalled();
  });
+ it.each(['upfront', 'retry'])('exposes only the public pending preparation stage for %s', async () => {
+  f.job.status='pending'; f.job.stage='preparing_references';
+  expect((await app.inject('/v1/app/videos/completions/job')).json()).toMatchObject({status:'pending',stage:'preparing_references'});
+  for (const [status, stage] of [['in_progress','submitting'],['in_progress','polling'],['in_progress','settling'],['failed',null],['completed','preparing_references']]) {
+   f.job.status=status; f.job.stage=stage;
+   expect((await app.inject('/v1/app/videos/completions/job')).json()).not.toHaveProperty('stage');
+  }
+ });
  it('GET is read-only and preserves app/end-user isolation', async () => {
   expect((await app.inject('/v1/app/videos/completions/job')).statusCode).toBe(200); expect(hooks.submit).not.toHaveBeenCalled();
   f.caller={kind:'end_user',sub:'bob'}; expect((await app.inject('/v1/app/videos/completions/job')).statusCode).toBe(404);

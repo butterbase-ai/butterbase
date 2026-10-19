@@ -489,6 +489,7 @@ export function buildPublicPreparationResponse(base: string, appId: string, job:
   const terminal = ['completed','failed','cancelled','expired'].includes(job.status);
   const settled = terminal && attempts.every(a => a.settlement_status === 'acknowledged');
   return { job_id: job.id, status: job.status, model: job.model, polling_url: pollingUrl,
+    ...(job.status === 'pending' && job.stage === 'preparing_references' ? { stage: 'preparing_references' } : {}),
     content_urls: job.status === 'completed' ? job.terminal_outcome?.output?.map((_, i) => `${pollingUrl}/content?index=${i}`) ?? null : null,
     error: job.terminal_outcome?.error ?? null, created_at: job.created_at,
     charged_credits_usd: settled ? attempts.reduce((sum, a) => sum + Number(a.settlement_receipt?.chargedUsd ?? 0), 0) : null,

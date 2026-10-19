@@ -6,6 +6,9 @@ export type InputIdentity = Record<string, { sha256: string; objectId?: string; 
 export type TerminalOutcome = {
   status: 'completed' | 'failed' | 'cancelled' | 'expired';
   output?: string[];
+  /** Upstream completion and expense survive public output validation failure. */
+  providerStatus?: 'completed';
+  providerCostUsd?: number;
   error?: string;
   [key: string]: unknown;
 };
@@ -96,7 +99,18 @@ export async function captureInputIdentity(db: PreparationDb, id: string, fence:
     WHERE id=$1 AND ${leased} AND ${mutable} AND (input_identity IS NULL OR input_identity=$3::jsonb)`, [id,fence,JSON.stringify(identity)])).rowCount === 1;
 }
 export async function setPreparationStage(db: PreparationDb, id: string, fence: number, stage: PreparationRow['stage']): Promise<boolean> {
-  return (await db.query(`UPDATE ai_video_preparations SET stage=$3,status='in_progress',updated_at=now() WHERE id=$1 AND ${leased} AND ${mutable}`, [id,fence,stage])).rowCount === 1;
+  return (await db.query(`UPDATE ai_video_preparations SET stage=$3,status=CASE WHEN $3='preparing_references' THEN 'pending' ELSE 'in_progress' END,updated_at=now() WHERE id=$1 AND ${leased} AND ${mutable}`, [id,fence,stage])).rowCount === 1;
+}
+
+/** Update public progress from the current fenced attempt, including recovery lanes. */
+export async function syncPreparationAttemptStage(db: PreparationDb, id: string, fence: number): Promise<void> {
+  await db.query(`UPDATE ai_video_preparations p SET status='in_progress',
+    stage=CASE WHEN a.submission_state='terminal' THEN 'settling' WHEN a.submission_state='accepted' THEN 'polling' ELSE 'submitting' END,
+    updated_at=now() FROM ai_video_attempts a
+    WHERE a.id=$1 AND a.fence=$2 AND a.archived_after_move IS NULL AND p.id=a.preparation_id
+      AND p.archived_after_move IS NULL AND p.deleted_at IS NULL AND p.status IN ('pending','in_progress')
+      AND NOT EXISTS (SELECT 1 FROM ai_video_attempts newer WHERE newer.preparation_id=p.id AND newer.attempt_number>a.attempt_number)
+      AND NOT (p.retry_consumed AND a.attempt_number=1)`, [id,fence]);
 }
 
 /** Locks the public job and atomically creates/reuses its current attempt. */
