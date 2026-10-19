@@ -55,6 +55,14 @@ export const MOVE_APP_RUNTIME_TABLES = [
   'ai_usage_logs',
   'ai_video_jobs',
   'ai_image_jobs',
+  // Compatibility release BEFORE migration 056. Absent source tables are
+  // skipped by copy; reverse paths tolerate missing future tables.
+  // These rows have app_id without cascading apps FKs so deletion retains
+  // unsettled attempts and durable provider cleanup tombstones.
+  'ai_video_preparations',
+  'ai_video_attempts',
+  'ai_reference_asset_groups',
+  'ai_reference_assets',
   'actor_usage_logs',
   'mcp_tool_call_log',
   'people_usage_logs',
@@ -165,3 +173,8 @@ export const TABLE_PK_OVERRIDES: Record<string, string> = {
  * with a reason and an owning issue.
  */
 export const MOVE_APP_EXCLUDED_CHILD: Record<string, string> = {};
+
+/** Additive tables that may be absent before the corresponding migration. */
+export const MOVE_APP_OPTIONAL_TABLES: ReadonlySet<string> = new Set([
+  'ai_video_preparations','ai_video_attempts','ai_reference_asset_groups','ai_reference_assets',
+]);
