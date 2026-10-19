@@ -1,5 +1,8 @@
 -- @scope: runtime
--- Admission/worker claims and app teardown/move share the app-row lock.
+-- INSERT admission takes the app lock first. Existing-row claims must NEVER
+-- wait child->app: NOWAIT returns no claim under contention, ready for retry.
+-- Deletion/move already owns app->child. Local tombstones, late completion and
+-- one-way source erasure do not acquire fresh external-effect authority.
 -- No provider IO occurs in these transactions. Already-claimed work may finish
 -- late; tombstones and attempt identities survive deletion for reconciliation.
 BEGIN;
@@ -32,8 +35,15 @@ BEGIN
  -- Recovery/settlement do not claim the preparation. Cancel/erase never needs
  -- fresh authority. Every new preparation claim serializes with app teardown.
  IF TG_OP='INSERT' OR (NEW.lease_owner IS NOT NULL AND NEW.fence IS DISTINCT FROM OLD.fence) THEN
-  SELECT * INTO owner FROM apps WHERE id=NEW.app_id FOR UPDATE;
-  IF NOT FOUND OR NOT (owner.provisioning_status='ready' OR (TG_OP='INSERT' AND owner.provisioning_status='migration_target_reserved' AND NEW.status IN ('completed','failed','cancelled','expired'))) OR owner.organization_id::text IS DISTINCT FROM NEW.organization_id
+  IF TG_OP='INSERT' THEN
+   SELECT * INTO owner FROM apps WHERE id=NEW.app_id FOR UPDATE;
+  ELSE
+   BEGIN
+    SELECT * INTO owner FROM apps WHERE id=NEW.app_id FOR UPDATE NOWAIT;
+   EXCEPTION WHEN lock_not_available THEN RETURN NULL;
+   END;
+  END IF;
+  IF owner.id IS NULL OR NOT (owner.provisioning_status='ready' OR (TG_OP='INSERT' AND owner.provisioning_status='migration_target_reserved' AND NEW.status IN ('completed','failed','cancelled','expired'))) OR owner.organization_id::text IS DISTINCT FROM NEW.organization_id
     OR owner.owner_id::text IS DISTINCT FROM NEW.user_id THEN
    RAISE EXCEPTION 'video preparation admission unavailable' USING ERRCODE='55000';
   END IF;
@@ -44,15 +54,26 @@ CREATE TRIGGER ai_video_preparation_admission BEFORE INSERT OR UPDATE ON ai_vide
 CREATE FUNCTION fence_reference_admission() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE owner apps%ROWTYPE;
 BEGIN
- IF TG_OP='UPDATE' AND NEW.cleanup_pending THEN
+ IF TG_OP='INSERT' THEN
   SELECT * INTO owner FROM apps WHERE id=NEW.app_id FOR UPDATE;
-  IF FOUND AND owner.provisioning_status IN ('migrating','migration_target_reserved') THEN RETURN NULL; END IF;
- END IF;
- IF TG_OP='INSERT' OR (NEW.lease_owner IS NOT NULL AND NEW.fence IS DISTINCT FROM OLD.fence AND NOT NEW.cleanup_pending AND NEW.status IN ('registering','pending')) THEN
-  SELECT * INTO owner FROM apps WHERE id=NEW.app_id FOR UPDATE;
-  IF NOT FOUND OR NOT (owner.provisioning_status='ready' OR (TG_OP='INSERT' AND owner.provisioning_status='migration_target_reserved' AND NEW.status IN ('new','active','failed','deleted') AND (NEW.lease_expires_at IS NULL OR NEW.lease_expires_at<=now()))) OR owner.organization_id::text IS DISTINCT FROM NEW.organization_id THEN
-   RAISE EXCEPTION 'reference admission unavailable' USING ERRCODE='55000';
+ ELSIF NEW.lease_owner IS NOT NULL AND NEW.fence IS DISTINCT FROM OLD.fence THEN
+  -- Covers registration, validation, cleanup AND uncertainty recovery. A
+  -- skipped row grants no IO and preserves the old fence/schedule for retry.
+  BEGIN
+   SELECT * INTO owner FROM apps WHERE id=NEW.app_id FOR UPDATE NOWAIT;
+  EXCEPTION WHEN lock_not_available THEN RETURN NULL;
+  END;
+  IF NEW.cleanup_pending OR NEW.status='uncertain' THEN
+   IF owner.provisioning_status IN ('migrating','migration_target_reserved') THEN RETURN NULL; END IF;
+   -- Orphan obligations may reconcile/clean up under retained credentials.
+   RETURN NEW;
   END IF;
+ ELSE
+  -- Tombstones and late handles must persist even during teardown/migration.
+  RETURN NEW;
+ END IF;
+ IF owner.id IS NULL OR NOT (owner.provisioning_status='ready' OR (TG_OP='INSERT' AND owner.provisioning_status='migration_target_reserved' AND NEW.status IN ('new','active','failed','deleted') AND (NEW.lease_expires_at IS NULL OR NEW.lease_expires_at<=now()))) OR owner.organization_id::text IS DISTINCT FROM NEW.organization_id THEN
+  RAISE EXCEPTION 'reference admission unavailable' USING ERRCODE='55000';
  END IF;
  RETURN NEW;
 END $$;

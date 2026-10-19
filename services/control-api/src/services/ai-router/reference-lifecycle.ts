@@ -11,6 +11,9 @@ export async function referenceTransaction<T>(db: PreparationDb, run: (tx: pg.Po
  catch (error) { await tx.query('ROLLBACK'); throw error; } finally { tx.release(); }
 }
 export async function lockReferenceScope(db: PreparationDb, scope: AssetScope): Promise<void> {
+ // Multi-step replacements must not retire a child before INSERT takes the
+ // app lock. Every scoped transaction uses app -> scope -> child order.
+ await db.query('SELECT id FROM apps WHERE id=$1 FOR UPDATE',[scope.appId]);
  await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify(values(scope))]);
 }
 /** A reference includes pre-upload hashes, because a crash may precede saving a
@@ -55,12 +58,24 @@ export async function finishReferenceCleanup(db:PreparationDb,row:ReferenceClean
 export async function sweepReferenceRetention(db:PreparationDb,limit=100):Promise<void>{
  const bound=Math.max(1,Math.min(limit,100));
  await db.query(`UPDATE ai_video_preparations SET request_json=video_preparation_redacted_request(request_json),source_erased_at=now(),updated_at=now()
- WHERE id IN (SELECT id FROM ai_video_preparations WHERE archived_after_move IS NULL AND source_erased_at IS NULL AND input_expires_at<=now() AND deadline<=now() ORDER BY input_expires_at LIMIT $1)`,[bound]);
- await db.query(`UPDATE ai_reference_assets r SET retired_at=COALESCE(retired_at,now()),deleted_at=COALESCE(deleted_at,now()),cleanup_pending=true,updated_at=now()
- WHERE id IN (SELECT r.id FROM ai_reference_assets r WHERE archived_after_move IS NULL AND cleaned_at IS NULL AND NOT cleanup_pending AND status NOT IN ('registering','uncertain') AND created_at<=now()-interval '24 hours' AND NOT ${retainedAssetSql()} ORDER BY created_at LIMIT $1)`,[bound]);
- await db.query(`UPDATE ai_reference_asset_groups g SET retired_at=COALESCE(retired_at,now()),deleted_at=COALESCE(deleted_at,now()),cleanup_pending=true,updated_at=now()
- WHERE id IN (SELECT g.id FROM ai_reference_asset_groups g WHERE archived_after_move IS NULL AND cleaned_at IS NULL AND NOT cleanup_pending AND status NOT IN ('registering','uncertain') AND created_at<=now()-interval '24 hours'
- AND NOT EXISTS(SELECT 1 FROM ai_reference_assets a WHERE a.group_id=g.id AND a.retired_at IS NULL AND a.deleted_at IS NULL) ORDER BY created_at LIMIT $1)`,[bound]);
+ WHERE id IN (SELECT id FROM ai_video_preparations WHERE source_erased_at IS NULL AND input_expires_at<=now() AND deadline<=now() ORDER BY input_expires_at LIMIT $1)`,[bound]);
+ // A bounded candidate page locks available app rows BEFORE child mutation.
+ // SKIP LOCKED leaves a contended/moving copy for a later sweep; deleted apps
+ // still have durable orphan cleanup obligations. Local source erasure above
+ // deliberately applies to both region copies without acquiring app authority.
+ for(const kind of ['asset','group'] as const) {
+  const dependency=kind==='asset'?`NOT ${retainedAssetSql()}`:`NOT EXISTS(SELECT 1 FROM ai_reference_assets a WHERE a.group_id=r.id AND a.retired_at IS NULL AND a.deleted_at IS NULL)`;
+  await db.query(`WITH candidates AS MATERIALIZED (
+   SELECT r.id,r.app_id FROM ${table(kind)} r WHERE archived_after_move IS NULL AND cleaned_at IS NULL AND NOT cleanup_pending
+    AND status NOT IN ('registering','uncertain') AND created_at<=now()-interval '24 hours' AND ${dependency} ORDER BY created_at LIMIT $1
+  ), owners AS MATERIALIZED (
+   SELECT app.id FROM apps app WHERE app.id IN (SELECT app_id FROM candidates)
+    AND app.provisioning_status NOT IN ('migrating','migration_target_reserved') ORDER BY app.id FOR UPDATE SKIP LOCKED
+  ) UPDATE ${table(kind)} r SET retired_at=COALESCE(retired_at,now()),deleted_at=COALESCE(deleted_at,now()),cleanup_pending=true,updated_at=now()
+  WHERE r.id IN (SELECT c.id FROM candidates c WHERE c.app_id IN (SELECT id FROM owners) OR NOT EXISTS(SELECT 1 FROM apps app WHERE app.id=c.app_id))
+   AND r.archived_after_move IS NULL AND r.cleaned_at IS NULL AND NOT r.cleanup_pending AND r.status NOT IN ('registering','uncertain') AND ${dependency}`,[bound]);
+ }
+
 }
 export interface ReferenceLimits { retainedAssets:number; retainedBytes:number; registrationsPerHour:number; concurrency:number }
 export class ReferenceLimitError extends Error { readonly code='REFERENCE_CAPACITY_EXCEEDED'; constructor(){super('Reference capacity exceeded');} }
