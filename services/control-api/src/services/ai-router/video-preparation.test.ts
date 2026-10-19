@@ -76,6 +76,53 @@ describe.skipIf(!url)('durable video lifecycle with real local PostgreSQL', () =
   vi.mocked(hooks.submit).mockRejectedValue(new Error('timeout')); const job = await makeJob(); await advance(job.id, 15);
   expect(hooks.submit).toHaveBeenCalledTimes(1); expect((await repository.listPreparationAttempts(db, job.id))[0].submission_state).toBe('uncertain'); expect(hooks.settle).not.toHaveBeenCalled();
  });
+ it('returns a timely explicit no-dispatch result to created with a delayed retry', async () => {
+  vi.mocked(hooks.submit).mockResolvedValueOnce({ status: 'not_submitted', reason: 'provider_capacity', nextPollAt: new Date(0) });
+  const job = await makeJob(); await advance(job.id, 2);
+  await db.query('UPDATE ai_video_preparations SET next_action_at=now() WHERE id=$1', [job.id]);
+  await createVideoPreparationDriver({ ...ctx(), hooks, retryMs: 5000 }).advanceVideoPreparation(job.id);
+  const deferred = (await repository.listPreparationAttempts(db, job.id))[0];
+  expect(deferred).toMatchObject({ submission_state: 'created', provider_handle: null, settlement_status: 'not_due' });
+  expect(deferred.next_action_at.getTime()).toBeGreaterThan(Date.now());
+  expect((await repository.getPreparation(db, job.id))!.next_action_at).toEqual(deferred.next_action_at);
+  await fresh().advanceVideoPreparation(job.id); expect(hooks.submit).toHaveBeenCalledTimes(1);
+  // Parent schedule drift must not bypass the attempt's delayed retry.
+  await db.query('UPDATE ai_video_preparations SET next_action_at=now() WHERE id=$1', [job.id]);
+  await fresh().advanceVideoPreparation(job.id); expect(hooks.submit).toHaveBeenCalledTimes(1);
+  expect((await repository.getPreparation(db, job.id))!.next_action_at).toEqual(deferred.next_action_at);
+  await advance(job.id, 12);
+  const attempts = await repository.listPreparationAttempts(db, job.id);
+  expect(attempts).toHaveLength(1); expect(attempts[0]).toMatchObject({ id: deferred.id, reservation_id: deferred.reservation_id, settlement_status: 'acknowledged' });
+  expect(hooks.submit).toHaveBeenCalledTimes(2); expect(hooks.settle).toHaveBeenCalledTimes(1);
+  expect((await db.query('SELECT * FROM test_usage')).rowCount).toBe(1);
+ });
+ it('defers the privacy retry without consuming another attempt or reservation', async () => {
+  vi.mocked(hooks.submit)
+   .mockResolvedValueOnce({ status: 'terminal', outcome: { status: 'failed', error: 'input_face_privacy', retryPaths: ['/input_images/0'] } })
+   .mockResolvedValueOnce({ status: 'not_submitted', reason: 'provider_capacity' });
+  const job = await makeJob();
+  for (let i = 0; i < 12 && vi.mocked(hooks.submit).mock.calls.length < 2; i++) await advance(job.id);
+  const deferred = (await repository.listPreparationAttempts(db, job.id))[1];
+  expect(deferred).toMatchObject({ attempt_number: 2, submission_state: 'created', settlement_status: 'not_due' });
+  await advance(job.id, 12);
+  const attempts = await repository.listPreparationAttempts(db, job.id);
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toMatchObject({ id: deferred.id, reservation_id: deferred.reservation_id, settlement_status: 'acknowledged' });
+  expect((await repository.getPreparation(db, job.id))).toMatchObject({ status: 'completed', retry_consumed: true });
+  expect(hooks.submit).toHaveBeenCalledTimes(3); expect(hooks.prepareReference).toHaveBeenCalledTimes(1);
+ });
+ it('ignores a no-dispatch result arriving after the generic hook timeout', async () => {
+  let release!: () => void;
+  const paused = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(hooks.submit).mockImplementation(async () => { await paused; return { status: 'not_submitted', reason: 'provider_capacity' }; });
+  const job = await makeJob(); await advance(job.id, 2);
+  await db.query('UPDATE ai_video_preparations SET next_action_at=now() WHERE id=$1', [job.id]);
+  await createVideoPreparationDriver({ ...ctx(), hooks, retryMs: 1, operationTimeoutMs: 30 }).advanceVideoPreparation(job.id);
+  expect((await repository.listPreparationAttempts(db, job.id))[0].submission_state).toBe('uncertain');
+  release(); await new Promise(resolve => setTimeout(resolve, 5)); await advance(job.id, 5);
+  expect((await repository.listPreparationAttempts(db, job.id))[0].submission_state).toBe('uncertain');
+  expect(hooks.submit).toHaveBeenCalledTimes(1); expect(hooks.settle).not.toHaveBeenCalled();
+ });
  it('retries one declared privacy rejection after independent settlement under same public id', async () => {
   vi.mocked(hooks.submit).mockResolvedValueOnce({ status: 'terminal', outcome: { status: 'failed', error: 'input_face_privacy', retryPaths: ['/input_images/0'] } });
   const job = await makeJob(); await advance(job.id, 28); expect(hooks.submit).toHaveBeenCalledTimes(2); expect(hooks.prepareReference).toHaveBeenCalledTimes(1);

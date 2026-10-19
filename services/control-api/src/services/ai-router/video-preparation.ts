@@ -140,6 +140,9 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
     else await p.finishPreparation(db, job.id, job.fence, outcome);
     return;
    }
+   // Honor the attempt's retry delay even if the parent schedule drifted or
+   // a worker exited between deferring the attempt and scheduling the parent.
+   if (current?.submission_state === 'created' && current.next_action_at > new Date()) { await scheduleJob(job, current.next_action_at); return; }
    const { request, selection } = preparationEnvelope(job); const paths = declaredReferencePaths(request);
    const progress: Record<string, ReferenceProgress> = { ...job.reference_progress };
    if (request.prepare_references === 'upfront' && !current) await p.setPreparationStage(db, job.id, job.fence, 'preparing_references');
@@ -178,7 +181,15 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
    if (!await freshAuthority(job)) { await p.markAttemptTerminal(db, claimed.id, claimed.fence, { status: 'cancelled' }); return; }
    const fenceCheck = await db.query(`SELECT id FROM ai_video_attempts WHERE id=$1 AND fence=$2 AND submission_state='submitting' AND lease_expires_at>now() AND archived_after_move IS NULL`, [claimed.id, claimed.fence]);
    if (!fenceCheck.rowCount) return;
-   try { await storeResult(claimed, await hooks.submit(ctx, claimed, job, Object.fromEntries(paths.flatMap(path => progress[path].assetId ? [[path, progress[path].assetId!]] : [])))); }
+   try {
+    const result = await hooks.submit(ctx, claimed, job, Object.fromEntries(paths.flatMap(path => progress[path].assetId ? [[path, progress[path].assetId!]] : [])));
+    if (result.status === 'not_submitted') {
+     // Only the direct, timely submit result grants this transition. Generic
+     // hook timeouts and recovery results must remain acceptance-unknown.
+     const next = new Date(Math.max(later().getTime(), result.nextPollAt?.getTime() ?? 0));
+     if (await p.deferUnsubmittedAttempt(db, claimed.id, claimed.fence, worker, next)) await scheduleJob(job, next);
+    } else await storeResult(claimed, result);
+   }
    catch { await p.markAttemptUncertain(db, claimed.id, claimed.fence, { code: 'acceptance_unknown' }); }
   } catch (error) {
    // Capacity/transient failures are retried on the persisted schedule; never log source URLs.

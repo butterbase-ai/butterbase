@@ -15,6 +15,9 @@ export type PreparationProviderResult =
  | { status: 'pending'; nextPollAt?: Date }
  | { status: 'uncertain' }
  | { status: 'terminal'; outcome: TerminalOutcome };
+/** Only a timely submit result proving no provider dispatch may authorize retry. */
+export type PreparationSubmitResult = PreparationProviderResult
+ | { status: 'not_submitted'; reason: 'provider_capacity'; nextPollAt?: Date };
 /** Private implementation owns provider eligibility, credentials and ALL money policy.
  * Transport exceptions/unknown responses are ambiguous, never automatic resends.
  * retryPaths is permitted ONLY for a verified structured input-face/privacy failure.
@@ -27,7 +30,7 @@ export interface VideoPreparationHooks {
  loadImage?(scope: AssetScope, source: string): Promise<LoadedReferenceImage>;
  prepareReference(ctx: PreparationContext, job: PreparationRow, path: string, progress: ReferenceProgress, image?: LoadedReferenceImage): Promise<ReferenceResult>;
  reserve(ctx: PreparationContext, attempt: AttemptRow, job: PreparationRow): Promise<{ ok: true } | { ok: false; error: string }>;
- submit(ctx: PreparationContext, attempt: AttemptRow, job: PreparationRow, assets: Record<string, string>): Promise<PreparationProviderResult>;
+ submit(ctx: PreparationContext, attempt: AttemptRow, job: PreparationRow, assets: Record<string, string>): Promise<PreparationSubmitResult>;
  poll(ctx: PreparationContext, attempt: AttemptRow, job: PreparationRow): Promise<PreparationProviderResult>;
  reconcile(ctx: PreparationContext, attempt: AttemptRow, job: PreparationRow): Promise<PreparationProviderResult>;
  readReceipt(ctx: PreparationContext, attempt: AttemptRow): Promise<Record<string, unknown> | null>;

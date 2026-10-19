@@ -146,6 +146,20 @@ export async function claimAttempt(db: PreparationDb, id: string, preparationId:
       AND submission_state IN ('created','accepted') AND (lease_expires_at IS NULL OR lease_expires_at<=now()) RETURNING *`,
   [id,preparationId,preparationFence,worker,leaseDuration(leaseMs)])).rows[0] ?? null;
 }
+/** Submit-only no-dispatch proof: never reset unknown/accepted work or a stale lease.
+ * Preserve reservation and attempt identity so the normal prepare lane can retry.
+ */
+export async function deferUnsubmittedAttempt(db: PreparationDb, id: string, fence: number, worker: string, nextActionAt: Date): Promise<boolean> {
+  return (await db.query(`UPDATE ai_video_attempts SET submission_state='created',
+    diagnostic='{"code":"submission_deferred_capacity"}'::jsonb,next_action_at=$4,
+    lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+    WHERE id=$1 AND ${leased} AND lease_owner=$3 AND submission_state='submitting'
+      AND provider_handle IS NULL AND terminal_outcome IS NULL AND terminal_at IS NULL
+      AND settlement_status='not_due' AND settlement_receipt IS NULL AND settled_at IS NULL
+      AND EXISTS (SELECT 1 FROM ai_video_preparations p WHERE p.id=preparation_id
+        AND p.archived_after_move IS NULL AND p.deleted_at IS NULL AND p.status IN ('pending','in_progress'))`,
+  [id,fence,worker,nextActionAt])).rowCount === 1;
+}
 /** Late confirmations may reconcile an uncertain POST with the original fence. */
 export async function markAttemptAccepted(db: PreparationDb, id: string, fence: number, providerHandle: Record<string, unknown>): Promise<boolean> {
   return (await db.query(`UPDATE ai_video_attempts SET submission_state='accepted',provider_handle=$3,updated_at=now()

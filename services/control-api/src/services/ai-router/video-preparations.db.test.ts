@@ -58,6 +58,33 @@ describe.skipIf(!dbUrl)('video preparation persistence (real PostgreSQL)', () =>
     expect((await p.getAttempt(pool, first.id))?.provider_handle).toEqual({ jobId: 'upstream-1' });
     await expect(pool.query('UPDATE ai_video_attempts SET billing_context = $2 WHERE id = $1', [first.id, {}])).rejects.toThrow(/immutable/);
   });
+  it('defers an undispatched leased submit without changing its attempt or reservation identity', async () => {
+    const row = await job(); const lease = await claim(row.id); const first = await attempt(row.id, lease.fence);
+    const sub = (await p.claimAttempt(pool, first.id, row.id, lease.fence, 'submitter', 60_000))!;
+    const next = new Date(Date.now() + 10_000);
+    expect(await p.deferUnsubmittedAttempt(pool, sub.id, sub.fence, 'submitter', next)).toBe(true);
+    expect(await p.getAttempt(pool, sub.id)).toMatchObject({ id: first.id, reservation_id: first.reservation_id, attempt_number: 1,
+      billing_context: first.billing_context, submission_state: 'created', settlement_status: 'not_due', provider_handle: null,
+      lease_owner: null, lease_expires_at: null, diagnostic: { code: 'submission_deferred_capacity' }, next_action_at: next });
+    expect(await p.deferUnsubmittedAttempt(pool, sub.id, sub.fence, 'submitter', next)).toBe(false);
+  });
+  it.each(['wrong_fence', 'wrong_owner', 'expired_lease', 'uncertain', 'accepted', 'terminal', 'handle', 'outcome', 'archived', 'deleted_parent'] as const)(
+    'refuses a no-dispatch reset with %s', async condition => {
+    const row = await job(); const lease = await claim(row.id); const first = await attempt(row.id, lease.fence);
+    const sub = (await p.claimAttempt(pool, first.id, row.id, lease.fence, 'submitter', 60_000))!;
+    if (condition === 'expired_lease') await pool.query("UPDATE ai_video_attempts SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [sub.id]);
+    if (condition === 'uncertain') await p.markAttemptUncertain(pool, sub.id, sub.fence, { code: 'acceptance_unknown' });
+    if (condition === 'accepted') await p.markAttemptAccepted(pool, sub.id, sub.fence, { id: 'paid' });
+    if (condition === 'terminal') await p.markAttemptTerminal(pool, sub.id, sub.fence, { status: 'failed' });
+    if (condition === 'handle') await pool.query("UPDATE ai_video_attempts SET provider_handle='{}' WHERE id=$1", [sub.id]);
+    // A partial outcome is permitted by the existing schema: still fail closed.
+    if (condition === 'outcome') await pool.query("UPDATE ai_video_attempts SET terminal_outcome='{}' WHERE id=$1", [sub.id]);
+    if (condition === 'archived') await pool.query('UPDATE ai_video_attempts SET archived_after_move=$2 WHERE id=$1', [sub.id, randomUUID()]);
+    if (condition === 'deleted_parent') await pool.query('UPDATE ai_video_preparations SET deleted_at=now() WHERE id=$1', [row.id]);
+    const before = (await pool.query('SELECT * FROM ai_video_attempts WHERE id=$1', [sub.id])).rows[0];
+    expect(await p.deferUnsubmittedAttempt(pool, sub.id, condition === 'wrong_fence' ? sub.fence + 1 : sub.fence, condition === 'wrong_owner' ? 'other' : 'submitter', new Date())).toBe(false);
+    expect((await pool.query('SELECT * FROM ai_video_attempts WHERE id=$1', [sub.id])).rows[0]).toEqual(before);
+  });
   it('requires durable settlement before the one atomic retry and never rewrites terminal outcomes', async () => {
     const row = await job(); const lease = await claim(row.id); const first = await attempt(row.id, lease.fence);
     const sub = (await p.claimAttempt(pool, first.id, row.id, lease.fence, 'submitter', 60_000))!;
