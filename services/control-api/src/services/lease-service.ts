@@ -29,6 +29,78 @@ export interface GrantResult {
   floorUsd: number;
 }
 
+/** A closed identity can never acquire a new lease, even if no lease existed. */
+export class ReservationClosedError extends Error {
+  constructor() {
+    super('Reservation is closed');
+    this.name = 'ReservationClosedError';
+  }
+}
+
+export interface LeaseReservationClosure {
+  reservationId: string;
+  organizationId: string;
+  hadLease: boolean;
+  closedAt: Date;
+}
+
+async function lockReservation(client: pg.PoolClient, reservationId: string): Promise<void> {
+  // Must precede the organization lock in grantLease. Closure itself never
+  // acquires an org/lease row lock; existing settlement runs after this commit.
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('credit-reservation:' || $1::uuid::text, 0))", [reservationId]);
+}
+
+export async function getLeaseReservationClosure(
+  db: pg.Pool | pg.PoolClient,
+  args: { reservationId: string; organizationId: string },
+): Promise<LeaseReservationClosure | null> {
+  const result = await db.query<{ reservation_id: string; organization_id: string; had_lease: boolean; closed_at: Date }>(
+    'SELECT reservation_id,organization_id,had_lease,closed_at FROM credit_reservation_closures WHERE reservation_id=$1',
+    [args.reservationId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  if (row.organization_id !== args.organizationId) throw new Error('Reservation identity mismatch');
+  return { reservationId: row.reservation_id, organizationId: row.organization_id, hadLease: row.had_lease, closedAt: row.closed_at };
+}
+
+/**
+ * Serialize closure against ALL grants of this identity, including an absent
+ * lease. hadLease=false is durable evidence that no grant can ever arrive.
+ * hadLease=true still requires ordinary terminal settlement before a receipt.
+ */
+export async function closeLeaseReservation(
+  platformPool: pg.Pool,
+  args: { reservationId: string; organizationId: string },
+): Promise<LeaseReservationClosure> {
+  const client = await platformPool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockReservation(client, args.reservationId);
+    const existing = await getLeaseReservationClosure(client, args);
+    if (existing) {
+      await client.query('COMMIT');
+      return existing;
+    }
+    const lease = await client.query<{ organization_id: string }>(
+      'SELECT organization_id FROM credit_leases WHERE lease_id=$1', [args.reservationId],
+    );
+    if (lease.rows[0] && lease.rows[0].organization_id !== args.organizationId) throw new Error('Reservation identity mismatch');
+    await client.query(
+      'INSERT INTO credit_reservation_closures(reservation_id,organization_id,had_lease) VALUES ($1,$2,$3)',
+      [args.reservationId,args.organizationId,lease.rows.length > 0],
+    );
+    const closed = (await getLeaseReservationClosure(client, args))!;
+    await client.query('COMMIT');
+    return closed;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promise<GrantResult> {
   if (args.amountUsd <= 0) throw new Error('grantLease: amountUsd must be positive');
   if (args.ttlSeconds <= 0) throw new Error('grantLease: ttlSeconds must be positive');
@@ -36,6 +108,12 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
+    if (args.reservationId) {
+      await lockReservation(client, args.reservationId);
+      if (await getLeaseReservationClosure(client, { reservationId: args.reservationId, organizationId: args.organizationId })) {
+        throw new ReservationClosedError();
+      }
+    }
     // Per-org billing (Phase 3b). Caller passes args.organizationId — this
     // is the app's owning org (AI gateway) or an explicit billing subject.
     // No implicit personal-org fallback at this layer.
