@@ -6,6 +6,7 @@ export interface ReferenceRow {
   id: string; organization_id: string; app_id: string; end_user_sub: string | null;
   provider_slot: string; credential_namespace: string; provider_id: string | null;
   status: 'new' | 'registering' | 'pending' | 'active' | 'uncertain' | 'failed' | 'deleted';
+  diagnostic?: Record<string, unknown> | null;
   cleanup_pending: boolean; deleted_at: Date | null; cleaned_at: Date | null;
   fence: number; lease_owner: string | null; lease_expires_at: Date | null;
 }
@@ -51,6 +52,16 @@ async function claim(db: PreparationDb, kind: Kind, scope: AssetScope, id: strin
 /** new grants registration; pending grants polling only. Expired registering/uncertain NEVER grants another POST. */
 export async function claimReferenceGroup(db: PreparationDb, scope: AssetScope, id: string, worker: string, leaseMs: number): Promise<ReferenceRow | null> { return claim(db,'group',scope,id,worker,leaseMs); }
 export async function claimReferenceAsset(db: PreparationDb, scope: AssetScope, id: string, worker: string, leaseMs: number): Promise<ReferenceAssetRow | null> { return claim(db,'asset',scope,id,worker,leaseMs) as Promise<ReferenceAssetRow | null>; }
+/** Active cache entries must be revalidated before use. This grants GET only,
+ * preserves the original provider handle, and makes failed lookups non-reusable. */
+export async function claimReferenceAssetValidation(db: PreparationDb, scope: AssetScope, id: string, worker: string, leaseMs: number): Promise<ReferenceAssetRow | null> {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('lease duration must be positive milliseconds');
+  return (await db.query<ReferenceAssetRow>(`UPDATE ai_reference_assets SET fence=fence+1,
+    lease_owner=$7,lease_expires_at=now()+$8*interval '1 millisecond',status='pending',updated_at=now()
+    WHERE ${scopeSql} AND id=$6 AND ${live} AND NOT cleanup_pending AND deleted_at IS NULL
+      AND status='active' AND provider_id IS NOT NULL AND (lease_expires_at IS NULL OR lease_expires_at<=now()) RETURNING *`,
+  [...scopeValues(scope),id,worker,leaseMs])).rows[0] ?? null;
+}
 async function persist(db: PreparationDb, kind: Kind, scope: AssetScope, id: string, fence: number, state: ReferenceState) {
   if ((state.status === 'active' || state.status === 'pending') && !state.providerId) throw new Error('provider ID required for accepted registration');
   // Late confirmation after deletion retains the handle for cleanup. The flags
