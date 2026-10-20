@@ -5,7 +5,7 @@ import type { ImageGenerationRequest } from './types.js';
 /**
  * Build a fetcher that always returns the given /images/generations response
  * body with HTTP 200. Records the request body so tests can assert on the
- * OpenAI-Images-shape payload submitImage sent upstream.
+ * OpenRouter image-generation payload submitImage sent upstream.
  */
 function imagesFetcher(responseBody: unknown, status = 200) {
   const fetcher = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => {
@@ -28,7 +28,7 @@ function baseReq(overrides: Partial<ImageGenerationRequest> = {}): ImageGenerati
 const B64_PNG_STUB = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
 describe('openrouter adapter — image methods (POST /api/v1/images/generations)', () => {
-  it('submitImage hits /images/generations with an OpenAI-Images-shape body', async () => {
+  it('submitImage hits /images/generations with the requested generation options', async () => {
     const fetcher = imagesFetcher({
       created: 1,
       data: [{ b64_json: B64_PNG_STUB, media_type: 'image/png' }],
@@ -54,21 +54,35 @@ describe('openrouter adapter — image methods (POST /api/v1/images/generations)
     });
   });
 
-  it('forwards a single input_images entry as `image` string (edit mode)', async () => {
+  it.each([
+    'google/gemini-3-pro-image',
+    'google/gemini-3.1-flash-image',
+    'openai/gpt-image-1-mini',
+  ])('forwards a single reference using OpenRouter input_references for %s', async (model) => {
     const fetcher = imagesFetcher({
       created: 1,
       data: [{ b64_json: B64_PNG_STUB, media_type: 'image/png' }],
     });
     const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
 
-    await adapter.submitImage!(baseReq({ input_images: ['https://example.com/ref.png'] }), 'openai/gpt-image-1-mini');
+    await adapter.submitImage!(baseReq({ model, input_images: ['https://example.com/ref.png'] }), model);
 
     const [, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     const sentBody = JSON.parse((init as RequestInit).body as string);
-    expect(sentBody.image).toBe('https://example.com/ref.png');
+    // OpenRouter's image API consumes typed input_references. The OpenAI
+    // `image` field was silently ignored for Gemini despite successful billing.
+    expect(sentBody.input_references).toEqual([
+      { type: 'image_url', image_url: { url: 'https://example.com/ref.png' } },
+    ]);
+    expect(sentBody.image).toBeUndefined();
+    expect(sentBody.input_images).toBeUndefined();
   });
 
-  it('forwards multiple input_images as `image` array', async () => {
+  it.each([
+    'google/gemini-3-pro-image',
+    'google/gemini-3.1-flash-image',
+    'openai/gpt-image-1-mini',
+  ])('preserves reference ordering in input_references for %s', async (model) => {
     const fetcher = imagesFetcher({
       created: 1,
       data: [{ b64_json: B64_PNG_STUB, media_type: 'image/png' }],
@@ -76,13 +90,48 @@ describe('openrouter adapter — image methods (POST /api/v1/images/generations)
     const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
 
     await adapter.submitImage!(
-      baseReq({ input_images: ['https://example.com/a.png', 'https://example.com/b.png'] }),
-      'openai/gpt-image-1-mini',
+      baseReq({ model, input_images: ['https://example.com/a.png', 'https://example.com/b.png'] }),
+      model,
     );
 
     const [, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     const sentBody = JSON.parse((init as RequestInit).body as string);
-    expect(sentBody.image).toEqual(['https://example.com/a.png', 'https://example.com/b.png']);
+    expect(sentBody.input_references).toEqual([
+      { type: 'image_url', image_url: { url: 'https://example.com/a.png' } },
+      { type: 'image_url', image_url: { url: 'https://example.com/b.png' } },
+    ]);
+    expect(sentBody.image).toBeUndefined();
+  });
+
+  it('preserves base64 data URLs in reference parts', async () => {
+    const fetcher = imagesFetcher({ data: [{ b64_json: B64_PNG_STUB }] });
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+    const imageUrl = `data:image/png;base64,${B64_PNG_STUB}`;
+
+    await adapter.submitImage!(
+      baseReq({ model: 'google/gemini-3.1-flash-image', input_images: [imageUrl] }),
+      'google/gemini-3.1-flash-image',
+    );
+
+    const [, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string).input_references).toEqual([
+      { type: 'image_url', image_url: { url: imageUrl } },
+    ]);
+  });
+
+  it.each([
+    { name: 'absent input_images', inputImages: undefined },
+    { name: 'empty input_images', inputImages: [] },
+  ])('omits reference fields for text-to-image requests: $name', async ({ inputImages }) => {
+    const fetcher = imagesFetcher({ data: [{ b64_json: B64_PNG_STUB }] });
+    const adapter = openrouterAdapter({ apiKey: 'k', fetch: fetcher });
+
+    await adapter.submitImage!(baseReq({ input_images: inputImages }), 'openai/gpt-image-1-mini');
+
+    const [, init] = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const sentBody = JSON.parse((init as RequestInit).body as string);
+    expect(sentBody).not.toHaveProperty('input_references');
+    expect(sentBody).not.toHaveProperty('image');
   });
 
   it('omits size/n/seed when not provided (no silent defaults)', async () => {
