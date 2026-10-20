@@ -3,15 +3,14 @@ import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
 
 /**
- * OpenRouter has a dedicated OpenAI-Images-compatible endpoint at
+ * OpenRouter has a dedicated image-generation endpoint at
  * POST /api/v1/images/generations. Request shape: { model, prompt, n?, size?,
  * seed? }. Response shape: { created, data: [{ b64_json, media_type }], usage:
  * { cost, ... } } — `response_format` is ignored; base64 is always returned.
  *
- * The endpoint accepts `image`/`mask` inputs for edits, but our validator maps
- * them into `input_images[]` / `mask` (URLs). We forward `input_images` as
- * `image` (single) or the array (multi) iff the model advertises it, and
- * `mask` as `mask`. Support here is conservative — probed live per model.
+ * Reference images use OpenRouter's typed `input_references` array. Translate
+ * Butterbase's `input_images` URLs into image_url parts, including for a single
+ * reference. The OpenAI-style `image` field is silently ignored by Gemini.
  */
 const OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL: ReadonlySet<string> = new Set([
   'size',
@@ -464,15 +463,13 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
    * recognises this and settles the row inline without polling.
    */
   async function submitImage(req: ImageGenerationRequest, upstreamId: string): Promise<ImageSubmitResult> {
-    // input_images / mask are forwarded as OpenAI-Images-style `image` / `mask`
-    // fields (single image → string, multi → array). OpenRouter's docs show
-    // these accepted on models that advertise edit mode; models that don't
-    // silently ignore. Rejection of unsupported params happens at the route
-    // via getSupportedImageParams — we only include them here if the caller
-    // provided them.
-    const imageParam = req.input_images && req.input_images.length > 0
-      ? (req.input_images.length === 1 ? req.input_images[0] : req.input_images)
-      : undefined;
+    // https://openrouter.ai/docs/api/api-reference/images/generate-an-image
+    // Both single and multiple references use the same typed array. Keep the
+    // caller's ordering so prompts can refer to images by their position.
+    const inputReferences = req.input_images?.map(url => ({
+      type: 'image_url' as const,
+      image_url: { url },
+    }));
 
     const body = {
       model: upstreamId,
@@ -480,7 +477,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       ...(req.n != null ? { n: req.n } : {}),
       ...(req.size ? { size: req.size } : {}),
       ...(req.seed != null ? { seed: req.seed } : {}),
-      ...(imageParam !== undefined ? { image: imageParam } : {}),
+      ...(inputReferences?.length ? { input_references: inputReferences } : {}),
       ...(req.mask ? { mask: req.mask } : {}),
     };
 
