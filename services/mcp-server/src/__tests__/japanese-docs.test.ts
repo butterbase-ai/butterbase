@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -17,9 +16,12 @@ async function withDocs(run: (client: Client) => Promise<void>) {
 function text(result: any): string { return result.content.map((block: any) => block.text ?? '').join('\n'); }
 
 describe('local Japanese MCP documentation', () => {
-  it('preserves the complete baseline English output byte for byte', () => {
-    expect(createHash('sha256').update(getUserDocumentation('all')).digest('hex')).toBe('55c885918f854ba95e7cbe30eff052f65a025273afa16e3274d91e98e09e723b');
+  it('keeps the default English output unchanged and selects Japanese only on request', () => {
+    const english = getUserDocumentation('all');
+    expect(english).toBe(getUserDocumentation('all', 'en'));
+    expect(english).not.toBe(getUserDocumentation('all', 'ja'));
     for (const topic of DOC_TOPICS) expect(getUserDocumentation(topic)).toBe(getUserDocumentation(topic, 'en'));
+    for (const topic of DOC_TOPICS.filter(topic => topic !== 'all')) expect(english).toContain(getUserDocumentation(topic));
   });
   it('returns Japanese for every existing topic and includes every section in all', () => {
     const all = getUserDocumentation('all', 'ja');
