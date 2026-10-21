@@ -52,7 +52,12 @@ The test creates uniquely named control/runtime/customer databases, drives
 `driveOnce` with the production step registry, and checks completion, customer
 rows, agent checkpoint child rows, KV contents, routing, and abort compensation.
 The fixture deliberately contains only the tables needed by this regression;
-it does not replace migration or full deployment tests.
+it does not replace migration or full deployment tests. It also does not
+exercise row-level security after a move: the destination database is created
+empty and filled from a `pg_dump --no-privileges` dump, so the `butterbase_*`
+roles and their grants are not created or re-applied here, and no role-switched
+query is run against the moved database. A local destination cluster must
+already provide those roles if the moved app uses RLS policies.
 
 Dump transport uses the existing injected upload/download seams with in-memory
 buffers; the customer dump/restore still runs real `pg_dump`/`psql`. R2 blob
