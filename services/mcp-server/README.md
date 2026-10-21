@@ -1,5 +1,7 @@
 # @butterbase/mcp
 
+[English](README.md) | [日本語](README.ja.md)
+
 The official [Model Context Protocol](https://modelcontextprotocol.io) server for [Butterbase](https://butterbase.ai) — manage schemas, auth, functions, storage, RAG, realtime, and deploys on Butterbase from any MCP-capable client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.).
 
 ## Install
@@ -73,6 +75,18 @@ The server exposes 38 tools across Butterbase's surface area, including:
 - **Docs, suggestions & hackathons** — `butterbase_docs`, `submit_suggestion`, `prep_and_submit_hackathon_entry`
 
 See the [Butterbase docs](https://butterbase.ai/docs) for the full list.
+
+## Japanese documentation
+
+Call `butterbase_docs` with `{ "topic": "auth", "language": "ja" }` or
+`{ "query": "ファイルのアップロード", "language": "ja" }`. English remains the default.
+The local docs tool keeps its existing topic identifiers and read-only behavior.
+
+Maintainers can refresh the static Japanese corpus with
+`node scripts/sync-japanese-docs.mjs` from this package after Japanese public docs
+are available in `services/docs/src/content/docs/ja`. An optional local git
+revision can be supplied; it is read locally and never fetched. The tool itself
+has no git, filesystem, or network dependency at runtime.
 
 ## License
 

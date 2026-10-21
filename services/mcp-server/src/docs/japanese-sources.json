@@ -1,0 +1,75 @@
+{
+  "overview": [
+    "getting-started/introduction.md",
+    "getting-started/before-you-start.md"
+  ],
+  "mcp": [
+    "getting-started/mcp-setup.md",
+    "api-reference/mcp-tools.md"
+  ],
+  "rest": [
+    "sdks-and-tools/rest-api.md",
+    "api-reference/data-api.md"
+  ],
+  "auth": [
+    "core-concepts/authentication.md",
+    "api-reference/auth-api.md"
+  ],
+  "storage": [
+    "core-concepts/storage.md",
+    "api-reference/storage-api.md"
+  ],
+  "functions": [
+    "core-concepts/functions.md",
+    "api-reference/functions-api.md"
+  ],
+  "frontend": [
+    "core-concepts/frontend-deployment.md",
+    "api-reference/frontend-api.md"
+  ],
+  "ai": [
+    "core-concepts/ai-integration.md",
+    "api-reference/ai-api.md"
+  ],
+  "meetings": [
+    "core-concepts/ai-meetings.md",
+    "api-reference/ai-meetings-api.md"
+  ],
+  "billing": [
+    "core-concepts/billing.md",
+    "core-concepts/plans-and-usage.md",
+    "api-reference/billing-api.md"
+  ],
+  "platform": [
+    "api-reference/platform-api.md",
+    "core-concepts/custom-domains.md"
+  ],
+  "regions": [
+    "core-concepts/regions.md"
+  ],
+  "schema": [
+    "core-concepts/database.md",
+    "core-concepts/row-level-security.md"
+  ],
+  "sdk": [
+    "sdks-and-tools/typescript-sdk.md"
+  ],
+  "cli": [
+    "sdks-and-tools/cli.md"
+  ],
+  "realtime": [
+    "core-concepts/realtime.md"
+  ],
+  "rag": [
+    "core-concepts/rag.md",
+    "api-reference/rag-api.md"
+  ],
+  "integrations": [
+    "core-concepts/integrations.md",
+    "api-reference/integrations-api.md"
+  ],
+  "substrate": [
+    "core-concepts/substrate.md",
+    "api-reference/substrate-api.md"
+  ]
+}

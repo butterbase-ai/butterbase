@@ -32,8 +32,10 @@ Available topics:
   - integrations: Third-party integrations (OAuth connect flow, tool execution, SDK, CLI)
   - substrate: Per-user memory + action coordination plane for AI agents (entities, decisions, attention rules, action ledger, outbox, ws stream, ctx.substrate inside functions)
 
+Pass language: "ja" for Japanese content and search (English by default).
+
 Example:
-  Input: { topic: "auth" }
+  Input: { topic: "auth", language: "ja" }
   Output: Full authentication documentation with OAuth setup, JWT handling, etc.
 
 Don't know the topic slug? Pass a freeform { query: "..." } instead and the tool
@@ -58,6 +60,7 @@ Idempotency: Safe to call anytime (read-only operation).`,
         .describe(
           'Section to return: all (default), overview, mcp, rest, auth, storage, functions, frontend, ai, meetings, billing, platform, regions, schema, sdk, cli, realtime, rag, integrations, substrate.'
         ),
+      language: z.enum(['en', 'ja']).optional().describe('Documentation language: en (default) or ja. API and topic identifiers stay unchanged.'),
       query: z
         .string()
         .optional()
@@ -72,28 +75,31 @@ Idempotency: Safe to call anytime (read-only operation).`,
       idempotentHint: true,
       openWorldHint: false,
     },
-    async ({ topic, query }) => {
+    async ({ topic, query, language = 'en' }) => {
       // Freeform search path: only when a query is given and no explicit topic.
       // (topic always wins so callers can pin an exact section.)
       if (query && query.trim() && !topic) {
-        const hits = searchUserDocumentation(query);
+        const hits = searchUserDocumentation(query, 5, language);
         const browsable = DOC_TOPICS.filter((t) => t !== 'all').join(', ');
         if (hits.length === 0) {
           return {
             content: [
               {
                 type: 'text' as const,
-                text: `No documentation section matched "${query}".\n\nValid topics: ${browsable}.\nCall butterbase_docs again with one of these as { topic }.`,
+                text: language === 'ja'
+                  ? `「${query}」に一致する文書はありません。\n\n利用できるトピック：${browsable}。\nいずれかを { topic, language: "ja" } で指定してください。`
+                  : `No documentation section matched "${query}".\n\nValid topics: ${browsable}.\nCall butterbase_docs again with one of these as { topic }.`,
               },
             ],
           };
         }
         const index = hits
-          .map((h) => `- ${h.topic} (${h.score} hit${h.score === 1 ? '' : 's'}): ${h.snippet.slice(0, 160)}…`)
+          .map((h) => (language === 'ja' ? `- ${h.topic}（${h.score}件）: ${h.snippet.slice(0, 160)}…` : `- ${h.topic} (${h.score} hit${h.score === 1 ? '' : 's'}): ${h.snippet.slice(0, 160)}…`))
           .join('\n');
-        const best = getUserDocumentation(hits[0].topic);
-        const text =
-          `# Search results for "${query}"\n\n` +
+        const best = getUserDocumentation(hits[0].topic, language);
+        const text = language === 'ja'
+          ? `# 「${query}」の検索結果\n\n関連するトピック：\n${index}\n\n最も一致した「${hits[0].topic}」の全文を表示します。別のトピックは { topic: "<name>", language: "ja" } で指定してください。\n\n---\n\n${best}`
+          : `# Search results for "${query}"\n\n` +
           `Top matching topics:\n${index}\n\n` +
           `Showing the full "${hits[0].topic}" section below (the best match). ` +
           `Call butterbase_docs with { topic: "<name>" } for any other.\n\n---\n\n${best}`;
@@ -101,7 +107,7 @@ Idempotency: Safe to call anytime (read-only operation).`,
       }
 
       const t = (topic ?? 'all') as DocTopic;
-      const text = getUserDocumentation(t);
+      const text = getUserDocumentation(t, language);
       return {
         content: [{ type: 'text' as const, text }],
       };
