@@ -155,7 +155,7 @@ PostgreSQLが入力を拒否しました。無効なJSON、数値や日付の形
 
 NULLを許可せず既定値もない列が、リクエストにありません。
 
-**対処：** details.columnに値を指定するか、スキーマに既定値（UUIDのgen_random_uuid()、日時のnow()など）を設定してください。
+**対処：** `details.column`に示された列に値を指定するか、スキーマに既定値（UUIDのgen_random_uuid()、日時のnow()など）を設定してください。
 
 <span id="authentication--authorization-errors"></span>
 

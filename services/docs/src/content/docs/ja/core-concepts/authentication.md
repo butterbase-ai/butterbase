@@ -415,7 +415,7 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 }
 ```
 
-butterbase_serviceとして実行し、ctx.userはnullです。ユーザーの特定には本文を使います。
+butterbase_serviceとして実行します（RLSをバイパス）。ctx.userはnullです。ユーザーの特定には本文を使います。
 
 <span id="token-lifetimes"></span>
 

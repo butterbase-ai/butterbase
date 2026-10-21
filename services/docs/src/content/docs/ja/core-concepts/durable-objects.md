@@ -150,7 +150,7 @@ async fetch(req: Request): Promise<Response> {
 }
 ```
 
-verifyTokenでは/auth/<app_id>/meを呼ぶかJWKSで署名検証します。関数や自分のサーバーからはAuthorizationを指定できるため、authenticatedやservice_keyを使えます。この制約はブラウザWebSocketに限ります。
+`verifyToken`では、`Authorization: Bearer <token>`を付けて`GET https://api.butterbase.ai/auth/<app_id>/me`を呼ぶか、JWKSで署名検証します。関数や自分のサーバーからはAuthorizationを指定できるため、authenticatedやservice_keyを使えます。この制約はブラウザWebSocketに限ります。
 :::
 
 <span id="environment-variables"></span>

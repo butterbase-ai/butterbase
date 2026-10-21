@@ -76,7 +76,7 @@ sidebar:
 |---|---|---|
 | なし | butterbase_anon | 公開データのみ |
 | エンドユーザーJWT | butterbase_user | ユーザー単位のデータ（RLS） |
-| APIキー（`bb_sk_...`） | butterbase_service | 全データ（サービス用のアクセス許可） |
+| APIキー（`bb_sk_...`） | butterbase_service | 全データ（RLSをバイパス） |
 
 <span id="create-a-row"></span>
 
