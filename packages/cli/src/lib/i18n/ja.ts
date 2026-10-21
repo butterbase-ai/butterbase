@@ -323,7 +323,7 @@ export const japaneseMessages: Record<string, string> = {
   "  Status:   ${0}": "  状態： ${0}",
   "  SSL:      ${0}": "  SSL： ${0}",
   "  Verification: ${0}": "  検証： ${0}",
-  "  Errors: ${0}": "  エラー数： ${0}",
+  "  Errors: ${0}": "  エラー： ${0}",
   "Failed to check domain status": "ドメインの状態を確認できませんでした",
   "Re-verifying domain...": "ドメインを再検証しています…",
   "Verification triggered": "検証を開始しました",
