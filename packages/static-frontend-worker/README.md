@@ -1,5 +1,7 @@
 # @butterbase/static-frontend-worker
 
+English | [日本語](README.ja.md)
+
 Per-app static frontend worker source for the Butterbase WfP dispatch namespace.
 
 One copy of the compiled output of `src/worker.ts` is uploaded by `control-api` into the WfP dispatch namespace per customer app (script name = appId). The worker is bound to a Cloudflare Assets binding configured with `html_handling: 'none'` and serves content via an explicit path resolution chain with SPA fallback.

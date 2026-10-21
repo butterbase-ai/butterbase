@@ -1,5 +1,7 @@
 # do-invoker
 
+English | [日本語](README.ja.md)
+
 Platform-owned CF Worker that lets non-CF services (deno-runtime on Fly)
 reach user Durable Objects without going through the public edge.
 
