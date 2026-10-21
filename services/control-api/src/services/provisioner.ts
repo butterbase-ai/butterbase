@@ -4,6 +4,9 @@ import { config, assertRegionConfig, assertRuntimeDbConfig } from '../config.js'
 import { getRuntimeDbPool } from './runtime-db.js';
 import { runDataPlaneMigrations } from './migrator.js';
 import * as neonClient from './neon-client.js';
+import { localDataPlaneUrlForRegion } from './local-data-plane.js';
+import { custDbNameFor } from './app-db-name.js';
+export { custDbNameFor, PG_MAX_DATNAME } from './app-db-name.js';
 import { getDataProjectIdForRegion, isProjectPerTenantForRegion } from './neon-projects.js';
 import { provisionNeonDbForApp } from './app-db-provision.js';
 import {
@@ -20,24 +23,6 @@ const generateId = customAlphabet(APP_ID_ALPHABET, APP_ID_LENGTH);
 /** Generate a new app ID. Exported so callers can create the ID before calling provisionApp(). */
 export function generateAppId(): string {
   return `${APP_ID_PREFIX}${generateId()}`;
-}
-
-/** Postgres `datname` limit. `custDbNameFor` truncates to this. */
-export const PG_MAX_DATNAME = 63;
-
-/**
- * The `cust_<appId>_<region>` move-app destination database name used by the
- * legacy (non-project-per-tenant) branch of `provisionAppDb` below.
- *
- * Exported so `neon-orphan-reconciler.ts` can reproduce it EXACTLY when
- * deciding which `cust_*` databases belong to live apps — any drift here
- * silently reclassifies live customer databases as orphans and deletes them.
- * Keep this the single source of truth for the naming; do not fork a copy.
- */
-export function custDbNameFor(appId: string, region: string): string {
-  return `cust_${appId.replace(/-/g, '_')}_${region.replace(/-/g, '_')}`
-    .toLowerCase()
-    .slice(0, PG_MAX_DATNAME);
 }
 
 /**
@@ -494,6 +479,45 @@ export async function provisionAppDb(
   // already asserted) and cron-scheduler (which never registers the
   // plugin). Idempotent guard handles the first case.
   assertRuntimeDbConfig();
+
+  // Local move smoke tests need an actual destination customer database and
+  // app_db_connections row, not a fake Neon project ID. This opt-in path must
+  // run before either Neon topology, and must never run in production.
+  if (process.env.BUTTERBASE_LOCAL === 'true') {
+    const uri = localDataPlaneUrlForRegion(region);
+    const neonDbName = custDbNameFor(appId, region);
+    const admin = new pg.Pool({ connectionString: uri.toString(), max: 1, connectionTimeoutMillis: 5000 });
+    try {
+      const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [neonDbName]);
+      if (existing.rows.length === 0) {
+        try {
+          await admin.query(`CREATE DATABASE "${neonDbName.replace(/"/g, '""')}"`);
+        } catch (error) {
+          // A concurrent retry may have created the same destination.
+          if ((error as { code?: string }).code !== '42P04') throw error;
+        }
+      }
+    } finally {
+      await admin.end();
+    }
+    uri.pathname = `/${neonDbName}`;
+    // libpq honours ?dbname over the path; keep pg and psql on the same DB.
+    uri.searchParams.delete('dbname');
+    uri.searchParams.delete('database');
+    const connectionUri = uri.toString();
+    const runtimePool = getRuntimeDbPool(config.runtimeDb, region);
+    await runtimePool.query(
+      `INSERT INTO app_db_connections (app_id, connection_string, pooler_connection_string, neon_project_id, neon_database_name)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (app_id) DO UPDATE
+         SET connection_string = EXCLUDED.connection_string,
+             pooler_connection_string = EXCLUDED.pooler_connection_string,
+             neon_project_id = EXCLUDED.neon_project_id,
+             neon_database_name = EXCLUDED.neon_database_name`,
+      [appId, connectionUri, null, null, neonDbName],
+    );
+    return { neonDbName, connectionUri };
+  }
 
   if (isProjectPerTenantForRegion(region)) {
     // One Neon project per app. The shared helper owns adopt-before-create,
