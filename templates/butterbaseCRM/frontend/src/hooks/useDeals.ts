@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { qk } from '@/lib/queryKeys';
 import { useCurrentWorkspaceId } from '@/lib/workspace';
@@ -52,7 +53,7 @@ export function useCreateDeal() {
       });
       const newId: string | undefined =
         verdict.result?.entity_id ?? verdict.result?.id ?? verdict.result?.entity?.id;
-      if (!newId) throw new Error('substrate upsert_entity returned no entity id');
+      if (!newId) throw new Error(uiText('substrate upsert_entity returned no entity id'));
       await logActivity('deal.created', 'deal', newId, { name: input.name });
       return {
         ...input,

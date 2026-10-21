@@ -1,3 +1,4 @@
+import { uiText, uiMessage } from "../i18n";
 import { create } from 'zustand';
 import { bb } from './butterbase';
 import type { AgentSseEvent } from './types';
@@ -34,7 +35,7 @@ export async function openAgentStream(body: AgentChatRequest, signal?: AbortSign
   let jwt = getAccessToken();
   if (!jwt) {
     jwt = await refreshAccessToken();
-    if (!jwt) throw new Error('not_authenticated');
+    if (!jwt) throw new Error(uiText('not_authenticated'));
   }
 
   let res = await fetch(`${API_URL}/v1/${APP_ID}/fn/agent-chat`, {
@@ -63,7 +64,7 @@ export async function openAgentStream(body: AgentChatRequest, signal?: AbortSign
 
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`agent_chat_${res.status}: ${detail.slice(0, 200)}`);
+    throw new Error(uiMessage`agent_chat_${res.status}: ${detail.slice(0, 200)}`);
   }
 
   return res.body.pipeThrough(new TextDecoderStream()).pipeThrough(parseSseStream());

@@ -1,3 +1,4 @@
+import { LanguagePicker, uiText, useUiLocale } from "../../i18n";
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Inbox as InboxIcon,
@@ -27,23 +28,24 @@ interface NavItemDef {
 }
 
 const WORKSPACE: NavItemDef[] = [
-  { to: '/inbox',    label: 'Inbox',    icon: InboxIcon, num: '01' },
-  { to: '/patterns', label: 'Patterns', icon: Sparkles,  num: '02' },
-  { to: '/docs',     label: 'Docs',     icon: BookOpen,  num: '03' },
+  { to: '/inbox',    get label() { return uiText('Inbox'); },    icon: InboxIcon, num: '01' },
+  { to: '/patterns', get label() { return uiText('Patterns'); }, icon: Sparkles,  num: '02' },
+  { to: '/docs',     get label() { return uiText('Docs'); },     icon: BookOpen,  num: '03' },
 ];
 
 const CONFIGURE: NavItemDef[] = [
-  { to: '/settings/team',         label: 'Team',         icon: Users,         num: '04' },
-  { to: '/settings/widget',       label: 'Widget',       icon: MessageSquare, num: '05' },
-  { to: '/settings/docs',         label: 'Knowledge',    icon: FileText,      num: '06' },
-  { to: '/settings/escalation',   label: 'Escalation',   icon: AlertOctagon,  num: '07' },
-  { to: '/settings/ai',           label: 'AI Models',    icon: Brain,         num: '08' },
-  { to: '/settings/skill',        label: 'Skills',       icon: Wrench,        num: '09' },
-  { to: '/settings/autonomy',     label: 'Autonomy',     icon: Bot,           num: '10' },
-  { to: '/settings/integrations', label: 'Integrations', icon: Plug,          num: '11' },
+  { to: '/settings/team',         get label() { return uiText('Team'); },         icon: Users,         num: '04' },
+  { to: '/settings/widget',       get label() { return uiText('Widget'); },       icon: MessageSquare, num: '05' },
+  { to: '/settings/docs',         get label() { return uiText('Knowledge'); },    icon: FileText,      num: '06' },
+  { to: '/settings/escalation',   get label() { return uiText('Escalation'); },   icon: AlertOctagon,  num: '07' },
+  { to: '/settings/ai',           get label() { return uiText('AI Models'); },    icon: Brain,         num: '08' },
+  { to: '/settings/skill',        get label() { return uiText('Skills'); },       icon: Wrench,        num: '09' },
+  { to: '/settings/autonomy',     get label() { return uiText('Autonomy'); },     icon: Bot,           num: '10' },
+  { to: '/settings/integrations', get label() { return uiText('Integrations'); }, icon: Plug,          num: '11' },
 ];
 
 function NavItem({ to, icon: Icon, label, num }: NavItemDef) {
+  useUiLocale();
   return (
     <NavLink
       to={to}
@@ -72,7 +74,7 @@ function NavItem({ to, icon: Icon, label, num }: NavItemDef) {
             )}
             strokeWidth={1.75}
           />
-          <span className="flex-1">{label}</span>
+          <span className="flex-1">{uiText(label)}</span>
           <span className="font-mono text-[10px] text-muted-foreground/70 num">{num}</span>
         </>
       )}
@@ -81,9 +83,11 @@ function NavItem({ to, icon: Icon, label, num }: NavItemDef) {
 }
 
 function Topbar({ onSignOut, email }: { onSignOut: () => void; email?: string }) {
+  useUiLocale();
   const initials = email?.split('@')[0]?.slice(0, 2).toUpperCase() || '?';
   return (
     <header className="relative flex h-16 items-center gap-4 px-5">
+      <LanguagePicker />
       <div className="flex-1" />
       <SupportOverviewPanel />
       <div className="hidden md:flex items-center gap-2">
@@ -93,7 +97,7 @@ function Topbar({ onSignOut, email }: { onSignOut: () => void; email?: string })
         <button
           onClick={onSignOut}
           className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[12px] text-muted-foreground hover:text-foreground hover:bg-foreground/[0.04] transition-colors"
-          title="Sign out"
+          title={uiText("Sign out")}
         >
           <LogOut className="h-3.5 w-3.5" strokeWidth={1.75} />
         </button>
@@ -104,6 +108,7 @@ function Topbar({ onSignOut, email }: { onSignOut: () => void; email?: string })
 }
 
 export function AppLayout() {
+  useUiLocale();
   const { user } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -122,20 +127,20 @@ export function AppLayout() {
             <span
               className="font-display text-[28px] leading-none text-foreground"
               style={{ fontVariationSettings: "'opsz' 144, 'SOFT' 50, 'wght' 500" }}
-            >butter</span>
-            <span className="font-editorial italic text-[28px] leading-none text-butter">support</span>
+            >{uiText("butter")}</span>
+            <span className="font-editorial italic text-[28px] leading-none text-butter">{uiText("support")}</span>
           </div>
           <div className="mt-1.5 flex items-center gap-2">
             <span className="h-px w-6 bg-foreground/40" />
-            <span className="eyebrow !text-[9.5px]">support&nbsp;console</span>
+            <span className="eyebrow !text-[9.5px]">{uiText("support console")}</span>
           </div>
         </div>
 
         <nav className="flex flex-col gap-0.5 px-3">
-          <div className="px-3 pb-2 eyebrow !text-[9.5px]">Workspace</div>
+          <div className="px-3 pb-2 eyebrow !text-[9.5px]">{uiText("Workspace")}</div>
           {WORKSPACE.map((it) => <NavItem key={it.to} {...it} />)}
 
-          <div className="px-3 pt-5 pb-2 eyebrow !text-[9.5px]">Configure</div>
+          <div className="px-3 pt-5 pb-2 eyebrow !text-[9.5px]">{uiText("Configure")}</div>
           {CONFIGURE.map((it) => <NavItem key={it.to} {...it} />)}
         </nav>
 
@@ -144,8 +149,7 @@ export function AppLayout() {
         <div className="px-6 pb-6">
           <div className="rule-dotted mb-4" />
           <p className="font-editorial italic text-[13px] leading-snug text-muted-foreground">
-            "The work is in the conversation."
-          </p>
+            {uiText("\"The work is in the conversation.\"")}</p>
           <p className="mt-2 eyebrow !text-[9px]">v1 · {SUBDOMAIN}</p>
         </div>
       </aside>

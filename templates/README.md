@@ -1,5 +1,7 @@
 # Templates
 
+[English](README.md) | [日本語](README.ja.md)
+
 Full, production-shaped applications built on Butterbase. Unlike [`Examples/`](../Examples) — which are small, single-concept demos — each template here is a complete product you can clone, configure, and use.
 
 These aren't starting points you build on top of. They're finished apps. Clone one and you have a working product with a real database, auth, deployed functions, and a React frontend — on day one.

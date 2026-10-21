@@ -1,3 +1,4 @@
+import { LanguagePicker, uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/console/lib/api';
@@ -10,6 +11,7 @@ import { cn } from '@/console/lib/utils';
 const STEPS = ['Knowledge', 'Widget', 'Escalation'];
 
 export function Setup() {
+  useUiLocale();
   const [step, setStep] = useState(1);
   const navigate = useNavigate();
 
@@ -45,6 +47,7 @@ export function Setup() {
 
   return (
     <div className="paper-grain flex min-h-screen items-center justify-center p-6 bg-background">
+      <div className="fixed bottom-4 right-4 z-50 rounded bg-background p-1"><LanguagePicker /></div>
       <div className="w-[680px] max-w-full">
         {/* Stepper */}
         <div className="mb-8 flex items-center justify-center gap-2">
@@ -76,83 +79,77 @@ export function Setup() {
         </div>
 
         <div className="card-flat p-10">
-          <p className="eyebrow mb-3">Setup · {step} of {STEPS.length}</p>
+          <p className="eyebrow mb-3">{uiText("Setup · ")}{step} {uiText(" of ")}{STEPS.length}</p>
           <h1 className="page-title">
-            {step === 1 && <>Feed the agent your <em>knowledge</em>.</>}
-            {step === 2 && <>Drop the widget into your <em>site</em>.</>}
-            {step === 3 && <>Where should we <em>escalate</em>?</>}
+            {step === 1 && <>{uiText("Feed the agent your ")}<em>{uiText("knowledge")}</em>.</>}
+            {step === 2 && <>{uiText("Drop the widget into your ")}<em>{uiText("site")}</em>.</>}
+            {step === 3 && <>{uiText("Where should we ")}<em>{uiText("escalate")}</em>?</>}
           </h1>
 
           <div className="mt-7 space-y-4">
             {step === 1 && (
               <>
                 <p className="text-sm leading-relaxed text-muted-foreground">
-                  Paste a help-center URL. We'll crawl, chunk, and embed it so the agent can answer using your docs.
-                </p>
+                  {uiText("Paste a help-center URL. We'll crawl, chunk, and embed it so the agent can answer using your docs.")}</p>
                 <div>
-                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">Display name · optional</label>
-                  <Input className="mt-2" value={docsName} onChange={(e) => setDocsName(e.target.value)} placeholder="Help center" />
+                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">{uiText("Display name · optional")}</label>
+                  <Input className="mt-2" value={docsName} onChange={(e) => setDocsName(e.target.value)} placeholder={uiText("Help center")} />
                 </div>
                 <div>
-                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">URL</label>
-                  <Input className="mt-2" value={docsUrl} onChange={(e) => setDocsUrl(e.target.value)} placeholder="https://docs.yourcompany.com" />
+                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">{uiText("URL")}</label>
+                  <Input className="mt-2" value={docsUrl} onChange={(e) => setDocsUrl(e.target.value)} placeholder={uiText("https://docs.yourcompany.com")} />
                 </div>
                 {docsErr && (
                   <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-3.5 py-2.5 text-xs text-destructive">{docsErr}</div>
                 )}
                 <div className="flex items-center gap-3 pt-1">
                   <Button onClick={ingest} disabled={!docsUrl || ingesting} size="lg">
-                    {ingesting ? 'Ingesting…' : 'Ingest & continue'}
+                    {ingesting ? uiText('Ingesting…') : uiText('Ingest & continue')}
                   </Button>
                   <button
                     className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground hover:text-caramel transition-colors"
                     onClick={() => setStep(2)}
                   >
-                    Skip for now →
-                  </button>
+                    {uiText("Skip for now →")}</button>
                 </div>
               </>
             )}
             {step === 2 && (
               <>
                 <p className="text-sm leading-relaxed text-muted-foreground">
-                  Drop this snippet on your site. Works for anyone — logged in or not. No server code required.
-                </p>
+                  {uiText("Drop this snippet on your site. Works for anyone — logged in or not. No server code required.")}</p>
                 <pre className="rounded-xl border border-rule-soft bg-paper-warm p-4 font-mono text-xs overflow-x-auto whitespace-pre-wrap text-caramel-deep/90">{snippet}</pre>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  Once a user logs in, optionally call{' '}
+                  {uiText("Once a user logs in, optionally call")}{' '}
                   <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">
                     ButterSupport.identify(&#123;user_id, email, name&#125;)
                   </code>{' '}
-                  to attach their identity to future tickets. Full details on the Widget settings page.
-                </p>
+                  {uiText("to attach their identity to future tickets. Full details on the Widget settings page.")}</p>
                 <div className="pt-1">
-                  <Button onClick={() => setStep(3)} size="lg">Continue →</Button>
+                  <Button onClick={() => setStep(3)} size="lg">{uiText("Continue →")}</Button>
                 </div>
               </>
             )}
             {step === 3 && (
               <>
                 <p className="text-sm leading-relaxed text-muted-foreground">
-                  Where should the agent escalate tickets it can't handle on its own?
-                </p>
+                  {uiText("Where should the agent escalate tickets it can't handle on its own?")}</p>
                 <div>
-                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">Channel</label>
+                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">{uiText("Channel")}</label>
                   <Select className="mt-2" value={channel} onChange={(e) => setChannel(e.target.value as any)}>
-                    <option value="email">Email</option>
-                    <option value="slack">Slack</option>
+                    <option value="email">{uiText("Email")}</option>
+                    <option value="slack">{uiText("Slack")}</option>
                   </Select>
                 </div>
                 <div>
                   <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">
-                    {channel === 'slack' ? 'Slack channel · e.g. #support' : 'Email address'}
+                    {channel === 'slack' ? uiText('Slack channel · e.g. #support') : uiText('Email address')}
                   </label>
                   <Input className="mt-2" value={target} onChange={(e) => setTarget(e.target.value)} />
                 </div>
                 <div className="pt-1">
                   <Button onClick={saveEscalation} disabled={!target} size="lg">
-                    Finish setup ✨
-                  </Button>
+                    {uiText("Finish setup ✨")}</Button>
                 </div>
               </>
             )}

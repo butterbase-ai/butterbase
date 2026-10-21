@@ -1,3 +1,4 @@
+import { uiMessage, uiText, useUiLocale } from "../../../i18n";
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { bb, APP_ID } from '@/console/lib/bb';
@@ -17,28 +18,29 @@ const MODES: Mode[] = ['draft_for_approval', 'auto_send', 'auto_resolve', 'force
 
 const MODE_COPY: Record<Mode, { label: string; desc: string; tone: 'safe' | 'caution' | 'danger' }> = {
   draft_for_approval: {
-    label: 'Draft for approval',
-    desc: 'Agent drafts; a founder must approve before the customer sees anything.',
+    get label() { return uiText('Draft for approval'); },
+    get desc() { return uiText('Agent drafts; a founder must approve before the customer sees anything.'); },
     tone: 'safe',
   },
   auto_send: {
-    label: 'Auto-send',
-    desc: 'Agent sends replies directly. Escalations still require approval.',
+    get label() { return uiText('Auto-send'); },
+    get desc() { return uiText('Agent sends replies directly. Escalations still require approval.'); },
     tone: 'caution',
   },
   auto_resolve: {
-    label: 'Auto-resolve',
-    desc: 'Agent replies and closes tickets when it judges the issue resolved. Highest autonomy.',
+    get label() { return uiText('Auto-resolve'); },
+    get desc() { return uiText('Agent replies and closes tickets when it judges the issue resolved. Highest autonomy.'); },
     tone: 'danger',
   },
   force_escalate: {
-    label: 'Always escalate',
-    desc: 'Agent never drafts a reply. Every ticket of this type goes straight to a human via your default escalation target.',
+    get label() { return uiText('Always escalate'); },
+    get desc() { return uiText('Agent never drafts a reply. Every ticket of this type goes straight to a human via your default escalation target.'); },
     tone: 'caution',
   },
 };
 
 export function AutonomySettings() {
+  useUiLocale();
   const qc = useQueryClient();
   const { data: rows = [] } = useQuery({
     queryKey: ['autonomy_settings'],
@@ -58,9 +60,9 @@ export function AutonomySettings() {
   async function updateMode(issue_type: string, mode: Mode) {
     if (mode !== 'draft_for_approval') {
       const ok = await confirm({
-        title: `Switch "${issue_type}" to ${MODE_COPY[mode].label}?`,
+        title: uiMessage`Switch "${issue_type}" to ${MODE_COPY[mode].label}?`,
         description: MODE_COPY[mode].desc,
-        confirmLabel: 'Switch',
+        confirmLabel: uiText('Switch'),
         variant: MODE_COPY[mode].tone === 'danger' ? 'destructive' : 'default',
       });
       if (!ok) return;
@@ -72,9 +74,9 @@ export function AutonomySettings() {
         { action: 'upsert', issue_type, mode },
       );
       qc.invalidateQueries({ queryKey: ['autonomy_settings'] });
-      toast.success(`"${issue_type}" set to ${MODE_COPY[mode].label}`);
+      toast.success(uiMessage`"${issue_type}" set to ${MODE_COPY[mode].label}`);
     } catch (e: any) {
-      toast.error(e?.message || 'Update failed');
+      toast.error(e?.message || uiText('Update failed'));
     }
   }
 
@@ -82,11 +84,11 @@ export function AutonomySettings() {
     const issue_type = newType.trim().toLowerCase().replace(/\s+/g, '_');
     if (!issue_type) return;
     if (issue_type === 'default') {
-      toast.warning('"default" already exists. Edit the row above instead.');
+      toast.warning(uiText('"default" already exists. Edit the row above instead.'));
       return;
     }
     if (rows.some((r) => r.issue_type === issue_type)) {
-      toast.warning(`Override for "${issue_type}" already exists.`);
+      toast.warning(uiMessage`Override for "${issue_type}" already exists.`);
       return;
     }
     setBusy(true);
@@ -99,9 +101,9 @@ export function AutonomySettings() {
       setNewType('');
       setNewMode('draft_for_approval');
       qc.invalidateQueries({ queryKey: ['autonomy_settings'] });
-      toast.success(`Override added for "${issue_type}"`);
+      toast.success(uiMessage`Override added for "${issue_type}"`);
     } catch (e: any) {
-      toast.error(e?.message || 'Add failed');
+      toast.error(e?.message || uiText('Add failed'));
     } finally {
       setBusy(false);
     }
@@ -109,9 +111,9 @@ export function AutonomySettings() {
 
   async function remove(issue_type: string) {
     const ok = await confirm({
-      title: `Remove "${issue_type}" override?`,
-      description: 'It will fall back to the default mode.',
-      confirmLabel: 'Remove',
+      title: uiMessage`Remove "${issue_type}" override?`,
+      description: uiText('It will fall back to the default mode.'),
+      confirmLabel: uiText('Remove'),
       variant: 'destructive',
     });
     if (!ok) return;
@@ -122,9 +124,9 @@ export function AutonomySettings() {
         { action: 'delete', issue_type },
       );
       qc.invalidateQueries({ queryKey: ['autonomy_settings'] });
-      toast.success(`"${issue_type}" override removed`);
+      toast.success(uiMessage`"${issue_type}" override removed`);
     } catch (e: any) {
-      toast.error(e?.message || 'Remove failed');
+      toast.error(e?.message || uiText('Remove failed'));
     }
   }
 
@@ -145,9 +147,9 @@ export function AutonomySettings() {
 
   async function applyRecommendedDefaults() {
     const ok = await confirm({
-      title: 'Insert recommended overrides?',
-      description: `${RECOMMENDED_DEFAULTS.length} recommended autonomy overrides will be inserted. Existing rows with the same issue_type will be left alone.`,
-      confirmLabel: 'Insert',
+      title: uiText('Insert recommended overrides?'),
+      description: uiMessage`${RECOMMENDED_DEFAULTS.length} recommended autonomy overrides will be inserted. Existing rows with the same issue_type will be left alone.`,
+      confirmLabel: uiText('Insert'),
     });
     if (!ok) return;
     setBusy(true);
@@ -164,11 +166,11 @@ export function AutonomySettings() {
         inserted++;
       }
       qc.invalidateQueries({ queryKey: ['autonomy_settings'] });
-      toast.success(`Inserted ${inserted} of ${RECOMMENDED_DEFAULTS.length} recommended overrides`, {
+      toast.success(uiMessage`Inserted ${inserted} of ${RECOMMENDED_DEFAULTS.length} recommended overrides`, {
         title: RECOMMENDED_DEFAULTS.length - inserted > 0 ? `${RECOMMENDED_DEFAULTS.length - inserted} already existed` : undefined,
       });
     } catch (e: any) {
-      toast.error(e?.message || 'Apply failed');
+      toast.error(e?.message || uiText('Apply failed'));
     } finally {
       setBusy(false);
     }
@@ -176,53 +178,52 @@ export function AutonomySettings() {
 
   return (
     <SettingsPage
-      label="Section 10 · Autonomy"
-      title={<>How <em>free</em> is the agent?</>}
-      description="Set a default autonomy mode for all tickets, and override per issue type."
+      label={uiText("Section 10 · Autonomy")}
+      title={<>{uiText("How ")}<em>{uiText("free")}</em> {uiText(" is the agent?")}</>}
+      description={uiText("Set a default autonomy mode for all tickets, and override per issue type.")}
     >
       <Card>
-        <CardHeader><CardTitle>Default mode</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{uiText("Default mode")}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Applied to every ticket unless an override below matches the ticket's <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">issue_type</code>.
+            {uiText("Applied to every ticket unless an override below matches the ticket's ")}<code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">issue_type</code>.
           </p>
           {defaultRow ? (
             <ModeRow row={defaultRow} onChange={(m) => updateMode('default', m)} canRemove={false} />
           ) : (
-            <p className="text-sm text-caramel">No default row found. Re-seed via <code>autonomy_settings</code>.</p>
+            <p className="text-sm text-caramel">{uiText("No default row found. Re-seed via ")}<code>autonomy_settings</code>.</p>
           )}
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle>Per-issue overrides</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{uiText("Per-issue overrides")}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {rows.length <= 1 && (
             <div className="rounded-2xl border border-dashed border-rule-soft bg-paper-soft/40 p-4">
-              <div className="mb-2 text-sm font-medium text-foreground">Get started in one click</div>
+              <div className="mb-2 text-sm font-medium text-foreground">{uiText("Get started in one click")}</div>
               <p className="mb-3 text-xs text-muted-foreground">
-                Seed 12 common overrides: billing / cancellation / refund / legal / security &amp; 6 more force-escalate; password_reset / how_to / pricing_inquiry auto-resolve.
-              </p>
+                {uiText("Seed 12 common overrides: billing / cancellation / refund / legal / security & 6 more force-escalate; password_reset / how_to / pricing_inquiry auto-resolve.")}</p>
               <Button size="sm" variant="outline" onClick={applyRecommendedDefaults} disabled={busy}>
-                {busy ? 'Applying…' : 'Apply recommended defaults'}
+                {busy ? uiText('Applying…') : uiText('Apply recommended defaults')}
               </Button>
             </div>
           )}
           <p className="text-sm text-muted-foreground">
-            Override autonomy for specific issue types produced by the classifier (e.g. <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">billing</code>, <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">password_reset</code>).
+            {uiText("Override autonomy for specific issue types produced by the classifier (e.g. ")}<code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">billing</code>, <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">password_reset</code>).
           </p>
 
           <div className="flex gap-2 flex-wrap">
             <Input
               value={newType}
               onChange={(e) => setNewType(e.target.value)}
-              placeholder="issue_type · e.g. billing"
+              placeholder={uiText("issue_type · e.g. billing")}
               className="flex-1 min-w-[200px]"
             />
             <Select value={newMode} onChange={(e) => setNewMode(e.target.value as Mode)} className="w-52">
               {MODES.map((m) => <option key={m} value={m}>{MODE_COPY[m].label}</option>)}
             </Select>
-            <Button onClick={addOverride} disabled={!newType.trim() || busy}>Add override</Button>
+            <Button onClick={addOverride} disabled={!newType.trim() || busy}>{uiText("Add override")}</Button>
           </div>
 
           <div className="rounded-2xl border border-rule-soft bg-paper-soft divide-y divide-[rgb(244_236_221/0.06)]">
@@ -232,7 +233,7 @@ export function AutonomySettings() {
               </div>
             ))}
             {overrides.length === 0 && (
-              <div className="p-4 text-sm text-muted-foreground">No overrides yet — all tickets use the default mode.</div>
+              <div className="p-4 text-sm text-muted-foreground">{uiText("No overrides yet — all tickets use the default mode.")}</div>
             )}
           </div>
         </CardContent>
@@ -252,6 +253,7 @@ function ModeRow({
   canRemove: boolean;
   onRemove?: () => void;
 }) {
+  useUiLocale();
   const copy = MODE_COPY[row.mode] || MODE_COPY.draft_for_approval;
   const toneBadge: Record<typeof copy.tone, 'green' | 'secondary' | 'amber'> = {
     safe: 'green',
@@ -271,7 +273,7 @@ function ModeRow({
         {MODES.map((m) => <option key={m} value={m}>{MODE_COPY[m].label}</option>)}
       </Select>
       {canRemove && (
-        <Button size="sm" variant="ghost" onClick={onRemove}>Remove</Button>
+        <Button size="sm" variant="ghost" onClick={onRemove}>{uiText("Remove")}</Button>
       )}
     </div>
   );

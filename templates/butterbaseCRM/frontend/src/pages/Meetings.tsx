@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react';
 import {
   addDays,
@@ -26,7 +27,7 @@ import { useObjectView } from '@/components/toolbar/useObjectView';
 import { useCustomValueLookup } from '@/hooks/useCustomFields';
 import { CustomFieldCell } from '@/components/CustomFieldCell';
 import { rowMatches, parseCustomFieldRef } from '@/lib/filterDsl';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { MeetingAIDialog } from '@/components/MeetingAIDialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -71,6 +72,7 @@ type Mode = 'week' | 'agenda' | 'table';
 /* ────────────────────────────────────────────────────────────── */
 
 function NewMeetingDialog({ defaultStart }: { defaultStart?: Date }) {
+  useUiLocale();
   const createMut = useCreateMeeting();
   const { data: companies = [] } = useCompanies();
   const { data: deals = [] } = useDeals();
@@ -109,7 +111,7 @@ function NewMeetingDialog({ defaultStart }: { defaultStart?: Date }) {
 
   async function submit() {
     if (!title.trim() || !startsAt) {
-      toast.error('Title and start time are required');
+      toast.error(uiText('Title and start time are required'));
       return;
     }
     try {
@@ -127,11 +129,11 @@ function NewMeetingDialog({ defaultStart }: { defaultStart?: Date }) {
         company_id: finalCompanyId,
         deal_id: dealId !== NONE ? dealId : null,
       });
-      toast.success('Meeting scheduled');
+      toast.success(uiText('Meeting scheduled'));
       reset();
       setOpen(false);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to schedule');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to schedule'));
     }
   }
 
@@ -140,38 +142,36 @@ function NewMeetingDialog({ defaultStart }: { defaultStart?: Date }) {
       <DialogTrigger asChild>
         <Button className="gap-2 bg-foreground text-background hover:bg-foreground/85">
           <Plus className="h-3.5 w-3.5" />
-          New meeting
-        </Button>
+          {uiText("New meeting")}</Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="font-display text-[22px] tracking-tight">
-            New meeting
-          </DialogTitle>
+            {uiText("New meeting")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <label className="eyebrow !text-[10px] block mb-1.5">Title</label>
+            <label className="eyebrow !text-[10px] block mb-1.5">{uiText("Title")}</label>
             <Input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               autoFocus
-              placeholder="Quarterly review · Acme"
+              placeholder={uiText("Quarterly review · Acme")}
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="eyebrow !text-[10px] block mb-1.5">Starts</label>
+              <label className="eyebrow !text-[10px] block mb-1.5">{uiText("Starts")}</label>
               <Input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} />
             </div>
             <div>
-              <label className="eyebrow !text-[10px] block mb-1.5">Ends (optional)</label>
+              <label className="eyebrow !text-[10px] block mb-1.5">{uiText("Ends (optional)")}</label>
               <Input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="min-w-0">
-              <label className="eyebrow !text-[10px] block mb-1.5">Linked company</label>
+              <label className="eyebrow !text-[10px] block mb-1.5">{uiText("Linked company")}</label>
               <Select
                 value={companyId}
                 onValueChange={(v) => {
@@ -184,11 +184,11 @@ function NewMeetingDialog({ defaultStart }: { defaultStart?: Date }) {
                 }}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="None" />
+                  <SelectValue placeholder={uiText("None")} />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NONE}>
-                    <span className="font-editorial italic text-muted-foreground">None</span>
+                    <span className="font-editorial italic text-muted-foreground">{uiText("None")}</span>
                   </SelectItem>
                   {sortedCompanies.map((c) => (
                     <SelectItem key={c.id} value={c.id}>
@@ -200,22 +200,21 @@ function NewMeetingDialog({ defaultStart }: { defaultStart?: Date }) {
             </div>
             <div className="min-w-0">
               <label className="eyebrow !text-[10px] mb-1.5 flex items-center justify-between">
-                <span>Linked deal</span>
+                <span>{uiText("Linked deal")}</span>
                 {companyId !== NONE && (
                   <span className="font-editorial italic !text-[9.5px] tracking-normal normal-case text-muted-foreground/70 ml-2">
-                    filtered
-                  </span>
+                    {uiText("filtered")}</span>
                 )}
               </label>
               <Select value={dealId} onValueChange={setDealId} disabled={filteredDeals.length === 0}>
                 <SelectTrigger>
                   <SelectValue
-                    placeholder={filteredDeals.length === 0 ? 'No deals' : 'None'}
+                    placeholder={filteredDeals.length === 0 ? uiText('No deals') : uiText('None')}
                   />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NONE}>
-                    <span className="font-editorial italic text-muted-foreground">None</span>
+                    <span className="font-editorial italic text-muted-foreground">{uiText("None")}</span>
                   </SelectItem>
                   {filteredDeals.map((d) => (
                     <SelectItem key={d.id} value={d.id}>
@@ -227,28 +226,27 @@ function NewMeetingDialog({ defaultStart }: { defaultStart?: Date }) {
             </div>
           </div>
           <div>
-            <label className="eyebrow !text-[10px] block mb-1.5">Location</label>
+            <label className="eyebrow !text-[10px] block mb-1.5">{uiText("Location")}</label>
             <Input
               value={location}
               onChange={(e) => setLocation(e.target.value)}
-              placeholder="In-person address or video link"
+              placeholder={uiText("In-person address or video link")}
             />
           </div>
           <div>
-            <label className="eyebrow !text-[10px] block mb-1.5">Notes</label>
+            <label className="eyebrow !text-[10px] block mb-1.5">{uiText("Notes")}</label>
             <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
           </div>
         </div>
         <DialogFooter>
           <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
-            Cancel
-          </Button>
+            {uiText("Cancel")}</Button>
           <Button
             onClick={submit}
             disabled={createMut.isPending}
             className="bg-foreground text-background hover:bg-foreground/85"
           >
-            {createMut.isPending ? 'Saving…' : 'Schedule'}
+            {createMut.isPending ? uiText('Saving…') : uiText('Schedule')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -276,6 +274,7 @@ function meetingPlacement(m: Meeting, dayStart: Date) {
 }
 
 function WeekView({ days, meetings, onOpen }: { days: Date[]; meetings: Meeting[]; onOpen: (m: Meeting) => void }) {
+  useUiLocale();
   const now = new Date();
   const nowOffset =
     now.getHours() >= HOUR_START && now.getHours() <= HOUR_END
@@ -405,6 +404,7 @@ function WeekView({ days, meetings, onOpen }: { days: Date[]; meetings: Meeting[
 /* ────────────────────────────────────────────────────────────── */
 
 function AgendaView({ days, meetings, onOpen }: { days: Date[]; meetings: Meeting[]; onOpen: (m: Meeting) => void }) {
+  useUiLocale();
   return (
     <div className="space-y-8">
       {days.map((d) => {
@@ -425,8 +425,7 @@ function AgendaView({ days, meetings, onOpen }: { days: Date[]; meetings: Meetin
             </div>
             {list.length === 0 ? (
               <p className="font-editorial italic text-[13px] text-muted-foreground/70 pl-1">
-                — nothing scheduled —
-              </p>
+                {uiText("— nothing scheduled —")}</p>
             ) : (
               <ul className="space-y-1.5">
                 {list.map((m) => {
@@ -476,6 +475,7 @@ function AgendaView({ days, meetings, onOpen }: { days: Date[]; meetings: Meetin
 /* ────────────────────────────────────────────────────────────── */
 
 export default function Meetings() {
+  useUiLocale();
   const { data: meetings = [], isLoading } = useMeetings();
   const [cursor, setCursor] = useState<Date>(new Date());
   const [mode, setMode] = useState<Mode>('week');
@@ -523,13 +523,12 @@ export default function Meetings() {
     <div className="flex h-full flex-col">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Section 04 · Schedule</p>
+          <p className="eyebrow mb-3">{uiText("Section 04 · Schedule")}</p>
           <h1 className="page-title">
-            Calendar <em>in motion</em>
+            {uiText("Calendar ")}<em>{uiText("in motion")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            Every conversation, on the books — a week at a glance or a clean agenda you can run from.
-          </p>
+            {uiText("Every conversation, on the books — a week at a glance or a clean agenda you can run from.")}</p>
         </div>
         <NewMeetingDialog />
       </div>
@@ -540,14 +539,14 @@ export default function Meetings() {
           <button
             onClick={() => setCursor(addWeeks(cursor, -1))}
             className="h-8 w-8 grid place-items-center rounded-md border border-border bg-card text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
-            aria-label="Previous week"
+            aria-label={uiText("Previous week")}
           >
             <ChevronLeft className="h-4 w-4" />
           </button>
           <button
             onClick={() => setCursor(addWeeks(cursor, 1))}
             className="h-8 w-8 grid place-items-center rounded-md border border-border bg-card text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
-            aria-label="Next week"
+            aria-label={uiText("Next week")}
           >
             <ChevronRight className="h-4 w-4" />
           </button>
@@ -555,8 +554,7 @@ export default function Meetings() {
             onClick={() => setCursor(new Date())}
             className="ml-2 h-8 px-3 rounded-md border border-border bg-card text-[12.5px] text-foreground hover:border-foreground/30 transition-colors"
           >
-            Today
-          </button>
+            {uiText("Today")}</button>
         </div>
 
         <div className="flex-1 min-w-0 flex items-baseline gap-3">
@@ -564,8 +562,7 @@ export default function Meetings() {
             {rangeLabel}
           </h2>
           <p className="font-editorial italic text-[13px] text-muted-foreground">
-            {weekMeetings.length} {weekMeetings.length === 1 ? 'meeting' : 'meetings'} this week
-          </p>
+            {weekMeetings.length} {weekMeetings.length === 1 ? uiText('meeting') : uiText('meetings')} {uiText(" this week")}</p>
         </div>
 
         {/* mode toggle */}
@@ -580,8 +577,7 @@ export default function Meetings() {
             )}
           >
             <CalendarIcon className="h-3 w-3" />
-            Week
-          </button>
+            {uiText("Week")}</button>
           <button
             onClick={() => setMode('agenda')}
             className={cn(
@@ -592,8 +588,7 @@ export default function Meetings() {
             )}
           >
             <List className="h-3 w-3" />
-            Agenda
-          </button>
+            {uiText("Agenda")}</button>
           <button
             onClick={() => setMode('table')}
             className={cn(
@@ -604,8 +599,7 @@ export default function Meetings() {
             )}
           >
             <TableIcon className="h-3 w-3" />
-            Table
-          </button>
+            {uiText("Table")}</button>
         </div>
       </div>
       {mode === 'table' && <ObjectToolbar objectType="meetings" />}
@@ -658,13 +652,14 @@ function MeetingsTable({ meetings, visibleFields, cvLookup, onOpen }: {
   cvLookup: ReturnType<typeof useCustomValueLookup>;
   onOpen: (m: Meeting) => void;
 }) {
+  useUiLocale();
   const visibleBuilt = visibleFields.filter((s) => !parseCustomFieldRef(s));
   const visibleCustom = visibleFields.map(parseCustomFieldRef).filter((x): x is string => !!x);
   if (meetings.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-12 text-center">
-        <h3 className="font-medium">No matches</h3>
-        <p className="mt-1 text-sm text-muted-foreground">Adjust filters or switch to Week / Agenda.</p>
+        <h3 className="font-medium">{uiText("No matches")}</h3>
+        <p className="mt-1 text-sm text-muted-foreground">{uiText("Adjust filters or switch to Week / Agenda.")}</p>
       </div>
     );
   }

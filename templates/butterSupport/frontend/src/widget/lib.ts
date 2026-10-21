@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 export interface WidgetIdentity {
   user_id?: string;
   email?: string;
@@ -68,7 +69,7 @@ async function call<T = any>(
   fn: string,
   body: Record<string, unknown> = {},
 ): Promise<T> {
-  if (!appId) throw new Error('butterSupport: no app id (set data-app-id on the script tag)');
+  if (!appId) throw new Error(uiText('butterSupport: no app id (set data-app-id on the script tag)'));
   const url = `${API_URL}/v1/${appId}/fn/${fn}`;
   const res = await fetch(url, {
     method: 'POST',

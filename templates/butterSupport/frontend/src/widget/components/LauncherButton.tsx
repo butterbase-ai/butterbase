@@ -1,11 +1,13 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { X } from 'lucide-react';
 import { BrandMark } from './BrandMark';
 
 export function LauncherButton({ open, onClick }: { open: boolean; onClick: () => void }) {
+  useUiLocale();
   return (
     <button
       onClick={onClick}
-      aria-label={open ? 'Close support' : 'Open support'}
+      aria-label={open ? uiText('Close support') : uiText('Open support')}
       className="bs-shadow relative inline-flex h-14 w-14 items-center justify-center rounded-full text-[#2A1C0A] transition-all duration-300 hover:scale-105 active:scale-95"
       style={{
         background: 'linear-gradient(135deg, #FBE08E 0%, #F5C842 50%, #E0A82E 100%)',
