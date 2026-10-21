@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs-extra';
@@ -8,8 +9,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const currentAppId = await getCurrentAppId();
   if (!currentAppId) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return currentAppId;
@@ -17,7 +18,7 @@ async function requireAppId(appId?: string): Promise<string> {
 
 function formatTable(rows: Record<string, unknown>[]) {
   if (rows.length === 0) {
-    console.log(chalk.yellow('(0 rows)'));
+    console.log(chalk.yellow(text('(0 rows)')));
     return;
   }
 
@@ -54,7 +55,7 @@ function formatTable(rows: Record<string, unknown>[]) {
     console.log(line);
   }
 
-  console.log(chalk.gray(`\n(${rows.length} row${rows.length === 1 ? '' : 's'})`));
+  console.log(chalk.gray(msg`\n(${rows.length} row${rows.length === 1 ? '' : 's'})`));
 }
 
 export async function dataQueryCommand(table: string, options: {
@@ -62,7 +63,7 @@ export async function dataQueryCommand(table: string, options: {
   order?: string; limit?: string; offset?: string; json?: boolean;
 }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora(`Querying ${table}...`).start();
+  const spinner = ora(msg`Querying ${table}...`).start();
 
   try {
     const params: Record<string, string> = {};
@@ -89,7 +90,7 @@ export async function dataQueryCommand(table: string, options: {
 
     formatTable(Array.isArray(rows) ? rows : []);
   } catch (error) {
-    spinner.fail('Query failed');
+    spinner.fail(text('Query failed'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -104,26 +105,26 @@ export async function dataInsertCommand(table: string, options: {
 
   if (options.data) {
     try { rowData = JSON.parse(options.data); }
-    catch { console.error(chalk.red('Invalid JSON in --data')); process.exit(1); }
+    catch { console.error(chalk.red(text('Invalid JSON in --data'))); process.exit(1); }
   } else if (options.file) {
     if (!await fs.pathExists(options.file)) {
-      console.error(chalk.red(`File not found: ${options.file}`));
+      console.error(chalk.red(msg`File not found: ${options.file}`));
       process.exit(1);
     }
     const content = await fs.readFile(options.file, 'utf-8');
     try { rowData = JSON.parse(content); }
-    catch { console.error(chalk.red('Invalid JSON in file')); process.exit(1); }
+    catch { console.error(chalk.red(text('Invalid JSON in file'))); process.exit(1); }
   } else {
-    console.error(chalk.red('Provide --data or --file'));
-    console.log(chalk.gray('Example: butterbase data insert posts --data \'{"title":"Hello"}\''));
+    console.error(chalk.red(text('Provide --data or --file')));
+    console.log(chalk.gray(text('Example: butterbase data insert posts --data \'{"title":"Hello"}\'')));
     process.exit(1);
   }
 
-  const spinner = ora(`Inserting into ${table}...`).start();
+  const spinner = ora(msg`Inserting into ${table}...`).start();
 
   try {
     const result = await insertRow(appId, table, rowData!);
-    spinner.succeed(`Row inserted into "${table}"`);
+    spinner.succeed(msg`Row inserted into "${table}"`);
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -135,7 +136,7 @@ export async function dataInsertCommand(table: string, options: {
       console.log(`  ${chalk.gray(key)}: ${val}`);
     }
   } catch (error) {
-    spinner.fail('Insert failed');
+    spinner.fail(text('Insert failed'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api-client.js';
@@ -16,7 +17,7 @@ async function requireAppId(opt?: string): Promise<string> {
   if (opt) return opt;
   const cur = await getCurrentAppId();
   if (!cur) {
-    console.log(chalk.red('✗ no app — use `butterbase apps use <id>` or --app'));
+    console.log(chalk.red(text('✗ no app — use `butterbase apps use <id>` or --app')));
     process.exit(1);
     return undefined as unknown as string;
   }
@@ -52,7 +53,7 @@ async function pollPreviewJob(jobId: string, label: string): Promise<CloneJob | 
     if (cur.status === 'completed' || cur.status === 'failed') {
       spin.stop();
       if (cur.status === 'failed') {
-        ora().fail(`Job failed: ${cur.error_message ?? '(no message)'}`);
+        ora().fail(msg`Job failed: ${cur.error_message ?? text('(no message)')}`);
         process.exit(1);
         return undefined;
       }
@@ -60,38 +61,38 @@ async function pollPreviewJob(jobId: string, label: string): Promise<CloneJob | 
     }
     spin.text = `${label}… (${cur.status})`;
   }
-  ora().fail('Timed out waiting for job');
+  ora().fail(text('Timed out waiting for job'));
   process.exit(1);
   return undefined;
 }
 
 function printWarnings(final: CloneJob) {
   if (final.warnings?.length) {
-    for (const w of final.warnings) console.log(chalk.yellow(`warning: ${w}`));
+    for (const w of final.warnings) console.log(chalk.yellow(msg`warning: ${w}`));
   }
 }
 
 export async function previewCreateCommand(opts: { app?: string; wait?: boolean; json?: boolean }) {
   const appId = await requireAppId(opts.app);
-  const spin = ora('Creating preview deployment…').start();
+  const spin = ora(text('Creating preview deployment…')).start();
   let result: { job_id: string };
   try {
     result = await apiPost<{ job_id: string }>(`/v1/apps/${appId}/staging`, {});
   } catch (e) {
     failSpinner(spin, e);
   }
-  spin.succeed(`Preview job ${result.job_id} started`);
-  console.log(chalk.gray(`  Production data is being copied — this can take a few minutes.`));
-  console.log(chalk.gray(`  Poll with: butterbase preview status --app ${appId}`));
+  spin.succeed(msg`Preview job ${result.job_id} started`);
+  console.log(chalk.gray(text(`  Production data is being copied — this can take a few minutes.`)));
+  console.log(chalk.gray(msg`  Poll with: butterbase preview status --app ${appId}`));
 
   if (opts.wait) {
-    const final = await pollPreviewJob(result.job_id, 'Waiting for the preview to be ready');
+    const final = await pollPreviewJob(result.job_id, text('Waiting for the preview to be ready'));
     if (!final) return;
     printWarnings(final);
     if (opts.json) {
       console.log(JSON.stringify({ job_id: final.job_id, preview_app_id: final.dest_app_id, warnings: final.warnings }));
     } else {
-      console.log(chalk.green(`✓ Preview ready — app id: ${final.dest_app_id}`));
+      console.log(chalk.green(msg`✓ Preview ready — app id: ${final.dest_app_id}`));
     }
     return;
   }
@@ -118,33 +119,33 @@ export async function previewStatusCommand(opts: { app?: string; json?: boolean 
   }
 
   if (!result.staging_app_id) {
-    console.log(chalk.gray('No preview deployment. Create one with: butterbase preview create'));
+    console.log(chalk.gray(text('No preview deployment. Create one with: butterbase preview create')));
     return;
   }
-  console.log(`Preview app:     ${result.staging_app_id}`);
-  console.log(`Last promoted:   ${result.last_promoted_at ?? 'never'}`);
-  console.log(`Last reset:      ${result.last_reset_at ?? 'never'}`);
+  console.log(msg`Preview app:     ${result.staging_app_id}`);
+  console.log(msg`Last promoted:   ${result.last_promoted_at ?? text('never')}`);
+  console.log(msg`Last reset:      ${result.last_reset_at ?? text('never')}`);
 }
 
 export async function previewResetCommand(opts: { app?: string; wait?: boolean; json?: boolean }) {
   const appId = await requireAppId(opts.app);
-  const spin = ora('Resetting preview deployment…').start();
+  const spin = ora(text('Resetting preview deployment…')).start();
   let result: { job_id: string };
   try {
     result = await apiPost<{ job_id: string }>(`/v1/apps/${appId}/staging/reset`, {});
   } catch (e) {
     failSpinner(spin, e);
   }
-  spin.succeed(`Reset job ${result.job_id} started`);
+  spin.succeed(msg`Reset job ${result.job_id} started`);
 
   if (opts.wait) {
-    const final = await pollPreviewJob(result.job_id, 'Waiting for reset to complete');
+    const final = await pollPreviewJob(result.job_id, text('Waiting for reset to complete'));
     if (!final) return;
     printWarnings(final);
     if (opts.json) {
       console.log(JSON.stringify({ job_id: final.job_id, warnings: final.warnings }));
     } else {
-      console.log(chalk.green('✓ Preview reset complete'));
+      console.log(chalk.green(text('✓ Preview reset complete')));
     }
     return;
   }
@@ -161,21 +162,21 @@ export async function previewDeleteCommand(opts: { app?: string; yes?: boolean; 
     const { confirmed } = await prompts({
       type: 'confirm',
       name: 'confirmed',
-      message: 'Delete this preview deployment? This is irreversible.',
+      message: text('Delete this preview deployment? This is irreversible.'),
       initial: false,
     });
     if (!confirmed) {
-      console.log(chalk.gray('Aborted.'));
+      console.log(chalk.gray(text('Aborted.')));
       return;
     }
   }
-  const spin = ora('Deleting preview deployment…').start();
+  const spin = ora(text('Deleting preview deployment…')).start();
   try {
     await apiDelete(`/v1/apps/${appId}/staging`);
   } catch (e) {
     failSpinner(spin, e);
   }
-  spin.succeed('Preview deployment deleted');
+  spin.succeed(text('Preview deployment deleted'));
   if (opts.json) console.log(JSON.stringify({ deleted: true }));
 }
 
@@ -190,7 +191,7 @@ export async function previewEnvGetCommand(opts: { app?: string; json?: boolean 
   }
   const keys = Object.keys(result.env_overrides ?? {});
   if (keys.length === 0) {
-    console.log(chalk.gray('(no overrides set)'));
+    console.log(chalk.gray(text('(no overrides set)')));
     return;
   }
   for (const k of keys) console.log(k);
@@ -202,7 +203,7 @@ export async function previewEnvSetCommand(vars: string[], opts: { app?: string;
   for (const v of vars) {
     const eq = v.indexOf('=');
     if (eq < 1) {
-      console.log(chalk.red(`✗ invalid format (expected KEY=value): ${v}`));
+      console.log(chalk.red(msg`✗ invalid format (expected KEY=value): ${v}`));
       process.exit(1);
       return;
     }
@@ -212,7 +213,7 @@ export async function previewEnvSetCommand(vars: string[], opts: { app?: string;
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
   } else {
-    console.log(chalk.green(`✓ set ${Object.keys(env_overrides).length} override(s)`));
+    console.log(chalk.green(msg`✓ set ${Object.keys(env_overrides).length} override(s)`));
   }
 }
 
@@ -230,17 +231,17 @@ export async function previewPromoteCheckCommand(opts: { app?: string; json?: bo
     return;
   }
 
-  console.log(`Can promote: ${result.can_promote ? chalk.green('yes') : chalk.red('no')}`);
+  console.log(msg`Can promote: ${result.can_promote ? chalk.green(text('yes')) : chalk.red(text('no'))}`);
   if (result.additive?.length) {
-    console.log(chalk.green(`\nAdditive changes (${result.additive.length}):`));
+    console.log(chalk.green(msg`\nAdditive changes (${result.additive.length}):`));
     console.log(JSON.stringify(result.additive, null, 2));
   }
   if (result.blocked?.length) {
-    console.log(chalk.red(`\nBlocked changes (${result.blocked.length}) — apply manually or roll back:`));
+    console.log(chalk.red(msg`\nBlocked changes (${result.blocked.length}) — apply manually or roll back:`));
     console.log(JSON.stringify(result.blocked, null, 2));
   }
   if (result.ignored_removals?.length) {
-    console.log(chalk.gray(`\nIgnored removals (${result.ignored_removals.length}) — not promoted:`));
+    console.log(chalk.gray(msg`\nIgnored removals (${result.ignored_removals.length}) — not promoted:`));
     console.log(JSON.stringify(result.ignored_removals, null, 2));
   }
 }
@@ -252,31 +253,31 @@ export async function previewPromoteRunCommand(opts: { app?: string; yes?: boole
     const { confirmed } = await prompts({
       type: 'confirm',
       name: 'confirmed',
-      message: 'Promote this preview to production? This deploys schema + functions to production.',
+      message: text('Promote this preview to production? This deploys schema + functions to production.'),
       initial: false,
     });
     if (!confirmed) {
-      console.log(chalk.gray('Aborted.'));
+      console.log(chalk.gray(text('Aborted.')));
       return;
     }
   }
-  const spin = ora('Starting promote…').start();
+  const spin = ora(text('Starting promote…')).start();
   let result: { job_id: string };
   try {
     result = await apiPost<{ job_id: string }>(`/v1/apps/${appId}/staging/promote`, {});
   } catch (e) {
     failSpinner(spin, e);
   }
-  spin.succeed(`Promote job ${result.job_id} started`);
+  spin.succeed(msg`Promote job ${result.job_id} started`);
 
   if (opts.wait) {
-    const final = await pollPreviewJob(result.job_id, 'Waiting for promote to complete');
+    const final = await pollPreviewJob(result.job_id, text('Waiting for promote to complete'));
     if (!final) return;
     printWarnings(final);
     if (opts.json) {
       console.log(JSON.stringify({ job_id: final.job_id, warnings: final.warnings }));
     } else {
-      console.log(chalk.green('✓ Promote complete — production updated'));
+      console.log(chalk.green(text('✓ Promote complete — production updated')));
     }
     return;
   }
