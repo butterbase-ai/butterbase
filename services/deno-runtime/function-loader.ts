@@ -235,17 +235,27 @@ function getCacheKey(appId: string, functionName: string): string {
   return `${appId}:${functionName}`;
 }
 
-async function getDeployedAt(
+/** Thrown by loadFunction when the app is paused; server.ts maps it to 503 APP_PAUSED. */
+export class AppPausedError extends Error {
+  constructor(appId: string) {
+    super(`App ${appId} is paused`);
+    this.name = "AppPausedError";
+  }
+}
+
+async function getDeployedState(
   appId: string,
   functionName: string
-): Promise<Date | null> {
+): Promise<{ deployed_at: Date; paused: boolean } | null> {
   return withRuntimeClient(async (client) => {
     const result = await client.queryObject(
-      `SELECT deployed_at FROM app_functions
-       WHERE app_id = $1 AND name = $2 AND deleted_at IS NULL`,
+      `SELECT f.deployed_at, COALESCE(a.paused, false) AS paused
+         FROM app_functions f
+         LEFT JOIN apps a ON a.id = f.app_id
+        WHERE f.app_id = $1 AND f.name = $2 AND f.deleted_at IS NULL`,
       [appId, functionName]
     );
-    return result.rows.length > 0 ? (result.rows[0] as any).deployed_at : null;
+    return result.rows.length > 0 ? (result.rows[0] as any) : null;
   });
 }
 
@@ -259,15 +269,17 @@ export async function loadFunction(
   const cached = cache.get(cacheKey);
   if (cached && Date.now() < cached.expires) {
     // Verify cached version is current
-    const currentDeployedAt = await getDeployedAt(appId, functionName);
+    const current = await getDeployedState(appId, functionName);
 
-    if (currentDeployedAt === null) {
+    if (current === null) {
       cache.delete(cacheKey);
       console.log(`Function deleted: ${cacheKey}`);
       return null;
     }
 
-    if (currentDeployedAt.getTime() <= cached.deployed_at.getTime()) {
+    if (current.paused) throw new AppPausedError(appId);
+
+    if (current.deployed_at.getTime() <= cached.deployed_at.getTime()) {
       console.log(`Cache hit (verified): ${cacheKey}`);
       return cached.metadata;
     }
@@ -310,7 +322,7 @@ export async function loadFunction(
          name, owner_id, region, subdomain,
          deployment_url, anon_key, allowed_origins,
          stripe_connect_account_id,
-         ai_config, jwt_config, auth_hook_function
+         ai_config, jwt_config, auth_hook_function, paused
        FROM apps WHERE id = $1`,
       [appId]
     );
@@ -328,6 +340,8 @@ export async function loadFunction(
         `Wait a few seconds and try again, or check the app status with list_apps.`
       );
     }
+
+    if (app.paused) throw new AppPausedError(appId);
 
     // Merge: app-level vars first, then per-function vars override. Platform
     // BUTTERBASE_* vars are spread AFTER this in worker-executor.ts and always win.

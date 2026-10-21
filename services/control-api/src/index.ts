@@ -31,6 +31,7 @@ import rateLimitPlugin from './plugins/rate-limit.js';
 import quotaEnforcementPlugin from './plugins/quota-enforcement.js';
 import flyReplayPlugin from './plugins/fly-replay.js';
 import migrationGuardPlugin from './plugins/migration-guard.js';
+import pauseGatePlugin from './plugins/pause-gate.js';
 import { healthRoutes } from './routes/health.js';
 import { initRoutes } from './routes/init.js';
 import { schemaRoutes } from './routes/schema.js';
@@ -106,7 +107,7 @@ import type { AuthProvider } from './services/auth-provider.js';
 import { config, assertRegionConfig, assertInternalEmailSecret } from './config.js';
 import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
-import { AppNotFoundError, AppAuthRequiredError, AppPausedError } from './services/app-resolver.js';
+import { AppNotFoundError, AppAuthRequiredError, AppPausedError, pausedRemediation } from './services/app-resolver.js';
 import { AuthorizationError, NotFoundError, ValidationError, ConflictError } from './services/api-errors.js';
 import { startFlushWorker, reconcileUsage } from './services/usage-metering.js';
 import { getRedisClient, shutdownRedis } from './services/redis.js';
@@ -431,8 +432,8 @@ app.setErrorHandler((error: any, request, reply) => {
     return reply.status(503).send(createAgentError({
       code: 'APP_PAUSED',
       message: error.message,
-      remediation: 'Resume the app with `butterbase apps resume <app-id>` (or manage_app action="resume" via MCP).',
-      details: { reason: error.reason },
+      remediation: `${pausedRemediation(error.pausedBy, error.reason)} Owners can resume with \`butterbase apps resume <app-id>\` or manage_app action="resume" via MCP.`,
+      details: { reason: error.reason, paused_by: error.pausedBy },
     }));
   }
 
@@ -571,6 +572,11 @@ app.register(kvCredentialsRoutes);
 app.register(kvResolveJwtRoutes);
 app.register(visitBeaconRoutes);
 app.register(internalEmailRoutes);
+// Pause gate: before kv-quota so a paused app is refused before quota work.
+// Route plugins registered BEFORE this line do not get the gate (encapsulated
+// plugins copy parent hooks at load), so app-scoped route plugins must be
+// registered after it.
+app.register(pauseGatePlugin);
 // kv-quota MUST be registered before kv-data/expose/admin routes so the
 // preHandler hook and kvAccount decoration are available when those routes mount.
 app.register(kvQuotaPlugin);
@@ -1219,6 +1225,7 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).orphanReconcilerInterval) clearInterval((app as any).orphanReconcilerInterval);
       if ((app as any).videoPreparationStop) (app as any).videoPreparationStop();
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
+      if ((app as any).stagingReaperStop) (app as any).stagingReaperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});
       if ((app as any).peopleEmailSweeperHandle) await (app as any).peopleEmailSweeperHandle.stop().catch(() => {});
