@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
-import type { Pool, PoolClient } from 'pg';
+import type { Pool } from 'pg';
 import { z } from 'zod';
 import { getAppPoolForApp } from '../services/app-pool.js';
+import { executeWithRole } from '../services/rls-context.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
 import { uploadObject } from '../services/s3.js';
@@ -94,30 +95,6 @@ async function resolveAuth(
   throw new Error('Authentication required');
 }
 
-async function executeWithRole<T>(
-  pool: Pool,
-  role: string,
-  userId: string | null,
-  fn: (client: PoolClient) => Promise<T>,
-): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL ROLE ${role}`);
-    await client.query(`SET LOCAL app.role = '${role}'`);
-    if (role === 'butterbase_user' && userId) {
-      await client.query(`SET LOCAL request.jwt.claim.sub = '${userId.replace(/'/g, "''")}'`);
-    }
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 
 // --- Route registration ---
 
