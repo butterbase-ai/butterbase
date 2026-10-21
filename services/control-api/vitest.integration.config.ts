@@ -15,7 +15,6 @@ export default defineConfig({
     testTimeout: 30000,
     hookTimeout: 30000,
     include: [
-      'src/services/rls-context.integration.test.ts',
       'src/__tests__/app-state-capture.integration.test.ts',
       'src/__tests__/auto-api.test.ts',
       'src/__tests__/fn-gateway.test.ts',
@@ -28,6 +27,7 @@ export default defineConfig({
       'src/__tests__/partner-proxy-route.test.ts',
       'src/__tests__/rls-routes.test.ts',
       'src/__tests__/rls-validator.test.ts',
+      'src/services/rls-context.integration.test.ts',
       'src/__tests__/runtime-db-smoke.test.ts',
       'src/__tests__/schema.test.ts',
       'src/__tests__/template-update.integration.test.ts',
