@@ -1,4 +1,4 @@
-/** Static Japanese public docs, source: 1cba70c.
+/** Static Japanese public docs, source: 305e690.
  * The local docs tool performs no filesystem, API, or network requests.
  */
 import type { DocTopic } from './user-documentation.js';
@@ -1225,7 +1225,7 @@ Authorizationヘッダーからロールを自動判定します。
 |---|---|---|
 | なし | butterbase_anon | 公開データのみ |
 | エンドユーザーJWT | butterbase_user | ユーザー単位のデータ（RLS） |
-| APIキー（\`bb_sk_...\`） | butterbase_service | 全データ（サービス用のアクセス許可） |
+| APIキー（\`bb_sk_...\`） | butterbase_service | 全データ（RLSをバイパス） |
 
 <span id="create-a-row"></span>
 
@@ -1701,7 +1701,7 @@ export default async function handler(req: Request, ctx: any): Promise<Response>
 }
 \`\`\`
 
-butterbase_serviceとして実行し、ctx.userはnullです。ユーザーの特定には本文を使います。
+butterbase_serviceとして実行します（RLSをバイパス）。ctx.userはnullです。ユーザーの特定には本文を使います。
 
 <span id="token-lifetimes"></span>
 
