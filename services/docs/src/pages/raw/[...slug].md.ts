@@ -4,7 +4,7 @@ import { stripFrontmatter } from '../../integrations/llms-generator';
 
 export const getStaticPaths: GetStaticPaths = async () => {
   const entries = await getCollection('docs');
-  return entries.map((entry) => ({
+  return entries.filter((entry) => !entry.data.draft).map((entry) => ({
     params: { slug: entry.id.replace(/\.(md|mdx)$/, '') },
     props: { body: entry.body ?? '' },
   }));
