@@ -309,6 +309,7 @@ export const japaneseMessages: Readonly<Record<string, string>> = {
   "Edit & publish": "編集して公開",
   "Repost": "再投稿",
   "Retry failed": "再試行に失敗しました",
+  "Retry failed channels": "失敗した投稿先を再試行",
   "Cancel schedule": "予約をキャンセル",
   "Delete this post from ${0}? This removes it from the platform (irreversible).": "${0}からこの投稿を削除しますか？サービス側の投稿を削除します。元に戻せません。",
   "Removed from ${0}": "${0}から削除しました",

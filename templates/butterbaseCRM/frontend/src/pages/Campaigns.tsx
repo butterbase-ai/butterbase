@@ -349,7 +349,7 @@ function MembersTable({ members, loading, entityType }: { members: CampaignListM
       <TableHeader>
         <TableRow>
           <TableHead>{uiText("Name")}</TableHead>
-          <TableHead>{uiText("Title")}</TableHead>
+          <TableHead>{uiText("Title", "Job title")}</TableHead>
           <TableHead>{uiText("Company")}</TableHead>
           <TableHead>{uiText("Email")}</TableHead>
           <TableHead className="text-right">{uiText("Added")}</TableHead>

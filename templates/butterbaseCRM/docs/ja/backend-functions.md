@@ -33,7 +33,7 @@
 | `propose-deals` | http | 移行後のスタブ。substrateを読み提案行を作る実装が残件 |
 | `register-integration` | http | ワークスペース・利用者へComposio連携を結びつける |
 | `start-campaign` | http | 下書きを有効にし、リストから送信行を作る |
-| `start-meeting-bot` | http | 場所・メモの会議URLへボットを送る。`bot_id`を記録し、費用上限・冪等性を適用 |
+| `start-meeting-bot` | http | Butterbaseの`/ai/meetings`ボットを、`attrs.location`またはメモから読み取ったZoom・Meet・Teams・WebexのURLへ送る。`bot_id`をsubstrateのイベントへ記録し、`sync_settings.notetaker_cost_cap_usd`で費用上限を設け、冪等。`sync_settings.notetaker_auto_enabled=true`のとき`ingest-calendar`から自動実行 |
 | `notetaker-webhook` | http/HMAC | JWTなしで会議イベントを受け、`transcript.done`を取り込む。初回登録が必要 |
 | `substrate-proxy` | http | ブラウザー向けの窓口。上限5000 |
 | `summarize-company` | http | 呼び出した利用者のRLSに従い、会社の2文の要約を生成 |

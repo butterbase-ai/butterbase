@@ -165,7 +165,7 @@ export function SocialPostDetailPanel({ post, onClose }: Props) {
             className="text-xs"
           >
             {retry.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCw className="h-3 w-3" />}
-            {uiText("Retry failed")}</Button>
+            {uiText("Retry failed", "Retry failed channels")}</Button>
         )}
         {canCancel && (
           <Button

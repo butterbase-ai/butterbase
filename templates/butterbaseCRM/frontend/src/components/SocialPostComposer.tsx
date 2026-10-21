@@ -244,10 +244,10 @@ export function SocialPostComposer({ open, onOpenChange, post, initialContent }:
 
   function scheduledIso(): string | undefined | null {
     if (!isScheduled) return null
-    if (!scheduleDate || !scheduleTime) { toast.error(uiText('Pick a date and time')); throw new Error(uiText('schedule')) }
+    if (!scheduleDate || !scheduleTime) { toast.error(uiText('Pick a date and time')); throw new Error('schedule') }
     const dt = new Date(`${scheduleDate}T${scheduleTime}`)
-    if (Number.isNaN(dt.getTime())) { toast.error(uiText('Invalid date/time')); throw new Error(uiText('schedule')) }
-    if (dt.getTime() < Date.now() + 30_000) { toast.error(uiText('Pick a time at least 30s from now')); throw new Error(uiText('schedule')) }
+    if (Number.isNaN(dt.getTime())) { toast.error(uiText('Invalid date/time')); throw new Error('schedule') }
+    if (dt.getTime() < Date.now() + 30_000) { toast.error(uiText('Pick a time at least 30s from now')); throw new Error('schedule') }
     return dt.toISOString()
   }
 
