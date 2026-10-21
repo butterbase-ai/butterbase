@@ -40,6 +40,15 @@ describe('local Japanese MCP documentation', () => {
     expect(searchUserDocumentation('fixturexyz404', 5, 'ja')).toEqual([]);
     expect(searchUserDocumentation('認証', 2, 'ja').length).toBeLessThanOrEqual(2);
   });
+  it('ranks the matching section first for ordinary Japanese questions', () => {
+    const top = (query: string) => searchUserDocumentation(query, 5, 'ja').map(hit => hit.topic);
+    expect(top('料金プランについて教えて')[0]).toBe('billing');
+    expect(top('ストレージの署名付きURLについて')[0]).toBe('storage');
+    expect(top('関数のタイムアウトはどこで設定しますか')[0]).toBe('functions');
+    expect(top('カスタムドメインの設定をお願いします')[0]).toBe('frontend');
+    expect(top('OAuthでログインを実装したい')[0]).toBe('auth');
+    expect(top('認証の方法を教えてください')).toContain('auth');
+  });
   it('exposes optional language and retains the read-only annotations', async () => {
     await withDocs(async client => {
       const { tools } = await client.listTools(); const docs = tools.find(tool => tool.name === 'butterbase_docs')!;

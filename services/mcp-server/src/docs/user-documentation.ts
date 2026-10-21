@@ -4159,6 +4159,17 @@ export interface DocSearchHit {
 }
 
 /**
+ * Topic-bearing chunks of a Japanese query: runs of kanji, katakana or Latin text.
+ * Hiragana (particles, verb endings, polite requests) separates the chunks and is dropped.
+ */
+function japaneseSearchTerms(query: string): string[] {
+  const chunks = [...new Set(query.normalize('NFKC').match(/[\p{Script=Han}々]+|[\p{Script=Katakana}ー]+|[a-z0-9][a-z0-9_./-]*/gu) ?? [])].filter(chunk => chunk !== '方法');
+  // A lone kanji left over from okurigana (教え, 知り, 願い) is not a topic.
+  const topical = chunks.filter(chunk => chunk.length > 1 || !/^\p{Script=Han}$/u.test(chunk));
+  return topical.length > 0 ? topical : chunks;
+}
+
+/**
  * Substring search across every documentation section. Splits the query into
  * whitespace-delimited terms, counts case-insensitive occurrences per section,
  * and returns the highest-scoring sections. No external index — the corpus is
@@ -4166,32 +4177,40 @@ export interface DocSearchHit {
  */
 export function searchUserDocumentation(query: string, maxHits = 5, language: DocLanguage = 'en'): DocSearchHit[] {
   const normalized = query.toLowerCase();
-  const stopwords = new Set(['の', 'を', 'に', 'で', 'は', 'が', 'と', 'も', 'へ', 'や', 'から', 'まで', 'です', 'ます', 'する', 'した', 'して', 'ください', 'こと', '方法']);
-  const terms = language === 'ja' && /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(normalized)
-    ? [...new Set([...new Intl.Segmenter('ja', { granularity: 'word' }).segment(normalized)].filter(part => part.isWordLike && !stopwords.has(part.segment)).map(part => part.segment))]
-    : normalized.split(/\s+/).filter(Boolean);
+  const japanese = language === 'ja';
+  const terms = japanese ? japaneseSearchTerms(normalized) : normalized.split(/\s+/).filter(Boolean);
   if (terms.length === 0) return [];
 
-  const hits: DocSearchHit[] = [];
-  for (const [topic, text] of Object.entries(language === 'ja' ? JAPANESE_SECTIONS : SECTIONS) as [Exclude<DocTopic, 'all'>, string][]) {
-    const lower = text.toLowerCase();
+  const sections = Object.entries(language === 'ja' ? JAPANESE_SECTIONS : SECTIONS) as [Exclude<DocTopic, 'all'>, string][];
+  // Japanese has no spaces, so frequent words dominate raw counts. Japanese results are ranked by
+  // log-scaled counts weighted by how few sections contain the term; English keeps the raw count.
+  const lowered = sections.map(([, text]) => text.toLowerCase());
+  const rarity = terms.map(term => Math.log((lowered.length + 1) / (1 + lowered.filter(text => text.includes(term)).length)));
+
+  const hits: (DocSearchHit & { rank: number })[] = [];
+  sections.forEach(([topic, text], section) => {
+    const lower = lowered[section];
     let score = 0;
+    let rank = 0;
     let firstPos = Infinity;
-    for (const term of terms) {
+    terms.forEach((term, i) => {
+      let count = 0;
       let idx = lower.indexOf(term);
       if (idx !== -1 && idx < firstPos) firstPos = idx;
       while (idx !== -1) {
-        score++;
+        count++;
         idx = lower.indexOf(term, idx + term.length);
       }
-    }
+      score += count;
+      rank += japanese ? rarity[i] * Math.log1p(count) : count;
+    });
     if (score > 0) {
       const start = Math.max(0, firstPos - 80);
       const snippet = text.slice(start, start + 240).replace(/\s+/g, ' ').trim();
-      hits.push({ topic, score, snippet });
+      hits.push({ topic, score, snippet, rank });
     }
-  }
+  });
 
-  hits.sort((a, b) => b.score - a.score);
-  return hits.slice(0, maxHits);
+  hits.sort((a, b) => b.rank - a.rank || b.score - a.score);
+  return hits.slice(0, maxHits).map(({ topic, score, snippet }) => ({ topic, score, snippet }));
 }
