@@ -1,0 +1,4 @@
+*, *::before, *::after { box-sizing: border-box; }
+h1, h2, h3, p { overflow-wrap: anywhere; }
+.example-language { max-width: 800px; margin: 16px auto; padding: 0 20px; text-align: right; }
+.example-language select { padding: 6px; }

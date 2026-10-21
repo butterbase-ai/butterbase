@@ -1,5 +1,7 @@
 # Butterbase backend setup (grocery list)
 
+English | [日本語](BUTTERBASE_SETUP.ja.md)
+
 Exact MCP tool calls used to provision the example backend.
 
 ## Step 1: Initialize app
