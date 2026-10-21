@@ -10,22 +10,22 @@ Butterbaseは、AIを使うアプリのためのオープンソースのバッ�
 
 ## 主な機能
 
-| 分野 | 機能 |
-|---|---|
-| データ | アプリ別Postgres、宣言的スキーマ、マイグレーション、自動生成REST API、行レベルセキュリティ（RLS） |
-| KV | リージョン別のキーと値の保存、TTL、使用量制限、監査記録、公開ルール。v0.2.0で追加 |
-| ファイル | S3/R2、署名付きURL、アクセス制御、非同期インデックス |
-| 関数 | Deno上で実行するTypeScriptのサーバーレス関数 |
-| Durable Objects | チャットルーム、ゲーム、レート制限、長時間エージェントなどのキー別状態管理 |
-| リアルタイム | WebSocketによるテーブル変更の購読とプレゼンス |
-| フロントエンド | ZIPまたはソースからの静的サイト・SPA配信、独自ドメイン、Next.js / Remix / AstroのEdge SSR |
-| エージェント | グラフで定義する複数ステップのLLM処理、チェックポイント、関数・MCPツール、人による承認待ち。`Examples/agents/` に例を収録 |
-| AI | チャット、埋め込み、モデル一覧を扱う共通ゲートウェイ。ルーターは差し替え可能 |
-| RAG | コレクション、文書取り込み、意味検索、検索結果を使った回答生成 |
-| 外部連携 | Composio経由のサードパーティーツール |
-| 認証 | メール、Google / GitHub / Apple / XなどのOAuth、JWT設定、ログイン後フック、サービスキー |
-| 運用 | 監査ログ、アプリイベントのWebhook、元リージョンのレプリカを保持するアプリ移動 |
-| MCP・プラグイン | HTTPの `/mcp` と `npx @butterbase/mcp` のstdio。Claude Codeプラグインは39スキルと34コマンドを収録 |
+| 分野 | 機能 | 主なAPI・コマンド |
+|---|---|---|
+| データ | アプリ別Postgres、宣言的スキーマ、マイグレーション、自動生成REST API、行レベルセキュリティ（RLS） | `/schema`、`/auto-api`、`/rls` |
+| KV | リージョン別のキーと値の保存、TTL、使用量制限、監査記録、公開ルール。v0.2.0で追加 | `/v1/:app/kv/*` |
+| ファイル | S3/R2、署名付きURL、アクセス制御、非同期インデックス | `/storage` |
+| 関数 | Deno上で実行するTypeScriptのサーバーレス関数 | `/functions` |
+| Durable Objects | チャットルーム、ゲーム、レート制限、長時間エージェントなどのキー別状態管理 | `/durable-objects` |
+| リアルタイム | WebSocketによるテーブル変更の購読とプレゼンス | `/realtime` |
+| フロントエンド | ZIPまたはソースからの静的サイト・SPA配信、独自ドメイン、Next.js / Remix / AstroのEdge SSR | `/frontend`、`/custom-domains`、`/edge-ssr`、`/edge-ssr-from-source` |
+| エージェント | グラフで定義する複数ステップのLLM処理、チェックポイント、関数・MCPツール、人による承認待ち。`Examples/agents/` に例を収録 | `/agents` |
+| AI | チャット、埋め込み、モデル一覧を扱う共通ゲートウェイ。ルーターは差し替え可能 | `/gateway`、`/ai-config` |
+| RAG | コレクション、文書取り込み、意味検索、検索結果を使った回答生成 | `/rag` |
+| 外部連携 | Composio経由のサードパーティーツール | `/integrations` |
+| 認証 | メール、Google / GitHub / Apple / XなどのOAuth、JWT設定、ログイン後フック、サービスキー | `/auth`、`/oauth-config`、`/api-keys` |
+| 運用 | 監査ログ、アプリイベントのWebhook、元リージョンのレプリカを保持するアプリ移動 | `/audit-logs`、`/webhooks`、`butterbase apps move`（[`docs/move-app.md`](./docs/move-app.md)） |
+| MCP・プラグイン | HTTPの `/mcp` と `npx @butterbase/mcp` のstdio。Claude Codeプラグインは39スキルと34コマンドを収録 | `/mcp` |
 
 各アプリのデータは通常のPostgresに保存されます。独自データストアへの移行を前提とせず、スキーマ、RLS、REST APIを使えます。[マネージド版](https://butterbase.ai)には無料枠があり、同じデータプレーンを複数リージョンで提供します。
 
