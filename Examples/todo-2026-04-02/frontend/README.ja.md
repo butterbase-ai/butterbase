@@ -7,7 +7,7 @@
 原文が紹介する公式プラグインは次の2つです。
 
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react)：[Oxc](https://oxc.rs)を使います。
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc)：[SWC](https://swc.rs/)を使います。
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc)：[SWC](https://swc.rs/)を使います。
 
 ## React Compiler
 
