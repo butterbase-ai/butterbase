@@ -10,6 +10,8 @@
 
 ### Added
 
+- **Idle pause**: real app requests record home-region activity with an hourly Redis throttle. The optional idle reaper warns owners, cancels pending notices when real traffic returns, and pauses abandoned free projects with a global circuit breaker. It is disabled unless `BUTTERBASE_IDLE_PAUSE_DAYS` is configured; supports dry-run rollout. Migration 056 remains required before deploying the activity hook.
+
 - **Ops**: `scripts/sync-paused-frontends.ts` -- run once after the dispatch worker deploy so apps paused before it show the paused page (rewrites their existing KV routes with `paused`). Idempotent; `--dry-run` lists the apps without writing.
 - **Idle pause**: Upgrading a free organization to a paid plan resumes the projects that were paused for inactivity. Projects you or Butterbase support paused stay paused.
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs

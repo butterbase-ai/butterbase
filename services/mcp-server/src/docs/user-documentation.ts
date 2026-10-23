@@ -2593,7 +2593,7 @@ Butterbase offers three plan tiers. Each plan includes a set of monthly usage al
 | **HIPAA** | — | — | Paid add-on |
 | **SLA** | — | — | Yes |
 
-Free projects are paused after 1 week of inactivity. Visitors to a paused project see an HTTP 503 "This project is paused." page, and Durable Object (/_do/) paths keep working.
+Free projects are paused after 1 week of inactivity. Owners receive a warning first. Real app traffic and qualifying human frontend visits count as activity; scheduled cron jobs do not. An inactivity-paused free project requires an upgrade to resume; upgrading automatically brings it back. Paid projects are excluded from inactivity pausing. Visitors to a paused project see an HTTP 503 "This project is paused." page, and Durable Object (/_do/) paths keep working.
 
 ### Usage meters
 
