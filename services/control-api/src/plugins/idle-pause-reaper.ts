@@ -5,7 +5,7 @@ import { getRedisClient } from '../services/redis.js';
 
 // All replicas must share REDIS_URL, as for lock:nightly-billing.
 export default fp(async (app) => {
-  let stop: (() => void) | undefined;
+  let stop: (() => Promise<void>) | undefined;
   app.addHook('onReady', async () => {
     if (!idlePauseConfigFromEnv() || process.env.SKIP_IDLE_PAUSE_REAPER) return;
     stop = startIdlePauseReaper({
@@ -15,5 +15,5 @@ export default fp(async (app) => {
       log: app.log,
     });
   });
-  app.addHook('onClose', async () => { stop?.(); });
+  app.addHook('onClose', async () => { await stop?.(); });
 }, { name: 'idle-pause-reaper' });

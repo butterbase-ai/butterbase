@@ -1,10 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { Redis } from 'ioredis';
 
 const emails = vi.hoisted(() => ({ owner: vi.fn(async () => {}), ops: vi.fn(async () => {}) }));
+const tracking = vi.hoisted(() => ({
+  pool: vi.fn(), redis: { set: vi.fn(async () => { throw new Error('regional Redis down'); }) },
+}));
 vi.mock('./idle-pause-emails.js', () => ({ sendIdlePauseEmail: emails.owner, sendIdlePauseBreakerEmail: emails.ops }));
-const { runIdlePauseOnce } = await import('./idle-app-reaper.js');
+vi.mock('./region-resolver.js', () => ({ resolveAppHomeRegion: async () => 'test-region' }));
+vi.mock('./redis-registry.js', () => ({ redisFor: () => tracking.redis }));
+vi.mock('./runtime-db.js', () => ({ getRuntimeDbPool: tracking.pool }));
+vi.mock('../config.js', () => ({ config: { runtimeDb: {} } }));
+const { markAppActive } = await import('./app-activity.js');
+const { onPauseStateChanged } = await import('./app-pause.js');
+const { runIdlePauseOnce, startIdlePauseReaper } = await import('./idle-app-reaper.js');
 const { idlePauseConfigFromEnv } = await import('./idle-pause-config.js');
 
 // Opt in explicitly; never reuse the application's configured databases.
@@ -51,6 +61,7 @@ suite('idle reaper SQL safety (real Postgres)', () => {
   });
   beforeEach(async () => {
     lock = null; vi.clearAllMocks();
+    tracking.pool.mockReturnValue(runtime);
     await control.query(`TRUNCATE org_app_index,frontend_visit_daily; UPDATE organizations SET plan_id = 'playground' WHERE id = '${freeOrg}'`);
     await runtime.query('TRUNCATE apps,app_environments');
   });
@@ -93,6 +104,9 @@ suite('idle reaper SQL safety (real Postgres)', () => {
     expect((await runtime.query('SELECT * FROM apps ORDER BY id')).rows).toEqual(before);
     expect(emails.owner).not.toHaveBeenCalled(); expect(emails.ops).not.toHaveBeenCalled();
     expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ dryRun: true }), expect.any(String));
+    expect(log.info).toHaveBeenCalledWith(expect.objectContaining({
+      apps: expect.arrayContaining([expect.objectContaining({ id: 'app_pause', plan: 'playground', region: 'test-region' })]),
+    }), expect.any(String));
   });
   it.each([{ maxPerTick: 1 }, { maxFraction: 0.2 }])('breaker blocks both notification and pause, but warning still runs (%j)', async (limit) => {
     await insert('app_warn'); await insert('app_notify', freeOrg, { warned: 8 });
@@ -141,6 +155,45 @@ suite('idle reaper SQL safety (real Postgres)', () => {
     expect(app.idle_warned_at).toBeNull(); expect(app.idle_pause_notified_at).toBeNull();
     expect(app.paused).toBe(false);
   });
+  it('real returning traffic survives a regional Redis outage and cancels a due pause', async () => {
+    await insert('app_redis_returned', freeOrg, { warned: 15, notified: 6 });
+    await markAppActive(control, 'app_redis_returned', log);
+    const app = await row('app_redis_returned');
+    expect(app.last_active_at.getTime()).toBeGreaterThan(Date.now() - 10000);
+    expect(app.idle_warned_at).toBeNull(); expect(app.idle_pause_notified_at).toBeNull();
+    await runIdlePauseOnce(deps(), cfg);
+    expect((await row('app_redis_returned')).paused).toBe(false);
+  });
+  it('finishes committed pause effects before stop resolves', async () => {
+    await insert('app_draining', freeOrg, { warned: 15, notified: 6 });
+    vi.stubEnv('BUTTERBASE_IDLE_PAUSE_DAYS', '28'); vi.stubEnv('BUTTERBASE_IDLE_PAUSE_MAX_FRACTION', '1');
+    let finish!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let effectsDone = false;
+    const unsubscribe = onPauseStateChanged(async (change) => {
+      if (change.appId === 'app_draining' && change.paused) { entered(); await gate; effectsDone = true; }
+    });
+    const stop = startIdlePauseReaper(deps());
+    try {
+      await started;
+      expect((await row('app_draining')).paused).toBe(true);
+      let drained = false;
+      const draining = stop().then(() => { drained = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(drained).toBe(false);
+      finish(); await draining;
+      expect(effectsDone).toBe(true);
+    } finally { finish(); await stop(); unsubscribe(); vi.unstubAllEnvs(); }
+  });
+  it('shutdown prevents a subsequent batch while retaining effects for committed rows', async () => {
+    await insert('app_warn'); await insert('app_pause', freeOrg, { warned: 15, notified: 6 });
+    const abort = new AbortController();
+    emails.owner.mockImplementationOnce(async () => { abort.abort(); });
+    await expect(runIdlePauseOnce({ ...deps(), signal: abort.signal }, cfg)).rejects.toThrow('stopped');
+    expect((await row('app_warn')).idle_warned_at).not.toBeNull();
+    expect((await row('app_pause')).paused).toBe(false);
+  });
   it('losing the lease before mutation prevents all writes and does not delete another worker\'s lease', async () => {
     await insert('app_warn');
     redis.eval.mockImplementationOnce(async () => { lock = 'new-owner'; return 0; });
@@ -152,5 +205,37 @@ suite('idle reaper SQL safety (real Postgres)', () => {
     await control.query("INSERT INTO org_app_index VALUES ('app_unknown_region',$1,'offline')", [freeOrg]);
     await runIdlePauseOnce({ ...deps(), runtimeDb: (region) => { if (region === 'offline') throw new Error('offline'); return runtime; } }, cfg);
     expect((await row('app_warn')).idle_warned_at).toBeNull(); expect(log.error).toHaveBeenCalled();
+  });
+  it.skipIf(!process.env.IDLE_PAUSE_TEST_REDIS_URL)('uses a real Redis lease to exclude concurrent workers and release only its token', async () => {
+    const client = new Redis(process.env.IDLE_PAUSE_TEST_REDIS_URL!);
+    const key = 'lock:idle-pause-reaper';
+    let finish!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const query = control.query.bind(control);
+    let first = true;
+    const slowControl = { query: async (...args: any[]) => {
+      if (first) { first = false; entered(); await gate; }
+      return (query as any)(...args);
+    } };
+    try {
+      await client.del(key);
+      const pending = runIdlePauseOnce({ ...deps(), redis: client, controlDb: slowControl as never }, cfg);
+      await started;
+      expect(await runIdlePauseOnce({ ...deps(), redis: client }, cfg)).toMatchObject({ locked: true });
+      finish(); await pending;
+      expect(await client.get(key)).toBeNull();
+
+      await insert('app_real_lease');
+      const runtimeQuery = runtime.query.bind(runtime);
+      const leaseStealer = { query: async (...args: any[]) => {
+        const result = await (runtimeQuery as any)(...args);
+        if (String(args[0]).includes('CASE WHEN')) await client.set(key, 'new-owner', 'EX', 60);
+        return result;
+      } };
+      await expect(runIdlePauseOnce({ ...deps(), redis: client, runtimeDb: () => leaseStealer as never }, cfg)).rejects.toThrow('lease lost');
+      expect(await client.get(key)).toBe('new-owner');
+      expect((await row('app_real_lease')).idle_warned_at).toBeNull();
+    } finally { finish(); await client.del(key); await client.quit(); }
   });
 });

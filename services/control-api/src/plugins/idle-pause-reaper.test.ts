@@ -18,3 +18,19 @@ it('does not initialize any worker when disabled', async () => {
   const app = Fastify(); await app.register(plugin); await app.ready(); await app.close();
   expect(start).not.toHaveBeenCalled();
 });
+it('awaits in-flight sweep cleanup before closing the database', async () => {
+  let finish!: () => void, entered!: () => void;
+  const gate = new Promise<void>((resolve) => { finish = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  stop.mockImplementationOnce(() => { entered(); return gate; });
+  let databaseClosed = false;
+  const app = Fastify(); app.decorate('controlDb', {} as never); app.decorate('runtimeDb', (() => ({})) as never);
+  app.addHook('onClose', async () => { databaseClosed = true; });
+  await app.register(plugin); await app.ready();
+  const closing = app.close();
+  try {
+    await started; await new Promise((resolve) => setImmediate(resolve));
+    expect(databaseClosed).toBe(false);
+  } finally { finish(); await closing; }
+  expect(databaseClosed).toBe(true);
+});

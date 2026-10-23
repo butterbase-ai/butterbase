@@ -11,6 +11,7 @@ const RENEW = "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('e
 const RELEASE = "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
 
 export interface IdleReaperDeps {
+  signal?: AbortSignal;
   controlDb: Pool;
   runtimeDb(region: string): Pool;
   redis: {
@@ -20,7 +21,7 @@ export interface IdleReaperDeps {
   log: { info(obj: unknown, msg?: string): void; warn(obj: unknown, msg?: string): void; error(obj: unknown, msg?: string): void };
 }
 export interface IdlePauseSummary { candidates: number; visited: number; warned: number; notified: number; paused: number; breaker: boolean; locked: boolean }
-interface Ref { app_id: string; region: string; organization_id: string }
+interface Ref { app_id: string; region: string; organization_id: string; plan_id: string }
 type Stage = 'warn' | 'notify' | 'pause';
 interface Candidate extends IdlePauseApp { stage: Stage; last_active_at: Date }
 
@@ -40,7 +41,7 @@ const STAGES: Record<Stage, string> = {
 
 async function freeApps(controlDb: Pool, cfg: IdlePauseConfig): Promise<Ref[]> {
   return (await controlDb.query<Ref>(
-    `SELECT oai.app_id, oai.region, oai.organization_id FROM org_app_index oai
+    `SELECT oai.app_id, oai.region, oai.organization_id, o.plan_id FROM org_app_index oai
        JOIN organizations o ON o.id = oai.organization_id
       WHERE o.plan_id = ANY($1::text[]) AND o.account_status <> 'suspended'`, [cfg.plans],
   )).rows;
@@ -63,6 +64,7 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
   const token = randomUUID();
   if (await redis.set(LOCK_KEY, token, 'EX', LOCK_SECONDS, 'NX') !== 'OK') return { ...summary, locked: true };
   const requireLease = async () => {
+    if (deps.signal?.aborted) throw new Error('Idle pause sweep stopped');
     if (Number(await redis.eval(RENEW, 1, LOCK_KEY, token, LOCK_SECONDS)) !== 1) throw new Error('Idle pause lease lost');
   };
   try {
@@ -100,7 +102,8 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
     const impact = candidates.filter((c) => c.stage !== 'warn').length;
     summary.breaker = impact > cfg.maxPerTick || impact > cfg.maxFraction * refs.length;
     if (cfg.dryRun) {
-      log.info({ ...summary, dryRun: true, apps: [...selected].flatMap(([region, apps]) => apps.map((a) => ({ ...a, region, plans: cfg.plans }))) }, '[idle-pause-reaper] dry run');
+      const planByApp = new Map(refs.map((r) => [r.app_id, r.plan_id]));
+      log.info({ ...summary, dryRun: true, apps: [...selected].flatMap(([region, apps]) => apps.map((a) => ({ ...a, region, plan: planByApp.get(a.id) }))) }, '[idle-pause-reaper] dry run');
       return summary;
     }
     if (summary.breaker) {
@@ -206,17 +209,26 @@ async function undo(runtime: Pool, apps: Candidate[], stage: Stage, log: IdleRea
   }
 }
 
-export function startIdlePauseReaper(deps: IdleReaperDeps, intervalMs = INTERVAL_MS): () => void {
+export function startIdlePauseReaper(deps: IdleReaperDeps, intervalMs = INTERVAL_MS): () => Promise<void> {
   const cfg = idlePauseConfigFromEnv();
-  if (!cfg || process.env.SKIP_IDLE_PAUSE_REAPER) return () => {};
+  if (!cfg || process.env.SKIP_IDLE_PAUSE_REAPER) return async () => {};
+  const abort = new AbortController();
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let activeRun: Promise<void>;
   const tick = async () => {
     if (stopped) return;
-    try { await runIdlePauseOnce(deps, cfg); }
-    catch (err) { deps.log.error({ err }, '[idle-pause-reaper] tick failed'); }
-    finally { if (!stopped) { timer = setTimeout(tick, intervalMs); timer.unref(); } }
+    try { await runIdlePauseOnce({ ...deps, signal: abort.signal }, cfg); }
+    catch (err) { if (!stopped) deps.log.error({ err }, '[idle-pause-reaper] tick failed'); }
+    finally { if (!stopped) { timer = setTimeout(() => { activeRun = tick(); }, intervalMs); timer.unref(); } }
   };
-  void tick();
-  return () => { stopped = true; if (timer) clearTimeout(timer); };
+  activeRun = tick();
+  return async () => {
+    stopped = true;
+    abort.abort();
+    if (timer) clearTimeout(timer);
+    // Finish compensation and effects for the already committed batch. Abort
+    // is checked before each subsequent UPDATE, so draining cannot start more.
+    await activeRun;
+  };
 }

@@ -3,7 +3,7 @@ vi.mock('./idle-pause-emails.js', () => ({ sendIdlePauseEmail: vi.fn(), sendIdle
 import { runIdlePauseOnce, startIdlePauseReaper, type IdleReaperDeps } from './idle-app-reaper.js';
 import { idlePauseConfigFromEnv } from './idle-pause-config.js';
 
-let stop: (() => void) | undefined;
+let stop: (() => void | Promise<void>) | undefined;
 let deps: IdleReaperDeps;
 const cfg = idlePauseConfigFromEnv({ BUTTERBASE_IDLE_PAUSE_DAYS: '28' })!;
 beforeEach(() => {
@@ -16,7 +16,7 @@ beforeEach(() => {
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   };
 });
-afterEach(() => { stop?.(); stop = undefined; vi.useRealTimers(); vi.unstubAllEnvs(); });
+afterEach(async () => { await stop?.(); stop = undefined; vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 describe('idle reaper lifecycle and lease', () => {
   it.each(['', '0', 'bogus'])('stays entirely off when DAYS is %s', async (days) => {
@@ -43,6 +43,14 @@ describe('idle reaper lifecycle and lease', () => {
     stop = startIdlePauseReaper(deps); stop(); finish('OK');
     await vi.advanceTimersByTimeAsync(24 * 3600_000);
     expect(deps.redis.set).toHaveBeenCalledOnce();
+  });
+  it('stop returns a promise that waits for the active sweep to finish', async () => {
+    let finish!: (value: string) => void;
+    vi.mocked(deps.redis.set).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    stop = startIdlePauseReaper(deps);
+    const draining = stop();
+    expect(draining).toBeInstanceOf(Promise);
+    finish('OK'); await draining;
   });
   it('logs Redis failure and retries on the next scheduled tick', async () => {
     vi.mocked(deps.redis.set).mockRejectedValueOnce(new Error('Redis down'));

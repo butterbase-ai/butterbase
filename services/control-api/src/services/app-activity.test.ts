@@ -40,6 +40,13 @@ describe('markAppActive', () => {
     await markAppActive(control, 'app_used', log);
     expect(io.query).not.toHaveBeenCalled();
   });
+  it('records returning traffic directly in the runtime DB when regional Redis is unavailable', async () => {
+    io.set.mockRejectedValueOnce(new Error('regional Redis down'));
+    await markAppActive(control, 'app_returned', log);
+    expect(io.query).toHaveBeenCalledWith(expect.stringMatching(/last_active_at = now\(\)/), ['app_returned']);
+    expect(io.query.mock.calls[0][0]).toMatch(/interval '1 hour'/);
+    expect(io.del).not.toHaveBeenCalled();
+  });
 
   it('releases the throttle after a failed DB write so later traffic can retry', async () => {
     io.query.mockRejectedValueOnce(new Error('runtime unavailable'));
