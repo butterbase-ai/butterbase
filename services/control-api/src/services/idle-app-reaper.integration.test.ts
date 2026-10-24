@@ -121,7 +121,7 @@ suite('idle reaper SQL safety (real Postgres)', () => {
     await insert('app_visit', freeOrg, { warned: 15, notified: 6 });
     const query = control.query.bind(control);
     let selects = 0;
-    const controlProxy = { query: async (...args: any[]) => {
+    const controlProxy = { connect: control.connect.bind(control), query: async (...args: any[]) => {
       const result = await (query as any)(...args);
       if (String(args[0]).includes('FROM org_app_index') && ++selects === 2) {
         await runtime.query("UPDATE apps SET last_active_at=now(),idle_warned_at=NULL,idle_pause_notified_at=NULL WHERE id='app_traffic'");
@@ -141,6 +141,22 @@ suite('idle reaper SQL safety (real Postgres)', () => {
     } };
     await runIdlePauseOnce({ ...deps(), runtimeDb: () => runtimeProxy as never }, cfg);
     expect((await row('app_upgrade')).paused).toBe(false);
+  });
+  it('skips an old regional candidate if cutover completes just before its app lock', async () => {
+    await insert('app_moved');
+    let moved = false;
+    const proxy = { query: control.query.bind(control), connect: async () => {
+      const c = await control.connect();
+      return { release:()=>c.release(), query:async (...args:any[]) => {
+        const result = await (c.query.bind(c) as any)(...args);
+        if (!moved && String(args[0]).includes('SET LOCAL lock_timeout')) {
+          moved=true; await control.query("UPDATE org_app_index SET region='new-region' WHERE app_id='app_moved'");
+        }
+        return result;
+      } };
+    } };
+    expect(await runIdlePauseOnce({ ...deps(),controlDb:proxy as never },cfg)).toMatchObject({ warned:0,notified:0,paused:0 });
+    expect((await row('app_moved')).idle_warned_at).toBeNull();
   });
   it('does not write when another worker owns the shared lease', async () => {
     await insert('app_warn'); lock = 'other-worker';
@@ -214,7 +230,7 @@ suite('idle reaper SQL safety (real Postgres)', () => {
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const query = control.query.bind(control);
     let first = true;
-    const slowControl = { query: async (...args: any[]) => {
+    const slowControl = { connect: control.connect.bind(control), query: async (...args: any[]) => {
       if (first) { first = false; entered(); await gate; }
       return (query as any)(...args);
     } };

@@ -40,6 +40,12 @@ describe('setPausedState: pause', () => {
 });
 
 describe('setPausedState: resume', () => {
+  it('can defer notifications until the caller releases its database locks', async () => {
+    const listener = vi.fn(); unsubs.push(onPauseStateChanged(listener));
+    const { db } = fakeDb([row({ paused: false })]);
+    await setPausedState(db, 'app_1', { paused: false, by: 'system' }, undefined, { notify: false });
+    expect(listener).not.toHaveBeenCalled();
+  });
   it('clears pause columns and refreshes activity', async () => {
     const { db, query } = fakeDb([row({ paused: false, paused_at: null, paused_reason: null, paused_by: null })]);
     await setPausedState(db, 'app_1', { paused: false, by: 'owner' });

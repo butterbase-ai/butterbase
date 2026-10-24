@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const io = vi.hoisted(() => ({
   region: vi.fn(async () => 'us-west-2'),
+  lockedRegion: 'us-west-2',
   redisFor: vi.fn(), pool: vi.fn(),
   set: vi.fn(async () => 'OK' as string | null),
   del: vi.fn(async () => 1), query: vi.fn(async () => ({ rows: [], rowCount: 1 })),
@@ -10,12 +11,15 @@ vi.mock('./region-resolver.js', () => ({ resolveAppHomeRegion: io.region }));
 vi.mock('./redis-registry.js', () => ({ redisFor: io.redisFor }));
 vi.mock('./runtime-db.js', () => ({ getRuntimeDbPool: io.pool }));
 vi.mock('../config.js', () => ({ config: { runtimeDb: {} } }));
+vi.mock('./app-state-lock.js', () => ({ withAppStateLocks: async (_db: unknown, ids: string[], work: Function) =>
+  work(ids.map(app_id=>({ app_id,region:io.lockedRegion })),{}) }));
 const { markAppActive } = await import('./app-activity.js');
 const control = {} as never;
 const log = { warn: vi.fn() };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  io.lockedRegion = 'us-west-2';
   io.region.mockResolvedValue('us-west-2');
   io.redisFor.mockReturnValue({ set: io.set, del: io.del });
   io.pool.mockReturnValue({ query: io.query });
@@ -23,6 +27,11 @@ beforeEach(() => {
 });
 
 describe('markAppActive', () => {
+  it('records traffic in the locked home if the app moved after throttle lookup', async () => {
+    io.lockedRegion = 'eu-west-1';
+    await markAppActive(control,'app_used',log);
+    expect(io.pool).toHaveBeenCalledWith({},'eu-west-1');
+  });
   it('stamps activity and clears warning/grace state in the home region', async () => {
     await markAppActive(control, 'app_used', log);
     expect(io.redisFor).toHaveBeenCalledWith('us-west-2');

@@ -2,10 +2,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 
 const runtimeQuery = vi.fn();
+const poolFor = vi.fn(() => ({ query: runtimeQuery }));
+let lockedRegion = 'us-east-1';
+vi.mock('../services/app-state-lock.js', async (orig) => ({
+  ...(await orig<object>()), withAppStateLocks: async (_db: unknown, ids: string[], work: Function) =>
+    work(ids.map(app_id=>({ app_id,region:lockedRegion })),{}),
+}));
 
 vi.mock('../config.js', () => ({ config: { runtimeDb: {} } }));
 vi.mock('../services/region-resolver.js', () => ({ resolveAppHomeRegion: vi.fn().mockResolvedValue('us-east-1') }));
-vi.mock('../services/runtime-db.js', () => ({ getRuntimeDbPool: () => ({ query: runtimeQuery }) }));
+vi.mock('../services/runtime-db.js', () => ({ getRuntimeDbPool: (...args: unknown[]) => (poolFor as Function)(...args) }));
 vi.mock('../services/audit/with-audit.js', () => ({ logFromRequest: vi.fn() }));
 vi.mock('../services/app-plan-resolver.js', () => ({ getLimitsForApp: vi.fn() }));
 const isOnIdlePausePlan = vi.fn();
@@ -28,9 +34,17 @@ async function build() {
   return app;
 }
 
-beforeEach(() => { runtimeQuery.mockReset(); isOnIdlePausePlan.mockReset().mockResolvedValue(false); });
+beforeEach(() => { lockedRegion = 'us-east-1'; poolFor.mockClear(); runtimeQuery.mockReset(); isOnIdlePausePlan.mockReset().mockResolvedValue(false); });
 
 describe('PATCH /v1/:app_id/config/pause', () => {
+  it('uses the home obtained under the lock rather than a stale region cache', async () => {
+    lockedRegion = 'eu-west-1';
+    runtimeQuery.mockResolvedValue({ rows:[{ app_id:'app_1',paused:true }] });
+    const app = await build();
+    expect((await app.inject({ method:'PATCH',url:'/v1/app_1/config/pause',payload:{ paused:true } })).statusCode).toBe(200);
+    expect(poolFor).toHaveBeenCalledWith({},'eu-west-1');
+    await app.close();
+  });
   it('pauses as owner and returns paused_by', async () => {
     runtimeQuery.mockResolvedValue({ rows: [{ app_id: 'app_1', paused: true, paused_at: 't', paused_reason: 'incident', paused_by: 'owner' }] });
     const app = await build();
@@ -55,7 +69,7 @@ describe('PATCH /v1/:app_id/config/pause', () => {
     const res = await app.inject({ method: 'PATCH', url: '/v1/app_1/config/pause', payload: { paused: false } });
     expect(res.statusCode).toBe(200);
     expect(isOnIdlePausePlan).toHaveBeenCalledWith(expect.anything(), 'app_1');
-    expect(runtimeQuery.mock.calls[0][1]).toEqual(['app_1', false]);
+    expect(runtimeQuery.mock.calls[0][1]).toEqual(['app_1', false, null]);
   });
 
   it('resume of an idle-paused app on a free plan is a 402 telling the owner to upgrade', async () => {
@@ -68,7 +82,7 @@ describe('PATCH /v1/:app_id/config/pause', () => {
     expect(res.statusCode).toBe(402);
     expect(res.json().error).toMatchObject({ code: 'APP_RESUME_REQUIRES_UPGRADE' });
     expect(res.json().error.remediation).toMatch(/upgrade/i);
-    expect(runtimeQuery.mock.calls[0][1]).toEqual(['app_1', true]);
+    expect(runtimeQuery.mock.calls[0][1]).toEqual(['app_1', true, null]);
   });
 
   it('pausing does not look up the plan', async () => {

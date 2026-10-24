@@ -92,6 +92,12 @@ vi.mock('../frontend-pause-sync.js', () => ({
   syncFrontendPausedState: vi.fn().mockResolvedValue({ rewritten: [] }),
 }));
 
+// These unit tests exercise deploy/pause coordination. Keep the live-domain
+// routing probe deterministic; its HTTP behavior has its own test suite.
+vi.mock('../spa-routing-probe.js', () => ({
+  probeSpaRouting: vi.fn(async () => ({ ok: true, status: 200, contentType: 'text/html' })),
+}));
+
 import * as R2 from '../r2.js';
 import { syncFrontendPausedState } from '../frontend-pause-sync.js';
 import * as CloudflarePages from '../cloudflare-pages.js';

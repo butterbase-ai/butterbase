@@ -9,7 +9,8 @@ import { config } from '../config.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { getLimitsForApp } from '../services/app-plan-resolver.js';
-import { setPausedState, ResumeRequiresUpgradeError } from '../services/app-pause.js';
+import { setPausedState, notifyPauseStateChanged, ResumeRequiresUpgradeError } from '../services/app-pause.js';
+import { withAppStateLocks, AppStateBusyError } from '../services/app-state-lock.js';
 import { isOnIdlePausePlan } from '../services/idle-pause-config.js';
 
 const updateCorsSchema = z.object({
@@ -621,16 +622,20 @@ export async function appConfigRoutes(app: FastifyInstance) {
 
     try {
       const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
-      const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
-      const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-
-      const state = paused
-        ? await setPausedState(runtimeDb, resolvedApp.id, { paused: true, by: 'owner', reason: reason ?? null }, app.log)
-        : await setPausedState(runtimeDb, resolvedApp.id, {
-            paused: false,
-            by: 'owner',
-            idlePausePlan: await isOnIdlePausePlan(app.controlDb, resolvedApp.id),
-          }, app.log);
+      let applied = false;
+      const state = await withAppStateLocks(app.controlDb, [resolvedApp.id], async ([ref], client) => {
+        if (!ref) throw new AppNotFoundError(resolvedApp.id);
+        const runtimeDb = getRuntimeDbPool(config.runtimeDb, ref.region);
+        const result = paused
+          ? await setPausedState(runtimeDb, resolvedApp.id, { paused: true, by: 'owner', reason: reason ?? null }, app.log, { notify: false })
+          : await setPausedState(runtimeDb, resolvedApp.id, {
+              paused: false, by: 'owner', idlePausePlan: await isOnIdlePausePlan(client, resolvedApp.id),
+            }, app.log, { notify: false });
+        applied = result !== null;
+        return result;
+      }).finally(async () => {
+        if (applied) await notifyPauseStateChanged({ appId: resolvedApp.id, paused, by: 'owner' }, app.log);
+      });
       if (!state) throw new AppNotFoundError(resolvedApp.id);
 
       logFromRequest(request, {
@@ -655,6 +660,9 @@ export async function appConfigRoutes(app: FastifyInstance) {
         paused_by: state.paused_by,
       });
     } catch (error) {
+      if (error instanceof AppStateBusyError) return reply.code(409).send(createAgentError({
+        code: error.code, message: error.message, remediation: 'Retry after the current app state change finishes.',
+      }));
       if (error instanceof ResumeRequiresUpgradeError) {
         return reply.code(402).send(createAgentError({
           code: APP_RESUME_REQUIRES_UPGRADE,

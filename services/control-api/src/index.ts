@@ -34,6 +34,7 @@ import migrationGuardPlugin from './plugins/migration-guard.js';
 import pauseGatePlugin from './plugins/pause-gate.js';
 import appActivityPlugin from './plugins/app-activity.js';
 import idlePauseReaperPlugin from './plugins/idle-pause-reaper.js';
+import idlePauseUpgradeReconcilerPlugin from './plugins/idle-pause-upgrade-reconciler.js';
 import { registerFrontendPauseSync } from './services/frontend-pause-sync.js';
 import { healthRoutes } from './routes/health.js';
 import { initRoutes } from './routes/init.js';
@@ -581,6 +582,7 @@ app.register(internalEmailRoutes);
 app.register(pauseGatePlugin);
 app.register(appActivityPlugin);
 app.register(idlePauseReaperPlugin);
+app.register(idlePauseUpgradeReconcilerPlugin);
 // Paused page (spec §5.6): keep dispatch-worker KV in step with apps.paused.
 // Registered as a plugin so app.controlDb (decorated by the database plugin) exists.
 app.register(async (instance) => { registerFrontendPauseSync(instance.controlDb); });
@@ -1168,7 +1170,7 @@ Promise.resolve(app.ready())
     // to this instance's own region — app_environments is a regional
     // runtime-plane table, same as the other per-region background jobs.
     if (process.env.SKIP_STAGING_REAPER !== '1') {
-      const stagingReaperStop = startStagingReaper(app.runtimeDb(regionConfig.instanceRegion), app.log);
+      const stagingReaperStop = startStagingReaper(app.runtimeDb(regionConfig.instanceRegion), app.log, app.controlDb, regionConfig.instanceRegion);
       (app as any).stagingReaperStop = stagingReaperStop;
     }
   })

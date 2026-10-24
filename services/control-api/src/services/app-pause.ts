@@ -83,6 +83,7 @@ export async function setPausedState(
   appId: string,
   input: PauseInput,
   log?: PauseLogger,
+  options: { notify?: boolean } = {},
 ): Promise<PausedState | null> {
   // Pause deliberately has no `WHERE paused = false`: re-pausing an already
   // paused app relabels paused_by (e.g. an admin pause over an idle pause
@@ -91,8 +92,8 @@ export async function setPausedState(
   // reaper's label and reason, or relabelling to 'owner' would let a free
   // owner resume without upgrading.
   const keepIdle = `paused AND paused_by = 'idle_reaper' AND $3 = 'owner'`;
-  const idlePausePlan = !input.paused && input.idlePausePlan === true;
-  const result = input.paused
+  const idlePausePlan = input.paused === false && input.idlePausePlan === true;
+  const result = input.paused === true
     ? await runtimeDb.query(
         `UPDATE apps
             SET paused = true,
@@ -130,6 +131,6 @@ export async function setPausedState(
     }
     return null;
   }
-  await notifyPauseStateChanged({ appId, paused: input.paused, by: input.by }, log);
+  if (options.notify !== false) await notifyPauseStateChanged({ appId, paused: input.paused, by: input.by }, log);
   return result.rows[0] as PausedState;
 }

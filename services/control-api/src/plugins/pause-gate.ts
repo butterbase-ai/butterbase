@@ -48,6 +48,27 @@ export function appIdFromParams(params: unknown): string | null {
   return p?.appId ?? p?.app_id ?? null;
 }
 
+/** Owner credentials permit management, never new work on a paused app.
+ * Match the registered route template rather than a user-controlled URL.
+ * Keep reads/cancellation/configuration available for diagnosis and cleanup.
+ */
+export function isAppExecutionRoute(method: string, route: string): boolean {
+  const suffix = route.replace(/^\/v1\/:(?:appId|app_id)(?=\/)/, '');
+  if (suffix.startsWith('/public/')) return true;
+  if (/^\/partners\/[^/]+\/[^/]+(?:\/.*)?$/.test(suffix)) return true;
+  if (method !== 'POST') return false;
+  return [
+    /^\/(?:chat|images|videos)\/completions$/,
+    /^\/embeddings$/,
+    /^\/ai\/(?:decide|meetings)$/,
+    /^\/agents\/[^/]+\/runs(?:\/[^/]+\/resume)?$/,
+    /^\/people\/(?:search\/(?:person|company)|profile(?:\/email)?)$/,
+    /^\/integrations\/execute$/,
+    /^\/functions\/[^/]+\/invoke$/,
+    /^\/rag\/collections\/[^/]+\/query$/,
+  ].some((pattern) => pattern.test(suffix));
+}
+
 /** Paused state of an app, or null when the app doesn't exist. */
 export async function readPausedState(controlDb: Pool, appId: string): Promise<CachedPausedState | null> {
   const redis = getRedisClient();
@@ -120,6 +141,7 @@ const pauseGatePlugin: FastifyPluginAsync = async (fastify) => {
 
     const auth = request.auth;
     const ownerCapable = !request.routeOptions.config?.public
+      && !isAppExecutionRoute(request.method, request.routeOptions.url ?? path)
       && auth?.userId
       && (auth.authMethod === 'jwt' || auth.authMethod === 'api_key');
     if (ownerCapable) {

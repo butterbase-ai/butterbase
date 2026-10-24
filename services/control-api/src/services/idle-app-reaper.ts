@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { notifyPauseStateChanged, setPausedState } from './app-pause.js';
 import { idlePauseConfigFromEnv, type IdlePauseConfig } from './idle-pause-config.js';
 import { sendIdlePauseEmail, sendIdlePauseBreakerEmail, type IdlePauseApp } from './idle-pause-emails.js';
+import { withAppStateLocks } from './app-state-lock.js';
 
 const LOCK_KEY = 'lock:idle-pause-reaper';
 const LOCK_SECONDS = 3600;
@@ -39,7 +40,7 @@ const STAGES: Record<Stage, string> = {
     AND idle_pause_notified_at < now() - $5::int * interval '1 day'`,
 };
 
-async function freeApps(controlDb: Pool, cfg: IdlePauseConfig): Promise<Ref[]> {
+async function freeApps(controlDb: Pick<Pool,'query'>, cfg: IdlePauseConfig): Promise<Ref[]> {
   return (await controlDb.query<Ref>(
     `SELECT oai.app_id, oai.region, oai.organization_id, o.plan_id FROM org_app_index oai
        JOIN organizations o ON o.id = oai.organization_id
@@ -47,7 +48,7 @@ async function freeApps(controlDb: Pool, cfg: IdlePauseConfig): Promise<Ref[]> {
   )).rows;
 }
 
-async function visitedApps(controlDb: Pool, ids: string[], cfg: IdlePauseConfig): Promise<Set<string>> {
+async function visitedApps(controlDb: Pick<Pool,'query'>, ids: string[], cfg: IdlePauseConfig): Promise<Set<string>> {
   if (!ids.length) return new Set();
   const rows = await controlDb.query<{ app_id: string }>(
     `SELECT app_id FROM frontend_visit_daily
@@ -124,13 +125,17 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
         byRegion.get(ref.region)!.push(ref);
       }
       for (const [region, refs] of byRegion) {
-        await requireLease();
-        await deps.runtimeDb(region).query(
+        await withAppStateLocks(controlDb,refs.map(r=>r.app_id),async locked => {
+          const current = locked.filter(r=>r.region===region && refs.some(old=>old.app_id===r.app_id && old.organization_id===r.organization_id));
+          if (!current.length) return;
+          await requireLease();
+          await deps.runtimeDb(region).query(
           `UPDATE apps SET idle_warned_at = NULL, idle_pause_notified_at = NULL
             WHERE id = ANY($1::text[]) AND organization_id = ANY($2::uuid[])
               AND paused = false AND (idle_warned_at IS NOT NULL OR idle_pause_notified_at IS NOT NULL)`,
-          [refs.map((r) => r.app_id), [...new Set(refs.map((r) => r.organization_id))]],
-        );
+          [current.map((r) => r.app_id), [...new Set(current.map((r) => r.organization_id))]],
+          );
+        });
       }
     }
 
@@ -152,44 +157,51 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
           : stage === 'notify' ? 'idle_pause_notified_at = now()'
           : `paused = true, paused_at = now(), paused_by = 'idle_reaper',
              paused_reason = 'Paused after ${cfg.days} days without activity.', updated_at = now()`;
-        // Parameter arity matches each predicate (warn/notify do not use $5).
-        const params: unknown[] = [eligible.map((r) => r.app_id), [...new Set(eligible.map((r) => r.organization_id))], cfg.days, cfg.warnDays];
-        if (stage === 'pause') params.push(cfg.graceDays);
-        let changed: Candidate[];
+        let valid: Candidate[] = [], compensated: Candidate[] = [];
+        let validationError: unknown;
         try {
-          changed = (await runtime.query<Candidate>(
-            `UPDATE apps SET ${assignment} WHERE ${BASE} AND ${STAGES[stage]} RETURNING id,name,organization_id,last_active_at`, params,
-          )).rows;
-        } catch (err) {
-          log.error({ err, region, stage }, '[idle-pause-reaper] region update failed');
-          continue;
-        }
-        // Org plan and visits live in another DB. An upgrade could have already
-        // run its resume hook before our UPDATE. Recheck after the write and
-        // compensate, rather than leaving a newly paid app permanently paused.
-        let stillEligible: Ref[];
-        try {
-          const current = await freeApps(controlDb, cfg);
-          const recent = await visitedApps(controlDb, changed.map((r) => r.id), cfg);
-          stillEligible = current.filter((r) => r.region === region && !recent.has(r.app_id));
-        } catch (err) {
-          await undo(runtime, changed, stage, log);
-          throw err;
-        }
-        const eligibleOrgs = new Map(stillEligible.map((r) => [r.app_id, r.organization_id]));
-        const valid = changed.filter((a) => eligibleOrgs.get(a.id) === a.organization_id);
-        await undo(runtime, changed.filter((a) => eligibleOrgs.get(a.id) !== a.organization_id), stage, log);
-        for (const app of valid) {
-          // Complete effects for committed rows even if the lease expires now.
-          // A subsequent worker cannot reselect these already-advanced rows.
-          if (stage === 'pause') {
-            await notifyPauseStateChanged({ appId: app.id, paused: true, by: 'idle_reaper' }, log);
-            summary.paused++;
-          } else {
-            await sendIdlePauseEmail(controlDb, app, stage === 'warn' ? 'project_idle_warning' : 'project_paused_idle', cfg.warnDays, log);
-            if (stage === 'warn') summary.warned++; else summary.notified++;
+          await withAppStateLocks(controlDb,eligible.map(r=>r.app_id),async (locked,client) => {
+            const current = locked.filter(r=>r.region===region && eligible.some(old=>old.app_id===r.app_id && old.organization_id===r.organization_id));
+            if (!current.length) return;
+            await requireLease();
+            const params: unknown[] = [current.map(r=>r.app_id), [...new Set(current.map(r=>r.organization_id))], cfg.days, cfg.warnDays];
+            if (stage === 'pause') params.push(cfg.graceDays);
+            let changed: Candidate[];
+            try {
+              changed = (await runtime.query<Candidate>(
+                `UPDATE apps SET ${assignment} WHERE ${BASE} AND ${STAGES[stage]} RETURNING id,name,organization_id,last_active_at`,params,
+              )).rows;
+            } catch (err) {
+              log.error({ err,region,stage },'[idle-pause-reaper] region update failed'); return;
+            }
+            // Keep the index locked through validation and compensation so a
+            // cutover cannot copy a pause that this sweep is about to undo.
+            try {
+              const fresh = await freeApps(client,cfg);
+              const recent = await visitedApps(client,changed.map(r=>r.id),cfg);
+              const orgs = new Map(fresh.filter(r=>r.region===region && !recent.has(r.app_id)).map(r=>[r.app_id,r.organization_id]));
+              valid = changed.filter(r=>orgs.get(r.id)===r.organization_id);
+              compensated = changed.filter(r=>orgs.get(r.id)!==r.organization_id);
+            } catch (err) { compensated=changed; validationError=err; }
+            await undo(runtime,compensated,stage,log);
+          });
+        } finally {
+          // Runtime writes are already committed even if the control COMMIT
+          // fails. Publish their effects after every app lock has released.
+          if (stage === 'pause') for (const app of compensated) {
+            await notifyPauseStateChanged({ appId:app.id,paused:false,by:'system' },log);
+          }
+          for (const app of valid) {
+            if (stage === 'pause') {
+              await notifyPauseStateChanged({ appId: app.id, paused: true, by: 'idle_reaper' }, log);
+              summary.paused++;
+            } else {
+              await sendIdlePauseEmail(controlDb, app, stage === 'warn' ? 'project_idle_warning' : 'project_paused_idle', cfg.warnDays, log);
+              if (stage === 'warn') summary.warned++; else summary.notified++;
+            }
           }
         }
+        if (validationError) throw validationError;
       }
     }
     return summary;
@@ -202,7 +214,7 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
 async function undo(runtime: Pool, apps: Candidate[], stage: Stage, log: IdleReaperDeps['log']): Promise<void> {
   for (const app of apps) {
     if (stage === 'pause') {
-      await setPausedState(runtime, app.id, { paused: false, by: 'system', onlyIfPausedBy: 'idle_reaper' }, log);
+      await setPausedState(runtime, app.id, { paused: false, by: 'system', onlyIfPausedBy: 'idle_reaper' }, log, { notify:false });
     } else {
       await runtime.query(`UPDATE apps SET idle_warned_at = NULL, idle_pause_notified_at = NULL WHERE id = $1 AND paused = false`, [app.id]);
     }

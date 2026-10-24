@@ -18,6 +18,7 @@ vi.mock('../services/redis-registry.js', () => ({ redisFor: () => regionRedis })
 vi.mock('../services/runtime-pool-registry.js', () => ({ listRuntimeRegions: () => ['us-east-1', 'us-west-2'] }));
 vi.mock('../services/region-resolver.js', () => ({
   getRuntimeDbForApp: vi.fn(async () => ({ query: runtimeQuery })),
+  resolveAppHomeRegion: vi.fn(async () => 'us-east-1'),
 }));
 vi.mock('../services/app-pause.js', () => ({
   onPauseStateChanged: (fn: any) => { pauseListener = fn; return () => {}; },
@@ -33,7 +34,7 @@ const { AppPausedError, AppNotFoundError } = await import('../services/app-resol
 
 const PAUSED = { paused: true, paused_reason: 'Paused after 28 days without activity.', paused_by: 'idle_reaper' };
 
-async function build(auth: Record<string, unknown> | null) {
+async function build(auth: Record<string, unknown> | null, actualAgents = false) {
   const app = Fastify();
   app.decorate('controlDb', {} as never);
   app.decorateRequest('auth', null as never);
@@ -44,7 +45,14 @@ async function build(auth: Record<string, unknown> | null) {
   });
   await app.register(pauseGatePlugin);
   app.get('/v1/:app_id/config', async () => ({ ok: true }));
-  app.get('/v1/:appId/agents', async () => ({ ok: true }));
+  if (actualAgents) await app.register((await import('../routes/agents.js')).agentsRoutes);
+  else app.get('/v1/:appId/agents', async () => ({ ok: true }));
+  app.get('/v1/:appId/partners/:hackathonSlug', async () => ({ pools: [] }));
+  app.route({ method: ['GET','POST','PUT','PATCH','DELETE'], url: '/v1/:appId/partners/:hackathonSlug/:slug/*', handler: async () => ({ executed: true }) });
+  for (const path of EXECUTION_PATHS) {
+    if (actualAgents && path.includes('/agents/')) continue;
+    app.post(path, async () => ({ executed: true }));
+  }
   app.post('/v1/:app_id/fn/:name', { config: { public: true } }, async () => ({ ok: true }));
   app.get('/v1/templates/:app_id', async () => ({ ok: true }));
   app.post('/v1/templates/:source_app_id/clone', async () => ({ ok: true }));
@@ -55,6 +63,16 @@ async function build(auth: Record<string, unknown> | null) {
 }
 
 const owner = { userId: 'u1', organizationId: 'o1', authMethod: 'jwt' };
+
+const EXECUTION_PATHS = [
+  '/v1/:appId/agents/:name/runs', '/v1/:appId/agents/:name/runs/:id/resume',
+  '/v1/:appId/chat/completions', '/v1/:appId/embeddings', '/v1/:appId/ai/decide',
+  '/v1/:appId/images/completions', '/v1/:appId/videos/completions', '/v1/:appId/ai/meetings',
+  '/v1/:appId/people/search/person', '/v1/:appId/people/search/company',
+  '/v1/:appId/people/profile', '/v1/:appId/people/profile/email',
+  '/v1/:appId/integrations/execute', '/v1/:appId/functions/:name/invoke',
+  '/v1/:appId/rag/collections/:name/query',
+];
 
 beforeEach(() => {
   store.clear();
@@ -115,6 +133,40 @@ describe('readPausedState cache', () => {
 });
 
 describe('pause gate', () => {
+  it.each(['jwt','api_key'])('actual agent routes deny %s execution while allowing list/cancel', async (authMethod) => {
+    runtimeQuery.mockResolvedValue({ rows: [{ ...PAUSED, id: 'agent_1', agent_id: 'agent_1', status: 'paused' }] });
+    resolveApp.mockResolvedValue({ id: 'app_1' });
+    const runtime = { startRun: vi.fn(), resumeRun: vi.fn(), cancelRun: vi.fn() };
+    const { setRuntimeClient } = await import('../routes/agents.js');
+    setRuntimeClient(runtime);
+    const app = await build({ ...owner, authMethod }, true);
+    for (const suffix of ['agents/echo/runs','agents/echo/runs/run_1/resume']) {
+      expect((await app.inject({ method: 'POST', url: `/v1/app_1/${suffix}`, payload: { input: 'test' } })).statusCode).toBe(503);
+    }
+    expect(runtime.startRun).not.toHaveBeenCalled(); expect(runtime.resumeRun).not.toHaveBeenCalled();
+    expect((await app.inject('/v1/app_1/agents')).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: '/v1/app_1/agents/echo/runs/run_1/cancel' })).statusCode).toBe(202);
+    expect(runtime.cancelRun).toHaveBeenCalledOnce();
+    await app.close(); setRuntimeClient(undefined);
+  });
+  it.each(['GET','POST','PUT','PATCH','DELETE'] as const)('blocks owner partner forwarding via %s but allows discovery', async (method) => {
+    runtimeQuery.mockResolvedValue({ rows: [PAUSED] }); resolveApp.mockResolvedValue({ id: 'app_1' });
+    const app = await build(owner);
+    expect((await app.inject({ method, url: '/v1/app_1/partners/event/provider/query' })).statusCode).toBe(503);
+    expect((await app.inject('/v1/app_1/partners/event')).statusCode).toBe(200);
+    await app.close();
+  });
+  it.each(EXECUTION_PATHS)('blocks owner compute on %s while preserving management access', async (path) => {
+    runtimeQuery.mockResolvedValue({ rows: [PAUSED] });
+    resolveApp.mockResolvedValue({ id: 'app_1' });
+    for (const authMethod of ['jwt', 'api_key']) {
+      const app = await build({ ...owner, authMethod });
+      const url = path.replace(':appId', 'app_1').replace(':name', 'echo').replace(':id', 'run_1');
+      expect((await app.inject({ method: 'POST', url })).statusCode).toBe(503);
+      expect((await app.inject({ method: 'GET', url: '/v1/app_1/config' })).statusCode).toBe(200);
+      await app.close();
+    }
+  });
   it('lets everything through for a running app', async () => {
     runtimeQuery.mockResolvedValue({ rows: [{ paused: false, paused_reason: null, paused_by: null }] });
     const app = await build({ userId: null, authMethod: 'anonymous' });
