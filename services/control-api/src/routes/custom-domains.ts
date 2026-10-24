@@ -19,6 +19,7 @@ import { quotaErrors } from '../utils/quota-errors.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import * as CustomHostnames from '../services/cloudflare-custom-hostnames.js';
 import { writeDomainMapping, deleteDomainMapping } from '../services/cloudflare-wfp.js';
+import { syncFrontendPausedState } from '../services/frontend-pause-sync.js';
 
 const addDomainSchema = z.object({
   hostname: z
@@ -68,9 +69,10 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
 
     // WfP backend required — apps is a runtime table
     const backendResult = await runtimeDb.query(
-      'SELECT deployment_backend FROM apps WHERE id = $1',
+      'SELECT deployment_backend, paused FROM apps WHERE id = $1',
       [appId],
     );
+    const paused = backendResult.rows[0]?.paused === true;
     if (backendResult.rows[0]?.deployment_backend !== 'wfp') {
       return reply.status(400).send(
         createAgentError({
@@ -150,7 +152,14 @@ export async function customDomainRoutes(fastify: FastifyInstance) {
 
     // Write KV mapping so the dispatch worker can route to this app
     try {
-      await writeDomainMapping(hostname, appId, region);
+      await writeDomainMapping(hostname, appId, region, paused);
+      // `paused` was read before the Cloudflare call; re-sync so a concurrent
+      // pause/resume is not overwritten by the stale value.
+      try {
+        await syncFrontendPausedState(controlDb, appId);
+      } catch (err) {
+        fastify.log.warn({ err, appId }, '[pause] post-write KV re-sync failed');
+      }
     } catch (error) {
       if (isHttpError(error)) throw error;
       // Non-fatal: domain is registered but won't route until KV is written.

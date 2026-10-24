@@ -87,7 +87,19 @@ vi.mock('../region-resolver.js', () => ({
   resolveAppHomeRegion: vi.fn(async () => 'local'),
 }));
 
+// Post-write paused re-sync (F1): mocked so tests assert the call and its failure isolation.
+vi.mock('../frontend-pause-sync.js', () => ({
+  syncFrontendPausedState: vi.fn().mockResolvedValue({ rewritten: [] }),
+}));
+
+// These unit tests exercise deploy/pause coordination. Keep the live-domain
+// routing probe deterministic; its HTTP behavior has its own test suite.
+vi.mock('../spa-routing-probe.js', () => ({
+  probeSpaRouting: vi.fn(async () => ({ ok: true, status: 200, contentType: 'text/html' })),
+}));
+
 import * as R2 from '../r2.js';
+import { syncFrontendPausedState } from '../frontend-pause-sync.js';
 import * as CloudflarePages from '../cloudflare-pages.js';
 import * as CloudflareWfp from '../cloudflare-wfp.js';
 import * as RuntimeDb from '../runtime-db.js';
@@ -152,6 +164,59 @@ afterEach(() => {
 });
 
 describe('runDeploymentPipeline (WfP branch)', () => {
+  it('re-syncs paused state from the DB right after the KV write', async () => {
+    (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(makeZipBuffer({ 'index.html': '<html>hi</html>' }));
+    const db = makeDb({ name: 'My App', subdomain: 'myapp', cloudflare_project_name: null, deployment_backend: 'wfp', region: 'local' });
+    wireRuntimeDb(db);
+    const order: string[] = [];
+    (CloudflareWfp.writeSubdomainMapping as ReturnType<typeof vi.fn>).mockImplementation(async () => { order.push('write'); });
+    (syncFrontendPausedState as ReturnType<typeof vi.fn>).mockImplementation(async () => { order.push('sync'); return { rewritten: [] }; });
+
+    await runDeploymentPipeline(db as unknown as import('pg').Pool, 'app_abc', 'dep_1', { r2_object_key: 'r2/key', framework: 'react-vite' });
+
+    expect(syncFrontendPausedState).toHaveBeenCalledWith(db, 'app_abc');
+    expect(order).toEqual(['write', 'sync']);
+  });
+
+  it('does not fail the deploy when the post-write re-sync rejects', async () => {
+    (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(makeZipBuffer({ 'index.html': '<html>hi</html>' }));
+    const db = makeDb({ name: 'My App', subdomain: 'myapp', cloudflare_project_name: null, deployment_backend: 'wfp', region: 'local' });
+    wireRuntimeDb(db);
+    (syncFrontendPausedState as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cf down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await runDeploymentPipeline(db as unknown as import('pg').Pool, 'app_abc', 'dep_1', { r2_object_key: 'r2/key', framework: 'react-vite' });
+
+    expect(warn).toHaveBeenCalled();
+    expect(CloudflareWfp.deleteUserWorker).not.toHaveBeenCalled();
+    const ready = db.query.mock.calls.find(([sql]) => /READY/.test(String(sql)));
+    expect(ready).toBeTruthy();
+  });
+
+  it('keeps a paused app paused: passes paused=true to the subdomain KV write', async () => {
+    const zipBuffer = makeZipBuffer({ 'index.html': '<html>hi</html>' });
+    (R2.downloadObjectAsBuffer as ReturnType<typeof vi.fn>).mockResolvedValue(zipBuffer);
+
+    const db = makeDb({
+      name: 'My App',
+      subdomain: 'myapp',
+      cloudflare_project_name: null,
+      deployment_backend: 'wfp',
+      region: 'local',
+      paused: true,
+    });
+
+    wireRuntimeDb(db);
+    await runDeploymentPipeline(
+      db as unknown as import('pg').Pool,
+      'app_abc',
+      'dep_1',
+      { r2_object_key: 'r2/key', framework: 'react-vite' }
+    );
+
+    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local', true);
+  });
+
   it('deploys via WfP when app.deployment_backend=wfp', async () => {
     const zipBuffer = makeZipBuffer({
       'index.html': '<html>hi</html>',
@@ -192,7 +257,7 @@ describe('runDeploymentPipeline (WfP branch)', () => {
     expect(call.envVars).toEqual({ VITE_API_URL: 'https://api.example.com' });
 
     // Subdomain mapping written
-    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local');
+    expect(CloudflareWfp.writeSubdomainMapping).toHaveBeenCalledWith('myapp', 'app_abc', 'local', false);
 
     // Pages NOT called
     expect(CloudflarePages.createDeployment).not.toHaveBeenCalled();

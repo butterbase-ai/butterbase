@@ -535,11 +535,11 @@ While paused:
 - Function invocations (HTTP and cron) return **503** with code `APP_PAUSED`.
 - Data-plane CRUD (`select_rows`, `insert_row`, REST) returns 503.
 - Storage uploads / downloads return 503.
-- Realtime websockets close with code `1013` ("Try again later").
+- Open realtime sockets are closed with code `1013` ("Try again later"); new connections are refused.
 
-What stays available so you can recover:
-- All control-plane endpoints (`manage_app` `list` and `get_config`, schema, RLS, env vars, the `manage_app` `pause` toggle itself).
-- Auth (login / signup) — operators may need to re-authenticate while paused.
+Auth (login / signup), KV, agents, RAG, people, and the durable objects and edge SSR management APIs return 503 too, and the function runtime refuses the app's functions. Visitors to a paused app's site (including edge SSR apps) see a "This project is paused." page within about a minute; Durable Object paths keep serving.
+
+What stays available so you can recover: the app's owners and org members, using a dashboard session or API key, keep management and data access on non-public routes (functions, KV and realtime are blocked for everyone, owners included) (`manage_app` `list` and `get_config`, schema, RLS, env vars, the `manage_app` `pause` toggle itself). Template listing and cloning are unaffected.
 
 **MCP:**
 

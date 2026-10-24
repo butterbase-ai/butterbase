@@ -1,6 +1,6 @@
 // Butterbase Deno Runtime Server
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { loadFunction, invalidateCache, warmupRuntimePool } from "./function-loader.ts";
+import { loadFunction, invalidateCache, AppPausedError, warmupRuntimePool } from "./function-loader.ts";
 import { executeFunction } from "./worker-executor.ts";
 import { logInvocation } from "./invocation-logger.ts";
 import { startRedisSubscriber } from "./redis-subscriber.ts";
@@ -217,6 +217,15 @@ serve(async (req: Request) => {
       activeWorkers--;
     }
   } catch (error) {
+    if (error instanceof AppPausedError) {
+      return new Response(
+        JSON.stringify({ error: "APP_PAUSED", message: error.message }),
+        {
+          status: 503,
+          headers: { "Content-Type": "application/json", "Retry-After": "3600" },
+        }
+      );
+    }
     console.error("Execution error:", error);
     return new Response(
       JSON.stringify({ error: (error as Error).message }),

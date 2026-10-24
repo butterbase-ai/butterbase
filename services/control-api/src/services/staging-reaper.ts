@@ -23,6 +23,8 @@
 // first to add it, not a continuation of an existing precedent.
 
 import type pg from 'pg';
+import { notifyPauseStateChanged } from './app-pause.js';
+import { withAppStateLocks } from './app-state-lock.js';
 
 const DEFAULT_IDLE_DAYS = 30;
 const INTERVAL_MS = 6 * 60 * 60 * 1000; // four times a day is plenty for a days-scale threshold
@@ -77,24 +79,45 @@ export async function runOnce(
   runtimeDb: pg.Pool,
   idleDays: number,
   logger: ReaperLogger,
+  controlDb: pg.Pool,
+  region: string,
 ): Promise<{ paused: number }> {
   const ids = await findIdleStagingApps(runtimeDb, idleDays);
   if (ids.length === 0) return { paused: 0 };
 
-  const res = await runtimeDb.query(
+  let changed: { id: string }[] = [];
+  const res = await withAppStateLocks(controlDb, ids, async (refs) => {
+    const current = refs.filter(r=>r.region === region).map(r=>r.app_id);
+    if (!current.length) return { rows: [] as { id: string }[], rowCount: 0 };
+    const result = await runtimeDb.query<{ id: string }>(
     `UPDATE apps SET paused = true, paused_at = now(),
-            paused_reason = $2, updated_at = now()
+            paused_reason = $2, paused_by = 'staging_reaper', updated_at = now()
       WHERE id = ANY($1)
-        AND id IN (SELECT staging_app_id FROM app_environments)`,
-    [ids, `Automatically paused after ${idleDays} days of inactivity.`],
-  );
+        AND paused = false
+        AND id IN (SELECT staging_app_id FROM app_environments)
+        AND updated_at < now() - ($3 || ' days')::interval
+        AND EXISTS (SELECT 1 FROM app_environments e WHERE e.staging_app_id = apps.id
+          AND COALESCE(e.last_reset_at,e.created_at) < now() - ($3 || ' days')::interval)
+      RETURNING id`,
+    [current, `Automatically paused after ${idleDays} days of inactivity.`, idleDays],
+    );
+    changed = result.rows;
+    return result;
+  }).finally(async () => {
+    for (const row of changed) await notifyPauseStateChanged({ appId: row.id, paused: true, by: 'staging_reaper' }, logger);
+  });
   logger.info({ paused: res.rowCount, ids }, '[staging-reaper] paused idle staging apps');
+  // The scoped batch UPDATE stays here (it is the safety property — see the
+  // doc comment above); app-pause supplies the side effects so a reaper
+  // pause is as complete as an owner pause.
   return { paused: res.rowCount ?? 0 };
 }
 
 export function startStagingReaper(
   runtimeDb: pg.Pool,
   logger: ReaperLogger,
+  controlDb: pg.Pool,
+  region: string,
   intervalMs: number = INTERVAL_MS,
 ): () => void {
   const idleDays = idleDaysFromEnv();
@@ -105,7 +128,7 @@ export function startStagingReaper(
   async function tick(): Promise<void> {
     if (!running) return;
     try {
-      await runOnce(runtimeDb, idleDays, logger);
+      await runOnce(runtimeDb, idleDays, logger, controlDb, region);
     } catch (err) {
       logger.error({ err }, '[staging-reaper] sweep failed');
     } finally {

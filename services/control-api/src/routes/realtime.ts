@@ -13,6 +13,7 @@ import {
 import { config } from '../config.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
+import { assertAppIdNotPaused } from '../plugins/pause-gate.js';
 
 // ============================================================================
 // Helpers
@@ -58,7 +59,7 @@ async function resolveRealtimeAuth(
 const wsTriggerCache = new Map<string, { functions: Map<string, string>; expires: number }>();
 const WS_TRIGGER_CACHE_TTL = 5000;
 
-async function handleWebSocketEvent(
+export async function handleWebSocketEvent(
   fastify: FastifyInstance,
   appId: string,
   userId: string | null,
@@ -91,6 +92,16 @@ async function handleWebSocketEvent(
     if (!functionName) {
       socket.send(JSON.stringify({ type: 'error', message: `No handler for event: ${event}` }));
       return;
+    }
+
+    try {
+      await assertAppIdNotPaused(fastify.controlDb, appId);
+    } catch (err) {
+      if (err instanceof AppPausedError) {
+        socket.send(JSON.stringify({ type: 'error', code: 'APP_PAUSED', message: 'App is paused' }));
+        return;
+      }
+      throw err;
     }
 
     // Forward to Deno runtime

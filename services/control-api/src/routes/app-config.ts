@@ -2,13 +2,16 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 import { createAgentError, getDocUrl, isHttpError } from '../services/error-handler.js';
-import { RESOURCE_NOT_FOUND, VALIDATION_INVALID_SCHEMA, EXTERNAL_DB_ERROR } from '@butterbase/shared/error-types';
+import { RESOURCE_NOT_FOUND, VALIDATION_INVALID_SCHEMA, EXTERNAL_DB_ERROR, APP_RESUME_REQUIRES_UPGRADE } from '@butterbase/shared/error-types';
 import { requireUserId } from '../utils/require-auth.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
 import { config } from '../config.js';
 import { resolveAppHomeRegion } from '../services/region-resolver.js';
 import { getRuntimeDbPool } from '../services/runtime-db.js';
 import { getLimitsForApp } from '../services/app-plan-resolver.js';
+import { setPausedState, notifyPauseStateChanged, ResumeRequiresUpgradeError } from '../services/app-pause.js';
+import { withAppStateLocks, AppStateBusyError } from '../services/app-state-lock.js';
+import { isOnIdlePausePlan } from '../services/idle-pause-config.js';
 
 const updateCorsSchema = z.object({
   allowed_origins: z.array(z.string().url()).min(1),
@@ -71,6 +74,7 @@ export async function appConfigRoutes(app: FastifyInstance) {
         `SELECT id, name, db_name, db_provisioned, region, allowed_origins, storage_config, auth_hook_function, access_mode,
                 visibility, listed, template_source_app_id, repo_latest_snapshot, fork_count,
                 substrate_organization_id,
+                paused, paused_at, paused_reason, paused_by,
                 created_at, updated_at
          FROM apps
          WHERE id = $1`,
@@ -618,28 +622,30 @@ export async function appConfigRoutes(app: FastifyInstance) {
 
     try {
       const resolvedApp = await AppResolver.resolveApp(app.controlDb, app_id, requireUserId(request), request.auth?.organizationId ?? null);
-      const region = await resolveAppHomeRegion(app.controlDb, resolvedApp.id);
-      const runtimeDb = getRuntimeDbPool(config.runtimeDb, region);
-
-      const result = await runtimeDb.query(
-        `UPDATE apps
-         SET paused = $1,
-             paused_at = CASE WHEN $1 THEN now() ELSE NULL END,
-             paused_reason = CASE WHEN $1 THEN $2 ELSE NULL END,
-             updated_at = now()
-         WHERE id = $3
-         RETURNING paused, paused_at, paused_reason`,
-        [paused, reason ?? null, resolvedApp.id]
-      );
+      let applied = false;
+      const state = await withAppStateLocks(app.controlDb, [resolvedApp.id], async ([ref], client) => {
+        if (!ref) throw new AppNotFoundError(resolvedApp.id);
+        const runtimeDb = getRuntimeDbPool(config.runtimeDb, ref.region);
+        const result = paused
+          ? await setPausedState(runtimeDb, resolvedApp.id, { paused: true, by: 'owner', reason: reason ?? null }, app.log, { notify: false })
+          : await setPausedState(runtimeDb, resolvedApp.id, {
+              paused: false, by: 'owner', idlePausePlan: await isOnIdlePausePlan(client, resolvedApp.id),
+            }, app.log, { notify: false });
+        applied = result !== null;
+        return result;
+      }).finally(async () => {
+        if (applied) await notifyPauseStateChanged({ appId: resolvedApp.id, paused, by: 'owner' }, app.log);
+      });
+      if (!state) throw new AppNotFoundError(resolvedApp.id);
 
       logFromRequest(request, {
         appId: resolvedApp.id,
         category: 'admin',
-        eventType: 'app.config.paused',
+        eventType: paused ? 'app.config.paused' : 'app.config.resumed',
         action: 'update',
         resourceType: 'app_config',
         resourceId: 'paused',
-        eventData: { paused, reason: reason ?? null },
+        eventData: { paused, reason: reason ?? null, by: 'owner' },
         success: true,
       });
 
@@ -647,12 +653,24 @@ export async function appConfigRoutes(app: FastifyInstance) {
         message: paused
           ? `App paused${reason ? ` (${reason})` : ''}. Data-plane traffic will return 503 until resumed.`
           : 'App resumed. Data-plane traffic restored.',
-        app_id: resolvedApp.id,
-        paused: result.rows[0].paused,
-        paused_at: result.rows[0].paused_at,
-        paused_reason: result.rows[0].paused_reason,
+        app_id: state.app_id,
+        paused: state.paused,
+        paused_at: state.paused_at,
+        paused_reason: state.paused_reason,
+        paused_by: state.paused_by,
       });
     } catch (error) {
+      if (error instanceof AppStateBusyError) return reply.code(409).send(createAgentError({
+        code: error.code, message: error.message, remediation: 'Retry after the current app state change finishes.',
+      }));
+      if (error instanceof ResumeRequiresUpgradeError) {
+        return reply.code(402).send(createAgentError({
+          code: APP_RESUME_REQUIRES_UPGRADE,
+          message: 'This app was paused after a period without activity and can only be resumed on a paid plan',
+          remediation: `Upgrade the plan at ${config.dashboardUrl}/billing. Upgrading resumes apps that were paused for inactivity.`,
+          documentation_url: getDocUrl(APP_RESUME_REQUIRES_UPGRADE),
+        }));
+      }
       if (error instanceof AppNotFoundError) {
         return reply.code(404).send(createAgentError({
           code: RESOURCE_NOT_FOUND,

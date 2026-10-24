@@ -17,6 +17,7 @@ import { config } from '../config.js';
 import { getRuntimeDbForApp } from './region-resolver.js';
 import { decrypt } from './crypto.js';
 import { notifyDeploymentFailed } from './failure-notifications.service.js';
+import { syncFrontendPausedState } from './frontend-pause-sync.js';
 
 export class DeploymentError extends Error {
   constructor(message: string, public readonly code?: string) {
@@ -551,7 +552,7 @@ export async function deployArtifact(
 
     // --- 3. Load app row (apps is runtime-tier) ---
     const appResult = await runtimePool.query(
-      `SELECT name, subdomain, deployment_backend, region FROM apps WHERE id = $1`,
+      `SELECT name, subdomain, deployment_backend, region, paused FROM apps WHERE id = $1`,
       [appId]
     );
     if (appResult.rows.length === 0) {
@@ -563,6 +564,7 @@ export async function deployArtifact(
       deployment_backend: (appResult.rows[0].deployment_backend as 'pages' | 'wfp' | undefined) ?? 'pages',
       // apps.region is NOT NULL post-Phase 1, but keep a defensive fallback.
       region: (appResult.rows[0].region as string | null) ?? 'us-east-1',
+      paused: appResult.rows[0].paused === true,
     };
 
     if (app.deployment_backend !== 'wfp') {
@@ -630,7 +632,7 @@ export async function deployArtifact(
     // --- 7. Subdomain mapping with rollback on failure ---
     console.log(`${tag} Step 4/6: Writing subdomain mapping ${app.subdomain} -> ${appId}…`);
     try {
-      await CloudflareWfp.writeSubdomainMapping(app.subdomain, appId, app.region);
+      await CloudflareWfp.writeSubdomainMapping(app.subdomain, appId, app.region, app.paused);
     } catch (err) {
       try {
         await CloudflareWfp.deleteUserWorker(appId);
@@ -638,6 +640,13 @@ export async function deployArtifact(
         /* best-effort */
       }
       throw err;
+    }
+
+    // Re-sync paused from the DB: it was read before the long upload above.
+    try {
+      await syncFrontendPausedState(db, appId);
+    } catch (err) {
+      console.warn(`${tag} [pause] post-write KV re-sync failed:`, err);
     }
 
     const url = `https://${app.subdomain}.${config.subdomain.baseDomain}`;

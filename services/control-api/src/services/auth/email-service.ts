@@ -316,6 +316,9 @@ export async function sendPasswordResetEmail(email: string, code: string, appNam
 // ---- Billing email notifications ----
 
 export type BillingEmailTemplate =
+  | 'project_idle_warning'
+  | 'project_paused_idle'
+  | 'idle_pause_breaker_ops'
   | 'payment_failed'
   | 'plan_downgraded'
   | 'soft_locked'
@@ -339,6 +342,9 @@ export type BillingEmailTemplate =
   | 'weekly_digest';
 
 const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
+  project_idle_warning: 'Your project will pause soon',
+  project_paused_idle: 'Your project has been paused',
+  idle_pause_breaker_ops: '[butterbase] Idle pause circuit breaker triggered',
   payment_failed: 'Action Required: Payment Failed',
   plan_downgraded: 'Your Butterbase plan was downgraded',
   soft_locked: 'Account Limited: Free Plan Limits Exceeded',
@@ -430,6 +436,12 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
   const dashboardUrl = process.env.DASHBOARD_URL || 'https://dashboard.butterbase.ai';
 
   switch (template) {
+    case 'project_idle_warning':
+      return `${data.appName || data.appId || 'Your project'} will pause in ${data.warnDays || '7'} days without activity.\n\nFree projects pause when unused. Bring real traffic to keep this project active, upgrade to keep it running on a paid plan, or do nothing and it will pause. Once paused, upgrading is required to resume. Your data is never deleted.\n\nUpgrade: ${dashboardUrl}/billing/upgrade\nDashboard: ${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}`;
+    case 'project_paused_idle':
+      return `${data.appName || data.appId || 'Your project'} has been paused after a period without activity. Your data is still there.\n\nUpgrade to resume. Projects on paid plans don't pause.\n\nUpgrade: ${dashboardUrl}/billing/upgrade\nDashboard: ${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}`;
+    case 'idle_pause_breaker_ops':
+      return `Idle pause circuit breaker triggered: ${data.count} apps out of ${data.freeApps} free apps would be notified or paused. No pause notifications or pauses were applied. Review the idle-pause logs before changing limits.`;
     case 'payment_failed':
       return [
         'We were unable to process your payment.',
@@ -1206,7 +1218,7 @@ ${renderButton({ href: logsUrl, label: 'Open function logs' })}
     });
   }
 
-  const notice = buildNoticeHtml(template, data, dashboardUrl);
+  const notice = buildNoticeHtml(template, data, dashboardUrl, opts.actionTokens);
   if (notice) return notice;
 
   return null;
@@ -1222,6 +1234,7 @@ function buildNoticeHtml(
   template: BillingEmailTemplate,
   data: Record<string, string>,
   dashboardUrl: string,
+  actionTokens?: BillingEmailOptions['actionTokens'],
 ): string | null {
   const e = escapeHtml;
   const app = data.appName || data.appId || '';
@@ -1233,6 +1246,26 @@ function buildNoticeHtml(
   const ops = (preheader: string, content: string) => renderEmailLayout({ preheader, content, audience: 'ops' });
 
   switch (template) {
+    case 'project_idle_warning':
+    case 'project_paused_idle': {
+      const warning = template === 'project_idle_warning';
+      const heading = warning ? `${app || 'Your project'} will pause in ${data.warnDays || '7'} days` : `${app || 'Your project'} has been paused`;
+      const unsubscribe = actionTokens?.unsubscribeTemplate
+        ? ` <a href="${e(notifActionUrl(actionTokens.unsubscribeTemplate))}">Unsubscribe from these emails</a>.` : '';
+      return owner(heading, renderNotice({
+        heading,
+        intro: warning
+          ? '<p>Free projects pause when unused. Bring real traffic to keep this project active, upgrade to keep it running on a paid plan, or do nothing and it will pause. Once paused, upgrading is required to resume. Your data is never deleted.</p>'
+          : '<p>Your project was paused after a period without activity. Your data is still there. Upgrade to resume. Projects on paid plans don\'t pause.</p>',
+        cta: { href: `${dashboardUrl}/billing/upgrade`, label: warning ? 'Upgrade your plan' : 'Upgrade to resume' },
+        note: `<a href="${e(`${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}`)}">Open the Butterbase dashboard</a>.${unsubscribe}`,
+      }));
+    }
+    case 'idle_pause_breaker_ops':
+      return ops('Idle pause circuit breaker triggered', renderNotice({
+        heading: 'Idle pause circuit breaker triggered',
+        intro: `<p>${e(data.count || '0')} apps out of ${e(data.freeApps || '0')} free apps would be notified or paused. No pause notifications or pauses were applied. Review the idle-pause logs before changing limits.</p>`,
+      }));
     case 'payment_failed': {
       const by = formatEmailDate(data.gracePeriodEndsAt);
       return owner(
@@ -1460,6 +1493,8 @@ export function buildBillingEmailSubject(
   template: BillingEmailTemplate,
   data: Record<string, string> = {},
 ): string {
+  if (template === 'project_idle_warning') return `${data.appName || data.appId || 'Your project'} will pause in ${data.warnDays || '7'} days`;
+  if (template === 'project_paused_idle') return `${data.appName || data.appId || 'Your project'} has been paused`;
   if (template === 'function_failed') {
     const app = data.appName || data.appId || 'your app';
     const fn = data.functionName || 'a function';
@@ -1618,6 +1653,7 @@ function digestTotalCount(data: Record<string, string>): number {
  * config.ses.devConsoleFallback is on.
  */
 const OPS_BILLING_TEMPLATES: ReadonlySet<BillingEmailTemplate> = new Set<BillingEmailTemplate>([
+  'idle_pause_breaker_ops',
   'clone_failed_ops',
   'clone_reaper_digest',
   'org_balance_low_ops',

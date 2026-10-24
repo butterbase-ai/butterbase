@@ -29,7 +29,7 @@ The exact prices and allowances live in two places, on purpose — they're not c
 butterbase billing status
 ```
 
-Playground projects are paused after a week with nothing happening on them. Nothing is deleted — resume them from the dashboard whenever you come back.
+Playground projects are paused after a week with nothing happening on them. Nothing is deleted. Owners receive a warning before an inactivity pause. Real app traffic and qualifying human frontend visits keep projects active; scheduled cron jobs do not. Once paused for inactivity, upgrade to a paid plan to bring the project back. Paid projects do not pause for inactivity.
 
 ## Usage meters
 

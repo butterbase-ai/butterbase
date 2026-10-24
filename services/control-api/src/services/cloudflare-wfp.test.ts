@@ -20,6 +20,8 @@ import {
   deleteUserWorker,
   writeSubdomainMapping,
   writeDomainMapping,
+  kvMappingValue,
+  readKvMapping,
   deleteSubdomainMapping,
   deployDoWorker,
   deleteDoWorker,
@@ -298,6 +300,50 @@ describe('writeDomainMapping', () => {
 
     const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
     expect(body).toEqual({ appId: 'app-uuid', region: 'eu-west-1' });
+  });
+});
+
+describe('kvMappingValue', () => {
+  it('omits paused when running', () => {
+    expect(kvMappingValue('app_1', 'us-east-1')).toBe('{"appId":"app_1","region":"us-east-1"}');
+    expect(kvMappingValue('app_1', 'us-east-1', false)).toBe('{"appId":"app_1","region":"us-east-1"}');
+  });
+  it('adds paused:true when paused', () => {
+    expect(kvMappingValue('app_1', 'us-east-1', true)).toBe('{"appId":"app_1","region":"us-east-1","paused":true}');
+  });
+});
+
+describe('paused KV writers', () => {
+  it('writeSubdomainMapping PUTs the paused value', async () => {
+    fetchMock.mockResolvedValueOnce(okText(null));
+    await writeSubdomainMapping('s', 'app_1', 'us-east-1', true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toMatch(/\/values\/sub:s$/);
+    expect((init as RequestInit).body).toBe(kvMappingValue('app_1', 'us-east-1', true));
+  });
+  it('writeDomainMapping PUTs the paused value', async () => {
+    fetchMock.mockResolvedValueOnce(okText(null));
+    await writeDomainMapping('x.com', 'app_1', 'us-east-1', true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toMatch(/\/values\/domain:x\.com$/);
+    expect((init as RequestInit).body).toBe(kvMappingValue('app_1', 'us-east-1', true));
+  });
+});
+
+describe('readKvMapping', () => {
+  it('returns the raw value, or null on 404', async () => {
+    const f = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('{"appId":"a","region":"r"}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"success":false}', { status: 404 }));
+    expect(await readKvMapping('sub:s')).toBe('{"appId":"a","region":"r"}');
+    expect(await readKvMapping('sub:missing')).toBeNull();
+    expect(f.mock.calls[0][0]).toMatch(/\/storage\/kv\/namespaces\/.*\/values\/sub:s$/);
+    f.mockRestore();
+  });
+  it('throws on other errors', async () => {
+    const f = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('boom', { status: 500 }));
+    await expect(readKvMapping('sub:s')).rejects.toThrow(/500/);
+    f.mockRestore();
   });
 });
 

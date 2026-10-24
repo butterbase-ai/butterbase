@@ -14,7 +14,11 @@
  * Run with:
  *   npx vitest run services/control-api/src/services/staging-reaper-integration.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+// This legacy suite exercises regional SQL; the lock integration suite covers
+// real control-plane coordination.
+vi.mock('./app-state-lock.js', () => ({ withAppStateLocks: async (_pool: unknown, ids: string[], work: Function) =>
+  work(ids.map(app_id=>({ app_id,region:'us-east-1' })),{}) }));
 import pg from 'pg';
 import { findIdleStagingApps, runOnce } from './staging-reaper.js';
 
@@ -116,7 +120,7 @@ beforeEach(async () => {
 
 describe('staging-reaper — real-DB safety property', () => {
   it('pauses the idle staging app but never the linked production app', async () => {
-    const result = await runOnce(runtimeDb, IDLE_DAYS, logger);
+    const result = await runOnce(runtimeDb, IDLE_DAYS, logger, {} as never, 'us-east-1');
     expect(result.paused).toBeGreaterThanOrEqual(1);
 
     expect(await isPaused(STAGING_IDLE)).toBe(true);
@@ -124,7 +128,7 @@ describe('staging-reaper — real-DB safety property', () => {
   });
 
   it('leaves an idle app alone when it is not in app_environments at all', async () => {
-    await runOnce(runtimeDb, IDLE_DAYS, logger);
+    await runOnce(runtimeDb, IDLE_DAYS, logger, {} as never, 'us-east-1');
     expect(await isPaused(ORPHAN_IDLE)).toBe(false);
   });
 
@@ -132,7 +136,7 @@ describe('staging-reaper — real-DB safety property', () => {
     const ids = await findIdleStagingApps(runtimeDb, IDLE_DAYS);
     expect(ids).not.toContain(STAGING_FRESH);
 
-    await runOnce(runtimeDb, IDLE_DAYS, logger);
+    await runOnce(runtimeDb, IDLE_DAYS, logger, {} as never, 'us-east-1');
     expect(await isPaused(STAGING_FRESH)).toBe(false);
   });
 
@@ -140,7 +144,7 @@ describe('staging-reaper — real-DB safety property', () => {
     const ids = await findIdleStagingApps(runtimeDb, IDLE_DAYS);
     expect(ids).not.toContain(STAGING_PAUSED);
 
-    await runOnce(runtimeDb, IDLE_DAYS, logger);
+    await runOnce(runtimeDb, IDLE_DAYS, logger, {} as never, 'us-east-1');
     // Still paused — the sweep neither un-pauses it nor errors on it.
     expect(await isPaused(STAGING_PAUSED)).toBe(true);
   });

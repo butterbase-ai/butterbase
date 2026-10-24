@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runReverseMove } from './reverse-move.js';
+vi.mock('../app-state-lock.js', () => ({ withAppStateLocks: async (pool: unknown, ids: string[], work: Function) =>
+  work(ids.map(app_id=>({ app_id,region:'eu-west-1',organization_id:null })),pool) }));
 
 vi.mock('./migration-store.js', () => ({
   getMigration: vi.fn(),
@@ -14,7 +16,7 @@ describe('runReverseMove', () => {
     vi.clearAllMocks();
   });
 
-  it('promotes source replica, flips routing back, unarchives rows', async () => {
+  it.each([[false], [true]])('promotes source replica, flips routing back, unarchives rows (paused=%s)', async (paused) => {
     (getMigration as any).mockResolvedValue({
       id: 'fwd-1',
       app_id: 'app-x',
@@ -27,16 +29,24 @@ describe('runReverseMove', () => {
     (createMigration as any).mockResolvedValue('rev-1');
     (markCompleted as any).mockResolvedValue(undefined);
 
+    let restoredPaused = !paused; // Original region is stale after forward migration.
+    const currentState = {
+      paused, paused_at: paused ? '2026-10-01T00:00:00Z' : null,
+      paused_reason: paused ? 'idle' : null, paused_by: paused ? 'idle_reaper' : null,
+      last_active_at: '2026-08-01T00:00:00Z', idle_warned_at: '2026-09-01T00:00:00Z',
+      idle_pause_notified_at: '2026-09-08T00:00:00Z',
+    };
     const sourcePool = {
-      query: vi.fn().mockImplementation(async (sql: string) => {
-        if (sql.includes('SELECT subdomain')) return { rows: [{ subdomain: 'demo' }] };
+      query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
+        if (sql.includes('SET paused = $2')) restoredPaused = params[1] as boolean;
+        if (sql.includes('SELECT subdomain')) return { rows: [{ subdomain: 'demo', paused: restoredPaused }] };
         if (/UPDATE "ai_(video_preparations|video_attempts|reference_asset_groups|reference_assets)"/.test(sql)) {
           throw Object.assign(new Error('future table absent'), { code: '42P01' });
         }
         return { rows: [] };
       }),
     };
-    const destPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    const destPool = { query: vi.fn().mockResolvedValue({ rows: [currentState] }) };
     const controlPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
 
     const writeSubdomainMapping = vi.fn().mockResolvedValue(undefined);
@@ -68,11 +78,14 @@ describe('runReverseMove', () => {
     expect(res.path).toBe('fast');
     expect(waitForReplicationCaughtUp).toHaveBeenCalledWith('us-east-1', 'app-x', 'fwd-1');
     expect(promoteSourceToPrimary).toHaveBeenCalledWith('us-east-1', 'app-x', 'fwd-1');
-    expect(updateOrgAppIndexRegion).toHaveBeenCalledWith(controlPool, 'app-x', 'us-east-1');
-    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'us-east-1');
-    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'us-east-1');
+    expect(controlPool.query).toHaveBeenCalledWith(expect.stringContaining('UPDATE org_app_index'), ['app-x','us-east-1']);
+    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'us-east-1', paused);
+    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'us-east-1', paused);
     expect(invalidateCacheAllRegions).toHaveBeenCalledWith('app-x');
     expect(markCompleted).toHaveBeenCalledWith(controlPool, 'rev-1');
+    expect(sourcePool.query).toHaveBeenCalledWith(expect.stringContaining('SET paused = $2'), [
+      'app-x', ...Object.values(currentState), 'us-east-1',
+    ]);
 
     // Dest set to migrating
     expect(destPool.query).toHaveBeenCalledWith(
@@ -82,7 +95,7 @@ describe('runReverseMove', () => {
     // Source set to ready with restored region
     expect(sourcePool.query).toHaveBeenCalledWith(
       expect.stringContaining(`provisioning_status = 'ready'`),
-      ['us-east-1', 'app-x'],
+      ['app-x', ...Object.values(currentState), 'us-east-1'],
     );
     // Unarchive happened against source pool
     const unarchiveCall = sourcePool.query.mock.calls.find((c: any[]) =>
@@ -113,7 +126,7 @@ describe('runReverseMove', () => {
         return { rows: [] };
       }),
     };
-    const destPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    const destPool = { query: vi.fn().mockResolvedValue({ rows: [{ paused: false }] }) };
 
     const order: string[] = [];
     const promoteSourceToPrimary = vi.fn().mockImplementation(async () => { order.push('promote'); });
@@ -138,10 +151,10 @@ describe('runReverseMove', () => {
       expect(opts.key).toBe('move-app/fwd-kv-1-reverse/dump.kv.jsonl.gz');
       return { records: 3 };
     });
-    const updateOrgAppIndexRegion = vi.fn().mockImplementation(async () => { order.push('updateIndex'); });
+    const updateOrgAppIndexRegion = vi.fn();
 
     const ctx: any = {
-      controlPool: { query: vi.fn().mockResolvedValue({ rows: [] }) },
+      controlPool: { query: vi.fn().mockImplementation(async (sql: string) => { if(sql.includes('UPDATE org_app_index')) order.push('updateIndex'); return { rows:[] }; }) },
       runtimePoolFor: (r: string) => (r === 'us-east-1' ? sourcePool : destPool),
       writeSubdomainMapping: vi.fn(),
       writeDomainMapping: vi.fn(),
@@ -175,7 +188,7 @@ describe('runReverseMove', () => {
     (createMigration as any).mockResolvedValue('rev-err-1');
 
     const sourcePool = { query: vi.fn().mockResolvedValue({ rows: [{ subdomain: 'd' }] }) };
-    const destPool = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    const destPool = { query: vi.fn().mockResolvedValue({ rows: [{ paused: false }] }) };
     const logError = vi.fn();
 
     const ctx: any = {

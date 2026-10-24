@@ -14,6 +14,7 @@ import { decrypt } from './crypto.js';
 import { notifyDeploymentFailed } from './failure-notifications.service.js';
 import { probeSpaRouting } from './spa-routing-probe.js';
 import { parseRedirects } from '@butterbase/static-frontend-worker';
+import { syncFrontendPausedState } from './frontend-pause-sync.js';
 
 export class DeploymentError extends Error {
   constructor(message: string, public readonly code?: string) {
@@ -415,6 +416,7 @@ interface PipelineCtx {
     cloudflare_project_name: string | null;
     deployment_backend: 'pages' | 'wfp';
     region: string;
+    paused: boolean;
   };
 }
 
@@ -514,7 +516,7 @@ async function deployViaPages(ctx: PipelineCtx): Promise<DeployResult> {
  * in-worker rewrite to /index.html (see WORKER_JS in cloudflare-wfp.ts).
  */
 async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
-  const { runtimePool, appId, tag, files, app } = ctx;
+  const { db, runtimePool, appId, tag, files, app } = ctx;
 
   if (!app.subdomain) {
     throw new DeploymentError('WfP deploy requires app.subdomain', 'NO_SUBDOMAIN');
@@ -594,7 +596,7 @@ async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
 
   console.log(`${tag} Step 4/5: Writing subdomain mapping ${app.subdomain} -> ${appId}…`);
   try {
-    await CloudflareWfp.writeSubdomainMapping(app.subdomain, appId, app.region);
+    await CloudflareWfp.writeSubdomainMapping(app.subdomain, appId, app.region, app.paused);
   } catch (err) {
     // Compensate: remove the worker we just uploaded so state stays consistent.
     // Without the KV mapping, the dispatch worker is unreachable — an orphan.
@@ -604,6 +606,14 @@ async function deployViaWfp(ctx: PipelineCtx): Promise<DeployResult> {
       /* best-effort */
     }
     throw err;
+  }
+
+  // The paused flag above was read before a long upload; a pause/resume that
+  // landed meanwhile would be overwritten by this stale write. Re-sync from the DB.
+  try {
+    await syncFrontendPausedState(db, appId);
+  } catch (err) {
+    console.warn(`${tag} [pause] post-write KV re-sync failed:`, err);
   }
 
   const url = `https://${app.subdomain}.${config.subdomain.baseDomain}`;
@@ -758,7 +768,7 @@ export async function deployArtifact(
 
     // --- Load app row, including deployment_backend selector (apps is runtime-tier) ---
     const appResult = await runtimePool.query(
-      `SELECT name, subdomain, cloudflare_project_name, deployment_backend, region FROM apps WHERE id = $1`,
+      `SELECT name, subdomain, cloudflare_project_name, deployment_backend, region, paused FROM apps WHERE id = $1`,
       [appId]
     );
 
@@ -773,6 +783,7 @@ export async function deployArtifact(
       deployment_backend: (appResult.rows[0].deployment_backend as 'pages' | 'wfp' | undefined) ?? 'pages',
       // apps.region is NOT NULL post-Phase 1, but keep a defensive default.
       region: (appResult.rows[0].region as string | null) ?? 'us-east-1',
+      paused: appResult.rows[0].paused === true,
     };
 
     const ctx: PipelineCtx = {

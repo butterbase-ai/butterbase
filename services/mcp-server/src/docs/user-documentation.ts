@@ -77,6 +77,7 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 | **manage_app** (action: "move") | Move an existing app to another region. Pass \`dest_region\`; returns a \`migration_id\`. The app stays available for reads during the move. |
 | **manage_app** (action: "move_status") | Check the progress of a move in flight. Pass \`migration_id\` (returned by action: "move"). |
 | **manage_app** (action: "teardown_source_replica") | After a completed move, decommission the retained source-region replica. Pass \`migration_id\`. |
+| **manage_app** (action: "resume") | Resume a paused app. Use action "resume" to bring a paused app back. While an app is paused, its owners keep management and data access (functions, KV and realtime are blocked for everyone, owners included); every other caller gets 503 APP_PAUSED on every app-scoped API. 503 APP_PAUSED responses include details.paused_by ("owner", "admin", "idle_reaper", "staging_reaper"). An "idle_reaper" pause on a free plan can't be resumed directly (402 APP_RESUME_REQUIRES_UPGRADE); upgrading the plan resumes it. Pause/resume can return retryable 409 APP_STATE_BUSY during concurrent state changes or region cutovers. Visitors to a paused app's site get an HTTP 503 "This project is paused." page within about a minute; Durable Object (/_do/) paths keep working. |
 | **manage_app** (action: "list") | List all apps you have access to with their metadata. |
 | **manage_app** (action: "delete") | Permanently delete an app and its database. This is irreversible. |
 | **manage_app** (action: "get_config") | Read an app's current configuration (CORS origins, JWT settings, storage limits). |
@@ -2616,7 +2617,7 @@ Butterbase offers three plan tiers. Each plan includes a set of monthly usage al
 | **HIPAA** | — | — | Paid add-on |
 | **SLA** | — | — | Yes |
 
-Free projects are paused after 1 week of inactivity.
+Free projects are paused after 1 week of inactivity. Owners receive a warning first. Real app traffic and qualifying human frontend visits count as activity; scheduled cron jobs do not. An inactivity-paused free project requires an upgrade to resume; upgrading automatically brings it back. Paid projects are excluded from inactivity pausing. Visitors to a paused project see an HTTP 503 "This project is paused." page, and Durable Object (/_do/) paths keep working.
 
 ### Usage meters
 

@@ -92,12 +92,14 @@ async function processNextTask(controlDb: pg.Pool, logger: Logger): Promise<void
   // rag_ingestion_queue is a runtime-tier table (per-region queue)
   const runtimePool = getRuntimeDbPool(config.runtimeDb, assertRegionConfig().instanceRegion);
 
+  // A paused app's jobs stay pending until it's resumed.
   const result = await runtimePool.query<RagTask>(
     `UPDATE rag_ingestion_queue
      SET status = 'processing', locked_at = now(), attempts = attempts + 1
      WHERE id = (
        SELECT id FROM rag_ingestion_queue
        WHERE status = 'pending' AND run_after <= now()
+         AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.id = rag_ingestion_queue.app_id AND a.paused)
        ORDER BY created_at ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED

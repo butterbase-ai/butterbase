@@ -13,7 +13,7 @@ import { createAgentError, getDocUrl, agentErrorFromEndUserJwtVerification } fro
 import { incrementUsage } from '../services/usage-metering.js';
 import { resolveOrganizationId } from '../services/org-resolver.js';
 import { logFromRequest } from '../services/audit/with-audit.js';
-import { AppPausedError, AppNotFoundError, AppResolver } from '../services/app-resolver.js';
+import { AppPausedError, AppNotFoundError, AppResolver, pausedRemediation } from '../services/app-resolver.js';
 import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import { APP_PAUSED } from '@butterbase/shared/error-types';
 
@@ -27,7 +27,7 @@ const uploadRequestSchema = z.object({
 /**
  * Resolves app and user based on auth method
  */
-async function resolveAppAndUser(
+export async function resolveAppAndUser(
   controlDb: Pool,
   runtimeDb: Pool,
   appId: string,
@@ -39,12 +39,12 @@ async function resolveAppAndUser(
 
     // Verify app exists and fetch storage_config — apps is a runtime table
     const appResult = await runtimeDb.query(
-      `SELECT id, storage_config, paused, paused_reason FROM apps WHERE id = $1`,
+      `SELECT id, storage_config, paused, paused_reason, paused_by FROM apps WHERE id = $1`,
       [appId]
     );
 
     if (appResult.rows[0]?.paused) {
-      throw new AppPausedError(appId, appResult.rows[0].paused_reason ?? null);
+      throw new AppPausedError(appId, appResult.rows[0].paused_reason ?? null, appResult.rows[0].paused_by ?? null);
     }
 
     return {
@@ -56,8 +56,11 @@ async function resolveAppAndUser(
     // Platform auth — use org-aware AppResolver
     try {
       const resolved = await AppResolver.resolveApp(controlDb, appId, auth.userId, auth.organizationId ?? null);
-      if (resolved.paused) {
-        throw new AppPausedError(appId, resolved.paused_reason ?? null);
+      // Owners (jwt / api_key that resolveApp accepted) keep storage access
+      // to a paused app; function keys and anonymous callers don't.
+      const isOwner = auth.authMethod === 'jwt' || auth.authMethod === 'api_key';
+      if (resolved.paused && !isOwner) {
+        throw new AppPausedError(appId, resolved.paused_reason ?? null, resolved.paused_by ?? null);
       }
       return { appExists: true, userId: auth.userId };
     } catch (err) {
@@ -75,11 +78,9 @@ function pausedReply(reply: any, error: AppPausedError) {
     .send(createAgentError({
       code: APP_PAUSED,
       message: 'App is paused',
-      remediation: error.reason
-        ? `The app owner paused this app: "${error.reason}". Wait for it to be resumed, or contact the owner.`
-        : 'The app owner paused this app. Wait for it to be resumed, or contact the owner.',
+      remediation: pausedRemediation(error.pausedBy, error.reason),
       documentation_url: getDocUrl(APP_PAUSED),
-      details: { paused_reason: error.reason },
+      details: { paused_reason: error.reason, paused_by: error.pausedBy },
     }));
 }
 

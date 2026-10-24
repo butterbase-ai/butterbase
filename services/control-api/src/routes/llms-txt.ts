@@ -38,6 +38,10 @@ For eligible video requests, explicitly declare known AI-generated fictional ima
 Use \`prepare_references: "on_rejection"\` (default, at most one eligible retry) or \`"upfront"\`. Never infer fictional provenance or consent from an image. Preparation sends declared images to an external provider for storage and validation.
 Keep the returned job ID and poll through preparing_references/submitting/polling/settling. Unsupported combinations return UNSUPPORTED_REFERENCE_PREPARATION; an uncertain submission needs reconciliation, not another POST. Source URLs are erased after24hours; provider copies wait for retained jobs and retryable cleanup. Registration is not separately charged; generation uses normal credits. See butterbase_docs topic ai for the full contract.
 
+### Paused apps
+
+Use \`manage_app\` action \`resume\` to resume an app, or action \`get_config\` to inspect it. HTTP 503 \`APP_PAUSED\` includes \`details.paused_by\`. Owners keep management and data access, but compute, KV and realtime remain blocked. An automatic inactivity pause on a free plan returns HTTP 402 \`APP_RESUME_REQUIRES_UPGRADE\`; upgrading the organization resumes idle-paused apps. Pause/resume can return HTTP 409 \`APP_STATE_BUSY\` during concurrent state changes or region cutovers: retry after a short delay.
+
 ## Error Handling
 
 All errors follow this structure:
