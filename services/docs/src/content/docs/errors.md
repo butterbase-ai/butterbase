@@ -332,9 +332,27 @@ A prerequisite resource or configuration is missing for the action (e.g. deployi
 **Code:** `APP_PAUSED`
 **Status:** 503
 
-The app is paused; every app-scoped API is unavailable until it is resumed, except to the app's owners and org members (dashboard session or API key, non-public routes).
+The app is paused. Its owners and org members keep management and data access with a dashboard session or API key on non-public routes. Compute, KV and realtime remain blocked for owners too. Other callers receive this error on app-scoped APIs.
 
-**Remediation:** Call the unpause/resume action on the app, or reactivate it from the dashboard. Paused apps still incur storage but reject new traffic.
+**Remediation:** Use `manage_app` action `resume` or the dashboard. An inactivity pause on a free plan requires an upgrade, which automatically resumes the app. Owner and support pauses remain separate. Paused apps still incur storage.
+
+### App State Busy
+
+**Code:** `APP_STATE_BUSY`
+**Status:** 409
+
+A pause or resume could not acquire the app's state lock while another operation, such as a region move, was updating it. This request made no pause-state change.
+
+**Remediation:** Retry the pause or resume after a short delay. Successful requests during a region cutover use the app's current home region.
+
+### App Resume Requires Upgrade
+
+**Code:** `APP_RESUME_REQUIRES_UPGRADE`
+**Status:** 402
+
+The app was automatically paused for inactivity and its organization is still on a free plan.
+
+**Remediation:** Upgrade the organization to a paid plan. Idle-paused apps resume automatically; apps paused by their owner or support remain paused.
 
 ## Schema errors
 
