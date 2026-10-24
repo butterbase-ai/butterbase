@@ -14,6 +14,8 @@
 
 - **Ops**: `scripts/sync-paused-frontends.ts` -- run once after the dispatch worker deploy so apps paused before it show the paused page (rewrites their existing KV routes with `paused`). Idempotent; `--dry-run` lists the apps without writing.
 - **Idle pause**: Upgrading a free organization to a paid plan resumes the projects that were paused for inactivity. Projects you or Butterbase support paused stay paused.
+- **AI video (optional)**: explicit fictional-character declarations, durable preparation stages, bounded eligible retry, provider cleanup, source retention, and deletion/move fences. Disabled unless the deployment enables eligible apps and models.
+
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
   `BUTTERBASE_INTERNAL_FN_KEY` (in addition to `DO_INVOKER_URL` /
   `DO_INVOKER_TOKEN`). The platform still injects the key into DO env so

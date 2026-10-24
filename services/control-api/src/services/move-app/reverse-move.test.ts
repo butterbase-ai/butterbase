@@ -40,6 +40,9 @@ describe('runReverseMove', () => {
       query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
         if (sql.includes('SET paused = $2')) restoredPaused = params[1] as boolean;
         if (sql.includes('SELECT subdomain')) return { rows: [{ subdomain: 'demo', paused: restoredPaused }] };
+        if (/UPDATE "ai_(video_preparations|video_attempts|reference_asset_groups|reference_assets)"/.test(sql)) {
+          throw Object.assign(new Error('future table absent'), { code: '42P01' });
+        }
         return { rows: [] };
       }),
     };
@@ -99,6 +102,9 @@ describe('runReverseMove', () => {
       typeof c[0] === 'string' && c[0].includes('archived_after_move = NULL'),
     );
     expect(unarchiveCall).toBeTruthy();
+    for (const table of ['ai_video_preparations','ai_video_attempts','ai_reference_asset_groups','ai_reference_assets']) {
+      expect(sourcePool.query).toHaveBeenCalledWith(expect.stringContaining(`UPDATE "${table}"`), ['fwd-1']);
+    }
   });
 
   it('fast path: dumps, clears, restores KV between promoteSourceToPrimary and updateOrgAppIndexRegion', async () => {

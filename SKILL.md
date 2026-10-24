@@ -119,3 +119,7 @@ Any MCP-capable client works. Tested with: **Claude Code**, **Claude Desktop**, 
 ## License
 
 Apache-2.0
+
+## Optional video reference preparation
+
+For explicitly declared AI-generated fictional characters, follow [bundled AI command guidance](docs/plugin-ai-command.md). Use `reference_declarations` only when supplied or established by the caller, and choose `prepare_references: "on_rejection"` (default) or `"upfront"`. Keep the same job ID through preparation and settlement. Do not infer consent or retry an uncertain paid submission. Preparation sends image bytes to a provider for storage; explain the retention behavior in the linked guide.

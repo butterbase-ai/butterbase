@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { MOVE_APP_OPTIONAL_TABLES } from './runtime-tables.js';
 import { NotFoundError, ConflictError } from '../api-errors.js';
 import { getMigration, createMigration, markCompleted } from './migration-store.js';
 import { runReverseMoveSlowPath } from './reverse-move-slow-path.js';
@@ -120,9 +121,13 @@ export async function runReverseMove(
     'app_edge_ssr_deployments','app_durable_objects','app_realtime_config',
     'app_integration_configs','storage_objects','app_db_connections',
     'app_orders','app_plans','app_products','app_subscriptions',
+    ...MOVE_APP_OPTIONAL_TABLES,
   ];
   for (const t of tables) {
-    await sourcePool.query(`UPDATE "${t}" SET archived_after_move = NULL WHERE archived_after_move = $1`, [forward.id]);
+    await sourcePool.query(`UPDATE "${t}" SET archived_after_move = NULL WHERE archived_after_move = $1`, [forward.id]).catch((error: any) => {
+      if (MOVE_APP_OPTIONAL_TABLES.has(t) && error.code === '42P01') return;
+      throw error;
+    });
   }
 
   await markCompleted(ctx.controlPool, revId);
