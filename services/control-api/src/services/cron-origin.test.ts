@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import { signCronOrigin, verifyCronOrigin, cronOriginHeaders } from './cron-origin.js';
 import activityPlugin from '../plugins/app-activity.js';
+import { verifyCronOrigin as verifyRuntimeOrigin } from '../../../deno-runtime/cron-origin.ts';
 
 vi.mock('./app-activity.js', () => ({ markAppActive: async () => {} }));
 const SECRET = 'cron-origin-test-secret';
@@ -10,6 +11,29 @@ const NOW = 1_800_000_000_000;
 afterEach(() => vi.unstubAllEnvs());
 
 describe('cron origin envelope', () => {
+  it('supports signed execution budgets longer than fifteen minutes', () => {
+    const token = signCronOrigin('app_demo', SECRET, NOW, 1235);
+    expect(verifyCronOrigin(token, 'app_demo', SECRET, NOW + 901_000)).toBe(true);
+    expect(verifyRuntimeOrigin(token, 'app_demo', SECRET, NOW + 901_000)).toBe(true);
+    expect(verifyCronOrigin(token, 'app_demo', SECRET, NOW + 1235_000)).toBe(false);
+  });
+  it('keeps the standalone Deno verifier interoperable with valid and hostile envelopes', () => {
+    const valid = signCronOrigin('app_demo', SECRET, NOW);
+    const cases: Array<[unknown, string, string, number, boolean]> = [
+      [valid, 'app_demo', SECRET, NOW, true],
+      [valid, 'app_other', SECRET, NOW, false],
+      [valid, 'app_demo', SECRET, NOW + 900_000, false],
+      [valid, 'app_demo', SECRET, NOW - 31_000, false],
+      [valid, 'app_demo', '', NOW, false],
+      [valid + 'x', 'app_demo', SECRET, NOW, false],
+      ['cron', 'app_demo', SECRET, NOW, false],
+      [undefined, 'app_demo', SECRET, NOW, false],
+    ];
+    for (const [token, appId, secret, time, expected] of cases) {
+      expect(verifyCronOrigin(token, appId, secret, time)).toBe(expected);
+      expect(verifyRuntimeOrigin(token, appId, secret, time)).toBe(expected);
+    }
+  });
   it('signs a bounded app-scoped envelope that verifies independently', () => {
     const token = signCronOrigin('app_demo', SECRET, NOW);
     const [payload, signature] = token.split('.');
@@ -28,9 +52,9 @@ describe('cron origin envelope', () => {
   it.each([undefined, '', 'cron', 'a.b.c', 'a.b', ['a', 'b'], 'x'.repeat(2048)])('ignores malformed client metadata: %j', (token) => {
     expect(verifyCronOrigin(token, 'app_demo', SECRET, NOW)).toBe(false);
   });
-  it('rejects signed malformed claims and overlong lifetimes', () => {
+  it('rejects signed malformed claims', () => {
     for (const claims of [{ appId: 'app_demo', iat: '1800000000', exp: 1800000900 },
-      { appId: 'app_demo', iat: 1800000000, exp: 1800000901 }, { appId: 'app_demo', iat: 1800000000, exp: 1799999999 }]) {
+      { appId: 'app_demo', iat: 1800000000, exp: '1800000901' }, { appId: 'app_demo', iat: 1800000000, exp: 1799999999 }]) {
       const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
       const sig = createHmac('sha256', SECRET).update(`butterbase:cron-origin:v1.${payload}`).digest('base64url');
       expect(verifyCronOrigin(`${payload}.${sig}`, 'app_demo', SECRET, NOW)).toBe(false);

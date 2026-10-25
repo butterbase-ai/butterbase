@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { cronOriginHeaders } from '../cron-origin.js';
 import { butterbaseRegionToFlyRegion, parseFlyRegionMap } from '@butterbase/shared';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../region-resolver.js';
@@ -75,6 +76,7 @@ export function fireAuthHook(
           headers: {
             'Content-Type': 'application/json',
             'x-app-id': appId,
+            ...cronOriginHeaders(appId),
             // Route to the app's home-region runtime — see authHookRegionHeaders.
             ...authHookRegionHeaders(homeRegion),
           },

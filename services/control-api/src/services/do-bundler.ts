@@ -4,6 +4,7 @@
 // suitable for upload to Cloudflare's Workers for Platforms (WfP) dispatch
 // namespace. No esbuild — concatenation + a fixed dispatch suffix template.
 import * as ts from 'typescript';
+import { createCronFetch } from './cron-fetch.js';
 
 export class BundlerError extends Error {
   constructor(message: string, public readonly code: string) {
@@ -261,12 +262,18 @@ const butterbase = {
     const caller = req.headers.get('x-butterbase-internal-caller');
     const loopDepthIn = Number(req.headers.get('x-butterbase-loop-depth') || '0') || 0;
     const userId = req.headers.get('x-butterbase-caller-user') || null;
+    // Opaque classification metadata. The control API / Deno executor verify
+    // its signature and app scope; it never replaces either bearer below.
+    const cronOrigin = req.headers.get('x-butterbase-cron-origin');
 
     const appId = envIn.BUTTERBASE_APP_ID;
     const apiUrl = envIn.BUTTERBASE_API_URL;
     const invokerUrl = envIn.DO_INVOKER_URL;
     const invokerToken = envIn.DO_INVOKER_TOKEN;
     const fnKey = envIn.BUTTERBASE_INTERNAL_FN_KEY;
+    const invokeFetch = cronOrigin
+      ? (${createCronFetch.toString()})(fetch.bind(globalThis), cronOrigin, [apiUrl, invokerUrl])
+      : fetch;
 
     return {
       env,
@@ -293,7 +300,7 @@ const butterbase = {
         const bodyInit = body === undefined || method === 'GET' || method === 'HEAD'
           ? undefined
           : (typeof body === 'string' ? body : JSON.stringify(body));
-        return fetch(invokerUrl + '/invoke', { method, headers: merged, body: bodyInit });
+        return invokeFetch(invokerUrl + '/invoke', { method, headers: merged, body: bodyInit });
       },
       async invoke(fnName, body, opts) {
         const nextDepth = loopDepthIn + 1;
@@ -313,7 +320,7 @@ const butterbase = {
         const bodyInit = body === undefined || method === 'GET' || method === 'HEAD'
           ? undefined
           : (typeof body === 'string' ? body : JSON.stringify(body));
-        return fetch(url, { method, headers: merged, body: bodyInit });
+        return invokeFetch(url, { method, headers: merged, body: bodyInit });
       },
     };
   },

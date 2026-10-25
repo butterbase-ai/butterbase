@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createHmac } from 'node:crypto';
+import { cronOriginHeaders, verifyCronOrigin } from '../services/cron-origin.js';
 
 const mark = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('../services/app-activity.js', () => ({ markAppActive: mark }));
@@ -26,7 +27,7 @@ beforeEach(async () => {
   app.get('/health', async () => ({}));
   app.get('/data', async () => ({}));
 });
-afterEach(async () => { await app.close(); vi.unstubAllEnvs(); });
+afterEach(async () => { await app.close(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 function origin(appId = 'app_demo', issuedAt = Math.floor(Date.now() / 1000), secret = 'cron-origin-test-secret') {
   const payload = Buffer.from(JSON.stringify({ appId, iat: issuedAt, exp: issuedAt + 900 })).toString('base64url');
@@ -35,6 +36,19 @@ function origin(appId = 'app_demo', issuedAt = Math.floor(Date.now() / 1000), se
 }
 
 describe('request activity', () => {
+  it('keeps a request classified as cron when its response finishes after token expiry', async () => {
+    const now = 1_800_000_000_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now + 899_000);
+    app.get('/v1/:app_id/slow', async () => {
+      vi.setSystemTime(now + 901_000);
+      return { continued: verifyCronOrigin(cronOriginHeaders('app_demo')['x-butterbase-cron-origin'], 'app_demo') };
+    });
+    const response = await app.inject({ url: '/v1/app_demo/slow', headers: { 'x-butterbase-cron-origin': origin('app_demo', now / 1000) } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ continued: true });
+    expect(mark).not.toHaveBeenCalled();
+  });
   it.each(['/v1/app_demo/config', '/storage/app_demo/objects', '/v1/app_demo/status/404'])('does not refresh activity for signed cron traffic on %s', async (url) => {
     const response = await app.inject({ url, headers: { 'x-butterbase-cron-origin': origin() } });
     expect(response.statusCode).toBe(url.endsWith('/404') ? 404 : 200);

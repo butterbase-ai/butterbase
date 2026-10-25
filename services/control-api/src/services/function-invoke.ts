@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { cronOriginHeaders } from './cron-origin.js';
 
 export interface InvokeFunctionParams {
   appId: string;
@@ -20,6 +21,7 @@ export async function invokeFunction(p: InvokeFunctionParams): Promise<InvokeFun
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-app-id': p.appId,
+    ...cronOriginHeaders(p.appId),
   };
   if (p.callerUserId) headers['x-user-id'] = p.callerUserId;
   if (p.runId) headers['x-run-id'] = p.runId;

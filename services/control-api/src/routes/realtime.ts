@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { cronOriginHeaders } from '../services/cron-origin.js';
 import type { Pool } from 'pg';
 import { getAppPoolForApp } from '../services/app-pool.js';
 import { installRealtimeTrigger } from '../services/schema-applier.js';
@@ -113,6 +114,7 @@ export async function handleWebSocketEvent(
           'Content-Type': 'application/json',
           'x-user-id': userId || '',
           'x-app-id': appId,
+          ...cronOriginHeaders(appId),
         },
         body: JSON.stringify({ event, payload }),
       }
