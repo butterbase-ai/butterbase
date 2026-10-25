@@ -56,6 +56,21 @@ describe('extractClassName', () => {
 });
 
 describe('buildBundle', () => {
+  it('preserves request-local cron origin through DO invocation helpers without sharing it with other requests', async () => {
+    const { bundle } = buildBundle([{ name: 'room', code: 'export class Room {}', access_mode: 'public' }]);
+    const sent: Request[] = [];
+    const helper = new Function('fetch', bundle.replace(/export class /g, 'class ').replace('export default {', 'const worker = {') + '\nreturn butterbase;')(
+      async (url: string, init: RequestInit) => { sent.push(new Request(url, init)); return new Response('{}'); },
+    );
+    const env = { BUTTERBASE_APP_ID: 'app_demo', BUTTERBASE_API_URL: 'https://api.test', DO_INVOKER_URL: 'https://invoker.test', DO_INVOKER_TOKEN: 'invoker-key', BUTTERBASE_INTERNAL_FN_KEY: 'function-key' };
+    const scheduled = helper.ctx(new Request('https://internal.butterbase/_dispatch/room/one', { headers: { 'x-butterbase-cron-origin': 'signed-origin' } }), env, {});
+    const external = helper.ctx(new Request('https://app.test/_do/room/one'), env, {});
+    await scheduled.invoke('child', {});
+    await external.invoke('child', {});
+    await scheduled.invokeDO('room', 'two', {});
+    expect(sent.map(req => req.headers.get('x-butterbase-cron-origin'))).toEqual(['signed-origin', null, 'signed-origin']);
+    expect(sent.map(req => req.headers.get('authorization'))).toEqual(['Bearer function-key', 'Bearer function-key', 'Bearer invoker-key']);
+  });
   it('concatenates classes and emits a dispatch handler with bindings', () => {
     const result = buildBundle([
       { name: 'chat-room',   code: 'export class ChatRoom {}',     access_mode: 'public' },

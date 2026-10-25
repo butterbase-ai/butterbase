@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { cronOriginHeaders } from '../services/cron-origin.js';
 import { Readable } from 'node:stream';
 import type { Pool, PoolClient } from 'pg';
 import { getAppPoolForApp } from '../services/app-pool.js';
@@ -395,6 +396,7 @@ export async function autoApiRoutes(app: FastifyInstance) {
             'Content-Type': (request.headers['content-type'] as string | undefined) ?? 'application/json',
             'x-app-id': appId,
             'x-trigger-type': 'webhook',
+            ...cronOriginHeaders(appId),
             'x-webhook-provider': cfg.provider,
           },
           body: rawBody as BodyInit,

@@ -1,5 +1,7 @@
 // Isolated function executor using Web Workers
 import type { FunctionMetadata } from "./function-loader.ts";
+import { cronOriginForExecution } from './cron-origin.ts';
+import { createCronFetch } from './cron-fetch.ts';
 
 // Platform-owned do-invoker Worker: inlined into generated ctx source so
 // user code cannot read them via Deno.env or ctx.env.
@@ -70,8 +72,13 @@ export async function executeFunction(
     const dbUrl = buildDatabaseUrl(metadata.app_id, metadata.db_connection_string);
 
     // Parse request
-    const requestBody = request.body ? await request.text() : null;
     const requestHeaders = Object.fromEntries(request.headers.entries());
+    const originToken = requestHeaders['x-butterbase-cron-origin'];
+    const cronOrigin = cronOriginForExecution(originToken, metadata.app_id, Deno.env.get('BUTTERBASE_INTERNAL_SECRET'), metadata.timeout_ms);
+    const requestBody = request.body ? await request.text() : null;
+    // Keep platform metadata out of the user-facing Request. It remains in the
+    // fetch closure, without exposing the platform signing secret to user code.
+    delete requestHeaders['x-butterbase-cron-origin'];
 
     // Reconstruct public API URL instead of internal runtime URL
     const url = new URL(request.url);
@@ -86,6 +93,7 @@ export async function executeFunction(
       requestBody,
       userId,
       caller,
+      cronOrigin,
     });
 
     // Execute in Web Worker with timeout
@@ -356,10 +364,19 @@ export function buildWorkerCode(
     requestBody: string | null;
     userId?: string;
     caller?: CallerInfo;
+    cronOrigin?: string;
   }
 ): string {
   return `
     import { Pool } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
+
+    ${context.cronOrigin ? `
+    globalThis.fetch = (${createCronFetch.toString()})(
+      globalThis.fetch.bind(globalThis),
+      ${JSON.stringify(context.cronOrigin)},
+      ${JSON.stringify([Deno.env.get('API_BASE_URL') || 'http://localhost:4000', Deno.env.get('CONTROL_API_URL') || '', DO_INVOKER_URL])}
+    );
+    ` : ''}
 
     // Sandbox: replace Deno.env with a frozen stub so user code and
     // library internals cannot read host environment variables.

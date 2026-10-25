@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config';
 // e2e:bootstrap docker stack.
 export default defineConfig({
   test: {
+    setupFiles: ['./test/native-fetch.ts'],
     // Run all test files in a single worker to prevent parallel DB collisions.
     // Hackathon tests insert rows with is_active=true, which hits the
     // hackathons_only_one_active unique partial index. singleFork serialises

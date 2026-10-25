@@ -1,5 +1,6 @@
 // Function management routes
 import type { FastifyInstance } from 'fastify';
+import { cronOriginHeaders } from '../services/cron-origin.js';
 import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { AppResolver } from '../services/app-resolver.js';
@@ -721,6 +722,7 @@ export async function registerFunctionRoutes(fastify: FastifyInstance) {
       // becomes the asserted id, and we mark the caller as a service-key
       // impersonator so functions that branch on ctx.caller.type can react.
       const runtimeHeaders: Record<string, string> = {
+        ...cronOriginHeaders(appId),
         'Content-Type': 'application/json',
         'x-user-id': asUser || requireUserId(request),
         'x-app-id': appId,

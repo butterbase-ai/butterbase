@@ -529,6 +529,13 @@ This is owner-scoped (same auth as the default path) — only the app owner can 
 
 ## Pausing an app (kill-switch)
 
+Scheduled cron runs do not keep a free app active for inactivity pausing. Calls
+from a scheduled function back to its app's API, including nested serverless
+function calls, retain their scheduled origin and do not refresh activity.
+Ordinary external API traffic still counts, including calls from external
+schedulers. Inactivity pausing is not a way to distinguish humans from automated
+API clients.
+
 The `manage_app` `pause` action is a single call that halts **all data-plane traffic** for an app — useful when a buggy webhook is spamming end users, a runaway cron is burning external API quotas, or you want to take an app offline for maintenance.
 
 While paused:
