@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { config } from '../../config.js';
 import { escapeHtml, renderEmailLayout, renderButton, renderAppEmailLayout, renderCodeBox, renderNotice } from './email-layout.js';
 import { isSilenced } from '../notification-prefs.service.js';
+import { idlePauseEmailCopy } from '../idle-pause-email-copy.js';
 
 /**
  * Optional per-recipient extensions to a billing email:
@@ -317,6 +318,7 @@ export async function sendPasswordResetEmail(email: string, code: string, appNam
 
 export type BillingEmailTemplate =
   | 'project_idle_warning'
+  | 'project_idle_reminder'
   | 'project_paused_idle'
   | 'idle_pause_breaker_ops'
   | 'payment_failed'
@@ -343,6 +345,7 @@ export type BillingEmailTemplate =
 
 const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
   project_idle_warning: 'Your project will pause soon',
+  project_idle_reminder: 'Reminder: your project will pause soon',
   project_paused_idle: 'Your project has been paused',
   idle_pause_breaker_ops: '[butterbase] Idle pause circuit breaker triggered',
   payment_failed: 'Action Required: Payment Failed',
@@ -437,9 +440,11 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
 
   switch (template) {
     case 'project_idle_warning':
-      return `${data.appName || data.appId || 'Your project'} will pause in ${data.warnDays || '7'} days without activity.\n\nFree projects pause when unused. Bring real traffic to keep this project active, upgrade to keep it running on a paid plan, or do nothing and it will pause. Once paused, upgrading is required to resume. Your data is never deleted.\n\nUpgrade: ${dashboardUrl}/billing/upgrade\nDashboard: ${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}`;
-    case 'project_paused_idle':
-      return `${data.appName || data.appId || 'Your project'} has been paused after a period without activity. Your data is still there.\n\nUpgrade to resume. Projects on paid plans don't pause.\n\nUpgrade: ${dashboardUrl}/billing/upgrade\nDashboard: ${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}`;
+    case 'project_idle_reminder':
+    case 'project_paused_idle': {
+      const copy = idlePauseEmailCopy(template, data);
+      return `${copy.paragraphs.join('\n\n')}\n\n${copy.button}: ${copy.billingUrl}\nOpen your project: ${copy.appUrl}`;
+    }
     case 'idle_pause_breaker_ops':
       return `Idle pause circuit breaker triggered: ${data.count} apps out of ${data.freeApps} free apps would be notified or paused. No pause notifications or pauses were applied. Review the idle-pause logs before changing limits.`;
     case 'payment_failed':
@@ -1247,18 +1252,16 @@ function buildNoticeHtml(
 
   switch (template) {
     case 'project_idle_warning':
+    case 'project_idle_reminder':
     case 'project_paused_idle': {
-      const warning = template === 'project_idle_warning';
-      const heading = warning ? `${app || 'Your project'} will pause in ${data.warnDays || '7'} days` : `${app || 'Your project'} has been paused`;
+      const copy = idlePauseEmailCopy(template, data);
       const unsubscribe = actionTokens?.unsubscribeTemplate
         ? ` <a href="${e(notifActionUrl(actionTokens.unsubscribeTemplate))}">Unsubscribe from these emails</a>.` : '';
-      return owner(heading, renderNotice({
-        heading,
-        intro: warning
-          ? '<p>Free projects pause when unused. Bring real traffic to keep this project active, upgrade to keep it running on a paid plan, or do nothing and it will pause. Once paused, upgrading is required to resume. Your data is never deleted.</p>'
-          : '<p>Your project was paused after a period without activity. Your data is still there. Upgrade to resume. Projects on paid plans don\'t pause.</p>',
-        cta: { href: `${dashboardUrl}/billing/upgrade`, label: warning ? 'Upgrade your plan' : 'Upgrade to resume' },
-        note: `<a href="${e(`${dashboardUrl}/apps/${encodeURIComponent(data.appId || '')}`)}">Open the Butterbase dashboard</a>.${unsubscribe}`,
+      return owner(copy.subject, renderNotice({
+        heading: copy.subject,
+        intro: copy.paragraphs.map(p => `<p>${e(p)}</p>`).join(''),
+        cta: { href: copy.billingUrl, label: copy.button },
+        note: `<a href="${e(copy.appUrl)}">Open your project</a>.${unsubscribe}`,
       }));
     }
     case 'idle_pause_breaker_ops':
@@ -1493,8 +1496,7 @@ export function buildBillingEmailSubject(
   template: BillingEmailTemplate,
   data: Record<string, string> = {},
 ): string {
-  if (template === 'project_idle_warning') return `${data.appName || data.appId || 'Your project'} will pause in ${data.warnDays || '7'} days`;
-  if (template === 'project_paused_idle') return `${data.appName || data.appId || 'Your project'} has been paused`;
+  if (template === 'project_idle_warning' || template === 'project_idle_reminder' || template === 'project_paused_idle') return idlePauseEmailCopy(template, data).subject;
   if (template === 'function_failed') {
     const app = data.appName || data.appId || 'your app';
     const fn = data.functionName || 'a function';

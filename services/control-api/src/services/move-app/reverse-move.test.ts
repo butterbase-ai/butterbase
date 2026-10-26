@@ -35,6 +35,7 @@ describe('runReverseMove', () => {
       paused_reason: paused ? 'idle' : null, paused_by: paused ? 'idle_reaper' : null,
       last_active_at: '2026-08-01T00:00:00Z', idle_warned_at: '2026-09-01T00:00:00Z',
       idle_pause_notified_at: '2026-09-08T00:00:00Z',
+      idle_reminded_at: '2026-09-05T00:00:00Z',
     };
     const sourcePool = {
       query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {

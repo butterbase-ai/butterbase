@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 import { Redis } from 'ioredis';
@@ -52,7 +53,7 @@ suite('idle reaper SQL safety (real Postgres)', () => {
       INSERT INTO organizations VALUES ('${freeOrg}','playground','active'), ('${paidOrg}','launch','active'), ('${suspendedOrg}','playground','suspended');`);
     await runtime.query(`CREATE TABLE apps(id text PRIMARY KEY, name text, organization_id uuid, provisioning_status text DEFAULT 'ready',
       paused boolean DEFAULT false, paused_at timestamptz, paused_reason text, paused_by text, updated_at timestamptz DEFAULT now(),
-      last_active_at timestamptz, idle_warned_at timestamptz, idle_pause_notified_at timestamptz);
+      last_active_at timestamptz, idle_warned_at timestamptz, idle_reminded_at timestamptz, idle_pause_notified_at timestamptz);
       CREATE TABLE app_environments(staging_app_id text);`);
   });
   afterAll(async () => {
@@ -65,13 +66,107 @@ suite('idle reaper SQL safety (real Postgres)', () => {
     await control.query(`TRUNCATE org_app_index,frontend_visit_daily; UPDATE organizations SET plan_id = 'playground' WHERE id = '${freeOrg}'`);
     await runtime.query('TRUNCATE apps,app_environments');
   });
-  async function insert(id: string, org: string | null = freeOrg, opts: { age?: number | null; warned?: number; notified?: number; ready?: boolean; paused?: boolean } = {}) {
+  async function insert(id: string, org: string | null = freeOrg, opts: { age?: number | null; warned?: number; reminded?: number | null; notified?: number; ready?: boolean; paused?: boolean } = {}) {
     await control.query('INSERT INTO org_app_index VALUES ($1,$2,$3)', [id, org, 'test-region']);
-    await runtime.query(`INSERT INTO apps(id,name,organization_id,last_active_at,idle_warned_at,idle_pause_notified_at,provisioning_status,paused)
-      VALUES ($1,$1,$2,now()-$3::int*interval '1 day',now()-$4::int*interval '1 day',now()-$5::int*interval '1 day',$6,$7)`,
-      [id, org, opts.age === undefined ? 40 : opts.age, opts.warned ?? null, opts.notified ?? null, opts.ready === false ? 'creating' : 'ready', opts.paused ?? false]);
+    await runtime.query(`INSERT INTO apps(id,name,organization_id,last_active_at,idle_warned_at,idle_reminded_at,idle_pause_notified_at,provisioning_status,paused)
+      VALUES ($1,$1,$2,now()-$3::int*interval '1 day',now()-$4::int*interval '1 day',now()-$5::int*interval '1 day',now()-$6::int*interval '1 day',$7,$8)`,
+      [id, org, opts.age === undefined ? 40 : opts.age, opts.warned ?? null, opts.reminded === undefined ? (opts.warned ? 4 : null) : opts.reminded, opts.notified ?? null, opts.ready === false ? 'creating' : 'ready', opts.paused ?? false]);
   }
   async function row(id: string) { return (await runtime.query('SELECT * FROM apps WHERE id=$1', [id])).rows[0]; }
+
+  it('adds the reminder marker without changing existing activity and can be rerun', async () => {
+    await insert('app_migration');
+    const before = await row('app_migration');
+    await runtime.query('ALTER TABLE apps DROP COLUMN idle_reminded_at');
+    const sql = readFileSync(new URL('../../../../db/runtime-plane/059_app_idle_reminder.sql', import.meta.url), 'utf8');
+    expect(sql.trimStart().startsWith('-- @scope: runtime')).toBe(true);
+    await runtime.query(sql); await runtime.query(sql);
+    const after = await row('app_migration');
+    expect(after.idle_reminded_at).toBeNull(); expect(after.last_active_at).toEqual(before.last_active_at);
+    expect(after.paused).toBe(before.paused); expect(after.idle_warned_at).toEqual(before.idle_warned_at);
+  });
+
+  it('delivers three ordered notices at 7/11/14 days and pauses after seven more days', async () => {
+    const target = { ...cfg, days: 14, warnDays: 7, reminderDays: 3, graceDays: 7 };
+    await insert('app_three', freeOrg, { age: 6 });
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ warned: 0, reminded: 0, notified: 0, paused: 0 });
+    await runtime.query("UPDATE apps SET last_active_at=now()-interval '7 days 1 hour' WHERE id='app_three'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ warned: 1, reminded: 0, notified: 0, paused: 0 });
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ warned: 0, reminded: 0 });
+    await runtime.query("UPDATE apps SET last_active_at=now()-interval '11 days 1 hour',idle_warned_at=now()-interval '4 days 1 hour' WHERE id='app_three'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ reminded: 1, notified: 0, paused: 0 });
+    expect((await row('app_three')).idle_reminded_at).not.toBeNull();
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ reminded: 0, notified: 0 });
+    await runtime.query("UPDATE apps SET last_active_at=now()-interval '14 days 1 hour',idle_warned_at=now()-interval '7 days 1 hour',idle_reminded_at=now()-interval '2 days' WHERE id='app_three'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ notified: 0 });
+    await runtime.query("UPDATE apps SET idle_reminded_at=now()-interval '3 days 1 hour' WHERE id='app_three'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ notified: 1, paused: 0 });
+    await runtime.query("UPDATE apps SET idle_pause_notified_at=now()-interval '6 days' WHERE id='app_three'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ paused: 0 });
+    await runtime.query("UPDATE apps SET idle_pause_notified_at=now()-interval '7 days 1 hour' WHERE id='app_three'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ paused: 1 });
+    expect(emails.owner.mock.calls.map(c => [c[2], c[3]])).toEqual([
+      ['project_idle_warning',7], ['project_idle_reminder',3], ['project_paused_idle',7],
+    ]);
+  });
+
+  it('gives an overdue app its full warning and reminder lead time', async () => {
+    const target = { ...cfg, days: 14, warnDays: 7, reminderDays: 3, graceDays: 7 };
+    await insert('app_late');
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ warned: 1, reminded: 0, notified: 0 });
+    expect(emails.owner.mock.calls[0]?.[5]).toBe(40);
+    await runtime.query("UPDATE apps SET idle_warned_at=now()-interval '3 days' WHERE id='app_late'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ reminded: 0, notified: 0 });
+    await runtime.query("UPDATE apps SET idle_warned_at=now()-interval '8 days' WHERE id='app_late'");
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ reminded: 1, notified: 0 });
+    expect(await runIdlePauseOnce(deps(), target)).toMatchObject({ notified: 0 });
+  });
+
+  it('does not send retroactive reminders to apps already in grace', async () => {
+    await insert('app_legacy_grace', freeOrg, { warned: 15, reminded: null, notified: 4 });
+    expect(await runIdlePauseOnce(deps(), cfg)).toMatchObject({ reminded: 0, notified: 0, paused: 0 });
+    expect(emails.owner).not.toHaveBeenCalled();
+  });
+
+  it('preserves the original two-email path when there is no room for a separate reminder', async () => {
+    await insert('app_short_warning', freeOrg, { warned: 2, reminded: null });
+    const short = { ...cfg, days: 14, warnDays: 1, reminderDays: 0 };
+    expect(await runIdlePauseOnce(deps(), short)).toMatchObject({ reminded: 0, notified: 1, paused: 0 });
+    expect(emails.owner.mock.calls[0]?.[2]).toBe('project_paused_idle');
+  });
+
+  it('discovers each staged transition on recurring real timers without calling a sweep', async () => {
+    vi.stubEnv('BUTTERBASE_IDLE_PAUSE_DAYS', '14');
+    vi.stubEnv('BUTTERBASE_IDLE_PAUSE_WARN_DAYS', '7');
+    vi.stubEnv('BUTTERBASE_IDLE_PAUSE_REMINDER_DAYS', '3');
+    vi.stubEnv('BUTTERBASE_IDLE_PAUSE_GRACE_DAYS', '7');
+    vi.stubEnv('BUTTERBASE_IDLE_PAUSE_MAX_FRACTION', '1');
+    await insert('app_timer', freeOrg, { age: 1 });
+    const stop = startIdlePauseReaper(deps(), 50);
+    try {
+      await vi.waitFor(() => expect(log.info).toHaveBeenCalledWith(expect.anything(), '[idle-pause-reaper] tick complete'));
+      await runtime.query("UPDATE apps SET last_active_at=now()-interval '7 days 1 hour' WHERE id='app_timer'");
+      await vi.waitFor(() => expect(emails.owner).toHaveBeenCalledTimes(1));
+      await runtime.query("UPDATE apps SET last_active_at=now()-interval '11 days 1 hour',idle_warned_at=now()-interval '4 days 1 hour' WHERE id='app_timer'");
+      await vi.waitFor(() => expect(emails.owner).toHaveBeenCalledTimes(2));
+      await runtime.query("UPDATE apps SET last_active_at=now()-interval '14 days 1 hour',idle_warned_at=now()-interval '7 days 1 hour',idle_reminded_at=now()-interval '3 days 1 hour' WHERE id='app_timer'");
+      await vi.waitFor(() => expect(emails.owner).toHaveBeenCalledTimes(3));
+      expect((await row('app_timer')).paused).toBe(false);
+      await runtime.query("UPDATE apps SET idle_pause_notified_at=now()-interval '7 days 1 hour' WHERE id='app_timer'");
+      await vi.waitFor(async () => expect((await row('app_timer')).paused_by).toBe('idle_reaper'));
+      expect(emails.owner.mock.calls.map(c => c[2])).toEqual(['project_idle_warning','project_idle_reminder','project_paused_idle']);
+    } finally { await stop(); vi.unstubAllEnvs(); }
+  });
+
+  it('returning HTTP and qualifying frontend traffic clear the reminder marker', async () => {
+    await insert('app_http_reset', freeOrg, { warned: 15, reminded: 4 });
+    await insert('app_frontend_reset', freeOrg, { warned: 15, reminded: 4 });
+    await markAppActive(control, 'app_http_reset', log);
+    expect((await row('app_http_reset')).idle_reminded_at).toBeNull();
+    await control.query("INSERT INTO frontend_visit_daily VALUES ('app_frontend_reset',CURRENT_DATE,3)");
+    await runIdlePauseOnce(deps(), cfg);
+    expect((await row('app_frontend_reset')).idle_reminded_at).toBeNull();
+  });
 
   it('warns, notifies, and pauses only after the full warning and grace intervals', async () => {
     await insert('app_warn'); await insert('app_notify', freeOrg, { warned: 8 });

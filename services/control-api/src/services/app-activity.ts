@@ -31,10 +31,11 @@ export async function markAppActive(
         if (!ref) return;
         await getRuntimeDbPool(config.runtimeDb, ref.region).query(
         `UPDATE apps SET last_active_at = now(), idle_warned_at = NULL,
+                         idle_reminded_at = NULL,
                          idle_pause_notified_at = NULL
           WHERE id = $1 AND paused = false
             AND (last_active_at IS NULL OR last_active_at < now() - interval '1 hour'
-                 OR idle_warned_at IS NOT NULL OR idle_pause_notified_at IS NOT NULL)`,
+                 OR idle_warned_at IS NOT NULL OR idle_reminded_at IS NOT NULL OR idle_pause_notified_at IS NOT NULL)`,
         [appId],
         );
       });

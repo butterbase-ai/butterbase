@@ -34,7 +34,7 @@ describe.skipIf(!url)('app state locking and cutover (real Postgres)', () => {
     await control.query('CREATE TABLE org_app_index(app_id text PRIMARY KEY,region text,organization_id uuid,updated_at timestamptz DEFAULT now())');
     await control.query(`CREATE TABLE organizations(id uuid PRIMARY KEY,plan_id text); INSERT INTO organizations VALUES ('${org}','playground')`);
     for (const pool of [a,b]) await pool.query(`CREATE TABLE apps(id text PRIMARY KEY,paused boolean,paused_at timestamptz,paused_reason text,paused_by text,
-      last_active_at timestamptz,idle_warned_at timestamptz,idle_pause_notified_at timestamptz,region text,
+      last_active_at timestamptz,idle_warned_at timestamptz,idle_pause_notified_at timestamptz,idle_reminded_at timestamptz,region text,
       provisioning_status text DEFAULT 'migrating',db_provisioned boolean DEFAULT false,updated_at timestamptz DEFAULT now());
       CREATE TABLE app_environments(staging_app_id text,created_at timestamptz,last_reset_at timestamptz)`);
     routing.pools={a,b};
@@ -171,12 +171,13 @@ describe.skipIf(!url)('app state locking and cutover (real Postgres)', () => {
     } finally { release(); await first; }
   });
   it('copies the current pause/activity state before publishing the new home', async () => {
-    await a.query("UPDATE apps SET paused=true,paused_at=now(),paused_by='idle_reaper',paused_reason='idle',idle_warned_at=now(),idle_pause_notified_at=now()");
+    await a.query("UPDATE apps SET paused=true,paused_at=now(),paused_by='idle_reaper',paused_reason='idle',idle_warned_at=now(),idle_pause_notified_at=now(),idle_reminded_at=now()");
     await cutoverAppState(ctx(),'app_lock','a','b');
     expect(await home()).toBe('b');
     const copied = (await b.query("SELECT * FROM apps WHERE id='app_lock'")).rows[0];
     expect(copied).toMatchObject({ paused:true,paused_by:'idle_reaper',paused_reason:'idle',region:'b',provisioning_status:'ready',db_provisioned:true });
     expect(copied.idle_warned_at).toBeInstanceOf(Date);
+    expect(copied.idle_reminded_at).toBeInstanceOf(Date);
     expect(copied.last_active_at).toEqual((await a.query('SELECT last_active_at FROM apps')).rows[0].last_active_at);
   });
   it('retry after committed cutover preserves writes already made at the new home', async () => {

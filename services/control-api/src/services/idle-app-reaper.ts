@@ -21,9 +21,9 @@ export interface IdleReaperDeps {
   };
   log: { info(obj: unknown, msg?: string): void; warn(obj: unknown, msg?: string): void; error(obj: unknown, msg?: string): void };
 }
-export interface IdlePauseSummary { candidates: number; visited: number; warned: number; notified: number; paused: number; breaker: boolean; locked: boolean }
+export interface IdlePauseSummary { candidates: number; visited: number; warned: number; reminded: number; notified: number; paused: number; breaker: boolean; locked: boolean }
 interface Ref { app_id: string; region: string; organization_id: string; plan_id: string }
-type Stage = 'warn' | 'notify' | 'pause';
+type Stage = 'warn' | 'remind' | 'notify' | 'pause';
 interface Candidate extends IdlePauseApp { stage: Stage; last_active_at: Date }
 
 // Repeated inside every UPDATE. Never trust a previously selected runtime row.
@@ -33,8 +33,12 @@ const BASE = `id = ANY($1::text[]) AND organization_id = ANY($2::uuid[])
   AND last_active_at < now() - ($3::int - $4::int) * interval '1 day'`;
 const STAGES: Record<Stage, string> = {
   warn: 'idle_warned_at IS NULL',
+  remind: `$5::int > 0 AND last_active_at < now() - ($3::int - $5::int) * interval '1 day'
+    AND idle_warned_at < now() - ($4::int - $5::int) * interval '1 day'
+    AND idle_reminded_at IS NULL AND idle_pause_notified_at IS NULL`,
   notify: `last_active_at < now() - $3::int * interval '1 day'
-    AND idle_warned_at < now() - $4::int * interval '1 day' AND idle_pause_notified_at IS NULL`,
+    AND idle_warned_at < now() - $4::int * interval '1 day'
+    AND ($5::int = 0 OR idle_reminded_at < now() - $5::int * interval '1 day') AND idle_pause_notified_at IS NULL`,
   pause: `last_active_at < now() - $3::int * interval '1 day'
     AND idle_warned_at < now() - $4::int * interval '1 day'
     AND idle_pause_notified_at < now() - $5::int * interval '1 day'`,
@@ -61,7 +65,7 @@ async function visitedApps(controlDb: Pick<Pool,'query'>, ids: string[], cfg: Id
 /** One guarded sweep. Production callers log failures and retry at the next tick. */
 export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfig): Promise<IdlePauseSummary> {
   const { controlDb, redis, log } = deps;
-  const summary: IdlePauseSummary = { candidates: 0, visited: 0, warned: 0, notified: 0, paused: 0, breaker: false, locked: false };
+  const summary: IdlePauseSummary = { candidates: 0, visited: 0, warned: 0, reminded: 0, notified: 0, paused: 0, breaker: false, locked: false };
   const token = randomUUID();
   if (await redis.set(LOCK_KEY, token, 'EX', LOCK_SECONDS, 'NX') !== 'OK') return { ...summary, locked: true };
   const requireLease = async () => {
@@ -84,10 +88,11 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
       try {
         const r = await deps.runtimeDb(region).query<Candidate>(
           `SELECT id, name, organization_id, last_active_at,
-            CASE WHEN ${STAGES.pause} THEN 'pause' WHEN ${STAGES.notify} THEN 'notify'
+            CASE WHEN ${STAGES.pause.replace('$5', '$6')} THEN 'pause' WHEN ${STAGES.notify} THEN 'notify'
+                 WHEN ${STAGES.remind} THEN 'remind'
                  WHEN ${STAGES.warn} THEN 'warn' END AS stage
            FROM apps WHERE ${BASE}`,
-          [apps.map((a) => a.app_id), [...new Set(apps.map((a) => a.organization_id))], cfg.days, cfg.warnDays, cfg.graceDays],
+          [apps.map((a) => a.app_id), [...new Set(apps.map((a) => a.organization_id))], cfg.days, cfg.warnDays, cfg.reminderDays, cfg.graceDays],
         );
         selected.set(region, r.rows.filter((r) => r.stage));
       } catch (err) {
@@ -100,7 +105,7 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
     if (scanFailed) return summary;
     const candidates = [...selected.values()].flat();
     summary.candidates = candidates.length;
-    const impact = candidates.filter((c) => c.stage !== 'warn').length;
+    const impact = candidates.filter((c) => c.stage === 'notify' || c.stage === 'pause').length;
     summary.breaker = impact > cfg.maxPerTick || impact > cfg.maxFraction * refs.length;
     if (cfg.dryRun) {
       const planByApp = new Map(refs.map((r) => [r.app_id, r.plan_id]));
@@ -130,9 +135,9 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
           if (!current.length) return;
           await requireLease();
           await deps.runtimeDb(region).query(
-          `UPDATE apps SET idle_warned_at = NULL, idle_pause_notified_at = NULL
+          `UPDATE apps SET idle_warned_at = NULL, idle_reminded_at = NULL, idle_pause_notified_at = NULL
             WHERE id = ANY($1::text[]) AND organization_id = ANY($2::uuid[])
-              AND paused = false AND (idle_warned_at IS NOT NULL OR idle_pause_notified_at IS NOT NULL)`,
+              AND paused = false AND (idle_warned_at IS NOT NULL OR idle_reminded_at IS NOT NULL OR idle_pause_notified_at IS NOT NULL)`,
           [current.map((r) => r.app_id), [...new Set(current.map((r) => r.organization_id))]],
           );
         });
@@ -141,8 +146,8 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
 
     for (const [region, apps] of selected) {
       const runtime = deps.runtimeDb(region);
-      for (const stage of ['warn', 'notify', 'pause'] as const) {
-        if (summary.breaker && stage !== 'warn') continue;
+      for (const stage of ['warn', 'remind', 'notify', 'pause'] as const) {
+        if (summary.breaker && (stage === 'notify' || stage === 'pause')) continue;
         const targets = apps.filter((a) => a.stage === stage);
         if (!targets.length) continue;
         // Control-plane errors abort the tick. Fresh traffic is also rechecked
@@ -154,6 +159,7 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
         if (!eligible.length) continue;
         await requireLease();
         const assignment = stage === 'warn' ? 'idle_warned_at = now()'
+          : stage === 'remind' ? 'idle_reminded_at = now()'
           : stage === 'notify' ? 'idle_pause_notified_at = now()'
           : `paused = true, paused_at = now(), paused_by = 'idle_reaper',
              paused_reason = 'Paused after ${cfg.days} days without activity.', updated_at = now()`;
@@ -166,6 +172,7 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
             await requireLease();
             const params: unknown[] = [current.map(r=>r.app_id), [...new Set(current.map(r=>r.organization_id))], cfg.days, cfg.warnDays];
             if (stage === 'pause') params.push(cfg.graceDays);
+            else if (stage !== 'warn') params.push(cfg.reminderDays);
             let changed: Candidate[];
             try {
               changed = (await runtime.query<Candidate>(
@@ -196,8 +203,10 @@ export async function runIdlePauseOnce(deps: IdleReaperDeps, cfg: IdlePauseConfi
               await notifyPauseStateChanged({ appId: app.id, paused: true, by: 'idle_reaper' }, log);
               summary.paused++;
             } else {
-              await sendIdlePauseEmail(controlDb, app, stage === 'warn' ? 'project_idle_warning' : 'project_paused_idle', cfg.warnDays, log);
-              if (stage === 'warn') summary.warned++; else summary.notified++;
+              const template = stage === 'warn' ? 'project_idle_warning' : stage === 'remind' ? 'project_idle_reminder' : 'project_paused_idle';
+              await sendIdlePauseEmail(controlDb, app, template, stage === 'remind' ? cfg.reminderDays : cfg.warnDays, log,
+                stage === 'warn' ? Math.floor((Date.now() - new Date(app.last_active_at).getTime()) / 86_400_000) : undefined);
+              if (stage === 'warn') summary.warned++; else if (stage === 'remind') summary.reminded++; else summary.notified++;
             }
           }
         }
@@ -216,7 +225,7 @@ async function undo(runtime: Pool, apps: Candidate[], stage: Stage, log: IdleRea
     if (stage === 'pause') {
       await setPausedState(runtime, app.id, { paused: false, by: 'system', onlyIfPausedBy: 'idle_reaper' }, log, { notify:false });
     } else {
-      await runtime.query(`UPDATE apps SET idle_warned_at = NULL, idle_pause_notified_at = NULL WHERE id = $1 AND paused = false`, [app.id]);
+      await runtime.query(`UPDATE apps SET idle_warned_at = NULL, idle_reminded_at = NULL, idle_pause_notified_at = NULL WHERE id = $1 AND paused = false`, [app.id]);
     }
   }
 }

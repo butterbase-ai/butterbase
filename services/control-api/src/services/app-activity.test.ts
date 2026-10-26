@@ -40,6 +40,7 @@ describe('markAppActive', () => {
     expect(io.query).toHaveBeenCalledWith(expect.stringMatching(/last_active_at = now\(\)/), ['app_used']);
     const sql = io.query.mock.calls[0][0] as string;
     expect(sql).toMatch(/idle_warned_at = NULL/);
+    expect(sql).toMatch(/idle_reminded_at = NULL/);
     expect(sql).toMatch(/idle_pause_notified_at = NULL/);
     expect(sql).toMatch(/paused = false/);
   });
