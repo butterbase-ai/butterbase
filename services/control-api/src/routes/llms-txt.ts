@@ -90,6 +90,10 @@ Example:
 }
 \`\`\`
 
+### Organization scope
+
+When the user is working in an organization, send \`X-Organization-Id\` on organization-scoped requests. The API verifies membership and rejects a foreign or missing organization. Managed organization-locked keys are bound to exactly one organization and cannot administer organizations. Stored assistant conversations keep the provenance they were created with; do not try to move one between product surfaces.
+
 ## Best Practices
 
 1. **Always check for existing apps** before creating new ones

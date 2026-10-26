@@ -37,6 +37,18 @@ vi.mock('../store.js', () => ({
 vi.mock('../mcp-client.js', () => ({ callMcpTool: vi.fn() }));
 vi.mock('../approvals-store.js', () => ({ createApproval: vi.fn(), checkTrust: vi.fn() }));
 
+/**
+ * The operator's managed-key containment guard validates a `bb_sk_…` token
+ * against the control database. This file uses a real-looking service key on
+ * purpose (the credential must never reach the sandbox) over a stub pool, so
+ * the guard's lookup throws and every operator tool call is denied before
+ * `build_app` dispatches. The guard is covered by locked-key-access's own
+ * tests; this file is about the build path.
+ */
+vi.mock('../../locked-key-access.js', () => ({
+  assertOperatorKeyArguments: vi.fn(async () => {}),
+}));
+
 import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';

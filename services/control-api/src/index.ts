@@ -113,6 +113,7 @@ import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
 import { AppNotFoundError, AppAuthRequiredError, AppPausedError, pausedRemediation } from './services/app-resolver.js';
 import { AuthorizationError, NotFoundError, ValidationError, ConflictError } from './services/api-errors.js';
+import { assertOperatorAccessPolicyReady } from './services/dashboard-agent/operator-access-policy.js';
 import { startFlushWorker, reconcileUsage } from './services/usage-metering.js';
 import { getRedisClient, shutdownRedis } from './services/redis.js';
 import { enforceExpiredGracePeriods } from './services/billing-service.js';
@@ -565,11 +566,32 @@ try {
   }
   app.log.info('Cloud overlays loaded');
 } catch (err) {
+  // A cloud deployment that requires the operator access policy must not fall
+  // back to the permissive OSS default when the overlay fails to load.
+  if (config.operatorAccessPolicyRequired) throw err;
   app.log.info(
     { err: (err as Error)?.message },
     'No cloud overlays found, running in OSS mode (Noop billing, Unlimited quotas)',
   );
 }
+
+// Office lifecycle registration runs after every plugin has loaded (so
+// app.controlDb exists) and before listen(). In required mode a missing or
+// broken policy fails startup instead of serving with the no-op default.
+app.addHook('onReady', async () => {
+  try {
+    // @ts-expect-error — overlay path resolved at runtime
+    const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
+    await overlay.bootstrapOfficeServices({ controlPool: app.controlDb });
+  } catch (err) {
+    if (config.operatorAccessPolicyRequired) throw err;
+    app.log.info(
+      { err: (err as Error)?.message },
+      'No Office overlay found, Office lifecycle disabled',
+    );
+  }
+  assertOperatorAccessPolicyReady(config.operatorAccessPolicyRequired);
+});
 
 app.register(internalLeaseRoutes);
 app.register(kvCredentialsRoutes);
@@ -757,6 +779,16 @@ try {
 } catch (err) {
   // OSS mode (overlay not built) is expected and must not throw.
   console.warn('[control-api] app-copy worker not started:', err);
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/office/routes.js');
+  await app.register(overlay.officeRoutes);
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a
+  // genuine registration error must fail startup when the policy is required.
+  if (config.operatorAccessPolicyRequired) throw err;
+  console.warn('[control-api] office overlay routes not registered:', err);
 }
 app.register(apiKeyRoutes);
 app.register(realtimeRoutes);

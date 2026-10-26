@@ -136,57 +136,33 @@ describe('ApiKeyService', () => {
   });
 
   describe("generateApiKey with scope='both'", () => {
-    let bothUserId: string;
-
-    beforeAll(async () => {
-      const result = await pool.query(
-        `INSERT INTO platform_users (email, cognito_sub)
-         VALUES ('plan-test-both@example.test', 'both-sub')
-         RETURNING id`
-      );
-      bothUserId = result.rows[0].id;
-    });
-
-    afterAll(async () => {
-      await pool.query('DELETE FROM platform_users WHERE id = $1', [bothUserId]);
-    });
-
-    it("mints a bb_sk_-prefixed key, sets scope=both, and sets substrate_user_id=user_id", async () => {
+    it("mints a bb_sk_-prefixed key and binds both scopes to the user's organization", async () => {
       const result = await ApiKeyService.generateApiKey(
-        pool, bothUserId, 'combined key', ['*'], 'both'
+        pool, testUserId, 'combined key', { substrateAccess: 'both' }
       );
 
       expect(result.key.startsWith('bb_sk_')).toBe(true);
 
       const row = (await pool.query(
-        `SELECT scope, substrate_user_id, user_id FROM api_keys WHERE id = $1`,
+        `SELECT scope, substrate_organization_id, organization_id, organization_locked FROM api_keys WHERE id = $1`,
         [result.keyId]
       )).rows[0];
 
       expect(row.scope).toBe('both');
-      expect(row.substrate_user_id).toBe(bothUserId);
-      expect(row.user_id).toBe(bothUserId);
+      expect(row.substrate_organization_id).toBe(testOrgId);
+      expect(row.organization_id).toBe(testOrgId);
+      expect(row.organization_locked).toBe(false);
     });
 
-    it("regression guard: 'both' always sets substrate_user_id=userId", async () => {
-      const guardResult = await pool.query(
-        `INSERT INTO platform_users (email, cognito_sub)
-         VALUES ('plan-test-both-guard@example.test', 'both-guard-sub')
-         RETURNING id`
+    it("binds a substrate-only key to the same organization", async () => {
+      const result = await ApiKeyService.generateApiKey(
+        pool, testUserId, 'substrate key', { substrateAccess: 'substrate' }
       );
-      const guardUserId = guardResult.rows[0].id;
-
-      try {
-        const result = await ApiKeyService.generateApiKey(
-          pool, guardUserId, 'guard key', ['*'], 'both'
-        );
-        const row = (await pool.query(
-          `SELECT substrate_user_id FROM api_keys WHERE id = $1`, [result.keyId]
-        )).rows[0];
-        expect(row.substrate_user_id).toBe(guardUserId);
-      } finally {
-        await pool.query('DELETE FROM platform_users WHERE id = $1', [guardUserId]);
-      }
+      const row = (await pool.query(
+        `SELECT scope, substrate_organization_id FROM api_keys WHERE id = $1`, [result.keyId]
+      )).rows[0];
+      expect(row.scope).toBe('substrate');
+      expect(row.substrate_organization_id).toBe(testOrgId);
     });
   });
 
@@ -194,12 +170,12 @@ describe('ApiKeyService', () => {
     let scopeUserId: string;
     let scopeOrgId: string;
 
-    async function seedKey(scope: 'app' | 'substrate', substrateUserId: string | null) {
+    async function seedKey(scope: 'app' | 'substrate') {
       const hash = crypto.randomBytes(20).toString('hex');
       await pool.query(
-        `INSERT INTO api_keys (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
+        `INSERT INTO api_keys (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_organization_id)
          VALUES ($1, $2, $3, 'bb_sk_xxx12', 'test', $4, $5, $6)`,
-        [scopeUserId, scopeOrgId, hash, ['*'], scope, substrateUserId]
+        [scopeUserId, scopeOrgId, hash, ['*'], scope, scope === 'substrate' ? scopeOrgId : null]
       );
     }
 
@@ -247,24 +223,24 @@ describe('ApiKeyService', () => {
 
     it('listKeys with no scope returns all non-revoked keys for the org (with scope field)', async () => {
       // migration 073: substrate_user_id must equal user_id for substrate keys
-      await seedKey('substrate', scopeUserId);
-      await seedKey('app', scopeUserId);
+      await seedKey('substrate');
+      await seedKey('app');
       const result = await ApiKeyService.listKeys(pool, scopeOrgId);
       expect(result).toHaveLength(2);
       expect(result.map((k: any) => k.scope).sort()).toEqual(['app', 'substrate']);
     });
 
     it('listKeys with scope=substrate returns only substrate keys', async () => {
-      await seedKey('substrate', scopeUserId);
-      await seedKey('app', scopeUserId);
+      await seedKey('substrate');
+      await seedKey('app');
       const result = await ApiKeyService.listKeys(pool, scopeOrgId, 'substrate');
       expect(result).toHaveLength(1);
       expect(result.every((k: any) => k.scope === 'substrate')).toBe(true);
     });
 
     it('listKeys with scope=app returns only app keys', async () => {
-      await seedKey('substrate', scopeUserId);
-      await seedKey('app', scopeUserId);
+      await seedKey('substrate');
+      await seedKey('app');
       const result = await ApiKeyService.listKeys(pool, scopeOrgId, 'app');
       expect(result).toHaveLength(1);
       expect(result.every((k: any) => k.scope === 'app')).toBe(true);
@@ -323,12 +299,12 @@ describe('ApiKeyService', () => {
         }
       });
 
-      async function seedKeyFor(userId: string, scope: 'app' | 'substrate', substrateUserId: string | null) {
+      async function seedKeyFor(userId: string, scope: 'app' | 'substrate') {
         const hash = crypto.randomBytes(20).toString('hex');
         await pool.query(
-          `INSERT INTO api_keys (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_user_id)
+          `INSERT INTO api_keys (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_organization_id)
            VALUES ($1, $2, $3, 'bb_sk_xxx12', 'test', $4, $5, $6)`,
-          [userId, scopeOrgId, hash, ['*'], scope, substrateUserId],
+          [userId, scopeOrgId, hash, ['*'], scope, scope === 'substrate' ? scopeOrgId : null],
         );
       }
 
@@ -337,9 +313,9 @@ describe('ApiKeyService', () => {
       });
 
       it('narrows to only the passed user\'s keys', async () => {
-        await seedKeyFor(scopeUserId, 'app', scopeUserId);
-        await seedKeyFor(scopeUserId, 'substrate', scopeUserId);
-        await seedKeyFor(otherUserId, 'app', otherUserId);
+        await seedKeyFor(scopeUserId, 'app');
+        await seedKeyFor(scopeUserId, 'substrate');
+        await seedKeyFor(otherUserId, 'app');
 
         // No userId → all 3 org keys.
         const all = await ApiKeyService.listKeys(pool, scopeOrgId);
@@ -355,10 +331,10 @@ describe('ApiKeyService', () => {
       });
 
       it('composes with scope filter (scope + userId both narrow)', async () => {
-        await seedKeyFor(scopeUserId, 'app', scopeUserId);
-        await seedKeyFor(scopeUserId, 'substrate', scopeUserId);
-        await seedKeyFor(otherUserId, 'app', otherUserId);
-        await seedKeyFor(otherUserId, 'substrate', otherUserId);
+        await seedKeyFor(scopeUserId, 'app');
+        await seedKeyFor(scopeUserId, 'substrate');
+        await seedKeyFor(otherUserId, 'app');
+        await seedKeyFor(otherUserId, 'substrate');
 
         const scopeSubstrate = await ApiKeyService.listKeys(pool, scopeOrgId, 'substrate', scopeUserId);
         expect(scopeSubstrate).toHaveLength(1);

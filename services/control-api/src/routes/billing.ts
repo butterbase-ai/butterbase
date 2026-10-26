@@ -1,4 +1,5 @@
 // services/control-api/src/routes/billing.ts
+import { AuthorizationError } from '../services/api-errors.js';
 import type { FastifyInstance } from 'fastify';
 import { isHttpError } from '../services/error-handler.js';
 import { z } from 'zod';
@@ -57,6 +58,16 @@ const usageQuerySchema = z.object({
 });
 
 export async function billingRoutes(app: FastifyInstance) {
+  app.addHook('preHandler', async (request) => {
+    const requestedOrg = (request.query as { org_id?: unknown } | undefined)?.org_id;
+    if (request.auth?.organizationLocked && requestedOrg !== undefined && requestedOrg !== request.auth.organizationId) {
+      throw new AuthorizationError('Managed key cannot override its organization', 'AUTH_ORG_FORBIDDEN');
+    }
+    if (request.auth?.organizationLocked &&
+        (request.method !== 'GET' || request.routeOptions.url === '/dashboard/onboard/status')) {
+      throw new AuthorizationError('Managed keys cannot administer account billing or identity', 'AUTH_ORG_FORBIDDEN');
+    }
+  });
   const dashboardUrl = process.env.DASHBOARD_URL || 'http://localhost:3000';
 
   const stripe = await loadStripeOverlay();
@@ -89,7 +100,9 @@ export async function billingRoutes(app: FastifyInstance) {
     // member of. Falls back to the caller's personal org when absent so legacy
     // callers keep working. Membership is enforced — non-members get 403.
     const query = (request.query ?? {}) as { org_id?: string };
-    const requestedOrgId = query.org_id;
+    const requestedOrgId = request.auth?.organizationLocked
+      ? request.auth.organizationId
+      : query.org_id;
     let targetOrgId: string | null = null;
     if (requestedOrgId) {
       const membership = await app.controlDb.query(
@@ -307,7 +320,7 @@ export async function billingRoutes(app: FastifyInstance) {
       const [aiUsageResult, credits, capStatus] = await Promise.all([
         aiUsagePromise,
         getCreditsBalance(app.controlDb, billingOrgId),
-        getSpendingCapStatus(app.controlDb, userId),
+        getSpendingCapStatus(app.controlDb, userId, request.auth?.organizationLocked ? request.auth.organizationId ?? undefined : undefined),
       ]);
 
       const aiUsageBreakdown = {
@@ -458,7 +471,9 @@ export async function billingRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     try {
-      const organizationId = await resolveOrganizationId(app.controlDb, userId);
+      const organizationId = request.auth?.organizationLocked
+        ? request.auth.organizationId!
+        : await resolveOrganizationId(app.controlDb, userId);
       const query = usageQuerySchema.parse(request.query);
 
       // Default to last 30 days
@@ -530,7 +545,9 @@ export async function billingRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     try {
-      const organizationId = await resolveOrganizationId(app.controlDb, userId);
+      const organizationId = request.auth?.organizationLocked
+        ? request.auth.organizationId!
+        : await resolveOrganizationId(app.controlDb, userId);
       const query = usageQuerySchema.parse(request.query);
 
       const endDate = query.endDate || new Date().toISOString().split('T')[0];
@@ -582,7 +599,7 @@ export async function billingRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
 
     try {
-      const status = await getSpendingCapStatus(app.controlDb, userId);
+      const status = await getSpendingCapStatus(app.controlDb, userId, request.auth?.organizationLocked ? request.auth.organizationId ?? undefined : undefined);
       return status;
     } catch (error) {
       if (isHttpError(error)) throw error;

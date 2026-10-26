@@ -148,7 +148,7 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 
 If your environment connects to a hosted MCP endpoint, include your API key as a Bearer token in the Authorization header on each request. The MCP endpoint URL and your API key are provided when you set up your connection.
 
-You can generate API keys using \`manage_auth_config\` (action: "generate_service_key") or through the dashboard. Keys are prefixed with \`bb_sk_\` and provide full access to your apps and data.
+You can generate API keys using \`manage_auth_config\` (action: "generate_service_key") or through the dashboard. Keys are prefixed with \`bb_sk_\` and provide full access to your apps and data. Platform keys are organization-scoped; organization-scoped API requests name the organization with the \`X-Organization-Id\` header and the API verifies membership. Managed keys created by a hosted product are locked to one organization and cannot administer organizations.
 
 ### Claude Code Plugin
 

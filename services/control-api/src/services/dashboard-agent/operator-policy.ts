@@ -764,6 +764,42 @@ export function operatorPolicyForOrg(
 }
 
 /**
+ * Combine this table's verdict with the Office consequential floor
+ * (`office-tool-policy.ts`).
+ *
+ * `operatorVerdict` is what `operatorPolicyForOrg` said BEFORE yolo is applied;
+ * the Office path never consults yolo. `null` means the caller is not an
+ * operator turn (an Office-origin foreground conversation, Task 9), where there
+ * is no operator table to defer to.
+ *
+ * WHY THE OFFICE VERDICT IS AUTHORITATIVE OVER 'approval' RATHER THAN MERGED
+ * BY STRICTNESS. The operator table's `approval` tier is a general
+ * unattended-agent affordance — a self-hosted org may lift all of it with
+ * `yolo_mode`. A customer Office has a narrower, contractual contract: reads
+ * and preparation are autonomous, consequential work is not. So `write_file`
+ * and `read_file`, which sit at the operator `approval` tier for historical
+ * reasons, are allowed for Office without requiring yolo; office-tool-policy
+ * names them explicitly. Merging by strictness would silently leave Office
+ * unable to prepare work, which contradicts the spec's "prepare work and
+ * compile code in a sandbox".
+ *
+ * WHAT IS NEVER LOOSENED: an operator `deny`. Cross-org targeting
+ * (`operatorPolicyForOrg`) and the substrate action denials are not product
+ * trade-offs, so they survive an Office 'allow'. Office 'deny' and 'approval'
+ * are themselves absolute.
+ *
+ * Precedence: office deny > office approval > operator deny > allow.
+ */
+export function resolveOfficeVerdict(
+  operatorVerdict: OperatorPolicy | null,
+  officeVerdict: OperatorPolicy,
+): OperatorPolicy {
+  if (officeVerdict === 'deny') return 'deny';
+  if (officeVerdict === 'approval') return 'approval';
+  return operatorVerdict === 'deny' ? 'deny' : 'allow';
+}
+
+/**
  * Thin wrapper over the table: may the operator call this tool at all?
  *
  * Since 2026-08-07 this is true for every tool: there is no tool-level deny

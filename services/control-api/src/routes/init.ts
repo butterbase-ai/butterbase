@@ -12,7 +12,7 @@ import {
   getProvisionAllowedRegions,
   resolveProvisionRegion,
 } from '../services/provision-region.js';
-import { addOrgAppIndex, removeOrgAppIndex, listAppsForUserAcrossOrgs } from '../services/org-app-index.js';
+import { addOrgAppIndex, removeOrgAppIndex, listAppsForUserAcrossOrgs, listUserApps } from '../services/org-app-index.js';
 import { resolveOrganizationId, assertOrgMember } from '../services/org-resolver.js';
 import { checkProjectQuota } from '../services/project-quota.js';
 import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
@@ -61,7 +61,9 @@ export async function initRoutes(app: FastifyInstance) {
     //      hit get_config to learn it exists.
     //   2. Every list row carries organization_id so callers can group/filter
     //      client-side; strict scoping at list time only obscured that.
-    const indexRows = await listAppsForUserAcrossOrgs(app.controlDb, ownerId);
+    const indexRows = request.auth.organizationLocked
+      ? await listUserApps(app.controlDb, request.auth.organizationId!)
+      : await listAppsForUserAcrossOrgs(app.controlDb, ownerId);
     if (indexRows.length === 0) return { apps: [] };
 
     // Fetch runtime rows for the exact app-ids resolved above — do NOT re-filter
@@ -78,10 +80,11 @@ export async function initRoutes(app: FastifyInstance) {
     const allRows: any[] = [];
     for (const [region, appIds] of idsByRegion) {
       const { rows } = await app.runtimeDb(region).query(
-        'SELECT id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_organization_id, substrate_autopropagate, created_at FROM apps WHERE id = ANY($1::text[]) ORDER BY created_at DESC',
+        'SELECT id, organization_id, name, subdomain, db_name, db_provisioned, provisioning_status, region, visibility, listed, template_source_app_id, fork_count, substrate_organization_id, substrate_autopropagate, created_at FROM apps WHERE id = ANY($1::text[]) ORDER BY created_at DESC',
         [appIds]
       );
       for (const row of rows) {
+        if (request.auth.organizationLocked && row.organization_id !== request.auth.organizationId) continue;
         // Surface the owning org so callers can group/filter without a second
         // round-trip. Runtime apps.organization_id may lag behind the control
         // index during backfill; org_app_index is the authoritative pointer.
@@ -99,7 +102,7 @@ export async function initRoutes(app: FastifyInstance) {
 
     // Org-aware auth check
     try {
-      await AppResolver.resolveApp(app.controlDb, app_id, ownerId, request.auth?.organizationId ?? null);
+      await AppResolver.resolveApp(app.controlDb, app_id, ownerId, request.auth?.organizationId ?? null, { strictOrganization: request.auth?.organizationLocked });
     } catch (err) {
       if (err instanceof AppNotFoundError) {
         return reply.code(404).send({ code: 'RESOURCE_NOT_FOUND', message: `App "${app_id}" not found` });
@@ -368,7 +371,7 @@ export async function initRoutes(app: FastifyInstance) {
     // Org-aware auth + get region
     let region: string;
     try {
-      await AppResolver.resolveApp(app.controlDb, app_id, callerUserId, request.auth?.organizationId ?? null);
+      await AppResolver.resolveApp(app.controlDb, app_id, callerUserId, request.auth?.organizationId ?? null, { strictOrganization: request.auth?.organizationLocked });
       // Look up the app's home region from the cross-region index.
       const idx = await app.controlDb.query<{ region: string }>(
         `SELECT region FROM org_app_index WHERE app_id = $1`,

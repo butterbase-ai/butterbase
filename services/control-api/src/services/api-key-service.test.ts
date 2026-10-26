@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ApiKeyService } from './api-key-service.js';
+import { ApiKeyService, mintOrganizationLockedApiKeyInTransaction } from './api-key-service.js';
 
 // Mock the Redis client so unit tests don't hit infra.
 vi.mock('./redis.js', () => ({
@@ -28,7 +28,7 @@ function makePoolStub(captured: { args?: unknown[] }) {
   } as any;
 }
 
-// INSERT param layout after Plan 07 (organization_id) + Plan 10.3 (substrate_organization_id):
+// INSERT param layout after organization locking:
 //   $1  args[0]  user_id
 //   $2  args[1]  organization_id
 //   $3  args[2]  key_hash
@@ -36,8 +36,8 @@ function makePoolStub(captured: { args?: unknown[] }) {
 //   $5  args[4]  name
 //   $6  args[5]  scopes
 //   $7  args[6]  scope (dbScope)
-//   $8  args[7]  substrate_user_id
-//   $9  args[8]  substrate_organization_id (null when scope='app')
+//   $8  args[7]  substrate_organization_id (null when scope='app')
+//   $9  args[8]  organization_locked
 
 describe('ApiKeyService.generateApiKey scopes', () => {
   let captured: { args?: unknown[] };
@@ -149,7 +149,29 @@ describe('ApiKeyService.generateApiKey scopes', () => {
       await ApiKeyService.generateApiKey(makePoolStub(captured), 'u1', 'k', {
         substrateAccess,
       });
-      expect(captured.args![8]).toBe(expectedOrgId);
+      expect(captured.args![7]).toBe(expectedOrgId);
     }
   );
+
+  it('leaves ordinary user keys unlocked even if request options contain a lock flag', async () => {
+    await ApiKeyService.generateApiKey(makePoolStub(captured), 'u1', 'k', {
+      organizationLocked: true,
+    } as any);
+    expect(captured.args![8]).toBe(false);
+  });
+});
+
+describe('trusted organization-locked key minting', () => {
+  it('passes plaintext only to its credential writer and returns only the key id', async () => {
+    const captured: { args?: unknown[] } = {};
+    let credentialKey = '';
+    const result = await mintOrganizationLockedApiKeyInTransaction(
+      makePoolStub(captured),
+      { userId: 'u1', organizationId: TEST_ORG_ID, name: 'Operator' },
+      async (key: string) => { credentialKey = key; },
+    );
+    expect(credentialKey).toMatch(/^bb_sk_[a-f0-9]{40}$/);
+    expect(result).toEqual({ keyId: 'key_test' });
+    expect(captured.args![8]).toBe(true);
+  });
 });

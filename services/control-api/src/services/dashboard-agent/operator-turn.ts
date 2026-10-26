@@ -13,6 +13,7 @@ import {
   type OperatorScratchpad,
 } from './operator-scratchpad-store.js';
 import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
+import { evaluateOperatorAccess } from './operator-access-policy.js';
 
 /**
  * ============================================================================
@@ -116,7 +117,14 @@ function mintFallbackTraceId(): string {
  * an operator waiting on a human decision is HEALTHY, and counting it as a
  * failure would misreport it. See `skipped` below.
  */
-export type OperatorSkip = { reason: 'pending_approval'; approvalId: string };
+export type OperatorSkip =
+  | { reason: 'pending_approval'; approvalId: string }
+  /**
+   * The organization lost access (paid plan, active account, current owner or
+   * managed credential) during the turn, or the policy backend denied it.
+   * `blockedReason` is one of the stable Office reason codes.
+   */
+  | { reason: 'access_blocked'; blockedReason: string };
 
 export type OperatorTurnResult = {
   conversationId: string;
@@ -687,6 +695,7 @@ export async function runOperatorTurn(
   let count = 0;
   let approvalId: string | null = null;
   let error: string | null = null;
+  let blockedReason: string | null = null;
 
   /**
    * `planned` — the turn has everything it needs (credential, conversation,
@@ -720,6 +729,28 @@ export async function runOperatorTurn(
       codeExecutor: opts.codeExecutor,
       buildExecutor: opts.buildExecutor,
       traceId,
+      /**
+       * Re-checked before every model request and before dispatching tools, so
+       * a downgrade, suspension or owner removal that lands mid-turn stops the
+       * next spend instead of finishing the turn. Org-scoped and resolved from
+       * the job, never from anything the model supplies.
+       */
+      accessGuard: async () => {
+        const decision = await evaluateOperatorAccess({
+          organizationId: job.organizationId,
+          phase: 'run',
+          origin: 'operator',
+        });
+        return {
+          allowed: decision.allowed,
+          reason: decision.reason,
+          // A cloud Office policy answers 'consequential'; that activates the
+          // Office floor in the loop (consequential tools need a human even
+          // with yolo on, preparation stays autonomous). The OSS default and
+          // the ordinary dashboard answer 'standard'.
+          approvalMode: decision.approvalMode,
+        };
+      },
       // Until now, job name and wake reason existed only as prose inside the
       // wake message — in the model's context window, in no structured field.
       // The ledger recorded every one of these as triggered_by
@@ -737,9 +768,33 @@ export async function runOperatorTurn(
       count++;
       if (event.type === 'approval_required') approvalId = event.approval_id;
       if (event.type === 'error') error = event.message;
+      if (event.type === 'blocked') blockedReason = event.reason;
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
+  }
+
+  // A blocked turn is a deliberate stop, not a failure: no error, no approval,
+  // and records/history stay exactly as the turn left them.
+  if (blockedReason) {
+    logOperatorCheckpoint('completed', {
+      traceId,
+      organizationId: job.organizationId,
+      conversationId,
+      events: count,
+      gated: false,
+      error: null,
+      outcome: 'skipped',
+      skippedReason: 'access_blocked',
+      blockedReason,
+    });
+    return {
+      conversationId,
+      events: count,
+      approvalId: null,
+      error: null,
+      skipped: { reason: 'access_blocked', blockedReason },
+    };
   }
 
   /**

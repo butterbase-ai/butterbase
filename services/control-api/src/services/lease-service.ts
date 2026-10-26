@@ -101,6 +101,60 @@ export async function closeLeaseReservation(
   }
 }
 
+/**
+ * The exact columns and floor resolution `grantLease` admits on:
+ * `COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0)`.
+ * A per-org override beats the plan's tier default, which beats 0 when there
+ * is no plan at all (plan_id NULL or dangling).
+ *
+ * Kept as one string so the read-only inspector and the leasing path cannot
+ * drift apart. `grantLease` appends `FOR UPDATE OF o` to serialize its own
+ * write; `readOrganizationCreditState` reads without a lock.
+ */
+const CREDIT_STATE_SELECT = `SELECT o.monthly_allowance_usd,
+       o.credits_usd,
+       COALESCE(o.credit_floor_usd, p.credit_floor_usd, 0) AS credit_floor_usd
+  FROM organizations o
+  LEFT JOIN plans p ON p.id = o.plan_id`;
+
+interface CreditStateRow {
+  monthly_allowance_usd: string;
+  credits_usd: string;
+  credit_floor_usd: string;
+}
+
+export interface OrganizationCreditState {
+  /** Combined balance: monthly allowance + top-up credits. */
+  balanceUsd: number;
+  /** Effective admission floor for this organization. */
+  floorUsd: number;
+}
+
+function parseCreditState(row: CreditStateRow): OrganizationCreditState {
+  return {
+    balanceUsd: parseFloat(row.monthly_allowance_usd) + parseFloat(row.credits_usd),
+    floorUsd: parseFloat(row.credit_floor_usd),
+  };
+}
+
+/**
+ * Read-only mirror of `grantLease`'s admission inputs. Returns null when the
+ * organization does not exist. Never locks, leases, or debits anything; the
+ * gateway's own `grantLease` remains the authoritative admission decision.
+ */
+export async function readOrganizationCreditState(
+  db: pg.Pool | pg.PoolClient,
+  organizationId: string,
+): Promise<OrganizationCreditState | null> {
+  const result = await db.query<CreditStateRow>(
+    `${CREDIT_STATE_SELECT}
+     WHERE o.id = $1`,
+    [organizationId],
+  );
+  const row = result.rows[0];
+  return row ? parseCreditState(row) : null;
+}
+
 export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promise<GrantResult> {
   if (args.amountUsd <= 0) throw new Error('grantLease: amountUsd must be positive');
   if (args.ttlSeconds <= 0) throw new Error('grantLease: ttlSeconds must be positive');
@@ -118,9 +172,9 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     // is the app's owning org (AI gateway) or an explicit billing subject.
     // No implicit personal-org fallback at this layer.
     const organizationId = args.organizationId;
-    // Floor resolution: COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0)
-    // — a per-org override beats the plan's tier default, which beats 0 when
-    // there is no plan at all (plan_id NULL or dangling).
+    // Floor resolution and admission arithmetic live in CREDIT_STATE_SELECT /
+    // parseCreditState so the read-only funding inspector cannot drift from
+    // this path.
     //
     // `FOR UPDATE OF o` on purpose: this SELECT joins plans, and a bare
     // `FOR UPDATE` on a join takes row locks on BOTH tables. Locking a shared
@@ -128,25 +182,16 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     // every org on that tier and risks deadlock. Scoping the lock to `o`
     // leaves plans unlocked; organizations is the only row this function
     // mutates.
-    const u = await client.query<{
-      monthly_allowance_usd: string;
-      credits_usd: string;
-      credit_floor_usd: string;
-    }>(
-      `SELECT o.monthly_allowance_usd,
-              o.credits_usd,
-              COALESCE(o.credit_floor_usd, p.credit_floor_usd, 0) AS credit_floor_usd
-       FROM organizations o
-       LEFT JOIN plans p ON p.id = o.plan_id
+    const u = await client.query<CreditStateRow>(
+      `${CREDIT_STATE_SELECT}
        WHERE o.id = $1 FOR UPDATE OF o`,
       [organizationId]
     );
     if (u.rows.length === 0) throw new NotFoundError('organization', organizationId);
 
+    // `monthly` is also needed to draw the allowance before top-up credits.
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
-    const topup = parseFloat(u.rows[0].credits_usd);
-    const floor = parseFloat(u.rows[0].credit_floor_usd);
-    const totalAvailable = monthly + topup;
+    const { balanceUsd: totalAvailable, floorUsd: floor } = parseCreditState(u.rows[0]);
     const expires = new Date(Date.now() + args.ttlSeconds * 1000);
 
     if (args.reservationId) {

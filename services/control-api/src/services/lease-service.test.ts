@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { grantLease, settleLease } from './lease-service.js';
+import { grantLease, readOrganizationCreditState, settleLease } from './lease-service.js';
 import { config } from '../config.js';
 
 const describeDb = process.env.RUN_DB_TESTS ? describe : describe.skip;
@@ -690,5 +690,47 @@ describeDb('credit_floor_usd migration phasing — live schema', () => {
       // means "inherit plan".
       expect(col.rows[0].column_default).toBeNull();
     }
+  });
+});
+
+describe('readOrganizationCreditState (unit)', () => {
+  function fakePool(result: { rows: Array<Record<string, string>> } | Error) {
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => {
+      if (result instanceof Error) throw result;
+      return result;
+    });
+    return { query } as unknown as pg.Pool & { query: typeof query };
+  }
+
+  it('combines monthly allowance and top-up credits against the effective floor', async () => {
+    const pool = fakePool({
+      rows: [{ monthly_allowance_usd: '2.5000', credits_usd: '-4.0000', credit_floor_usd: '-25.0000' }],
+    });
+
+    await expect(readOrganizationCreditState(pool, 'org-1')).resolves.toEqual({
+      balanceUsd: -1.5,
+      floorUsd: -25,
+    });
+  });
+
+  it('returns null when the organization does not exist', async () => {
+    const pool = fakePool({ rows: [] });
+    await expect(readOrganizationCreditState(pool, 'org-missing')).resolves.toBeNull();
+  });
+
+  it('shares the floor expression with grantLease and takes no row lock', async () => {
+    const pool = fakePool({ rows: [] });
+
+    await readOrganizationCreditState(pool, 'org-1');
+
+    const [sql] = pool.query.mock.calls[0] as [string];
+    expect(sql).toContain('COALESCE(o.credit_floor_usd, p.credit_floor_usd, 0)');
+    expect(sql).not.toMatch(/FOR UPDATE/i);
+    expect(sql.trim().toUpperCase().startsWith('SELECT')).toBe(true);
+  });
+
+  it('propagates read failures so the caller can deny safely', async () => {
+    const pool = fakePool(new Error('database down'));
+    await expect(readOrganizationCreditState(pool, 'org-1')).rejects.toThrow('database down');
   });
 });

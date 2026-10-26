@@ -32,6 +32,47 @@ export function positiveIntOr(raw: string | undefined, fallback: number): number
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/**
+ * A CORS origin, normalized to its bare origin.
+ *
+ * Office is served from two origins (the preserved demo and the customer
+ * site). A misconfigured allowlist must fail at startup rather than silently
+ * matching nothing, and an entry carrying a path or credentials can never
+ * match a browser `Origin` header anyway.
+ */
+export function normalizeOrigin(value: string, source: string): string {
+  const trimmed = value.trim();
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error(`${source} contains an invalid origin: ${JSON.stringify(value)}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`${source} must use http or https: ${JSON.stringify(value)}`);
+  }
+  if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error(
+      `${source} must contain bare origins (no path, query, or credentials): ${JSON.stringify(value)}`,
+    );
+  }
+  return url.origin;
+}
+
+/** Comma-separated origin list; empty entries are ignored, duplicates collapse. */
+export function parseAllowedOrigins(
+  raw: string | undefined,
+  source = 'OFFICE_ALLOWED_ORIGINS',
+): string[] {
+  if (!raw) return [];
+  const origins = raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => normalizeOrigin(part, source));
+  return [...new Set(origins)];
+}
+
 export const config = {
   port: parseInt(process.env.CONTROL_API_PORT ?? '4000', 10),
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -260,8 +301,24 @@ export const config = {
   dashboardUrl: process.env.DASHBOARD_URL ?? 'http://localhost:3000',
   adminDashboardUrl: process.env.ADMIN_DASHBOARD_URL ?? 'http://localhost:3001',
   submissionsDashboardUrl: process.env.SUBMISSIONS_DASHBOARD_URL ?? 'http://localhost:5173',
-  officeUrl: process.env.OFFICE_URL ?? 'http://localhost:3100',
+  /**
+   * The single legacy Office origin. New deployments should also set
+   * OFFICE_ALLOWED_ORIGINS to every Office frontend (demo and customer); this
+   * value is still honored for compatibility.
+   */
+  officeUrl: normalizeOrigin(process.env.OFFICE_URL ?? 'http://localhost:3100', 'OFFICE_URL'),
+  /** Every browser origin allowed to call the API as Office. */
+  officeAllowedOrigins: (() => {
+    const legacy = normalizeOrigin(process.env.OFFICE_URL ?? 'http://localhost:3100', 'OFFICE_URL');
+    const configured = parseAllowedOrigins(process.env.OFFICE_ALLOWED_ORIGINS);
+    return configured.includes(legacy) ? configured : [...configured, legacy];
+  })(),
   templatesUrl: process.env.TEMPLATES_URL ?? 'http://localhost:5174',
+  /**
+   * Cloud deployments set this so startup fails if the private operator access
+   * policy did not register. OSS defaults off, preserving self-hosted behavior.
+   */
+  operatorAccessPolicyRequired: process.env.OPERATOR_ACCESS_POLICY_REQUIRED === '1',
 
   subdomain: {
     baseDomain: process.env.BASE_DOMAIN ?? 'butterbase.dev',

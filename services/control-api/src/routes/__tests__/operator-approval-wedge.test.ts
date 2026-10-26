@@ -23,7 +23,7 @@
  * store and the message store all run against the real control-plane DB.
  */
 
-import { describe, it, expect, vi, beforeEach, afterAll, type MockedFunction } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll, type MockedFunction } from 'vitest';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 
@@ -39,6 +39,13 @@ import { resolveOperatorApproval } from '../dashboard-agent.js';
 import { getOrCreateOperatorConversation } from '../../services/dashboard-agent/operator-store.js';
 import { createApproval, getApprovalForOrg } from '../../services/dashboard-agent/approvals-store.js';
 import { appendMessage, listMessages, type Message } from '../../services/dashboard-agent/store.js';
+import { setOperatorAccessPolicy } from '../../services/dashboard-agent/operator-access-policy.js';
+import {
+  captureApprovalOperation,
+  functionSourceArtifact,
+  workingTreeArtifact,
+} from '../../services/dashboard-agent/approval-operation.js';
+import { getSharedWorkingTreeCache } from '../../services/dashboard-agent/loop.js';
 
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
 
@@ -254,15 +261,20 @@ describe('C2 — resolving an operator approval leaves a VALID conversation hist
     const approval = await createApproval(pool, {
       conversationId,
       turnMessageId: messageId,
-      toolName: 'manage_billing',
-      toolArgs: { action: 'refund' },
+      // `manage_frontend` is absent from the operator tool TABLE entirely, so
+      // `principalMayExecute('human', …)` refuses it. `manage_billing` — the
+      // tool this test used before 2026-08-07 — is ON the surface at the
+      // approval tier now, so it is legitimately executable by a human
+      // principal and no longer demonstrates the guard.
+      toolName: 'manage_frontend',
+      toolArgs: { action: 'delete', app_id: 'app-1' },
       sensitivity: 'destructive',
     });
     await appendMessage(
       pool, conversationId,
       {
         role: 'assistant', content: '', toolCallId: 'call_billing',
-        toolName: 'manage_billing', toolArgs: { action: 'refund' }, toolResult: null,
+        toolName: 'manage_frontend', toolArgs: { action: 'delete', app_id: 'app-1' }, toolResult: null,
         modelUsed: 'claude-sonnet-4-5', pendingApprovalId: approval.id,
       },
       messageId,
@@ -275,6 +287,459 @@ describe('C2 — resolving an operator approval leaves a VALID conversation hist
     expect(outcome.ok).toBe(false);
     expect((outcome as { code: number }).code).toBe(502);
     expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 8 — Office consequential approvals
+// ---------------------------------------------------------------------------
+
+/**
+ * A real org with an owner and a member. `organization_members` has FKs to
+ * `organizations` and `platform_users`, and `platform_users.personal_organization_id`
+ * is NOT NULL, so the fixture creates the org first (its `owner_id` has no FK),
+ * then the users pointing at it, then the memberships.
+ */
+async function seedOrgWithOwnerAndMember(): Promise<{ orgId: string; ownerId: string; memberId: string }> {
+  const orgId = randomUUID();
+  const ownerId = randomUUID();
+  const memberId = randomUUID();
+
+  await pool.query(
+    `INSERT INTO organizations
+       (id, name, owner_id, personal, credits_usd, auto_refill_enabled,
+        account_status, monthly_allowance_usd, special_pricing)
+     VALUES ($1, 'Wedge Office Test', $2, false, 0, false, 'active', 0, false)`,
+    [orgId, ownerId],
+  );
+  await pool.query(
+    `INSERT INTO platform_users (id, email, personal_organization_id)
+     VALUES ($1, $2, $3), ($4, $5, $3)`,
+    [ownerId, `${ownerId}@wedge.test`, orgId, memberId, `${memberId}@wedge.test`],
+  );
+  await pool.query(
+    `INSERT INTO organization_members (organization_id, user_id, role, joined_at)
+     VALUES ($1, $2, 'owner', NOW()), ($1, $3, 'member', NOW())`,
+    [orgId, ownerId, memberId],
+  );
+  return { orgId, ownerId, memberId };
+}
+
+async function dropOrg(orgId: string): Promise<void> {
+  await pool.query(`DELETE FROM organization_members WHERE organization_id = $1`, [orgId]);
+  await pool.query(`DELETE FROM platform_users WHERE personal_organization_id = $1`, [orgId]);
+  await pool.query(`DELETE FROM organizations WHERE id = $1`, [orgId]);
+}
+
+async function seedConsequentialApproval(input: {
+  orgId: string;
+  approvedOperation?: unknown;
+  toolName?: string;
+  toolArgs?: unknown;
+}) {
+  const conversationId = await getOrCreateOperatorConversation(pool, input.orgId, 'claude-sonnet-4-5');
+  const messageId = randomUUID();
+  const toolName = input.toolName ?? 'insert_row';
+  const toolArgs = input.toolArgs ?? { app_id: 'app-1', table: 'tickets', data: { status: 'done' } };
+  const approval = await createApproval(pool, {
+    conversationId,
+    turnMessageId: messageId,
+    toolName,
+    toolArgs,
+    sensitivity: 'destructive',
+    approvedOperation: (input.approvedOperation ?? null) as never,
+  });
+  await appendMessage(
+    pool, conversationId,
+    {
+      role: 'assistant', content: '', toolCallId: `call_${randomUUID().slice(0, 8)}`,
+      toolName, toolArgs, toolResult: null,
+      modelUsed: 'claude-sonnet-4-5', pendingApprovalId: approval.id,
+    },
+    messageId,
+  );
+  return { conversationId, approval };
+}
+
+describe('Task 8 — Office consequential approval authorization', () => {
+  afterEach(() => {
+    setOperatorAccessPolicy(null);
+  });
+
+  it('a member cannot approve; the owner can', async () => {
+    const { orgId, ownerId, memberId } = await seedOrgWithOwnerAndMember();
+    try {
+      setOperatorAccessPolicy({
+        evaluate: async () => ({ allowed: true, reason: null, approvalMode: 'consequential' }),
+      });
+      mockCallMcpTool.mockResolvedValue({ ok: true, result: { ok: true } });
+      const { approval } = await seedConsequentialApproval({
+        orgId,
+        approvedOperation: captureApprovalOperation({
+          toolName: 'insert_row',
+          args: { app_id: 'app-1', table: 'tickets', data: { status: 'done' } },
+        }),
+      });
+
+      const asMember = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'member-jwt',
+        userId: memberId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+      expect(asMember).toMatchObject({ ok: false, code: 403 });
+      expect(mockCallMcpTool).not.toHaveBeenCalled();
+
+      const asOwner = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'owner-jwt',
+        userId: ownerId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+      expect(asOwner).toEqual({ ok: true });
+      expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+      expect((await getApprovalForOrg(pool, approval.id, orgId))!.status).toBe('approved');
+    } finally {
+      await dropOrg(orgId);
+    }
+  });
+
+  it('a service/API key cannot approve a consequential action', async () => {
+    const { orgId, ownerId } = await seedOrgWithOwnerAndMember();
+    try {
+      setOperatorAccessPolicy({
+        evaluate: async () => ({ allowed: true, reason: null, approvalMode: 'consequential' }),
+      });
+      const { approval } = await seedConsequentialApproval({
+        orgId,
+        approvedOperation: captureApprovalOperation({ toolName: 'insert_row', args: { app_id: 'app-1' } }),
+      });
+
+      const outcome = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'bb_sk_service',
+        userId: ownerId,
+        authMethod: 'api_key',
+        resolution: { status: 'approved' },
+      });
+
+      expect(outcome).toMatchObject({ ok: false, code: 403 });
+      expect(mockCallMcpTool).not.toHaveBeenCalled();
+    } finally {
+      await dropOrg(orgId);
+    }
+  });
+
+  it('downgraded entitlement blocks approve but a denial still completes', async () => {
+    const { orgId, ownerId } = await seedOrgWithOwnerAndMember();
+    try {
+      setOperatorAccessPolicy({
+        evaluate: async () => ({ allowed: false, reason: 'paid_plan_required', approvalMode: 'consequential' }),
+      });
+      const { approval } = await seedConsequentialApproval({
+        orgId,
+        approvedOperation: captureApprovalOperation({ toolName: 'insert_row', args: { app_id: 'app-1' } }),
+      });
+
+      const approve = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'owner-jwt',
+        userId: ownerId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+      expect(approve).toMatchObject({ ok: false, code: 409, error: 'paid_plan_required' });
+      expect(mockCallMcpTool).not.toHaveBeenCalled();
+      // Still pending — the owner can decide the other way.
+      expect((await getApprovalForOrg(pool, approval.id, orgId))!.status).toBe('pending');
+
+      const deny = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'owner-jwt',
+        userId: ownerId,
+        authMethod: 'jwt',
+        resolution: { status: 'denied', reason: 'not any more' },
+      });
+      expect(deny).toEqual({ ok: true });
+      expect(mockCallMcpTool).not.toHaveBeenCalled();
+      expect((await getApprovalForOrg(pool, approval.id, orgId))!.status).toBe('denied');
+    } finally {
+      await dropOrg(orgId);
+    }
+  });
+
+  it('a legacy consequential approval with no recorded operation must be re-proposed', async () => {
+    const { orgId, ownerId } = await seedOrgWithOwnerAndMember();
+    try {
+      setOperatorAccessPolicy({
+        evaluate: async () => ({ allowed: true, reason: null, approvalMode: 'consequential' }),
+      });
+      const { approval } = await seedConsequentialApproval({ orgId });
+
+      const outcome = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'owner-jwt',
+        userId: ownerId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+
+      expect(outcome).toMatchObject({ ok: false, code: 409 });
+      expect((outcome as { error: string }).error).toContain('approval_operation_missing');
+      expect(mockCallMcpTool).not.toHaveBeenCalled();
+    } finally {
+      await dropOrg(orgId);
+    }
+  });
+
+  it('a STANDARD (non-Office) approval keeps its existing behavior: membership-only', async () => {
+    // No policy registered => evaluateOperatorAccess answers 'standard'.
+    const { orgId, memberId } = await seedOrgWithOwnerAndMember();
+    try {
+      mockCallMcpTool.mockResolvedValue({ ok: true, result: { ok: true } });
+      const { approval } = await seedConsequentialApproval({ orgId });
+
+      const outcome = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'member-jwt',
+        userId: memberId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+
+      expect(outcome).toEqual({ ok: true });
+      expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    } finally {
+      await dropOrg(orgId);
+    }
+  });
+
+  it('a changed working-tree artifact refuses the execution (never substitutes B)', async () => {
+    const { orgId, ownerId } = await seedOrgWithOwnerAndMember();
+    const cache = getSharedWorkingTreeCache();
+    const conversationId = await getOrCreateOperatorConversation(pool, orgId, 'claude-sonnet-4-5');
+    try {
+      setOperatorAccessPolicy({
+        evaluate: async () => ({ allowed: true, reason: null, approvalMode: 'consequential' }),
+      });
+      cache.write(conversationId, 'app-1', 'src/App.tsx', 'artifact A');
+      const messageId = randomUUID();
+      const toolArgs = { app_id: 'app-1' };
+      const opA = captureApprovalOperation({
+        toolName: 'deploy_frontend',
+        args: toolArgs,
+        artifact: {
+          kind: 'inline_code',
+          referenceId: 'app-1',
+          // A digest that cannot match what the tree actually builds.
+          sha256: 'a'.repeat(64),
+        },
+      });
+      const approval = await createApproval(pool, {
+        conversationId,
+        turnMessageId: messageId,
+        toolName: 'deploy_frontend',
+        toolArgs,
+        sensitivity: 'destructive',
+        approvedOperation: opA,
+      });
+      await appendMessage(
+        pool, conversationId,
+        {
+          role: 'assistant', content: '', toolCallId: 'call_deploy',
+          toolName: 'deploy_frontend', toolArgs, toolResult: null,
+          modelUsed: 'claude-sonnet-4-5', pendingApprovalId: approval.id,
+        },
+        messageId,
+      );
+
+      const fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const outcome = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'owner-jwt',
+        userId: ownerId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+
+      expect(outcome).toMatchObject({ ok: false, code: 409 });
+      expect((outcome as { error: string }).error).toContain('approval_operation_changed');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(mockCallMcpTool).not.toHaveBeenCalled();
+      // Still pending, so the owner can re-propose or deny.
+      expect((await getApprovalForOrg(pool, approval.id, orgId))!.status).toBe('pending');
+    } finally {
+      cache.evict(conversationId, 'app-1');
+      await pool.query(`DELETE FROM dashboard_agent_conversations WHERE id = $1`, [conversationId]);
+      await dropOrg(orgId);
+    }
+  });
+
+  it('an UNCHANGED approve replays the recorded FRONTEND deploy through the HTTP transport', async () => {
+    const { orgId, ownerId } = await seedOrgWithOwnerAndMember();
+    const cache = getSharedWorkingTreeCache();
+    const conversationId = await getOrCreateOperatorConversation(pool, orgId, 'claude-sonnet-4-5');
+    const prevApiUrl = process.env.CONTROL_API_URL;
+    const prevFetch = global.fetch;
+    try {
+      process.env.CONTROL_API_URL = 'http://api.test';
+      setOperatorAccessPolicy({
+        evaluate: async () => ({ allowed: true, reason: null, approvalMode: 'consequential' }),
+      });
+      cache.write(conversationId, 'app-1', 'src/App.tsx', 'artifact A');
+      const artifact = workingTreeArtifact('app-1', cache.get(conversationId, 'app-1'));
+      const toolArgs = { app_id: 'app-1' };
+      const approval = await createApproval(pool, {
+        conversationId,
+        turnMessageId: randomUUID(),
+        toolName: 'deploy_frontend',
+        toolArgs,
+        sensitivity: 'destructive',
+        approvedOperation: captureApprovalOperation({ toolName: 'deploy_frontend', args: toolArgs, artifact }),
+      });
+      await appendMessage(
+        pool, conversationId,
+        {
+          role: 'assistant', content: '', toolCallId: 'call_deploy_ok',
+          toolName: 'deploy_frontend', toolArgs, toolResult: null,
+          modelUsed: 'claude-sonnet-4-5', pendingApprovalId: approval.id,
+        },
+        randomUUID(),
+      );
+
+      const calls: string[] = [];
+      const json = (body: unknown) => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(body),
+      });
+      global.fetch = vi.fn(async (url: unknown, init?: { method?: string }) => {
+        const u = String(url);
+        const m = init?.method ?? 'GET';
+        calls.push(`${m} ${u}`);
+        if (u === 'http://api.test/v1/app-1/frontend/deployments/from-source') {
+          return json({ deployment_id: 'dep_1', upload_url: 'https://r2.test/put' });
+        }
+        if (u === 'https://r2.test/put') return { ok: true, status: 200, text: async () => 'ok' };
+        if (u === 'http://api.test/v1/app-1/frontend/deployments/from-source/dep_1/start') {
+          return json({ ok: true });
+        }
+        if (u === 'http://api.test/v1/app-1/frontend/deployments') {
+          return json({ deployments: [{ id: 'dep_1', status: 'READY', url: 'https://app.test' }] });
+        }
+        throw new Error(`unexpected fetch: ${m} ${u}`);
+      }) as unknown as typeof fetch;
+
+      const outcome = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'owner-jwt',
+        userId: ownerId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+
+      expect(outcome).toEqual({ ok: true });
+      expect(calls).toEqual(expect.arrayContaining([
+        'POST http://api.test/v1/app-1/frontend/deployments/from-source',
+        'PUT https://r2.test/put',
+        'POST http://api.test/v1/app-1/frontend/deployments/from-source/dep_1/start',
+        'GET http://api.test/v1/app-1/frontend/deployments',
+      ]));
+      expect((await getApprovalForOrg(pool, approval.id, orgId))!.status).toBe('approved');
+    } finally {
+      process.env.CONTROL_API_URL = prevApiUrl;
+      if (prevApiUrl === undefined) delete process.env.CONTROL_API_URL;
+      global.fetch = prevFetch;
+      cache.evict(conversationId, 'app-1');
+      await pool.query(`DELETE FROM dashboard_agent_conversations WHERE id = $1`, [conversationId]);
+      await dropOrg(orgId);
+    }
+  }, 30_000);
+
+  it('an UNCHANGED approve replays the recorded FUNCTION deploy through the HTTP transport', async () => {
+    const { orgId, ownerId } = await seedOrgWithOwnerAndMember();
+    const cache = getSharedWorkingTreeCache();
+    const conversationId = await getOrCreateOperatorConversation(pool, orgId, 'claude-sonnet-4-5');
+    const prevApiUrl = process.env.CONTROL_API_URL;
+    const prevFetch = global.fetch;
+    try {
+      process.env.CONTROL_API_URL = 'http://api.test';
+      setOperatorAccessPolicy({
+        evaluate: async () => ({ allowed: true, reason: null, approvalMode: 'consequential' }),
+      });
+      cache.write(conversationId, 'app-1', 'functions/send-receipt/index.ts', 'export const handler = 1');
+      const artifact = functionSourceArtifact(
+        'app-1:send-receipt', 'send-receipt', cache.get(conversationId, 'app-1'),
+      );
+      const toolArgs = { app_id: 'app-1', function_name: 'send-receipt' };
+      const approval = await createApproval(pool, {
+        conversationId,
+        turnMessageId: randomUUID(),
+        toolName: 'deploy_function_from_workspace',
+        toolArgs,
+        sensitivity: 'destructive',
+        approvedOperation: captureApprovalOperation({
+          toolName: 'deploy_function_from_workspace', args: toolArgs, artifact,
+        }),
+      });
+      await appendMessage(
+        pool, conversationId,
+        {
+          role: 'assistant', content: '', toolCallId: 'call_fn_deploy',
+          toolName: 'deploy_function_from_workspace', toolArgs, toolResult: null,
+          modelUsed: 'claude-sonnet-4-5', pendingApprovalId: approval.id,
+        },
+        randomUUID(),
+      );
+
+      const bodies: unknown[] = [];
+      global.fetch = vi.fn(async (_url: unknown, init?: { body?: string }) => {
+        bodies.push(JSON.parse(init?.body ?? '{}'));
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ id: 'fn_1', url: 'https://fn.test' }),
+        };
+      }) as unknown as typeof fetch;
+
+      const outcome = await resolveOperatorApproval(pool, {
+        approvalId: approval.id,
+        orgId,
+        jwt: 'owner-jwt',
+        userId: ownerId,
+        authMethod: 'jwt',
+        resolution: { status: 'approved' },
+      });
+
+      expect(outcome).toEqual({ ok: true });
+      // The frozen inline source is what shipped — read from the tree at
+      // execution time, never from the resolve body (which carries none).
+      expect(bodies).toEqual([{
+        name: 'send-receipt',
+        code: 'export const handler = 1',
+        trigger: { type: 'http' },
+      }]);
+    } finally {
+      process.env.CONTROL_API_URL = prevApiUrl;
+      if (prevApiUrl === undefined) delete process.env.CONTROL_API_URL;
+      global.fetch = prevFetch;
+      cache.evict(conversationId, 'app-1');
+      await pool.query(`DELETE FROM dashboard_agent_conversations WHERE id = $1`, [conversationId]);
+      await dropOrg(orgId);
+    }
   });
 });
 

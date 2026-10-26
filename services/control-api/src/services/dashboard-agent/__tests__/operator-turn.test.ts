@@ -41,6 +41,7 @@ import * as credModule from '../operator-credential.js';
 import * as approvalsModule from '../approvals-store.js';
 import * as scratchpadModule from '../operator-scratchpad-store.js';
 import * as messageStoreModule from '../store.js';
+import { setOperatorAccessPolicy } from '../operator-access-policy.js';
 import {
   runOperatorTurn,
   resolveOperatorModel,
@@ -570,8 +571,8 @@ describe('runOperatorTurn — model selection', () => {
 
     await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
 
-    expect(DEFAULT_OPERATOR_MODEL).toBe('anthropic/claude-sonnet-4.5');
-    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('anthropic/claude-sonnet-4.5');
+    expect(DEFAULT_OPERATOR_MODEL).toBe('qwen/qwen3.7-flash');
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('qwen/qwen3.7-flash');
     // The exact class of id that 404s: no provider segment.
     expect(DEFAULT_OPERATOR_MODEL).toContain('/');
     expect(DEFAULT_OPERATOR_MODEL).not.toMatch(/^claude-/);
@@ -781,12 +782,59 @@ describe('runOperatorTurn — trace id (D1)', () => {
     expect(mockMarkResumed).toHaveBeenCalledWith(stubPool, 'appr-gate-1');
   });
 
-  it('does not resume while an approval is still pending (no resumable row is even looked at)', async () => {
+  it('runs but does not resume while an approval is still pending', async () => {
+    // The previous test leaves a resolved-unconsumed approval on the mock; this
+    // case is about a still-PENDING one, which the real query filters out.
+    mockFindResumable.mockResolvedValue(null);
     mockListPending.mockResolvedValue([pendingApproval('appr-pending')]);
 
     await runOperatorTurn(stubPool, { job, wake: { reason: 'timer', traceId: 'optr_x' } });
 
-    expect(mockRunAgentTurn).not.toHaveBeenCalled();
+    // Since 2026-08-08 a pending decision no longer skips the wake (see the
+    // long note in operatorPreflight); it only must not be consumed as a
+    // resume, so this wake keeps its own minted trace id.
+    expect(mockRunAgentTurn).toHaveBeenCalledTimes(1);
+    expect(mockRunAgentTurn.mock.calls[0][0]).toMatchObject({ traceId: 'optr_x' });
     expect(mockMarkResumed).not.toHaveBeenCalled();
+  });
+});
+
+describe('runOperatorTurn — organization access guard', () => {
+  afterEach(() => { setOperatorAccessPolicy(null); });
+
+  it('passes a guard that consults the registered policy', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    const evaluate = vi.fn(async () => ({ allowed: true, reason: null, approvalMode: 'consequential' as const }));
+    setOperatorAccessPolicy({ evaluate });
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    const input = mockRunAgentTurn.mock.calls[0][0] as { accessGuard?: () => Promise<unknown> };
+    expect(typeof input.accessGuard).toBe('function');
+    // Task 8: the guard also carries the policy's `approvalMode`, which is
+    // what activates the Office consequential floor inside the loop. It is
+    // forwarded verbatim — the transport is not the place to reinterpret it.
+    await expect(input.accessGuard!()).resolves.toEqual({
+      allowed: true,
+      reason: null,
+      approvalMode: 'consequential',
+    });
+    expect(evaluate).toHaveBeenCalledWith({
+      organizationId: job.organizationId,
+      phase: 'run',
+      origin: 'operator',
+    });
+  });
+
+  it('returns a typed access-blocked skip when the turn reports blocked', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'blocked', reason: 'credits_required' }) as any);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(r).toMatchObject({
+      error: null,
+      approvalId: null,
+      skipped: { reason: 'access_blocked', blockedReason: 'credits_required' },
+    });
   });
 });

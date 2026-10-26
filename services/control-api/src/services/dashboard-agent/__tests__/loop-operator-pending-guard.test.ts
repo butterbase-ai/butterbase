@@ -1,3 +1,4 @@
+vi.mock('../../api-key-service.js', () => ({ ApiKeyService: { validateApiKey: vi.fn(async () => ({ organizationLocked: false })) } }));
 /**
  * LAYER 1 of the re-proposal defence, at the dispatch site — and LAYER 3's
  * tool.

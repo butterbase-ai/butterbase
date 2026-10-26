@@ -22,7 +22,7 @@ export type SnapshotTitleGateway = {
  * against the AI gateway, using the same AI_GATEWAY_URL env var and bearer
  * JWT pattern as the main loop's streamChatCompletion.
  */
-export function createGatewayChat(jwt: string): SnapshotTitleGateway {
+export function createGatewayChat(jwt: string, organizationId: string | null = null): SnapshotTitleGateway {
   return {
     async chat({ prompt, timeoutMs }) {
       const url = `${process.env.AI_GATEWAY_URL ?? 'http://localhost:3000'}/v1/chat/completions`;
@@ -34,6 +34,10 @@ export function createGatewayChat(jwt: string): SnapshotTitleGateway {
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${jwt}`,
+            // Attribution follows the same rule as the main stream: an Office
+            // turn's helper call bills the Office's organization, and an
+            // ordinary dashboard turn sends nothing.
+            ...(organizationId ? { 'X-Organization-Id': organizationId } : {}),
           },
           body: JSON.stringify({
             model: 'anthropic/claude-haiku-4.5',

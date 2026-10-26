@@ -12,6 +12,14 @@ export type McpCallResult = {
   ok: boolean;
   result?: unknown;
   error?: string;
+  /**
+   * Optional stable failure code for callers that must map a refusal to a
+   * specific HTTP status rather than the generic 502. Currently only
+   * `approval_operation_changed` (Task 8): the approved operation no longer
+   * matches what the server can execute, which is a 409 and a required
+   * re-proposal — not a transport failure.
+   */
+  code?: string;
 };
 
 /**

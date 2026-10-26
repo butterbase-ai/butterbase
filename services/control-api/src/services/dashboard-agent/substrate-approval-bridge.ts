@@ -77,7 +77,19 @@ import {
   isValidSubstrateActionId,
   readSubstrateEscalationActionId,
   SUBSTRATE_ESCALATION_TOOL,
+  type Approval,
 } from './approvals-store.js';
+import {
+  ApprovalOperationChangedError,
+  captureApprovalOperation,
+  deploymentArtifact,
+  verifyApprovalOperation,
+} from './approval-operation.js';
+import type { WorkingTreeCache } from './working-tree.js';
+import { createDeployer } from './deploy.js';
+import { createFunctionDeployer } from './deploy-function.js';
+import { createHttpFrontendMcp } from './frontend-http.js';
+import { createHttpFunctionMcp } from './function-http.js';
 
 /**
  * `callMcpTool` returns the raw JSON-RPC `result`, which for a tools/call is
@@ -122,6 +134,166 @@ function isSubstratePropose(name: string, args: unknown): args is Record<string,
  * package. Only two fields are load-bearing and both are checked defensively.
  */
 type ProposeShape = { action_id?: unknown; requires_approval?: unknown };
+
+/**
+ * Prove that the operation a human approved is the operation that can be
+ * executed NOW. Returns a refusal `McpCallResult`, or null to proceed.
+ *
+ * Two cases, both from the spec:
+ *
+ *  - A row WITH `approvedOperation`: rebuild the candidate from the current
+ *    working tree and compare. A deployment whose source changed since the
+ *    proposal is refused with `approval_operation_changed`; B is never
+ *    substituted for A. The owner must re-propose.
+ *  - A row WITHOUT one, in Office consequential mode: insufficient immutable
+ *    metadata — refuse and require a re-proposal. This is the legacy-row rule.
+ *    A standard (self-hosted / non-Office) approval keeps its old behaviour,
+ *    because nothing recorded an operation for it in the first place.
+ *
+ * A caller that passes no `approval` at all is a direct/legacy caller; this
+ * function has nothing to verify and says so by returning null. The route and
+ * the loop always pass the row.
+ */
+function verifyRecordedOperation(opts: {
+  name: string;
+  args: unknown;
+  approval?: Pick<Approval, 'approvedOperation' | 'conversationId'> | null;
+  officeConsequential?: boolean;
+  cache?: WorkingTreeCache;
+}): McpCallResult | null {
+  if (!opts.approval) return null;
+
+  if (!opts.approval.approvedOperation) {
+    if (opts.officeConsequential) {
+      return {
+        ok: false,
+        code: 'approval_operation_changed',
+        error:
+          'approval_operation_missing: this approval has no recorded operation and must be re-proposed',
+      };
+    }
+    return null;
+  }
+
+  const appId =
+    opts.args && typeof opts.args === 'object' && !Array.isArray(opts.args)
+      ? (opts.args as { app_id?: unknown }).app_id
+      : undefined;
+  const tree =
+    opts.cache && typeof appId === 'string'
+      ? opts.cache.get(opts.approval.conversationId, appId)
+      : undefined;
+
+  const candidate = captureApprovalOperation({
+    toolName: opts.name,
+    args: opts.args,
+    artifact: deploymentArtifact(opts.name, opts.args, tree),
+  });
+
+  try {
+    verifyApprovalOperation(opts.approval.approvedOperation, candidate);
+    return null;
+  } catch (err) {
+    if (err instanceof ApprovalOperationChangedError) {
+      return { ok: false, code: err.code, error: err.message };
+    }
+    throw err;
+  }
+}
+
+/** The operator's in-process deployment tools — no MCP counterpart exists. */
+const LOCAL_DEPLOY_TOOLS: ReadonlySet<string> = new Set([
+  'deploy_frontend',
+  'deploy_function_from_workspace',
+]);
+
+/**
+ * Dispatch a deploy approval through the SAME orchestration the live turn
+ * uses (`deploy.ts` / `deploy-function.ts`), over the same HTTP transports.
+ *
+ * WHY THIS IS NEEDED AT ALL: `deploy_frontend` and
+ * `deploy_function_from_workspace` are loop-internal names. Replaying them
+ * through `callMcpTool` reaches no server — before this, an approved deploy
+ * could never execute. The transports keep authorization where it was: the
+ * approving owner's JWT goes to routes that run `requireUserId` +
+ * `AppResolver`, exactly like a human dashboard deploy.
+ *
+ * The exactly-once cache still applies: this runs INSIDE `executeOnce`'s
+ * advisory-lock transaction, keyed on the approval id, so a retried approve
+ * is served from the cache rather than deploying twice.
+ */
+function localDeployDispatch(opts: {
+  name: string;
+  jwt: string;
+  orgId: string;
+  approval?: Pick<Approval, 'conversationId'> | null;
+  cache?: WorkingTreeCache;
+}): ((call: { name: string; args: unknown }) => Promise<McpCallResult>) | undefined {
+  if (!LOCAL_DEPLOY_TOOLS.has(opts.name)) return undefined;
+
+  return async (call) => {
+    const args = (call.args ?? {}) as Record<string, unknown>;
+    const appId = typeof args.app_id === 'string' && args.app_id.length > 0 ? args.app_id : null;
+    if (!appId) return { ok: false, error: 'app_id is required' };
+    if (!opts.cache || !opts.approval?.conversationId) {
+      return {
+        ok: false,
+        error: `no working tree is available to execute "${call.name}"; re-propose from a turn that can prepare it`,
+      };
+    }
+    const convId = opts.approval.conversationId;
+
+    if (call.name === 'deploy_frontend') {
+      const deployer = createDeployer({
+        cache: opts.cache,
+        mcp: createHttpFrontendMcp(),
+        onDeploymentProgress: () => {},
+      });
+      const r = await deployer.deploy({ convId, appId, jwt: opts.jwt });
+      return r.ok
+        ? { ok: true, result: { deployment_id: r.deployment_id, url: r.url } }
+        : { ok: false, error: r.error };
+    }
+
+    const functionName =
+      typeof args.function_name === 'string' && args.function_name.length > 0
+        ? args.function_name
+        : null;
+    if (!functionName) return { ok: false, error: 'function_name is required' };
+
+    const httpFn = createHttpFunctionMcp();
+    const deployer = createFunctionDeployer({
+      cache: opts.cache,
+      mcp: {
+        async call(name, fnArgs, jwt) {
+          try {
+            const result = await httpFn.call(name, fnArgs, jwt);
+            return { ok: true as const, result };
+          } catch (e) {
+            return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+          }
+        },
+      },
+      onFunctionDeployProgress: () => {},
+    });
+
+    const r = await deployer.deploy({
+      convId,
+      appId,
+      jwt: opts.jwt,
+      functionName,
+      trigger: args.trigger as
+        | { type: 'http' | 'cron' | 's3_upload' | 'webhook' | 'websocket'; config?: unknown }
+        | undefined,
+      envVars: args.envVars as Record<string, string> | undefined,
+      timeoutMs: args.timeoutMs as number | undefined,
+      memoryLimitMb: args.memoryLimitMb as number | undefined,
+    });
+    return r.ok
+      ? { ok: true, result: { url: r.url, deployment_id: r.deploymentId } }
+      : { ok: false, error: r.error };
+  };
+}
 
 /**
  * Execute an approved operator tool call, bridging substrate's native
@@ -181,8 +353,29 @@ export async function executeApprovedOperatorTool(
     orgId: string;
     /** The gating turn's trace id, read off the approval row. See `executeOnce`'s doc comment. */
     traceId?: string | null;
+    /**
+     * The approval row. Required for immutable-operation verification and for
+     * the operator's in-process deploy tools (which need its conversation id
+     * to find the working tree). Optional only for direct/legacy callers.
+     */
+    approval?: Pick<Approval, 'approvedOperation' | 'conversationId' | 'toolName' | 'toolArgs'> | null;
+    /** Whether this turn is governed by the customer Office contract. */
+    officeConsequential?: boolean;
+    /** The process's working-tree singleton; required to replay a deploy. */
+    cache?: WorkingTreeCache;
   },
 ): Promise<McpCallResult> {
+  // Ahead of executeOnce, the advisory lock and every dispatch: an approval
+  // whose recorded operation no longer matches must not execute anything.
+  const refused = verifyRecordedOperation({
+    name: opts.name,
+    args: opts.args,
+    approval: opts.approval,
+    officeConsequential: opts.officeConsequential,
+    cache: opts.cache,
+  });
+  if (refused) return refused;
+
   // Bound to a const so the type predicate's narrowing survives to the uses
   // below (TypeScript does not preserve aliased narrowing through a mutable
   // property access like `opts.args`).
@@ -201,6 +394,13 @@ export async function executeApprovedOperatorTool(
     orgId: opts.orgId,
     principal: 'human',
     traceId: opts.traceId,
+    dispatch: localDeployDispatch({
+      name: opts.name,
+      jwt: opts.jwt,
+      orgId: opts.orgId,
+      approval: opts.approval,
+      cache: opts.cache,
+    }),
   });
 
   // Not a gated substrate propose (a rule mutation, manage_integrations, …),

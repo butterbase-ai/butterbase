@@ -16,6 +16,7 @@
  */
 
 import pg from 'pg';
+import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
@@ -32,8 +33,11 @@ import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-gua
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
-import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
+import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS, resolveOfficeVerdict, type OperatorPolicy } from './operator-policy.js';
+import { classifyOfficeTool } from './office-tool-policy.js';
+import { captureApprovalOperation, deploymentArtifact } from './approval-operation.js';
 import { readOperatorYoloMode } from './operator-yolo.js';
+import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
 import { trimOperatorHistory } from './operator-history.js';
 import { getSystemPrompt } from './prompt.js';
@@ -72,7 +76,9 @@ export type LoopEvent =
   | { type: 'deployment_progress'; deployment_id: string; status: string; url?: string; log_tail?: string; error?: string }
   | { type: 'function_deployment_progress'; function_name: string; status: 'queued' | 'uploading' | 'live' | 'failed'; url?: string; error?: string }
   | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' }
-  | { type: 'title_updated'; title: string };
+  | { type: 'title_updated'; title: string }
+  /** The organization lost access mid-turn; no further model/tool work runs. */
+  | { type: 'blocked'; reason: string };
 
 /** Thrown by streamChatCompletion when the gateway returns a 402 credits error. */
 export class InsufficientCreditsStreamError extends Error {
@@ -203,6 +209,17 @@ export function getSharedWorkingTreeCache(): WorkingTreeCache {
 }
 
 /**
+ * `args.app_id` when the call names one — the working-tree key for artifact
+ * capture at approval time. A non-string or empty value is absent; there is
+ * nothing to look up and nothing to verify.
+ */
+function appIdFromArgs(args: unknown): string | null {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const appId = (args as { app_id?: unknown }).app_id;
+  return typeof appId === 'string' && appId.length > 0 ? appId : null;
+}
+
+/**
  * Unwrap a raw MCP `tools/call` JSON-RPC result — `{content:[{type:'text',
  * text}], isError?}` — into the flat payload internal loop-callers
  * (deploy.ts, repo-sync.ts, schema-context.ts, deploy-function.ts) already
@@ -256,6 +273,36 @@ function defaultMcp(): Mcp {
   return {
     async call(name: string, args: unknown, jwt: string) {
       const r = await callMcpTool(name, args, jwt);
+      if (!r.ok) throw new Error(r.error ?? 'mcp call failed');
+      return parseMcpToolResult(name, r.result);
+    },
+  };
+}
+
+/**
+ * The MCP transport for an Office-origin turn (Task 9).
+ *
+ * `callMcpTool` already accepts an active organization and forwards it as
+ * `x-organization-id`; the generic `Mcp` seam here is three-argument, so an
+ * ordinary dashboard turn has never carried one. That is correct for the
+ * dashboard — its tools use the caller's JWT and their personal-org fallback.
+ * It is NOT correct for a customer Office: a member who belongs to two
+ * organizations would otherwise read and write through whichever org their
+ * token happens to resolve to, while the question was asked of the Office's
+ * organization and is billed to it.
+ *
+ * This wrapper closes that gap for exactly one case: a conversation whose
+ * STORED row says `office` and names its organization. It reaches
+ * `callMcpTool` directly rather than `deps.mcp`, because the three-argument
+ * interface is the thing that cannot carry the org. It preserves
+ * `defaultMcp`'s contract exactly — throw on failure, parse the MCP envelope
+ * — so callers cannot tell which transport they got except by where the
+ * request went.
+ */
+function createOrganizationScopedMcp(organizationId: string): Mcp {
+  return {
+    async call(name: string, args: unknown, jwt: string) {
+      const r = await callMcpTool(name, args, jwt, organizationId);
       if (!r.ok) throw new Error(r.error ?? 'mcp call failed');
       return parseMcpToolResult(name, r.result);
     },
@@ -387,6 +434,16 @@ export async function* streamChatCompletion(opts: {
   messages: GatewayMessage[];
   tools: ToolSpec[];
   jwt: string;
+  /**
+   * The organization this completion is billed to (Task 9). Forwarded as
+   * `x-organization-id`; the gateway attributes usage to it instead of the
+   * personal organization its JWT fallback would otherwise pick.
+   *
+   * Absent for every ordinary dashboard turn, which keeps that surface's
+   * billing exactly where it was. The loop supplies it only for a stored
+   * Office conversation.
+   */
+  organizationId?: string | null;
 }): AsyncGenerator<StreamChunk> {
   const url = `${process.env.AI_GATEWAY_URL ?? 'http://localhost:3000'}/v1/chat/completions`;
 
@@ -395,6 +452,7 @@ export async function* streamChatCompletion(opts: {
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${opts.jwt}`,
+      ...(opts.organizationId ? { 'X-Organization-Id': opts.organizationId } : {}),
     },
     body: JSON.stringify({
       model: opts.model,
@@ -678,6 +736,25 @@ export async function* runAgentTurn(
      * user-instructed.
      */
     triggerContext?: Record<string, unknown>;
+    /**
+     * Optional organization-access recheck, consulted before every model
+     * request and before dispatching a batch of tools. Supplied by the
+     * operator turn; absent for human conversations, which are governed by
+     * their request authentication instead.
+     *
+     * `approvalMode` comes from the registered `OperatorAccessPolicy`. A
+     * cloud Office policy answers 'consequential' for operator/Office origins
+     * (and 'standard' for the ordinary dashboard), which activates the Office
+     * floor in `office-tool-policy.ts`: consequential tools need a human even
+     * when `yolo_mode` is on, and preparation stays autonomous without it.
+     * Absent means 'standard' — a self-hosted deployment with no cloud policy
+     * keeps its existing yolo behaviour exactly.
+     */
+    accessGuard?: () => Promise<{
+      allowed: boolean;
+      reason: string | null;
+      approvalMode?: 'standard' | 'consequential';
+    }>;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
@@ -712,6 +789,67 @@ export async function* runAgentTurn(
   const operatorOrgId = operatorOrgIdFromUserId(input.userId);
 
   /**
+   * ── Office provenance, read from the STORED conversation (Task 9) ────────
+   *
+   * Whether this turn is a customer Office's question — and which organization
+   * pays for it — is a property of the conversation row, not of anything a
+   * caller passes. That is deliberate. A flag or a request field would make
+   * "am I in an Office?" something a route could forget to set (failing open
+   * to the ordinary dashboard, with its cheaper billing and no consequential
+   * floor) or something a client could try to choose. Reading the row means
+   * the answer is whatever the server wrote at creation, for every caller:
+   * Ask, regenerate, an approval resume, a retry.
+   *
+   * A read failure degrades to the ordinary dashboard. That direction is safe
+   * rather than merely conventional: without a readable conversation the turn
+   * cannot append a message either, so it fails at the next step — it does not
+   * run Office work on an unverified identity.
+   *
+   * Operator turns skip the read: their identity is the org sentinel and their
+   * conversation is never Office-origin.
+   */
+  let officeOrganizationId: string | null = null;
+  if (!isOperator) {
+    try {
+      const stored = await getConversationFn(input.pool, input.conversationId, input.userId);
+      if (stored?.origin === 'office' && stored.organizationId) {
+        officeOrganizationId = stored.organizationId;
+      }
+    } catch {
+      // See above: treated as an ordinary dashboard turn.
+    }
+  }
+  const isOfficeTurn = officeOrganizationId !== null;
+
+  /**
+   * The guard for a foreground Office turn. It answers the same question the
+   * operator guard does — may this organization keep working right now? — and
+   * returns the same `approvalMode`, so the loop's existing two uses of it
+   * (before every model request, before every tool batch) apply unchanged.
+   *
+   * An explicitly supplied `input.accessGuard` wins: the operator path owns
+   * its own recheck and this is not a second, competing policy.
+   */
+  const accessGuard = input.accessGuard ?? (isOfficeTurn
+    ? async () => evaluateOperatorAccess({
+        organizationId: officeOrganizationId as string,
+        phase: 'run',
+        origin: 'office',
+        actorUserId: input.userId,
+        model: input.model,
+      })
+    : undefined);
+
+  if (isOfficeTurn) {
+    console.log('[dashboard-agent] office turn', {
+      conversationId: input.conversationId,
+      organizationId: officeOrganizationId,
+    });
+  }
+
+  const officeMcp = isOfficeTurn ? createOrganizationScopedMcp(officeOrganizationId as string) : null;
+
+  /**
    * The loop makes MCP calls the MODEL did not ask for. They go through
    * `deps.mcp` (default: `defaultMcp()` → the same `callMcpTool`), not through
    * the dispatch site, so the policy check there never sees them:
@@ -739,6 +877,7 @@ export async function* runAgentTurn(
   const turnMcp: Mcp = isOperator
     ? {
         async call(name: string, args: unknown, jwt: string) {
+          await assertOperatorKeyArguments(input.pool, jwt, operatorOrgId, args);
           // Loop-internal tools have no MCP counterpart; an internal caller
           // asking for one by name is a bug, not a permitted call.
           if (OPERATOR_LOCAL_TOOLS.has(name) || operatorPolicyForOrg(name, args, operatorOrgId) !== 'allow') {
@@ -747,7 +886,12 @@ export async function* runAgentTurn(
           return deps.mcp.call(name, args, jwt);
         },
       }
-    : deps.mcp;
+    /**
+     * An Office turn's tool transport carries the Office's organization (see
+     * `createOrganizationScopedMcp`). Everything else keeps the three-argument
+     * dashboard transport it has always used.
+     */
+    : (officeMcp ?? deps.mcp);
 
   /**
    * An operator turn gets a DIFFERENT `RepoSync` implementation: `repo-http.ts`,
@@ -781,7 +925,14 @@ export async function* runAgentTurn(
   const repoSync: RepoSync =
     isOperator && !depsOverride?.repoSync
       ? createHttpRepoSync({ cache })
-      : deps.repoSync;
+      /**
+       * Office turns hydrate and flush through the org-scoped MCP for the same
+       * reason their tool calls do: a member's personal-org fallback must not
+       * decide where this Office's source is read from or written to.
+       */
+      : officeMcp && !depsOverride?.repoSync
+        ? createRepoSync({ cache, mcp: officeMcp })
+        : deps.repoSync;
 
   /**
    * The org's substrate `yolo_mode` — read LAZILY, at most once per turn, and
@@ -812,6 +963,28 @@ export async function* runAgentTurn(
     if (yoloModeCache === null) yoloModeCache = await readOperatorYoloMode(turnMcp, input.jwt);
     return yoloModeCache;
   };
+
+  /**
+   * Whether this turn is governed by the customer Office contract rather than
+   * the general unattended-operator one. Set from the access policy's
+   * `approvalMode` on every guard evaluation (before each model request and
+   * before each tool batch), never from anything the model supplies.
+   *
+   * True for an operator turn whose registered policy answers
+   * 'consequential', and for a FOREGROUND turn whose stored conversation is
+   * Office-origin (Task 9 — the guard above is built from the row). False for
+   * a self-hosted deployment with no cloud policy ('standard'), for ordinary
+   * dashboard conversations, and for any turn whose conversation cannot be
+   * read. When true:
+   *
+   *   - consequential tools need a human even with `yolo_mode` on;
+   *   - Office preparation (`write_file`, `read_file`, …) is autonomous
+   *     without it;
+   *   - an operator `deny` still wins, unchanged.
+   *
+   * See `resolveOfficeVerdict` for the full precedence.
+   */
+  let officeConsequential = false;
 
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
@@ -1122,11 +1295,27 @@ export async function* runAgentTurn(
       let assistantText = '';
       const pendingToolCalls: Array<{ id: string; name: string; args: unknown }> = [];
 
+      // Recheck before EVERY model request. A downgrade or owner removal that
+      // lands between iterations stops the next spend here rather than after it.
+      if (accessGuard) {
+        const access = await accessGuard();
+        if (!access.allowed) {
+          yield { type: 'blocked', reason: access.reason ?? 'service_unavailable' };
+          terminated = true;
+          break outer;
+        }
+        officeConsequential = access.approvalMode === 'consequential';
+      }
+
       const stream = streamChatCompletion({
         model: input.model,
         messages,
         tools,
         jwt: input.jwt,
+        // Billing attribution for an Office turn; absent (undefined) for every
+        // ordinary dashboard turn, which the gateway then bills exactly as
+        // before.
+        organizationId: officeOrganizationId,
       });
 
       try {
@@ -1194,8 +1383,33 @@ export async function* runAgentTurn(
 
       const allowedToolNames = new Set(tools.map((t) => t.name));
       const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
+      // Recheck once before any tool in this batch is dispatched. The assistant
+      // tool-call row is already persisted, so a denial is written back as a
+      // tool RESULT for every call — history stays paired and the model never
+      // sees a hanging call.
+      let accessBlockedReason: string | null = null;
+      if (accessGuard) {
+        const access = await accessGuard();
+        if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
+        else officeConsequential = access.approvalMode === 'consequential';
+      }
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
+
+        if (accessBlockedReason) {
+          const payload = { error: 'office_access_blocked', reason: accessBlockedReason };
+          toolCallResults.push({ id: tc.id, result: payload });
+          yield { type: 'tool_result', id: tc.id, result: payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload,
+          });
+          continue;
+        }
 
         /**
          * THE CONTROL. For operator turns the policy table decides, per
@@ -1216,9 +1430,32 @@ export async function* runAgentTurn(
          * stored credential being org-bound — an external property, not a
          * control.
          */
-        let operatorVerdict = isOperator
+        let operatorVerdict: OperatorPolicy | null = isOperator
           ? operatorPolicyForOrg(tc.name, tc.args, operatorOrgId)
           : null;
+        if (isOperator) {
+          try {
+            await assertOperatorKeyArguments(input.pool, input.jwt, operatorOrgId, tc.args);
+          } catch {
+            operatorVerdict = 'deny';
+          }
+        }
+
+        /**
+         * THE OFFICE FLOOR (Task 8). In a customer Office turn the Office
+         * classifier is authoritative for reads/preparation/consequences, and
+         * an operator 'deny' (cross-org, self-approval) still wins. Yolo is
+         * never consulted here — the whole point is that a customer Office
+         * does not inherit the substrate shortcut for consequential work.
+         *
+         * `officeConsequential` is derived from the server-side access policy
+         * on this turn, never from a model argument; it is false for every
+         * self-hosted deployment with no cloud policy, which is why their
+         * behaviour is unchanged.
+         */
+        if (officeConsequential) {
+          operatorVerdict = resolveOfficeVerdict(operatorVerdict, classifyOfficeTool(tc.name, tc.args));
+        }
 
         /**
          * `yolo_mode`, applied only where it can matter. A 'deny' never reaches
@@ -1236,6 +1473,7 @@ export async function* runAgentTurn(
          * request. It falls through to the catalog guard below either way.
          */
         if (
+          !officeConsequential &&
           operatorVerdict === 'approval' &&
           allowedToolNames.has(tc.name) &&
           (await resolveYoloMode())
@@ -1370,6 +1608,27 @@ export async function* runAgentTurn(
         // was before the tiers changed.
         if (operatorVerdict === 'approval' && allowedToolNames.has(tc.name)) {
           const messageId = randomUUID();
+          /**
+           * The server-owned record of WHAT is being approved (Task 8).
+           *
+           * Downstream tools still receive only `tc.args`. This object lives
+           * in `dashboard_agent_approvals.approved_operation` and is what the
+           * replay verifies against: the exact tool, the exact args, the
+           * target app, and — for a deployment — a digest of the source that
+           * was proposed. A later working-tree change cannot ride in under
+           * this approval; it is refused with `approval_operation_changed`
+           * and must be re-proposed.
+           */
+          const approvedOperation = captureApprovalOperation({
+            toolName: tc.name,
+            args: tc.args,
+            artifact: (() => {
+              const appId = appIdFromArgs(tc.args);
+              return appId
+                ? deploymentArtifact(tc.name, tc.args, cache.get(input.conversationId, appId))
+                : undefined;
+            })(),
+          });
           const approval = await createApproval(input.pool, {
             conversationId: input.conversationId,
             turnMessageId: messageId,
@@ -1380,6 +1639,7 @@ export async function* runAgentTurn(
             // expects, and there is no weaker meaning available.
             sensitivity: 'destructive',
             traceId: input.traceId ?? null,
+            approvedOperation,
           });
           // `gated`: the operator turn stops here, right now, and does not
           // resume until a human resolves `approval.id` — reported via
@@ -2001,8 +2261,18 @@ export async function* runAgentTurn(
             toolName: tc.name,
           });
         }
+        /**
+         * The active org for this tool call.
+         *
+         * Ordinary dashboard turns keep using the request's `organizationId`
+         * header, exactly as before. An Office turn uses the organization
+         * bound to its STORED conversation — the same value the gateway is
+         * billed and the guard evaluated. They are equal whenever the route's
+         * binding check passed, and when they are not, the stored one wins.
+         */
+        const toolOrganizationId = officeOrganizationId ?? input.organizationId;
         const call = await callMcpTool(
-          tc.name, tc.args, input.jwt, input.organizationId, input.traceId, input.triggerContext,
+          tc.name, tc.args, input.jwt, toolOrganizationId, input.traceId, input.triggerContext,
         );
         // Scope app discovery to the active org. The shared `/apps` endpoint
         // deliberately fans out across every org the user belongs to; here —
@@ -2014,9 +2284,9 @@ export async function* runAgentTurn(
           call.ok &&
           tc.name === 'manage_app' &&
           (tc.args as { action?: string } | null)?.action === 'list' &&
-          input.organizationId
+          toolOrganizationId
         ) {
-          call.result = scopeAppListToOrg(call.result, input.organizationId);
+          call.result = scopeAppListToOrg(call.result, toolOrganizationId);
         }
 
         /**
@@ -2128,6 +2398,12 @@ export async function* runAgentTurn(
           content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
         });
       }
+
+      if (accessBlockedReason) {
+        yield { type: 'blocked', reason: accessBlockedReason };
+        terminated = true;
+        break outer;
+      }
     }
 
     // Reached the tool call cap
@@ -2155,7 +2431,7 @@ export async function* runAgentTurn(
         // must never block or fail the SSE stream, so every step is wrapped.
         if (flushResult.newSnapshotId) {
           try {
-            const gateway = snapshotTitleGatewayFactory(input.jwt);
+            const gateway = snapshotTitleGatewayFactory(input.jwt, officeOrganizationId);
             const snapshotTitle = await deriveSnapshotTitle(
               input.userMessage,
               lastAssistantText,
@@ -2205,7 +2481,7 @@ export async function* runAgentTurn(
       try {
         const conversation = await getConversationFn(input.pool, input.conversationId, input.userId);
         if (conversation && conversation.title === 'New conversation') {
-          const gateway = snapshotTitleGatewayFactory(input.jwt);
+          const gateway = snapshotTitleGatewayFactory(input.jwt, officeOrganizationId);
           const title = await generateConversationTitle(input.userMessage, lastAssistantText, gateway);
           if (title) {
             const updated = await updateConversationTitleFn(
