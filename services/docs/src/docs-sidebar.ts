@@ -35,6 +35,7 @@ export const sidebar: StarlightUserConfig['sidebar'] = [
       { label: 'Key-Value Store', slug: 'core-concepts/kv' },
       { label: 'Realtime', slug: 'core-concepts/realtime' },
       { label: 'Substrate', slug: 'core-concepts/substrate' },
+      { label: 'Office', slug: 'core-concepts/office' },
       { label: 'Charging Your Users', slug: 'core-concepts/billing' },
       { label: 'Plans & Usage', slug: 'core-concepts/plans-and-usage' },
       { label: 'Integrations', slug: 'core-concepts/integrations' },

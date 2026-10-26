@@ -151,3 +151,12 @@ Response shape is identical to the login response. Failure responses are HTTP 40
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | /v1/\{app_id}/audit-logs | Query auth events. Filters: `user_id`, `event_type`, `limit`, `offset` |
+
+## Organization scope
+
+Platform requests made with a dashboard JWT can name the organization with the
+`X-Organization-Id` header. The API verifies that the caller is a member; a
+missing or foreign organization is rejected. Organization-locked platform keys
+are managed credentials bound to exactly one organization — they cannot be used
+to administer organizations and cannot be pointed at another organization. This
+is separate from end-user authentication above, which is scoped by `{app_id}`.

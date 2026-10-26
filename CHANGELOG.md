@@ -14,6 +14,11 @@
 
 - **Ops**: `scripts/sync-paused-frontends.ts` -- run once after the dispatch worker deploy so apps paused before it show the paused page (rewrites their existing KV routes with `paused`). Idempotent; `--dry-run` lists the apps without writing.
 - **Idle pause**: Upgrading a free organization to a paid plan resumes the projects that were paused for inactivity. Projects you or Butterbase support paused stay paused.
+
+- **Assistant API (generic)**: organization-scoped requests can name the organization with the `X-Organization-Id` header (membership-checked); stored assistant conversations record a server-owned `origin` and organization. Organization-locked managed keys are bound to exactly one organization and cannot administer organizations. Approval rows can carry a recorded immutable operation for replay verification.
+
+- **CORS**: `OFFICE_ALLOWED_ORIGINS` accepts a comma-separated list of Office frontend origins; the legacy single `OFFICE_URL` remains supported. Malformed entries fail startup rather than being silently ignored.
+
 - **AI video (optional)**: explicit fictional-character declarations, durable preparation stages, bounded eligible retry, provider cleanup, source retention, and deletion/move fences. Disabled unless the deployment enables eligible apps and models.
 
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
