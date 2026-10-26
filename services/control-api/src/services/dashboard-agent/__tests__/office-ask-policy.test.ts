@@ -314,6 +314,21 @@ describe('an Office-origin conversation is governed by the Office floor', () => 
       1, stubPool, 'conv-1', expect.objectContaining({ role: 'user', content: 'Do the thing' }),
     );
   });
+
+  it('fails the turn closed when the stored provenance cannot be read', async () => {
+    // A conversation row is the ONLY evidence that this is an Office turn. If
+    // that read fails, proceeding as an ordinary dashboard turn would drop the
+    // Office floor, the organization-scoped tools and the organization's
+    // billing — a fail-open downgrade. The turn must stop instead.
+    mockGetConversation.mockRejectedValueOnce(new Error('database unavailable'));
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+
+    await expect(collect(runAgentTurn(baseInput))).rejects.toThrow('database unavailable');
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(POLICY_CALLS).toEqual([]);
+  });
 });
 
 describe('an ordinary dashboard conversation is unchanged', () => {
