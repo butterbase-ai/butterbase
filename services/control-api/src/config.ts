@@ -262,6 +262,11 @@ export const config = {
   submissionsDashboardUrl: process.env.SUBMISSIONS_DASHBOARD_URL ?? 'http://localhost:5173',
   officeUrl: process.env.OFFICE_URL ?? 'http://localhost:3100',
   templatesUrl: process.env.TEMPLATES_URL ?? 'http://localhost:5174',
+  /**
+   * Cloud deployments set this so startup fails if the private operator access
+   * policy did not register. OSS defaults off, preserving self-hosted behavior.
+   */
+  operatorAccessPolicyRequired: process.env.OPERATOR_ACCESS_POLICY_REQUIRED === '1',
 
   subdomain: {
     baseDomain: process.env.BASE_DOMAIN ?? 'butterbase.dev',
