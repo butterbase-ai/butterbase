@@ -29,7 +29,7 @@ The exact prices and allowances live in two places, on purpose — they're not c
 butterbase billing status
 ```
 
-Playground projects are paused after a week with nothing happening on them. Nothing is deleted. Owners receive a warning before an inactivity pause. Real app traffic and qualifying human frontend visits keep projects active; scheduled cron jobs do not. Once paused for inactivity, upgrade to a paid plan to bring the project back. Paid projects do not pause for inactivity.
+Playground projects are paused after a week with nothing happening on them. Nothing is deleted. Owners receive a warning and a follow-up reminder before an inactivity pause. The emails explain how much time remains and how to keep the project active. Real app traffic and qualifying human frontend visits keep projects active; scheduled cron jobs do not. Once paused for inactivity, upgrade to a paid plan to bring the project back. Paid projects do not pause for inactivity.
 
 ## Usage meters
 

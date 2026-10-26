@@ -38,7 +38,7 @@ const { appConfigRoutes } = await import('../routes/app-config.js');
 const suite = endpoints.control && endpoints.runtime && endpoints.redis ? describe : describe.skip;
 suite('idle pause lifecycle on migrated schemas with real Redis and HTTP hooks', () => {
   const owner = randomUUID(), org = randomUUID(), appId = `app_idle_verify_${randomUUID().replaceAll('-', '')}`;
-  const config = { ...idlePauseConfigFromEnv({ BUTTERBASE_IDLE_PAUSE_DAYS: '28' })!, maxFraction: 1 };
+  const config = { ...idlePauseConfigFromEnv({ BUTTERBASE_IDLE_PAUSE_DAYS: '14', BUTTERBASE_IDLE_PAUSE_GRACE_DAYS: '7' })!, maxFraction: 1 };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   let control: pg.Pool, runtime: pg.Pool, redis: Redis;
   let app: ReturnType<typeof Fastify>;
@@ -88,26 +88,31 @@ suite('idle pause lifecycle on migrated schemas with real Redis and HTTP hooks',
   const patch = (paused: boolean) => app.inject({ method: 'PATCH', url: `/v1/${appId}/config/pause`, headers: { 'x-owner': '1' }, payload: { paused } });
 
   it('records real HTTP activity and cancels warning/grace', async () => {
-    await runtime.query(`UPDATE apps SET last_active_at=now()-interval '40 days', idle_warned_at=now()-interval '10 days', idle_pause_notified_at=now() WHERE id=$1`, [appId]);
+    await runtime.query(`UPDATE apps SET last_active_at=now()-interval '40 days', idle_warned_at=now()-interval '10 days', idle_reminded_at=now()-interval '5 days', idle_pause_notified_at=now() WHERE id=$1`, [appId]);
     expect((await app.inject(`/v1/${appId}/public/data`)).statusCode).toBe(200);
     await vi.waitFor(async () => expect(Date.now() - (await row()).last_active_at.getTime()).toBeLessThan(5000));
     const after = await row();
-    expect(after.idle_warned_at).toBeNull(); expect(after.idle_pause_notified_at).toBeNull();
+    expect(after.idle_warned_at).toBeNull(); expect(after.idle_reminded_at).toBeNull(); expect(after.idle_pause_notified_at).toBeNull();
   });
 
-  it('warns, notifies, honors grace, pauses, rejects free resume, and resumes after upgrade', async () => {
+  it('warns, reminds, notifies, honors grace, pauses, rejects free resume, and resumes after upgrade', async () => {
     await redis.del(...keys);
     await runtime.query(`UPDATE apps SET last_active_at=now()-interval '40 days' WHERE id=$1`, [appId]);
     expect(await sweep()).toMatchObject({ warned: 1, notified: 0, paused: 0 });
     expect(await sweep()).toMatchObject({ warned: 0, notified: 0, paused: 0 });
     await runtime.query(`UPDATE apps SET idle_warned_at=now()-interval '8 days' WHERE id=$1`, [appId]);
+    expect(await sweep()).toMatchObject({ reminded: 1, notified: 0, paused: 0 });
+    expect(await sweep()).toMatchObject({ reminded: 0, notified: 0, paused: 0 });
+    await runtime.query(`UPDATE apps SET idle_reminded_at=now()-interval '4 days' WHERE id=$1`, [appId]);
     expect(await sweep()).toMatchObject({ notified: 1, paused: 0 });
     expect((await row()).paused).toBe(false);
     expect(await sweep()).toMatchObject({ paused: 0 });
     await runtime.query(`UPDATE apps SET idle_pause_notified_at=now()-interval '6 days' WHERE id=$1`, [appId]);
+    expect(await sweep()).toMatchObject({ paused: 0 });
+    await runtime.query(`UPDATE apps SET idle_pause_notified_at=now()-interval '8 days' WHERE id=$1`, [appId]);
     expect(await sweep()).toMatchObject({ paused: 1 });
     expect((await row()).paused_by).toBe('idle_reaper');
-    expect(mail.owner).toHaveBeenCalledTimes(2);
+    expect(mail.owner).toHaveBeenCalledTimes(3);
     expect((await app.inject(`/v1/${appId}/public/data`)).statusCode).toBe(503);
     expect((await app.inject({ method: 'POST', url: `/v1/${appId}/agents/echo/runs`, headers: { 'x-owner': '1' } })).statusCode).toBe(503);
     expect((await app.inject({ url: `/v1/${appId}/config`, headers: { 'x-owner': '1' } })).statusCode).toBe(200);
@@ -119,6 +124,7 @@ suite('idle pause lifecycle on migrated schemas with real Redis and HTTP hooks',
     expect(await resumeIdlePausedAppsForOrg(control, org, 'launch', log)).toEqual([appId]);
     expect((await row()).paused).toBe(false);
     expect((await row()).idle_warned_at).toBeNull();
+    expect((await row()).idle_reminded_at).toBeNull();
     expect((await row()).idle_pause_notified_at).toBeNull();
     expect((await app.inject(`/v1/${appId}/public/data`)).statusCode).toBe(200);
     await runtime.query(`UPDATE apps SET last_active_at=now()-interval '100 days' WHERE id=$1`, [appId]);

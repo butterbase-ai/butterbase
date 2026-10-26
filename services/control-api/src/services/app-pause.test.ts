@@ -50,7 +50,7 @@ describe('setPausedState: resume', () => {
     const { db, query } = fakeDb([row({ paused: false, paused_at: null, paused_reason: null, paused_by: null })]);
     await setPausedState(db, 'app_1', { paused: false, by: 'owner' });
     const sql = query.mock.calls[0][0] as string;
-    for (const frag of ['paused = false', 'paused_at = NULL', 'paused_reason = NULL', 'paused_by = NULL', 'last_active_at = now()', 'idle_warned_at = NULL', 'idle_pause_notified_at = NULL']) {
+    for (const frag of ['paused = false', 'paused_at = NULL', 'paused_reason = NULL', 'paused_by = NULL', 'last_active_at = now()', 'idle_warned_at = NULL', 'idle_reminded_at = NULL', 'idle_pause_notified_at = NULL']) {
       expect(sql).toContain(frag);
     }
   });

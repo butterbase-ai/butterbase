@@ -113,6 +113,7 @@ export async function setPausedState(
                 paused_by = NULL,
                 last_active_at = now(),
                 idle_warned_at = NULL,
+                idle_reminded_at = NULL,
                 idle_pause_notified_at = NULL,
                 updated_at = now()
           WHERE id = $1

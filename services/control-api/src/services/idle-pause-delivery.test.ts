@@ -14,8 +14,15 @@ it('notifies all org owners with recipient preferences and unsubscribe headers',
   expect(db.query).toHaveBeenCalledWith(expect.stringContaining("om.role = 'owner'"), ['org_team']);
   expect(send).toHaveBeenCalledTimes(2);
   expect(send).toHaveBeenCalledWith('two@example.test', 'project_idle_warning',
-    { appId: 'app_1', appName: 'Pantry', warnDays: '7' },
+    { appId: 'app_1', appName: 'Pantry', organizationId: 'org_team', warnDays: '7' },
     { userId: 'owner2', controlPool: db, scope: { appId: 'app_1' }, actionTokens: { unsubscribeTemplate: 'unsubscribe-token' } });
+});
+it('delivers the reminder to owners with its configured lead time and unsubscribe scope', async () => {
+  const db = { query: vi.fn(async () => ({ rows: [{ id: 'owner1', email: 'one@example.test' }] })) };
+  await sendIdlePauseEmail(db as never, app, 'project_idle_reminder', 3, log);
+  expect(send).toHaveBeenCalledWith('one@example.test', 'project_idle_reminder',
+    { appId: 'app_1', appName: 'Pantry', organizationId: 'org_team', warnDays: '3' },
+    expect.objectContaining({ userId: 'owner1', scope: { appId: 'app_1' }, actionTokens: { unsubscribeTemplate: 'unsubscribe-token' } }));
 });
 it('keeps delivering when one recipient or token mint fails', async () => {
   const db = { query: vi.fn(async () => ({ rows: [{ id: 'u1', email: 'one@example.test' }, { id: 'u2', email: 'two@example.test' }] })) };

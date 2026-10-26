@@ -8,9 +8,10 @@ type Log = { warn(obj: unknown, msg?: string): void };
 export async function sendIdlePauseEmail(
   controlDb: Pool,
   app: IdlePauseApp,
-  template: 'project_idle_warning' | 'project_paused_idle',
+  template: 'project_idle_warning' | 'project_idle_reminder' | 'project_paused_idle',
   warnDays: number,
   log: Log,
+  inactiveDays?: number,
 ): Promise<void> {
   try {
     const owners = await controlDb.query<{ id: string; email: string }>(
@@ -30,7 +31,8 @@ export async function sendIdlePauseEmail(
           log.warn({ err, appId: app.id, userId: owner.id }, '[idle-pause] unsubscribe token unavailable');
         }
         const result = await sendBillingEmail(owner.email, template, {
-          appId: app.id, appName: app.name, warnDays: String(warnDays),
+          appId: app.id, appName: app.name, organizationId: app.organization_id, warnDays: String(warnDays),
+          ...(inactiveDays !== undefined ? { inactiveDays: String(inactiveDays) } : {}),
         }, {
           controlPool: controlDb, userId: owner.id, scope: { appId: app.id },
           actionTokens: unsubscribeTemplate ? { unsubscribeTemplate } : undefined,

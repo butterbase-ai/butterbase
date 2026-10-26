@@ -14,6 +14,7 @@ const DEFAULT_PLANS = ['playground'];
 export interface IdlePauseConfig {
   days: number;
   warnDays: number;
+  reminderDays: number;
   graceDays: number;
   minVisitors: number;
   dryRun: boolean;
@@ -31,15 +32,19 @@ export function idlePauseConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Id
   };
   const days = number('DAYS', 0);
   const warnDays = number('WARN_DAYS', 7);
+  // Existing short-warning installations must not be silently disabled.
+  // A one-day warning keeps its original two-email path (no room for a reminder).
+  const reminderDays = number('REMINDER_DAYS', Math.min(3, warnDays - 1));
   const graceDays = number('GRACE_DAYS', 5);
   const minVisitors = number('MIN_VISITORS', 3);
   const maxPerTick = number('MAX_PER_TICK', 25);
   const maxFraction = number('MAX_FRACTION', 0.2);
   const dryRun = env[prefix + 'DRY_RUN']?.trim() || 'false';
   if (![days, warnDays, graceDays, minVisitors, maxPerTick].every((n) => Number.isSafeInteger(n) && n > 0)
-    || days <= warnDays || !(maxFraction > 0 && maxFraction <= 1)
+    || !Number.isSafeInteger(reminderDays) || reminderDays < 0
+    || days <= warnDays || warnDays <= reminderDays || !(maxFraction > 0 && maxFraction <= 1)
     || !['true', 'false'].includes(dryRun)) return null;
-  return { days, warnDays, graceDays, minVisitors, maxPerTick, maxFraction,
+  return { days, warnDays, reminderDays, graceDays, minVisitors, maxPerTick, maxFraction,
     plans: idlePausePlansFromEnv(env[prefix + 'PLANS']), dryRun: dryRun === 'true' };
 }
 
