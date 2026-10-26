@@ -73,7 +73,9 @@ export type LoopEvent =
   | { type: 'deployment_progress'; deployment_id: string; status: string; url?: string; log_tail?: string; error?: string }
   | { type: 'function_deployment_progress'; function_name: string; status: 'queued' | 'uploading' | 'live' | 'failed'; url?: string; error?: string }
   | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' }
-  | { type: 'title_updated'; title: string };
+  | { type: 'title_updated'; title: string }
+  /** The organization lost access mid-turn; no further model/tool work runs. */
+  | { type: 'blocked'; reason: string };
 
 /** Thrown by streamChatCompletion when the gateway returns a 402 credits error. */
 export class InsufficientCreditsStreamError extends Error {
@@ -679,6 +681,13 @@ export async function* runAgentTurn(
      * user-instructed.
      */
     triggerContext?: Record<string, unknown>;
+    /**
+     * Optional organization-access recheck, consulted before every model
+     * request and before dispatching a batch of tools. Supplied by the
+     * operator turn; absent for human conversations, which are governed by
+     * their request authentication instead.
+     */
+    accessGuard?: () => Promise<{ allowed: boolean; reason: string | null }>;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
@@ -1124,6 +1133,17 @@ export async function* runAgentTurn(
       let assistantText = '';
       const pendingToolCalls: Array<{ id: string; name: string; args: unknown }> = [];
 
+      // Recheck before EVERY model request. A downgrade or owner removal that
+      // lands between iterations stops the next spend here rather than after it.
+      if (input.accessGuard) {
+        const access = await input.accessGuard();
+        if (!access.allowed) {
+          yield { type: 'blocked', reason: access.reason ?? 'service_unavailable' };
+          terminated = true;
+          break outer;
+        }
+      }
+
       const stream = streamChatCompletion({
         model: input.model,
         messages,
@@ -1196,8 +1216,32 @@ export async function* runAgentTurn(
 
       const allowedToolNames = new Set(tools.map((t) => t.name));
       const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
+      // Recheck once before any tool in this batch is dispatched. The assistant
+      // tool-call row is already persisted, so a denial is written back as a
+      // tool RESULT for every call — history stays paired and the model never
+      // sees a hanging call.
+      let accessBlockedReason: string | null = null;
+      if (input.accessGuard) {
+        const access = await input.accessGuard();
+        if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
+      }
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
+
+        if (accessBlockedReason) {
+          const payload = { error: 'office_access_blocked', reason: accessBlockedReason };
+          toolCallResults.push({ id: tc.id, result: payload });
+          yield { type: 'tool_result', id: tc.id, result: payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload,
+          });
+          continue;
+        }
 
         /**
          * THE CONTROL. For operator turns the policy table decides, per
@@ -2136,6 +2180,12 @@ export async function* runAgentTurn(
           tool_call_id: tc.id,
           content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
         });
+      }
+
+      if (accessBlockedReason) {
+        yield { type: 'blocked', reason: accessBlockedReason };
+        terminated = true;
+        break outer;
       }
     }
 

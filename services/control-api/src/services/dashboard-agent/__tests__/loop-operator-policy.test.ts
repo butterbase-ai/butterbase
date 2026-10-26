@@ -809,3 +809,54 @@ describe('managed operator credential target containment', () => {
     resolve.mockRestore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// organization access guard — Task 7
+// ---------------------------------------------------------------------------
+
+describe('operator — organization access guard', () => {
+  it('stops before the first model call when the guard denies', async () => {
+    const fetchMock = vi.fn(async () => gatewayResponse([
+      { choices: [{ delta: { content: 'should not happen' }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ]));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const accessGuard = vi.fn(async () => ({ allowed: false, reason: 'credits_required' }));
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard })));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    expect(events).toContainEqual({ type: 'blocked', reason: 'credits_required' });
+  });
+
+  it('rechecks before the second model call and stops without requesting it', async () => {
+    oneToolCallThenStop('select_rows', { app_id: 'app-1', table: 't' });
+    const accessGuard = vi.fn()
+      .mockResolvedValueOnce({ allowed: true, reason: null })
+      .mockResolvedValueOnce({ allowed: true, reason: null })
+      .mockResolvedValue({ allowed: false, reason: 'account_suspended' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard })));
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(events).toContainEqual({ type: 'blocked', reason: 'account_suspended' });
+  });
+
+  it('blocks tool dispatch and writes a denied tool result after a downgrade', async () => {
+    oneToolCallThenStop('select_rows', { app_id: 'app-1', table: 't' });
+    const accessGuard = vi.fn()
+      .mockResolvedValueOnce({ allowed: true, reason: null })
+      .mockResolvedValueOnce({ allowed: false, reason: 'credential_repair_required' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard })));
+
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    const toolResult = events.find((e) => e.type === 'tool_result');
+    expect(toolResult).toMatchObject({
+      result: { error: 'office_access_blocked', reason: 'credential_repair_required' },
+    });
+    expect(events).toContainEqual({ type: 'blocked', reason: 'credential_repair_required' });
+  });
+});
