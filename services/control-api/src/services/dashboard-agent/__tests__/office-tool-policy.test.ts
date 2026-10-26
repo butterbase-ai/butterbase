@@ -21,6 +21,7 @@ import { classifyOfficeTool } from '../office-tool-policy.js';
 import {
   OPERATOR_APPROVAL_SUBSTRATE_ACTIONS,
   OPERATOR_DENIED_SUBSTRATE_ACTIONS,
+  resolveOfficeVerdict,
 } from '../operator-policy.js';
 
 describe('consequential work requires approval even when the operator tier would allow it', () => {
@@ -182,5 +183,33 @@ describe('the agent may never weaken its own controls', () => {
     for (const action of OPERATOR_APPROVAL_SUBSTRATE_ACTIONS) {
       expect(classifyOfficeTool('manage_substrate', { action })).toBe('approval');
     }
+  });
+});
+
+describe('resolveOfficeVerdict precedence', () => {
+  it('never lets the Office floor lift an operator denial', () => {
+    // A foreign org_id (operator deny) plus a consequential Office action
+    // (Office approval) must stay denied. Turning it into an approval would put
+    // a cross-organization proposal in front of the owner even though the
+    // executor refuses it.
+    expect(resolveOfficeVerdict('deny', 'approval')).toBe('deny');
+    expect(resolveOfficeVerdict('deny', 'allow')).toBe('deny');
+    expect(resolveOfficeVerdict('deny', 'deny')).toBe('deny');
+  });
+
+  it('keeps the Office approval binding over an operator allow', () => {
+    expect(resolveOfficeVerdict('allow', 'approval')).toBe('approval');
+    expect(resolveOfficeVerdict('approval', 'approval')).toBe('approval');
+  });
+
+  it('lets an Office allow clear the operator approval tier for preparation', () => {
+    expect(resolveOfficeVerdict('approval', 'allow')).toBe('allow');
+    expect(resolveOfficeVerdict(null, 'allow')).toBe('allow');
+  });
+
+  it('keeps an Office denial absolute', () => {
+    expect(resolveOfficeVerdict('allow', 'deny')).toBe('deny');
+    expect(resolveOfficeVerdict('approval', 'deny')).toBe('deny');
+    expect(resolveOfficeVerdict(null, 'deny')).toBe('deny');
   });
 });
