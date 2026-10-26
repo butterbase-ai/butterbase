@@ -86,6 +86,32 @@ function rowToApproval(row: any): Approval {
 }
 
 /**
+ * A pending decision as the ORGANIZATION feed sees it (Task 9).
+ *
+ * `source` says which surface raised it, and it is deliberately the only new
+ * fact:
+ *
+ *   - `'operator'` — the headless operator's own conversation (the
+ *     `operator:<org>` sentinel author);
+ *   - `'office'` — a foreground Ask conversation created by a MEMBER of the
+ *     organization. The owner must be able to see and answer it from the same
+ *     queue as background work, or the owner-only approval contract would
+ *     have no UI.
+ *
+ * It carries nothing from the conversation itself: no message content, no
+ * transcript, no title. The decision payload was already the pending tool
+ * call; a member's chat stays theirs.
+ */
+export type OrgApproval = Approval & { source: 'operator' | 'office' };
+
+function rowToOrgApproval(row: any): OrgApproval {
+  return {
+    ...rowToApproval(row),
+    source: row.source === 'office' ? 'office' : 'operator',
+  };
+}
+
+/**
  * Create a new approval record. Stores all necessary info for later
  * approval/denial/expiration. Returns the created approval.
  */
@@ -357,37 +383,40 @@ export async function getApproval(
 }
 
 /**
- * Org-scoped lookup for the OPERATOR's approvals: any member of the org may
- * resolve them (the operator conversation's user_id is the sentinel
- * `operator:<org>`, which no human user_id ever matches, so this is the only
- * path a human can use to reach it).
+ * Org-scoped lookup for approvals the caller's organization may resolve.
  *
- * The `user_id` predicate is load-bearing, not decorative. The operator
- * approval routes authorise on org membership alone, so without it this would
- * match ANY conversation carrying an organization_id. That is safe today only
- * because createConversation never sets that column — an unstated invariant
- * nothing enforces. The moment a migration, an analytics feature, or org-scoped
- * chat backfills it, these routes would silently widen to "any org member can
- * read another member's tool_args and execute their gated tool calls". Scope
- * structurally instead of relying on that accident.
+ * An ordinary operator approval is reachable here because the operator
+ * conversation's `user_id` is the `operator:<org>` sentinel — no human
+ * user_id ever matches, so this is the only path a human can use to reach it.
  *
- * operatorUserId is the single source of truth for the sentinel format; do not
- * inline the `operator:` prefix here.
+ * Task 9 WIDENS this to Office-origin FOREGROUND approvals: a member asked in
+ * the customer Office, the turn paused for a human, and the owner decides it
+ * from the same organization queue. The predicate is exact:
+ * `c.user_id = $3 OR (c.origin = 'office' AND c.organization_id = $2)` — the
+ * organization match is already the outer condition, so an Office approval
+ * from another org can never appear. It does NOT widen to "any conversation
+ * carrying an organization_id": a dashboard conversation that one day carries
+ * one stays invisible here.
+ *
+ * `source` is returned so the caller can tell the two apart without looking at
+ * anything private.
  */
 export async function getApprovalForOrg(
   pool: pg.Pool,
   id: string,
   orgId: string
-): Promise<Approval | null> {
+): Promise<OrgApproval | null> {
   const result = await pool.query(
-    `SELECT ${APPROVAL_COLS_JOIN}
+    `SELECT ${APPROVAL_COLS_JOIN},
+            CASE WHEN c.user_id = $3 THEN 'operator' ELSE 'office' END AS source
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
-     WHERE a.id = $1 AND c.organization_id = $2 AND c.user_id = $3`,
+     WHERE a.id = $1 AND c.organization_id = $2
+       AND (c.user_id = $3 OR c.origin = 'office')`,
     [id, orgId, operatorUserId(orgId)]
   );
 
-  return result.rows.length === 0 ? null : rowToApproval(result.rows[0]);
+  return result.rows.length === 0 ? null : rowToOrgApproval(result.rows[0]);
 }
 
 /**
@@ -482,23 +511,24 @@ export async function listPendingGatedCalls(
 }
 
 /**
- * List an org's pending OPERATOR approvals (the operator conversation's
- * user_id sentinel excludes them from any user-scoped query).
- *
- * Scoped to the operator conversation, not merely to the org — see
- * getApprovalForOrg for why that predicate is load-bearing.
+ * List an organization's pending approvals — background operator work AND
+ * Office-origin foreground decisions (Task 9; see getApprovalForOrg for the
+ * exact predicate and why it does not widen further).
  */
-export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<Approval[]> {
+export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<OrgApproval[]> {
   const result = await pool.query(
-    `SELECT ${APPROVAL_COLS_JOIN}
+    `SELECT ${APPROVAL_COLS_JOIN},
+            CASE WHEN c.user_id = $2 THEN 'operator' ELSE 'office' END AS source
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
-     WHERE c.organization_id = $1 AND c.user_id = $2 AND a.status = 'pending'
+     WHERE c.organization_id = $1
+       AND (c.user_id = $2 OR c.origin = 'office')
+       AND a.status = 'pending'
      ORDER BY a.created_at ASC`,
     [orgId, operatorUserId(orgId)]
   );
 
-  return result.rows.map(rowToApproval);
+  return result.rows.map(rowToOrgApproval);
 }
 
 /**

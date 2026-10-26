@@ -11,6 +11,17 @@
 import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest';
 import type pg from 'pg';
 
+/**
+ * The tool-call cap is UNLIMITED by default since builder mode landed
+ * ("builder-mode chains 20+ tool calls per turn routinely" — see
+ * TOOL_CALL_LIMIT). This suite pins the CAP's behaviour, so it must supply one,
+ * and it must do so before loop.ts reads the env at import time — hence
+ * `vi.hoisted` rather than a statement in `beforeEach`.
+ */
+vi.hoisted(() => {
+  process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT = '8';
+});
+
 // ---------------------------------------------------------------------------
 // Module mocks — must be declared before any dynamic imports
 // ---------------------------------------------------------------------------
@@ -33,7 +44,16 @@ vi.mock('../approvals-store.js', () => ({
   checkTrust: vi.fn(),
 }));
 
+// The four OPERATOR_* names are literal here because operator-policy.ts
+// (imported by the loop since the Office floor landed) reads them at module
+// scope. `vi.importActual` inside this factory hangs the Windows test worker
+// during collection, so the values are copied instead — they are stable public
+// tool names, and loop-operator-policy.test.ts exercises the real module.
 vi.mock('../tool-catalog.js', () => ({
+  OPERATOR_SCRATCHPAD_TOOL: 'update_operator_scratchpad',
+  OPERATOR_SANDBOX_CODE_TOOL: 'run_sandbox_code',
+  OPERATOR_BUILD_TOOL: 'build_app',
+  OPERATOR_PENDING_DECISIONS_TOOL: 'list_pending_decisions',
   getToolCatalog: vi.fn().mockReturnValue([
     {
       name: 'manage_app',
@@ -80,6 +100,12 @@ vi.mock('../tool-catalog.js', () => ({
     name === 'write_file' || name === 'read_file' || name === 'list_files' || name === 'delete_file',
   isDeployTool: (name: string) => name === 'deploy_frontend',
   isDeployFunctionTool: (name: string) => name === 'deploy_function_from_workspace',
+  // Loop-internal operator tools the loop asks about by predicate (the same
+  // import-chain fix as the constants above — see the comment there).
+  isOperatorScratchpadTool: (name: string) => name === 'update_operator_scratchpad',
+  isRunSandboxCodeTool: (name: string) => name === 'run_sandbox_code',
+  isBuildAppTool: (name: string) => name === 'build_app',
+  isListPendingDecisionsTool: (name: string) => name === 'list_pending_decisions',
   sensitivityFor: (name: string, args: any) => {
     const action = args && typeof args === 'object' ? (args as Record<string, unknown>).action : null;
     if (name === 'manage_app' && (action === 'delete' || action === 'pause')) return 'destructive';
@@ -289,8 +315,10 @@ describe('runAgentTurn — one tool call', () => {
       { type: 'done' },
     ]);
 
-    // MCP called with flat args
-    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'list' }, 'test-jwt');
+    // MCP called with flat args. The trailing org/trace/trigger-context
+    // arguments are undefined on a dashboard turn; slice past them so this
+    // assertion stays about the call itself.
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'list' }, 'test-jwt']);
 
     // 4 persisted rows: user, assistant+tool_call, tool_result, final assistant
     expect(mockAppendMessage).toHaveBeenCalledTimes(4);
@@ -599,8 +627,8 @@ describe('runAgentTurn — two tool calls in one pass (Fix 1)', () => {
 
     // Two MCP calls with the correct arguments
     expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
-    expect(mockCallMcpTool).toHaveBeenNthCalledWith(1, 'manage_app', { action: 'list' }, 'test-jwt');
-    expect(mockCallMcpTool).toHaveBeenNthCalledWith(2, 'manage_app', { action: 'get_config', id: 'app_x' }, 'test-jwt');
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'list' }, 'test-jwt']);
+    expect(mockCallMcpTool.mock.calls[1].slice(0, 3)).toEqual(['manage_app', { action: 'get_config', id: 'app_x' }, 'test-jwt']);
 
     // Persistence: 1 user + 2 assistant (one per tool_call) + 2 tool + 1 final assistant = 6
     expect(mockAppendMessage).toHaveBeenCalledTimes(6);
@@ -1286,7 +1314,7 @@ describe('runAgentTurn — conversation auto-titling (Plan 3e Task 2)', () => {
       ]),
     );
 
-    mockGetConversation.mockResolvedValueOnce(stubConversation);
+    mockGetConversation.mockResolvedValue(stubConversation);
     const gatewayChatSpy = vi.fn().mockResolvedValue('Todo App Setup');
     const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
     mockUpdateConversationTitle.mockResolvedValueOnce({ ...stubConversation, title: 'Todo App Setup' });
@@ -1323,7 +1351,7 @@ describe('runAgentTurn — conversation auto-titling (Plan 3e Task 2)', () => {
       ]),
     );
 
-    mockGetConversation.mockResolvedValueOnce({ ...stubConversation, title: 'Renamed by user' });
+    mockGetConversation.mockResolvedValue({ ...stubConversation, title: 'Renamed by user' });
     const gatewayChatSpy = vi.fn();
     const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
 
@@ -1344,7 +1372,7 @@ describe('runAgentTurn — conversation auto-titling (Plan 3e Task 2)', () => {
       ]),
     );
 
-    mockGetConversation.mockResolvedValueOnce(stubConversation);
+    mockGetConversation.mockResolvedValue(stubConversation);
     const gatewayChatSpy = vi.fn().mockRejectedValue(new Error('timeout'));
     const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
 
@@ -1447,7 +1475,7 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
 
     expect(mockCheckTrust).not.toHaveBeenCalled();
     expect(mockCreateApproval).not.toHaveBeenCalled();
-    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'list' }, 'test-jwt');
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'list' }, 'test-jwt']);
     expect(events.find((e) => e.type === 'approval_required')).toBeUndefined();
     expect(events.find((e) => e.type === 'done')).toBeDefined();
   });
@@ -1467,7 +1495,7 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
 
     expect(mockCheckTrust).toHaveBeenCalledWith(stubPool, 'conv-1', 'manage_app');
     expect(mockCreateApproval).not.toHaveBeenCalled();
-    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'delete', id: 'app_1' }, 'test-jwt');
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'delete', id: 'app_1' }, 'test-jwt']);
     expect(events.find((e) => e.type === 'approval_required')).toBeUndefined();
     expect(events.find((e) => e.type === 'done')).toBeDefined();
   });

@@ -37,6 +37,7 @@ import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS, reso
 import { classifyOfficeTool } from './office-tool-policy.js';
 import { captureApprovalOperation, deploymentArtifact } from './approval-operation.js';
 import { readOperatorYoloMode } from './operator-yolo.js';
+import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
 import { trimOperatorHistory } from './operator-history.js';
 import { getSystemPrompt } from './prompt.js';
@@ -278,6 +279,36 @@ function defaultMcp(): Mcp {
   };
 }
 
+/**
+ * The MCP transport for an Office-origin turn (Task 9).
+ *
+ * `callMcpTool` already accepts an active organization and forwards it as
+ * `x-organization-id`; the generic `Mcp` seam here is three-argument, so an
+ * ordinary dashboard turn has never carried one. That is correct for the
+ * dashboard — its tools use the caller's JWT and their personal-org fallback.
+ * It is NOT correct for a customer Office: a member who belongs to two
+ * organizations would otherwise read and write through whichever org their
+ * token happens to resolve to, while the question was asked of the Office's
+ * organization and is billed to it.
+ *
+ * This wrapper closes that gap for exactly one case: a conversation whose
+ * STORED row says `office` and names its organization. It reaches
+ * `callMcpTool` directly rather than `deps.mcp`, because the three-argument
+ * interface is the thing that cannot carry the org. It preserves
+ * `defaultMcp`'s contract exactly — throw on failure, parse the MCP envelope
+ * — so callers cannot tell which transport they got except by where the
+ * request went.
+ */
+function createOrganizationScopedMcp(organizationId: string): Mcp {
+  return {
+    async call(name: string, args: unknown, jwt: string) {
+      const r = await callMcpTool(name, args, jwt, organizationId);
+      if (!r.ok) throw new Error(r.error ?? 'mcp call failed');
+      return parseMcpToolResult(name, r.result);
+    },
+  };
+}
+
 let _defaultDeps: LoopDeps | undefined;
 function getDefaultDeps(): LoopDeps {
   if (!_defaultDeps) {
@@ -403,6 +434,16 @@ export async function* streamChatCompletion(opts: {
   messages: GatewayMessage[];
   tools: ToolSpec[];
   jwt: string;
+  /**
+   * The organization this completion is billed to (Task 9). Forwarded as
+   * `x-organization-id`; the gateway attributes usage to it instead of the
+   * personal organization its JWT fallback would otherwise pick.
+   *
+   * Absent for every ordinary dashboard turn, which keeps that surface's
+   * billing exactly where it was. The loop supplies it only for a stored
+   * Office conversation.
+   */
+  organizationId?: string | null;
 }): AsyncGenerator<StreamChunk> {
   const url = `${process.env.AI_GATEWAY_URL ?? 'http://localhost:3000'}/v1/chat/completions`;
 
@@ -411,6 +452,7 @@ export async function* streamChatCompletion(opts: {
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${opts.jwt}`,
+      ...(opts.organizationId ? { 'X-Organization-Id': opts.organizationId } : {}),
     },
     body: JSON.stringify({
       model: opts.model,
@@ -747,6 +789,67 @@ export async function* runAgentTurn(
   const operatorOrgId = operatorOrgIdFromUserId(input.userId);
 
   /**
+   * ── Office provenance, read from the STORED conversation (Task 9) ────────
+   *
+   * Whether this turn is a customer Office's question — and which organization
+   * pays for it — is a property of the conversation row, not of anything a
+   * caller passes. That is deliberate. A flag or a request field would make
+   * "am I in an Office?" something a route could forget to set (failing open
+   * to the ordinary dashboard, with its cheaper billing and no consequential
+   * floor) or something a client could try to choose. Reading the row means
+   * the answer is whatever the server wrote at creation, for every caller:
+   * Ask, regenerate, an approval resume, a retry.
+   *
+   * A read failure degrades to the ordinary dashboard. That direction is safe
+   * rather than merely conventional: without a readable conversation the turn
+   * cannot append a message either, so it fails at the next step — it does not
+   * run Office work on an unverified identity.
+   *
+   * Operator turns skip the read: their identity is the org sentinel and their
+   * conversation is never Office-origin.
+   */
+  let officeOrganizationId: string | null = null;
+  if (!isOperator) {
+    try {
+      const stored = await getConversationFn(input.pool, input.conversationId, input.userId);
+      if (stored?.origin === 'office' && stored.organizationId) {
+        officeOrganizationId = stored.organizationId;
+      }
+    } catch {
+      // See above: treated as an ordinary dashboard turn.
+    }
+  }
+  const isOfficeTurn = officeOrganizationId !== null;
+
+  /**
+   * The guard for a foreground Office turn. It answers the same question the
+   * operator guard does — may this organization keep working right now? — and
+   * returns the same `approvalMode`, so the loop's existing two uses of it
+   * (before every model request, before every tool batch) apply unchanged.
+   *
+   * An explicitly supplied `input.accessGuard` wins: the operator path owns
+   * its own recheck and this is not a second, competing policy.
+   */
+  const accessGuard = input.accessGuard ?? (isOfficeTurn
+    ? async () => evaluateOperatorAccess({
+        organizationId: officeOrganizationId as string,
+        phase: 'run',
+        origin: 'office',
+        actorUserId: input.userId,
+        model: input.model,
+      })
+    : undefined);
+
+  if (isOfficeTurn) {
+    console.log('[dashboard-agent] office turn', {
+      conversationId: input.conversationId,
+      organizationId: officeOrganizationId,
+    });
+  }
+
+  const officeMcp = isOfficeTurn ? createOrganizationScopedMcp(officeOrganizationId as string) : null;
+
+  /**
    * The loop makes MCP calls the MODEL did not ask for. They go through
    * `deps.mcp` (default: `defaultMcp()` → the same `callMcpTool`), not through
    * the dispatch site, so the policy check there never sees them:
@@ -783,7 +886,12 @@ export async function* runAgentTurn(
           return deps.mcp.call(name, args, jwt);
         },
       }
-    : deps.mcp;
+    /**
+     * An Office turn's tool transport carries the Office's organization (see
+     * `createOrganizationScopedMcp`). Everything else keeps the three-argument
+     * dashboard transport it has always used.
+     */
+    : (officeMcp ?? deps.mcp);
 
   /**
    * An operator turn gets a DIFFERENT `RepoSync` implementation: `repo-http.ts`,
@@ -817,7 +925,14 @@ export async function* runAgentTurn(
   const repoSync: RepoSync =
     isOperator && !depsOverride?.repoSync
       ? createHttpRepoSync({ cache })
-      : deps.repoSync;
+      /**
+       * Office turns hydrate and flush through the org-scoped MCP for the same
+       * reason their tool calls do: a member's personal-org fallback must not
+       * decide where this Office's source is read from or written to.
+       */
+      : officeMcp && !depsOverride?.repoSync
+        ? createRepoSync({ cache, mcp: officeMcp })
+        : deps.repoSync;
 
   /**
    * The org's substrate `yolo_mode` — read LAZILY, at most once per turn, and
@@ -855,9 +970,12 @@ export async function* runAgentTurn(
    * `approvalMode` on every guard evaluation (before each model request and
    * before each tool batch), never from anything the model supplies.
    *
-   * False for a self-hosted deployment with no cloud policy ('standard'), for
-   * human dashboard conversations (no guard at all), and — until Task 9 wires
-   * Office Ask — for foreground conversations. When true:
+   * True for an operator turn whose registered policy answers
+   * 'consequential', and for a FOREGROUND turn whose stored conversation is
+   * Office-origin (Task 9 — the guard above is built from the row). False for
+   * a self-hosted deployment with no cloud policy ('standard'), for ordinary
+   * dashboard conversations, and for any turn whose conversation cannot be
+   * read. When true:
    *
    *   - consequential tools need a human even with `yolo_mode` on;
    *   - Office preparation (`write_file`, `read_file`, …) is autonomous
@@ -1179,8 +1297,8 @@ export async function* runAgentTurn(
 
       // Recheck before EVERY model request. A downgrade or owner removal that
       // lands between iterations stops the next spend here rather than after it.
-      if (input.accessGuard) {
-        const access = await input.accessGuard();
+      if (accessGuard) {
+        const access = await accessGuard();
         if (!access.allowed) {
           yield { type: 'blocked', reason: access.reason ?? 'service_unavailable' };
           terminated = true;
@@ -1194,6 +1312,10 @@ export async function* runAgentTurn(
         messages,
         tools,
         jwt: input.jwt,
+        // Billing attribution for an Office turn; absent (undefined) for every
+        // ordinary dashboard turn, which the gateway then bills exactly as
+        // before.
+        organizationId: officeOrganizationId,
       });
 
       try {
@@ -1266,8 +1388,8 @@ export async function* runAgentTurn(
       // tool RESULT for every call — history stays paired and the model never
       // sees a hanging call.
       let accessBlockedReason: string | null = null;
-      if (input.accessGuard) {
-        const access = await input.accessGuard();
+      if (accessGuard) {
+        const access = await accessGuard();
         if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
         else officeConsequential = access.approvalMode === 'consequential';
       }
@@ -2139,8 +2261,18 @@ export async function* runAgentTurn(
             toolName: tc.name,
           });
         }
+        /**
+         * The active org for this tool call.
+         *
+         * Ordinary dashboard turns keep using the request's `organizationId`
+         * header, exactly as before. An Office turn uses the organization
+         * bound to its STORED conversation — the same value the gateway is
+         * billed and the guard evaluated. They are equal whenever the route's
+         * binding check passed, and when they are not, the stored one wins.
+         */
+        const toolOrganizationId = officeOrganizationId ?? input.organizationId;
         const call = await callMcpTool(
-          tc.name, tc.args, input.jwt, input.organizationId, input.traceId, input.triggerContext,
+          tc.name, tc.args, input.jwt, toolOrganizationId, input.traceId, input.triggerContext,
         );
         // Scope app discovery to the active org. The shared `/apps` endpoint
         // deliberately fans out across every org the user belongs to; here —
@@ -2152,9 +2284,9 @@ export async function* runAgentTurn(
           call.ok &&
           tc.name === 'manage_app' &&
           (tc.args as { action?: string } | null)?.action === 'list' &&
-          input.organizationId
+          toolOrganizationId
         ) {
-          call.result = scopeAppListToOrg(call.result, input.organizationId);
+          call.result = scopeAppListToOrg(call.result, toolOrganizationId);
         }
 
         /**
@@ -2299,7 +2431,7 @@ export async function* runAgentTurn(
         // must never block or fail the SSE stream, so every step is wrapped.
         if (flushResult.newSnapshotId) {
           try {
-            const gateway = snapshotTitleGatewayFactory(input.jwt);
+            const gateway = snapshotTitleGatewayFactory(input.jwt, officeOrganizationId);
             const snapshotTitle = await deriveSnapshotTitle(
               input.userMessage,
               lastAssistantText,
@@ -2349,7 +2481,7 @@ export async function* runAgentTurn(
       try {
         const conversation = await getConversationFn(input.pool, input.conversationId, input.userId);
         if (conversation && conversation.title === 'New conversation') {
-          const gateway = snapshotTitleGatewayFactory(input.jwt);
+          const gateway = snapshotTitleGatewayFactory(input.jwt, officeOrganizationId);
           const title = await generateConversationTitle(input.userMessage, lastAssistantText, gateway);
           if (title) {
             const updated = await updateConversationTitleFn(

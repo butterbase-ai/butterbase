@@ -14,8 +14,12 @@ vi.mock('../../services/dashboard-agent/approvals-store.js', async (importOrigin
 }));
 vi.mock('../../services/dashboard-agent/tool-bridge.js', () => ({ executeOnce: vi.fn() }));
 // resolveOperatorApproval delegates its persistence to resume.ts, which reads
-// and writes messages. Stub only those three; the rest of the store is left
+// and writes messages. Stub only those four; the rest of the store is left
 // real so the route module's other imports still resolve.
+//
+// `replaceToolResultForCall` is the fourth because resume.ts now writes the
+// answer by OVERWRITING a placeholder row when one exists (2026-08-08). Left
+// real, it takes the stub pool and throws before the assertions run.
 vi.mock('../../services/dashboard-agent/store.js', async () => ({
   ...(await vi.importActual<typeof import('../../services/dashboard-agent/store.js')>(
     '../../services/dashboard-agent/store.js',
@@ -23,6 +27,7 @@ vi.mock('../../services/dashboard-agent/store.js', async () => ({
   getMessageByPendingApprovalId: vi.fn(),
   clearPendingApproval: vi.fn(),
   appendMessage: vi.fn(),
+  replaceToolResultForCall: vi.fn(async () => false),
 }));
 
 import { Pool } from 'pg';

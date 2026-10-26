@@ -100,7 +100,9 @@ export async function getOrCreateOperatorConversation(
   const inserted = await pool.query<{ id: string }>(
     `INSERT INTO dashboard_agent_conversations (organization_id, user_id, title, model)
      VALUES ($1, $2, 'Operator', $3)
-     ON CONFLICT (organization_id, user_id) WHERE organization_id IS NOT NULL DO NOTHING
+     ON CONFLICT (organization_id, user_id)
+       WHERE organization_id IS NOT NULL AND user_id = 'operator:' || organization_id
+       DO NOTHING
      RETURNING id`,
     [orgId, userId, model],
   );
