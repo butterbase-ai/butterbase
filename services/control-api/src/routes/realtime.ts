@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { cronOriginHeaders } from '../services/cron-origin.js';
 import type { Pool } from 'pg';
 import { getAppPoolForApp } from '../services/app-pool.js';
@@ -21,35 +21,79 @@ import { assertAppIdNotPaused } from '../plugins/pause-gate.js';
 // ============================================================================
 
 /**
- * Resolve auth from the upgrade request — same logic as auto-api resolveAppAndPool
+ * Selects exactly one realtime credential. This route is registered `public`,
+ * so the auth plugin skips it and `request.auth` is never populated; native
+ * clients put their credential in `Authorization`, browser clients use
+ * `?token=`. A supplied but malformed or ambiguous credential fails closed
+ * instead of being demoted to anonymous.
+ */
+export function realtimeCredential(request: FastifyRequest): string | undefined {
+  const authorization = request.headers.authorization;
+  const query = request.query as Record<string, unknown>;
+  const hasQueryToken = Object.prototype.hasOwnProperty.call(query, 'token');
+  // Node can discard duplicate Authorization values; inspect the raw headers too.
+  const rawHeaders: string[] = Array.isArray(request.raw?.rawHeaders) ? request.raw.rawHeaders : [];
+  const headerCount = rawHeaders.filter((value: string, index: number) =>
+    index % 2 === 0 && value.toLowerCase() === 'authorization'
+  ).length;
+  if (headerCount > 1 || (authorization !== undefined && hasQueryToken)) {
+    throw new Error('Ambiguous realtime credentials');
+  }
+  if (authorization !== undefined) {
+    const match = typeof authorization === 'string' && /^Bearer ([^\s,]+)$/i.exec(authorization);
+    if (!match) throw new Error('Invalid realtime authorization header');
+    return match[1];
+  }
+  if (hasQueryToken) {
+    if (typeof query.token !== 'string' || !query.token || /[\s,]/.test(query.token)) {
+      throw new Error('Invalid realtime query credential');
+    }
+    return query.token;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve auth from the wire credential — same logic as resolveAppAndPool
  * but doesn't need to return a pool (the manager handles that).
  */
-async function resolveRealtimeAuth(
+export async function resolveRealtimeAuth(
   controlDb: Pool,
   appId: string,
-  auth: any
+  token: string | undefined
 ): Promise<{
   dbName: string;
   role: 'butterbase_anon' | 'butterbase_user' | 'butterbase_service';
   userId: string | null;
 }> {
-  if (auth.authMethod === 'end_user_jwt') {
-    const endUserClaims = await verifyEndUserJwt(controlDb, appId, auth.rawToken!);
-    const app = await AppResolver.resolveAppPublic(controlDb, appId);
-    assertAppNotPaused(app);
-    return { dbName: app.db_name, role: 'butterbase_user', userId: endUserClaims.sub };
-  } else if (auth.authMethod === 'api_key' || auth.authMethod === 'jwt') {
-    const app = await AppResolver.resolveApp(controlDb, appId, auth.userId!, auth.organizationId ?? null);
+  if (token?.startsWith('bb_sk_')) {
+    // Never create a service identity before successful validation. Scope and
+    // owner/org checks are both required, including for public apps.
+    const { ApiKeyService } = await import('../services/api-key-service.js');
+    const auth = await ApiKeyService.validateApiKey(controlDb, token);
+    if (!auth || auth.authMethod !== 'api_key' || !auth.keyId || !auth.userId ||
+        (!auth.scopes.includes('*') && !auth.scopes.includes(`app:${appId}`))) {
+      throw new Error('Invalid realtime service credential');
+    }
+    const app = await AppResolver.resolveApp(controlDb, appId, auth.userId, auth.organizationId ?? null);
     assertAppNotPaused(app);
     return { dbName: app.db_name, role: 'butterbase_service', userId: null };
-  } else {
+  }
+  if (token !== undefined) {
+    // Verification enforces RS256, the app's signing key/issuer, and expiry.
+    const claims = await verifyEndUserJwt(controlDb, appId, token);
+    if (typeof claims.sub !== 'string' || !claims.sub || claims.app_id !== appId ||
+        typeof claims.exp !== 'number' || !Number.isFinite(claims.exp)) {
+      throw new Error('Invalid realtime end-user identity');
+    }
     const app = await AppResolver.resolveAppPublic(controlDb, appId);
     assertAppNotPaused(app);
-    if (app.access_mode === 'authenticated') {
-      throw new AppAuthRequiredError(appId);
-    }
-    return { dbName: app.db_name, role: 'butterbase_anon', userId: null };
+    return { dbName: app.db_name, role: 'butterbase_user', userId: claims.sub };
   }
+  const app = await AppResolver.resolveAppPublic(controlDb, appId);
+  assertAppNotPaused(app);
+  if (app.access_mode === 'authenticated') throw new AppAuthRequiredError(appId);
+  return { dbName: app.db_name, role: 'butterbase_anon', userId: null };
 }
 
 // ============================================================================
@@ -152,59 +196,16 @@ export async function realtimeRoutes(app: FastifyInstance) {
     const { app_id } = request.params as { app_id: string };
 
     // -----------------------------------------------------------------------
-    // Resolve auth: support both Authorization header and ?token= query param.
-    // Browser WebSocket API does not support custom headers, so clients must
-    // pass their JWT (or API key) via the query string instead.
+    // Resolve auth from the wire credential. This route is public, so the auth
+    // plugin never populates request.auth: a native client's Authorization
+    // header must be read here, while browser clients may pass ?token=.
     // -----------------------------------------------------------------------
-    let auth = request.auth;
-    if (!auth || auth.authMethod === 'anonymous') {
-      const query = request.query as Record<string, string | undefined>;
-      const tokenFromQuery = query.token;
-      if (tokenFromQuery) {
-        if (tokenFromQuery.startsWith('bb_sk_')) {
-          // API key via query param
-          auth = { userId: null, authMethod: 'api_key', scopes: ['*'] } as any;
-          // Validate the key
-          try {
-            const { ApiKeyService } = await import('../services/api-key-service.js');
-            const keyAuth = await ApiKeyService.validateApiKey(app.controlDb, tokenFromQuery);
-            if (keyAuth) {
-              auth = keyAuth;
-            }
-          } catch {
-            // Fall through to anonymous
-          }
-        } else {
-          // Assume JWT — check if it's an end-user JWT
-          try {
-            const decoded = JSON.parse(
-              Buffer.from(tokenFromQuery.split('.')[1], 'base64').toString()
-            );
-            if (decoded.iss && decoded.iss.startsWith('butterbase:app:')) {
-              auth = {
-                userId: '',
-                authMethod: 'end_user_jwt',
-                scopes: [],
-                rawToken: tokenFromQuery,
-              } as any;
-            }
-          } catch {
-            // Not a valid JWT — leave as anonymous
-          }
-        }
-      }
-    }
-    // Ensure auth always has a value
-    if (!auth) {
-      auth = { userId: null, authMethod: 'anonymous', scopes: [] };
-    }
-
     let dbName: string;
     let role: 'butterbase_anon' | 'butterbase_user' | 'butterbase_service';
     let userId: string | null;
 
     try {
-      const resolved = await resolveRealtimeAuth(app.controlDb, app_id, auth);
+      const resolved = await resolveRealtimeAuth(app.controlDb, app_id, realtimeCredential(request));
       dbName = resolved.dbName;
       role = resolved.role;
       userId = resolved.userId;
