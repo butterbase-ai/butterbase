@@ -1,4 +1,6 @@
 import type { Pool } from 'pg';
+import { assertLockedKeyTarget } from '../locked-key-access.js';
+import { AuthorizationError } from '../api-errors.js';
 import type { FastifyRequest } from 'fastify';
 import { verifyEndUserJwt } from '../end-user-auth.js';
 import { getRuntimeDbForApp } from '../region-resolver.js';
@@ -53,6 +55,14 @@ export async function authorizeAppAiCall(
   appId: string,
   request: FastifyRequest,
 ): Promise<AppAiAuthResult> {
+  try {
+    await assertLockedKeyTarget(controlDb, request.auth, { appIds: [appId] });
+  } catch (err) {
+    if (err instanceof AuthorizationError || err instanceof AppNotFoundError) {
+      return { ok: false, status: 403, body: { error: 'forbidden', code: 'FORBIDDEN' } };
+    }
+    throw err;
+  }
   let ownerId: string;
   try {
     const runtimePool = await getRuntimeDbForApp(controlDb, appId);

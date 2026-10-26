@@ -204,13 +204,17 @@ export class ApiKeyService {
     try {
       const cached = await getRedisClient().get(cacheKey);
       if (cached === API_KEY_INVALID_SENTINEL) return null;
-      if (cached) return JSON.parse(cached) as AuthContext;
+      if (cached) {
+        const auth = JSON.parse(cached) as AuthContext;
+        // Entries written before lock support are not evidence of an unlocked key.
+        if (typeof auth.organizationLocked === 'boolean') return auth;
+      }
     } catch {
       // Redis miss/error — fall through to DB
     }
 
     const result = await pool.query(
-      `SELECT id, user_id, organization_id, scopes, revoked_at, expires_at
+      `SELECT id, user_id, organization_id, organization_locked, scopes, revoked_at, expires_at
        FROM api_keys
        WHERE key_hash = $1`,
       [keyHash]
@@ -239,6 +243,7 @@ export class ApiKeyService {
       scopes: key.scopes,
       keyId: key.id,
       organizationId: key.organization_id,
+      organizationLocked: key.organization_locked === true,
     };
 
     getRedisClient().setex(cacheKey, API_KEY_CACHE_TTL, JSON.stringify(authContext)).catch(() => {});
@@ -303,6 +308,12 @@ export class ApiKeyService {
     }
 
     return result.rows.length > 0;
+  }
+
+  /** Call after committing trusted key changes (including organization_locked). */
+  static async invalidateKeyCache(pool: Pool, keyId: string): Promise<void> {
+    const result = await pool.query<{ key_hash: string }>('SELECT key_hash FROM api_keys WHERE id = $1', [keyId]);
+    if (result.rows[0]?.key_hash) await getRedisClient().del(apiKeyCacheKey(result.rows[0].key_hash));
   }
 
   /**

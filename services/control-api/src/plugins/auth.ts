@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { AuthorizationError } from '../services/api-errors.js';
+import { assertLockedKeyArguments, assertLockedKeyTarget } from '../services/locked-key-access.js';
 import fp from 'fastify-plugin';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { ApiKeyService } from '../services/api-key-service.js';
@@ -467,6 +469,28 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
           remediation: 'Verify your JWT token is valid and not expired. If using Cognito, ensure the token was issued for the correct user pool.',
           documentation_url: getDocUrl('AUTH_INVALID_TOKEN'),
         }));
+      }
+    }
+  });
+
+  // Runs after parsing params/body, before any authenticated route dispatch.
+  fastify.addHook('preHandler', async (request) => {
+    if (!request.auth?.organizationLocked) return;
+    if (request.routeOptions.url?.startsWith('/admin/')) {
+      throw new AuthorizationError('Managed keys cannot administer platform accounts', 'AUTH_ORG_FORBIDDEN');
+    }
+    const rawOrg = request.headers['x-organization-id'];
+    const organizationId = Array.isArray(rawOrg) ? rawOrg[0] : rawOrg;
+    await assertLockedKeyTarget(fastify.controlDb, request.auth, { organizationId });
+    await assertLockedKeyArguments(fastify.controlDb, request.auth, request.params);
+    await assertLockedKeyArguments(fastify.controlDb, request.auth, request.query);
+    await assertLockedKeyArguments(fastify.controlDb, request.auth, request.body);
+    if (request.routeOptions.url === '/mcp') {
+      const messages = Array.isArray(request.body) ? request.body : [request.body];
+      for (const message of messages as any[]) {
+        if (message?.method === 'tools/call') {
+          await assertLockedKeyArguments(fastify.controlDb, request.auth, message.params?.arguments);
+        }
       }
     }
   });

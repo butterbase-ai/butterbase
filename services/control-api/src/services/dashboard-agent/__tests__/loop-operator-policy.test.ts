@@ -15,6 +15,9 @@
 
 import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest';
 import type pg from 'pg';
+import { ApiKeyService } from '../../api-key-service.js';
+import { AppResolver, AppNotFoundError } from '../../app-resolver.js';
+vi.mock('../../api-key-service.js', () => ({ ApiKeyService: { validateApiKey: vi.fn() } }));
 
 vi.mock('../store.js', () => ({
   appendMessage: vi.fn(),
@@ -791,5 +794,18 @@ describe('non-operator conversation is unaffected', () => {
 
     expect(mockCreateApproval).not.toHaveBeenCalled();
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('managed operator credential target containment', () => {
+  it('rejects a foreign app before an allowed MCP tool dispatch', async () => {
+    vi.mocked(ApiKeyService.validateApiKey).mockResolvedValue({ userId: 'owner', authMethod: 'api_key', scopes: ['*'], keyId: 'managed-key', organizationLocked: true, organizationId: ORG_ID });
+    const resolve = vi.spyOn(AppResolver, 'resolveApp').mockRejectedValue(new AppNotFoundError('app_foreign'));
+    oneToolCallThenStop('select_rows', { app_id: 'app_foreign', table: 'items' });
+    const pool = { query: vi.fn(async () => ({ rows: [{ id: 'managed-key' }] })) } as any;
+    const events = await collect(runAgentTurn(operatorInput({ jwt: 'bb_sk_managed', pool })));
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    expect(events.some((event) => event.type === 'tool_result' && event.error?.includes('not permitted'))).toBe(true);
+    resolve.mockRestore();
   });
 });

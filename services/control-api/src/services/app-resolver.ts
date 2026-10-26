@@ -117,6 +117,7 @@ export class AppResolver {
      * back to the membership-enumeration check for backwards compatibility.
      */
     activeOrganizationId?: string | null,
+    options: { strictOrganization?: boolean } = {},
   ): Promise<{ id: string; name: string; owner_id: string; db_name: string; paused: boolean; paused_reason: string | null; paused_by: PausedBy | null }> {
     const region = await resolveHomeRegion(controlPool, appId);
     if (!region) throw new AppNotFoundError(appId);
@@ -141,6 +142,12 @@ export class AppResolver {
       throw new AppNotFoundError(appId);
     }
     const row = result.rows[0];
+    // Managed keys must prove canonical app ownership before any user shortcut.
+    if (options.strictOrganization &&
+        (!activeOrganizationId || !row.organization_id ||
+         row.organization_id !== activeOrganizationId)) {
+      throw new AppNotFoundError(appId);
+    }
 
     // Auth resolves in this order:
     //   1. app in caller's active org  → allow (fast path for bb_sk_* keys)

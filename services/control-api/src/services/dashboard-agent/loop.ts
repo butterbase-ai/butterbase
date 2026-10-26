@@ -16,6 +16,7 @@
  */
 
 import pg from 'pg';
+import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
@@ -739,6 +740,7 @@ export async function* runAgentTurn(
   const turnMcp: Mcp = isOperator
     ? {
         async call(name: string, args: unknown, jwt: string) {
+          await assertOperatorKeyArguments(input.pool, jwt, operatorOrgId, args);
           // Loop-internal tools have no MCP counterpart; an internal caller
           // asking for one by name is a bug, not a permitted call.
           if (OPERATOR_LOCAL_TOOLS.has(name) || operatorPolicyForOrg(name, args, operatorOrgId) !== 'allow') {
@@ -1219,6 +1221,13 @@ export async function* runAgentTurn(
         let operatorVerdict = isOperator
           ? operatorPolicyForOrg(tc.name, tc.args, operatorOrgId)
           : null;
+        if (isOperator) {
+          try {
+            await assertOperatorKeyArguments(input.pool, input.jwt, operatorOrgId, tc.args);
+          } catch {
+            operatorVerdict = 'deny';
+          }
+        }
 
         /**
          * `yolo_mode`, applied only where it can matter. A 'deny' never reaches

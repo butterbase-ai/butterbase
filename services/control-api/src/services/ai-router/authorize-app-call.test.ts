@@ -189,3 +189,22 @@ describe('authorizeAppAiCall', () => {
     if (r.ok) throw new Error('unreachable');
   });
 });
+
+describe('locked key AI containment', () => {
+  it.each(['*', 'app:app_target'])('rejects a cross-org owner shortcut with scope %s', async (scope) => {
+    const db = makeDb({ owner_id: OWNER_ID, organization_id: '22222222-2222-4222-8222-222222222222' } as any);
+    mockedResolve.mockImplementation(async () => db);
+    const result = await authorizeAppAiCall(db, APP_ID, makeReq({ userId: OWNER_ID, authMethod: 'api_key', scopes: [scope], organizationLocked: true, keyId: 'managed-key', organizationId: '11111111-1111-4111-8111-111111111111' } as any));
+    expect(result.ok).toBe(false);
+  });
+});
+
+it('passes strict organization through the AI authorizer before owner access', async () => {
+  const org = '11111111-1111-4111-8111-111111111111';
+  const db = makeDb({ owner_id: OWNER_ID });
+  mockedResolve.mockImplementation(async () => db);
+  mockedResolveApp.mockResolvedValue({ id: APP_ID });
+  const result = await authorizeAppAiCall(db, APP_ID, makeReq({ userId: OWNER_ID, authMethod: 'api_key', keyId: 'managed-key', organizationLocked: true, organizationId: org }));
+  expect(result.ok).toBe(true);
+  expect(mockedResolveApp).toHaveBeenCalledWith(db, APP_ID, OWNER_ID, org, { strictOrganization: true });
+});

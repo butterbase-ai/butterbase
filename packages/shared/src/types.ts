@@ -122,6 +122,8 @@ export interface AuthContext {
    * may resolve via a control-DB lookup.
    */
   organizationId?: string | null;
+  /** Service-managed credentials cannot cross their bound organization. */
+  organizationLocked?: boolean;
 }
 
 /**
