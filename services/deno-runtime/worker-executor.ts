@@ -75,7 +75,7 @@ export async function executeFunction(
     const requestHeaders = Object.fromEntries(request.headers.entries());
     const originToken = requestHeaders['x-butterbase-cron-origin'];
     const cronOrigin = cronOriginForExecution(originToken, metadata.app_id, Deno.env.get('BUTTERBASE_INTERNAL_SECRET'), metadata.timeout_ms);
-    const requestBody = request.body ? await request.text() : null;
+    const requestBody = request.body ? new Uint8Array(await request.arrayBuffer()) : null;
     // Keep platform metadata out of the user-facing Request. It remains in the
     // fetch closure, without exposing the platform signing secret to user code.
     delete requestHeaders['x-butterbase-cron-origin'];
@@ -361,12 +361,18 @@ export function buildWorkerCode(
     requestUrl: string;
     requestMethod: string;
     requestHeaders: Record<string, string>;
-    requestBody: string | null;
+    requestBody: string | Uint8Array | null;
     userId?: string;
     caller?: CallerInfo;
     cronOrigin?: string;
   }
 ): string {
+  // Embed bytes as base64 data, never decoded text or executable source. Keep
+  // legacy string callers (including empty-string absence) compatible.
+  const requestBodyCode = context.requestBody instanceof Uint8Array
+    ? `Uint8Array.from(atob(${JSON.stringify(btoa(Array.from(context.requestBody, byte => String.fromCharCode(byte)).join("")))}), c => c.charCodeAt(0))`
+    : context.requestBody ? JSON.stringify(context.requestBody) : null;
+
   return `
     import { Pool } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
 
@@ -422,7 +428,7 @@ export function buildWorkerCode(
     const request = new Request("${context.requestUrl}", {
       method: "${context.requestMethod}",
       headers: ${JSON.stringify(context.requestHeaders)},
-      ${context.requestBody ? `body: ${JSON.stringify(context.requestBody)},` : ""}
+      ${requestBodyCode !== null ? `body: ${requestBodyCode},` : ""}
     });
 
     // Shared row converter for BigInt compatibility
