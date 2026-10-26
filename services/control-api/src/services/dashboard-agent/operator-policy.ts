@@ -785,18 +785,19 @@ export function operatorPolicyForOrg(
  *
  * WHAT IS NEVER LOOSENED: an operator `deny`. Cross-org targeting
  * (`operatorPolicyForOrg`) and the substrate action denials are not product
- * trade-offs, so they survive an Office 'allow'. Office 'deny' and 'approval'
- * are themselves absolute.
+ * trade-offs, so they survive every Office verdict — including an Office
+ * 'approval'. Office 'deny' is absolute, and Office 'approval' cannot turn a
+ * denied cross-org call into a proposal the executor would refuse anyway.
  *
- * Precedence: office deny > office approval > operator deny > allow.
+ * Precedence: any deny wins; otherwise office approval > operator approval > allow.
  */
 export function resolveOfficeVerdict(
   operatorVerdict: OperatorPolicy | null,
   officeVerdict: OperatorPolicy,
 ): OperatorPolicy {
-  if (officeVerdict === 'deny') return 'deny';
+  if (officeVerdict === 'deny' || operatorVerdict === 'deny') return 'deny';
   if (officeVerdict === 'approval') return 'approval';
-  return operatorVerdict === 'deny' ? 'deny' : 'allow';
+  return 'allow';
 }
 
 /**

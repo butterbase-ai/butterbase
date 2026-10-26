@@ -800,10 +800,12 @@ export async function* runAgentTurn(
    * the answer is whatever the server wrote at creation, for every caller:
    * Ask, regenerate, an approval resume, a retry.
    *
-   * A read failure degrades to the ordinary dashboard. That direction is safe
-   * rather than merely conventional: without a readable conversation the turn
-   * cannot append a message either, so it fails at the next step — it does not
-   * run Office work on an unverified identity.
+   * A read failure FAILS THE TURN. It is tempting to degrade to the ordinary
+   * dashboard here, but the stored row is the only evidence of Office
+   * provenance: doing so would drop the Office consequential floor, send tools
+   * without the Office organization, and bill the personal organization — a
+   * fail-open downgrade of a customer's contract. A failed read is not
+   * evidence that the conversation is a dashboard one.
    *
    * Operator turns skip the read: their identity is the org sentinel and their
    * conversation is never Office-origin.
@@ -815,8 +817,8 @@ export async function* runAgentTurn(
       if (stored?.origin === 'office' && stored.organizationId) {
         officeOrganizationId = stored.organizationId;
       }
-    } catch {
-      // See above: treated as an ordinary dashboard turn.
+    } catch (error) {
+      throw error;
     }
   }
   const isOfficeTurn = officeOrganizationId !== null;
