@@ -54,6 +54,27 @@ export type OperatorJob = {
   intervalSeconds: number;
 };
 
+/** Upsert the single default job on the caller's transaction. */
+export async function upsertOperatorSweepInTransaction(
+  client: pg.PoolClient,
+  organizationId: string,
+  instructions: string,
+  intervalSeconds: number,
+  now: Date,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dashboard_agent_operator_jobs
+       (organization_id, name, instructions, interval_seconds, next_run_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (organization_id, name) DO UPDATE
+       SET instructions = EXCLUDED.instructions,
+           interval_seconds = EXCLUDED.interval_seconds,
+           next_run_at = EXCLUDED.next_run_at,
+           enabled = TRUE`,
+    [organizationId, 'sweep', instructions, intervalSeconds, now],
+  );
+}
+
 /**
  * SELECT-first fast path, then an atomic INSERT that writes organization_id
  * inline (no separate UPDATE, so there is never a window where the row

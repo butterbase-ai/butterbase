@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import {
   API_KEY_PREFIX,
   API_KEY_SUBSTRATE_PREFIX,
@@ -92,6 +92,50 @@ function buildScopes(opts: GenerateApiKeyOptions): string[] {
   return ['*', ...extras];
 }
 
+type MintedApiKey = { key: string; keyId: string; prefix: string; name: string };
+
+/** Service-only insertion path. The caller owns the client's transaction. */
+async function insertApiKey(
+  db: Pool | PoolClient,
+  userId: string,
+  organizationId: string,
+  name: string,
+  options: GenerateApiKeyOptions,
+  organizationLocked: boolean,
+): Promise<MintedApiKey> {
+  validateScopeInputs(options);
+  const scopes = buildScopes(options);
+  const scope = options.substrateAccess ?? 'app';
+  const isSubstrateOnly = scope === 'substrate';
+  const isBoth = scope === 'both';
+  const prefix = isSubstrateOnly ? API_KEY_SUBSTRATE_PREFIX : API_KEY_PREFIX;
+  const fullKey = `${prefix}${crypto.randomBytes(20).toString('hex')}`;
+  const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex');
+  const keyPrefix = fullKey.substring(0, 12);
+  const dbScope = isBoth ? 'both' : (isSubstrateOnly ? 'substrate' : 'app');
+  const substrateOrganizationId = (isSubstrateOnly || isBoth) ? organizationId : null;
+
+  const result = await db.query(
+    `INSERT INTO api_keys
+       (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_organization_id, organization_locked)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id, name`,
+    [userId, organizationId, keyHash, keyPrefix, name, scopes, dbScope, substrateOrganizationId, organizationLocked],
+  );
+  return { key: fullKey, keyId: result.rows[0].id, prefix: keyPrefix, name: result.rows[0].name };
+}
+
+/** Trusted service operation; never pass request options to this function. */
+export async function mintOrganizationLockedApiKeyInTransaction(
+  client: PoolClient,
+  input: { userId: string; organizationId: string; name: string },
+  saveCredential: (key: string) => Promise<void>,
+): Promise<{ keyId: string }> {
+  const { key, keyId } = await insertApiKey(client, input.userId, input.organizationId, input.name, {}, true);
+  await saveCredential(key);
+  return { keyId };
+}
+
 export class ApiKeyService {
   /**
    * Generate a new API key for a user.
@@ -113,18 +157,6 @@ export class ApiKeyService {
     options: GenerateApiKeyOptions = {}
   ): Promise<{ key: string; keyId: string; prefix: string; name: string }> {
     validateScopeInputs(options);
-    const scopes = buildScopes(options);
-    const scope = options.substrateAccess ?? 'app';
-    const isSubstrateOnly = scope === 'substrate';
-    const isBoth = scope === 'both';
-    const prefix = isSubstrateOnly ? API_KEY_SUBSTRATE_PREFIX : API_KEY_PREFIX;
-
-    const randomBytes = crypto.randomBytes(20);
-    const randomHex = randomBytes.toString('hex');
-    const fullKey = `${prefix}${randomHex}`;
-    const keyHash = crypto.createHash('sha256').update(fullKey).digest('hex');
-    const keyPrefix = fullKey.substring(0, 12);
-    const dbScope = isBoth ? 'both' : (isSubstrateOnly ? 'substrate' : 'app');
 
     // Org rollout (Plan 07 mig 077): api_keys.organization_id is NOT NULL.
     // Cross-org key minting (Plan 10 follow-up): if the caller supplies an
@@ -155,22 +187,7 @@ export class ApiKeyService {
       organizationId = resolved;
     }
 
-    const substrateOrganizationId = (isSubstrateOnly || isBoth) ? organizationId : null;
-
-    const result = await pool.query(
-      `INSERT INTO api_keys
-         (user_id, organization_id, key_hash, key_prefix, name, scopes, scope, substrate_organization_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, name`,
-      [userId, organizationId, keyHash, keyPrefix, name, scopes, dbScope, substrateOrganizationId]
-    );
-
-    return {
-      key: fullKey,
-      keyId: result.rows[0].id,
-      prefix: keyPrefix,
-      name: result.rows[0].name,
-    };
+    return insertApiKey(pool, userId, organizationId, name, options, false);
   }
 
   /**
