@@ -80,6 +80,7 @@ import {
   executeApprovedOperatorTool,
   rejectEscalatedSubstrateAction,
 } from '../services/dashboard-agent/substrate-approval-bridge.js';
+import { evaluateOperatorAccess } from '../services/dashboard-agent/operator-access-policy.js';
 // TEMPORARY — dev-mode operator trace viewer. Delete with GET /operator/traces.
 import { operatorUserId } from '../services/dashboard-agent/operator-store.js';
 import { listOperatorTraces } from '../services/dashboard-agent/operator-traces.js';
@@ -319,7 +320,29 @@ export async function resolveCallerOrgId(
 
 export type OperatorResolveOutcome =
   | { ok: true }
-  | { ok: false; code: 400 | 404 | 409 | 502; error: string };
+  | { ok: false; code: 400 | 403 | 404 | 409 | 502; error: string };
+
+/**
+ * Is `userId` a current OWNER of `orgId`?
+ *
+ * The operator routes authorise on membership (any member may see and, for an
+ * ordinary self-hosted operator, resolve). Task 8 tightens that for
+ * CONSEQUENTIAL Office approvals: only an owner may approve a deployment or a
+ * live-data change. Read from the database on every resolution — an
+ * indefinitely cached role is exactly the stale authority the spec forbids.
+ */
+export async function isOrganizationOwner(
+  pool: pg.Pool,
+  orgId: string,
+  userId: string,
+): Promise<boolean> {
+  const result = await pool.query<{ role: string }>(
+    `SELECT role FROM organization_members
+      WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
+    [orgId, userId],
+  );
+  return result.rows[0]?.role === 'owner';
+}
 
 /**
  * Org-scoped approval resolution for operator turns.
@@ -367,11 +390,74 @@ export async function resolveOperatorApproval(
      * which human authorised an operator-raised, irreversible action.
      */
     userId: string;
+    /**
+     * How the caller authenticated (`request.auth.authMethod`). Only a human
+     * session may approve a consequential Office action — service keys and
+     * API keys cannot. Optional because direct/server callers (tests, internal
+     * helpers) have no transport to read it from; the HTTP route always
+     * supplies it.
+     */
+    authMethod?: string;
     resolution: { status: 'approved' } | { status: 'denied'; reason?: string };
   },
 ): Promise<OperatorResolveOutcome> {
   const approval = await getApprovalForOrg(pool, input.approvalId, input.orgId);
   if (!approval) return { ok: false, code: 404, error: 'approval not found' };
+
+  /**
+   * ── Office consequential gate (Task 8) ──────────────────────────────────
+   *
+   * In cloud mode the access policy answers `approvalMode: 'consequential'`
+   * for operator/Office origins. A consequential approval is:
+   *
+   *   - approvable only by a HUMAN session (not a service/API key);
+   *   - approvable only by a CURRENT OWNER of the approval's organization;
+   *   - executable only while the policy still allows `execute` for that org
+   *     (paid entitlement, account state, managed credential, funding);
+   *   - required to carry a recorded immutable operation. A legacy row that
+   *     predates one must be re-proposed rather than executed on trust.
+   *
+   * DENIAL IS DELIBERATELY NOT GATED. Refusing old work must remain possible
+   * with no paid plan, no credits and no current owner — that is how an org
+   * unwinds a pending action. The evaluation therefore runs only for approve,
+   * and the deny path is unchanged.
+   */
+  const access =
+    input.resolution.status === 'approved'
+      ? await evaluateOperatorAccess({
+          organizationId: input.orgId,
+          phase: 'execute',
+          origin: 'operator',
+          actorUserId: input.userId,
+        })
+      : { allowed: true, reason: null, approvalMode: 'standard' as const };
+  const officeConsequential = access.approvalMode === 'consequential';
+
+  if (input.resolution.status === 'approved' && officeConsequential) {
+    if (input.authMethod !== undefined && input.authMethod !== 'jwt') {
+      return {
+        ok: false,
+        code: 403,
+        error: 'a human organization-owner session is required to approve this action',
+      };
+    }
+    if (!(await isOrganizationOwner(pool, input.orgId, input.userId))) {
+      return { ok: false, code: 403, error: 'only an organization owner may approve this action' };
+    }
+    if (!access.allowed) {
+      // 409: the approval is still valid and still pending; it simply cannot
+      // execute under the organization's current state. Denial remains
+      // available, so this is not a wedge.
+      return { ok: false, code: 409, error: access.reason ?? 'service_unavailable' };
+    }
+    if (!approval.approvedOperation) {
+      return {
+        ok: false,
+        code: 409,
+        error: 'approval_operation_missing: this approval must be re-proposed',
+      };
+    }
+  }
 
   const outcome = await completeApprovalResolution(pool, {
     approval,
@@ -400,6 +486,13 @@ export async function resolveOperatorApproval(
         // this execution reports the id of the TURN that gated, not a fresh
         // one for the click that resolved it.
         traceId: a.traceId,
+        // The row carries the immutable operation and the conversation whose
+        // working tree a deploy replay needs. A deploy approved here runs
+        // through the same HTTP transports a live turn uses; a changed tree
+        // is refused with approval_operation_changed.
+        approval: a,
+        officeConsequential,
+        cache: getSharedWorkingTreeCache(),
       }),
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
@@ -1262,6 +1355,10 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       orgId: org.orgId,
       jwt,
       userId,
+      // Consequential Office approvals require a HUMAN session: a service or
+      // API key can list and deny, but only a person (and, below, only an
+      // owner) may authorise a deployment or live-data change.
+      authMethod: request.auth?.authMethod,
       resolution:
         parsed.data.status === 'approved'
           ? { status: 'approved' }

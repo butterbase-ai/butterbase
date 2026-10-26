@@ -741,7 +741,15 @@ export async function runOperatorTurn(
           phase: 'run',
           origin: 'operator',
         });
-        return { allowed: decision.allowed, reason: decision.reason };
+        return {
+          allowed: decision.allowed,
+          reason: decision.reason,
+          // A cloud Office policy answers 'consequential'; that activates the
+          // Office floor in the loop (consequential tools need a human even
+          // with yolo on, preparation stays autonomous). The OSS default and
+          // the ordinary dashboard answer 'standard'.
+          approvalMode: decision.approvalMode,
+        };
       },
       // Until now, job name and wake reason existed only as prose inside the
       // wake message — in the model's context window, in no structured field.

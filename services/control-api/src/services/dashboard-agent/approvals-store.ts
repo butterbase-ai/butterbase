@@ -1,5 +1,10 @@
 import pg from 'pg';
 import { operatorUserId } from './operator-store.js';
+import {
+  captureApprovalOperation,
+  readApprovedOperation,
+  type ApprovedOperation,
+} from './approval-operation.js';
 
 export type Approval = {
   id: string;
@@ -40,14 +45,25 @@ export type Approval = {
    * actually continues the gated turn.
    */
   resumedAt: string | null;
+  /**
+   * The server-owned record of the operation a human is approving (Task 8).
+   *
+   * Downstream tools still receive `toolArgs` only; this is the immutable
+   * identity the replay verifies against, including a digest of the proposed
+   * build artifact for deployment tools. Null for rows that predate the
+   * column and for approvals created outside the operator path — see
+   * `readApprovedOperation`, which also turns a corrupted value into null so
+   * a hand-inserted row can never authorise an execution.
+   */
+  approvedOperation: ApprovedOperation | null;
 };
 
 const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
   sensitivity, status, trust_scope, deny_reason, created_at, resolved_at, resolved_by,
-  trace_id, resumed_at`;
+  trace_id, resumed_at, approved_operation`;
 
 /** Same columns as APPROVAL_COLS, `a.`-prefixed for queries that JOIN dashboard_agent_conversations. */
-const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at`;
+const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at, a.approved_operation`;
 
 function rowToApproval(row: any): Approval {
   return {
@@ -65,6 +81,7 @@ function rowToApproval(row: any): Approval {
     resolvedBy: row.resolved_by ?? null,
     traceId: row.trace_id ?? null,
     resumedAt: row.resumed_at ?? null,
+    approvedOperation: readApprovedOperation(row.approved_operation),
   };
 }
 
@@ -86,14 +103,28 @@ export async function createApproval(
      * for the human assistant, which has no distributed trace.
      */
     traceId?: string | null;
+    /**
+     * The server-owned operation being approved. Supplied by the operator
+     * loop's approval gate (loop.ts); absent for the human assistant's
+     * sensitivity gate, whose approvals keep their existing behaviour.
+     */
+    approvedOperation?: ApprovedOperation | null;
   }
 ): Promise<Approval> {
   const result = await pool.query(
     `INSERT INTO dashboard_agent_approvals
-     (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id)
-     VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+     (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation)
+     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
      RETURNING ${APPROVAL_COLS}`,
-    [input.conversationId, input.turnMessageId, input.toolName, JSON.stringify(input.toolArgs), input.sensitivity, input.traceId ?? null]
+    [
+      input.conversationId,
+      input.turnMessageId,
+      input.toolName,
+      JSON.stringify(input.toolArgs),
+      input.sensitivity,
+      input.traceId ?? null,
+      input.approvedOperation ? JSON.stringify(input.approvedOperation) : null,
+    ]
   );
 
   return rowToApproval(result.rows[0]);
@@ -261,10 +292,22 @@ export async function createSubstrateEscalationApproval(
 
     const inserted = await client.query(
       `INSERT INTO dashboard_agent_approvals
-       (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id)
-       VALUES ($1, $2, $3, $4, 'destructive', 'pending', $5)
+       (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation)
+       VALUES ($1, $2, $3, $4, 'destructive', 'pending', $5, $6)
        RETURNING ${APPROVAL_COLS}`,
-      [input.conversationId, input.pausedMessageId, SUBSTRATE_ESCALATION_TOOL, JSON.stringify(toolArgs), input.traceId ?? null],
+      [
+        input.conversationId,
+        input.pausedMessageId,
+        SUBSTRATE_ESCALATION_TOOL,
+        JSON.stringify(toolArgs),
+        input.traceId ?? null,
+        // The operation here is built above from a server-issued action id,
+        // so it is immutable by construction — there is no model argument or
+        // working-tree artifact to re-verify. Recording it keeps every
+        // operator approval row uniform: an Office approval with no recorded
+        // operation means "re-propose".
+        JSON.stringify(captureApprovalOperation({ toolName: SUBSTRATE_ESCALATION_TOOL, args: toolArgs })),
+      ],
     );
 
     const marked = await client.query(

@@ -33,7 +33,9 @@ import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-gua
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
-import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
+import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS, resolveOfficeVerdict, type OperatorPolicy } from './operator-policy.js';
+import { classifyOfficeTool } from './office-tool-policy.js';
+import { captureApprovalOperation, deploymentArtifact } from './approval-operation.js';
 import { readOperatorYoloMode } from './operator-yolo.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
 import { trimOperatorHistory } from './operator-history.js';
@@ -203,6 +205,17 @@ let _sharedCache: WorkingTreeCache | undefined;
 export function getSharedWorkingTreeCache(): WorkingTreeCache {
   if (!_sharedCache) _sharedCache = new WorkingTreeCache();
   return _sharedCache;
+}
+
+/**
+ * `args.app_id` when the call names one — the working-tree key for artifact
+ * capture at approval time. A non-string or empty value is absent; there is
+ * nothing to look up and nothing to verify.
+ */
+function appIdFromArgs(args: unknown): string | null {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const appId = (args as { app_id?: unknown }).app_id;
+  return typeof appId === 'string' && appId.length > 0 ? appId : null;
 }
 
 /**
@@ -686,8 +699,20 @@ export async function* runAgentTurn(
      * request and before dispatching a batch of tools. Supplied by the
      * operator turn; absent for human conversations, which are governed by
      * their request authentication instead.
+     *
+     * `approvalMode` comes from the registered `OperatorAccessPolicy`. A
+     * cloud Office policy answers 'consequential' for operator/Office origins
+     * (and 'standard' for the ordinary dashboard), which activates the Office
+     * floor in `office-tool-policy.ts`: consequential tools need a human even
+     * when `yolo_mode` is on, and preparation stays autonomous without it.
+     * Absent means 'standard' — a self-hosted deployment with no cloud policy
+     * keeps its existing yolo behaviour exactly.
      */
-    accessGuard?: () => Promise<{ allowed: boolean; reason: string | null }>;
+    accessGuard?: () => Promise<{
+      allowed: boolean;
+      reason: string | null;
+      approvalMode?: 'standard' | 'consequential';
+    }>;
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
@@ -823,6 +848,25 @@ export async function* runAgentTurn(
     if (yoloModeCache === null) yoloModeCache = await readOperatorYoloMode(turnMcp, input.jwt);
     return yoloModeCache;
   };
+
+  /**
+   * Whether this turn is governed by the customer Office contract rather than
+   * the general unattended-operator one. Set from the access policy's
+   * `approvalMode` on every guard evaluation (before each model request and
+   * before each tool batch), never from anything the model supplies.
+   *
+   * False for a self-hosted deployment with no cloud policy ('standard'), for
+   * human dashboard conversations (no guard at all), and — until Task 9 wires
+   * Office Ask — for foreground conversations. When true:
+   *
+   *   - consequential tools need a human even with `yolo_mode` on;
+   *   - Office preparation (`write_file`, `read_file`, …) is autonomous
+   *     without it;
+   *   - an operator `deny` still wins, unchanged.
+   *
+   * See `resolveOfficeVerdict` for the full precedence.
+   */
+  let officeConsequential = false;
 
   // 1. Persist the user turn
   await appendMessage(input.pool, input.conversationId, {
@@ -1142,6 +1186,7 @@ export async function* runAgentTurn(
           terminated = true;
           break outer;
         }
+        officeConsequential = access.approvalMode === 'consequential';
       }
 
       const stream = streamChatCompletion({
@@ -1224,6 +1269,7 @@ export async function* runAgentTurn(
       if (input.accessGuard) {
         const access = await input.accessGuard();
         if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
+        else officeConsequential = access.approvalMode === 'consequential';
       }
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
@@ -1262,7 +1308,7 @@ export async function* runAgentTurn(
          * stored credential being org-bound — an external property, not a
          * control.
          */
-        let operatorVerdict = isOperator
+        let operatorVerdict: OperatorPolicy | null = isOperator
           ? operatorPolicyForOrg(tc.name, tc.args, operatorOrgId)
           : null;
         if (isOperator) {
@@ -1271,6 +1317,22 @@ export async function* runAgentTurn(
           } catch {
             operatorVerdict = 'deny';
           }
+        }
+
+        /**
+         * THE OFFICE FLOOR (Task 8). In a customer Office turn the Office
+         * classifier is authoritative for reads/preparation/consequences, and
+         * an operator 'deny' (cross-org, self-approval) still wins. Yolo is
+         * never consulted here — the whole point is that a customer Office
+         * does not inherit the substrate shortcut for consequential work.
+         *
+         * `officeConsequential` is derived from the server-side access policy
+         * on this turn, never from a model argument; it is false for every
+         * self-hosted deployment with no cloud policy, which is why their
+         * behaviour is unchanged.
+         */
+        if (officeConsequential) {
+          operatorVerdict = resolveOfficeVerdict(operatorVerdict, classifyOfficeTool(tc.name, tc.args));
         }
 
         /**
@@ -1289,6 +1351,7 @@ export async function* runAgentTurn(
          * request. It falls through to the catalog guard below either way.
          */
         if (
+          !officeConsequential &&
           operatorVerdict === 'approval' &&
           allowedToolNames.has(tc.name) &&
           (await resolveYoloMode())
@@ -1423,6 +1486,27 @@ export async function* runAgentTurn(
         // was before the tiers changed.
         if (operatorVerdict === 'approval' && allowedToolNames.has(tc.name)) {
           const messageId = randomUUID();
+          /**
+           * The server-owned record of WHAT is being approved (Task 8).
+           *
+           * Downstream tools still receive only `tc.args`. This object lives
+           * in `dashboard_agent_approvals.approved_operation` and is what the
+           * replay verifies against: the exact tool, the exact args, the
+           * target app, and — for a deployment — a digest of the source that
+           * was proposed. A later working-tree change cannot ride in under
+           * this approval; it is refused with `approval_operation_changed`
+           * and must be re-proposed.
+           */
+          const approvedOperation = captureApprovalOperation({
+            toolName: tc.name,
+            args: tc.args,
+            artifact: (() => {
+              const appId = appIdFromArgs(tc.args);
+              return appId
+                ? deploymentArtifact(tc.name, tc.args, cache.get(input.conversationId, appId))
+                : undefined;
+            })(),
+          });
           const approval = await createApproval(input.pool, {
             conversationId: input.conversationId,
             turnMessageId: messageId,
@@ -1433,6 +1517,7 @@ export async function* runAgentTurn(
             // expects, and there is no weaker meaning available.
             sensitivity: 'destructive',
             traceId: input.traceId ?? null,
+            approvedOperation,
           });
           // `gated`: the operator turn stops here, right now, and does not
           // resume until a human resolves `approval.id` — reported via

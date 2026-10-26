@@ -120,6 +120,18 @@ export async function executeOnce(
      * for the human assistant's own approvals, which have no trace.
      */
     traceId?: string | null;
+    /**
+     * How the call actually reaches its tool. Defaults to `callMcpTool`.
+     *
+     * Exists for the operator's IN-PROCESS deploy tools (`deploy_frontend`,
+     * `deploy_function_from_workspace`), which have no MCP counterpart at all —
+     * replaying them through `callMcpTool` reaches no server and fails. The
+     * approval executor supplies a local dispatcher for exactly those names;
+     * everything else keeps the default. This does NOT widen the exactly-once
+     * contract: the dispatch still runs inside the same advisory-lock
+     * transaction and its success is cached under the same approval id.
+     */
+    dispatch?: (call: { name: string; args: unknown }) => Promise<McpCallResult>;
   },
 ): Promise<McpCallResult> {
   // Ahead of every path that can reach callMcpTool, and ahead of touching the
@@ -185,7 +197,9 @@ export async function executeOnce(
       return cached.rows[0].result;
     }
 
-    const result = await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId, opts.traceId);
+    const result = opts.dispatch
+      ? await opts.dispatch({ name: opts.name, args: opts.args })
+      : await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId, opts.traceId);
 
     if (result.ok) {
       await client.query(

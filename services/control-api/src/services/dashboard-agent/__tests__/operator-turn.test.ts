@@ -811,7 +811,14 @@ describe('runOperatorTurn — organization access guard', () => {
 
     const input = mockRunAgentTurn.mock.calls[0][0] as { accessGuard?: () => Promise<unknown> };
     expect(typeof input.accessGuard).toBe('function');
-    await expect(input.accessGuard!()).resolves.toEqual({ allowed: true, reason: null });
+    // Task 8: the guard also carries the policy's `approvalMode`, which is
+    // what activates the Office consequential floor inside the loop. It is
+    // forwarded verbatim — the transport is not the place to reinterpret it.
+    await expect(input.accessGuard!()).resolves.toEqual({
+      allowed: true,
+      reason: null,
+      approvalMode: 'consequential',
+    });
     expect(evaluate).toHaveBeenCalledWith({
       organizationId: job.organizationId,
       phase: 'run',

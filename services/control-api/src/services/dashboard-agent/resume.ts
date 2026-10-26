@@ -180,6 +180,18 @@ export async function completeApprovalResolution(
   if (resolution.status === 'approved') {
     const call = await execute(approval);
     if (!call.ok) {
+      /**
+       * A refused IMMUTABLE OPERATION is a 409, not a transport failure.
+       * `approval_operation_changed` means the operation the owner approved
+       * can no longer be executed as approved (the working tree moved, or a
+       * legacy Office approval has no recorded operation). The tool never
+       * ran; the approval stays pending so it can be denied or re-proposed.
+       * Reported as 502 it would read like a flaky upstream and invite a
+       * retry that can never succeed.
+       */
+      if (call.code === 'approval_operation_changed') {
+        return { ok: false, code: 409, error: call.error ?? 'approval_operation_changed' };
+      }
       return { ok: false, code: 502, error: `Tool execution failed: ${call.error}` };
     }
     toolResult = call.result;

@@ -43,7 +43,7 @@ import * as approvalsStoreModule from '../approvals-store.js';
 import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL } from '../tool-catalog.js';
 import { operatorUserId } from '../operator-store.js';
 import { isOperatorToolAllowed } from '../operator-policy.js';
-import { runAgentTurn, type LoopEvent } from '../loop.js';
+import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop.js';
 
 const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
 const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
@@ -858,5 +858,187 @@ describe('operator — organization access guard', () => {
       result: { error: 'office_access_blocked', reason: 'credential_repair_required' },
     });
     expect(events).toContainEqual({ type: 'blocked', reason: 'credential_repair_required' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Office consequential mode — Task 8
+// ---------------------------------------------------------------------------
+
+/**
+ * The cloud access policy answers with `approvalMode`. For an operator/Office
+ * turn that is 'consequential', which means the Office floor in
+ * office-tool-policy.ts applies and `yolo_mode` may no longer lift a
+ * consequential approval. 'standard' keeps the old, self-hosted behaviour.
+ */
+function consequentialGuard() {
+  return vi.fn(async () => ({
+    allowed: true,
+    reason: null,
+    approvalMode: 'consequential' as const,
+  }));
+}
+function standardGuard() {
+  return vi.fn(async () => ({
+    allowed: true,
+    reason: null,
+    approvalMode: 'standard' as const,
+  }));
+}
+
+describe('operator — Office consequential mode', () => {
+  it('yolo CANNOT promote a deployment in Office mode; the deploy never dispatches', async () => {
+    withYolo(true);
+    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: consequentialGuard() })));
+
+    expect(realDispatches()).toEqual([]);
+    expect(mockCreateApproval).toHaveBeenCalledTimes(1);
+    expect(events.some((e) => e.type === 'approval_required')).toBe(true);
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+    // Not even the yolo probe is worth a round-trip when the Office floor
+    // already decided.
+    expect(yoloProbes()).toEqual([]);
+  });
+
+  it('yolo CANNOT promote integration execution in Office mode', async () => {
+    withYolo(true);
+    oneToolCallThenStop('manage_integrations', {
+      action: 'execute_action',
+      tool_name: 'GMAIL_SEND_EMAIL',
+      params: { to: 'customer@example.test' },
+    });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: consequentialGuard() })));
+
+    expect(realDispatches()).toEqual([]);
+    expect(events.some((e) => e.type === 'approval_required')).toBe(true);
+  });
+
+  it('an unknown integration action is gated, not executed', async () => {
+    withYolo(true);
+    oneToolCallThenStop('manage_integrations', { action: 'some_future_action', app_id: 'app-1' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: consequentialGuard() })));
+
+    expect(realDispatches()).toEqual([]);
+    expect(events.some((e) => e.type === 'approval_required')).toBe(true);
+  });
+
+  it('reads still dispatch under Office mode, even with yolo off', async () => {
+    withYolo(false);
+    oneToolCallThenStop('select_rows', { app_id: 'app-1', table: 'tickets' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: consequentialGuard() })));
+
+    expect(realDispatches()).toHaveLength(1);
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+  });
+
+  it('preparation and builds stay allowed under Office mode', async () => {
+    withYolo(false);
+    oneToolCallThenStop('write_file', { app_id: 'app-1', path: 'src/a.tsx', content: 'x' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: consequentialGuard() })));
+
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+  });
+
+  it('a control-weakening substrate action stays DENIED under Office mode', async () => {
+    withYolo(true);
+    oneToolCallThenStop('manage_substrate', { action: 'approve', action_id: 'act-1' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: consequentialGuard() })));
+
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(realDispatches()).toEqual([]);
+    const denied = events.find(
+      (e) => e.type === 'tool_result'
+        && String((e as { error?: unknown }).error ?? '').includes('not permitted'),
+    );
+    expect(denied).toBeTruthy();
+  });
+
+  it('standard mode keeps the self-hosted yolo behaviour (no regression)', async () => {
+    withYolo(true);
+    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: standardGuard() })));
+
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+  });
+});
+
+describe('operator — server-owned approval operation', () => {
+  // The working tree is a process-wide singleton and `write_file` tests above
+  // leave content in it. Clear it so "no artifact" here means the tree really
+  // is empty, not "a previous test's file".
+  beforeEach(() => {
+    getSharedWorkingTreeCache().evict('conv-1', 'app-1');
+  });
+
+  it('records the exact operation on every operator approval', async () => {
+    withYolo(false);
+    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+
+    await collect(runAgentTurn(operatorInput()));
+
+    expect(mockCreateApproval).toHaveBeenCalledWith(
+      stubPool,
+      expect.objectContaining({
+        toolName: 'deploy_frontend',
+        approvedOperation: {
+          version: 1,
+          toolName: 'deploy_frontend',
+          args: { app_id: 'app-1' },
+          targetAppId: 'app-1',
+        },
+      }),
+    );
+  });
+
+  it('carries the working-tree artifact for a frontend deploy', async () => {
+    const cache = getSharedWorkingTreeCache();
+    cache.write('conv-1', 'app-1', 'src/App.tsx', 'export default function App() {}');
+    try {
+      withYolo(false);
+      oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+
+      await collect(runAgentTurn(operatorInput()));
+
+      const input = mockCreateApproval.mock.calls[0][1] as {
+        approvedOperation?: { artifact?: { kind: string; referenceId?: string; sha256: string } };
+      };
+      expect(input.approvedOperation?.artifact).toEqual({
+        kind: 'inline_code',
+        referenceId: 'app-1',
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    } finally {
+      cache.evict('conv-1', 'app-1');
+    }
+  });
+
+  it('carries the function entry-file artifact for a function deploy', async () => {
+    const cache = getSharedWorkingTreeCache();
+    cache.write('conv-1', 'app-1', 'functions/send-receipt/index.ts', 'export const handler = 1');
+    try {
+      withYolo(false);
+      oneToolCallThenStop('deploy_function_from_workspace', {
+        app_id: 'app-1',
+        function_name: 'send-receipt',
+      });
+
+      await collect(runAgentTurn(operatorInput()));
+
+      const input = mockCreateApproval.mock.calls[0][1] as {
+        approvedOperation?: { artifact?: { referenceId?: string } };
+      };
+      expect(input.approvedOperation?.artifact?.referenceId).toBe('app-1:send-receipt');
+    } finally {
+      cache.evict('conv-1', 'app-1');
+    }
   });
 });
