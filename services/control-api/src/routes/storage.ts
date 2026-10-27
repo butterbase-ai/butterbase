@@ -532,13 +532,13 @@ export async function storageRoutes(app: FastifyInstance) {
       const isPlatformAuth = request.auth.authMethod !== 'end_user_jwt';
       const result = isPlatformAuth
         ? await runtimeDb.query(
-            `SELECT key
+            `SELECT key, access_scope
              FROM storage_objects
              WHERE id = $1 AND app_id = $2 AND (access_scope='app' OR published_at IS NOT NULL)`,
             [objectId, appId]
           )
         : await runtimeDb.query(
-            `SELECT key
+            `SELECT key, access_scope
              FROM storage_objects
              WHERE id = $1 AND app_id = $2 AND ((access_scope='app' AND ${legacyOwnerPredicate(userId, 3)})
                OR (access_scope='prepared_video' AND published_at IS NOT NULL AND access_subject=$3::text))`,
@@ -554,14 +554,20 @@ export async function storageRoutes(app: FastifyInstance) {
         }));
       }
 
-      // Delete from S3
-      await deleteObject(result.rows[0].key);
-
-      // Delete from database
-      await runtimeDb.query(
-        'DELETE FROM storage_objects WHERE id = $1',
-        [objectId]
-      );
+      if (result.rows[0].access_scope === 'prepared_video') {
+        // The DB trigger retains bucket/key and tombstones the output before
+        // removing metadata. Its independent cleanup worker owns physical IO.
+        const deleted = await runtimeDb.query(`DELETE FROM storage_objects s WHERE s.id=$1 AND s.app_id=$2
+          AND s.access_scope='prepared_video' AND s.published_at IS NOT NULL
+          AND ($3::boolean OR s.access_subject=$4::text)
+          AND EXISTS(SELECT 1 FROM ai_video_preparation_outputs o WHERE o.object_id=s.id
+            AND o.app_id=s.app_id AND o.organization_id=s.organization_id::text
+            AND o.bucket=s.bucket AND o.object_key=s.key AND o.archived_after_move IS NULL)`, [objectId, appId, isPlatformAuth, userId]);
+        if (deleted.rowCount !== 1) return reply.status(503).send(createAgentError({ code: 'STORAGE_DELETE_PENDING', message: 'Storage deletion unavailable', remediation: 'Retry after current storage work finishes.' }));
+      } else {
+        await deleteObject(result.rows[0].key);
+        await runtimeDb.query('DELETE FROM storage_objects WHERE id = $1 AND app_id=$2', [objectId, appId]);
+      }
 
       logFromRequest(request, {
         appId,

@@ -69,7 +69,9 @@ export async function teardownAppStorage(
   let rows: { bucket: string; key: string }[];
   try {
     const res = await runtimeDb.query<{ bucket: string; key: string }>(
-      'SELECT bucket, key FROM storage_objects WHERE app_id = $1',
+      // Managed generated objects retain their own deletion obligations after
+      // metadata/app cascades; do not bypass their ownership/fence checks here.
+      "SELECT bucket, key FROM storage_objects WHERE app_id = $1 AND COALESCE(to_jsonb(storage_objects)->>'access_scope','app')<>'prepared_video'",
       [appId],
     );
     rows = res.rows;

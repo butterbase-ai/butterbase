@@ -7,6 +7,7 @@ import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js'
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRedisClient } from '../services/redis.js';
+import { incrementUsage } from '../services/usage-metering.js';
 import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import {
   routeVideoSubmit, routeVideoPoll, settleVideoJob,
@@ -199,11 +200,15 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
     try {
-      const body = videoSubmitSchema.parse(request.body);
+      let body = videoSubmitSchema.parse(request.body);
       const preparationRegion = await resolveAppHomeRegion(app.controlDb, appId);
+      const hooks=getVideoPreparationHooks();
+      const context={platformPool:app.controlDb,runtimePool,region:preparationRegion};
+      const scope={appId,organizationId,userId:ownerId,endUserSub};
+      const enriched=await hooks?.enrichRequest?.(context,scope,body);
+      if(enriched)body=videoSubmitSchema.parse(enriched.request);
       const prepared = await admitVideoPreparation(
-        { platformPool: app.controlDb, runtimePool, region: preparationRegion }, getVideoPreparationHooks(),
-        { appId, organizationId, userId: ownerId, endUserSub }, body,
+        context,hooks,scope,body,enriched?.policy,
       );
       if (prepared) {
         return reply.code(202).send({ job_id: prepared.id, status: 'pending', polling_url: `${publicProto(request)}://${publicHost(request)}/v1/${appId}/videos/completions/${prepared.id}` });
@@ -343,8 +348,23 @@ export async function aiVideoRoutes(app: FastifyInstance) {
         const attempt = (await listPreparationAttempts(runtimePool, jobId)).find(a => a.terminal_outcome?.status === 'completed' && a.settlement_status === 'acknowledged');
         if (!attempt) return reply.code(502).send({ error: 'content_unavailable', code: 'CONTENT_UNAVAILABLE' });
         const region = await resolveAppHomeRegion(app.controlDb, appId);
-        const { stream, contentType } = await preparationHooks.content({ platformPool: app.controlDb, runtimePool, region }, attempt, index);
-        return reply.code(200).header('Content-Type', contentType).send(Readable.fromWeb(stream as any));
+        const content = await preparationHooks.content({ platformPool: app.controlDb, runtimePool, region }, attempt, index,
+          { ...(request.headers.range ? { range: request.headers.range } : {}) });
+        const stream = Readable.fromWeb(content.stream as any);
+        if (storedVideoOutputIds(prepared.terminal_outcome)) {
+          let bytes = 0, metered = false;
+          stream.on('data', chunk => { bytes += Buffer.byteLength(chunk); });
+          const meter = () => {
+            if (metered) return; metered = true;
+            if (bytes) void incrementUsage(organizationId, ownerId, 'bandwidth_bytes', bytes, appId)
+              .catch(() => app.log.warn({ appId }, 'video: content bandwidth metering failed'));
+          };
+          stream.once('end', meter); stream.once('close', meter);
+          reply.header('Accept-Ranges', 'bytes');
+        }
+        if (content.contentLength !== undefined) reply.header('Content-Length', content.contentLength);
+        if (content.contentRange) reply.header('Content-Range', content.contentRange);
+        return reply.code(content.statusCode ?? 200).header('Content-Type', content.contentType).send(stream);
       }
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });

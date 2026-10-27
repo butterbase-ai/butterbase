@@ -189,11 +189,12 @@ export async function markPreparedOutputUploadStarted(pool: pg.Pool, id: string,
     WHERE ${liveCopy} AND capacity_reserved AND sha256 IS NOT NULL AND upload_claim_fence IS DISTINCT FROM $2`, [id, fence])).rowCount === 1;
 }
 
-export async function deferPreparedOutput(pool: pg.Pool, id: string, fence: number, errorCode: string, next: Date): Promise<boolean> {
+export async function deferPreparedOutput(pool: pg.Pool, id: string, fence: number, errorCode: string, next: Date, clearSource = false): Promise<boolean> {
   if (!Number.isFinite(next.getTime()) || !/^[a-z_]{1,80}$/.test(errorCode)) throw new PreparedOutputError('OUTPUT_INVALID_RETRY', 'Invalid output retry');
   return (await pool.query(`UPDATE ai_video_preparation_outputs v SET state='pending',lease_owner=NULL,lease_expires_at=NULL,
-    uncertain_put=uncertain_put OR upload_uncertain_until IS NOT NULL,error_code=$3,next_action_at=$4,updated_at=now()
-    WHERE ${liveCopy}`, [id, fence, errorCode, next])).rowCount === 1;
+    uncertain_put=uncertain_put OR upload_uncertain_until IS NOT NULL,error_code=$3,next_action_at=$4,
+    source_handle=CASE WHEN $5 THEN NULL ELSE source_handle END,updated_at=now()
+    WHERE ${liveCopy}`, [id, fence, errorCode, next, clearSource])).rowCount === 1;
 }
 
 export async function requestPreparedOutputCleanup(pool: pg.Pool, args: {

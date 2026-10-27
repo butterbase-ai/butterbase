@@ -17,6 +17,7 @@ export class VideoOutputStorageError extends Error {
   }
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+let defaultClient: S3Client | undefined;
 const fail = (code: string, permanent = true, statusCode = 503) => new VideoOutputStorageError(code, permanent, statusCode);
 const status = (e: unknown) => (e as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
 function safeError(e: unknown): VideoOutputStorageError {
@@ -60,7 +61,7 @@ function byteRange(value: string | undefined, size: number): { start: number; en
 
 /** Streams only immutable, measured, owned objects; never returns bucket/provider URLs. */
 export function createRetainedVideoStore(options: { client?: S3Client; maxBytes?: number; timeoutMs?: number; signal?: AbortSignal } = {}) {
-  const client = options.client ?? createRetainedObjectClient();
+  const client = options.client ?? (defaultClient ??= createRetainedObjectClient());
   const maxBytes = options.maxBytes ?? PREPARED_OUTPUT_MAX_BYTES, timeoutMs = options.timeoutMs ?? 20_000;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > PREPARED_OUTPUT_MAX_BYTES
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) throw fail('OUTPUT_INVALID_LIMIT');

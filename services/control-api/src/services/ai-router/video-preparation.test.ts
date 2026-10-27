@@ -40,6 +40,14 @@ describe.skipIf(!url)('durable video lifecycle with real local PostgreSQL', () =
   expect(await admitVideoPreparation(ctx(), hooks, scope, { model: 'test', prompt: 'plain' })).toBeNull(); const job = await makeJob();
   expect(job.status).toBe('pending'); expect(await repository.getPreparation(db, job.id)).toBeTruthy(); expect(hooks.loadImage).not.toHaveBeenCalled(); expect(hooks.reserve).not.toHaveBeenCalled(); expect(hooks.submit).not.toHaveBeenCalled();
  });
+ it('pins the temporary policy audit and rejects changed reference bytes before any reservation or provider call', async () => {
+  const policy={policyId:'temporary-bridge',confirmationId:'confirmed-project',expiresAt:new Date(Date.now()+3600_000).toISOString(),expectedSha256:{'/input_images/0':'b'.repeat(64)}};
+  const job=(await admitVideoPreparation(ctx(),hooks,scope,body,policy))!;
+  await advance(job.id);
+  expect(await repository.getPreparation(db,job.id)).toMatchObject({status:'failed',terminal_outcome:{error:'reference_changed'}});
+  expect(hooks.reserve).not.toHaveBeenCalled();expect(hooks.submit).not.toHaveBeenCalled();expect(hooks.prepareReference).not.toHaveBeenCalled();
+  expect((await repository.getPreparation(db,job.id))?.request_json).toMatchObject({selection:{billingContext:{temporaryReferencePolicy:policy}}});
+ });
  it.each(['upfront','on_rejection'])('keeps registration pending then transitions accepted, polling and terminal (%s)', async mode => {
   if (mode === 'on_rejection') vi.mocked(hooks.submit).mockResolvedValueOnce({status:'terminal',outcome:{status:'failed',error:'input_face_privacy',retryPaths:['/input_images/0']}});
   vi.mocked(hooks.prepareReference).mockResolvedValueOnce({status:'processing',referenceId:'ref',nextAction:'poll',nextPollAt:new Date(0)});

@@ -5,6 +5,8 @@ import type { LoadedReferenceImage } from './reference-image.js';
 export interface PreparationContext { runtimePool: pg.Pool; platformPool: pg.Pool; region: string }
 export interface PreparationScope { appId: string; organizationId: string; userId: string; endUserSub: string | null }
 export interface PreparationSelection { providerSlot: string; credentialNamespace: string; billingContext: Record<string, unknown> }
+/** Trusted server policy evidence, pinned in the immutable selection, never accepted in a public body. */
+export interface TemporaryReferencePolicy { policyId: string; confirmationId: string; expiresAt: string; expectedSha256: Record<string,string> }
 export interface ReferenceProgress { sha256: string; referenceId?: string; assetId?: string; nextAction?: 'ensure_with_image' | 'poll'; nextPollAt?: string }
 export type ReferenceResult =
  | { status: 'processing'; referenceId: string; nextPollAt: Date; nextAction: 'ensure_with_image' | 'poll' }
@@ -23,8 +25,12 @@ export type PreparationSubmitResult = PreparationProviderResult
  * retryPaths is permitted ONLY for a verified structured input-face/privacy failure.
  */
 export interface VideoPreparationHooks {
+ /** Metadata-only enrichment after authentication; default absent. */
+ enrichRequest?(ctx: PreparationContext, scope: PreparationScope, request: Record<string,unknown>): Promise<{ request: Record<string,unknown>; policy?: TemporaryReferencePolicy }>;
  /** Bounded provider cleanup/reconciliation and local source retention. */
  maintainReferences?(ctx: PreparationContext): Promise<void>;
+ /** Independent retained-output cleanup; must not depend on provider credentials. */
+ maintainOutputs?(ctx: PreparationContext): Promise<void>;
  quote(ctx: PreparationContext, scope: PreparationScope, request: Record<string, unknown>): Promise<PreparationSelection | null>;
  authorize(ctx: PreparationContext, job: PreparationRow): Promise<'allowed' | 'cancelled' | 'region_mismatch'>;
  loadImage?(scope: AssetScope, source: string): Promise<LoadedReferenceImage>;
@@ -37,7 +43,9 @@ export interface VideoPreparationHooks {
  settle(ctx: PreparationContext, attempt: AttemptRow, job: PreparationRow): Promise<Record<string, unknown>>;
  /** SQL only, awaited within SAME runtime transaction as acknowledgement. */
  writeUsage(tx: pg.PoolClient, job: PreparationRow, attempt: AttemptRow, receipt: Record<string, unknown>): Promise<void>;
- content(ctx: PreparationContext, attempt: AttemptRow, index: number): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
+ content(ctx: PreparationContext, attempt: AttemptRow, index: number, options?: { range?: string }): Promise<{
+  stream: ReadableStream<Uint8Array>; contentType: string; statusCode?: 200 | 206; contentLength?: number; contentRange?: string;
+ }>;
 }
 let hooks: VideoPreparationHooks | null = null;
 export function setVideoPreparationHooks(value: VideoPreparationHooks | null): void { hooks = value; }
