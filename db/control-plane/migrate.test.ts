@@ -261,6 +261,62 @@ describe('098-104 credit_floor_usd phase headers (regression guard)', () => {
   });
 });
 
+describe('125_audit_events_retention_and_revoke migration', () => {
+  const migrationPath = path.join(__dirname, '125_audit_events_retention_and_revoke.sql');
+
+  it('has a valid platform scope header', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(parseScopeHeader(sql)).toEqual('platform');
+  });
+
+  it('adds audit_retention_days to plans with default 180', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/ALTER TABLE\s+plans[\s\S]+ADD COLUMN[\s\S]+audit_retention_days\s+int/i);
+    expect(sql).toMatch(/DEFAULT\s+180/i);
+  });
+
+  it('seeds enterprise plan at 365 days', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/UPDATE\s+plans\s+SET\s+audit_retention_days\s*=\s*365\s+WHERE\s+id\s*=\s*'enterprise'/i);
+  });
+
+  it('creates the audit_events_guard trigger function', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE OR REPLACE FUNCTION\s+audit_events_guard\(\)/i);
+    expect(sql).toMatch(/RETURNS TRIGGER/i);
+    expect(sql).toMatch(/audit\.purge_active/i);
+  });
+
+  it('attaches the immutability trigger to audit_events', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE TRIGGER\s+audit_events_immutability_guard/i);
+    expect(sql).toMatch(/BEFORE UPDATE OR DELETE ON audit_events/i);
+  });
+
+  it('creates a SECURITY DEFINER purge_audit_events() function', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/CREATE OR REPLACE FUNCTION\s+purge_audit_events\(\)/i);
+    expect(sql).toMatch(/SECURITY DEFINER/i);
+    expect(sql).toMatch(/RETURNS\s+bigint/i);
+  });
+
+  it('purge function sets audit.purge_active before deleting', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/set_config\('audit\.purge_active',\s*'true',\s*true\)/i);
+  });
+
+  it('purge function deletes based on plan retention window', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/audit_retention_days/i);
+    expect(sql).toMatch(/DELETE FROM\s+audit_events/i);
+  });
+
+  it('also revokes UPDATE/DELETE from non-owner roles via PUBLIC', () => {
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+    expect(sql).toMatch(/REVOKE\s+UPDATE,\s*DELETE\s+ON\s+audit_events\s+FROM\s+PUBLIC/i);
+  });
+});
+
 describe('migrations', () => {
   it('088_app_meetings_webhooks has correct column schema', async () => {
     const dbUrl = process.env.TEST_DATABASE_URL;
