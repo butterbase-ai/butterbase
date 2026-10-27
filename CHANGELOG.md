@@ -12,6 +12,11 @@
 
 ### Added
 
+- **AI images**: model-specific generation and reference-edit contracts for GPT Image 2.5 Flare/Sunburst, Grok Imagine Image 2.0/Quality, and FLUX 3 Image/Klein, including local option/limit validation. Discover configured availability with `manage_ai` action `list_models`.
+- **MCP videos**: `manage_ai` action `submit_video` forwards explicit `reference_declarations` and `prepare_references` to the existing fictional-character preparation flow. Older MCP clients can use REST.
+- **AI model listings**: image/video availability requires an enabled, configured generation adapter. Unimplemented discovered models remain internal to catalog discovery.
+- **AI video pricing**: recognize cents-based output/continuation and image-input SKUs, plus H3 image allowances and H3 Max resolution tiers. Provider-reported actual cost remains authoritative; unknown quotes retain estimated-cost behavior.
+
 - **Idle pause**: real app requests record home-region activity with an hourly Redis throttle. The optional idle reaper warns owners, cancels pending notices when real traffic returns, and pauses abandoned free projects with a global circuit breaker. It is disabled unless `BUTTERBASE_IDLE_PAUSE_DAYS` is configured; supports dry-run rollout. Migration 056 remains required before deploying the activity hook.
 
 - **Ops**: `scripts/sync-paused-frontends.ts` -- run once after the dispatch worker deploy so apps paused before it show the paused page (rewrites their existing KV routes with `paused`). Idempotent; `--dry-run` lists the apps without writing.

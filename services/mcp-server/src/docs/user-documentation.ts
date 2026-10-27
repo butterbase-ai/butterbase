@@ -1984,6 +1984,18 @@ Streams \`video/mp4\` bytes. The \`?index=\` parameter selects among multiple ou
 
 **MCP shortcut:** Through the \`manage_ai\` MCP tool, use \`{ action: "submit_video", ... }\` and \`{ action: "poll_video", ... }\`.
 
+### Image generation models and options
+
+Discover executable image models with MCP \`manage_ai\` action \`list_models\`, \`modality: "image"\`, or REST \`GET /v1/{app_id}/ai/models?modality=image\`. The list includes configured image adapters that claim the model; discovered but unimplemented models are excluded.
+
+Submit images with \`manage_ai\` action \`submit_image\` or \`POST /v1/{app_id}/images/completions\`. New canonical IDs are \`openai/gpt-image-2.5-flare\`, \`openai/gpt-image-2.5-sunburst\`, \`x-ai/grok-imagine-image-2.0\`, \`x-ai/grok-imagine-image-quality\`, \`black-forest-labs/flux-3-image\`, and \`black-forest-labs/flux-3-image-klein\`; use IDs returned by the connected deployment's model list.
+
+GPT Image 2.5 accepts explicit pixel \`size\` such as \`1024x1024\` or \`auto\`, 1–10 outputs and up to 14 references through this API. Pixel edges are multiples of 16, at most 3840 each, with 655360–8294400 total pixels and at most 3:1 aspect ratio. Grok uses \`1K\`/\`2K\`, one output and up to three references. FLUX 3 Image/Klein use \`768\`/\`1K\`/\`1.5K\`/\`2K\`/\`4K\`, one output and up to ten references. These models accept model-specific \`aspect_ratio\` and ordered \`input_images\`; explicit pixel dimensions and ratio must agree.
+
+Pass rendering options in \`provider\`: GPT Image 2.5 supports \`quality\` (auto/low/medium/high/xhigh/max), \`background\` (auto/opaque/transparent) and integer \`output_compression\` (0–100). Grok Image 2.0 supports \`quality\` low/medium; Grok Quality and FLUX 3 expose no provider options. These newer image contracts do not expose seed or mask. Unsupported options return \`UNSUPPORTED_PARAM\` before generation.
+
+Reservations are estimates with headroom. Returned provider usage is authoritative when available; the customer charge includes the applicable account markup. Unknown price formats remain estimates rather than verified price quotes.
+
 ### Optional fictional character references
 
 Eligible apps and models can declare specific image slots as AI-generated fictional characters:

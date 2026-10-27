@@ -132,7 +132,7 @@ drive the SDK from inside a function or DO.`,
       seed: z.number().int().optional(),
       // submit_image
       size: z.string().optional().describe('For submit_image: e.g. "1024x1024", "1K", "2K", "4K" (model-specific)'),
-      n: z.number().int().positive().max(10).optional().describe('For submit_image: number of images (GPT Image only)'),
+      n: z.number().int().positive().max(10).optional().describe('For submit_image: number of images, subject to the selected model limit (up to 10 for GPT Image; 1 for Grok and FLUX 3)'),
       input_images: z.array(z.string().url()).max(14).optional().describe('For submit_image / submit_video: HTTPS URLs for reference / image-to-image / edit source'),
       input_references: z.array(z.union([z.string().url(), z.record(z.unknown())])).max(14).optional().describe('For submit_video: style/content reference images (reference-to-video). HTTPS URL strings, or the upstream\'s native object form, forwarded as-is'),
       frame_images: z.array(z.record(z.unknown())).max(14).optional().describe('For submit_video: seed frames in the upstream\'s native object form, forwarded as-is — e.g. { type: "image_url", image_url: { url }, frame_type: "first_frame" | "last_frame" }'),
