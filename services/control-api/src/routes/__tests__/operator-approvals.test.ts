@@ -274,16 +274,22 @@ describe('resolveCallerOrgId', () => {
 describe('operator route membership wiring', () => {
   let app: FastifyInstance;
   const query = vi.fn();
+  let authenticated = true;
 
   beforeEach(async () => {
     process.env.DASHBOARD_ASSISTANT_ENABLED = '1';
+    authenticated = true;
     query.mockReset();
     query.mockResolvedValue({ rows: [], rowCount: 0 });
 
     app = Fastify({ logger: false });
     app.decorateRequest('auth', null as any);
     app.addHook('onRequest', async (request) => {
-      (request as any).auth = { userId: 'some-user', authMethod: 'jwt', scopes: ['*'] };
+      // The production auth plugin always decorates `auth`; anonymous is a
+      // null userId, not a missing object.
+      (request as any).auth = authenticated
+        ? { userId: 'some-user', authMethod: 'jwt', scopes: ['*'] }
+        : { userId: null, authMethod: 'anonymous', scopes: [] };
     });
     app.decorate('controlDb', { query } as any);
     await app.register(dashboardAgentRoutes);
@@ -323,5 +329,96 @@ describe('operator route membership wiring', () => {
     const res = await app.inject({ method: 'GET', url: '/operator/approvals' });
     expect(res.statusCode).toBe(400);
     expect(approvalsModule.listPendingByOrg).not.toHaveBeenCalled();
+  });
+
+  // ── GET /operator/approvals/:id ──────────────────────────────────────────
+  //
+  // The smoke's verify-approved phase must be able to observe a RESOLVED
+  // approval. The list route is pending-only, so it can never do that.
+
+  const memberQuery = () =>
+    query.mockResolvedValue({ rows: [{ organization_id: ORG_A }], rowCount: 1 });
+
+  it('returns the safe shape for a resolved approval', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue({
+      ...approval,
+      status: 'approved',
+      resolvedAt: '2026-10-27T10:00:00.000Z',
+      source: 'office',
+    } as any);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      approval: {
+        id: 'appr-1',
+        status: 'approved',
+        resolved_at: '2026-10-27T10:00:00.000Z',
+        source: 'office',
+        tool_name: 'manage_substrate',
+        created_at: '',
+      },
+    });
+    // No transcript, arguments or recorded operation cross this route.
+    expect(res.body).not.toContain('tool_args');
+    expect(res.body).not.toContain('approved_operation');
+    expect(mockGet).toHaveBeenCalledWith(expect.anything(), 'appr-1', ORG_A);
+  });
+
+  it('also returns a pending approval, so the phase can distinguish waiting from resolved', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue({ ...approval, source: 'operator' } as any);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval).toMatchObject({ status: 'pending', resolved_at: null, source: 'operator' });
+  });
+
+  it('404s an approval that is missing or belongs to another organization', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue(null);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-foreign',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'approval not found' });
+  });
+
+  it('403s a non-member before any approval lookup', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_B },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it('401s an unauthenticated request', async () => {
+    authenticated = false;
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(mockGet).not.toHaveBeenCalled();
   });
 });
