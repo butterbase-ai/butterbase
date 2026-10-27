@@ -381,7 +381,9 @@ export const config = {
   },
 
   deployment: {
-    defaultBackend: process.env.DEPLOYMENT_DEFAULT_BACKEND === 'wfp' ? ('wfp' as const) : ('pages' as const),
+    // Workers for Platforms is the default hosting backend. A deployment that
+    // still relies on Cloudflare Pages must set DEPLOYMENT_DEFAULT_BACKEND=pages.
+    defaultBackend: process.env.DEPLOYMENT_DEFAULT_BACKEND === 'pages' ? ('pages' as const) : ('wfp' as const),
   },
 
   partnerProxy: {

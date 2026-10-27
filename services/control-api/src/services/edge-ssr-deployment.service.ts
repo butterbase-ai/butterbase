@@ -561,7 +561,7 @@ export async function deployArtifact(
     const app = {
       name: appResult.rows[0].name as string,
       subdomain: (appResult.rows[0].subdomain as string | null) ?? null,
-      deployment_backend: (appResult.rows[0].deployment_backend as 'pages' | 'wfp' | undefined) ?? 'pages',
+      deployment_backend: (appResult.rows[0].deployment_backend as 'pages' | 'wfp' | undefined) ?? config.deployment.defaultBackend,
       // apps.region is NOT NULL post-Phase 1, but keep a defensive fallback.
       region: (appResult.rows[0].region as string | null) ?? 'us-east-1',
       paused: appResult.rows[0].paused === true,
