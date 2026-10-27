@@ -1451,6 +1451,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         source: approval.source,
         tool_name: approval.toolName,
         created_at: approval.createdAt,
+        references: approval.references ?? [],
       },
     });
   });
