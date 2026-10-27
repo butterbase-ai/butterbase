@@ -7,6 +7,7 @@ import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js'
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRedisClient } from '../services/redis.js';
+import { incrementUsage } from '../services/usage-metering.js';
 import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import {
   routeVideoSubmit, routeVideoPoll, settleVideoJob,
@@ -29,7 +30,7 @@ import { readAutoRefillState } from './ai-config.js';
 import { resolveMarkupPct, type MarkupSource } from '../services/ai-router/special-pricing.js';
 import { getVideoPreparationHooks } from '../services/ai-router/video-preparation-hooks.js';
 import { admitVideoPreparation, PreparationOptionError, referenceSource } from '../services/ai-router/video-preparation.js';
-import { getPreparation, listPreparationAttempts, type PreparationRow, type AttemptRow } from '../services/ai-router/video-preparations.js';
+import { getPreparation, listPreparationAttempts, storedVideoOutputIds, type PreparationRow, type AttemptRow } from '../services/ai-router/video-preparations.js';
 
 // Public URLs returned to clients must honor the X-Forwarded-* headers that
 // Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
@@ -199,11 +200,15 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
     try {
-      const body = videoSubmitSchema.parse(request.body);
+      let body = videoSubmitSchema.parse(request.body);
       const preparationRegion = await resolveAppHomeRegion(app.controlDb, appId);
+      const hooks=getVideoPreparationHooks();
+      const context={platformPool:app.controlDb,runtimePool,region:preparationRegion};
+      const scope={appId,organizationId,userId:ownerId,endUserSub};
+      const enriched=await hooks?.enrichRequest?.(context,scope,body);
+      if(enriched)body=videoSubmitSchema.parse(enriched.request);
       const prepared = await admitVideoPreparation(
-        { platformPool: app.controlDb, runtimePool, region: preparationRegion }, getVideoPreparationHooks(),
-        { appId, organizationId, userId: ownerId, endUserSub }, body,
+        context,hooks,scope,body,enriched?.policy,
       );
       if (prepared) {
         return reply.code(202).send({ job_id: prepared.id, status: 'pending', polling_url: `${publicProto(request)}://${publicHost(request)}/v1/${appId}/videos/completions/${prepared.id}` });
@@ -338,12 +343,28 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       if (prepared && preparationHooks) {
         if (!canReadPreparation(prepared, appId, authz.caller)) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
         if (prepared.status !== 'completed') return reply.code(409).send({ error: 'job_not_completed', code: 'JOB_NOT_COMPLETED', current_status: prepared.status });
-        if (index >= (prepared.terminal_outcome?.output?.length ?? 0)) return reply.code(400).send({ error: 'invalid_index', code: 'INVALID_INDEX' });
+        const output = storedVideoOutputIds(prepared.terminal_outcome) ?? prepared.terminal_outcome?.output;
+        if (index >= (output?.length ?? 0)) return reply.code(400).send({ error: 'invalid_index', code: 'INVALID_INDEX' });
         const attempt = (await listPreparationAttempts(runtimePool, jobId)).find(a => a.terminal_outcome?.status === 'completed' && a.settlement_status === 'acknowledged');
         if (!attempt) return reply.code(502).send({ error: 'content_unavailable', code: 'CONTENT_UNAVAILABLE' });
         const region = await resolveAppHomeRegion(app.controlDb, appId);
-        const { stream, contentType } = await preparationHooks.content({ platformPool: app.controlDb, runtimePool, region }, attempt, index);
-        return reply.code(200).header('Content-Type', contentType).send(Readable.fromWeb(stream as any));
+        const content = await preparationHooks.content({ platformPool: app.controlDb, runtimePool, region }, attempt, index,
+          { ...(request.headers.range ? { range: request.headers.range } : {}) });
+        const stream = Readable.fromWeb(content.stream as any);
+        if (storedVideoOutputIds(prepared.terminal_outcome)) {
+          let bytes = 0, metered = false;
+          stream.on('data', chunk => { bytes += Buffer.byteLength(chunk); });
+          const meter = () => {
+            if (metered) return; metered = true;
+            if (bytes) void incrementUsage(organizationId, ownerId, 'bandwidth_bytes', bytes, appId)
+              .catch(() => app.log.warn({ appId }, 'video: content bandwidth metering failed'));
+          };
+          stream.once('end', meter); stream.once('close', meter);
+          reply.header('Accept-Ranges', 'bytes');
+        }
+        if (content.contentLength !== undefined) reply.header('Content-Length', content.contentLength);
+        if (content.contentRange) reply.header('Content-Range', content.contentRange);
+        return reply.code(content.statusCode ?? 200).header('Content-Type', content.contentType).send(stream);
       }
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
@@ -488,9 +509,10 @@ export function buildPublicPreparationResponse(base: string, appId: string, job:
   const pollingUrl = `${base}/v1/${appId}/videos/completions/${job.id}`;
   const terminal = ['completed','failed','cancelled','expired'].includes(job.status);
   const settled = terminal && attempts.every(a => a.settlement_status === 'acknowledged');
+  const output = storedVideoOutputIds(job.terminal_outcome) ?? job.terminal_outcome?.output;
   return { job_id: job.id, status: job.status, model: job.model, polling_url: pollingUrl,
     ...(job.status === 'pending' && job.stage === 'preparing_references' ? { stage: 'preparing_references' } : {}),
-    content_urls: job.status === 'completed' ? job.terminal_outcome?.output?.map((_, i) => `${pollingUrl}/content?index=${i}`) ?? null : null,
+    content_urls: job.status === 'completed' ? output?.map((_, i) => `${pollingUrl}/content?index=${i}`) ?? null : null,
     error: job.terminal_outcome?.error ?? null, created_at: job.created_at,
     charged_credits_usd: settled ? attempts.reduce((sum, a) => sum + Number(a.settlement_receipt?.chargedUsd ?? 0), 0) : null,
     settled_at: settled ? attempts.map(a => a.settled_at).filter(Boolean).sort((a,b) => b!.getTime()-a!.getTime())[0] ?? null : null };

@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { generatePresignedUploadUrl, generatePresignedDownloadUrl, deleteObject, S3Error } from '../services/s3.js';
 import { checkStorageQuota, StorageQuotaError } from '../services/storage-quota.js';
+import { withAppStorageAdmission, StorageAdmissionError } from '../services/storage-admission.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
 import type { EndUserClaims } from '@butterbase/shared/types';
 import { config } from '../config.js';
@@ -82,6 +83,13 @@ function pausedReply(reply: any, error: AppPausedError) {
       documentation_url: getDocUrl(APP_PAUSED),
       details: { paused_reason: error.reason, paused_by: error.pausedBy },
     }));
+}
+
+// App JWT subjects can be opaque text. Preserve indexed UUID ownership for
+// ordinary objects without trying to cast another subject into an app-user FK.
+function legacyOwnerPredicate(subject: string, parameter: 2 | 3): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(subject)
+    ? `user_id=$${parameter}::text::uuid` : 'false';
 }
 
 export async function storageRoutes(app: FastifyInstance) {
@@ -210,12 +218,12 @@ export async function storageRoutes(app: FastifyInstance) {
       const organizationId = await resolveOrgFromApp(runtimeDb, appId);
 
       // Create database record immediately
-      const dbResult = await runtimeDb.query(
+      const dbResult = await withAppStorageAdmission(runtimeDb, appId, body.sizeBytes, body.contentType, tx => tx.query(
         `INSERT INTO storage_objects (app_id, organization_id, user_id, bucket, key, filename, content_type, size_bytes, public)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
         [appId, organizationId, storageUserId, config.s3.bucket, result.objectKey, body.filename, body.contentType, body.sizeBytes, body.public]
-      );
+      ));
 
       // Calculate storage quota info
       const storageStats = await runtimeDb.query(
@@ -261,6 +269,13 @@ export async function storageRoutes(app: FastifyInstance) {
     } catch (error) {
       if (error instanceof AppPausedError) {
         return pausedReply(reply, error);
+      }
+      if (error instanceof StorageAdmissionError) {
+        return reply.status(error.permanent ? 429 : 503).send(createAgentError({
+          code: error.permanent ? 'QUOTA_STORAGE_EXCEEDED' : 'QUOTA_STORAGE_ERROR',
+          message: 'Storage admission unavailable', remediation: 'Check app storage limits and retry when capacity is available.',
+          documentation_url: getDocUrl('QUOTA_STORAGE_EXCEEDED'), details: { code: error.code },
+        }));
       }
       if (error instanceof StorageQuotaError) {
         return reply.status(400).send(createAgentError({
@@ -342,7 +357,7 @@ export async function storageRoutes(app: FastifyInstance) {
         ? await runtimeDb.query(
             `SELECT id, user_id, key, filename, content_type, size_bytes, created_at
              FROM storage_objects
-             WHERE app_id = $1
+             WHERE app_id = $1 AND (access_scope='app' OR published_at IS NOT NULL)
              ORDER BY created_at DESC
              LIMIT 100`,
             [appId]
@@ -350,7 +365,8 @@ export async function storageRoutes(app: FastifyInstance) {
         : await runtimeDb.query(
             `SELECT id, user_id, key, filename, content_type, size_bytes, created_at
              FROM storage_objects
-             WHERE app_id = $1 AND user_id = $2
+             WHERE app_id = $1 AND ((access_scope='app' AND ${legacyOwnerPredicate(userId, 2)})
+               OR (access_scope='prepared_video' AND published_at IS NOT NULL AND access_subject=$2::text))
              ORDER BY created_at DESC
              LIMIT 100`,
             [appId, userId]
@@ -402,7 +418,7 @@ export async function storageRoutes(app: FastifyInstance) {
 
       // Always fetch the object without user_id filter, then check authorization
       const result = await runtimeDb.query(
-        `SELECT key, filename, size_bytes, user_id, public
+        `SELECT key, filename, size_bytes, user_id, public, access_scope, access_subject, published_at
          FROM storage_objects
          WHERE id = $1 AND app_id = $2`,
         [objectId, appId]
@@ -419,8 +435,9 @@ export async function storageRoutes(app: FastifyInstance) {
 
       const obj = result.rows[0];
       const isPlatformAuth = request.auth.authMethod !== 'end_user_jwt';
-      const isAuthorized =
-        isPlatformAuth ||
+      const isAuthorized = obj.access_scope === 'prepared_video'
+        ? obj.published_at != null && (isPlatformAuth || (typeof obj.access_subject === 'string' && obj.access_subject === userId))
+        : isPlatformAuth ||
         storageConfig?.publicReadEnabled === true ||
         obj.public === true ||
         obj.user_id === userId;
@@ -515,15 +532,16 @@ export async function storageRoutes(app: FastifyInstance) {
       const isPlatformAuth = request.auth.authMethod !== 'end_user_jwt';
       const result = isPlatformAuth
         ? await runtimeDb.query(
-            `SELECT key
+            `SELECT key, access_scope
              FROM storage_objects
-             WHERE id = $1 AND app_id = $2`,
+             WHERE id = $1 AND app_id = $2 AND (access_scope='app' OR published_at IS NOT NULL)`,
             [objectId, appId]
           )
         : await runtimeDb.query(
-            `SELECT key
+            `SELECT key, access_scope
              FROM storage_objects
-             WHERE id = $1 AND app_id = $2 AND user_id = $3`,
+             WHERE id = $1 AND app_id = $2 AND ((access_scope='app' AND ${legacyOwnerPredicate(userId, 3)})
+               OR (access_scope='prepared_video' AND published_at IS NOT NULL AND access_subject=$3::text))`,
             [objectId, appId, userId]
           );
 
@@ -536,14 +554,20 @@ export async function storageRoutes(app: FastifyInstance) {
         }));
       }
 
-      // Delete from S3
-      await deleteObject(result.rows[0].key);
-
-      // Delete from database
-      await runtimeDb.query(
-        'DELETE FROM storage_objects WHERE id = $1',
-        [objectId]
-      );
+      if (result.rows[0].access_scope === 'prepared_video') {
+        // The DB trigger retains bucket/key and tombstones the output before
+        // removing metadata. Its independent cleanup worker owns physical IO.
+        const deleted = await runtimeDb.query(`DELETE FROM storage_objects s WHERE s.id=$1 AND s.app_id=$2
+          AND s.access_scope='prepared_video' AND s.published_at IS NOT NULL
+          AND ($3::boolean OR s.access_subject=$4::text)
+          AND EXISTS(SELECT 1 FROM ai_video_preparation_outputs o WHERE o.object_id=s.id
+            AND o.app_id=s.app_id AND o.organization_id=s.organization_id::text
+            AND o.bucket=s.bucket AND o.object_key=s.key AND o.archived_after_move IS NULL)`, [objectId, appId, isPlatformAuth, userId]);
+        if (deleted.rowCount !== 1) return reply.status(503).send(createAgentError({ code: 'STORAGE_DELETE_PENDING', message: 'Storage deletion unavailable', remediation: 'Retry after current storage work finishes.' }));
+      } else {
+        await deleteObject(result.rows[0].key);
+        await runtimeDb.query('DELETE FROM storage_objects WHERE id = $1 AND app_id=$2', [objectId, appId]);
+      }
 
       logFromRequest(request, {
         appId,

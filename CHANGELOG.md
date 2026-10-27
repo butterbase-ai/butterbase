@@ -12,6 +12,8 @@
 
 ### Added
 
+- **Prepared video storage (optional)**: retained private output objects, bounded transfers and durable cleanup, storage limits, authenticated byte-range playback and zero customer charge on failed delivery. Deploy optional move-table compatibility first, apply runtime migration061 in every region, then deploy policy-aware readers with output admission disabled before enabling the new contract. Existing provider-backed jobs keep their original behavior.
+
 - **AI images**: model-specific generation and reference-edit contracts for GPT Image 2.5 Flare/Sunburst, Grok Imagine Image 2.0/Quality, and FLUX 3 Image/Klein, including local option/limit validation. Discover configured availability with `manage_ai` action `list_models`.
 - **MCP videos**: `manage_ai` action `submit_video` forwards explicit `reference_declarations` and `prepare_references` to the existing fictional-character preparation flow. Older MCP clients can use REST.
 - **AI model listings**: image/video availability requires an enabled, configured generation adapter. Unimplemented discovered models remain internal to catalog discovery.

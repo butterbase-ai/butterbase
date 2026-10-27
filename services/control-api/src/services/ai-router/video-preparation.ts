@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as p from './video-preparations.js';
+import { finishStoredPreparation } from './video-preparation-outputs.js';
 import { loadReferenceImage } from './reference-image.js';
 import type { AssetScope } from './reference-assets.js';
-import type { PreparationContext, PreparationScope, PreparationSelection, VideoPreparationHooks, PreparationProviderResult, ReferenceProgress } from './video-preparation-hooks.js';
+import type { PreparationContext, PreparationScope, PreparationSelection, VideoPreparationHooks, PreparationProviderResult, ReferenceProgress, TemporaryReferencePolicy } from './video-preparation-hooks.js';
 export const PREPARATION_DEFAULTS = Object.freeze({ deadlineMs: 600_000, retentionMs: 86_400_000, leaseMs: 90_000, retryMs: 5_000, batchSize: 8, scopeConcurrency: 2, operationTimeoutMs: 45_000 });
 /** Internal deployment knobs, independent of the legacy two-hour sweeper window. */
 export function videoPreparationSettings(env: NodeJS.ProcessEnv = process.env) {
@@ -29,11 +30,12 @@ export function declaredReferencePaths(request: Record<string, unknown>): string
  return declarations?.map(x => x.path) ?? [];
 }
 /** Admission is metadata-only; downloads, credit reservations and provider POSTs run in worker. */
-export async function admitVideoPreparation(ctx: PreparationContext, hooks: VideoPreparationHooks | null, scope: PreparationScope, request: Record<string, unknown>): Promise<p.PreparationRow | null> {
+export async function admitVideoPreparation(ctx: PreparationContext, hooks: VideoPreparationHooks | null, scope: PreparationScope, request: Record<string, unknown>, policy?: TemporaryReferencePolicy): Promise<p.PreparationRow | null> {
  if (!declaredReferencePaths(request).length) return null;
  const selection = await hooks?.quote(ctx, scope, request);
  if (!selection) throw new PreparationOptionError('Reference preparation is not enabled for this app and model');
- return p.createPreparation(ctx.runtimePool, { ...scope, model: String(request.model), requestJson: { request, selection }, deadline: new Date(Date.now() + videoPreparationSettings().deadlineMs), inputExpiresAt: new Date(Date.now() + PREPARATION_DEFAULTS.retentionMs) });
+ const pinned = policy ? { ...selection,billingContext:{...selection.billingContext,temporaryReferencePolicy:policy} } : selection;
+ return p.createPreparation(ctx.runtimePool, { ...scope, model: String(request.model), requestJson: { request, selection:pinned }, deadline: new Date(Date.now() + videoPreparationSettings().deadlineMs), inputExpiresAt: new Date(Date.now() + PREPARATION_DEFAULTS.retentionMs) });
 }
 export function referenceSource(request: Record<string, unknown>, path: string): string {
  const match = /^\/(input_images|frame_images|input_references)\/(0|[1-9]\d*)$/.exec(path);
@@ -46,10 +48,13 @@ export function referenceSource(request: Record<string, unknown>, path: string):
  throw new PreparationOptionError('Declaration must identify an image reference');
 }
 function safeOutcome(outcome: p.TerminalOutcome): p.TerminalOutcome {
- if (outcome.status === 'completed' && (!outcome.output?.length || !outcome.output.every(value => {
+ if (outcome.status !== 'completed') return outcome;
+ const valid = outcome.outputObjectIds !== undefined ? p.storedVideoOutputIds(outcome) !== null
+  : Boolean(outcome.output?.length && outcome.output.every(value => {
   try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password; }
   catch { return false; }
- }))) {
+ }));
+ if (!valid) {
   // Preserve known expenditure and upstream completion even when no public output is valid.
   const cost = outcome.providerCostUsd;
   return { status: 'failed', error: 'invalid_provider_output', providerStatus: 'completed',
@@ -130,7 +135,9 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
    if (current?.submission_state === 'accepted' || current?.submission_state === 'uncertain' || current?.submission_state === 'submitting') { await recoverAttempt(current); return; }
    if (current?.submission_state === 'terminal' && !(job.retry_consumed && current.attempt_number === 1)) {
     if (!job.retry_consumed && eligibleRetry(job, current.terminal_outcome!) && await p.consumePreparationRetry(db, job.id, job.fence)) { await p.setPreparationStage(db, job.id, job.fence, 'preparing_references'); return; }
-    await p.finishPreparation(db, job.id, job.fence, current.terminal_outcome!); return;
+    if (p.storedVideoOutputIds(current.terminal_outcome)) await finishStoredPreparation(db, job.id, job.fence);
+    else await p.finishPreparation(db, job.id, job.fence, current.terminal_outcome!);
+    return;
    }
    const authority = await hooks.authorize(ctx, job);
    if (authority === 'region_mismatch') return;
@@ -150,6 +157,8 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
    if (uncaptured) {
     if (!await freshAuthority(job)) return;
     const image = await (hooks.loadImage ?? loadReferenceImage)(preparationAssetScope(job), referenceSource(request, uncaptured));
+    const policy=selection.billingContext.temporaryReferencePolicy as TemporaryReferencePolicy|undefined;
+    if(policy?.expectedSha256[uncaptured]&&policy.expectedSha256[uncaptured]!==image.sha256){await p.finishPreparation(db,job.id,job.fence,{status:'failed',error:'reference_changed'});return;}
     progress[uncaptured] = { sha256: image.sha256 }; await scheduleJob(job, later(), progress); return;
    }
    if (!job.input_identity) { await p.captureInputIdentity(db, job.id, job.fence, Object.fromEntries(paths.map(path => [path, { sha256: progress[path].sha256 }]))); return; }
