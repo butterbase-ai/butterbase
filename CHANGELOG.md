@@ -4,6 +4,8 @@
 
 ### Breaking changes
 
+- **Deployment**: Workers for Platforms (`wfp`) is now the default hosting backend. A deployment that still relies on Cloudflare Pages must set `DEPLOYMENT_DEFAULT_BACKEND=pages`; the `apps.deployment_backend` column default is now `wfp` (runtime migration 060). Existing app rows keep their recorded backend.
+
 - **CLI**: `bb keys generate --scope` now takes `account|app` (was an arbitrary string array). Use `--extra-scope <token>` for additional allowlisted scope tokens (`ai:gateway`, `substrate`). Migration: `bb keys generate foo --scope ai:gateway` → `bb keys generate foo --scope account --extra-scope ai:gateway`.
 
 - **Upgrade order**: self-hosters must run `npm run migrate:runtime` (runtime migration 056) **before** upgrading control-api, because the new image selects `apps.paused_by`.

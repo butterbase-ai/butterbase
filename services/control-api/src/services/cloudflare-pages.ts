@@ -1,6 +1,7 @@
 // services/control-api/src/services/cloudflare-pages.ts
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,6 +10,30 @@ import { config } from '../config.js';
 import { CF_BASE } from './cloudflare-client.js';
 
 const execFileAsync = promisify(execFile);
+const resolveModule = createRequire(import.meta.url).resolve;
+
+/**
+ * How to invoke the wrangler CLI.
+ *
+ * `npx wrangler` only works when the command runs from a directory whose
+ * resolution chain reaches the package. This deployment runs from a temp
+ * directory (`/tmp/cf-deploy-...`), so in the production image — where
+ * wrangler is a nested workspace dependency — `npx` never saw it and the
+ * deploy failed with `sh: wrangler: not found`.
+ *
+ * Resolve the installed JS entry from THIS module's own resolution chain and
+ * run it with the current Node binary. The `npx` fallback keeps environments
+ * where wrangler is only available through npx working.
+ */
+export function wranglerInvocation(
+  resolve: (id: string) => string = resolveModule,
+): { file: string; args: string[] } {
+  try {
+    return { file: process.execPath, args: [resolve('wrangler/bin/wrangler.js')] };
+  } catch {
+    return { file: 'npx', args: ['wrangler'] };
+  }
+}
 
 export interface FileEntry {
   path: string;
@@ -166,9 +191,11 @@ export async function createDeployment(
       fs.writeFileSync(filePath, file.content);
     }
 
-    // Deploy via wrangler
-    const { stdout } = await execFileAsync('npx', [
-      'wrangler', 'pages', 'deploy', tmpDir,
+    // Deploy via wrangler. Resolve the installed CLI rather than relying on
+    // `npx` from this temp cwd (see wranglerInvocation).
+    const wrangler = wranglerInvocation();
+    const { stdout } = await execFileAsync(wrangler.file, [
+      ...wrangler.args, 'pages', 'deploy', tmpDir,
       '--project-name', projectName,
       '--branch', 'main',
     ], {

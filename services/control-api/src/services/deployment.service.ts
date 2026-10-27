@@ -109,7 +109,7 @@ export async function deployTemplatePage(
     `SELECT deployment_backend, region FROM apps WHERE id = $1`,
     [appId]
   );
-  const backend = row.rows[0]?.deployment_backend ?? 'pages';
+  const backend = row.rows[0]?.deployment_backend ?? config.deployment.defaultBackend;
   const appRegion = row.rows[0]?.region ?? 'us-east-1';
 
   if (backend === 'wfp') {
@@ -780,7 +780,7 @@ export async function deployArtifact(
       name: appResult.rows[0].name as string,
       subdomain: (appResult.rows[0].subdomain as string | null) ?? null,
       cloudflare_project_name: (appResult.rows[0].cloudflare_project_name as string | null) ?? null,
-      deployment_backend: (appResult.rows[0].deployment_backend as 'pages' | 'wfp' | undefined) ?? 'pages',
+      deployment_backend: (appResult.rows[0].deployment_backend as 'pages' | 'wfp' | undefined) ?? config.deployment.defaultBackend,
       // apps.region is NOT NULL post-Phase 1, but keep a defensive default.
       region: (appResult.rows[0].region as string | null) ?? 'us-east-1',
       paused: appResult.rows[0].paused === true,
@@ -1175,7 +1175,7 @@ export async function deleteAppCloudflareResources(
     [appId]
   );
   const subdomain = appRow.rows[0]?.subdomain ?? null;
-  const backend = appRow.rows[0]?.deployment_backend ?? 'pages';
+  const backend = appRow.rows[0]?.deployment_backend ?? config.deployment.defaultBackend;
 
   if (backend === 'wfp') {
     await cleanupWfpResources(runtimePool, appId, subdomain);
