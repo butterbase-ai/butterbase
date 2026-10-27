@@ -103,7 +103,7 @@ describe('runReverseMove', () => {
       typeof c[0] === 'string' && c[0].includes('archived_after_move = NULL'),
     );
     expect(unarchiveCall).toBeTruthy();
-    for (const table of ['ai_video_preparations','ai_video_attempts','ai_reference_asset_groups','ai_reference_assets']) {
+    for (const table of ['ai_video_preparations','ai_video_attempts','ai_video_preparation_outputs','ai_reference_asset_groups','ai_reference_assets']) {
       expect(sourcePool.query).toHaveBeenCalledWith(expect.stringContaining(`UPDATE "${table}"`), ['fwd-1']);
     }
   });
