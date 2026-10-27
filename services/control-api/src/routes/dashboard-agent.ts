@@ -26,6 +26,8 @@
  *          "For simplicity ... pick and document").
  *   GET    /operator/approvals/:id – one approval, resolved or pending, for
  *          smoke/ops checks that must observe a resolution (no transcript).
+ *   GET    /operator/approvals/:id/conversation – the prose window up to the
+ *          approval's turn (no tool rows, args or results).
  *   GET    /operator/approvals – pending approvals raised by the headless
  *          operator for the caller's org (org-scoped, membership-checked).
  *   POST   /operator/approvals/:id/resolve – approve/deny one of those.
@@ -79,6 +81,7 @@ import {
   getApprovalForOrg,
   listPendingByOrg,
 } from '../services/dashboard-agent/approvals-store.js';
+import { listApprovalConversation } from '../services/dashboard-agent/approval-conversation.js';
 import {
   executeApprovedOperatorTool,
   rejectEscalatedSubstrateAction,
@@ -1450,6 +1453,39 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         created_at: approval.createdAt,
       },
     });
+  });
+
+  // ── GET /operator/approvals/:id/conversation ─────────────────────────────
+  //
+  // The prose window that led to a decision. Membership of the approval's
+  // organization authorises the read; the response carries only user/assistant
+  // text up to the approval's turn. Tool rows, args and results never leave the
+  // server, and the window is capped because the operator conversation is one
+  // per organization forever.
+  app.get('/operator/approvals/:id/conversation', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    const rawLimit = (request.query as { limit?: string } | undefined)?.limit;
+    const limit = rawLimit === undefined ? 20 : Number.parseInt(rawLimit, 10);
+    if (!Number.isFinite(limit) || limit < 1 || limit > 50) {
+      return reply.code(400).send({ error: 'limit must be an integer between 1 and 50' });
+    }
+
+    const { id } = request.params as { id: string };
+    const approval = await getApprovalForOrg(app.controlDb, id, org.orgId);
+    if (!approval) return reply.code(404).send({ error: 'approval not found' });
+
+    const window = await listApprovalConversation(app.controlDb, {
+      conversationId: approval.conversationId,
+      turnMessageId: approval.turnMessageId,
+      approvalCreatedAt: new Date(approval.createdAt),
+      limit,
+    });
+    return reply.send(window);
   });
 
   // ── GET /operator/traces ─────────────────────────────────────────────────
