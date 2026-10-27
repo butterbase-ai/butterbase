@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import type { Redis } from 'ioredis';
 import { readCatalogEntry, readEnabledRouters } from './catalog.js';
+import { normalizedVideoSkuRate } from './video-sku-pricing.js';
 import { rankRoutersForModel, rankRoutersPresenceMode, rankRoutersWaterfall, estimateWorstCaseUsd, pickStickyRouter } from './select.js';
 import { markSlotDown, readDownSlots, COOLDOWN_TRIGGER_KINDS } from './slot-cooldown.js';
 import {
@@ -682,6 +683,8 @@ function ratePerSecondFromRouter(
   rawPricing: unknown,
   req: VideoGenerationRequest,
 ): number | null {
+  const normalized = normalizedVideoSkuRate(rawPricing, req);
+  if (normalized) return normalized.rateUsdPerSecond;
   const rp = rawPricing as
     | {
         pricing_skus?: Record<string, string>;

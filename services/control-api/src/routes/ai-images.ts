@@ -306,7 +306,10 @@ export async function aiImageRoutes(app: FastifyInstance) {
       }
       return reply
         .code(200)
-        .header('Content-Type', job.content_type ?? upstream.headers.get('content-type') ?? 'image/png')
+        // Inline outputs carry an individual MIME type; the job-wide type is
+        // only a fallback and must not relabel a later JPEG as the first PNG.
+        .header('Content-Type', (url.startsWith('data:') ? upstream.headers.get('content-type') : null)
+          ?? job.content_type ?? upstream.headers.get('content-type') ?? 'image/png')
         .send(Readable.fromWeb(upstream.body as any));
     } catch (error) {
       return handleImageError(app, reply, organizationId, error);
@@ -448,7 +451,8 @@ export function validateImageParams(
       };
     }
   }
-  return null;
+  const invalid = paramSpec.validate?.(body);
+  return invalid ? { error: invalid.message, code: 'UNSUPPORTED_PARAM', param: invalid.param, model: body.model } : null;
 }
 
 export async function handleImageError(app: FastifyInstance, reply: any, organizationId: string, error: unknown) {
