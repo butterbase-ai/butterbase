@@ -1471,7 +1471,9 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     if (!org.ok) return reply.code(org.code).send({ error: org.error });
 
     const rawLimit = (request.query as { limit?: string } | undefined)?.limit;
-    const limit = rawLimit === undefined ? 20 : Number.parseInt(rawLimit, 10);
+    const limit = rawLimit === undefined
+      ? 20
+      : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN;
     if (!Number.isFinite(limit) || limit < 1 || limit > 50) {
       return reply.code(400).send({ error: 'limit must be an integer between 1 and 50' });
     }

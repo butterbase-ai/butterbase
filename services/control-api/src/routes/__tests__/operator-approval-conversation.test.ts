@@ -232,12 +232,14 @@ describe('GET /operator/approvals/:id/conversation', () => {
   });
 
   it('rejects an invalid limit', async () => {
-    const response = await app.inject({
-      method: 'GET',
-      url: '/operator/approvals/appr-1/conversation?limit=0',
-      headers: { 'x-organization-id': orgId },
-    });
-    expect(response.statusCode).toBe(400);
+    for (const limit of ['0', '51', 'abc', '1abc']) {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/operator/approvals/appr-1/conversation?limit=${limit}`,
+        headers: { 'x-organization-id': orgId },
+      });
+      expect(response.statusCode, limit).toBe(400);
+    }
   });
 
   it('404s another organization’s approval', async () => {
