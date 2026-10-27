@@ -36,6 +36,7 @@ import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
 import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS, resolveOfficeVerdict, type OperatorPolicy } from './operator-policy.js';
 import { classifyOfficeTool } from './office-tool-policy.js';
 import { captureApprovalOperation, deploymentArtifact } from './approval-operation.js';
+import { getSharedDeployTreeStore, type DeployTreeStore } from './deploy-tree-store.js';
 import { readOperatorYoloMode } from './operator-yolo.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
@@ -158,6 +159,14 @@ export type BuildExecutor = (req: BuildExecutorRequest) => Promise<BuildExecutor
 
 export type LoopDeps = {
   cache: WorkingTreeCache;
+  /**
+   * Shared store for the exact source a deploy approval proposes. Fly routes
+   * requests across API machines, and `cache` is process-local: without this,
+   * a resolve landing on another instance has no files to deploy. Optional so
+   * existing callers/tests that never propose deployments behave unchanged;
+   * production always supplies `getSharedDeployTreeStore()`.
+   */
+  treeStore?: DeployTreeStore;
   mcp: Mcp;
   repoSync: RepoSync;
   recordUsage: (pool: pg.Pool, row: UsageRow) => Promise<void>;
@@ -317,6 +326,7 @@ function getDefaultDeps(): LoopDeps {
     const repoSync = createRepoSync({ cache, mcp });
     _defaultDeps = {
       cache,
+      treeStore: getSharedDeployTreeStore(),
       mcp,
       repoSync,
       recordUsage: recordUsageDefault,
@@ -760,7 +770,7 @@ export async function* runAgentTurn(
 ): AsyncGenerator<LoopEvent> {
   const base = getDefaultDeps();
   const deps: LoopDeps = { ...base, ...(depsOverride ?? {}) };
-  const { cache, recordUsage, loadTemplate } = deps;
+  const { cache, treeStore, recordUsage, loadTemplate } = deps;
   const snapshotTitleGatewayFactory = deps.snapshotTitleGatewayFactory ?? createGatewayChat;
   const upsertSnapshotLabelFn = deps.upsertSnapshotLabel ?? upsertSnapshotLabel;
   const getConversationFn = deps.getConversation ?? getConversation;
@@ -1610,6 +1620,57 @@ export async function* runAgentTurn(
         // was before the tiers changed.
         if (operatorVerdict === 'approval' && allowedToolNames.has(tc.name)) {
           const messageId = randomUUID();
+          const appId = appIdFromArgs(tc.args);
+          const deployTool = isDeployTool(tc.name) || isDeployFunctionTool(tc.name);
+          const deployStore = deployTool ? treeStore : undefined;
+          /**
+           * The EXACT source being proposed. `cache` is process-local and Fly
+           * routes requests across machines, so a digest alone is not enough:
+           * the resolve may land where this tree has never existed. The store
+           * persists the files under the approval id so any instance can
+           * rehydrate them. `deploymentArtifact` is also the readiness proof:
+           * a frontend deploy needs a non-empty tree, and a function deploy
+           * needs its entry file, before it is reasonable to ask a human.
+           */
+          const proposedTree =
+            deployTool && appId ? cache.get(input.conversationId, appId) : undefined;
+          const artifact = deployTool
+            ? deploymentArtifact(tc.name, tc.args, proposedTree)
+            : undefined;
+
+          if (deployStore && (!proposedTree || !artifact)) {
+            const errorMsg =
+              'deploy_tree_unavailable: prepare and write the files in this turn before proposing a deployment. ' +
+              'Nothing was created; re-propose once the working tree is ready.';
+            await appendMessage(
+              input.pool,
+              input.conversationId,
+              {
+                role: 'assistant',
+                content: i === 0 ? assistantText : '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: null,
+                modelUsed: input.model,
+              },
+              messageId,
+            );
+            yield { type: 'tool_call', ...tc };
+            const resultPayload = { error: errorMsg };
+            toolCallResults.push({ id: tc.id, ...resultPayload });
+            yield { type: 'tool_result', id: tc.id, ...resultPayload };
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: resultPayload,
+            });
+            continue;
+          }
+
           /**
            * The server-owned record of WHAT is being approved (Task 8).
            *
@@ -1624,14 +1685,57 @@ export async function* runAgentTurn(
           const approvedOperation = captureApprovalOperation({
             toolName: tc.name,
             args: tc.args,
-            artifact: (() => {
-              const appId = appIdFromArgs(tc.args);
-              return appId
-                ? deploymentArtifact(tc.name, tc.args, cache.get(input.conversationId, appId))
-                : undefined;
-            })(),
+            artifact,
           });
+
+          /**
+           * Persist the tree BEFORE the approval row exists. If it cannot be
+           * stored, no approval is created at all: an approval nobody can
+           * execute is worse than an ordinary tool error the model can read
+           * and adapt to. The id is generated here so the snapshot and the row
+           * are addressed by the same value even if the insert is retried.
+           */
+          const approvalId = deployStore && proposedTree ? randomUUID() : undefined;
+          if (deployStore && approvalId && proposedTree) {
+            const saved = await deployStore.save(approvalId, proposedTree);
+            if (!saved) {
+              const errorMsg =
+                'deploy_tree_unavailable: the deployment source could not be stored safely. ' +
+                'Nothing was created; retry this turn.';
+              await appendMessage(
+                input.pool,
+                input.conversationId,
+                {
+                  role: 'assistant',
+                  content: i === 0 ? assistantText : '',
+                  toolCallId: tc.id,
+                  toolName: tc.name,
+                  toolArgs: tc.args,
+                  toolResult: null,
+                  modelUsed: input.model,
+                },
+                messageId,
+              );
+              yield { type: 'tool_call', ...tc };
+              const resultPayload = { error: errorMsg };
+              toolCallResults.push({ id: tc.id, ...resultPayload });
+              yield { type: 'tool_result', id: tc.id, ...resultPayload };
+              await appendMessage(input.pool, input.conversationId, {
+                role: 'tool',
+                content: '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: resultPayload,
+              });
+              continue;
+            }
+          }
+
           const approval = await createApproval(input.pool, {
+            // Only deploy approvals pre-allocate an id (for the snapshot key);
+            // every other approval keeps the database default.
+            ...(approvalId ? { id: approvalId } : {}),
             conversationId: input.conversationId,
             turnMessageId: messageId,
             toolName: tc.name,

@@ -85,7 +85,8 @@ import {
   deploymentArtifact,
   verifyApprovalOperation,
 } from './approval-operation.js';
-import type { WorkingTreeCache } from './working-tree.js';
+import { WorkingTreeCache } from './working-tree.js';
+import type { DeployTreeStore } from './deploy-tree-store.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { createHttpFrontendMcp } from './frontend-http.js';
@@ -206,6 +207,64 @@ const LOCAL_DEPLOY_TOOLS: ReadonlySet<string> = new Set([
   'deploy_frontend',
   'deploy_function_from_workspace',
 ]);
+
+function appIdFromArgs(args: unknown): string | null {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const appId = (args as { app_id?: unknown }).app_id;
+  return typeof appId === 'string' && appId.length > 0 ? appId : null;
+}
+
+function deployTreeUnavailable(): McpCallResult {
+  return {
+    ok: false,
+    code: 'approval_operation_changed',
+    error:
+      'deploy_tree_unavailable: the approved deployment source is not available on this instance; ' +
+      're-propose the deployment from a turn that can prepare it',
+  };
+}
+
+/**
+ * Resolve the working-tree cache an approved deploy must execute from.
+ *
+ * The live turn's `cache` is process-local. Fly routes the resolve to any API
+ * machine, so a deploy approval that relied on that cache alone would fail on
+ * every other instance with "no files to deploy". The proposal persisted the
+ * exact tree under the approval id; load it here and hand the deployer a
+ * temporary cache. The recorded digest is then verified against the LOADED
+ * tree, not against whatever the local cache happens to hold.
+ *
+ * FAIL CLOSED. A missing/expired snapshot is a re-proposal, never a guess:
+ * returning the local cache here would reintroduce "approve A, ship whatever
+ * is in memory". Only deploy tools consult the store; every other approval is
+ * unchanged.
+ */
+async function resolveExecutionCache(opts: {
+  approvalId: string;
+  name: string;
+  args: unknown;
+  approval?: Pick<Approval, 'conversationId'> | null;
+  cache?: WorkingTreeCache;
+  treeStore?: DeployTreeStore;
+}): Promise<{ cache?: WorkingTreeCache; refusal?: McpCallResult }> {
+  if (!LOCAL_DEPLOY_TOOLS.has(opts.name) || !opts.treeStore) return { cache: opts.cache };
+
+  const convId = opts.approval?.conversationId;
+  const appId = appIdFromArgs(opts.args);
+  if (!convId || !appId) return { refusal: deployTreeUnavailable() };
+
+  let tree;
+  try {
+    tree = await opts.treeStore.load(opts.approvalId);
+  } catch {
+    tree = null;
+  }
+  if (!tree || tree.size === 0) return { refusal: deployTreeUnavailable() };
+
+  const cache = new WorkingTreeCache();
+  cache.set(convId, appId, tree);
+  return { cache };
+}
 
 /**
  * Dispatch a deploy approval through the SAME orchestration the live turn
@@ -363,8 +422,31 @@ export async function executeApprovedOperatorTool(
     officeConsequential?: boolean;
     /** The process's working-tree singleton; required to replay a deploy. */
     cache?: WorkingTreeCache;
+    /**
+     * Shared snapshots of proposed deploy trees. Production passes
+     * `getSharedDeployTreeStore()`; when supplied, a deploy approval executes
+     * from the SNAPSHOT and a missing one is refused. Absent for direct/legacy
+     * callers, whose behaviour is unchanged.
+     */
+    treeStore?: DeployTreeStore;
   },
 ): Promise<McpCallResult> {
+  // The snapshot, when present, REPLACES the process-local cache for a deploy.
+  // Resolved before verification so "propose A, resolve on another machine"
+  // verifies against the persisted A rather than an empty map. A missing
+  // snapshot refuses here, before executeOnce, the advisory lock or any
+  // transport call.
+  const resolvedCache = await resolveExecutionCache({
+    approvalId: opts.approvalId,
+    name: opts.name,
+    args: opts.args,
+    approval: opts.approval,
+    cache: opts.cache,
+    treeStore: opts.treeStore,
+  });
+  if (resolvedCache.refusal) return resolvedCache.refusal;
+  const cache = resolvedCache.cache;
+
   // Ahead of executeOnce, the advisory lock and every dispatch: an approval
   // whose recorded operation no longer matches must not execute anything.
   const refused = verifyRecordedOperation({
@@ -372,7 +454,7 @@ export async function executeApprovedOperatorTool(
     args: opts.args,
     approval: opts.approval,
     officeConsequential: opts.officeConsequential,
-    cache: opts.cache,
+    cache,
   });
   if (refused) return refused;
 
@@ -399,7 +481,7 @@ export async function executeApprovedOperatorTool(
       jwt: opts.jwt,
       orgId: opts.orgId,
       approval: opts.approval,
-      cache: opts.cache,
+      cache,
     }),
   });
 

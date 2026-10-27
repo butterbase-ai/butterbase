@@ -72,11 +72,14 @@ export type HttpFunctionDeps = {
   baseUrl?: string
   /** Injectable for tests. Production uses global `fetch`. */
   fetchImpl?: typeof fetch
+  /** Bound for the deploy request; a hung leg must not wedge the approval. */
+  requestTimeoutMs?: number
 }
 
 export function createHttpFunctionMcp(deps: HttpFunctionDeps = {}): Mcp {
   const baseUrl = (deps.baseUrl ?? defaultBaseUrl()).replace(/\/+$/, '')
   const doFetch = deps.fetchImpl ?? fetch
+  const requestTimeoutMs = deps.requestTimeoutMs ?? 60_000
 
   return {
     async call(name: string, args: unknown, jwt: string) {
@@ -99,11 +102,24 @@ export function createHttpFunctionMcp(deps: HttpFunctionDeps = {}): Mcp {
        */
       const { app_id: _omit, ...body } = a
 
-      const res = await doFetch(`${baseUrl}/v1/${encodeURIComponent(appId)}/functions`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      })
+      const path = `/v1/${encodeURIComponent(appId)}/functions`
+      const signal = AbortSignal.timeout(requestTimeoutMs)
+      let res: Response
+      try {
+        res = await doFetch(`${baseUrl}${path}`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal,
+        })
+      } catch (err) {
+        // The signal is aborted before fetch rejects, distinguishing OUR
+        // deadline from a connection failure.
+        if (signal.aborted) {
+          throw new Error(`function deploy POST ${path} timed out after ${requestTimeoutMs}ms`)
+        }
+        throw err
+      }
       // Text first: error bodies are not always JSON, and an empty body would
       // make res.json() throw with a message that hides the status the caller
       // actually needs.

@@ -24,6 +24,8 @@
  *          approve/deny + resume-and-execute steps described in the Plan 3b
  *          Task 3 brief into a single endpoint (documented choice — see brief
  *          "For simplicity ... pick and document").
+ *   GET    /operator/approvals/:id – one approval, resolved or pending, for
+ *          smoke/ops checks that must observe a resolution (no transcript).
  *   GET    /operator/approvals – pending approvals raised by the headless
  *          operator for the caller's org (org-scoped, membership-checked).
  *   POST   /operator/approvals/:id/resolve – approve/deny one of those.
@@ -81,6 +83,7 @@ import {
   executeApprovedOperatorTool,
   rejectEscalatedSubstrateAction,
 } from '../services/dashboard-agent/substrate-approval-bridge.js';
+import { getSharedDeployTreeStore } from '../services/dashboard-agent/deploy-tree-store.js';
 import { evaluateOperatorAccess } from '../services/dashboard-agent/operator-access-policy.js';
 // TEMPORARY — dev-mode operator trace viewer. Delete with GET /operator/traces.
 import { operatorUserId } from '../services/dashboard-agent/operator-store.js';
@@ -583,6 +586,9 @@ export async function resolveOperatorApproval(
         approval: a,
         officeConsequential,
         cache: getSharedWorkingTreeCache(),
+        // The snapshot, not the process cache, is what proves and builds a
+        // deploy on whichever API machine resolves this approval.
+        treeStore: getSharedDeployTreeStore(),
       }),
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
@@ -1410,6 +1416,42 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     return reply.send({ approvals: await listPendingByOrg(app.controlDb, org.orgId) });
   });
 
+  // ── GET /operator/approvals/:id ──────────────────────────────────────────
+  //
+  // ONE approval, including a resolved one. The list above is pending-only by
+  // design, so a smoke or ops check could never observe the outcome it just
+  // approved — the gap that made the Office canary verify resolutions by hand
+  // in the database.
+  //
+  // Scoped exactly like the list route: membership of the organization that
+  // owns the approval's conversation is what authorises the read, and the
+  // lookup (`getApprovalForOrg`) applies the operator/Office-origin predicate.
+  // The response is a PROJECTION — id, status, timestamps, source and tool
+  // name only. No tool arguments, recorded operation, or transcript: observing
+  // a decision must not become a way to read one organization's conversation.
+  app.get('/operator/approvals/:id', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    const { id } = request.params as { id: string };
+    const approval = await getApprovalForOrg(app.controlDb, id, org.orgId);
+    if (!approval) return reply.code(404).send({ error: 'approval not found' });
+
+    return reply.send({
+      approval: {
+        id: approval.id,
+        status: approval.status,
+        resolved_at: approval.resolvedAt,
+        source: approval.source,
+        tool_name: approval.toolName,
+        created_at: approval.createdAt,
+      },
+    });
+  });
+
   // ── GET /operator/traces ─────────────────────────────────────────────────
   //
   // TEMPORARY (2026-08-07). Read-only view of what the operator actually did,
@@ -1632,6 +1674,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
               approval: a,
               officeConsequential: true,
               cache: getSharedWorkingTreeCache(),
+              treeStore: getSharedDeployTreeStore(),
             }),
           denyCleanup: (a) =>
             rejectEscalatedSubstrateAction(app.controlDb, {

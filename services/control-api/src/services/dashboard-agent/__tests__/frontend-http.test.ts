@@ -146,6 +146,56 @@ describe('narrowness — this is the security control, not ceremony', () => {
   });
 });
 
+/**
+ * A hung create/start/list leg is a real production failure mode: the approval
+ * request has no response boundary, the build job sits PENDING, and the owner
+ * sees a blank gateway error. Every request needs a bound, and a timed-out one
+ * must say so rather than surfacing a bare "aborted".
+ */
+describe('requests are bounded', () => {
+  /** A fetch that only settles when the request signal aborts — like a black-holed socket. */
+  function hangingFetch(): typeof fetch {
+    return vi.fn((_url: any, init: any = {}) => new Promise<Response>((_resolve, reject) => {
+      const signal = (init as RequestInit).signal;
+      if (!signal) return;
+      signal.addEventListener(
+        'abort',
+        () => reject(new DOMException('This operation was aborted', 'AbortError')),
+        { once: true },
+      );
+    })) as unknown as typeof fetch;
+  }
+
+  it('bounds start_from_source and names the route it gave up on', async () => {
+    const mcp = createHttpFrontendMcp({
+      baseUrl: 'http://api.test',
+      fetchImpl: hangingFetch(),
+      startTimeoutMs: 20,
+    });
+
+    await expect(
+      mcp.call('manage_frontend', {
+        action: 'start_from_source',
+        app_id: APP,
+        deployment_id: 'dep_1',
+        lockfile_hash: 'aaaaaaaa',
+      }, JWT),
+    ).rejects.toThrow(/\/start timed out after 20ms/);
+  });
+
+  it('bounds the other calls at the request timeout', async () => {
+    const mcp = createHttpFrontendMcp({
+      baseUrl: 'http://api.test',
+      fetchImpl: hangingFetch(),
+      requestTimeoutMs: 20,
+    });
+
+    await expect(
+      mcp.call('manage_frontend', { action: 'list_deployments', app_id: APP }, JWT),
+    ).rejects.toThrow(/frontend GET .*timed out after 20ms/);
+  });
+});
+
 describe('failures surface as errors, not as silent success', () => {
   it('throws with the status and body on a non-2xx', async () => {
     const f = fakeFetch(() => ({ status: 409, body: { error: { message: 'source zip missing' } } }));
