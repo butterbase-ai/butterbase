@@ -34,6 +34,29 @@ vi.mock('../../services/dashboard-agent/mcp-client.js', async () => {
   return { ...actual, callMcpTool: vi.fn() };
 });
 
+/**
+ * Deploy approvals now execute from the persisted snapshot, not the
+ * process-local cache — that is the fix for cross-instance resolves. These
+ * tests run against the real DB but must not require a live Redis, so the
+ * shared store is an in-memory Map owned by this file. Each deploy test seeds
+ * the same tree it writes to the working-tree cache.
+ */
+const { deployTreeSnapshots } = vi.hoisted(() => ({
+  deployTreeSnapshots: new Map<string, unknown>(),
+}));
+
+vi.mock('../../services/dashboard-agent/deploy-tree-store.js', () => ({
+  getSharedDeployTreeStore: () => ({
+    save: async (approvalId: string, tree?: Map<string, unknown>) => {
+      if (!tree || tree.size === 0) return false;
+      deployTreeSnapshots.set(approvalId, tree);
+      return true;
+    },
+    load: async (approvalId: string) => deployTreeSnapshots.get(approvalId) ?? null,
+  }),
+  createDeployTreeStore: vi.fn(),
+}));
+
 import * as mcpClientModule from '../../services/dashboard-agent/mcp-client.js';
 import { resolveOperatorApproval } from '../dashboard-agent.js';
 import { getOrCreateOperatorConversation } from '../../services/dashboard-agent/operator-store.js';
@@ -46,6 +69,7 @@ import {
   workingTreeArtifact,
 } from '../../services/dashboard-agent/approval-operation.js';
 import { getSharedWorkingTreeCache } from '../../services/dashboard-agent/loop.js';
+import { getSharedDeployTreeStore } from '../../services/dashboard-agent/deploy-tree-store.js';
 
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
 
@@ -54,6 +78,7 @@ const pool = new Pool({ connectionString: process.env.CONTROL_TEST_DATABASE_URL 
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  deployTreeSnapshots.clear();
   await pool.query(`DELETE FROM dashboard_agent_conversations WHERE organization_id = $1`, [ORG]);
 });
 
@@ -552,6 +577,8 @@ describe('Task 8 — Office consequential approval authorization', () => {
         sensitivity: 'destructive',
         approvedOperation: opA,
       });
+      // Execution reads the persisted snapshot, not the live cache.
+      await getSharedDeployTreeStore().save(approval.id, cache.get(conversationId, 'app-1')!);
       await appendMessage(
         pool, conversationId,
         {
@@ -609,6 +636,7 @@ describe('Task 8 — Office consequential approval authorization', () => {
         sensitivity: 'destructive',
         approvedOperation: captureApprovalOperation({ toolName: 'deploy_frontend', args: toolArgs, artifact }),
       });
+      await getSharedDeployTreeStore().save(approval.id, cache.get(conversationId, 'app-1')!);
       await appendMessage(
         pool, conversationId,
         {
@@ -695,6 +723,7 @@ describe('Task 8 — Office consequential approval authorization', () => {
           toolName: 'deploy_function_from_workspace', args: toolArgs, artifact,
         }),
       });
+      await getSharedDeployTreeStore().save(approval.id, cache.get(conversationId, 'app-1')!);
       await appendMessage(
         pool, conversationId,
         {

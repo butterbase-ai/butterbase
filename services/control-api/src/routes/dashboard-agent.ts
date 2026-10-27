@@ -81,6 +81,7 @@ import {
   executeApprovedOperatorTool,
   rejectEscalatedSubstrateAction,
 } from '../services/dashboard-agent/substrate-approval-bridge.js';
+import { getSharedDeployTreeStore } from '../services/dashboard-agent/deploy-tree-store.js';
 import { evaluateOperatorAccess } from '../services/dashboard-agent/operator-access-policy.js';
 // TEMPORARY — dev-mode operator trace viewer. Delete with GET /operator/traces.
 import { operatorUserId } from '../services/dashboard-agent/operator-store.js';
@@ -583,6 +584,9 @@ export async function resolveOperatorApproval(
         approval: a,
         officeConsequential,
         cache: getSharedWorkingTreeCache(),
+        // The snapshot, not the process cache, is what proves and builds a
+        // deploy on whichever API machine resolves this approval.
+        treeStore: getSharedDeployTreeStore(),
       }),
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
@@ -1632,6 +1636,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
               approval: a,
               officeConsequential: true,
               cache: getSharedWorkingTreeCache(),
+              treeStore: getSharedDeployTreeStore(),
             }),
           denyCleanup: (a) =>
             rejectEscalatedSubstrateAction(app.controlDb, {

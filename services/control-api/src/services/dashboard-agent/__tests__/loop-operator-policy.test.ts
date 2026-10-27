@@ -44,6 +44,8 @@ import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL } from 
 import { operatorUserId } from '../operator-store.js';
 import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop.js';
+import type { DeployTreeStore } from '../deploy-tree-store.js';
+import type { WorkingTree } from '../working-tree.js';
 
 const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
 const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
@@ -278,6 +280,24 @@ function withYolo(yolo: boolean) {
     }
     return { ok: true, result: { content: [{ type: 'text', text: '{}' }] } } as never;
   });
+}
+
+/**
+ * A deploy-tree store backed by a Map. The real store is Redis; the loop's
+ * concern is only WHEN it saves and under which id.
+ */
+function fakeTreeStore(overrides: Partial<DeployTreeStore> = {}) {
+  const saved = new Map<string, WorkingTree>();
+  const store: DeployTreeStore = {
+    save: vi.fn(async (approvalId: string, tree?: WorkingTree) => {
+      if (!tree || tree.size === 0) return false;
+      saved.set(approvalId, tree);
+      return true;
+    }),
+    load: vi.fn(async (approvalId: string) => saved.get(approvalId) ?? null),
+    ...overrides,
+  };
+  return { store, saved };
 }
 
 describe('operator — approval verdict', () => {
@@ -888,18 +908,27 @@ function standardGuard() {
 
 describe('operator — Office consequential mode', () => {
   it('yolo CANNOT promote a deployment in Office mode; the deploy never dispatches', async () => {
-    withYolo(true);
-    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+    const cache = getSharedWorkingTreeCache();
+    cache.write('conv-1', 'app-1', 'index.html', '<html/>');
+    const { store } = fakeTreeStore();
+    try {
+      withYolo(true);
+      oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
 
-    const events = await collect(runAgentTurn(operatorInput({ accessGuard: consequentialGuard() })));
+      const events = await collect(
+        runAgentTurn(operatorInput({ accessGuard: consequentialGuard() }), { treeStore: store }),
+      );
 
-    expect(realDispatches()).toEqual([]);
-    expect(mockCreateApproval).toHaveBeenCalledTimes(1);
-    expect(events.some((e) => e.type === 'approval_required')).toBe(true);
-    expect(events.some((e) => e.type === 'done')).toBe(false);
-    // Not even the yolo probe is worth a round-trip when the Office floor
-    // already decided.
-    expect(yoloProbes()).toEqual([]);
+      expect(realDispatches()).toEqual([]);
+      expect(mockCreateApproval).toHaveBeenCalledTimes(1);
+      expect(events.some((e) => e.type === 'approval_required')).toBe(true);
+      expect(events.some((e) => e.type === 'done')).toBe(false);
+      // Not even the yolo probe is worth a round-trip when the Office floor
+      // already decided.
+      expect(yoloProbes()).toEqual([]);
+    } finally {
+      cache.evict('conv-1', 'app-1');
+    }
   });
 
   it('yolo CANNOT promote integration execution in Office mode', async () => {
@@ -981,18 +1010,18 @@ describe('operator — server-owned approval operation', () => {
 
   it('records the exact operation on every operator approval', async () => {
     withYolo(false);
-    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+    oneToolCallThenStop('manage_schema', { app_id: 'app-1', action: 'list' });
 
     await collect(runAgentTurn(operatorInput()));
 
     expect(mockCreateApproval).toHaveBeenCalledWith(
       stubPool,
       expect.objectContaining({
-        toolName: 'deploy_frontend',
+        toolName: 'manage_schema',
         approvedOperation: {
           version: 1,
-          toolName: 'deploy_frontend',
-          args: { app_id: 'app-1' },
+          toolName: 'manage_schema',
+          args: { app_id: 'app-1', action: 'list' },
           targetAppId: 'app-1',
         },
       }),
@@ -1001,12 +1030,13 @@ describe('operator — server-owned approval operation', () => {
 
   it('carries the working-tree artifact for a frontend deploy', async () => {
     const cache = getSharedWorkingTreeCache();
+    const { store } = fakeTreeStore();
     cache.write('conv-1', 'app-1', 'src/App.tsx', 'export default function App() {}');
     try {
       withYolo(false);
       oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
 
-      await collect(runAgentTurn(operatorInput()));
+      await collect(runAgentTurn(operatorInput(), { treeStore: store }));
 
       const input = mockCreateApproval.mock.calls[0][1] as {
         approvedOperation?: { artifact?: { kind: string; referenceId?: string; sha256: string } };
@@ -1023,6 +1053,7 @@ describe('operator — server-owned approval operation', () => {
 
   it('carries the function entry-file artifact for a function deploy', async () => {
     const cache = getSharedWorkingTreeCache();
+    const { store } = fakeTreeStore();
     cache.write('conv-1', 'app-1', 'functions/send-receipt/index.ts', 'export const handler = 1');
     try {
       withYolo(false);
@@ -1031,7 +1062,7 @@ describe('operator — server-owned approval operation', () => {
         function_name: 'send-receipt',
       });
 
-      await collect(runAgentTurn(operatorInput()));
+      await collect(runAgentTurn(operatorInput(), { treeStore: store }));
 
       const input = mockCreateApproval.mock.calls[0][1] as {
         approvedOperation?: { artifact?: { referenceId?: string } };
@@ -1040,5 +1071,69 @@ describe('operator — server-owned approval operation', () => {
     } finally {
       cache.evict('conv-1', 'app-1');
     }
+  });
+});
+
+describe('operator — deploy tree snapshot', () => {
+  const cache = getSharedWorkingTreeCache();
+
+  beforeEach(() => {
+    cache.evict('conv-1', 'app-1');
+  });
+
+  it('persists the proposed tree under the approval id it creates', async () => {
+    cache.write('conv-1', 'app-1', 'src/App.tsx', 'export default function App() { return null }');
+    const { store, saved } = fakeTreeStore();
+    mockCreateApproval.mockImplementation((async (
+      _pool: unknown,
+      input: { id?: string },
+    ) => ({ id: input.id ?? 'approval-1' })) as never);
+
+    withYolo(false);
+    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+    await collect(runAgentTurn(operatorInput(), { treeStore: store }));
+
+    expect(store.save).toHaveBeenCalledTimes(1);
+    const [approvalId, snapshot] = vi.mocked(store.save).mock.calls[0];
+    expect(snapshot?.get('src/App.tsx')?.content).toBe(
+      'export default function App() { return null }',
+    );
+    expect(mockCreateApproval).toHaveBeenCalledWith(
+      stubPool,
+      expect.objectContaining({ id: approvalId }),
+    );
+    expect(saved.has(approvalId as string)).toBe(true);
+  });
+
+  it('refuses a deploy proposal before the working tree exists', async () => {
+    const { store } = fakeTreeStore();
+
+    withYolo(false);
+    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+    const events = await collect(runAgentTurn(operatorInput(), { treeStore: store }));
+
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(store.save).not.toHaveBeenCalled();
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toContain('deploy_tree_unavailable');
+  });
+
+  it('does not create an approval when the snapshot cannot be stored', async () => {
+    cache.write('conv-1', 'app-1', 'index.html', '<html/>');
+    const { store } = fakeTreeStore({ save: vi.fn(async () => false) });
+
+    withYolo(false);
+    oneToolCallThenStop('deploy_frontend', { app_id: 'app-1' });
+    const events = await collect(runAgentTurn(operatorInput(), { treeStore: store }));
+
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+    const result = events.find((e) => e.type === 'tool_result') as
+      | Extract<LoopEvent, { type: 'tool_result' }>
+      | undefined;
+    expect(result!.error).toContain('deploy_tree_unavailable');
   });
 });

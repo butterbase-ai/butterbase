@@ -118,6 +118,12 @@ function rowToOrgApproval(row: any): OrgApproval {
 export async function createApproval(
   pool: pg.Pool,
   input: {
+    /**
+     * Pre-allocated id, used by deploy approvals so the persisted source tree
+     * and the approval row share one key. Omitted for every other approval;
+     * the database default then applies.
+     */
+    id?: string;
     conversationId: string;
     turnMessageId: string;
     toolName: string;
@@ -139,10 +145,11 @@ export async function createApproval(
 ): Promise<Approval> {
   const result = await pool.query(
     `INSERT INTO dashboard_agent_approvals
-     (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation)
-     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+     (id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation)
+     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, 'pending', $7, $8)
      RETURNING ${APPROVAL_COLS}`,
     [
+      input.id ?? null,
       input.conversationId,
       input.turnMessageId,
       input.toolName,
