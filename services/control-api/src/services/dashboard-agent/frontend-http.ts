@@ -66,21 +66,49 @@ export type HttpFrontendDeps = {
   baseUrl?: string
   /** Injectable for tests. Production uses global `fetch`. */
   fetchImpl?: typeof fetch
+  /**
+   * Bound for create/list calls. A hung request here has no server-side
+   * deadline; without this the approval request stays open until the proxy
+   * fails it with a blank 502.
+   */
+  requestTimeoutMs?: number
+  /** Bound for `start_from_source`, the leg that queues the build. */
+  startTimeoutMs?: number
 }
 
 export function createHttpFrontendMcp(deps: HttpFrontendDeps = {}): Mcp {
   const baseUrl = (deps.baseUrl ?? defaultBaseUrl()).replace(/\/+$/, '')
   const doFetch = deps.fetchImpl ?? fetch
+  const requestTimeoutMs = deps.requestTimeoutMs ?? 60_000
+  const startTimeoutMs = deps.startTimeoutMs ?? 30_000
 
-  async function api(method: 'GET' | 'POST', path: string, jwt: string, body?: unknown): Promise<any> {
-    const res = await doFetch(`${baseUrl}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${jwt}`,
-        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    })
+  async function api(
+    method: 'GET' | 'POST',
+    path: string,
+    jwt: string,
+    body?: unknown,
+    timeoutMs: number = requestTimeoutMs,
+  ): Promise<any> {
+    const signal = AbortSignal.timeout(timeoutMs)
+    let res: Response
+    try {
+      res = await doFetch(`${baseUrl}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${jwt}`,
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal,
+      })
+    } catch (err) {
+      // `AbortSignal.timeout` marks the signal aborted before fetch rejects,
+      // so this distinguishes OUR deadline from a connection/DNS failure.
+      if (signal.aborted) {
+        throw new Error(`frontend ${method} ${path} timed out after ${timeoutMs}ms`)
+      }
+      throw err
+    }
     // Text first: error bodies are not always JSON, and an empty body would
     // make res.json() throw with a message that hides the status the caller
     // actually needs.
@@ -125,7 +153,7 @@ export function createHttpFrontendMcp(deps: HttpFrontendDeps = {}): Mcp {
             packageManager: a.package_manager ?? 'npm',
             lockfileHash: a.lockfile_hash,
             ...(a.user_env ? { userEnv: a.user_env } : {}),
-          })
+          }, startTimeoutMs)
         }
 
         case 'list_deployments':
