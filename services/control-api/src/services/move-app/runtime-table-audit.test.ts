@@ -140,6 +140,17 @@ describe('auditRuntimeTablesForPool — FK child tables', () => {
 });
 
 describe('video preparation schema compatibility', () => {
+  it('boots with retained output obligations after the storage migration', async () => {
+    const pool = makePool({
+      appIdTables: ['ai_video_preparations', 'ai_video_attempts', 'ai_video_preparation_outputs'],
+      fkPairs: [
+        { child_table: 'ai_video_attempts', parent_table: 'ai_video_preparations' },
+        { child_table: 'ai_video_preparation_outputs', parent_table: 'ai_video_attempts' },
+      ],
+    });
+    await expect(auditRuntimeTablesForPool(pool as any, 'output-storage')).resolves.toBeUndefined();
+  });
+
   it('accepts regions before and after the additive migration, including app_id tables without app FKs', async () => {
     await expect(auditRuntimeTablesForPool(makePool({}) as any, 'before')).resolves.toBeUndefined();
     const pool = makePool({

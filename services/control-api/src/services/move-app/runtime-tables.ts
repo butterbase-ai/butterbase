@@ -64,6 +64,9 @@ export const MOVE_APP_RUNTIME_TABLES = [
   // archived source copies never perform cleanup or provider operations.
   'ai_video_preparations',
   'ai_video_attempts',
+  // Register before the additive output-storage migration; active copies block
+  // moves, while completed object identities follow their retained attempts.
+  'ai_video_preparation_outputs',
   'ai_reference_asset_groups',
   'ai_reference_assets',
   'actor_usage_logs',
@@ -179,5 +182,5 @@ export const MOVE_APP_EXCLUDED_CHILD: Record<string, string> = {};
 
 /** Additive tables that may be absent before the corresponding migration. */
 export const MOVE_APP_OPTIONAL_TABLES: ReadonlySet<string> = new Set([
-  'ai_video_preparations','ai_video_attempts','ai_reference_asset_groups','ai_reference_assets',
+  'ai_video_preparations','ai_video_attempts','ai_video_preparation_outputs','ai_reference_asset_groups','ai_reference_assets',
 ]);
