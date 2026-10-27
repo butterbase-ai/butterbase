@@ -5,7 +5,7 @@ import { createPreparedOutputTestDb } from '../../test/fixtures/prepared-output-
 
 const seams = vi.hoisted(() => ({ pool: null as any, owner: '', org: '', downloads: 0 }));
 vi.mock('../services/runtime-db.js', () => ({ getRuntimeDbPool: () => seams.pool }));
-vi.mock('../services/region-resolver.js', () => ({ resolveAppHomeRegion: async () => 'us-east-1' }));
+vi.mock('../services/region-resolver.js', () => ({ resolveAppHomeRegion: async () => 'us-east-1', getRuntimeDbForApp: async () => seams.pool }));
 vi.mock('../services/org-resolver.js', () => ({ resolveOrganizationId: async () => seams.org }));
 vi.mock('../services/usage-metering.js', () => ({ incrementUsage: vi.fn(async () => {}) }));
 vi.mock('../services/audit/with-audit.js', () => ({ logFromRequest: vi.fn() }));
@@ -19,13 +19,14 @@ vi.mock('../services/app-resolver.js', async importOriginal => {
   } } };
 });
 vi.mock('../services/s3.js', () => ({
-  generatePresignedUploadUrl: vi.fn(),
+  generatePresignedUploadUrl: vi.fn(async (appId: string, owner: string) => ({ objectKey: `${appId}/${owner}/${randomUUID()}_video.mp4`, uploadUrl: 'https://objects.example/upload', expiresIn: 300 })),
   generatePresignedDownloadUrl: vi.fn(async () => `https://objects.example/download?nonce=${++seams.downloads}`),
   deleteObject: vi.fn(async () => {}),
   S3Error: class S3Error extends Error {},
 }));
 import { storageRoutes } from './storage.js';
 import { deleteObject, generatePresignedDownloadUrl } from '../services/s3.js';
+import * as outputs from '../services/ai-router/video-preparation-outputs.js';
 
 let fixture: Awaited<ReturnType<typeof createPreparedOutputTestDb>>;
 let scope: Awaited<ReturnType<typeof fixture.seed>>;
@@ -36,8 +37,8 @@ const subject = 'fictional-subject';
 describe.skipIf(!process.env.VIDEO_OUTPUT_TEST_DATABASE_URL)('prepared storage HTTP access (isolated PostgreSQL)', () => {
   beforeAll(async () => {
     fixture = await createPreparedOutputTestDb(); seams.pool = fixture.pool;
-    await fixture.pool.query(`ALTER TABLE apps ADD COLUMN storage_config jsonb DEFAULT '{"publicReadEnabled":true}',
-      ADD COLUMN paused boolean DEFAULT false,ADD COLUMN paused_reason text,ADD COLUMN paused_by text`);
+    await fixture.pool.query(`ALTER TABLE apps ALTER COLUMN storage_config SET DEFAULT '{"publicReadEnabled":true}';
+      ALTER TABLE apps ADD COLUMN paused boolean DEFAULT false,ADD COLUMN paused_reason text,ADD COLUMN paused_by text`);
     app = Fastify(); app.decorate('controlDb', fixture.pool);
     app.addHook('onRequest', async request => {
       const token = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
@@ -96,5 +97,16 @@ describe.skipIf(!process.env.VIDEO_OUTPUT_TEST_DATABASE_URL)('prepared storage H
     expect((await remove(owned)).statusCode).toBe(204);
     expect((await get(owned)).statusCode).toBe(404);
     expect((await remove(platformOnly, 'owner')).statusCode).toBe(204);
+  });
+  it('rechecks ordinary uploads against retained copy reservations inside shared admission', async () => {
+    await fixture.pool.query('UPDATE apps SET storage_config=$2 WHERE id=$1', [scope.app, { storageLimitBytes: 800 }]);
+    const row = (await outputs.ensurePreparedOutputs(fixture.pool, { attemptId: scope.attempt.id, attemptFence: 1, count: 1, bucket: 'test-bucket' }))![0];
+    const claim = (await outputs.claimPreparedOutput(fixture.pool, row.id, { attemptFence: 1, worker: 'copy' }))!;
+    await outputs.recordPreparedOutputMeasurement(fixture.pool, row.id, claim.fence, { sizeBytes: 128, sha256: 'a'.repeat(64), contentType: 'video/mp4' });
+    expect(await outputs.reservePreparedOutputCapacity(fixture.pool, row.id, claim.fence)).toBe(true);
+    const response = await app.inject({ method: 'POST', url: `/storage/${scope.app}/upload`, headers: { authorization: 'Bearer owner' }, payload: { filename: 'video.mp4', contentType: 'video/mp4', sizeBytes: 128 } });
+    expect(response.statusCode).toBe(429);
+    expect(response.json().error.code).toBe('QUOTA_STORAGE_EXCEEDED');
+    expect((await fixture.pool.query('SELECT count(*)::int AS n FROM storage_objects')).rows[0].n).toBe(5);
   });
 });

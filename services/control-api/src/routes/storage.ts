@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { generatePresignedUploadUrl, generatePresignedDownloadUrl, deleteObject, S3Error } from '../services/s3.js';
 import { checkStorageQuota, StorageQuotaError } from '../services/storage-quota.js';
+import { withAppStorageAdmission, StorageAdmissionError } from '../services/storage-admission.js';
 import { verifyEndUserJwt } from '../services/end-user-auth.js';
 import type { EndUserClaims } from '@butterbase/shared/types';
 import { config } from '../config.js';
@@ -217,12 +218,12 @@ export async function storageRoutes(app: FastifyInstance) {
       const organizationId = await resolveOrgFromApp(runtimeDb, appId);
 
       // Create database record immediately
-      const dbResult = await runtimeDb.query(
+      const dbResult = await withAppStorageAdmission(runtimeDb, appId, body.sizeBytes, body.contentType, tx => tx.query(
         `INSERT INTO storage_objects (app_id, organization_id, user_id, bucket, key, filename, content_type, size_bytes, public)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
         [appId, organizationId, storageUserId, config.s3.bucket, result.objectKey, body.filename, body.contentType, body.sizeBytes, body.public]
-      );
+      ));
 
       // Calculate storage quota info
       const storageStats = await runtimeDb.query(
@@ -268,6 +269,13 @@ export async function storageRoutes(app: FastifyInstance) {
     } catch (error) {
       if (error instanceof AppPausedError) {
         return pausedReply(reply, error);
+      }
+      if (error instanceof StorageAdmissionError) {
+        return reply.status(error.permanent ? 429 : 503).send(createAgentError({
+          code: error.permanent ? 'QUOTA_STORAGE_EXCEEDED' : 'QUOTA_STORAGE_ERROR',
+          message: 'Storage admission unavailable', remediation: 'Check app storage limits and retry when capacity is available.',
+          documentation_url: getDocUrl('QUOTA_STORAGE_EXCEEDED'), details: { code: error.code },
+        }));
       }
       if (error instanceof StorageQuotaError) {
         return reply.status(400).send(createAgentError({

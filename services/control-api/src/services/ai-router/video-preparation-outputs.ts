@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
+import { assertAppStorageAdmission } from '../storage-admission.js';
 import { finishPreparation, storedVideoOutputIds, type AttemptRow, type PreparationRow, type TerminalOutcome } from './video-preparations.js';
 
 export const PREPARED_OUTPUT_MAX_BYTES = 256 * 1024 * 1024;
@@ -22,6 +23,8 @@ export interface PreparedOutputRow {
   state: 'pending' | 'copying' | 'copied' | 'stored' | 'cleanup_pending' | 'deleted' | 'failed';
   provider_cost_usd: string | null;
   provider_completed_at: Date;
+  /** Private opaque provider evidence; erased when copied or retired. Never a public DTO. */
+  source_handle: string | null;
   size_bytes: string | null;
   sha256: string | null;
   content_type: 'video/mp4' | 'video/webm' | null;
@@ -87,11 +90,12 @@ export async function listPreparedOutputs(db: pg.Pool | pg.PoolClient, attemptId
 }
 
 export async function ensurePreparedOutputs(pool: pg.Pool, args: {
-  attemptId: string; attemptFence: number; bucket: string; count: number; providerCostUsd?: number;
+  attemptId: string; attemptFence: number; bucket: string; count: number; providerCostUsd?: number; sourceHandles?: string[];
 }): Promise<PreparedOutputRow[] | null> {
   if (!Number.isSafeInteger(args.count) || args.count < 1 || args.count > 8) throw new PreparedOutputError('OUTPUT_INVALID_COUNT', 'Invalid output count');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/.test(args.bucket)) throw new PreparedOutputError('OUTPUT_INVALID_BUCKET', 'Invalid output bucket');
   if (args.providerCostUsd !== undefined && (!Number.isFinite(args.providerCostUsd) || args.providerCostUsd < 0 || args.providerCostUsd >= 1_000_000)) throw new PreparedOutputError('OUTPUT_INVALID_COST', 'Invalid output cost evidence');
+  if (args.sourceHandles !== undefined && (args.sourceHandles.length !== args.count || args.sourceHandles.some(h => typeof h !== 'string' || !h.length || Buffer.byteLength(h)>8192))) throw new PreparedOutputError('OUTPUT_INVALID_SOURCE', 'Invalid private output source');
   return withAuthority(pool, args.attemptId, args.attemptFence, async (tx, { attempt, job }) => {
     if (!uuid.test(job.user_id) || !/^[a-zA-Z0-9_-]+$/.test(job.app_id)) throw new PreparedOutputError('OUTPUT_INVALID_SCOPE', 'Invalid output key namespace');
     let rows = await listPreparedOutputs(tx, attempt.id);
@@ -107,6 +111,10 @@ export async function ensurePreparedOutputs(pool: pg.Pool, args: {
       }
     } else if (args.providerCostUsd !== undefined && rows.every(r => r.provider_cost_usd === null)) {
       await tx.query('UPDATE ai_video_preparation_outputs SET provider_cost_usd=$2 WHERE attempt_id=$1 AND archived_after_move IS NULL', [attempt.id, args.providerCostUsd]);
+    }
+    if (args.sourceHandles) for (let index = 0; index < args.count; index++) {
+      await tx.query(`UPDATE ai_video_preparation_outputs SET source_handle=$3,updated_at=now()
+        WHERE attempt_id=$1 AND output_index=$2 AND state='pending' AND deleted_at IS NULL AND archived_after_move IS NULL`, [attempt.id, index, args.sourceHandles[index]]);
     }
     rows = await listPreparedOutputs(tx, attempt.id);
     return rows;
@@ -151,6 +159,18 @@ export async function recordPreparedOutputMeasurement(pool: pg.Pool, id: string,
   const result = await pool.query(`UPDATE ai_video_preparation_outputs v SET size_bytes=$3,sha256=$4,content_type=$5,updated_at=now()
     WHERE ${liveCopy}`, [id, fence, value.sizeBytes, value.sha256, value.contentType]);
   return result.rowCount === 1;
+}
+
+export async function reservePreparedOutputCapacity(pool: pg.Pool, id: string, fence: number): Promise<boolean> {
+  const base = (await pool.query<PreparedOutputRow>('SELECT * FROM ai_video_preparation_outputs WHERE id=$1 AND archived_after_move IS NULL', [id])).rows[0];
+  if (!base || base.claim_attempt_fence === null) return false;
+  return await withAuthority(pool, base.attempt_id, base.claim_attempt_fence, async tx => {
+    const row = (await tx.query<PreparedOutputRow>(`SELECT * FROM ai_video_preparation_outputs v WHERE ${liveCopy} FOR UPDATE`, [id, fence])).rows[0];
+    if (!row || !row.sha256 || !row.size_bytes || !row.content_type) return false;
+    if (row.capacity_reserved) return true;
+    await assertAppStorageAdmission(tx, row.app_id, Number(row.size_bytes), row.content_type);
+    return (await tx.query(`UPDATE ai_video_preparation_outputs v SET capacity_reserved=true,updated_at=now() WHERE ${liveCopy}`, [id, fence])).rowCount === 1;
+  }) ?? false;
 }
 
 export async function markPreparedOutputCopied(pool: pg.Pool, id: string, fence: number): Promise<boolean> {

@@ -25,6 +25,7 @@ CREATE TABLE ai_video_preparation_outputs (
  state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','copying','copied','stored','cleanup_pending','deleted','failed')),
  provider_cost_usd numeric(12,6) CHECK(provider_cost_usd>=0 AND provider_cost_usd<>'NaN'::numeric),
  provider_completed_at timestamptz NOT NULL DEFAULT now(),
+ source_handle text CHECK(octet_length(source_handle)<=8192),
  size_bytes bigint CHECK(size_bytes>0 AND size_bytes<=268435456),
  sha256 text CHECK(sha256 ~ '^[0-9a-f]{64}$'),
  content_type text CHECK(content_type IN ('video/mp4','video/webm')),
@@ -58,6 +59,7 @@ CREATE INDEX ai_video_outputs_work ON ai_video_preparation_outputs(next_action_a
 
 CREATE FUNCTION protect_video_output_identity() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+ IF NEW.deleted_at IS NOT NULL OR NEW.state IN ('copied','stored','cleanup_pending','deleted','failed') THEN NEW.source_handle := NULL; END IF;
  IF (NEW.id,NEW.preparation_id,NEW.attempt_id,NEW.organization_id,NEW.app_id,NEW.user_id,NEW.end_user_sub,
      NEW.output_index,NEW.expected_outputs,NEW.object_id,NEW.bucket,NEW.object_key,NEW.deadline,NEW.provider_completed_at)
  IS DISTINCT FROM (OLD.id,OLD.preparation_id,OLD.attempt_id,OLD.organization_id,OLD.app_id,OLD.user_id,OLD.end_user_sub,
@@ -82,8 +84,8 @@ BEGIN
   RAISE EXCEPTION 'deleted video output cannot be resurrected';
  END IF;
  IF OLD.archived_after_move IS NOT NULL AND
-    (NEW.state,NEW.lease_owner,NEW.fence,NEW.sha256,NEW.size_bytes) IS DISTINCT FROM
-    (OLD.state,OLD.lease_owner,OLD.fence,OLD.sha256,OLD.size_bytes) THEN
+    (NEW.state,NEW.lease_owner,NEW.fence,NEW.sha256,NEW.size_bytes,NEW.source_handle) IS DISTINCT FROM
+    (OLD.state,OLD.lease_owner,OLD.fence,OLD.sha256,OLD.size_bytes,OLD.source_handle) THEN
   RAISE EXCEPTION 'archived video output cannot perform work';
  END IF;
  RETURN NEW;

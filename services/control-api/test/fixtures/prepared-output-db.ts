@@ -10,7 +10,7 @@ export async function createPreparedOutputTestDb() {
   const schema = `video_output_repository_${randomUUID().replaceAll('-', '')}`;
   const pool = new pg.Pool({ connectionString: url, options: `-c search_path=${schema},pg_catalog`, max: 12 });
   await pool.query(`CREATE SCHEMA ${schema}`);
-  await pool.query(`CREATE TABLE apps(id text PRIMARY KEY,organization_id uuid NOT NULL,owner_id uuid NOT NULL,provisioning_status text NOT NULL DEFAULT 'ready');
+  await pool.query(`CREATE TABLE apps(id text PRIMARY KEY,organization_id uuid NOT NULL,owner_id uuid NOT NULL,provisioning_status text NOT NULL DEFAULT 'ready',storage_config jsonb NOT NULL DEFAULT '{}');
     CREATE TABLE storage_objects(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),app_id text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,organization_id uuid NOT NULL,user_id uuid,bucket text NOT NULL,key text NOT NULL,filename text,content_type text,size_bytes bigint,public boolean NOT NULL DEFAULT false,metadata jsonb DEFAULT '{}',archived_after_move uuid,created_at timestamptz DEFAULT now(),UNIQUE(app_id,bucket,key));`);
   for (const name of ['056_ai_video_preparations.sql', '057_ai_video_preparation_schedule.sql', '058_ai_reference_lifecycle.sql', '061_ai_video_preparation_outputs.sql']) await pool.query(await readFile(new URL(`../../../../db/runtime-plane/${name}`, import.meta.url), 'utf8'));
   return {
