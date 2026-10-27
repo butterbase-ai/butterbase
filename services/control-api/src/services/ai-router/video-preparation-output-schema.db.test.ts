@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { hasBlockingPreparationWork } from './video-preparations.js';
 
 const url = process.env.VIDEO_OUTPUT_TEST_DATABASE_URL;
 const schema = `video_outputs_${randomUUID().replaceAll('-', '')}`;
@@ -58,7 +59,7 @@ describe.skipIf(!url)('prepared output schema (isolated PostgreSQL)', () => {
   });
   it('keeps cleanup identity after app deletion and forbids resurrection', async () => {
     const row = await insert();
-    await db.query("UPDATE ai_video_preparation_outputs SET state='copying',lease_owner='worker',lease_expires_at=now()+interval '30 seconds',fence=fence+1,claim_attempt_fence=0 WHERE id=$1", [row.id]);
+    await db.query("UPDATE ai_video_preparation_outputs SET state='copying',lease_owner='worker',lease_expires_at=now()+interval '30 seconds',fence=fence+1,claim_attempt_fence=0,upload_uncertain_until=now()+interval '2 minutes',cleanup_probe_until=now()+interval '1 day' WHERE id=$1", [row.id]);
     await db.query("DELETE FROM apps WHERE id='app-output'");
     const retained = (await db.query('SELECT * FROM ai_video_preparation_outputs WHERE id=$1', [row.id])).rows[0];
     expect(retained).toMatchObject({ object_id: object, bucket: 'test-bucket', object_key: key, state: 'cleanup_pending', lease_owner: null });
@@ -86,9 +87,11 @@ describe.skipIf(!url)('prepared output schema (isolated PostgreSQL)', () => {
     const row = await insert();
     await db.query("UPDATE ai_video_attempts SET submission_state='terminal',terminal_outcome='{\"status\":\"failed\"}',terminal_at=now(),settlement_status='acknowledged',settlement_receipt='{}',settled_at=now() WHERE id=$1", [attempt]);
     await db.query("UPDATE ai_video_preparations SET status='failed',terminal_outcome='{\"status\":\"failed\"}' WHERE id=$1", [preparation]);
+    expect(await hasBlockingPreparationWork(db, 'app-output')).toBe(true);
     await expect(db.query("UPDATE apps SET provisioning_status='migrating' WHERE id='app-output'")).rejects.toThrow(/output|retained/);
     await db.query("UPDATE ai_video_preparation_outputs SET state='cleanup_pending' WHERE id=$1", [row.id]);
     await db.query("UPDATE ai_video_preparation_outputs SET state='deleted',deleted_at=now(),cleanup_probe_until=NULL WHERE id=$1", [row.id]);
+    expect(await hasBlockingPreparationWork(db, 'app-output')).toBe(false);
     await expect(db.query("UPDATE apps SET provisioning_status='migrating' WHERE id='app-output'")).resolves.toBeDefined();
   });
 });

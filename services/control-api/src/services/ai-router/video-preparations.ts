@@ -6,6 +6,8 @@ export type InputIdentity = Record<string, { sha256: string; objectId?: string; 
 export type TerminalOutcome = {
   status: 'completed' | 'failed' | 'cancelled' | 'expired';
   output?: string[];
+  /** Stable retained storage identities for the storage-backed contract. */
+  outputObjectIds?: string[];
   /** Upstream completion and expense survive public output validation failure. */
   providerStatus?: 'completed';
   providerCostUsd?: number;
@@ -62,8 +64,17 @@ const live = `archived_after_move IS NULL`;
 const leased = `fence = $2 AND lease_expires_at > now() AND ${live}`;
 const mutable = `status IN ('pending','in_progress') AND deleted_at IS NULL`;
 function leaseDuration(ms: number) { if (!Number.isSafeInteger(ms) || ms <= 0) throw new Error('lease duration must be positive milliseconds'); return ms; }
+export function storedVideoOutputIds(outcome: TerminalOutcome | null): string[] | null {
+  const ids = outcome?.outputObjectIds;
+  return outcome?.status === 'completed' && outcome.output === undefined && Array.isArray(ids)
+    && ids.length > 0 && ids.length <= 8 && new Set(ids).size === ids.length
+    && ids.every(id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? ids : null;
+}
 function validateOutcome(outcome: TerminalOutcome) {
-  if (outcome.status === 'completed' && !outcome.output?.some(x => typeof x === 'string' && x.length > 0)) throw new Error('completed outcome requires output');
+  if (outcome.status !== 'completed') return;
+  if (outcome.outputObjectIds !== undefined) {
+    if (!storedVideoOutputIds(outcome)) throw new Error('completed outcome requires valid unique storage object IDs');
+  } else if (!outcome.output?.some(x => typeof x === 'string' && x.length > 0)) throw new Error('completed outcome requires output');
 }
 
 /** Insert the stable public job before reserving or submitting anything. */
@@ -207,7 +218,13 @@ export async function hasBlockingPreparationWork(db: PreparationDb, appId: strin
     OR EXISTS (SELECT 1 FROM ai_video_attempts WHERE app_id=$1 AND ${live} AND settlement_status!='acknowledged')
     OR EXISTS (SELECT 1 FROM ai_reference_assets WHERE app_id=$1 AND ${live} AND (cleanup_pending OR status IN ('registering','pending','uncertain') OR lease_expires_at>now()))
     OR EXISTS (SELECT 1 FROM ai_reference_asset_groups WHERE app_id=$1 AND ${live} AND (cleanup_pending OR status IN ('registering','pending','uncertain') OR lease_expires_at>now())) AS blocked`, [appId]);
-  return r.rows[0].blocked;
+  if (r.rows[0].blocked) return true;
+  // Compatibility registration can run before the additive storage migration.
+  const outputTable = await db.query<{ name: string | null }>("SELECT to_regclass('ai_video_preparation_outputs') AS name");
+  if (!outputTable.rows[0]?.name) return false;
+  return (await db.query<{ blocked: boolean }>(`SELECT EXISTS(SELECT 1 FROM ai_video_preparation_outputs
+    WHERE app_id=$1 AND archived_after_move IS NULL AND (state IN ('pending','copying','copied','cleanup_pending')
+      OR (state='deleted' AND cleanup_probe_until>now()))) AS blocked`, [appId])).rows[0].blocked;
 }
 /** Background recovery includes expired jobs so workers can explicitly expire them. */
 export async function listPreparationWork(db: PreparationDb, limit = 100): Promise<PreparationRow[]> {

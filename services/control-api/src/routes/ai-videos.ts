@@ -29,7 +29,7 @@ import { readAutoRefillState } from './ai-config.js';
 import { resolveMarkupPct, type MarkupSource } from '../services/ai-router/special-pricing.js';
 import { getVideoPreparationHooks } from '../services/ai-router/video-preparation-hooks.js';
 import { admitVideoPreparation, PreparationOptionError, referenceSource } from '../services/ai-router/video-preparation.js';
-import { getPreparation, listPreparationAttempts, type PreparationRow, type AttemptRow } from '../services/ai-router/video-preparations.js';
+import { getPreparation, listPreparationAttempts, storedVideoOutputIds, type PreparationRow, type AttemptRow } from '../services/ai-router/video-preparations.js';
 
 // Public URLs returned to clients must honor the X-Forwarded-* headers that
 // Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
@@ -338,7 +338,8 @@ export async function aiVideoRoutes(app: FastifyInstance) {
       if (prepared && preparationHooks) {
         if (!canReadPreparation(prepared, appId, authz.caller)) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
         if (prepared.status !== 'completed') return reply.code(409).send({ error: 'job_not_completed', code: 'JOB_NOT_COMPLETED', current_status: prepared.status });
-        if (index >= (prepared.terminal_outcome?.output?.length ?? 0)) return reply.code(400).send({ error: 'invalid_index', code: 'INVALID_INDEX' });
+        const output = storedVideoOutputIds(prepared.terminal_outcome) ?? prepared.terminal_outcome?.output;
+        if (index >= (output?.length ?? 0)) return reply.code(400).send({ error: 'invalid_index', code: 'INVALID_INDEX' });
         const attempt = (await listPreparationAttempts(runtimePool, jobId)).find(a => a.terminal_outcome?.status === 'completed' && a.settlement_status === 'acknowledged');
         if (!attempt) return reply.code(502).send({ error: 'content_unavailable', code: 'CONTENT_UNAVAILABLE' });
         const region = await resolveAppHomeRegion(app.controlDb, appId);
@@ -488,9 +489,10 @@ export function buildPublicPreparationResponse(base: string, appId: string, job:
   const pollingUrl = `${base}/v1/${appId}/videos/completions/${job.id}`;
   const terminal = ['completed','failed','cancelled','expired'].includes(job.status);
   const settled = terminal && attempts.every(a => a.settlement_status === 'acknowledged');
+  const output = storedVideoOutputIds(job.terminal_outcome) ?? job.terminal_outcome?.output;
   return { job_id: job.id, status: job.status, model: job.model, polling_url: pollingUrl,
     ...(job.status === 'pending' && job.stage === 'preparing_references' ? { stage: 'preparing_references' } : {}),
-    content_urls: job.status === 'completed' ? job.terminal_outcome?.output?.map((_, i) => `${pollingUrl}/content?index=${i}`) ?? null : null,
+    content_urls: job.status === 'completed' ? output?.map((_, i) => `${pollingUrl}/content?index=${i}`) ?? null : null,
     error: job.terminal_outcome?.error ?? null, created_at: job.created_at,
     charged_credits_usd: settled ? attempts.reduce((sum, a) => sum + Number(a.settlement_receipt?.chargedUsd ?? 0), 0) : null,
     settled_at: settled ? attempts.map(a => a.settled_at).filter(Boolean).sort((a,b) => b!.getTime()-a!.getTime())[0] ?? null : null };

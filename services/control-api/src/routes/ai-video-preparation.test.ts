@@ -8,7 +8,7 @@ vi.mock('../services/redis.js', () => ({ getRedisClient:vi.fn() }));
 vi.mock('./ai-config.js', () => ({readAutoRefillState:vi.fn()}));
 vi.mock('../services/ai-router/special-pricing.js', () => ({resolveMarkupPct:vi.fn(async () => ({pct:20,source:'global'}))}));
 vi.mock('../services/ai-router/router.js', () => ({routeVideoSubmit:f.legacySubmit,routeVideoPoll:vi.fn(),settleVideoJob:vi.fn(),billedVideoCostUsd:vi.fn(),RouterError:class extends Error{},InsufficientCreditsError:class extends Error{}}));
-vi.mock('../services/ai-router/video-preparations.js', () => ({createPreparation:f.create,getPreparation:vi.fn(async () => f.job),listPreparationAttempts:vi.fn(async () => f.attempts)}));
+vi.mock('../services/ai-router/video-preparations.js', async importOriginal => ({...await importOriginal<typeof import('../services/ai-router/video-preparations.js')>(),createPreparation:f.create,getPreparation:vi.fn(async () => f.job),listPreparationAttempts:vi.fn(async () => f.attempts)}));
 import { aiVideoRoutes } from './ai-videos.js';
 import { setVideoPreparationHooks } from '../services/ai-router/video-preparation-hooks.js';
 let app: ReturnType<typeof Fastify>; let hooks:any;
@@ -46,5 +46,13 @@ describe('durable preparation HTTP seam', () => {
  });
  it('rejects unsupported declared flow before legacy paid submission', async () => {
   hooks.quote.mockResolvedValue(null); const response=await app.inject({method:'POST',url:'/v1/app/videos/completions',payload:body});expect(response.statusCode).toBe(400);expect(f.create).not.toHaveBeenCalled();expect(f.legacySubmit).not.toHaveBeenCalled();
+ });
+ it('serves stored-object output indices through the same authenticated content route', async () => {
+  f.job.status='completed';f.job.terminal_outcome={status:'completed',outputObjectIds:['00000000-0000-4000-8000-000000000001']};
+  f.attempts=[{terminal_outcome:f.job.terminal_outcome,settlement_status:'acknowledged'}];
+  const response=await app.inject('/v1/app/videos/completions/job/content?index=0');
+  expect(response.statusCode).toBe(200);expect(response.body).toBe('video');
+  expect((await app.inject('/v1/app/videos/completions/job/content?index=1')).statusCode).toBe(400);
+  expect(hooks.content).toHaveBeenCalledTimes(1);
  });
 });

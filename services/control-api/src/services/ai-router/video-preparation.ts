@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as p from './video-preparations.js';
+import { finishStoredPreparation } from './video-preparation-outputs.js';
 import { loadReferenceImage } from './reference-image.js';
 import type { AssetScope } from './reference-assets.js';
 import type { PreparationContext, PreparationScope, PreparationSelection, VideoPreparationHooks, PreparationProviderResult, ReferenceProgress } from './video-preparation-hooks.js';
@@ -46,10 +47,13 @@ export function referenceSource(request: Record<string, unknown>, path: string):
  throw new PreparationOptionError('Declaration must identify an image reference');
 }
 function safeOutcome(outcome: p.TerminalOutcome): p.TerminalOutcome {
- if (outcome.status === 'completed' && (!outcome.output?.length || !outcome.output.every(value => {
+ if (outcome.status !== 'completed') return outcome;
+ const valid = outcome.outputObjectIds !== undefined ? p.storedVideoOutputIds(outcome) !== null
+  : Boolean(outcome.output?.length && outcome.output.every(value => {
   try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password; }
   catch { return false; }
- }))) {
+ }));
+ if (!valid) {
   // Preserve known expenditure and upstream completion even when no public output is valid.
   const cost = outcome.providerCostUsd;
   return { status: 'failed', error: 'invalid_provider_output', providerStatus: 'completed',
@@ -130,7 +134,9 @@ export function createVideoPreparationDriver(options: PreparationContext & { hoo
    if (current?.submission_state === 'accepted' || current?.submission_state === 'uncertain' || current?.submission_state === 'submitting') { await recoverAttempt(current); return; }
    if (current?.submission_state === 'terminal' && !(job.retry_consumed && current.attempt_number === 1)) {
     if (!job.retry_consumed && eligibleRetry(job, current.terminal_outcome!) && await p.consumePreparationRetry(db, job.id, job.fence)) { await p.setPreparationStage(db, job.id, job.fence, 'preparing_references'); return; }
-    await p.finishPreparation(db, job.id, job.fence, current.terminal_outcome!); return;
+    if (p.storedVideoOutputIds(current.terminal_outcome)) await finishStoredPreparation(db, job.id, job.fence);
+    else await p.finishPreparation(db, job.id, job.fence, current.terminal_outcome!);
+    return;
    }
    const authority = await hooks.authorize(ctx, job);
    if (authority === 'region_mismatch') return;

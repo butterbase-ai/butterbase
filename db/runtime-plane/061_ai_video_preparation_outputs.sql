@@ -29,6 +29,9 @@ CREATE TABLE ai_video_preparation_outputs (
  sha256 text CHECK(sha256 ~ '^[0-9a-f]{64}$'),
  content_type text CHECK(content_type IN ('video/mp4','video/webm')),
  capacity_reserved boolean NOT NULL DEFAULT false,
+ upload_claim_fence integer,
+ upload_uncertain_until timestamptz,
+ uncertain_put boolean NOT NULL DEFAULT false,
  deadline timestamptz NOT NULL,
  next_action_at timestamptz NOT NULL DEFAULT now(),
  attempts integer NOT NULL DEFAULT 0 CHECK(attempts>=0),
@@ -64,6 +67,7 @@ BEGIN
  OR (OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS DISTINCT FROM OLD.deleted_at) THEN
   RAISE EXCEPTION 'video output identity and measured bytes are immutable';
  END IF;
+ IF OLD.uncertain_put AND NOT NEW.uncertain_put THEN RAISE EXCEPTION 'uncertain upload history is immutable'; END IF;
  IF NEW.state IS DISTINCT FROM OLD.state AND NOT (
    (OLD.state='pending' AND NEW.state IN ('copying','cleanup_pending','failed')) OR
    (OLD.state='copying' AND NEW.state IN ('pending','copied','cleanup_pending','failed')) OR
@@ -137,6 +141,38 @@ END $$;
 CREATE TRIGGER video_outputs_admission BEFORE INSERT OR UPDATE ON ai_video_preparation_outputs
  FOR EACH ROW EXECUTE FUNCTION fence_video_output_admission();
 
+CREATE FUNCTION require_retained_video_output() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE owner apps%ROWTYPE; actual_ids jsonb; actual_count integer; expected integer;
+BEGIN
+ IF NEW.submission_state<>'terminal' OR OLD.submission_state='terminal' OR NEW.terminal_outcome->>'status'<>'completed' THEN RETURN NEW; END IF;
+ IF NOT (NEW.terminal_outcome ? 'outputObjectIds') THEN
+  IF NEW.billing_context->>'outputStorageVersion'='1' THEN RAISE EXCEPTION 'completed attempt requires retained output metadata'; END IF;
+  RETURN NEW;
+ END IF;
+ -- The attempt row is already locked. Never wait child->app during teardown.
+ BEGIN SELECT * INTO owner FROM apps WHERE id=NEW.app_id FOR UPDATE NOWAIT;
+ EXCEPTION WHEN lock_not_available THEN RETURN NULL; END;
+ IF owner.id IS NULL OR owner.provisioning_status<>'ready' OR owner.organization_id::text<>NEW.organization_id
+    OR OLD.lease_expires_at IS NULL OR OLD.lease_expires_at<=now()
+    OR NOT EXISTS(SELECT 1 FROM ai_video_preparations p WHERE p.id=NEW.preparation_id
+      AND p.app_id=NEW.app_id AND p.organization_id=NEW.organization_id AND p.user_id=owner.owner_id::text
+      AND p.deleted_at IS NULL AND p.archived_after_move IS NULL) THEN RETURN NULL; END IF;
+ SELECT count(*)::integer,min(o.expected_outputs),jsonb_agg(o.object_id::text ORDER BY o.output_index)
+  INTO actual_count,expected,actual_ids
+ FROM ai_video_preparation_outputs o JOIN storage_objects s ON s.id=o.object_id
+ WHERE o.attempt_id=NEW.id AND o.preparation_id=NEW.preparation_id AND o.app_id=NEW.app_id
+  AND o.organization_id=NEW.organization_id AND o.state='stored' AND o.deleted_at IS NULL AND o.archived_after_move IS NULL
+  AND s.app_id=o.app_id AND s.organization_id::text=o.organization_id AND s.bucket=o.bucket AND s.key=o.object_key
+  AND s.size_bytes=o.size_bytes AND s.content_type=o.content_type AND s.access_scope='prepared_video'
+  AND s.access_subject IS NOT DISTINCT FROM o.end_user_sub AND NOT s.public AND s.published_at IS NULL AND s.archived_after_move IS NULL;
+ IF actual_count=0 OR actual_count<>expected OR actual_ids IS DISTINCT FROM NEW.terminal_outcome->'outputObjectIds' THEN
+  RAISE EXCEPTION 'completed attempt requires every retained output and matching storage metadata';
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER video_attempts_retained_output BEFORE UPDATE ON ai_video_attempts
+ FOR EACH ROW EXECUTE FUNCTION require_retained_video_output();
+
 CREATE FUNCTION protect_prepared_storage_policy() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF OLD.access_scope='prepared_video' AND
@@ -145,13 +181,28 @@ BEGIN
     OR (OLD.published_at IS NOT NULL AND NEW.published_at IS DISTINCT FROM OLD.published_at)) THEN
    RAISE EXCEPTION 'prepared storage access policy is immutable';
  END IF;
+ IF NEW.access_scope='prepared_video' AND OLD.published_at IS NULL AND NEW.published_at IS NOT NULL
+  AND NOT EXISTS(SELECT 1 FROM ai_video_preparation_outputs o
+    JOIN ai_video_preparations p ON p.id=o.preparation_id JOIN ai_video_attempts a ON a.id=o.attempt_id
+    WHERE o.object_id=NEW.id AND o.app_id=NEW.app_id AND o.organization_id=NEW.organization_id::text
+      AND o.state='stored' AND o.deleted_at IS NULL AND o.archived_after_move IS NULL
+      AND p.status='completed' AND p.deleted_at IS NULL AND p.archived_after_move IS NULL
+      AND p.terminal_outcome->'outputObjectIds' ? NEW.id::text
+      AND a.settlement_status='acknowledged' AND a.settlement_receipt->>'status'='settled') THEN
+  RAISE EXCEPTION 'prepared output publication requires completed delivery and acknowledged settlement';
+ END IF;
  RETURN NEW;
 END $$;
 CREATE TRIGGER storage_prepared_policy BEFORE UPDATE ON storage_objects FOR EACH ROW
  EXECUTE FUNCTION protect_prepared_storage_policy();
 
 CREATE FUNCTION tombstone_prepared_storage_object() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE owner apps%ROWTYPE;
 BEGIN
+ IF EXISTS(SELECT 1 FROM ai_video_preparation_outputs WHERE object_id=OLD.id AND archived_after_move IS NULL) THEN
+  BEGIN SELECT * INTO owner FROM apps WHERE id=OLD.app_id FOR UPDATE NOWAIT;
+  EXCEPTION WHEN lock_not_available THEN RETURN NULL; END;
+ END IF;
  UPDATE ai_video_preparation_outputs SET state='cleanup_pending',deleted_at=COALESCE(deleted_at,now()),
   error_code='object_deleted',fence=fence+1,lease_owner=NULL,lease_expires_at=NULL,
   next_action_at=now(),updated_at=now()
@@ -166,8 +217,8 @@ BEGIN
  IF TG_OP='DELETE' OR (NEW.provisioning_status IN ('deleting','deprovisioning') AND NEW.provisioning_status IS DISTINCT FROM OLD.provisioning_status) THEN
   UPDATE ai_video_preparation_outputs SET state='cleanup_pending',deleted_at=COALESCE(deleted_at,now()),
    error_code='app_deleted',
-   cleanup_not_before=CASE WHEN state='copying' THEN GREATEST(cleanup_not_before,COALESCE(lease_expires_at,now())+interval '1 minute') ELSE cleanup_not_before END,
-   cleanup_probe_until=CASE WHEN state='copying' THEN GREATEST(cleanup_probe_until,now()+interval '1 day') ELSE cleanup_probe_until END,
+   cleanup_not_before=GREATEST(cleanup_not_before,COALESCE(upload_uncertain_until,now())),
+   uncertain_put=uncertain_put OR upload_uncertain_until IS NOT NULL,
    fence=fence+1,lease_owner=NULL,lease_expires_at=NULL,next_action_at=now(),updated_at=now()
   WHERE app_id=OLD.id AND archived_after_move IS NULL AND state<>'deleted';
  ELSIF NEW.provisioning_status='migrating' AND OLD.provisioning_status IS DISTINCT FROM NEW.provisioning_status THEN

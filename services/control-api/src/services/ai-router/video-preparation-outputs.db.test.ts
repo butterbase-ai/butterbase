@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createPreparedOutputTestDb } from '../../test/prepared-output-db.js';
+import { createPreparedOutputTestDb } from '../../../test/fixtures/prepared-output-db.js';
 import * as outputs from './video-preparation-outputs.js';
 
 const dbUrl = process.env.VIDEO_OUTPUT_TEST_DATABASE_URL;

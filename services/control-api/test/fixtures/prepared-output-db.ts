@@ -21,7 +21,8 @@ export async function createPreparedOutputTestDb() {
       const owner = randomUUID(), org = randomUUID(), app = `app-output${suffix}`;
       await pool.query('INSERT INTO apps(id,organization_id,owner_id) VALUES($1,$2,$3)', [app, org, owner]);
       const job = (await pool.query(`INSERT INTO ai_video_preparations(organization_id,app_id,user_id,end_user_sub,model,request_json,deadline,input_expires_at)
-        VALUES($1,$2,$3,$4,'example/video','{}',now()+interval '10 minutes',now()+interval '1 day') RETURNING *`, [org, app, owner, subject])).rows[0];
+        VALUES($1,$2,$3,$4,'example/video',$5,now()+interval '10 minutes',now()+interval '1 day') RETURNING *`,
+      [org, app, owner, subject, { request: { model: 'example/video' }, selection: { providerSlot: 'example', credentialNamespace: 'credential-v1', billingContext: {} } }])).rows[0];
       const attempt = (await pool.query(`INSERT INTO ai_video_attempts(preparation_id,organization_id,app_id,attempt_number,reservation_id,provider_slot,credential_namespace,billing_context,submission_state,provider_handle,fence,lease_owner,lease_expires_at)
         VALUES($1,$2,$3,1,gen_random_uuid(),'example','credential-v1','{}','accepted','{"id":"accepted-video"}',1,'poller',now()+interval '60 seconds') RETURNING *`, [job.id, org, app])).rows[0];
       return { owner, org, app, job, attempt };
