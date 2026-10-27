@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs-extra';
@@ -9,9 +10,9 @@ async function requireAppId(appId?: string): Promise<string> {
 
   const currentAppId = await getCurrentAppId();
   if (!currentAppId) {
-    console.log(chalk.red('✗ No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
-    console.log(chalk.gray('Or: butterbase schema get --app <app-id>'));
+    console.log(chalk.red(text('✗ No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
+    console.log(chalk.gray(text('Or: butterbase schema get --app <app-id>')));
     process.exit(1);
   }
 
@@ -20,7 +21,7 @@ async function requireAppId(appId?: string): Promise<string> {
 
 export async function schemaGetCommand(options: { app?: string; output?: string }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Fetching schema...').start();
+  const spinner = ora(text('Fetching schema...')).start();
 
   try {
     const response: any = await getSchema(appId);
@@ -30,12 +31,12 @@ export async function schemaGetCommand(options: { app?: string; output?: string 
 
     if (options.output) {
       await fs.writeFile(options.output, schemaJson);
-      console.log(chalk.green(`✓ Schema saved to ${options.output}`));
+      console.log(chalk.green(msg`✓ Schema saved to ${options.output}`));
     } else {
       console.log(schemaJson);
     }
   } catch (error) {
-    spinner.fail('Failed to fetch schema');
+    spinner.fail(text('Failed to fetch schema'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -45,33 +46,33 @@ export async function schemaApplyCommand(file: string, options: { app?: string; 
   const appId = await requireAppId(options.app);
 
   if (!await fs.pathExists(file)) {
-    console.log(chalk.red(`✗ File not found: ${file}`));
+    console.log(chalk.red(msg`✗ File not found: ${file}`));
     process.exit(1);
   }
 
-  const spinner = ora('Reading schema file...').start();
+  const spinner = ora(text('Reading schema file...')).start();
 
   try {
     const schemaContent = await fs.readFile(file, 'utf-8');
     const schema = JSON.parse(schemaContent);
 
-    spinner.text = options.dryRun ? 'Running dry-run...' : 'Applying schema...';
+    spinner.text = options.dryRun ? text('Running dry-run...') : text('Applying schema...');
 
     const response: any = await applySchema(appId, schema, options.dryRun, options.name);
 
     spinner.stop();
 
     if (options.dryRun) {
-      console.log(chalk.blue('\n📋 Dry-run results:\n'));
+      console.log(chalk.blue(text('\n📋 Dry-run results:\n')));
       console.log(JSON.stringify(response, null, 2));
     } else {
-      console.log(chalk.green('\n✓ Schema applied successfully!'));
+      console.log(chalk.green(text('\n✓ Schema applied successfully!')));
       if (response.migration_id) {
-        console.log(chalk.gray(`  Migration ID: ${response.migration_id}`));
+        console.log(chalk.gray(msg`  Migration ID: ${response.migration_id}`));
       }
     }
   } catch (error) {
-    spinner.fail(options.dryRun ? 'Dry-run failed' : 'Failed to apply schema');
+    spinner.fail(options.dryRun ? text('Dry-run failed') : text('Failed to apply schema'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

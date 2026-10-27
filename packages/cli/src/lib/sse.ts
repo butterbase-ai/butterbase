@@ -1,3 +1,4 @@
+import { text, msg } from './i18n.js';
 // Tiny SSE consumer. Emits each `data:` line to stdout (un-escaping \\n back
 // to \n), resolves on `event: done`. Bearer auth only.
 import http from 'node:http';
@@ -26,7 +27,7 @@ export function streamSSE(
       },
       (res) => {
         if (res.statusCode! >= 400) {
-          reject(new Error(`logs returned ${res.statusCode}`));
+          reject(new Error(msg`logs returned ${res.statusCode}`));
           return;
         }
         let buf = '';
@@ -41,7 +42,7 @@ export function streamSSE(
               resolve({ done: true, bytesReceived });
             } else if (evt.startsWith('event: error')) {
               const dataLine = evt.split('\n').find((l) => l.startsWith('data: '));
-              reject(new Error(dataLine ? dataLine.slice(6) : 'Build error'));
+              reject(new Error(dataLine ? dataLine.slice(6) : text('Build error')));
             } else if (evt.startsWith('data: ')) {
               const payload = evt.slice(6);
               bytesReceived += Buffer.byteLength(payload, 'utf8');

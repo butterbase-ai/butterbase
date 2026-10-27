@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import {
@@ -10,8 +11,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const current = await getCurrentAppId();
   if (!current) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return current;
@@ -27,21 +28,21 @@ export async function moveCommand(
   try {
     const reg: any = await listRegions();
     if (!reg.regions?.includes(destRegion)) {
-      console.log(chalk.red(`Unknown region '${destRegion}'. Valid: ${(reg.regions ?? []).join(', ')}`));
+      console.log(chalk.red(msg`Unknown region '${destRegion}'. Valid: ${(reg.regions ?? []).join(', ')}`));
       process.exit(1);
     }
   } catch (e) {
-    console.log(chalk.yellow(`Could not validate region (proceeding anyway): ${(e as Error).message}`));
+    console.log(chalk.yellow(msg`Could not validate region (proceeding anyway): ${(e as Error).message}`));
   }
-  const spinner = ora(`Starting migration to ${destRegion}...`).start();
+  const spinner = ora(msg`Starting migration to ${destRegion}...`).start();
   let migrationId: string;
   try {
     const r: any = await moveApp(resolvedApp, destRegion);
-    spinner.succeed(`Migration started: ${r.migration_id} (${r.status})`);
+    spinner.succeed(msg`Migration started: ${r.migration_id} (${r.status})`);
     if (options.json) console.log(JSON.stringify(r, null, 2));
     migrationId = r.migration_id;
   } catch (e) {
-    spinner.fail('Move failed');
+    spinner.fail(text('Move failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -55,9 +56,9 @@ export async function moveCommand(
       if (TERMINAL.has(s.current_step)) {
         process.stdout.write('\n');
         if (s.current_step === 'completed') {
-          console.log(chalk.green(`✓ Migration complete (source replica retained — teardown with: butterbase apps replicas teardown ${migrationId})`));
+          console.log(chalk.green(msg`✓ Migration complete (source replica retained — teardown with: butterbase apps replicas teardown ${migrationId})`));
         } else {
-          console.log(chalk.red(`✗ Migration ${s.current_step}${s.last_error ? `: ${s.last_error}` : ''}`));
+          console.log(chalk.red(msg`✗ Migration ${s.current_step}${s.last_error ? `: ${s.last_error}` : ''}`));
         }
         break;
       }
@@ -85,10 +86,10 @@ export async function migrationActiveCommand(appId: string | undefined, options:
     const r: any = await getActiveMigration(resolvedApp);
     if (options.json) return console.log(JSON.stringify(r, null, 2));
     if (!r.migration) {
-      console.log(chalk.gray('No active migration.'));
+      console.log(chalk.gray(text('No active migration.')));
       return;
     }
-    console.log(`${r.migration.id}  step=${r.migration.current_step}  ${r.migration.source_region}→${r.migration.dest_region}`);
+    console.log(msg`${r.migration.id}  step=${r.migration.current_step}  ${r.migration.source_region}→${r.migration.dest_region}`);
   } catch (e) {
     console.error(chalk.red((e as Error).message));
     process.exit(1);
@@ -96,26 +97,26 @@ export async function migrationActiveCommand(appId: string | undefined, options:
 }
 
 export async function migrationAbortCommand(appId: string, migrationId: string, options: { json?: boolean }) {
-  const spinner = ora('Aborting migration...').start();
+  const spinner = ora(text('Aborting migration...')).start();
   try {
     const r = await abortMigration(appId, migrationId);
-    spinner.succeed('Abort requested');
+    spinner.succeed(text('Abort requested'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Abort failed');
+    spinner.fail(text('Abort failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
 }
 
 export async function migrationReverseCommand(appId: string, migrationId: string, options: { json?: boolean }) {
-  const spinner = ora('Reversing migration...').start();
+  const spinner = ora(text('Reversing migration...')).start();
   try {
     const r = await reverseMigration(appId, migrationId);
-    spinner.succeed('Reverse migration enqueued');
+    spinner.succeed(text('Reverse migration enqueued'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Reverse failed');
+    spinner.fail(text('Reverse failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -127,11 +128,11 @@ export async function replicasListCommand(options: { json?: boolean }) {
     if (options.json) return console.log(JSON.stringify(r, null, 2));
     const list = r.source_replicas ?? [];
     if (list.length === 0) {
-      console.log(chalk.gray('No retained source replicas.'));
+      console.log(chalk.gray(text('No retained source replicas.')));
       return;
     }
     for (const sr of list) {
-      console.log(`${sr.migration_id}  app=${sr.app_id}  ${sr.source_region}→${sr.dest_region}  state=${sr.state}`);
+      console.log(msg`${sr.migration_id}  app=${sr.app_id}  ${sr.source_region}→${sr.dest_region}  state=${sr.state}`);
     }
   } catch (e) {
     console.error(chalk.red((e as Error).message));
@@ -140,13 +141,13 @@ export async function replicasListCommand(options: { json?: boolean }) {
 }
 
 export async function replicaTeardownCommand(migrationId: string, options: { json?: boolean }) {
-  const spinner = ora('Tearing down source replica...').start();
+  const spinner = ora(text('Tearing down source replica...')).start();
   try {
     const r = await tearDownSourceReplica(migrationId);
-    spinner.succeed('Source replica torn down');
+    spinner.succeed(text('Source replica torn down'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Teardown failed');
+    spinner.fail(text('Teardown failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
