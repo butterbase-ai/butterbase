@@ -85,4 +85,34 @@ describe.skipIf(!endpoint || !process.env.VIDEO_OUTPUT_TEST_DATABASE_URL)('retai
     expect((await outputs.listPreparedOutputs(db.pool, scope.attempt.id))[0]).toMatchObject({ state: 'cleanup_pending' });
     expect((await db.pool.query('SELECT count(*)::int AS n FROM storage_objects')).rows[0].n).toBe(0);
   });
+  it('retains process capacity while post-spool authority remains blocked after database lease expiry',async()=>{
+    const scopes=[scope,await db.seed(null,'-two'),await db.seed(null,'-three')];
+    for(const value of scopes)await outputs.ensurePreparedOutputs(db.pool,{attemptId:value.attempt.id,attemptFence:1,bucket,count:1,sourceHandles:['source'],providerCostUsd:0.2});
+    let blocked=0,release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+    const start=(value:typeof scope)=>materializePreparedVideoOutputs({...options(),attemptId:value.attempt.id,authorize:async(_row,additional)=>{if(additional>0){blocked++;await gate;}}});
+    const first=start(scopes[0]),second=start(scopes[1]);let third:ReturnType<typeof start>|undefined;
+    try{
+      for(let n=0;n<100&&blocked<2;n++)await new Promise(resolve=>setTimeout(resolve,5));
+      expect(blocked).toBe(2);
+      await db.pool.query("UPDATE ai_video_preparation_outputs SET lease_expires_at=now()-interval '1 second' WHERE state='copying'");
+      third=start(scopes[2]);
+      await new Promise(resolve=>setTimeout(resolve,100));
+      expect(blocked).toBe(2);
+      expect(await third).toMatchObject({status:'pending'});
+    }finally{release();await Promise.allSettled([first,second,...(third?[third]:[])]);}
+  });
+  it('returns at its deadline but holds slots until uncancellable policy calls and disposal finish',async()=>{
+    const scopes=[scope,await db.seed(null,'-timeout-two'),await db.seed(null,'-timeout-three')];
+    for(const value of scopes)await outputs.ensurePreparedOutputs(db.pool,{attemptId:value.attempt.id,attemptFence:1,bucket,count:1,sourceHandles:['source'],providerCostUsd:0.2});
+    let blocked=0,release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+    const start=(value:typeof scope)=>materializePreparedVideoOutputs({...options(),attemptId:value.attempt.id,timeoutMs:250,authorize:async(_row,additional)=>{if(additional>0){blocked++;await gate;}}});
+    const first=start(scopes[0]),second=start(scopes[1]);
+    try{
+      expect(await first).toMatchObject({status:'pending'});expect(await second).toMatchObject({status:'pending'});
+      expect(blocked).toBe(2);
+      await db.pool.query("UPDATE ai_video_preparation_outputs SET lease_expires_at=now()-interval '1 second' WHERE state='copying'");
+      expect(await start(scopes[2])).toMatchObject({status:'pending'});expect(blocked).toBe(2);
+    }finally{release();await new Promise(resolve=>setTimeout(resolve,150));}
+    expect(await materializePreparedVideoOutputs({...options(),attemptId:scopes[2].attempt.id})).toMatchObject({status:'ready'});
+  });
 });

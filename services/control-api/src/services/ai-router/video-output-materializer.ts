@@ -17,14 +17,37 @@ export type OutputMaterializationResult =
   | { status: 'failed'; error: string; providerCostUsd?: number };
 
 /** One bounded copy per invocation. Caller already owns an accepted attempt lease. */
-export async function materializePreparedVideoOutputs(options: {
+type MaterializationOptions = {
   pool: pg.Pool; attemptId: string; attemptFence: number;
   authorize(row: outputs.PreparedOutputRow, additionalBytes: number): Promise<void>;
   fetchSource(handle: string, signal: AbortSignal): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string }>;
   createStore?: (signal: AbortSignal) => ReturnType<typeof createRetainedVideoStore>;
-}): Promise<OutputMaterializationResult> {
+  timeoutMs?: number;
+};
+// A database lease can expire while a database or policy call is still running.
+// Keep the local slot until that invocation and its file disposal actually end.
+const activeCopies = new WeakMap<pg.Pool, number>();
+export async function materializePreparedVideoOutputs(options: MaterializationOptions): Promise<OutputMaterializationResult> {
+  const active = activeCopies.get(options.pool) ?? 0;
+  if (active >= 2) return { status: 'pending' };
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new Error('Invalid copy timeout');
+  activeCopies.set(options.pool, active + 1);
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const expired = new Promise<OutputMaterializationResult>(resolve => {
+    timer = setTimeout(() => { controller.abort(); resolve({ status: 'pending' }); }, timeoutMs); timer.unref();
+  });
+  const work = materialize(options, controller.signal).finally(() => {
+    clearTimeout(timer); controller.abort();
+    activeCopies.set(options.pool, (activeCopies.get(options.pool) ?? 1) - 1);
+  });
+  return Promise.race([work, expired]);
+}
+async function materialize(options: MaterializationOptions, signal: AbortSignal): Promise<OutputMaterializationResult> {
   const { pool, attemptId, attemptFence } = options;
   const rows = await outputs.listPreparedOutputs(pool, attemptId);
+  if (signal.aborted) return { status: 'pending' };
   if (!rows.length) return { status: 'pending', refreshSources: true };
   const evidence = rows[0].provider_cost_usd === null ? {} : { providerCostUsd: Number(rows[0].provider_cost_usd) };
   const failed = rows.find(row => row.deleted_at || ['cleanup_pending','deleted','failed'].includes(row.state));
@@ -37,12 +60,12 @@ export async function materializePreparedVideoOutputs(options: {
   if (!next) return finish();
   const row = await outputs.claimPreparedOutput(pool, next.id, { attemptFence, worker: randomUUID(), leaseMs: 35_000 });
   if (!row) return { status: 'pending' };
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 30_000); timer.unref();
-  const signal = controller.signal;
   const store = options.createStore?.(signal) ?? createRetainedVideoStore({ signal });
   let spooled: Awaited<ReturnType<typeof spoolVideoOutput>> | undefined, sourceFailure = false;
   try {
+    signal.throwIfAborted();
     await options.authorize(row, row.capacity_reserved ? 0 : Number(row.size_bytes ?? 0));
+    signal.throwIfAborted();
     if (row.sha256 && await store.inspect(retainedVideoIdentity(row))) {
       if (!await outputs.markPreparedOutputCopied(pool, row.id, row.fence)) return { status: 'pending' };
       return finish();
@@ -60,6 +83,7 @@ export async function materializePreparedVideoOutputs(options: {
     if (!await outputs.recordPreparedOutputMeasurement(pool, row.id, row.fence, spooled)) return { status: 'pending' };
     const measured = { ...row, sha256: spooled.sha256, size_bytes: String(spooled.sizeBytes), content_type: spooled.contentType };
     await options.authorize(measured, row.capacity_reserved ? 0 : spooled.sizeBytes);
+    signal.throwIfAborted();
     if (!await outputs.reservePreparedOutputCapacity(pool, row.id, row.fence)) return { status: 'pending' };
     signal.throwIfAborted();
     if (!await outputs.markPreparedOutputUploadStarted(pool, row.id, row.fence)) return { status: 'pending' };
@@ -77,5 +101,5 @@ export async function materializePreparedVideoOutputs(options: {
     }
     await outputs.deferPreparedOutput(pool, row.id, row.fence, code, new Date(Date.now() + 5000), sourceFailure);
     return { status: 'pending', ...(sourceFailure ? { refreshSources: true } : {}) };
-  } finally { clearTimeout(timer); controller.abort(); await spooled?.dispose(); }
+  } finally { await spooled?.dispose(); }
 }

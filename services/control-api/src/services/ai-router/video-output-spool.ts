@@ -1,12 +1,54 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdtemp, unlink, rmdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtemp, unlink, rmdir, mkdir, lstat, opendir } from 'node:fs/promises';
+import { tmpdir, hostname } from 'node:os';
+import { join, resolve, dirname } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { PREPARED_OUTPUT_MAX_BYTES } from './video-preparation-outputs.js';
 import { VideoOutputStorageError } from './video-output-store.js';
+
+const spoolRoot = join(tmpdir(), 'butterbase-prepared-video');
+const host = createHash('sha256').update(hostname()).digest('hex').slice(0, 12);
+const processState = globalThis as typeof globalThis & { __butterbaseVideoSpoolIncarnation?: string };
+const incarnation = processState.__butterbaseVideoSpoolIncarnation ??= randomBytes(16).toString('hex');
+const prefix = `bb-video-output-${host}-${process.pid}-${incarnation}-`;
+
+/** Delete only recognized files belonging to a provably dead local process.
+ * Ambiguous foreign PID reuse or an inaccessible process keeps its files. */
+export async function reapAbandonedVideoSpools(base = spoolRoot): Promise<void> {
+  const root = resolve(base);
+  let entries;
+  try {
+    const stat = await lstat(root); if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+    entries = await opendir(root);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  let inspected = 0;
+  for await (const entry of entries) {
+    if (++inspected > 64) break;
+    const match = /^bb-video-output-([a-f0-9]{12})-([1-9][0-9]{0,9})-([a-f0-9]{32})-[A-Za-z0-9]{6}$/.exec(entry.name);
+    if (!match || match[1] !== host || !entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const pid = Number(match[2]);
+    if (pid === process.pid) { if (match[3] === incarnation) continue; }
+    else { try { process.kill(pid, 0); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue; } }
+    const directory = resolve(root, entry.name); if (dirname(directory) !== root) continue;
+    try {
+      const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+      let hasOutput = false, unknown = false;
+      for await (const child of await opendir(directory)) {
+        if (child.name !== 'output' || hasOutput) { unknown = true; break; }
+        hasOutput = true;
+      }
+      if (unknown) continue;
+      if (hasOutput) {
+        const file = join(directory, 'output'); const fileStat = await lstat(file);
+        if (!fileStat.isFile() || fileStat.isSymbolicLink()) continue;
+        await unlink(file);
+      }
+      await rmdir(directory);
+    } catch (error) { if (!['ENOENT','ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  }
+}
 
 /** Spool under backpressure, bounded by bytes and time, with no whole-video buffer. */
 export async function spoolVideoOutput(source: { stream: ReadableStream<Uint8Array>; contentType: string }, options: {
@@ -35,7 +77,12 @@ export async function spoolVideoOutput(source: { stream: ReadableStream<Uint8Arr
   };
   try {
     if (signal.aborted) { await source.stream.cancel().catch(() => {}); throw unavailable(); }
-    directory = await mkdtemp(join(options.directory ?? tmpdir(), 'bb-video-output-'));
+    const base = options.directory ?? spoolRoot;
+    await mkdir(base, { recursive: true, mode: 0o700 });
+    const baseStat = await lstat(base);
+    if (!baseStat.isDirectory() || baseStat.isSymbolicLink()) throw unavailable();
+    await reapAbandonedVideoSpools(base);
+    directory = await mkdtemp(join(base, prefix));
     filePath = join(directory, 'output');
     let sizeBytes = 0; const hash = createHash('sha256'); let header = Buffer.alloc(0);
     const measure = new Transform({ transform(chunk: Buffer, _encoding, callback) {

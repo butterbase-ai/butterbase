@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createPreparedOutputTestDb } from '../../../test/fixtures/prepared-output-db.js';
 import * as outputs from './video-preparation-outputs.js';
 import { maintainPreparedOutputCleanup } from './video-output-cleanup.js';
+import * as preparations from './video-preparations.js';
 
 describe.skipIf(!process.env.VIDEO_OUTPUT_TEST_DATABASE_URL)('independent retained-output cleanup lane (isolated PostgreSQL)', () => {
   let db: Awaited<ReturnType<typeof createPreparedOutputTestDb>>, scope: Awaited<ReturnType<typeof db.seed>>;
@@ -46,5 +47,34 @@ describe.skipIf(!process.env.VIDEO_OUTPUT_TEST_DATABASE_URL)('independent retain
     await maintainPreparedOutputCleanup(db.pool, { canWork: async () => true, remove: async () => { calls++; return true; } });
     expect((await outputs.listPreparedOutputs(db.pool, scope.attempt.id))[0]).toMatchObject({ state: 'deleted', source_handle: null });
     expect(calls).toBe(0);expect(row.object_id).toBeTruthy();
+  });
+  async function completedBytesBeforeDeadline() {
+    scope=await db.seed(null,'-settlement',1000);
+    const row=await allocated(false);
+    const current=(await outputs.listPreparedOutputs(db.pool,scope.attempt.id))[0];
+    await outputs.markPreparedOutputCopied(db.pool,row.id,current.fence);
+    const ids=(await outputs.commitPreparedOutputMetadata(db.pool,{attemptId:scope.attempt.id,attemptFence:1}))!;
+    return {row,ids};
+  }
+  it('retains immutable completed output across a delayed settlement after deadline, then publishes the charged receipt',async()=>{
+    const {ids}=await completedBytesBeforeDeadline();
+    expect(await preparations.markAttemptTerminal(db.pool,scope.attempt.id,1,{status:'completed',outputObjectIds:ids,providerCostUsd:0.2})).toBe(true);
+    await new Promise(resolve=>setTimeout(resolve,1100));let removals=0;
+    await maintainPreparedOutputCleanup(db.pool,{canWork:async()=>true,remove:async()=>{removals++;return true;}});
+    const claimed=(await preparations.claimPreparation(db.pool,scope.job.id,'publish',90_000))!;
+    await preparations.acknowledgeAttemptSettlement(db.pool,scope.attempt.id,{status:'settled',chargedUsd:0.24});
+    await expect(outputs.finishStoredPreparation(db.pool,scope.job.id,claimed.fence)).resolves.toBe(true);
+    expect(removals).toBe(0);
+    expect((await db.pool.query('SELECT published_at FROM storage_objects WHERE id=$1',[ids[0]])).rows[0].published_at).toBeTruthy();
+  });
+  it('rechecks terminal completion after a stale cleanup scan before retiring metadata',async()=>{
+    const {ids}=await completedBytesBeforeDeadline();
+    await new Promise(resolve=>setTimeout(resolve,1100));let marked=false,removals=0;
+    await maintainPreparedOutputCleanup(db.pool,{canWork:async()=>{
+      if(!marked){marked=true;expect(await preparations.markAttemptTerminal(db.pool,scope.attempt.id,1,{status:'completed',outputObjectIds:ids,providerCostUsd:0.2})).toBe(true);}return true;
+    },remove:async()=>{removals++;return true;}});
+    expect(marked).toBe(true);expect(removals).toBe(0);
+    expect((await outputs.listPreparedOutputs(db.pool,scope.attempt.id))[0].state).toBe('stored');
+    expect((await db.pool.query('SELECT count(*)::int AS n FROM storage_objects WHERE id=$1',[ids[0]])).rows[0].n).toBe(1);
   });
 });

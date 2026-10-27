@@ -3,12 +3,14 @@ import type pg from 'pg';
 import * as outputs from './video-preparation-outputs.js';
 import { createRetainedVideoStore } from './video-output-store.js';
 import { retainedVideoIdentity } from './video-output-materializer.js';
+import { reapAbandonedVideoSpools } from './video-output-spool.js';
 
 /** Independent of provider IO and credentials, bounded to two cleanup claims. */
 export async function maintainPreparedOutputCleanup(pool: pg.Pool, options: {
   canWork(appId: string, organizationId: string): Promise<boolean>;
   remove?: (row: outputs.PreparedOutputRow, signal: AbortSignal) => Promise<boolean>;
 }): Promise<void> {
+  await reapAbandonedVideoSpools();
   if (!(await pool.query("SELECT to_regclass('ai_video_preparation_outputs') AS name")).rows[0]?.name) return;
   // SQL-only retirement preserves cleanup evidence when no attempt worker can
   // retain authority (deadline, deleted/failed parent, or missing app).
@@ -16,7 +18,9 @@ export async function maintainPreparedOutputCleanup(pool: pg.Pool, options: {
     JOIN ai_video_preparations p ON p.id=o.preparation_id LEFT JOIN apps a ON a.id=o.app_id
     WHERE o.archived_after_move IS NULL AND o.state IN ('pending','copying','copied','stored')
       AND (p.deleted_at IS NOT NULL OR p.status IN ('failed','cancelled','expired') OR
-        (p.status<>'completed' AND p.deadline<=now()) OR a.id IS NULL)
+        (p.status<>'completed' AND p.deadline<=now() AND NOT (o.state='stored' AND EXISTS
+          (SELECT 1 FROM ai_video_attempts t WHERE t.id=o.attempt_id AND t.submission_state='terminal'
+            AND t.terminal_outcome->>'status'='completed'))) OR a.id IS NULL)
     ORDER BY o.next_action_at LIMIT 8`)).rows;
   for (const row of stale) {
     if (!await options.canWork(row.app_id, row.organization_id)) continue;
@@ -32,7 +36,10 @@ export async function maintainPreparedOutputCleanup(pool: pg.Pool, options: {
         fence=o.fence+1,lease_owner=NULL,lease_expires_at=NULL,next_action_at=now(),updated_at=now()
         FROM ai_video_preparations p WHERE o.id=$1 AND p.id=o.preparation_id AND o.archived_after_move IS NULL
           AND o.state IN ('pending','copying','copied','stored') AND (p.deleted_at IS NOT NULL OR p.status IN ('failed','cancelled','expired')
-            OR (p.status<>'completed' AND p.deadline<=now()) OR NOT EXISTS(SELECT 1 FROM apps WHERE id=o.app_id))`, [row.id]);
+            OR (p.status<>'completed' AND p.deadline<=now() AND NOT (o.state='stored' AND EXISTS
+              (SELECT 1 FROM ai_video_attempts t WHERE t.id=o.attempt_id AND t.submission_state='terminal'
+                AND t.terminal_outcome->>'status'='completed')))
+            OR NOT EXISTS(SELECT 1 FROM apps WHERE id=o.app_id))`, [row.id]);
       await tx.query(`DELETE FROM storage_objects s USING ai_video_preparation_outputs o WHERE o.id=$1 AND s.id=o.object_id
         AND s.app_id=o.app_id AND s.organization_id::text=o.organization_id AND s.access_scope='prepared_video'
         AND s.published_at IS NULL AND o.state='cleanup_pending'`, [row.id]);
