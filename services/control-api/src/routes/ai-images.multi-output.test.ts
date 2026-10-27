@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
+import { nativeFetch } from '../../test/native-fetch.js';
 const f = vi.hoisted(() => ({ job: null as any }));
 vi.mock('../services/ai-router/authorize-app-call.js', () => ({ authorizeAppAiCall: async () => ({ ok: true, ownerId: 'owner', caller: { kind: 'owner' } }) }));
 vi.mock('../services/region-resolver.js', () => ({ getRuntimeDbForApp: async () => ({}), resolveAppHomeRegion: async () => 'test' }));
@@ -12,7 +13,8 @@ import { aiImageRoutes } from './ai-images.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
 
 let app: ReturnType<typeof Fastify> | undefined;
-afterEach(async () => { await app?.close(); app = undefined; });
+beforeEach(() => { vi.stubGlobal('fetch', nativeFetch); });
+afterEach(async () => { await app?.close(); app = undefined; vi.unstubAllGlobals(); });
 
 describe('multiple inline image outputs', () => {
   async function generation(data: Array<{ b64_json: string; media_type: string }>) {
