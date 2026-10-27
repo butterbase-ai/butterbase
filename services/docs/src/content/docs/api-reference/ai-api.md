@@ -404,17 +404,33 @@ Image generation follows the same async submit → poll → download shape as vi
 
 ### Choosing a model
 
-Image models appear in `GET /v1/{app_id}/ai/models` alongside chat and video. Available at launch:
+Discover configured, executable image models with `GET /v1/{app_id}/ai/models?modality=image` or MCP `manage_ai` action `list_models`. Catalog discovery alone does not make a model callable. Canonical model families include:
 
 | Family | Model IDs |
 |--------|-----------|
 | OpenAI | `openai/gpt-image-2`, `openai/gpt-image-1`, `openai/gpt-image-1-mini` |
+| GPT Image 2.5 | `openai/gpt-image-2.5-flare`, `openai/gpt-image-2.5-sunburst` |
+| Grok Imagine | `x-ai/grok-imagine-image-2.0`, `x-ai/grok-imagine-image-quality` |
+| FLUX 3 | `black-forest-labs/flux-3-image`, `black-forest-labs/flux-3-image-klein` |
 | Google (Nano Banana) | `google/gemini-3-pro-image-preview`, `google/gemini-3.1-flash-image-preview`, `google/gemini-2.5-flash-image` |
 | ByteDance Seedream | `bytedance/seedream-5-pro`, `bytedance/seedream-5-lite`, `bytedance/seedream-4-5` |
 | Alibaba Wan | `alibaba/wan-2.7-image-pro`, `alibaba/wan-2.7-image`, `alibaba/wan-2.6-t2i`, `alibaba/wan-2.6-image` |
 | PrunaAI | `prunaai/p-image`, `prunaai/p-image-edit` |
 
-Each model exposes a **different subset** of parameters. Submitting an unsupported param returns `400 UNSUPPORTED_PARAM` with the full whitelist of what that model does accept — no silent drops.
+Each model exposes a **different subset** of parameters. Unsupported model options return `400 UNSUPPORTED_PARAM` with the affected parameter before generation.
+
+For the newer image families:
+
+| Family | `size` | Output count | Reference limit | Rendering options in `provider` |
+|---|---|---|---|---|
+| GPT Image 2.5 | Explicit pixels, e.g. `1024x1024`, or `auto` | 1–10 | 14 through this API | `quality`: auto/low/medium/high/xhigh/max; `background`: auto/opaque/transparent; `output_compression`: 0–100 |
+| Grok Imagine Image 2.0 | `1K`, `2K` | 1 | 3 | `quality`: low/medium |
+| Grok Imagine Image Quality | `1K`, `2K` | 1 | 3 | None |
+| FLUX 3 Image / Klein | `768`, `1K`, `1.5K`, `2K`, `4K` | 1 | 10 | None |
+
+These families support `aspect_ratio` and ordered `input_images`; supported ratios vary by model. GPT Image 2.5 pixel dimensions must be multiples of 16, at most 3840 per edge, between 655360 and 8294400 total pixels, and at most 3:1. An explicit `aspect_ratio` must agree with explicit pixel dimensions. Seed and mask options are not exposed for these newer contracts.
+
+An image completion includes the actual customer charge. A credit reservation is an estimate with headroom; it is not a published model price. Provider usage, when returned, determines the provider-cost basis before the applicable account markup.
 
 ### 1. Submit a job
 
@@ -834,7 +850,7 @@ Eligible apps and models can declare specific image slots as AI-generated fictio
 }
 ```
 
-Add these fields to an ordinary video request. Declare only images the caller knows are AI-generated fictional characters. A declaration does not establish consent for a real person's likeness or guarantee that an image will pass provider validation. Do not infer a declaration from appearance or a prompt.
+Add these fields to an ordinary REST video request or to MCP `manage_ai` with `action: "submit_video"`. The MCP client must use a server version whose tool schema includes both fields. Declare only images the caller knows are AI-generated fictional characters. A declaration does not establish consent for a real person's likeness or guarantee that an image will pass provider validation. Do not infer a declaration from appearance or a prompt.
 
 `on_rejection` is the default: prepare only after a verified eligible input rejection and retry once after settlement. `upfront` prepares all declared slots before submission. Canonical paths address image entries in `input_images`, `frame_images`, or `input_references`; use one canonical collection and avoid conflicting aliases. Up to eight distinct slots can be declared. Undeclared requests use ordinary video generation.
 

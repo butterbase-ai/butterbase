@@ -113,6 +113,8 @@ export interface ImageSupportedParams {
   topLevel: ReadonlySet<string>;
   /** Whitelisted keys inside the `provider: {...}` bag. */
   provider: ReadonlySet<string>;
+  /** Optional model-specific limits, checked before reserving credits. */
+  validate?(request: ImageGenerationRequest): { param: string; message: string } | null;
 }
 
 export interface AdapterUsage {

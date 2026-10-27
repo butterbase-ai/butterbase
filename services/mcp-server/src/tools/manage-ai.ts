@@ -26,7 +26,7 @@ Actions:
                        Set defaultModel, defaultDecisionModel, allowedModels, maxTokensPerRequest (1–100000), or rotate BYOK.
   - get_usage         { app_id, startDate?, endDate? }
                        Aggregate token counts and costs over a window.
-  - submit_video      { app_id, model, prompt, duration?, resolution?, aspect_ratio?, generate_audio?, seed?, input_images?, input_references?, frame_images?, provider? }
+  - submit_video      { app_id, model, prompt, duration?, resolution?, aspect_ratio?, generate_audio?, seed?, input_images?, input_references?, frame_images?, reference_declarations?, prepare_references?, provider? }
                        Submits an async video-generation job. Returns { job_id, status, polling_url }.
                        Poll the returned URL until status is "completed".
                        For image-to-video, supply seed imagery in the shape the target model's
@@ -132,10 +132,15 @@ drive the SDK from inside a function or DO.`,
       seed: z.number().int().optional(),
       // submit_image
       size: z.string().optional().describe('For submit_image: e.g. "1024x1024", "1K", "2K", "4K" (model-specific)'),
-      n: z.number().int().positive().max(10).optional().describe('For submit_image: number of images (GPT Image only)'),
+      n: z.number().int().positive().max(10).optional().describe('For submit_image: number of images, subject to the selected model limit (up to 10 for GPT Image; 1 for Grok and FLUX 3)'),
       input_images: z.array(z.string().url()).max(14).optional().describe('For submit_image / submit_video: HTTPS URLs for reference / image-to-image / edit source'),
       input_references: z.array(z.union([z.string().url(), z.record(z.unknown())])).max(14).optional().describe('For submit_video: style/content reference images (reference-to-video). HTTPS URL strings, or the upstream\'s native object form, forwarded as-is'),
       frame_images: z.array(z.record(z.unknown())).max(14).optional().describe('For submit_video: seed frames in the upstream\'s native object form, forwarded as-is — e.g. { type: "image_url", image_url: { url }, frame_type: "first_frame" | "last_frame" }'),
+      reference_declarations: z.array(z.object({
+        path: z.string(),
+        kind: z.literal('ai_generated_fictional_character'),
+      }).strict()).max(8).optional().describe('For submit_video: explicitly declare AI-generated fictional character references by canonical slot path, e.g. /input_images/0. Available only for enabled apps and supported models; never declare real people.'),
+      prepare_references: z.enum(['on_rejection', 'upfront']).optional().describe('For submit_video with reference_declarations: prepare declared references on an exact input-face/privacy rejection (default) or upfront. Does not retry general moderation failures.'),
       mask: z.string().url().optional().describe('For submit_image: HTTPS URL of alpha mask (GPT Image 2 edit mode)'),
       negative_prompt: z.string().optional().describe('For submit_image: text of what to avoid (Wan 2.6 only)'),
       provider: z.record(z.unknown()).optional().describe('For submit_image: model-specific passthrough params (e.g. bbox_list, quality, optimize_prompt_options)'),
@@ -255,6 +260,8 @@ drive the SDK from inside a function or DO.`,
             if (args.input_images !== undefined) videoBody.input_images = args.input_images;
             if (args.input_references !== undefined) videoBody.input_references = args.input_references;
             if (args.frame_images !== undefined) videoBody.frame_images = args.frame_images;
+            if (args.reference_declarations !== undefined) videoBody.reference_declarations = args.reference_declarations;
+            if (args.prepare_references !== undefined) videoBody.prepare_references = args.prepare_references;
             if (args.provider !== undefined) videoBody.provider = args.provider;
             result = await apiPost(`/v1/${app_id}/videos/completions`, videoBody);
             break;
