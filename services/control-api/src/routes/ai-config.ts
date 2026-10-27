@@ -27,7 +27,8 @@ import { getRedisClient } from '../services/redis.js';
 import { routeChatCompletion, routeEmbedding, routeDecision, RouterError, InsufficientCreditsError } from '../services/ai-router/router.js';
 import { insufficientCreditsFields } from '../services/ai-router/billing-gate.js';
 import { openrouterAdapter } from '../services/ai-router/adapters/openrouter.js';
-import { listCatalogModels, readCatalogEntry } from '../services/ai-router/catalog.js';
+import { listCatalogModels, readCatalogEntry, readEnabledRouters } from '../services/ai-router/catalog.js';
+import { isMediaModelRoutable } from '../services/ai-router/model-support.js';
 import { AdapterError } from '../services/ai-router/adapters/types.js';
 import { upstreamReason } from '../services/ai-router/upstream-reason.js';
 import { AI_BODY_LIMIT_BYTES } from '../services/ai-router/body-limit.js';
@@ -582,7 +583,12 @@ export async function aiConfigRoutes(app: FastifyInstance) {
         // Derive modality: pick the first router's modality if set, otherwise default to 'chat'
         const modalityOf = (e: NonNullable<(typeof entries)[number]>) => e.routers[0]?.modality ?? 'chat';
         // Filter before pricing so a filtered request doesn't do a markup lookup per catalog model.
-        const selected = entries.filter(Boolean).filter(e => !modalityFilter || modalityOf(e!) === modalityFilter);
+        let selected = entries.filter(Boolean).filter(e => !modalityFilter || modalityOf(e!) === modalityFilter);
+        if (selected.some(e => ['image', 'video'].includes(modalityOf(e!)))) {
+          const [adapters, routerStatuses] = await Promise.all([buildAdapters(), readEnabledRouters(redis)]);
+          const enabledRouters = new Set(routerStatuses.filter(r => r.enabled).map(r => r.name));
+          selected = selected.filter(e => isMediaModelRoutable(e!, adapters, enabledRouters));
+        }
         const models = await Promise.all(selected.map(async e => {
           const firstRouter = e!.routers.length > 0 ? e!.routers[0] : null;
           const modality = modalityOf(e!);
