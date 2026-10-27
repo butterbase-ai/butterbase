@@ -834,7 +834,7 @@ Eligible apps and models can declare specific image slots as AI-generated fictio
 }
 ```
 
-Add these fields to an ordinary video request. Declare only images the caller knows are AI-generated fictional characters. A declaration does not establish consent for a real person's likeness or guarantee that an image will pass provider validation. Do not infer a declaration from appearance or a prompt.
+Add these fields to an ordinary REST video request or to MCP `manage_ai` with `action: "submit_video"`. The MCP client must use a server version whose tool schema includes both fields. Declare only images the caller knows are AI-generated fictional characters. A declaration does not establish consent for a real person's likeness or guarantee that an image will pass provider validation. Do not infer a declaration from appearance or a prompt.
 
 `on_rejection` is the default: prepare only after a verified eligible input rejection and retry once after settlement. `upfront` prepares all declared slots before submission. Canonical paths address image entries in `input_images`, `frame_images`, or `input_references`; use one canonical collection and avoid conflicting aliases. Up to eight distinct slots can be declared. Undeclared requests use ordinary video generation.
 
