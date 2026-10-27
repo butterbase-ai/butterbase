@@ -29,6 +29,7 @@ import {
   listPendingGatedCalls,
   type PendingGatedCallRow,
 } from './approvals-store.js';
+import { referencesForApproval } from './approval-references.js';
 import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-guard.js';
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
@@ -1746,6 +1747,12 @@ export async function* runAgentTurn(
             sensitivity: 'destructive',
             traceId: input.traceId ?? null,
             approvedOperation,
+            references: referencesForApproval({
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolCalls: pendingToolCalls,
+              toolResults: toolCallResults,
+            }),
           });
           // `gated`: the operator turn stops here, right now, and does not
           // resume until a human resolves `approval.id` — reported via

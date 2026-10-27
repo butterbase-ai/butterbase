@@ -38,6 +38,7 @@ import * as storeModule from '../../services/dashboard-agent/store.js';
 import { resolveOperatorApproval, resolveCallerOrgId, dashboardAgentRoutes } from '../dashboard-agent.js';
 
 const mockGet = approvalsModule.getApprovalForOrg as MockedFunction<typeof approvalsModule.getApprovalForOrg>;
+const mockList = approvalsModule.listPendingByOrg as MockedFunction<typeof approvalsModule.listPendingByOrg>;
 const mockResolve = approvalsModule.resolveApproval as MockedFunction<typeof approvalsModule.resolveApproval>;
 const mockExecute = bridgeModule.executeOnce as MockedFunction<typeof bridgeModule.executeOnce>;
 const mockPaused = storeModule.getMessageByPendingApprovalId as MockedFunction<typeof storeModule.getMessageByPendingApprovalId>;
@@ -50,6 +51,7 @@ const approval = {
   toolName: 'manage_substrate', toolArgs: { action: 'propose' },
   sensitivity: 'destructive' as const, status: 'pending' as const,
   trustScope: null, denyReason: null, createdAt: '', resolvedAt: null,
+  references: [],
 };
 
 const pausedRow = { id: 'msg-1', toolCallId: 'call_1' } as any;
@@ -363,12 +365,57 @@ describe('operator route membership wiring', () => {
         source: 'office',
         tool_name: 'manage_substrate',
         created_at: '',
+        references: [],
       },
     });
     // No transcript, arguments or recorded operation cross this route.
     expect(res.body).not.toContain('tool_args');
     expect(res.body).not.toContain('approved_operation');
     expect(mockGet).toHaveBeenCalledWith(expect.anything(), 'appr-1', ORG_A);
+  });
+
+  it('includes the approval references without opening the transcript', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue({
+      ...approval,
+      references: [{ kind: 'record', id: 'ent_1', label: 'Marcus Webb' }],
+      source: 'office',
+    } as any);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval.references).toEqual([
+      { kind: 'record', id: 'ent_1', label: 'Marcus Webb' },
+    ]);
+    expect(res.body).not.toContain('tool_args');
+    expect(res.body).not.toContain('approved_operation');
+  });
+
+  it('includes references in the pending list', async () => {
+    query.mockResolvedValue({ rows: [{ organization_id: ORG_A }], rowCount: 1 });
+    mockList.mockResolvedValue([
+      {
+        ...approval,
+        source: 'operator',
+        references: [{ kind: 'file', label: 'Invoice #1042' }],
+      } as any,
+    ]);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approvals[0].references).toEqual([
+      { kind: 'file', label: 'Invoice #1042' },
+    ]);
   });
 
   it('also returns a pending approval, so the phase can distinguish waiting from resolved', async () => {

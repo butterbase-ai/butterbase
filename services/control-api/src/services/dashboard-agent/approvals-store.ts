@@ -6,6 +6,25 @@ import {
   type ApprovedOperation,
 } from './approval-operation.js';
 
+export type ApprovalReferenceKind =
+  | 'entity'
+  | 'record'
+  | 'file'
+  | 'app'
+  | 'artifact'
+  | 'message';
+
+export type ApprovalReference = {
+  kind: ApprovalReferenceKind;
+  /** Stable id when the tool result has one; used for dedupe and client
+   *  resolution. Never displayed. */
+  id?: string;
+  /** Human label from the tool result. Never an id. */
+  label: string;
+  /** Optional second line from the tool result. Never raw JSON. */
+  detail?: string;
+};
+
 export type Approval = {
   id: string;
   conversationId: string;
@@ -56,14 +75,18 @@ export type Approval = {
    * a hand-inserted row can never authorise an execution.
    */
   approvedOperation: ApprovedOperation | null;
+  /** The records, files and apps the turn read before proposing this action.
+   *  Empty for rows that predate the column and for payloads the extractor
+   *  cannot prove. Never a tool name, raw id or JSON blob. */
+  references: ApprovalReference[];
 };
 
 const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
   sensitivity, status, trust_scope, deny_reason, created_at, resolved_at, resolved_by,
-  trace_id, resumed_at, approved_operation`;
+  trace_id, resumed_at, approved_operation, "references"`;
 
 /** Same columns as APPROVAL_COLS, `a.`-prefixed for queries that JOIN dashboard_agent_conversations. */
-const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at, a.approved_operation`;
+const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at, a.approved_operation, a."references"`;
 
 function rowToApproval(row: any): Approval {
   return {
@@ -82,6 +105,7 @@ function rowToApproval(row: any): Approval {
     traceId: row.trace_id ?? null,
     resumedAt: row.resumed_at ?? null,
     approvedOperation: readApprovedOperation(row.approved_operation),
+    references: Array.isArray(row.references) ? row.references : [],
   };
 }
 
@@ -141,12 +165,14 @@ export async function createApproval(
      * sensitivity gate, whose approvals keep their existing behaviour.
      */
     approvedOperation?: ApprovedOperation | null;
+    /** Evidence the turn read before the gate. Defaults to empty. */
+    references?: ApprovalReference[];
   }
 ): Promise<Approval> {
   const result = await pool.query(
     `INSERT INTO dashboard_agent_approvals
-     (id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation)
-     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, 'pending', $7, $8)
+     (id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation, "references")
+     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, 'pending', $7, $8, $9)
      RETURNING ${APPROVAL_COLS}`,
     [
       input.id ?? null,
@@ -157,6 +183,7 @@ export async function createApproval(
       input.sensitivity,
       input.traceId ?? null,
       input.approvedOperation ? JSON.stringify(input.approvedOperation) : null,
+      JSON.stringify(input.references ?? []),
     ]
   );
 
