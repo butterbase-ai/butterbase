@@ -1,6 +1,7 @@
 import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, DecisionRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
 import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
+import { openrouterImageModel } from './openrouter-image-models.js';
 
 /**
  * OpenRouter has a dedicated image-generation endpoint at
@@ -12,33 +13,6 @@ import { extractReasoningTokens } from '../reasoning.js';
  * Butterbase's `input_images` URLs into image_url parts, including for a single
  * reference. The OpenAI-style `image` field is silently ignored by Gemini.
  */
-const OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL: ReadonlySet<string> = new Set([
-  'size',
-  'n',
-  'seed',
-  'input_images',
-]);
-const OPENROUTER_IMAGE_SUPPORTED_PROVIDER: ReadonlySet<string> = new Set([]);
-
-/**
- * Canonical IDs OpenRouter serves as image models via /api/v1/images/generations.
- * Each entry was probed live with a real POST — models that failed (e.g.
- * `sourceful/riverflow-v2.5-pro`, which requires aspect_ratio and rejects the
- * OpenAI-Images `size` param) are excluded here AND from
- * CANONICAL_IMAGE_MODEL_ROUTES in select.ts.
- */
-const OPENROUTER_IMAGE_MODELS: ReadonlySet<string> = new Set([
-  'openai/gpt-image-2',
-  'openai/gpt-image-1',
-  'openai/gpt-image-1-mini',
-  'google/gemini-3.1-flash-lite-image',
-  'google/gemini-3.1-flash-image',
-  'google/gemini-3-pro-image',
-  'black-forest-labs/flux.2-pro',
-  'black-forest-labs/flux.2-max',
-  'black-forest-labs/flux.2-flex',
-  'black-forest-labs/flux.2-klein-4b',
-]);
 
 interface OpenRouterConfig {
   apiKey: string;
@@ -463,6 +437,9 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
    * recognises this and settles the row inline without polling.
    */
   async function submitImage(req: ImageGenerationRequest, upstreamId: string): Promise<ImageSubmitResult> {
+    const model = openrouterImageModel(req.model);
+    const invalid = model?.params.validate?.(req);
+    if (invalid) throw new AdapterError('openrouter', 400, 'bad_request', `${invalid.param}: ${invalid.message}`);
     // https://openrouter.ai/docs/api/api-reference/images/generate-an-image
     // Both single and multiple references use the same typed array. Keep the
     // caller's ordering so prompts can refer to images by their position.
@@ -479,9 +456,12 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       ...(req.seed != null ? { seed: req.seed } : {}),
       ...(inputReferences?.length ? { input_references: inputReferences } : {}),
       ...(req.mask ? { mask: req.mask } : {}),
+      ...(model?.params.topLevel.has('aspect_ratio') && req.aspect_ratio !== undefined ? { aspect_ratio: req.aspect_ratio } : {}),
+      ...Object.fromEntries([...(model?.params.provider ?? [])]
+        .filter(key => req.provider?.[key] !== undefined).map(key => [key, req.provider![key]])),
     };
 
-    const res = await fetcher(`${base}/images/generations`, {
+    const res = await fetcher(`${base}/${model?.endpoint ?? 'images/generations'}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -549,11 +529,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
   }
 
   function getSupportedImageParams(canonicalId: string): ImageSupportedParams | null {
-    if (!OPENROUTER_IMAGE_MODELS.has(canonicalId)) return null;
-    return {
-      topLevel: OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL,
-      provider: OPENROUTER_IMAGE_SUPPORTED_PROVIDER,
-    };
+    return openrouterImageModel(canonicalId)?.params ?? null;
   }
 
   return {

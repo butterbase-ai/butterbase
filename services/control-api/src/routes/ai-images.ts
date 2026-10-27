@@ -448,7 +448,8 @@ export function validateImageParams(
       };
     }
   }
-  return null;
+  const invalid = paramSpec.validate?.(body);
+  return invalid ? { error: invalid.message, code: 'UNSUPPORTED_PARAM', param: invalid.param, model: body.model } : null;
 }
 
 export async function handleImageError(app: FastifyInstance, reply: any, organizationId: string, error: unknown) {
