@@ -33,12 +33,25 @@ describe('video SKU currencies and modes', () => {
   });
   it('retains H3 dollar pricing and its documented five free image references', () => {
     const model = 'minimax/hailuo-3'; const e = entry({ duration_seconds: '0.20', reference_images: '0.02' }, model);
-    expect(billedVideoCostUsd(e, request(model, { input_images: Array(5).fill('https://images.example/a') }), 'openrouter', true)).toBe(1);
-    expect(billedVideoCostUsd(e, request(model, { input_images: Array(7).fill('https://images.example/a') }), 'openrouter', true)).toBe(1.04);
+    const refs = (n: number) => Array.from({ length: n }, () => ({ type: 'image_url', image_url: { url: 'https://images.example/a' } }));
+    expect(billedVideoCostUsd(e, request(model, { input_references: refs(5) }), 'openrouter', true)).toBe(1);
+    expect(billedVideoCostUsd(e, request(model, { input_references: refs(7) }), 'openrouter', true)).toBe(1.04);
   });
   it('counts input images when the optional frame collection is empty', () => {
     const e = entry({ cents_per_video_output_second_720p: '20', cents_per_image_input: '2' });
     expect(billedVideoCostUsd(e, request(undefined, { frame_images: [], input_images: ['https://images.example/a'] }), 'openrouter', true)).toBe(1.02);
+  });
+  it('does not bill canonical references with no unambiguous upstream mapping', () => {
+    const model = 'minimax/hailuo-3';
+    expect(billedVideoCostUsd(entry({ duration_seconds: '0.20', reference_images: '0.02' }, model),
+      request(model, { input_images: Array(7).fill('https://images.example/a') }), 'openrouter', true)).toBeNull();
+  });
+  it('counts distinct frames and style references that are both submitted', () => {
+    const req = request(undefined, {
+      frame_images: [{ type: 'image_url', image_url: { url: 'https://images.example/frame' }, frame_type: 'first_frame' }],
+      input_references: [{ type: 'image_url', image_url: { url: 'https://images.example/style' } }],
+    });
+    expect(billedVideoCostUsd(entry({ cents_per_video_output_second_720p: '20', cents_per_image_input: '2' }), req, 'openrouter', true)).toBe(1.04);
   });
   it('selects the requested H3 Max resolution without borrowing a more expensive tier', () => {
     const model = 'minimax/hailuo-3-max'; const e = entry({ duration_seconds: '0.20', duration_seconds_480p: '0.10', duration_seconds_768p: '0.20' }, model);

@@ -1,4 +1,5 @@
 import type { VideoGenerationRequest } from './adapters/types.js';
+import { normalizeOpenRouterVideoInputs } from './adapters/openrouter-video-inputs.js';
 
 /** null means an older format; a null rate means a recognized but incomplete quote. */
 export function normalizedVideoSkuRate(
@@ -27,11 +28,10 @@ export function normalizedVideoSkuRate(
     if (exact && exact in skus) return number(exact);
     return number(prefix);
   };
-  const references = request.input_references ?? [];
-  const videoInput = references.some(ref => typeof ref === 'object' && ref.type === 'video_url');
-  const imageCount = references.length
-    ? references.filter(ref => typeof ref === 'string' || ref.type === 'image_url').length
-    : request.frame_images?.length || request.input_images?.length || 0;
+  const inputs = normalizeOpenRouterVideoInputs(request);
+  if (!inputs.ok || inputs.imageCount === null) return unknown;
+  const videoInput = inputs.hasVideoInput;
+  const imageCount = inputs.imageCount;
   let rate: number | null;
   let extra = 0;
   if (cents) {

@@ -2,6 +2,7 @@ import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequ
 import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
 import { openrouterImageModel } from './openrouter-image-models.js';
+import { normalizeOpenRouterVideoInputs } from './openrouter-video-inputs.js';
 
 /**
  * OpenRouter has a dedicated image-generation endpoint at
@@ -358,7 +359,9 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     req: VideoGenerationRequest,
     upstreamId: string,
   ): Promise<VideoSubmitResult> {
-    const body = { ...req, model: upstreamId };
+    const normalized = normalizeOpenRouterVideoInputs(req);
+    if (!normalized.ok) throw new AdapterError('openrouter', 400, 'bad_request', normalized.error);
+    const body = { ...normalized.request, model: upstreamId };
     const res = await fetcher(`${base}/videos`, {
       method: 'POST',
       headers: {
@@ -488,25 +491,26 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
 
     const first = json.data?.[0];
-    if (!first || typeof first.b64_json !== 'string' || first.b64_json.length === 0) {
+    if (!first || !json.data!.every(item => typeof item.b64_json === 'string' && item.b64_json.length > 0)) {
       // Deliberate: return failed rather than throw so the job row settles cleanly
       // (no lease refund; upstream cost was presumably $0 in this case).
       return {
         upstreamJobId: `or-img-${crypto.randomUUID()}`,
         pollingUrl: '',
         status: 'failed',
-        error: 'OpenRouter images endpoint returned no b64_json in data[0]',
+        error: 'OpenRouter images endpoint returned incomplete image data',
+        providerCostUsd: pickProviderCost(json.usage) ?? undefined,
       };
     }
 
     const contentType = first.media_type ?? 'image/png';
-    const dataUri = `data:${contentType};base64,${first.b64_json}`;
+    const dataUris = json.data!.map(item => `data:${item.media_type ?? 'image/png'};base64,${item.b64_json}`);
 
     return {
       upstreamJobId: `or-img-${crypto.randomUUID()}`,
       pollingUrl: '',  // sync-inline; route settles without polling
       status: 'completed',
-      unsignedUrls: [dataUri],
+      unsignedUrls: dataUris,
       providerCostUsd: pickProviderCost(json.usage) ?? undefined,
       contentType,
     };
