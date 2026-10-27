@@ -18,7 +18,7 @@ const READ_ACTIONS: Record<string, ReadonlySet<string>> = {
     'list_memory',
   ]),
   manage_storage: new Set(['list', 'get']),
-  manage_app: new Set(['list', 'get']),
+  manage_app: new Set(['list']),
   manage_repo: new Set(['pull_latest', 'pull_snapshot']),
   manage_schema: new Set(['get']),
 };
@@ -85,6 +85,16 @@ function refsFromValue(value: unknown, kind: ApprovalReferenceKind): ApprovalRef
   return [];
 }
 
+/** `/v1/:app_id/schema` nests the map under `schema.tables`; tests and older
+ *  helpers sometimes pass it directly. Accept both, nothing else. */
+function tablesFrom(result: Record<string, unknown>): unknown {
+  const schema = result.schema;
+  if (schema && typeof schema === 'object' && !Array.isArray(schema)) {
+    return (schema as Record<string, unknown>).tables;
+  }
+  return result.tables;
+}
+
 function refsFromTables(value: unknown): ApprovalReference[] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
   return Object.keys(value as Record<string, unknown>)
@@ -96,7 +106,6 @@ function singleKind(toolName: string, action: string): ApprovalReferenceKind | n
   if (toolName === 'manage_substrate' && action === 'get_entity') return 'entity';
   if (toolName === 'manage_substrate' && action === 'get_source_artifact') return 'artifact';
   if (toolName === 'manage_storage' && action === 'get') return 'file';
-  if (toolName === 'manage_app' && action === 'get') return 'app';
   if (toolName === 'manage_schema' && action === 'get') return 'record';
   return null;
 }
@@ -132,7 +141,7 @@ export function referencesForApproval(input: {
     for (const container of CONTAINERS) {
       candidates.push(...refsFromValue(result[container.key], container.kind));
     }
-    candidates.push(...refsFromTables(result.tables));
+    candidates.push(...refsFromTables(tablesFrom(result)));
 
     const kind = singleKind(call.name, action);
     if (kind) {

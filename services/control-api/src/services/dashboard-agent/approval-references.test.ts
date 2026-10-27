@@ -64,7 +64,7 @@ describe('referencesForApproval', () => {
     ]);
 
     expect(one('manage_schema', { action: 'get' }, {
-      tables: { invoices: { columns: {} }, clients: { columns: {} } },
+      schema: { tables: { invoices: { columns: {} }, clients: { columns: {} } } },
     })).toEqual([
       { kind: 'record', id: 'invoices', label: 'invoices' },
       { kind: 'record', id: 'clients', label: 'clients' },
