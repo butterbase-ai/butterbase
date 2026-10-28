@@ -114,6 +114,24 @@ export const OPERATOR_BUILD_TOOL = 'build_app';
  */
 export const OPERATOR_PENDING_DECISIONS_TOOL = 'list_pending_decisions';
 
+/**
+ * The Office skill creator (Office-only, in-process).
+ *
+ * Present ONLY when the Office overlay supplies a `skillCreator` executor for
+ * the turn — an owner's Office Ask. The loop filters it out everywhere else,
+ * so a dashboard turn and a self-hosted deployment never see the name.
+ */
+export const SKILL_CREATOR_TOOL = 'skill_creator';
+
+/**
+ * Runs the pinned skill package's entrypoint (Office-only, in-process).
+ *
+ * Present only while a skill run or a draft test is active AND the overlay
+ * supplies a `skillScript` executor. It is not a general shell: the executor
+ * materialises the pinned archive and refuses any path outside it.
+ */
+export const RUN_SKILL_SCRIPT_TOOL = 'run_skill_script';
+
 export function getToolCatalog(): ToolSpec[] {
   return [
     // ---- App lifecycle & discovery ----
@@ -390,6 +408,44 @@ export function getToolCatalog(): ToolSpec[] {
         'These have NOT been approved. Nothing here executes, nothing here is a way to approve, deny, cancel or expire anything, and no argument changes what it returns. ' +
         'Re-proposing something that is already in this list is refused before it reaches the owner, so read this instead of proposing again.',
       parameters: { type: 'object', additionalProperties: false, properties: {} },
+    },
+
+    // ---- Office skill seams (Office-overlay-supplied, loop-internal) ------
+    {
+      name: SKILL_CREATOR_TOOL,
+      description:
+        'Draft or revise an Office skill from the owner\'s request. Use this when the owner asks the Office to behave differently, for example "also check the Google Sheet every morning". ' +
+        'You supply the owner\'s request in their own words; the creator writes the skill package (SKILL.md plus Python scripts and assets), validates it, and enqueues a read-only test against real data. ' +
+        'It NEVER executes the skill and cannot approve it: the owner sees a summary and the test result, then decides. ' +
+        'Pass `target_skill_id` to update a named existing skill, or `draft_version_id` to revise a draft already under discussion. ' +
+        'This tool may be ABSENT from your tool list; if it is not offered, this is not an Office where the owner can create skills.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['request'],
+        properties: {
+          request: { type: 'string', description: 'The owner\'s customization request, in their own words.' },
+          target_skill_id: { type: 'string', description: 'Existing skill to update rather than create.' },
+          draft_version_id: { type: 'string', description: 'Draft version to revise.' },
+          timezone: { type: 'string', description: 'IANA timezone for interpreting "every morning".' },
+        },
+      },
+    },
+    {
+      name: RUN_SKILL_SCRIPT_TOOL,
+      description:
+        'Run the pinned skill package\'s entrypoint with a JSON input and return its stdout, stderr and exit code. ' +
+        'The script is pure computation: it has no network and no credentials. Fetch any external data with the read tools first and pass it as `input`. ' +
+        'The entrypoint must stay inside the package\'s scripts/ directory. ' +
+        'This tool is present ONLY while a skill run or a draft test is active; it is absent otherwise.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          entrypoint: { type: 'string', description: 'Optional entrypoint override inside scripts/.' },
+          input: { description: 'JSON value passed to the script as input.json.' },
+        },
+      },
     },
   ];
 }

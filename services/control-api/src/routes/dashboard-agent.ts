@@ -91,6 +91,9 @@ import { evaluateOperatorAccess } from '../services/dashboard-agent/operator-acc
 // TEMPORARY — dev-mode operator trace viewer. Delete with GET /operator/traces.
 import { operatorUserId } from '../services/dashboard-agent/operator-store.js';
 import { listOperatorTraces } from '../services/dashboard-agent/operator-traces.js';
+import type {
+  IntegrationReader, SkillCreatorExecutor,
+} from '../services/dashboard-agent/skill-types.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -146,6 +149,51 @@ const rewindMcp = {
 
 function getRewindRepoSync() {
   return createRepoSync({ cache: getSharedWorkingTreeCache(), mcp: rewindMcp });
+}
+
+// ---------------------------------------------------------------------------
+// Office Ask executors (skill_creator + org integration reads)
+// ---------------------------------------------------------------------------
+
+export type OfficeAskExecutors = {
+  skillCreator?: SkillCreatorExecutor;
+  integrationReader?: IntegrationReader;
+};
+
+type OfficeAskLoader = (input: {
+  controlPool: unknown;
+  conversation: { origin: string; organizationId: string | null };
+  userId: string;
+}) => Promise<OfficeAskExecutors>;
+
+let officeAskLoader: OfficeAskLoader | null = null;
+
+/** Test-only: replace the overlay import. Pass `null` to restore. */
+export function __setOfficeAskExecutorsLoaderForTest(loader: OfficeAskLoader | null): void {
+  officeAskLoader = loader;
+}
+
+/**
+ * The overlay supplies these ONLY for an owner's Office Ask turn; it performs
+ * the role check. This function performs the provenance gate (Office only) and
+ * FAILS CLOSED to `{}` whenever the overlay is absent or throws — OSS mode has
+ * no skill store and no organization integrations, so neither tool may exist
+ * there.
+ */
+export async function resolveOfficeAskExecutors(
+  input: Parameters<OfficeAskLoader>[0],
+): Promise<OfficeAskExecutors> {
+  if (input.conversation.origin !== 'office') return {};
+  if (officeAskLoader) {
+    try { return await officeAskLoader(input); } catch { return {}; }
+  }
+  try {
+    // @ts-expect-error — overlay path exists only in the built cloud image
+    const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/office/skills/tool-executor.js');
+    return await overlay.officeAskExecutors(input) as OfficeAskExecutors;
+  } catch {
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +891,17 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(officeAccess.code).send({ error: officeAccess.error });
     }
 
+    /**
+     * Office Ask tools, resolved BEFORE the stream opens: an owner's Office
+     * conversation may receive the skill creator and the org integration
+     * reader; a member's and every dashboard conversation get `{}`.
+     */
+    const officeAsk = await resolveOfficeAskExecutors({
+      controlPool: app.controlDb,
+      conversation,
+      userId,
+    });
+
     // Extract JWT verbatim from Authorization header for the loop / gateway.
     const authHeader = request.headers.authorization ?? '';
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
@@ -880,6 +939,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         model: resolveAssistantModel(model),
         pool: app.controlDb,
         organizationId: readOrgId(request),
+        ...officeAsk,
       });
 
       for await (const event of gen) {

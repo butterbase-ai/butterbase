@@ -40,7 +40,7 @@ vi.mock('../approvals-store.js', () => ({
 import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';
-import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL } from '../tool-catalog.js';
+import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL } from '../tool-catalog.js';
 import { operatorUserId } from '../operator-store.js';
 import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop.js';
@@ -593,7 +593,10 @@ describe('operator — catalog filtering (affordance, not the control)', () => {
     const expected = getToolCatalog()
       .map((t) => t.name)
       .filter(isOperatorToolAllowed)
-      .filter((n) => n !== OPERATOR_SANDBOX_CODE_TOOL && n !== OPERATOR_BUILD_TOOL);
+      .filter((n) => n !== OPERATOR_SANDBOX_CODE_TOOL && n !== OPERATOR_BUILD_TOOL)
+      // Office skill seams are withheld by the same absence rule: no
+      // skillScript/activeSkill on this ordinary operator turn.
+      .filter((n) => n !== SKILL_CREATOR_TOOL && n !== RUN_SKILL_SCRIPT_TOOL);
 
     expect(offered.sort()).toEqual(expected.sort());
     expect(offered.length).toBeGreaterThan(0);
@@ -756,7 +759,13 @@ describe('non-operator conversation is unaffected', () => {
 
     const offered = toolNamesSent(bodies[0]);
     expect(offered.sort()).toEqual(
-      getToolCatalog().filter((t) => t.operatorOnly !== true).map((t) => t.name).sort(),
+      getToolCatalog()
+        .filter((t) => t.operatorOnly !== true)
+        // Skill seams need their executors, which this plain dashboard turn
+        // does not supply.
+        .filter((t) => t.name !== SKILL_CREATOR_TOOL && t.name !== RUN_SKILL_SCRIPT_TOOL)
+        .map((t) => t.name)
+        .sort(),
     );
   });
 

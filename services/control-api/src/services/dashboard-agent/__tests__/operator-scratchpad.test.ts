@@ -245,7 +245,11 @@ describe('human assistant — unchanged', () => {
   it('is offered exactly the catalog minus operator-only specs', async () => {
     const { bodies } = noToolCalls();
     await collect(runAgentTurn(humanInput()));
-    const expected = getToolCatalog().filter((t) => t.operatorOnly !== true).map((t) => t.name);
+    const expected = getToolCatalog()
+      .filter((t) => t.operatorOnly !== true)
+      // Office skill seams require executors this plain turn does not supply.
+      .filter((t) => t.name !== 'skill_creator' && t.name !== 'run_skill_script')
+      .map((t) => t.name);
     expect(toolNamesSent(bodies[0])).toEqual(expected);
     // Sanity: the filter actually removed something, so this is not vacuous.
     // Not hardcoded to "- 1": the operator-only count grew to 2 with
@@ -253,7 +257,9 @@ describe('human assistant — unchanged', () => {
     // track that count rather than assume the scratchpad tool is the only one.
     const operatorOnlyCount = getToolCatalog().filter((t) => t.operatorOnly === true).length;
     expect(operatorOnlyCount).toBeGreaterThanOrEqual(2);
-    expect(expected.length).toBe(getToolCatalog().length - operatorOnlyCount);
+    const seamCount = getToolCatalog()
+      .filter((t) => t.name === 'skill_creator' || t.name === 'run_skill_script').length;
+    expect(expected.length).toBe(getToolCatalog().length - operatorOnlyCount - seamCount);
   });
 
   it('sends a byte-identical system prompt', async () => {
