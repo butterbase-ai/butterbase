@@ -25,6 +25,8 @@ import {
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
   OPERATOR_PENDING_DECISIONS_TOOL,
+  SKILL_CREATOR_TOOL,
+  RUN_SKILL_SCRIPT_TOOL,
 } from './tool-catalog.js';
 
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
@@ -76,6 +78,8 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
   OPERATOR_PENDING_DECISIONS_TOOL,
+  SKILL_CREATOR_TOOL,
+  RUN_SKILL_SCRIPT_TOOL,
 ]);
 
 /**
@@ -243,6 +247,16 @@ export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Ma
    * queue for the owner's approval would never be used.
    */
   [OPERATOR_PENDING_DECISIONS_TOOL, 'allow'],
+  /**
+   * Office skill seams are 'approval' in the GENERAL operator table: the table
+   * describes an unattended operator on any deployment, and these tools do not
+   * exist there (no executor is supplied, so the catalog filter removes them).
+   * In a customer Office the Office policy classifies both as 'allow'; the
+   * stricter of the two answers governs, so Office turns dispatch them without
+   * a human while a hypothetical self-hosted turn could not.
+   */
+  [SKILL_CREATOR_TOOL, 'approval'],
+  [RUN_SKILL_SCRIPT_TOOL, 'approval'],
 
   // ---- approval: everything else the catalog advertises ----
   // app lifecycle & discovery

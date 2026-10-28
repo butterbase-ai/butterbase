@@ -213,3 +213,21 @@ describe('resolveOfficeVerdict precedence', () => {
     expect(resolveOfficeVerdict(null, 'deny')).toBe('deny');
   });
 });
+
+describe('skill tools and the org-scoped read action', () => {
+  it('allows the two Office skill tools', () => {
+    expect(classifyOfficeTool('skill_creator', { request: 'check the sheet every morning' })).toBe('allow');
+    expect(classifyOfficeTool('run_skill_script', { entrypoint: 'scripts/check.py' })).toBe('allow');
+  });
+
+  it('allows only the read action on manage_integrations', () => {
+    expect(classifyOfficeTool('manage_integrations', {
+      action: 'execute_read', tool_slug: 'GOOGLESHEETS_GET_VALUES',
+    })).toBe('allow');
+    expect(classifyOfficeTool('manage_integrations', {
+      action: 'execute_action', tool_slug: 'GOOGLESHEETS_UPDATE_VALUES',
+    })).toBe('approval');
+    expect(classifyOfficeTool('manage_integrations', { action: 'send_email' })).toBe('approval');
+    expect(classifyOfficeTool('manage_integrations', {})).toBe('approval');
+  });
+});

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { randomUUID } from 'crypto';
 import { runAgentTurn, type BuildExecutor } from './loop.js';
+import type { ActiveSkillContext, IntegrationReader, SkillScriptExecutor } from './skill-types.js';
 import { getOrCreateOperatorConversation, operatorUserId, type OperatorJob } from './operator-store.js';
 import { getOperatorCredential } from './operator-credential.js';
 import { listPendingByConv, findResumableApproval, markApprovalResumed, type Approval } from './approvals-store.js';
@@ -593,6 +594,19 @@ export async function runOperatorTurn(
      * a fallback to building on the control plane).
      */
     buildExecutor?: BuildExecutor;
+    /**
+     * Runs the pinned skill entrypoint for this turn. Supplied by the skill
+     * runner; absent on every ordinary operator wake, where `run_skill_script`
+     * is therefore not offered.
+     */
+    skillScript?: SkillScriptExecutor;
+    /** The skill version pinned by the run that dispatched this turn. */
+    activeSkill?: ActiveSkillContext;
+    /**
+     * Organization-scoped integration reads. Supplied by the Office overlay so
+     * `manage_integrations` `execute_read` uses the org's own connection.
+     */
+    integrationReader?: IntegrationReader;
   },
 ): Promise<OperatorTurnResult> {
   const { job, wake } = opts;
@@ -728,6 +742,9 @@ export async function runOperatorTurn(
       organizationId: job.organizationId,
       codeExecutor: opts.codeExecutor,
       buildExecutor: opts.buildExecutor,
+      skillScript: opts.skillScript,
+      activeSkill: opts.activeSkill,
+      integrationReader: opts.integrationReader,
       traceId,
       /**
        * Re-checked before every model request and before dispatching tools, so

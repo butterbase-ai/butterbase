@@ -19,7 +19,8 @@ import pg from 'pg';
 import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import type { ActiveSkillContext, IntegrationReader, SkillCreatorExecutor, SkillScriptExecutor } from './skill-types.js';
 import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
 import {
@@ -688,6 +689,18 @@ export function scopeAppListToOrg(result: unknown, orgId: string): unknown {
   }
 }
 
+/**
+ * A skill entrypoint is a relative path inside the package's `scripts/`
+ * directory. The sandbox executor re-checks this; the loop checks it first so
+ * an obviously bad argument costs no sandbox round trip.
+ */
+function isSkillEntrypoint(path: string): boolean {
+  if (!path || path.startsWith('/') || path.includes('\\')) return false;
+  const parts = path.split('/');
+  if (parts.some((part) => part === '' || part === '.' || part === '..')) return false;
+  return path.startsWith('scripts/');
+}
+
 export async function* runAgentTurn(
   input: {
     conversationId: string;
@@ -722,6 +735,35 @@ export async function* runAgentTurn(
      * model (see the `tools` construction below).
      */
     buildExecutor?: BuildExecutor;
+    /**
+     * Office skill creation. Supplied by the Office overlay ONLY for an owner's
+     * Office Ask turn; absent everywhere else. `skill_creator` is offered to
+     * the model only when this is present, and the creator itself cannot
+     * approve its own draft.
+     */
+    skillCreator?: SkillCreatorExecutor;
+    /**
+     * Runs the pinned skill entrypoint. Supplied only while a skill run or a
+     * draft test is active, together with `activeSkill`. Absent means
+     * `run_skill_script` is absent from the catalog — there is no general shell
+     * fallback.
+     */
+    skillScript?: SkillScriptExecutor;
+    /** The version pinned by the run; also names the entrypoint package. */
+    activeSkill?: ActiveSkillContext;
+    /**
+     * Organization-scoped integration reads (`manage_integrations`
+     * `execute_read`). Supplied by the Office overlay; absent in OSS mode, where
+     * the action returns `integration_reader_unavailable` rather than falling
+     * through to the app-scoped MCP tool.
+     */
+    integrationReader?: IntegrationReader;
+    /**
+     * A draft test: reads are allowed, consequential tools return
+     * `read_only_test`, and NO approval row is created. Set only by the skill
+     * test runner; a real run leaves it unset so the normal policy applies.
+     */
+    readOnly?: boolean;
     /**
      * Distributed trace id for this turn (see operator-turn.ts). Supplied by
      * `runOperatorTurn`; absent for the human assistant, which has no trace.
@@ -1037,12 +1079,24 @@ export async function* runAgentTurn(
   // thing that decides whether a turn with no sandbox can reach it. There is
   // no host-side build, and a build that ran in THIS process would execute the
   // customer's `postinstall` scripts on the control plane.
-  const baseTools = isOperator
+  // SAFETY-CRITICAL on the same terms as `codeExecutor`/`buildExecutor`: an
+  // Office skill tool has no MCP counterpart and no host fallback, so a missing
+  // seam must hide it from the model AND from `allowedToolNames` (built from
+  // this list), never merely refuse it at dispatch. Applied to BOTH branches:
+  // `skill_creator` rides an owner's HUMAN Office Ask turn, not an operator
+  // turn, so the non-operator branch needs the identical filter.
+  const seamAvailable = (t: ToolSpec): boolean =>
+    (t.name !== SKILL_CREATOR_TOOL || typeof input.skillCreator === 'function') &&
+    (t.name !== RUN_SKILL_SCRIPT_TOOL
+      || (typeof input.skillScript === 'function' && input.activeSkill !== undefined));
+
+  const baseTools = (isOperator
     ? getToolCatalog()
         .filter((t) => isOperatorToolAllowed(t.name))
         .filter((t) => t.name !== OPERATOR_SANDBOX_CODE_TOOL || typeof input.codeExecutor === 'function')
         .filter((t) => t.name !== OPERATOR_BUILD_TOOL || typeof input.buildExecutor === 'function')
-    : getToolCatalog().filter((t) => t.operatorOnly !== true);
+    : getToolCatalog().filter((t) => t.operatorOnly !== true)
+  ).filter(seamAvailable);
 
   /**
    * Replace the hand-written argument schemas with the ones the MCP server
@@ -1620,6 +1674,42 @@ export async function* runAgentTurn(
         // returns it to the model as an ordinary tool error, which is what it
         // was before the tiers changed.
         if (operatorVerdict === 'approval' && allowedToolNames.has(tc.name)) {
+          /**
+           * A draft test is READ-ONLY. A consequential call never reaches
+           * `createApproval` — the test's promise is that it changes nothing
+           * and leaves the owner no decision. The refusal is an ordinary tool
+           * result so the model reads it and continues the test.
+           */
+          if (input.readOnly === true) {
+            const messageId = randomUUID();
+            const blocked = { blocked: true, code: 'read_only_test', tool: tc.name };
+            await appendMessage(
+              input.pool,
+              input.conversationId,
+              {
+                role: 'assistant',
+                content: i === 0 ? assistantText : '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: null,
+                modelUsed: input.model,
+              },
+              messageId,
+            );
+            yield { type: 'tool_call', ...tc };
+            toolCallResults.push({ id: tc.id, result: blocked });
+            yield { type: 'tool_result', id: tc.id, result: blocked };
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: blocked,
+            });
+            continue;
+          }
           const messageId = randomUUID();
           const appId = appIdFromArgs(tc.args);
           const deployTool = isDeployTool(tc.name) || isDeployFunctionTool(tc.name);
@@ -1796,6 +1886,38 @@ export async function* runAgentTurn(
         if (sensitivity !== 'safe') {
           const trusted = await checkTrust(input.pool, input.conversationId, tc.name);
           if (!trusted) {
+            // Defence in depth for a read-only test that somehow reaches the
+            // human sensitivity path: same refusal, still no approval row.
+            if (input.readOnly === true) {
+              const messageId = randomUUID();
+              const blocked = { blocked: true, code: 'read_only_test', tool: tc.name };
+              await appendMessage(
+                input.pool,
+                input.conversationId,
+                {
+                  role: 'assistant',
+                  content: i === 0 ? assistantText : '',
+                  toolCallId: tc.id,
+                  toolName: tc.name,
+                  toolArgs: tc.args,
+                  toolResult: null,
+                  modelUsed: input.model,
+                },
+                messageId,
+              );
+              yield { type: 'tool_call', ...tc };
+              toolCallResults.push({ id: tc.id, result: blocked });
+              yield { type: 'tool_result', id: tc.id, result: blocked };
+              await appendMessage(input.pool, input.conversationId, {
+                role: 'tool',
+                content: '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: blocked,
+              });
+              continue;
+            }
             const messageId = randomUUID();
             const approval = await createApproval(input.pool, {
               conversationId: input.conversationId,
@@ -2359,6 +2481,175 @@ export async function* runAgentTurn(
             toolResult: payload.error ? { error: payload.error } : (payload.result ?? {}),
           });
           continue;
+        }
+
+        // ---- Route: Office skill creator (in-process) --------------------
+        //
+        // No MCP tool by this name exists. The executor is supplied ONLY by the
+        // Office overlay for an owner's Office Ask turn, and the catalog filter
+        // above already hides the name when it is absent; the explicit check
+        // here is defence in depth. The creator drafts and enqueues a test; it
+        // never runs the skill and cannot approve it.
+        if (tc.name === SKILL_CREATOR_TOOL) {
+          toolCallsCount++;
+          const creatorArgs = (tc.args ?? {}) as {
+            request?: unknown;
+            target_skill_id?: unknown;
+            draft_version_id?: unknown;
+            timezone?: unknown;
+          };
+          let payload: { result?: unknown; error?: string };
+          const request = typeof creatorArgs.request === 'string' ? creatorArgs.request.trim() : '';
+          if (typeof input.skillCreator !== 'function' || !input.organizationId) {
+            payload = { error: `Tool "${tc.name}" is not available in this turn.` };
+          } else if (!request) {
+            payload = { error: `Tool "${tc.name}" requires a non-empty string "request" argument.` };
+          } else {
+            try {
+              const created = await input.skillCreator({
+                args: {
+                  request,
+                  ...(typeof creatorArgs.target_skill_id === 'string'
+                    ? { target_skill_id: creatorArgs.target_skill_id } : {}),
+                  ...(typeof creatorArgs.draft_version_id === 'string'
+                    ? { draft_version_id: creatorArgs.draft_version_id } : {}),
+                  ...(typeof creatorArgs.timezone === 'string' ? { timezone: creatorArgs.timezone } : {}),
+                },
+                organizationId: input.organizationId,
+                userId: input.userId,
+                jwt: input.jwt,
+                model: input.model,
+              });
+              payload = { result: { content: [{ type: 'text', text: JSON.stringify(created) }] } };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        // ---- Route: skill script execution (in-process) ------------------
+        //
+        // The executor materialises the PINNED version archive and runs its
+        // entrypoint. It is not a shell: the entrypoint must stay under the
+        // package's `scripts/`, and there is no host fallback when the seam is
+        // absent (the catalog filter above already removed the name).
+        if (tc.name === RUN_SKILL_SCRIPT_TOOL) {
+          toolCallsCount++;
+          const scriptArgs = (tc.args ?? {}) as { entrypoint?: unknown; input?: unknown };
+          let payload: { result?: unknown; error?: string };
+          const requestedEntrypoint = typeof scriptArgs.entrypoint === 'string'
+            ? scriptArgs.entrypoint.trim() : '';
+          const entrypoint = requestedEntrypoint || input.activeSkill?.entrypoint || '';
+          if (typeof input.skillScript !== 'function' || !input.activeSkill) {
+            payload = { error: `Tool "${tc.name}" is not available outside a skill run.` };
+          } else if (!isSkillEntrypoint(entrypoint)) {
+            payload = { error: 'invalid_entrypoint: the entrypoint must stay inside scripts/.' };
+          } else {
+            try {
+              const result = await input.skillScript({
+                skill: input.activeSkill,
+                args: {
+                  ...(requestedEntrypoint ? { entrypoint } : {}),
+                  ...(scriptArgs.input !== undefined ? { input: scriptArgs.input } : {}),
+                },
+              });
+              payload = {
+                result: {
+                  content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                      stdout: result.stdout,
+                      stderr: result.stderr,
+                      exit_code: result.exitCode,
+                    }),
+                  }],
+                },
+              };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield { type: 'tool_result', id: tc.id, ...payload };
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        // ---- Route: organization-scoped integration read (in-process) ----
+        //
+        // `execute_read` is the Office read path: it uses the ORGANIZATION's
+        // connection, accepts no `app_id`, and can never send or change
+        // anything. Every other action falls through to the normal (app-scoped,
+        // approval-gated) MCP path. Without an injected reader the action is
+        // refused rather than degrading to a different integration identity.
+        if (tc.name === 'manage_integrations') {
+          const integrationArgs = (tc.args ?? {}) as {
+            action?: unknown;
+            tool_slug?: unknown;
+            params?: unknown;
+          };
+          if (
+            typeof integrationArgs.action === 'string'
+            && integrationArgs.action.trim().toLowerCase() === 'execute_read'
+          ) {
+            toolCallsCount++;
+            let payload: { result?: unknown; error?: string };
+            const toolSlug = typeof integrationArgs.tool_slug === 'string'
+              ? integrationArgs.tool_slug.trim() : '';
+            if (typeof input.integrationReader !== 'function') {
+              payload = { error: 'integration_reader_unavailable' };
+            } else if (!input.organizationId) {
+              payload = { error: 'organization_required' };
+            } else if (!toolSlug) {
+              payload = { error: 'tool_slug is required' };
+            } else {
+              try {
+                const params = integrationArgs.params
+                  && typeof integrationArgs.params === 'object'
+                  && !Array.isArray(integrationArgs.params)
+                  ? integrationArgs.params as Record<string, unknown>
+                  : undefined;
+                const result = await input.integrationReader({
+                  organizationId: input.organizationId,
+                  toolSlug,
+                  ...(params ? { params } : {}),
+                  readOnly: input.readOnly === true,
+                });
+                payload = { result: result.content };
+              } catch (err) {
+                payload = { error: err instanceof Error ? err.message : String(err) };
+              }
+            }
+            toolCallResults.push({ id: tc.id, ...payload });
+            yield { type: 'tool_result', id: tc.id, ...payload };
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+            });
+            continue;
+          }
         }
 
         // ---- Default: MCP tool -------------------------------------------

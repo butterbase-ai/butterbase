@@ -95,6 +95,11 @@ const OPERATOR_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   // Operator working state
   'update_operator_scratchpad',
   'list_pending_decisions',
+  // Office skills: the creator drafts and enqueues a read-only test; it cannot
+  // run, approve, deploy or send. The script executor is scoped to the pinned
+  // package and its sandbox is network-denied.
+  'skill_creator',
+  'run_skill_script',
 ]);
 
 /**
@@ -203,7 +208,7 @@ const ACTION_RULES: Readonly<Record<string, ActionRule>> = {
    * decision.
    */
   manage_integrations: {
-    allow: set(['list_available', 'list_connected', 'list_tools']),
+    allow: set(['list_available', 'list_connected', 'list_tools', 'execute_read']),
     approval: set([]),
     defaultAllow: false,
   },
