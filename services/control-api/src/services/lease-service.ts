@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { NotFoundError } from './api-errors.js';
+import { roundCreditUsd as roundUsd } from './credit-precision.js';
 
 export interface GrantArgs {
   /** User whose action is being billed (audit + credit_leases.user_id). */
@@ -156,7 +157,8 @@ export async function readOrganizationCreditState(
 }
 
 export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promise<GrantResult> {
-  if (args.amountUsd <= 0) throw new Error('grantLease: amountUsd must be positive');
+  const requested = roundUsd(args.amountUsd);
+  if (requested <= 0) throw new Error('grantLease: amountUsd must be positive');
   if (args.ttlSeconds <= 0) throw new Error('grantLease: ttlSeconds must be positive');
 
   const client = await platformPool.connect();
@@ -199,7 +201,7 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
         'SELECT lease_id,organization_id,user_id,region,amount_usd,expires_at,status FROM credit_leases WHERE lease_id=$1', [args.reservationId]);
       const row = existing.rows[0];
       if (row) {
-        if (row.organization_id !== organizationId || row.user_id !== args.userId || row.region !== args.region || Number(row.amount_usd) !== Number(args.amountUsd.toFixed(4))) throw new Error('Reservation identity mismatch');
+        if (row.organization_id !== organizationId || row.user_id !== args.userId || row.region !== args.region || Number(row.amount_usd) !== requested) throw new Error('Reservation identity mismatch');
         if (row.status !== 'active' || row.expires_at <= new Date()) throw new Error('Reservation is no longer active');
         // Reauthorization on replay excludes this reservation's own draw.
         if (args.allowFloor && totalAvailable + Number(row.amount_usd) < floor) {
@@ -218,9 +220,9 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
         await client.query('COMMIT');
         return { leaseId: null, amountGranted: 0, expiresAt: expires, balanceUsd: totalAvailable, floorUsd: floor };
       }
-      granted = args.amountUsd;
+      granted = requested;
     } else {
-      granted = Math.min(totalAvailable, args.amountUsd);
+      granted = roundUsd(Math.min(totalAvailable, requested));
     }
 
     if (granted <= 0) {
@@ -231,8 +233,8 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     // monthly is drawn first and never driven negative; credits_usd absorbs the
     // remainder and is the ONLY column permitted to go negative (it persists
     // across billing cycles, so debt cannot be erased by a monthly reset).
-    const monthlyDraw = Math.max(0, Math.min(monthly, granted));
-    const topupDraw = +(granted - monthlyDraw).toFixed(4);
+    const monthlyDraw = roundUsd(Math.max(0, Math.min(monthly, granted)));
+    const topupDraw = roundUsd(granted - monthlyDraw);
     let sourcePool: 'monthly' | 'topup' | 'split';
     let topupAmountColumn: number | null;
     if (monthlyDraw > 0 && topupDraw === 0) {
@@ -348,10 +350,10 @@ export async function settleLease(
     const granted = parseFloat(r.rows[0].amount_usd);
     // Legacy clamps the charge to the reservation (never bills beyond what was
     // pre-debited). Reserve-small bills the true cost and trues up the delta.
-    const actual = args.allowOverdraft
+    const actual = roundUsd(args.allowOverdraft
       ? Math.max(0, args.actualUsd)
-      : Math.min(Math.max(0, args.actualUsd), granted);
-    const delta = +(actual - granted).toFixed(4);
+      : Math.min(Math.max(0, args.actualUsd), granted));
+    const delta = roundUsd(actual - granted);
     const orgIdRow = r.rows[0].organization_id;
     const sourcePool = r.rows[0].source_pool;
     const topupPortion = r.rows[0].topup_amount_usd ? parseFloat(r.rows[0].topup_amount_usd) : 0;
@@ -378,8 +380,8 @@ export async function settleLease(
         [orgIdRow]
       );
       const monthlyNow = parseFloat(cur.rows[0].monthly_allowance_usd);
-      const fromMonthly = Math.max(0, Math.min(monthlyNow, delta));
-      const fromTopup = +(delta - fromMonthly).toFixed(4);
+      const fromMonthly = roundUsd(Math.max(0, Math.min(monthlyNow, delta)));
+      const fromTopup = roundUsd(delta - fromMonthly);
       if (fromMonthly > 0) {
         await client.query(
           `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd - $1 WHERE id = $2`,
@@ -393,7 +395,7 @@ export async function settleLease(
         );
       }
     } else if (delta < 0) {
-      refund = +(-delta).toFixed(4);
+      refund = -delta;
       if (sourcePool === 'monthly') {
         await client.query(
           `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
@@ -405,8 +407,8 @@ export async function settleLease(
           [refund, orgIdRow]
         );
       } else {
-        const monthlyRefund = +((refund * monthlyPortion) / granted).toFixed(4);
-        const topupRefund = +(refund - monthlyRefund).toFixed(4);
+        const monthlyRefund = roundUsd((refund * monthlyPortion) / granted);
+        const topupRefund = roundUsd(refund - monthlyRefund);
         if (monthlyRefund > 0) {
           await client.query(
             `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,

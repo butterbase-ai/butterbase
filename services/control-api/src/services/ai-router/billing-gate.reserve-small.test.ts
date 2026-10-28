@@ -12,7 +12,7 @@ describe('InsufficientCreditsError — floor shape', () => {
 });
 
 describe('MIN_LEASE_USD', () => {
-  it('is the smallest value satisfying amount_usd > 0 at NUMERIC(12,4)', () => {
+  it('keeps the existing nominal reservation amount', () => {
     expect(MIN_LEASE_USD).toBe(0.0001);
   });
 });
