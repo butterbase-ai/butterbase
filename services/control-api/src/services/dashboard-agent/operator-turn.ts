@@ -603,6 +603,12 @@ export async function runOperatorTurn(
     /** The skill version pinned by the run that dispatched this turn. */
     activeSkill?: ActiveSkillContext;
     /**
+     * The pinned skill's instructions, prepended to the ordinary wake message.
+     * Supplied only for a real skill run; the rest of the wake context (pending
+     * decisions, scratchpad) stays intact underneath it.
+     */
+    skillPrompt?: string;
+    /**
      * Organization-scoped integration reads. Supplied by the Office overlay so
      * `manage_integrations` `execute_read` uses the org's own connection.
      */
@@ -736,7 +742,9 @@ export async function runOperatorTurn(
       conversationId,
       userId: operatorUserId(job.organizationId),
       jwt: credential,
-      userMessage: buildWakeMessage(job, wake, scratchpad, pending),
+      userMessage: opts.skillPrompt
+        ? `${opts.skillPrompt}\n\n---\n\n${buildWakeMessage(job, wake, scratchpad, pending)}`
+        : buildWakeMessage(job, wake, scratchpad, pending),
       model,
       pool,
       organizationId: job.organizationId,
