@@ -1,5 +1,25 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import type { ApprovedOperation } from './approval-operation.js';
+
+/** JSONB-stable ordering; arrays and all business fields remain significant. */
+export function proposalFingerprint(value: unknown): string {
+  function canonical(item: unknown): unknown {
+    if (Array.isArray(item)) return item.map(canonical);
+    if (item && typeof item === 'object') return Object.fromEntries(Object.keys(item).sort().map(key => [key, canonical((item as Record<string, unknown>)[key])]));
+    return item;
+  }
+  return createHash('sha256').update(JSON.stringify(canonical(value)) ?? 'null').digest('hex');
+}
+
+export function proposalIntentFingerprint(toolName: string, args: unknown, artifact?: ApprovedOperation['artifact']): string {
+  let normalized = args;
+  if (toolName === 'manage_substrate' && args && typeof args === 'object' && !Array.isArray(args) && (args as Record<string, unknown>).action === 'propose') {
+    const { idempotency_key: _transportKey, ...rest } = args as Record<string, unknown>;
+    normalized = rest;
+  }
+  return proposalFingerprint({ toolName, args: normalized, ...(artifact ? { artifact } : {}) });
+}
 
 const OpaqueId = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/);
 const Digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -62,7 +82,7 @@ export const PreparedProposalSchema = z.object({
   reason: z.object({ text: z.string().trim().min(1).max(2000), attribution: z.literal('operator') }).strict(),
   evidence: z.array(VerifiedEvidenceSchema).max(10),
   preview: ProposalPreviewSchema,
-  preconditions: z.array(ProposalPreconditionSchema).max(200),
+  preconditions: z.array(ProposalPreconditionSchema).min(1).max(200),
 }).strict();
 export type PreparedProposal = z.infer<typeof PreparedProposalSchema>;
 
@@ -120,6 +140,9 @@ export interface ProposalContext {
   origin: 'operator' | 'office';
   conversationId: string;
   operation: ApprovedOperation;
+  /** Server-owned snapshot bytes, never populated from wrapper arguments. */
+  artifactSource?: string;
+  artifactFiles?: Array<{ path: string; content: string; sha256: string }>;
   validateRegisteredToolArguments(name: string, args: unknown): Promise<{ toolName: string; args: Record<string, unknown> }>;
   signal?: AbortSignal;
 }
@@ -133,6 +156,8 @@ export type ProposalVerification =
   | { status: 'unavailable'; code: 'proposal_review_unavailable' };
 export interface ApprovalProposalProvider {
   enabled(organizationId: string): boolean;
+  /** Pure action-specific parsing, shared with dispatch; never reads targets. */
+  validateArguments?(toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>>;
   prepare(context: ProposalContext, input: ProposalInput): Promise<PreparationResult>;
   revalidate(context: ProposalContext, saved: PreparedProposal): Promise<ProposalVerification>;
 }

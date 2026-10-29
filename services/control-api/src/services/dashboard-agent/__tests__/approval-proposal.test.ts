@@ -4,6 +4,8 @@ import {
   readPreparedProposal,
   readExecutionOutcome,
   projectPreparedProposal,
+  proposalFingerprint,
+  proposalIntentFingerprint,
 } from '../approval-proposal.js';
 
 const operation = { tool: 'manage_substrate', arguments: { action: 'cancel_outbox', outbox_id: 'obx_example' } };
@@ -20,6 +22,14 @@ const prepared = () => ({
 });
 
 describe('structured approval contract', () => {
+  it('canonically binds validated operations without stripping business payload keys', () => {
+    expect(proposalFingerprint({ a: 1, b: 2 })).toBe(proposalFingerprint({ b: 2, a: 1 }));
+    const args = { action: 'propose', capability: 'send_email_draft', payload: { idempotency_key: 'business-one' }, idempotency_key: 'transport-one' };
+    const fingerprint = proposalIntentFingerprint('manage_substrate', args);
+    expect(fingerprint).toBe(proposalIntentFingerprint('manage_substrate', { ...args, idempotency_key: 'transport-two' }));
+    expect(fingerprint).not.toBe(proposalIntentFingerprint('manage_substrate', { ...args, payload: { idempotency_key: 'business-two' } }));
+    expect(proposalIntentFingerprint('other', { idempotency_key: 'one' })).not.toBe(proposalIntentFingerprint('other', { idempotency_key: 'two' }));
+  });
   it('requires a bounded, explicit operator reason and structured arguments', () => {
     expect(ProposalInputSchema.parse({ operation, reason: '  Obsolete draft.  ' }).reason).toBe('Obsolete draft.');
     for (const reason of ['', '  ', 'x'.repeat(2001)]) expect(ProposalInputSchema.safeParse({ operation, reason }).success).toBe(false);
@@ -41,6 +51,7 @@ describe('structured approval contract', () => {
     expect(readPreparedProposal(null)).toBeNull();
     expect(readPreparedProposal({ ...prepared(), version: 2 })).toBeNull();
     expect(readPreparedProposal({ ...prepared(), operationFingerprint: 'invalid' })).toBeNull();
+    expect(readPreparedProposal({ ...prepared(), preconditions: [] })).toBeNull();
     expect(readPreparedProposal(prepared())?.reason.attribution).toBe('operator');
   });
   it('projects only review fields and redacts structured credential inputs', () => {
