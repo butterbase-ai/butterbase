@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { operatorUserId } from './operator-store.js';
+import { readPreparedProposal, readExecutionOutcome, type PreparedProposal, type ExecutionOutcome } from './approval-proposal.js';
 import {
   captureApprovalOperation,
   readApprovedOperation,
@@ -79,14 +80,17 @@ export type Approval = {
    *  Empty for rows that predate the column and for payloads the extractor
    *  cannot prove. Never a tool name, raw id or JSON blob. */
   references: ApprovalReference[];
+  /** Null for legacy rows; never reconstructed from transcript prose. */
+  proposalDetails?: PreparedProposal | null;
+  executionOutcome?: ExecutionOutcome | null;
 };
 
 const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
   sensitivity, status, trust_scope, deny_reason, created_at, resolved_at, resolved_by,
-  trace_id, resumed_at, approved_operation, "references"`;
+  trace_id, resumed_at, approved_operation, "references", proposal_details, execution_outcome`;
 
 /** Same columns as APPROVAL_COLS, `a.`-prefixed for queries that JOIN dashboard_agent_conversations. */
-const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at, a.approved_operation, a."references"`;
+const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at, a.approved_operation, a."references", a.proposal_details, a.execution_outcome`;
 
 function rowToApproval(row: any): Approval {
   return {
@@ -106,6 +110,8 @@ function rowToApproval(row: any): Approval {
     resumedAt: row.resumed_at ?? null,
     approvedOperation: readApprovedOperation(row.approved_operation),
     references: Array.isArray(row.references) ? row.references : [],
+    proposalDetails: readPreparedProposal(row.proposal_details),
+    executionOutcome: readExecutionOutcome(row.execution_outcome),
   };
 }
 
@@ -167,12 +173,13 @@ export async function createApproval(
     approvedOperation?: ApprovedOperation | null;
     /** Evidence the turn read before the gate. Defaults to empty. */
     references?: ApprovalReference[];
+    proposalDetails?: PreparedProposal | null;
   }
 ): Promise<Approval> {
   const result = await pool.query(
     `INSERT INTO dashboard_agent_approvals
-     (id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation, "references")
-     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, 'pending', $7, $8, $9)
+     (id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation, "references", proposal_details)
+     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, 'pending', $7, $8, $9, $10)
      RETURNING ${APPROVAL_COLS}`,
     [
       input.id ?? null,
@@ -184,6 +191,7 @@ export async function createApproval(
       input.traceId ?? null,
       input.approvedOperation ? JSON.stringify(input.approvedOperation) : null,
       JSON.stringify(input.references ?? []),
+      input.proposalDetails ? JSON.stringify(input.proposalDetails) : null,
     ]
   );
 
