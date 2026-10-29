@@ -115,6 +115,12 @@ function rowToApproval(row: any): Approval {
   };
 }
 
+/** Internal refresh after the caller has authorized this exact conversation. */
+export async function getApprovalInConversation(pool: pg.Pool, id: string, conversationId: string): Promise<Approval | null> {
+  const result = await pool.query(`SELECT ${APPROVAL_COLS} FROM dashboard_agent_approvals WHERE id=$1 AND conversation_id=$2`, [id, conversationId]);
+  return result.rows[0] ? rowToApproval(result.rows[0]) : null;
+}
+
 /**
  * A pending decision as the ORGANIZATION feed sees it (Task 9).
  *
@@ -570,6 +576,17 @@ export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<Or
     [orgId, operatorUserId(orgId)]
   );
 
+  return result.rows.map(rowToOrgApproval);
+}
+
+export async function listRecentResolvedByOrg(pool: pg.Pool, orgId: string): Promise<OrgApproval[]> {
+  const result = await pool.query(
+    `SELECT ${APPROVAL_COLS_JOIN}, CASE WHEN c.user_id=$2 THEN 'operator' ELSE 'office' END AS source
+     FROM dashboard_agent_approvals a JOIN dashboard_agent_conversations c ON c.id=a.conversation_id
+     WHERE c.organization_id=$1 AND (c.user_id=$2 OR c.origin='office') AND a.status!='pending'
+     ORDER BY a.resolved_at DESC NULLS LAST,a.created_at DESC LIMIT 50`,
+    [orgId,operatorUserId(orgId)],
+  );
   return result.rows.map(rowToOrgApproval);
 }
 

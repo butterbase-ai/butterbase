@@ -16,7 +16,7 @@
  */
 
 import pg from 'pg';
-import { validateRegisteredToolArguments } from '@butterbase/mcp-server/tool-validation';
+import { validateProposalToolArguments as validateRegisteredToolArguments } from './proposal-validation.js';
 import { PROPOSE_ACTION_TOOL } from './tool-catalog.js';
 import { getApprovalProposalProvider, ProposalInputSchema, proposalIntentFingerprint, type ProposalInput } from './approval-proposal.js';
 import { validateProposalOperation, LocalOperationSchemas } from './proposal-validation.js';
@@ -1602,6 +1602,14 @@ export async function* runAgentTurn(
           (await resolveYoloMode())
         ) {
           operatorVerdict = operatorPolicyForOrg(tc.name, tc.args, operatorOrgId, { yoloMode: true });
+        }
+
+        if (officeConsequential && !proposalProvider && operatorVerdict === 'approval' && input.readOnly !== true) {
+          const payload = { code: 'proposal_unavailable', message: 'Required Office preparation is unavailable. No owner approval was created.' };
+          await replyProposal(payload);
+          toolCallResults.push({ id: originalCall.id, result: payload });
+          yield { type: 'tool_result', id: originalCall.id, result: payload };
+          continue;
         }
 
         // Structured gates use the same effective policy computed above. The

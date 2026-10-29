@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateLocalOperation, validateProposalOperation } from '../proposal-validation.js';
+import { z } from 'zod';
+import { validateLocalOperation, validateProposalOperation, createProposalToolValidator } from '../proposal-validation.js';
 
 describe('proposal executable validation', () => {
+  it('validates explicit cloud overlay registration without runtime startup', async () => {
+    const handler = vi.fn();
+    const validator = await createProposalToolValidator(async server => {
+      server.tool('synthetic_cloud_tool', 'Synthetic', { count: z.number().default(7) }, handler);
+    });
+    expect(await validator('synthetic_cloud_tool', {})).toEqual({ toolName: 'synthetic_cloud_tool', args: { count: 7 } });
+    expect(handler).not.toHaveBeenCalled();
+  });
   it('requires the exact local contract and an available executor without MCP fallback', () => {
     expect(validateLocalOperation('deploy_frontend', { app_id: 'app_example' }, new Set(['deploy_frontend']))).toEqual({ toolName: 'deploy_frontend', args: { app_id: 'app_example' } });
     expect(() => validateLocalOperation('deploy_frontend', {}, new Set(['deploy_frontend']))).toThrow('tool_arguments_invalid');

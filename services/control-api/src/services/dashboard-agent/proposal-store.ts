@@ -85,3 +85,43 @@ export async function persistPreparedApproval(pool: pg.Pool, input: PersistPrepa
     throw error;
   } finally { client.release(); }
 }
+
+/** Expiry and the original model call's terminal result are indivisible. */
+export async function expireProposalAndCompleteCall(pool: pg.Pool, input: {
+  approval: Approval;
+  code: 'proposal_state_changed' | 'proposal_review_required';
+  resolvedBy?: string | null;
+  afterExpire?: (client: pg.PoolClient) => Promise<void>;
+}): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const expired = await client.query(
+      `UPDATE dashboard_agent_approvals SET status='expired',resolved_at=now(),resolved_by=$2,deny_reason=$3
+       WHERE id=$1 AND status='pending' RETURNING id`,
+      [input.approval.id,input.resolvedBy ?? null,input.code],
+    );
+    if (!expired.rowCount) { await client.query('ROLLBACK'); return false; }
+    const paused = await client.query(
+      `SELECT * FROM dashboard_agent_messages WHERE pending_approval_id=$1 AND conversation_id=$2 FOR UPDATE`,
+      [input.approval.id,input.approval.conversationId],
+    );
+    const message = paused.rows[0];
+    if (!message?.tool_call_id) throw new Error('proposal_paused_call_missing');
+    const result = JSON.stringify({ code: input.code, executed: false, message: 'Prepare this same operation again with current details and an explicit reason before requesting owner review.' });
+    const replaced = await client.query(
+      `UPDATE dashboard_agent_messages SET tool_name=$3,tool_args=$4,tool_result=$5
+       WHERE conversation_id=$1 AND role='tool' AND tool_call_id=$2`,
+      [input.approval.conversationId,message.tool_call_id,message.tool_name,JSON.stringify(message.tool_args),result],
+    );
+    if (!replaced.rowCount) await client.query(
+      `INSERT INTO dashboard_agent_messages(conversation_id,role,content,tool_call_id,tool_name,tool_args,tool_result)
+       VALUES($1,'tool','',$2,$3,$4,$5)`,
+      [input.approval.conversationId,message.tool_call_id,message.tool_name,JSON.stringify(message.tool_args),result],
+    );
+    await client.query('UPDATE dashboard_agent_messages SET pending_approval_id=NULL WHERE id=$1', [message.id]);
+    if (input.afterExpire) await input.afterExpire(client);
+    await client.query('COMMIT'); return true;
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
+}

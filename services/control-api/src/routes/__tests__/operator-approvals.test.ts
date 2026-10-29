@@ -13,6 +13,11 @@ vi.mock('../../services/dashboard-agent/approvals-store.js', async (importOrigin
   resolveApproval: vi.fn(),
 }));
 vi.mock('../../services/dashboard-agent/tool-bridge.js', () => ({ executeOnce: vi.fn() }));
+// These unit cases stub all persistence and have no database connection.
+// Session-lock serialization is exercised by the real-database race suite.
+vi.mock('../../services/dashboard-agent/approval-resolution-lock.js', () => ({
+  withApprovalResolutionLock: async (pool: unknown, approval: unknown, work: (pool: unknown, approval: unknown) => Promise<unknown>) => work(pool, approval),
+}));
 // resolveOperatorApproval delegates its persistence to resume.ts, which reads
 // and writes messages. Stub only those four; the rest of the store is left
 // real so the route module's other imports still resolve.
@@ -348,6 +353,9 @@ describe('operator route membership wiring', () => {
       status: 'approved',
       resolvedAt: '2026-10-27T10:00:00.000Z',
       source: 'office',
+      toolArgs: { action: 'propose', payload: { token: 'private-credential', nested: { api_key: 'private-credential', name: 'Visible field' } } },
+      approvedOperation: { version: 1, toolName: 'manage_substrate', args: { token: 'private-operation' } },
+      proposalDetails: null,
     } as any);
 
     const res = await app.inject({
@@ -360,21 +368,36 @@ describe('operator route membership wiring', () => {
     expect(res.json()).toEqual({
       approval: {
         id: 'appr-1',
+        conversationId: 'conv-1',
+        turnMessageId: 'msg-1',
+        toolName: 'manage_substrate',
+        toolArgs: { action: 'propose', payload: { token: '[redacted]', nested: { api_key: '[redacted]', name: 'Visible field' } } },
+        sensitivity: 'destructive',
         status: 'approved',
+        trustScope: null,
+        denyReason: null,
+        createdAt: '',
+        resolvedAt: '2026-10-27T10:00:00.000Z',
         resolved_at: '2026-10-27T10:00:00.000Z',
         source: 'office',
         tool_name: 'manage_substrate',
         created_at: '',
         references: [],
+        review: { reviewStatus: 'legacy', proposal: null, executionOutcome: null, permittedActions: { approve: false, decline: false, requestReview: false } },
       },
     });
-    // No transcript, arguments or recorded operation cross this route.
+    // Older argument displays are sanitized; executable metadata stays private.
     expect(res.body).not.toContain('tool_args');
     expect(res.body).not.toContain('approved_operation');
+    expect(res.json().approval).not.toHaveProperty('approvedOperation');
+    expect(res.json().approval).not.toHaveProperty('proposalDetails');
+    expect(res.json().approval).not.toHaveProperty('transcript');
+    expect(res.body).not.toContain('private-credential');
+    expect(res.body).not.toContain('private-operation');
     expect(mockGet).toHaveBeenCalledWith(expect.anything(), 'appr-1', ORG_A);
   });
 
-  it('includes the approval references without opening the transcript', async () => {
+  it('omits unverified legacy references without opening the transcript', async () => {
     memberQuery();
     mockGet.mockResolvedValue({
       ...approval,
@@ -389,14 +412,14 @@ describe('operator route membership wiring', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().approval.references).toEqual([
-      { kind: 'record', id: 'ent_1', label: 'Marcus Webb' },
-    ]);
+    expect(res.json().approval.references).toEqual([]);
+    expect(res.json().approval.review).toMatchObject({ reviewStatus: 'legacy', proposal: null, permittedActions: { approve: false } });
+    expect(res.body).not.toContain('Marcus Webb');
     expect(res.body).not.toContain('tool_args');
     expect(res.body).not.toContain('approved_operation');
   });
 
-  it('includes references in the pending list', async () => {
+  it('omits unverified legacy references in the pending list', async () => {
     query.mockResolvedValue({ rows: [{ organization_id: ORG_A }], rowCount: 1 });
     mockList.mockResolvedValue([
       {
@@ -413,9 +436,9 @@ describe('operator route membership wiring', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().approvals[0].references).toEqual([
-      { kind: 'file', label: 'Invoice #1042' },
-    ]);
+    expect(res.json().approvals[0].references).toEqual([]);
+    expect(res.json().approvals[0].review).toMatchObject({ reviewStatus: 'legacy', proposal: null, permittedActions: { approve: false } });
+    expect(res.body).not.toContain('Invoice #1042');
   });
 
   it('also returns a pending approval, so the phase can distinguish waiting from resolved', async () => {

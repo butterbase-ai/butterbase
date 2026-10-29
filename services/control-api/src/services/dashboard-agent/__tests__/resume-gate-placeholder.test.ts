@@ -17,6 +17,8 @@
 import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest';
 import type pg from 'pg';
 
+vi.mock('../approval-resolution-lock.js', () => ({ withApprovalResolutionLock: async (pool: unknown, approval: unknown, work: any) => work(pool, approval) }));
+
 vi.mock('../store.js', () => ({
   getMessageByPendingApprovalId: vi.fn(),
   clearPendingApproval: vi.fn(),

@@ -46,6 +46,7 @@ import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop.js';
 import type { DeployTreeStore } from '../deploy-tree-store.js';
 import type { WorkingTree } from '../working-tree.js';
+import { setApprovalProposalProvider } from '../approval-proposal.js';
 
 const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
 const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
@@ -155,6 +156,8 @@ function humanInput(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  // Compatibility backend: provider installed, new writers explicitly off.
+  setApprovalProposalProvider({ enabled: () => false, prepare: async () => { throw Error('writer off'); }, revalidate: async () => ({ status: 'unavailable', code: 'proposal_review_unavailable' }) });
   vi.clearAllMocks();
   mockAppendMessage.mockResolvedValue(stubMessage);
   mockListMessages.mockResolvedValue([]);

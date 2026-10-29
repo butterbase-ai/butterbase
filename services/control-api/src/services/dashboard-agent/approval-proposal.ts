@@ -158,6 +158,7 @@ export interface ApprovalProposalProvider {
   enabled(organizationId: string): boolean;
   /** Pure action-specific parsing, shared with dispatch; never reads targets. */
   validateArguments?(toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>>;
+  canRead?(context: ProposalContext, saved: PreparedProposal): Promise<boolean>;
   prepare(context: ProposalContext, input: ProposalInput): Promise<PreparationResult>;
   revalidate(context: ProposalContext, saved: PreparedProposal): Promise<ProposalVerification>;
 }

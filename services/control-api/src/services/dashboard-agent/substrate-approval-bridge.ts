@@ -87,6 +87,9 @@ import {
 } from './approval-operation.js';
 import { WorkingTreeCache } from './working-tree.js';
 import type { DeployTreeStore } from './deploy-tree-store.js';
+import { verifyPreparedApproval } from './proposal-review.js';
+import { validateProposalToolArguments } from './proposal-validation.js';
+import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { createHttpFrontendMcp } from './frontend-http.js';
@@ -417,7 +420,9 @@ export async function executeApprovedOperatorTool(
      * the operator's in-process deploy tools (which need its conversation id
      * to find the working tree). Optional only for direct/legacy callers.
      */
-    approval?: Pick<Approval, 'approvedOperation' | 'conversationId' | 'toolName' | 'toolArgs'> | null;
+    approval?: Pick<Approval, 'approvedOperation' | 'conversationId' | 'toolName' | 'toolArgs' | 'proposalDetails' | 'executionOutcome'> | null;
+    actorUserId?: string;
+    origin?: 'operator' | 'office';
     /** Whether this turn is governed by the customer Office contract. */
     officeConsequential?: boolean;
     /** The process's working-tree singleton; required to replay a deploy. */
@@ -431,6 +436,7 @@ export async function executeApprovedOperatorTool(
     treeStore?: DeployTreeStore;
   },
 ): Promise<McpCallResult> {
+  if (opts.approval?.proposalDetails && LOCAL_DEPLOY_TOOLS.has(opts.name) && !opts.treeStore) return { ok: false, code: 'proposal_review_unavailable', error: 'The saved deployment source cannot currently be read.' };
   // The snapshot, when present, REPLACES the process-local cache for a deploy.
   // Resolved before verification so "propose A, resolve on another machine"
   // verifies against the persisted A rather than an empty map. A missing
@@ -444,7 +450,9 @@ export async function executeApprovedOperatorTool(
     cache: opts.cache,
     treeStore: opts.treeStore,
   });
-  if (resolvedCache.refusal) return resolvedCache.refusal;
+  if (resolvedCache.refusal) return opts.approval?.proposalDetails
+    ? { ok: false, code: 'proposal_review_unavailable', error: 'The saved deployment source cannot currently be read.' }
+    : resolvedCache.refusal;
   const cache = resolvedCache.cache;
 
   // Ahead of executeOnce, the advisory lock and every dispatch: an approval
@@ -457,6 +465,15 @@ export async function executeApprovedOperatorTool(
     cache,
   });
   if (refused) return refused;
+
+  if (opts.officeConsequential || opts.approval?.proposalDetails) {
+    if (!opts.approval?.proposalDetails || !opts.approval.approvedOperation) return { ok: false, code: 'proposal_review_required', error: 'Request a complete proposal before approving this legacy action.' };
+    const access = await evaluateOperatorAccess({ organizationId: opts.orgId, actorUserId: opts.actorUserId, origin: opts.origin ?? 'operator', phase: 'execute' });
+    const owner = opts.actorUserId ? await pool.query(`SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2 LIMIT 1`, [opts.orgId,opts.actorUserId]) : { rows: [] };
+    if (!access.allowed || owner.rows[0]?.role !== 'owner') return { ok: false, code: 'office_access_blocked', error: 'Current owner access is required.' };
+    const verification = await verifyPreparedApproval({ organizationId: opts.orgId, actorUserId: opts.actorUserId, origin: opts.origin ?? 'operator', conversationId: opts.approval.conversationId, operation: opts.approval.approvedOperation, validateRegisteredToolArguments: validateProposalToolArguments }, opts.approval as Approval);
+    if (verification.status !== 'valid') return { ok: false, code: verification.code, error: verification.code };
+  }
 
   // Bound to a const so the type predicate's narrowing survives to the uses
   // below (TypeScript does not preserve aliased narrowing through a mutable
@@ -553,6 +570,9 @@ export async function executeApprovedOperatorTool(
     return { ok: false, error: `substrate approve failed: ${approvedEnvelope.text}` };
   }
 
+  // The final native result, rather than the intermediate parked propose,
+  // is authoritative for crash recovery and execution reporting.
+  await pool.query('UPDATE dashboard_agent_tool_executions SET result=$2 WHERE approval_id=$1', [opts.approvalId, JSON.stringify(approved)]);
   // The turn resumes with the EXECUTED outcome, not the pending propose.
   return approved;
 }

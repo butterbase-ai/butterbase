@@ -197,9 +197,13 @@ export async function executeOnce(
       return cached.rows[0].result;
     }
 
-    const result = opts.dispatch
+    let result = opts.dispatch
       ? await opts.dispatch({ name: opts.name, args: opts.args })
       : await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId, opts.traceId);
+
+    if (result.ok && (result.result as { isError?: unknown } | null)?.isError === true) {
+      result = { ok: false, code: 'tool_rejected', error: 'The tool rejected this operation.' };
+    }
 
     if (result.ok) {
       await client.query(

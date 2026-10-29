@@ -174,6 +174,13 @@ beforeEach(() => {
 });
 
 describe('structured proposal gate', () => {
+  it('creates no Office owner gate when its required preparation provider is absent', async () => {
+    setApprovalProposalProvider(null);
+    oneToolCallThenStop('manage_substrate', { action: 'cancel_outbox', outbox_id: 'obx_synthetic' });
+    const events = await collect(runAgentTurn(operatorInput({ accessGuard: async () => ({ allowed: true, approvalMode: 'consequential', reason: null }) })));
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(events.some(e => e.type === 'tool_result' && JSON.stringify(e).includes('proposal_unavailable'))).toBe(true);
+  });
   const operation = { tool: 'manage_substrate', arguments: { action: 'cancel_outbox', outbox_id: 'obx_synthetic' } };
   const ready = () => PreparedProposalSchema.parse({ version: 1, source: 'explicit', preparedAt: new Date().toISOString(), intentFingerprint: 'a'.repeat(64), operationFingerprint: 'b'.repeat(64), reason: { text: 'Obsolete draft.', attribution: 'operator' }, evidence: [], preview: { title: 'Cancel draft?', summary: 'Stops delivery.', target: { label: 'Draft', reference: 'obx_synthetic' }, effects: ['Stops attempts.'], fields: [] }, preconditions: [{ kind: 'outbox', referenceId: 'obx_synthetic', fingerprint: 'c'.repeat(64) }] });
   function install(result: any = { status: 'ready', proposal: ready() }) {
@@ -261,4 +268,3 @@ describe('structured proposal gate', () => {
     expect(events.some(e => e.type === 'tool_result' && JSON.stringify(e).includes('proposal_review_unavailable'))).toBe(true);
   });
 });
-

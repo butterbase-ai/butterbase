@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createRegisteredToolServer } from '@butterbase/mcp-server/tool-registry';
+import { createRegisteredToolValidator, validateRegisteredToolArguments } from '@butterbase/mcp-server/tool-validation';
 
 const Id = z.string().trim().min(1).max(128);
 const App = { app_id: Id };
@@ -28,6 +31,18 @@ export const LocalOperationSchemas: Record<string, z.ZodTypeAny> = {
 };
 
 export type ValidatedOperation = { toolName: string; args: Record<string, unknown> };
+export type ProposalToolValidator = (name: string, args: unknown) => Promise<ValidatedOperation>;
+let proposalToolValidator: ProposalToolValidator | null = null;
+export function setProposalToolValidator(validator: ProposalToolValidator | null): void { proposalToolValidator = validator; }
+export function validateProposalToolArguments(name: string, args: unknown): Promise<ValidatedOperation> {
+  return (proposalToolValidator ?? validateRegisteredToolArguments)(name, args);
+}
+/** Cloud bootstrap supplies the exact overlay registrations explicitly. This
+ * also works in source checkouts without the production bundled directory. */
+export async function createProposalToolValidator(registerOverlays: (server: McpServer) => void | Promise<void>): Promise<ProposalToolValidator> {
+  const validator = createRegisteredToolValidator(await createRegisteredToolServer({ registerOverlays }));
+  return (name, args) => validator.validate(name, args);
+}
 export class ProposalValidationError extends Error {
   constructor(readonly code: 'tool_unavailable' | 'tool_arguments_invalid' | 'proposal_invalid') { super(code); }
 }

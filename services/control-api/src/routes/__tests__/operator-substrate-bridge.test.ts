@@ -391,8 +391,8 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
   });
 
-  it('a propose that substrate itself rejected is surfaced unchanged, with no approve attempt', async () => {
-    const { approval } = await pauseOnGatedTool(GATED_PROPOSE);
+  it('a rejected propose remains pending with no completion or native approve attempt', async () => {
+    const { approval, conversationId, toolCallId } = await pauseOnGatedTool(GATED_PROPOSE);
 
     mockCallMcpTool.mockResolvedValueOnce(mcpToolError({ error: 'capability blocked by principle' }));
 
@@ -402,8 +402,17 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
       jwt: 'jwt-token',
       resolution: { status: 'approved' },
     });
-    // callMcpTool reported ok, so this resolves — the model sees the error text.
-    expect(outcome).toEqual({ ok: true });
+    // MCP transport success cannot turn a tool-level rejection into execution.
+    expect(outcome).toEqual({ ok: false, code: 502, error: 'Tool execution failed: The tool rejected this operation.' });
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect((mockCallMcpTool.mock.calls[0][1] as { action: string }).action).toBe('propose');
+    expect((await getApprovalForOrg(pool, approval.id, ORG))?.status).toBe('pending');
+    const messages = await listMessages(pool, conversationId);
+    expect(toolRow(messages, toolCallId)).toBeUndefined();
+    expect(messages.find(message => message.role === 'assistant' && message.toolCallId === toolCallId)?.pendingApprovalId).toBe(approval.id);
+    const cached = await pool.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM dashboard_agent_tool_executions WHERE approval_id = $1', [approval.id],
+    );
+    expect(cached.rows[0].n).toBe(0);
   });
 });

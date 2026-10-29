@@ -66,8 +66,17 @@ import { setOperatorAccessPolicy } from '../../services/dashboard-agent/operator
 import {
   captureApprovalOperation,
   functionSourceArtifact,
+  readApprovedOperation,
   workingTreeArtifact,
+  type ApprovedOperation,
 } from '../../services/dashboard-agent/approval-operation.js';
+import {
+  PreparedProposalSchema,
+  proposalFingerprint,
+  proposalIntentFingerprint,
+  setApprovalProposalProvider,
+} from '../../services/dashboard-agent/approval-proposal.js';
+import { createProposalToolValidator, setProposalToolValidator } from '../../services/dashboard-agent/proposal-validation.js';
 import { getSharedWorkingTreeCache } from '../../services/dashboard-agent/loop.js';
 import { getSharedDeployTreeStore } from '../../services/dashboard-agent/deploy-tree-store.js';
 
@@ -366,6 +375,7 @@ async function seedConsequentialApproval(input: {
   const messageId = randomUUID();
   const toolName = input.toolName ?? 'insert_row';
   const toolArgs = input.toolArgs ?? { app_id: 'app-1', table: 'tickets', data: { status: 'done' } };
+  const operation = readApprovedOperation(input.approvedOperation);
   const approval = await createApproval(pool, {
     conversationId,
     turnMessageId: messageId,
@@ -373,6 +383,7 @@ async function seedConsequentialApproval(input: {
     toolArgs,
     sensitivity: 'destructive',
     approvedOperation: (input.approvedOperation ?? null) as never,
+    proposalDetails: operation ? preparedDetails(operation) : null,
   });
   await appendMessage(
     pool, conversationId,
@@ -386,9 +397,45 @@ async function seedConsequentialApproval(input: {
   return { conversationId, approval };
 }
 
+/** The target adapter is a test seam here: authorization, operation identity,
+ * saved source, execution locking and transcript persistence remain real. */
+function preparedDetails(operation: ApprovedOperation) {
+  const target = operation.targetAppId ?? 'synthetic-target';
+  return PreparedProposalSchema.parse({
+    version: 1,
+    source: 'explicit',
+    preparedAt: new Date().toISOString(),
+    operationFingerprint: proposalFingerprint(operation),
+    intentFingerprint: proposalIntentFingerprint(operation.toolName, operation.args, operation.artifact),
+    reason: { text: 'Apply this exact synthetic fixture change.', attribution: 'operator' },
+    evidence: [],
+    preview: {
+      title: 'Apply the reviewed fixture change?',
+      summary: 'Execute the recorded operation against the synthetic fixture target.',
+      target: { label: 'Synthetic fixture application', reference: target },
+      effects: ['Applies this exact recorded change.'],
+      fields: [],
+      ...(operation.artifact?.referenceId ? { artifact: operation.artifact } : {}),
+    },
+    preconditions: [{ kind: 'app', referenceId: target, fingerprint: proposalFingerprint({ fixtureTarget: target }) }],
+  });
+}
+
 describe('Task 8 — Office consequential approval authorization', () => {
+  beforeEach(async () => {
+    setProposalToolValidator(await createProposalToolValidator(() => {}));
+    setApprovalProposalProvider({
+      enabled: () => true,
+      prepare: async () => ({ status: 'blocked', code: 'proposal_unreviewable', message: 'The fixture inserts its server-prepared metadata directly.' }),
+      revalidate: async (context, saved) => proposalFingerprint(context.operation) === saved.operationFingerprint
+        ? { status: 'valid' }
+        : { status: 'changed', code: 'proposal_state_changed' },
+    });
+  });
   afterEach(() => {
     setOperatorAccessPolicy(null);
+    setApprovalProposalProvider(null);
+    setProposalToolValidator(null);
   });
 
   it('a member cannot approve; the owner can', async () => {
@@ -576,6 +623,7 @@ describe('Task 8 — Office consequential approval authorization', () => {
         toolArgs,
         sensitivity: 'destructive',
         approvedOperation: opA,
+        proposalDetails: preparedDetails(opA),
       });
       // Execution reads the persisted snapshot, not the live cache.
       await getSharedDeployTreeStore().save(approval.id, cache.get(conversationId, 'app-1')!);
@@ -602,11 +650,13 @@ describe('Task 8 — Office consequential approval authorization', () => {
       });
 
       expect(outcome).toMatchObject({ ok: false, code: 409 });
-      expect((outcome as { error: string }).error).toContain('approval_operation_changed');
+      expect((outcome as { error: string }).error).toBe('proposal_state_changed');
       expect(fetchMock).not.toHaveBeenCalled();
       expect(mockCallMcpTool).not.toHaveBeenCalled();
-      // Still pending, so the owner can re-propose or deny.
-      expect((await getApprovalForOrg(pool, approval.id, orgId))!.status).toBe('pending');
+      // A stale prepared gate expires and completes its original tool call so
+      // the operator can prepare a fresh review without a transcript wedge.
+      expect((await getApprovalForOrg(pool, approval.id, orgId))!.status).toBe('expired');
+      expect(unansweredToolCalls(await listMessages(pool, conversationId))).toEqual([]);
     } finally {
       cache.evict(conversationId, 'app-1');
       await pool.query(`DELETE FROM dashboard_agent_conversations WHERE id = $1`, [conversationId]);
@@ -628,13 +678,15 @@ describe('Task 8 — Office consequential approval authorization', () => {
       cache.write(conversationId, 'app-1', 'src/App.tsx', 'artifact A');
       const artifact = workingTreeArtifact('app-1', cache.get(conversationId, 'app-1'));
       const toolArgs = { app_id: 'app-1' };
+      const operation = captureApprovalOperation({ toolName: 'deploy_frontend', args: toolArgs, artifact });
       const approval = await createApproval(pool, {
         conversationId,
         turnMessageId: randomUUID(),
         toolName: 'deploy_frontend',
         toolArgs,
         sensitivity: 'destructive',
-        approvedOperation: captureApprovalOperation({ toolName: 'deploy_frontend', args: toolArgs, artifact }),
+        approvedOperation: operation,
+        proposalDetails: preparedDetails(operation),
       });
       await getSharedDeployTreeStore().save(approval.id, cache.get(conversationId, 'app-1')!);
       await appendMessage(
@@ -713,15 +765,15 @@ describe('Task 8 — Office consequential approval authorization', () => {
         'app-1:send-receipt', 'send-receipt', cache.get(conversationId, 'app-1'),
       );
       const toolArgs = { app_id: 'app-1', function_name: 'send-receipt' };
+      const operation = captureApprovalOperation({ toolName: 'deploy_function_from_workspace', args: toolArgs, artifact });
       const approval = await createApproval(pool, {
         conversationId,
         turnMessageId: randomUUID(),
         toolName: 'deploy_function_from_workspace',
         toolArgs,
         sensitivity: 'destructive',
-        approvedOperation: captureApprovalOperation({
-          toolName: 'deploy_function_from_workspace', args: toolArgs, artifact,
-        }),
+        approvedOperation: operation,
+        proposalDetails: preparedDetails(operation),
       });
       await getSharedDeployTreeStore().save(approval.id, cache.get(conversationId, 'app-1')!);
       await appendMessage(
