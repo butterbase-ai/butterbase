@@ -107,6 +107,7 @@ function substrateLedger(gate: { approve?: Promise<void>; reject?: Promise<void>
       return mcpEnvelope({
         action_id: ACTION_ID,
         status: action === 'approve' ? 'executed' : 'rejected',
+        ...(action === 'approve' ? { executed: true } : {}),
       });
     }
     return mcpEnvelope(
@@ -303,7 +304,7 @@ describe('I-1 — exactly-once is preserved for the call that does own the key',
 
     // Still pending, so the retry re-attempts the call rather than replaying.
     expect((await getApprovalForOrg(pool, approval.id, ORG))!.status).toBe('pending');
-    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ action_id: ACTION_ID, status: 'executed' }) as never);
+    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ action_id: ACTION_ID, status: 'executed', executed: true }) as never);
     const retry = await resolveOperatorApproval(pool, {
       approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', userId: USER,
       resolution: { status: 'approved' },

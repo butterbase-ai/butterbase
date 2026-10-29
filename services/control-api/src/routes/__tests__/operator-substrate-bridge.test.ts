@@ -198,7 +198,7 @@ describe('C2b — no second call when substrate did not gate', () => {
     });
 
     mockCallMcpTool.mockResolvedValue(
-      mcpOk({ action_id: 'act_auto', requires_approval: false, result: { decision_id: 'dec_1' } }),
+      mcpOk({ action_id: 'act_auto', status: 'executed', requires_approval: false, verdict: { result: 'auto_approved' }, result: { decision_id: 'dec_1' } }),
     );
 
     const outcome = await resolveOperatorApproval(pool, {
@@ -220,7 +220,7 @@ describe('C2b — no second call when substrate did not gate', () => {
     // buildReplayResult sets requires_approval = (status === 'proposed'), so an
     // action past `proposed` replays as false.
     mockCallMcpTool.mockResolvedValue(
-      mcpOk({ action_id: 'act_replay', requires_approval: false, replay: true, result: { ok: true } }),
+      mcpOk({ action_id: 'act_replay', status: 'executed', requires_approval: false, verdict: { result: 'auto_approved' }, replay: true, result: { ok: true } }),
     );
 
     await resolveOperatorApproval(pool, {
@@ -403,7 +403,7 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
       resolution: { status: 'approved' },
     });
     // MCP transport success cannot turn a tool-level rejection into execution.
-    expect(outcome).toEqual({ ok: false, code: 502, error: 'Tool execution failed: The tool rejected this operation.' });
+    expect(outcome).toEqual({ ok: false, code: 502, error: 'Tool execution failed: The operation may have taken effect; reconcile its outcome before retrying.' });
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
     expect((mockCallMcpTool.mock.calls[0][1] as { action: string }).action).toBe('propose');
     expect((await getApprovalForOrg(pool, approval.id, ORG))?.status).toBe('pending');

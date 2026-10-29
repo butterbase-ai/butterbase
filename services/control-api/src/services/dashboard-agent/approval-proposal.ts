@@ -107,14 +107,18 @@ export function readExecutionOutcome(value: unknown): ExecutionOutcome | null {
 }
 
 const CREDENTIAL_FIELD = /password|passwd|secret|token|authorization|credential|private.?key|api.?key|cookie/i;
+const ENVIRONMENT_FIELD = /^(env|envVars|env_vars|environment|environmentVariables)$/i;
 /** Only structured argument display. This does not claim to sanitize arbitrary source. */
 export function redactProposalArguments(value: unknown, depth = 0): unknown {
   if (depth > 20) return '[unavailable]';
   if (Array.isArray(value)) return value.map(item => redactProposalArguments(item, depth + 1));
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
-      CREDENTIAL_FIELD.test(key) ? '[redacted]' : redactProposalArguments(item, depth + 1),
-    ]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+      if (ENVIRONMENT_FIELD.test(key)) return [key, item && typeof item === 'object' && !Array.isArray(item)
+        ? Object.fromEntries(Object.entries(item).map(([name, entry]) => [name, entry === null ? null : '[redacted]']))
+        : '[redacted]'];
+      return [key, CREDENTIAL_FIELD.test(key) ? '[redacted]' : redactProposalArguments(item, depth + 1)];
+    }));
   }
   return value;
 }

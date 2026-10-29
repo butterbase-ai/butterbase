@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { normalizeExecutionResult } from './execution-outcome.js';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
 import { principalMayExecute, orgIdArgIsForeign, type OperatorPrincipal } from './operator-policy.js';
 
@@ -194,16 +195,14 @@ export async function executeOnce(
     );
     if (cached.rows.length > 0) {
       await client.query('COMMIT');
-      return cached.rows[0].result;
+      return normalizeExecutionResult({ toolName: opts.name, toolArgs: opts.args }, cached.rows[0].result);
     }
 
     let result = opts.dispatch
       ? await opts.dispatch({ name: opts.name, args: opts.args })
       : await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId, opts.traceId);
 
-    if (result.ok && (result.result as { isError?: unknown } | null)?.isError === true) {
-      result = { ok: false, code: 'tool_rejected', error: 'The tool rejected this operation.' };
-    }
+    result = normalizeExecutionResult({ toolName: opts.name, toolArgs: opts.args }, result);
 
     if (result.ok) {
       await client.query(

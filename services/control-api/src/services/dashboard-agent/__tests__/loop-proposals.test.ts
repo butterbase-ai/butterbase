@@ -267,4 +267,19 @@ describe('structured proposal gate', () => {
     expect(events.some(e => e.type === 'approval_required')).toBe(false);
     expect(events.some(e => e.type === 'tool_result' && JSON.stringify(e).includes('proposal_review_unavailable'))).toBe(true);
   });
+  it('recovers dynamic escalation in a foreground Office conversation after a new turn', async () => {
+    const prepare = install();
+    mockGetConversation.mockResolvedValue({ id: 'conv-1', userId: HUMAN_USER, origin: 'office', organizationId: ORG_ID } as any);
+    const args = { action: 'propose', capability: 'revert_action', payload: { action_id: 'act_original' } };
+    const input = humanInput({ accessGuard: async () => ({ allowed: true, approvalMode: 'consequential', reason: null }) });
+    mockCallMcpTool.mockImplementation(async () => ({ ok: true, result: { content: [{ type: 'text', text: JSON.stringify({ action_id: 'act_parked', requires_approval: true }) }] } }));
+    oneToolCallThenStop('manage_substrate', args);
+    const events = await collect(runAgentTurn(input));
+    expect(events.some(e => e.type === 'tool_result' && JSON.stringify(e).includes('parkedProposal'))).toBe(true);
+    vi.mocked(findParkedProposalIntent).mockResolvedValueOnce('act_parked');
+    oneToolCallThenStop('propose_action', { operation: { tool: 'manage_substrate', arguments: args }, reason: 'Restore the prior record.' });
+    await collect(runAgentTurn(input));
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ origin: 'office', operation: expect.objectContaining({ args: { action: 'approve', action_id: 'act_parked' } }) }), expect.anything());
+    expect(mockCallMcpTool.mock.calls.filter(([, args]) => (args as any)?.action === 'propose')).toHaveLength(1);
+  });
 });

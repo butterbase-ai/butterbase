@@ -85,6 +85,17 @@ const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcp
 const ORG = 'org-wedge-test';
 const pool = new Pool({ connectionString: process.env.CONTROL_TEST_DATABASE_URL });
 
+function mcpSuccess(payload: unknown) {
+  return { ok: true, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } };
+}
+
+function executedProposeResult() {
+  return mcpSuccess({
+    action_id: 'act_1', status: 'executed', requires_approval: false,
+    verdict: { result: 'auto_approved' }, result: { entity_id: 'entity_1' },
+  });
+}
+
 beforeEach(async () => {
   vi.clearAllMocks();
   deployTreeSnapshots.clear();
@@ -150,7 +161,7 @@ function unansweredToolCalls(messages: Message[]): string[] {
 describe('C2 — resolving an operator approval leaves a VALID conversation history', () => {
   it('approve: writes the matching role:tool row and clears pending_approval_id', async () => {
     const { conversationId, approval, toolCallId } = await pauseOnGatedTool();
-    mockCallMcpTool.mockResolvedValue({ ok: true, result: { action_id: 'act_1', status: 'executed' } });
+    mockCallMcpTool.mockResolvedValue(executedProposeResult());
 
     // Pre-state: the history is invalid — this is the wedge.
     expect(unansweredToolCalls(await listMessages(pool, conversationId))).toEqual([toolCallId]);
@@ -175,7 +186,7 @@ describe('C2 — resolving an operator approval leaves a VALID conversation hist
     expect(toolRow.toolName).toBe('manage_substrate');
     // The tool RESULT, unwrapped from the McpCallResult envelope — the same
     // shape resume.ts persists for the human assistant.
-    expect(toolRow.toolResult).toEqual({ action_id: 'act_1', status: 'executed' });
+    expect(toolRow.toolResult).toEqual(executedProposeResult().result);
 
     // 3. No pending marker survives.
     expect(messages.every((m) => m.pendingApprovalId === null)).toBe(true);
@@ -240,7 +251,7 @@ describe('C2 — resolving an operator approval leaves a VALID conversation hist
 
   it('a retried approve replays the cached result and fires the tool once', async () => {
     const { conversationId, approval } = await pauseOnGatedTool();
-    mockCallMcpTool.mockResolvedValue({ ok: true, result: { action_id: 'act_1' } });
+    mockCallMcpTool.mockResolvedValue(executedProposeResult());
 
     const first = await resolveOperatorApproval(pool, {
       approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', resolution: { status: 'approved' },
@@ -279,7 +290,7 @@ describe('C2 — resolving an operator approval leaves a VALID conversation hist
     // approved_by_kind='human' audit row). The approval bridge calls the same
     // action on a person's behalf and must not be caught by that denial.
     const { approval } = await pauseOnGatedTool({ action: 'approve', action_id: 'act_1' });
-    mockCallMcpTool.mockResolvedValue({ ok: true, result: { status: 'executed' } });
+    mockCallMcpTool.mockResolvedValue(mcpSuccess({ action_id: 'act_1', status: 'executed', executed: true }));
 
     const outcome = await resolveOperatorApproval(pool, {
       approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', resolution: { status: 'approved' },
@@ -846,7 +857,7 @@ describe('C2 — a NUL byte in the tool result cannot wedge the conversation', (
     const { conversationId, approval, toolCallId } = await pauseOnGatedTool();
     mockCallMcpTool.mockResolvedValue({
       ok: true,
-      result: { note: `before${NUL}after`, nested: { [`k${NUL}`]: [`v${NUL}`] } },
+      result: { ...executedProposeResult().result, note: `before${NUL}after`, nested: { [`k${NUL}`]: [`v${NUL}`] } },
     });
 
     // No throw escapes.
@@ -868,7 +879,7 @@ describe('C2 — a NUL byte in the tool result cannot wedge the conversation', (
     expect(toolRow.toolCallId).toBe(toolCallId);
     // Stored with the NULs stripped: those bytes are the only way the persisted
     // result differs from what the tool returned.
-    expect(toolRow.toolResult).toEqual({ note: 'beforeafter', nested: { k: ['v'] } });
+    expect(toolRow.toolResult).toEqual({ ...executedProposeResult().result, note: 'beforeafter', nested: { k: ['v'] } });
 
     expect(messages.every((m) => m.pendingApprovalId === null)).toBe(true);
     expect((await getApprovalForOrg(pool, approval.id, ORG))!.status).toBe('approved');

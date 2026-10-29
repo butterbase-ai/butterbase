@@ -219,9 +219,9 @@ async function completeApprovalResolutionUnlocked(
         return { ok: false, code: 409, error: 'proposal_state_changed' };
       }
       if (tracked) {
-        const known = ['tool_rejected', 'proposal_review_unavailable', 'proposal_review_required', 'proposal_invalid', 'office_access_blocked'].includes(call.code ?? '');
+        const known = ['tool_rejected', 'substrate_rejected', 'proposal_review_unavailable', 'proposal_review_required', 'proposal_invalid', 'office_access_blocked'].includes(call.code ?? '');
         await recordExecutionOutcome(pool, approvalId, { ...base, state: known ? 'failed' : 'unconfirmed', finishedAt: new Date().toISOString(), safeErrorCode: known ? call.code! : 'execution_unconfirmed' });
-        return { ok: false, code: known && call.code !== 'tool_rejected' ? 409 : 502, error: known ? call.code! : 'execution_unconfirmed' };
+        return { ok: false, code: known && !['tool_rejected', 'substrate_rejected'].includes(call.code ?? '') ? 409 : 502, error: known ? call.code! : 'execution_unconfirmed' };
       }
       /**
        * A refused IMMUTABLE OPERATION is a 409, not a transport failure.

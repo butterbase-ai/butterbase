@@ -3,20 +3,42 @@ import type { Approval } from './approvals-store.js';
 import { ExecutionOutcomeSchema, type ExecutionOutcome } from './approval-proposal.js';
 import type { McpCallResult } from './mcp-client.js';
 
-export function isConfirmedExecution(approval: Pick<Approval, 'toolName' | 'toolArgs'>, call: McpCallResult): boolean {
-  if (!call?.ok || (call.result as any)?.isError === true) return false;
-  if (approval.toolName === 'manage_substrate' && ['propose', 'approve'].includes((approval.toolArgs as any)?.action)) {
-    const result = call.result as any;
-    try {
-      const text = result?.content?.find((item: any) => item.type === 'text')?.text;
-      if (!text) return false;
-      const parsed = JSON.parse(text);
-      if ((approval.toolArgs as any)?.action === 'approve') return parsed?.executed === true;
-      return parsed?.executed === true || parsed?.requires_approval === false;
-    } catch { return false; }
-  }
-  return true;
+type ExecutionState = 'succeeded' | 'pending' | 'failed' | 'unconfirmed';
+type Executable = Pick<Approval, 'toolName' | 'toolArgs'>;
+function envelopeJson(result: unknown): any {
+  try {
+    const text = (result as any)?.content?.find((item: any) => item.type === 'text')?.text;
+    return typeof text === 'string' ? JSON.parse(text) : null;
+  } catch { return null; }
 }
+/** A transport-success envelope is not proof that an effect succeeded. */
+export function executionState(approval: Executable, call: McpCallResult): ExecutionState {
+  if (!call?.ok || (call.result as any)?.isError === true) return 'unconfirmed';
+  if (approval.toolName === 'invoke_function') {
+    const result = envelopeJson(call.result);
+    return typeof result?.status === 'number' && result.status >= 200 && result.status < 400 ? 'succeeded' : 'unconfirmed';
+  }
+  if (approval.toolName === 'manage_substrate' && ['propose', 'approve'].includes((approval.toolArgs as any)?.action)) {
+    const result = envelopeJson(call.result);
+    if (!result) return 'unconfirmed';
+    if ((approval.toolArgs as any)?.action === 'approve') return result.executed === true ? 'succeeded' : 'unconfirmed';
+    if (result.status === 'rejected' || result.verdict?.result === 'blocked') return 'failed';
+    if (result.executed === true || result.status === 'executed') return 'succeeded';
+    if (result.requires_approval === true && typeof result.action_id === 'string') return 'pending';
+    // Older replicas omit status. Only their explicit committed automatic
+    // verdict proves execution; an ambiguous historical replay does not.
+    return result.requires_approval === false && ['auto_approved', 'auto_approved_yolo', 'auto_approved_user_override'].includes(result.verdict?.result) ? 'succeeded' : 'unconfirmed';
+  }
+  return 'succeeded';
+}
+export function normalizeExecutionResult(approval: Executable, call: McpCallResult): McpCallResult {
+  if (!call.ok) return call;
+  const state = executionState(approval, call);
+  if (state === 'unconfirmed') return { ok: false, code: 'execution_unconfirmed', error: 'The operation may have taken effect; reconcile its outcome before retrying.' };
+  if (state === 'failed') return { ok: false, code: 'substrate_rejected', error: 'Substrate rejected this operation before execution.' };
+  return call;
+}
+export function isConfirmedExecution(approval: Executable, call: McpCallResult): boolean { return executionState(approval, call) === 'succeeded'; }
 export async function readConfirmedExecution(pool: pg.Pool, approval: Approval): Promise<McpCallResult | null> {
   const { rows } = await pool.query('SELECT result FROM dashboard_agent_tool_executions WHERE approval_id=$1', [approval.id]);
   return rows[0] && isConfirmedExecution(approval, rows[0].result) ? rows[0].result : null;

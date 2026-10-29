@@ -9,9 +9,11 @@ export async function findParkedProposalIntent(pool: pg.Pool, organizationId: st
   const { rows } = await pool.query<{ action_id: string }>(
     `SELECT DISTINCT m.tool_result->'parkedProposal'->>'actionId' AS action_id
        FROM dashboard_agent_messages m JOIN dashboard_agent_conversations c ON c.id=m.conversation_id
-      WHERE c.id=$1 AND c.organization_id=$2 AND m.role='tool'
-        AND m.tool_name='manage_substrate' AND m.tool_args->>'action'='propose'
-        AND m.tool_result->>'code'='proposal_incomplete'
+      WHERE c.id=$1 AND c.organization_id=$2
+        AND ((m.role='tool' AND m.tool_name='manage_substrate')
+          OR (m.role='user' AND m.tool_name='proposal_review_handoff'))
+        AND m.tool_args->>'action'='propose'
+        AND m.tool_result->>'code' IN ('proposal_incomplete','proposal_review_required')
         AND m.tool_result->'parkedProposal'->>'intentFingerprint'=$3`,
     [conversationId, organizationId, fingerprint],
   );
@@ -108,7 +110,7 @@ export async function expireProposalAndCompleteCall(pool: pg.Pool, input: {
     );
     const message = paused.rows[0];
     if (!message?.tool_call_id) throw new Error('proposal_paused_call_missing');
-    const result = JSON.stringify({ code: input.code, executed: false, message: 'Prepare this same operation again with current details and an explicit reason before requesting owner review.' });
+    const result = JSON.stringify({ code: input.code, ...(input.code === 'proposal_state_changed' ? { executed: false } : {}), request_authorizes_execution: false, message: 'Prepare this same operation again with current details and an explicit reason before requesting owner review. This request does not authorize execution.' });
     const replaced = await client.query(
       `UPDATE dashboard_agent_messages SET tool_name=$3,tool_args=$4,tool_result=$5
        WHERE conversation_id=$1 AND role='tool' AND tool_call_id=$2`,

@@ -21,7 +21,7 @@ export async function verifyPreparedApproval(context: ProposalContext, approval:
 export async function buildProposalReview(approval: Approval, context: ProposalContext, permitted: ProposalReviewDto['permittedActions']): Promise<ProposalReviewDto> {
   const pending = approval.status === 'pending';
   const executionOutcome = readExecutionOutcome(approval.executionOutcome);
-  const base = { executionOutcome, permittedActions: { approve: false, decline: pending && permitted.decline, requestReview: pending && permitted.requestReview } };
+  const base = { executionOutcome, permittedActions: { approve: false, decline: pending && permitted.decline, requestReview: pending && permitted.requestReview && !['succeeded', 'running', 'unconfirmed'].includes(executionOutcome?.state ?? '') } };
   if (!approval.proposalDetails || !approval.approvedOperation) return { ...base, reviewStatus: 'legacy', proposal: null };
   const provider = getApprovalProposalProvider();
   let readable = false;

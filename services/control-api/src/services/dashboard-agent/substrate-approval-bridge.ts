@@ -90,6 +90,7 @@ import type { DeployTreeStore } from './deploy-tree-store.js';
 import { verifyPreparedApproval } from './proposal-review.js';
 import { validateProposalToolArguments } from './proposal-validation.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
+import { normalizeExecutionResult } from './execution-outcome.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { createHttpFrontendMcp } from './frontend-http.js';
@@ -570,9 +571,12 @@ export async function executeApprovedOperatorTool(
     return { ok: false, error: `substrate approve failed: ${approvedEnvelope.text}` };
   }
 
+  const confirmed = normalizeExecutionResult({ toolName: 'manage_substrate', toolArgs: approveArgs }, approved);
+  if (!confirmed.ok) return confirmed;
+
   // The final native result, rather than the intermediate parked propose,
   // is authoritative for crash recovery and execution reporting.
-  await pool.query('UPDATE dashboard_agent_tool_executions SET result=$2 WHERE approval_id=$1', [opts.approvalId, JSON.stringify(approved)]);
+  await pool.query('UPDATE dashboard_agent_tool_executions SET result=$2 WHERE approval_id=$1', [opts.approvalId, JSON.stringify(confirmed)]);
   // The turn resumes with the EXECUTED outcome, not the pending propose.
   return approved;
 }

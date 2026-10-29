@@ -2859,7 +2859,7 @@ export async function* runAgentTurn(
          * propose as an ordinary tool result: today's behaviour, never a
          * half-paused turn.
          */
-        if (isOperator && call.ok) {
+        if ((isOperator || (isOfficeTurn && structuredProposals)) && call.ok) {
           const escalatedActionId = readSubstrateEscalation(tc.name, tc.args, call.result);
           if (escalatedActionId && structuredProposals) {
             call.result = { code: 'proposal_incomplete', message: 'Substrate parked this operation. Call propose_action with the same operation, an explicit reason and optional references. Do not propose it again.', parkedProposal: { actionId: escalatedActionId, intentFingerprint: proposalIntentFingerprint(tc.name, tc.args) } };

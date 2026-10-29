@@ -1,11 +1,14 @@
 import type pg from 'pg';
-import type { Approval } from './approvals-store.js';
+import { readSubstrateEscalationActionId, type Approval } from './approvals-store.js';
 import { withApprovalResolutionLock } from './approval-resolution-lock.js';
 import { expireProposalAndCompleteCall } from './proposal-store.js';
 import { getOrCreateOperatorConversation, operatorUserId } from './operator-store.js';
-import { getApprovalProposalProvider } from './approval-proposal.js';
-import { stripJsonbNulls } from './store.js';
+import { getApprovalProposalProvider, ProposalInputSchema, proposalIntentFingerprint } from './approval-proposal.js';
+import { stripJsonbNulls, getMessageByPendingApprovalId } from './store.js';
+import { captureApprovalOperation } from './approval-operation.js';
+import { validateProposalToolArguments } from './proposal-validation.js';
 import { resolveOperatorModel } from './operator-turn.js';
+import { readConfirmedExecution } from './execution-outcome.js';
 
 /** The owner requests preparation, never replacement arguments or execution. */
 export async function requestApprovalReview(pool: pg.Pool, input: {
@@ -13,19 +16,45 @@ export async function requestApprovalReview(pool: pg.Pool, input: {
 }): Promise<{ ok: true; resume: 'queued' | 'waiting' } | { ok: false }> {
   return withApprovalResolutionLock(pool, input.approval, async (scoped, current) => {
     if (!current || current.status !== 'pending') return { ok: false };
+    if (await readConfirmedExecution(scoped, current) || current.executionOutcome?.state === 'succeeded') return { ok: false };
     if (current.executionOutcome && ['running', 'unconfirmed'].includes(current.executionOutcome.state)) return { ok: false };
+    let operation = current.approvedOperation ?? captureApprovalOperation({ toolName: current.toolName, args: current.toolArgs });
+    let parkedProposal: { actionId: string; intentFingerprint: string } | null = null;
+    const actionId = readSubstrateEscalationActionId(current);
+    const paused = actionId ? await getMessageByPendingApprovalId(scoped, current.id) : null;
+    if (actionId) {
+      // Recover only the server-bound parked action and original model intent.
+      // A model-facing wrapper must never be told to supply an approve call.
+      let intent = paused ? { tool: paused.toolName, arguments: paused.toolArgs } : null;
+      if (paused?.toolName === 'propose_action') {
+        const parsed = ProposalInputSchema.safeParse(paused.toolArgs);
+        intent = parsed.success ? parsed.data.operation : null;
+      }
+      if (intent?.tool !== 'manage_substrate' || (intent.arguments as any)?.action !== 'propose') return { ok: false };
+      try {
+        const parsed = await validateProposalToolArguments(intent.tool, intent.arguments);
+        const provider = getApprovalProposalProvider();
+        const args = provider?.validateArguments ? await provider.validateArguments(parsed.toolName, parsed.args) : parsed.args;
+        operation = captureApprovalOperation({ toolName: parsed.toolName, args });
+        parkedProposal = { actionId, intentFingerprint: proposalIntentFingerprint(parsed.toolName, args) };
+      } catch { return { ok: false }; }
+    }
     let queued = false;
     const expired = await expireProposalAndCompleteCall(scoped, {
       approval: current, code: 'proposal_review_required', resolvedBy: input.actorUserId,
       afterExpire: async client => {
+        if (parkedProposal && paused?.toolCallId) await client.query(
+          `UPDATE dashboard_agent_messages SET tool_result=tool_result || $3::jsonb
+           WHERE conversation_id=$1 AND role='tool' AND tool_call_id=$2`,
+          [current.conversationId,paused.toolCallId,JSON.stringify({ parkedProposal })],
+        );
         const conversation = await client.query('SELECT user_id FROM dashboard_agent_conversations WHERE id=$1', [current.conversationId]);
         if (conversation.rows[0]?.user_id !== operatorUserId(input.organizationId)) {
           // Hand off only the org-shared frozen operation. A member's private
           // conversation is never impersonated or copied to the operator.
           const operatorConversationId = await getOrCreateOperatorConversation(client as unknown as pg.Pool, input.organizationId, resolveOperatorModel());
-          const operation = current.approvedOperation ?? { toolName: current.toolName, args: current.toolArgs };
           const content = '=== PROPOSAL REVIEW REQUEST (platform-authored) ===\n' + JSON.stringify(stripJsonbNulls({ approval_id: current.id, operation, requested_by: input.actorUserId })) + '\nThe owner requested a complete proposal for this frozen operation. Verify its current target and any supporting records, explain your reason, then use propose_action. This request does not authorize execution. Do not invent intent from a sweep summary.\n=== END PROPOSAL REVIEW REQUEST ===';
-          await client.query(`INSERT INTO dashboard_agent_messages(conversation_id,role,content) VALUES($1,'user',$2)`, [operatorConversationId, content]);
+          await client.query(`INSERT INTO dashboard_agent_messages(conversation_id,role,content,tool_name,tool_args,tool_result) VALUES($1,'user',$2,$3,$4,$5)`, [operatorConversationId, content, parkedProposal ? 'proposal_review_handoff' : null, parkedProposal ? JSON.stringify(operation.args) : null, parkedProposal ? JSON.stringify({ code: 'proposal_review_required', parkedProposal }) : null]);
           await client.query('UPDATE dashboard_agent_conversations SET last_message_at=now(),updated_at=now() WHERE id=$1', [operatorConversationId]);
         }
         if (input.mayRun && getApprovalProposalProvider()?.enabled(input.organizationId)) {

@@ -11,6 +11,16 @@ const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcp
 const ORG = 'org-bridge-test';
 const pool = new Pool({ connectionString: process.env.CONTROL_TEST_DATABASE_URL });
 
+function executedProposeResult() {
+  return {
+    ok: true,
+    result: { content: [{ type: 'text', text: JSON.stringify({
+      action_id: 'act_1', status: 'executed', requires_approval: false,
+      verdict: { result: 'auto_approved' }, result: { decision_id: 'dec_1' },
+    }) }] },
+  };
+}
+
 beforeEach(async () => {
   vi.clearAllMocks();
   await pool.query(
@@ -56,7 +66,7 @@ describe('executeOnce', () => {
 
   it('executes once and caches the result', async () => {
     const approval = await makeApproval();
-    mockCallMcpTool.mockResolvedValue({ ok: true, result: { id: 'act_1' } });
+    mockCallMcpTool.mockResolvedValue(executedProposeResult());
 
     const first = await executeOnce(pool, {
       approvalId: approval.id, name: 'manage_substrate',
@@ -67,8 +77,8 @@ describe('executeOnce', () => {
       args: { action: 'propose' }, jwt: 'k', orgId: ORG, principal: 'operator',
     });
 
-    expect(first).toEqual({ ok: true, result: { id: 'act_1' } });
-    expect(second).toEqual({ ok: true, result: { id: 'act_1' } });
+    expect(first).toEqual(executedProposeResult());
+    expect(second).toEqual(executedProposeResult());
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
   });
 
@@ -97,7 +107,7 @@ describe('executeOnce', () => {
       // Hold the transaction open long enough that a naive implementation's
       // second caller would certainly have passed its cache SELECT by now.
       await new Promise((r) => setTimeout(r, 100));
-      return { ok: true, result: { id: 'act_1' } };
+      return executedProposeResult();
     });
 
     const args = {
@@ -115,7 +125,7 @@ describe('executeOnce', () => {
     ]);
 
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
-    expect(first).toEqual({ ok: true, result: { id: 'act_1' } });
+    expect(first).toEqual(executedProposeResult());
     expect(second).toEqual(first);
 
     const rows = await pool.query<{ n: number }>(
