@@ -8,7 +8,7 @@ import { stripJsonbNulls, getMessageByPendingApprovalId } from './store.js';
 import { captureApprovalOperation } from './approval-operation.js';
 import { validateProposalToolArguments } from './proposal-validation.js';
 import { resolveOperatorModel } from './operator-turn.js';
-import { readConfirmedExecution } from './execution-outcome.js';
+import { readConfirmedExecution, hasUnconfirmedExecution } from './execution-outcome.js';
 
 /** The owner requests preparation, never replacement arguments or execution. */
 export async function requestApprovalReview(pool: pg.Pool, input: {
@@ -17,6 +17,7 @@ export async function requestApprovalReview(pool: pg.Pool, input: {
   return withApprovalResolutionLock(pool, input.approval, async (scoped, current) => {
     if (!current || current.status !== 'pending') return { ok: false };
     if (await readConfirmedExecution(scoped, current) || current.executionOutcome?.state === 'succeeded') return { ok: false };
+    if (await hasUnconfirmedExecution(scoped, current.id)) return { ok: false };
     if (current.executionOutcome && ['running', 'unconfirmed'].includes(current.executionOutcome.state)) return { ok: false };
     let operation = current.approvedOperation ?? captureApprovalOperation({ toolName: current.toolName, args: current.toolArgs });
     let parkedProposal: { actionId: string; intentFingerprint: string } | null = null;

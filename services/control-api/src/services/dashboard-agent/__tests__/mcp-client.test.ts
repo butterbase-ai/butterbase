@@ -11,17 +11,17 @@ describe('MCP Client', () => {
   });
 
   describe('getToolCatalog()', () => {
-    it('returns an array with exactly one tool: manage_app', () => {
+    it('includes manage_app exactly once in the shared catalog', () => {
       const catalog = getToolCatalog();
-      expect(catalog).toHaveLength(1);
-      expect(catalog[0].name).toBe('manage_app');
-      expect(catalog[0].description).toBeDefined();
-      expect(catalog[0].parameters).toBeDefined();
+      const manageTools = catalog.filter((tool) => tool.name === 'manage_app');
+      expect(manageTools).toHaveLength(1);
+      expect(manageTools[0].description).toBeDefined();
+      expect(manageTools[0].parameters).toBeDefined();
     });
 
     it('manage_app tool has flat parameters schema (no params wrapper)', () => {
       const catalog = getToolCatalog();
-      const manageTool = catalog[0];
+      const manageTool = catalog.find((tool) => tool.name === 'manage_app')!;
       expect(manageTool.parameters).toHaveProperty('type', 'object');
       expect(manageTool.parameters).toHaveProperty('properties');
       expect(manageTool.parameters.properties).toHaveProperty('action');
@@ -35,6 +35,7 @@ describe('MCP Client', () => {
     it('calls MCP endpoint with correct JSON-RPC format and Bearer token header', async () => {
       const mockFetch = vi.fn().mockResolvedValueOnce({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({ result: { apps: [] } }),
       });
       global.fetch = mockFetch;
@@ -75,6 +76,7 @@ describe('MCP Client', () => {
     it('handles JSON.parse errors gracefully', async () => {
       const mockFetch = vi.fn().mockResolvedValueOnce({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => {
           throw new Error('Invalid JSON');
         },
@@ -85,12 +87,14 @@ describe('MCP Client', () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toBeDefined();
+      expect(result.error).toBe('Invalid JSON');
       // Should not throw
     });
 
     it('returns { ok: false, error } for MCP error response', async () => {
       const mockFetch = vi.fn().mockResolvedValueOnce({
         ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({
           error: { message: 'Tool not found' },
         }),

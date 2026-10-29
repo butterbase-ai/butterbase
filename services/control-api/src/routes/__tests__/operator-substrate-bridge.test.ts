@@ -43,6 +43,10 @@ const pool = new Pool({ connectionString: process.env.CONTROL_TEST_DATABASE_URL 
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  // A correctly blocked retry may leave one-shot responses unconsumed. Clear
+  // both the queue and implementation before configuring this test's server.
+  mockCallMcpTool.mockReset();
+  mockCallMcpTool.mockResolvedValue(mcpOk({ executed: true }));
   await pool.query(`DELETE FROM dashboard_agent_conversations WHERE organization_id = $1`, [ORG]);
 });
 
@@ -311,8 +315,8 @@ describe('C2b — the bridge is not permission for the operator to approve', () 
   });
 });
 
-describe('C2b — a failed follow-up approve does not wedge the conversation', () => {
-  it('surfaces 502, leaves the approval pending, writes no partial history, and does not re-propose on retry', async () => {
+describe('C2b — an uncertain follow-up approve requires reconciliation', () => {
+  it('surfaces 502, leaves the approval pending, writes no partial history, and blocks a blind retry', async () => {
     const { conversationId, approval, toolCallId } = await pauseOnGatedTool(GATED_PROPOSE);
 
     mockCallMcpTool
@@ -333,11 +337,12 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
     expect(toolRow(messages, toolCallId)).toBeUndefined();
     const paused = messages.find((m) => m.role === 'assistant' && m.toolCallId === toolCallId);
     expect(paused?.pendingApprovalId).toBe(approval.id);
-    expect((await getApprovalForOrg(pool, approval.id, ORG))?.status).toBe('pending');
+    expect(await getApprovalForOrg(pool, approval.id, ORG)).toMatchObject({
+      status: 'pending', executionOutcome: { state: 'unconfirmed' },
+    });
 
-    // Retry: the propose is served from executeOnce's cache — the capability is
-    // NOT proposed a second time — and the retried approve completes the turn.
-    mockCallMcpTool.mockResolvedValueOnce(mcpOk({ executed: true, result: { ok: true } }));
+    // The upstream error says the action may already have executed. Neither
+    // native approve nor the original propose is safe to send again.
 
     const retry = await resolveOperatorApproval(pool, {
       approvalId: approval.id,
@@ -345,21 +350,20 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
       jwt: 'jwt-token',
       resolution: { status: 'approved' },
     });
-    expect(retry).toEqual({ ok: true });
+    expect(retry).toEqual({ ok: false, code: 409, error: 'execution_unconfirmed: reconcile the prior attempt before any further execution' });
 
-    // 3 total: propose, failed approve, retried approve. No second propose.
-    expect(mockCallMcpTool).toHaveBeenCalledTimes(3);
-    expect(
-      mockCallMcpTool.mock.calls.filter(
-        (c) => (c[1] as Record<string, unknown>).action === 'propose',
-      ),
-    ).toHaveLength(1);
+    expect(mockCallMcpTool.mock.calls.map(call => (call[1] as { action: string }).action)).toEqual(['propose', 'approve']);
 
-    expect(toolRow(await listMessages(pool, conversationId), toolCallId)).toBeDefined();
+    expect(toolRow(await listMessages(pool, conversationId), toolCallId)).toBeUndefined();
+    const cached = await pool.query<{ result: { ok: boolean; code: string } }>(
+      'SELECT result FROM dashboard_agent_tool_executions WHERE approval_id = $1', [approval.id],
+    );
+    expect(cached.rows).toHaveLength(1);
+    expect(cached.rows[0].result).toMatchObject({ ok: false, code: 'execution_unconfirmed' });
   });
 
-  it('a transport failure on the approve leg is reported, not swallowed', async () => {
-    const { approval } = await pauseOnGatedTool(GATED_PROPOSE);
+  it('a transport failure on the approve leg is reported and blocks repeat execution', async () => {
+    const { approval, conversationId, toolCallId } = await pauseOnGatedTool(GATED_PROPOSE);
 
     mockCallMcpTool
       .mockResolvedValueOnce(mcpOk({ action_id: 'act_gated_5', requires_approval: true }))
@@ -371,9 +375,14 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
       jwt: 'jwt-token',
       resolution: { status: 'approved' },
     });
-    expect(outcome).toMatchObject({ code: 502 });
-    expect((outcome as { error: string }).error).toContain('substrate approve failed');
-    expect((await getApprovalForOrg(pool, approval.id, ORG))?.status).toBe('pending');
+    expect(outcome).toMatchObject({ ok: false, code: 502 });
+    expect((outcome as { error: string }).error).toContain('reconcile its outcome before retrying');
+    expect(await getApprovalForOrg(pool, approval.id, ORG)).toMatchObject({ status: 'pending', executionOutcome: { state: 'unconfirmed' } });
+    expect(await resolveOperatorApproval(pool, {
+      approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', resolution: { status: 'approved' },
+    })).toEqual({ ok: false, code: 409, error: 'execution_unconfirmed: reconcile the prior attempt before any further execution' });
+    expect(mockCallMcpTool.mock.calls.map(call => (call[1] as { action: string }).action)).toEqual(['propose', 'approve']);
+    expect(toolRow(await listMessages(pool, conversationId), toolCallId)).toBeUndefined();
   });
 
   it('requires_approval with no action_id fails closed rather than guessing', async () => {
@@ -394,7 +403,12 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
   it('a rejected propose remains pending with no completion or native approve attempt', async () => {
     const { approval, conversationId, toolCallId } = await pauseOnGatedTool(GATED_PROPOSE);
 
-    mockCallMcpTool.mockResolvedValueOnce(mcpToolError({ error: 'capability blocked by principle' }));
+    // The policy engine returns a committed blocked verdict for a known
+    // no-effect rejection. An opaque MCP error alone cannot establish that.
+    mockCallMcpTool.mockResolvedValueOnce(mcpOk({
+      action_id: 'act_blocked', status: 'rejected', requires_approval: false,
+      verdict: { result: 'blocked', reason: 'capability blocked by principle', conflicts: [] },
+    }));
 
     const outcome = await resolveOperatorApproval(pool, {
       approvalId: approval.id,
@@ -403,7 +417,7 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
       resolution: { status: 'approved' },
     });
     // MCP transport success cannot turn a tool-level rejection into execution.
-    expect(outcome).toEqual({ ok: false, code: 502, error: 'Tool execution failed: The operation may have taken effect; reconcile its outcome before retrying.' });
+    expect(outcome).toEqual({ ok: false, code: 502, error: 'Tool execution failed: Substrate rejected this operation before execution.' });
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
     expect((mockCallMcpTool.mock.calls[0][1] as { action: string }).action).toBe('propose');
     expect((await getApprovalForOrg(pool, approval.id, ORG))?.status).toBe('pending');
@@ -414,5 +428,26 @@ describe('C2b — a failed follow-up approve does not wedge the conversation', (
       'SELECT count(*)::int AS n FROM dashboard_agent_tool_executions WHERE approval_id = $1', [approval.id],
     );
     expect(cached.rows[0].n).toBe(0);
+  });
+
+  it('an opaque propose tool error stays uncertain without a native approve or partial history', async () => {
+    const { approval, conversationId, toolCallId } = await pauseOnGatedTool(GATED_PROPOSE);
+    mockCallMcpTool.mockResolvedValueOnce(mcpToolError({ error: 'upstream response unavailable' }));
+    const input = { approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', resolution: { status: 'approved' as const } };
+
+    expect(await resolveOperatorApproval(pool, input)).toMatchObject({ ok: false, code: 502 });
+    expect(await resolveOperatorApproval(pool, input)).toEqual({
+      ok: false, code: 409, error: 'execution_unconfirmed: reconcile the prior attempt before any further execution',
+    });
+    expect(mockCallMcpTool.mock.calls.map(call => (call[1] as { action: string }).action)).toEqual(['propose']);
+    expect(await getApprovalForOrg(pool, approval.id, ORG)).toMatchObject({ status: 'pending', executionOutcome: { state: 'unconfirmed' } });
+    const messages = await listMessages(pool, conversationId);
+    expect(toolRow(messages, toolCallId)).toBeUndefined();
+    expect(messages.find(message => message.role === 'assistant' && message.toolCallId === toolCallId)?.pendingApprovalId).toBe(approval.id);
+    const cached = await pool.query<{ result: { ok: boolean; code: string } }>(
+      'SELECT result FROM dashboard_agent_tool_executions WHERE approval_id = $1', [approval.id],
+    );
+    expect(cached.rows).toHaveLength(1);
+    expect(cached.rows[0].result).toMatchObject({ ok: false, code: 'execution_unconfirmed' });
   });
 });

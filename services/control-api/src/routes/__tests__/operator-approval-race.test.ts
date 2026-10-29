@@ -34,6 +34,7 @@ const pool = new Pool({ connectionString: process.env.CONTROL_TEST_DATABASE_URL 
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  mockCallMcpTool.mockReset();
   await pool.query(`DELETE FROM dashboard_agent_conversations WHERE organization_id = $1`, [ORG]);
 });
 
@@ -286,15 +287,17 @@ describe('I-1 — exactly-once is preserved for the call that does own the key',
     expect(JSON.stringify(replay)).toContain('executed');
   });
 
-  it('does not cache a FAILED approve — a transient error stays retryable', async () => {
+  it('does not cache a known no-effect rejection — a corrected request stays retryable', async () => {
     const { approval } = await escalate();
-    mockCallMcpTool.mockResolvedValue({ ok: false, error: 'substrate unreachable' } as never);
+    // This explicit trusted code confirms rejection before an effect. A lost
+    // transport response is uncertain and must never use this retry fixture.
+    mockCallMcpTool.mockResolvedValue({ ok: false, code: 'tool_rejected', error: 'substrate refused before execution' } as never);
 
     const first = await resolveOperatorApproval(pool, {
       approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', userId: USER,
       resolution: { status: 'approved' },
     });
-    expect(first).toEqual({ ok: false, code: 502, error: 'Tool execution failed: substrate unreachable' });
+    expect(first).toEqual({ ok: false, code: 502, error: 'Tool execution failed: substrate refused before execution' });
 
     const rows = await pool.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM dashboard_agent_tool_executions WHERE approval_id = $1`,

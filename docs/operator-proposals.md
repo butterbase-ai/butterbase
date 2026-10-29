@@ -95,6 +95,12 @@ or ambiguous attempt with no confirmed result requires reconciliation; it must
 not automatically repeat a possibly completed effect. A confirmed effect cannot
 later be relabeled as a denial because transcript completion was interrupted.
 
+Uncertain responses also leave a negative execution receipt. This applies to
+older approvals and to the native approval leg after a proposal was parked.
+A lost response or an exception after dispatch cannot silently cause another
+request. Review refresh checks this receipt even if its outcome projection is
+missing. Only an explicit trusted no-effect refusal remains retryable.
+
 Concurrent resolutions serialize around the existing execution cache. This
 prevents duplicate callers from dispatching together; it does not make remote
 side effects universally crash-proof or exactly once across every failure.

@@ -44,12 +44,13 @@ vi.mock('../approvals-store.js', () => ({
   checkTrust: vi.fn(),
 }));
 
-// The four OPERATOR_* names are literal here because operator-policy.ts
+// The public tool names are literal here because operator-policy.ts
 // (imported by the loop since the Office floor landed) reads them at module
 // scope. `vi.importActual` inside this factory hangs the Windows test worker
 // during collection, so the values are copied instead — they are stable public
 // tool names, and loop-operator-policy.test.ts exercises the real module.
 vi.mock('../tool-catalog.js', () => ({
+  PROPOSE_ACTION_TOOL: 'propose_action',
   OPERATOR_SCRATCHPAD_TOOL: 'update_operator_scratchpad',
   OPERATOR_SANDBOX_CODE_TOOL: 'run_sandbox_code',
   OPERATOR_BUILD_TOOL: 'build_app',

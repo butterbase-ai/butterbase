@@ -82,9 +82,9 @@ describe('executeOnce', () => {
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
   });
 
-  it('does not cache a failed execution', async () => {
+  it('does not cache a trusted rejection before execution', async () => {
     const approval = await makeApproval();
-    mockCallMcpTool.mockResolvedValue({ ok: false, error: 'boom' });
+    mockCallMcpTool.mockResolvedValue({ ok: false, code: 'tool_rejected', error: 'rejected before execution' });
 
     await executeOnce(pool, {
       approvalId: approval.id, name: 'manage_substrate',
@@ -96,6 +96,29 @@ describe('executeOnce', () => {
     });
 
     expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['sdk-error', 'transport-error', 'dispatcher-throws'] as const)('records uncertain %s results for legacy approvals and blocks repetition', async (kind) => {
+    const approval = await makeApproval();
+    let effects = 0;
+    mockCallMcpTool.mockImplementation(async () => {
+      effects++;
+      return kind === 'sdk-error'
+        ? { ok: true, result: { isError: true, content: [{ type: 'text', text: 'response unavailable' }] } }
+        : { ok: false, error: 'response connection lost' };
+    });
+    const args = {
+      approvalId: approval.id, name: 'manage_substrate', args: { action: 'propose' },
+      jwt: 'k', orgId: ORG, principal: 'human' as const,
+      ...(kind === 'dispatcher-throws' ? { dispatch: async () => { effects++; throw new Error('response connection lost after dispatch'); } } : {}),
+    };
+    const first = await executeOnce(pool, args);
+    const second = await executeOnce(pool, args);
+    expect(first).toMatchObject({ ok: false, code: 'execution_unconfirmed' });
+    expect(second).toEqual(first);
+    expect(effects).toBe(1);
+    expect((await pool.query('SELECT execution_outcome FROM dashboard_agent_approvals WHERE id=$1', [approval.id])).rows[0].execution_outcome).toMatchObject({ state: 'unconfirmed', attemptCount: 1 });
+    expect((await pool.query('SELECT count(*)::int AS n FROM dashboard_agent_tool_executions WHERE approval_id=$1', [approval.id])).rows[0].n).toBe(1);
   });
 
   // Regression: before the advisory-lock fix both concurrent callers missed

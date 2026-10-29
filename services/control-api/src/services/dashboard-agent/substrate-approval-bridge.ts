@@ -90,7 +90,7 @@ import type { DeployTreeStore } from './deploy-tree-store.js';
 import { verifyPreparedApproval } from './proposal-review.js';
 import { validateProposalToolArguments } from './proposal-validation.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
-import { normalizeExecutionResult } from './execution-outcome.js';
+import { normalizeExecutionResult, recordUnconfirmedOutcome, unconfirmedExecution } from './execution-outcome.js';
 import { createDeployer } from './deploy.js';
 import { createFunctionDeployer } from './deploy-function.js';
 import { createHttpFrontendMcp } from './frontend-http.js';
@@ -561,18 +561,19 @@ export async function executeApprovedOperatorTool(
     };
   }
 
-  const approved = await callMcpTool('manage_substrate', approveArgs, opts.jwt, opts.orgId, opts.traceId);
-  if (!approved.ok) {
-    return { ok: false, error: `substrate approve failed: ${approved.error ?? 'unknown error'}` };
+  let approved: McpCallResult;
+  try { approved = await callMcpTool('manage_substrate', approveArgs, opts.jwt, opts.orgId, opts.traceId); }
+  catch { approved = unconfirmedExecution(); }
+  const confirmed = approved.ok
+    ? normalizeExecutionResult({ toolName: 'manage_substrate', toolArgs: approveArgs }, approved)
+    : unconfirmedExecution();
+  if (!confirmed.ok) {
+    // Replace the intermediate parked-propose receipt as well. Otherwise a
+    // legacy retry would replay that receipt and blindly send native approve.
+    await pool.query('UPDATE dashboard_agent_tool_executions SET result=$2 WHERE approval_id=$1', [opts.approvalId, JSON.stringify(confirmed)]);
+    await recordUnconfirmedOutcome(pool, opts.approvalId);
+    return confirmed;
   }
-
-  const approvedEnvelope = readMcpEnvelope(approved.result);
-  if (approvedEnvelope?.isError) {
-    return { ok: false, error: `substrate approve failed: ${approvedEnvelope.text}` };
-  }
-
-  const confirmed = normalizeExecutionResult({ toolName: 'manage_substrate', toolArgs: approveArgs }, approved);
-  if (!confirmed.ok) return confirmed;
 
   // The final native result, rather than the intermediate parked propose,
   // is authoritative for crash recovery and execution reporting.

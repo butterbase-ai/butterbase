@@ -197,7 +197,7 @@ async function completeApprovalResolutionUnlocked(
     const previous = approval.executionOutcome;
     const attemptCount = previous?.attemptCount ?? 0;
     const base: ExecutionOutcome = { version: 1, state: 'running', attemptCount: attemptCount + 1, startedAt: new Date().toISOString(), finishedAt: null, safeErrorCode: null, resultReference: null };
-    if (tracked && !cached && ['running', 'unconfirmed'].includes(previous?.state ?? '')) {
+    if (!cached && ['running', 'unconfirmed'].includes(previous?.state ?? '')) {
       await recordExecutionOutcome(pool, approvalId, { ...previous!, state: 'unconfirmed', safeErrorCode: 'execution_unconfirmed' });
       return { ok: false, code: 409, error: 'execution_unconfirmed: reconcile the prior attempt before any further execution' };
     }

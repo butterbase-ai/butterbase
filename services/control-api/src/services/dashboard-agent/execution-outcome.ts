@@ -43,7 +43,26 @@ export async function readConfirmedExecution(pool: pg.Pool, approval: Approval):
   const { rows } = await pool.query('SELECT result FROM dashboard_agent_tool_executions WHERE approval_id=$1', [approval.id]);
   return rows[0] && isConfirmedExecution(approval, rows[0].result) ? rows[0].result : null;
 }
-export async function recordExecutionOutcome(pool: pg.Pool, approvalId: string, outcome: ExecutionOutcome): Promise<void> {
+export async function hasUnconfirmedExecution(pool: pg.Pool, approvalId: string): Promise<boolean> {
+  const { rows } = await pool.query('SELECT result FROM dashboard_agent_tool_executions WHERE approval_id=$1', [approvalId]);
+  return rows[0]?.result?.code === 'execution_unconfirmed';
+}
+export async function recordExecutionOutcome(pool: Pick<pg.Pool, 'query'>, approvalId: string, outcome: ExecutionOutcome): Promise<void> {
   const parsed = ExecutionOutcomeSchema.parse(outcome);
   await pool.query('UPDATE dashboard_agent_approvals SET execution_outcome=$2 WHERE id=$1', [approvalId, JSON.stringify(parsed)]);
+}
+/** Legacy approvals need the same uncertainty barrier as prepared reviews. */
+export async function recordUnconfirmedOutcome(pool: Pick<pg.Pool, 'query'>, approvalId: string): Promise<void> {
+  const { rows } = await pool.query('SELECT execution_outcome FROM dashboard_agent_approvals WHERE id=$1', [approvalId]);
+  const parsed = ExecutionOutcomeSchema.safeParse(rows[0]?.execution_outcome);
+  const previous = parsed.success ? parsed.data : null;
+  const now = new Date().toISOString();
+  await recordExecutionOutcome(pool, approvalId, {
+    version: 1, state: 'unconfirmed', attemptCount: Math.max(1, previous?.attemptCount ?? 0),
+    startedAt: previous?.startedAt ?? now, finishedAt: now,
+    safeErrorCode: 'execution_unconfirmed', resultReference: null,
+  });
+}
+export function unconfirmedExecution(): McpCallResult {
+  return { ok: false, code: 'execution_unconfirmed', error: 'The operation may have taken effect; reconcile its outcome before retrying.' };
 }
