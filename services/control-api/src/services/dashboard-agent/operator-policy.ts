@@ -27,6 +27,7 @@ import {
   OPERATOR_PENDING_DECISIONS_TOOL,
   SKILL_CREATOR_TOOL,
   RUN_SKILL_SCRIPT_TOOL,
+  PROPOSE_ACTION_TOOL,
 } from './tool-catalog.js';
 
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
@@ -74,6 +75,7 @@ export type OperatorPolicyContext = {
  * path, which ends in `callMcpTool`) and the loop's internal `turnMcp` wrapper.
  */
 export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  PROPOSE_ACTION_TOOL,
   OPERATOR_SCRATCHPAD_TOOL,
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
@@ -216,6 +218,7 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
  * nothing but presigned, blob-scoped, one-hour GET urls.
  */
 export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Map<string, OperatorToolTier>([
+  [PROPOSE_ACTION_TOOL, 'allow'],
   // ---- allow: reads, and writes that stay inside the org's own memory ----
   ['butterbase_docs', 'allow'],
   ['list_regions', 'allow'],

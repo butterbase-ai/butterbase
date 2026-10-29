@@ -57,6 +57,7 @@ function flatOpen(): object {
  * identity, so the target org is never taken from model-supplied arguments.
  */
 export const OPERATOR_SCRATCHPAD_TOOL = 'update_operator_scratchpad';
+export const PROPOSE_ACTION_TOOL = 'propose_action';
 
 /**
  * The operator's sandbox-code-execution tool.
@@ -134,6 +135,18 @@ export const RUN_SKILL_SCRIPT_TOOL = 'run_skill_script';
 
 export function getToolCatalog(): ToolSpec[] {
   return [
+    {
+      name: PROPOSE_ACTION_TOOL,
+      description: 'Prepare one consequential operation for owner review. Supply the exact tool and arguments, an explicit reason, and optionally 0..10 typed supporting record references. Preparation does not execute the operation. Automatic operations return proposal_not_required. Missing or inaccessible targets cannot reach the owner. If a direct operation returns proposal_incomplete, repeat the same operation here with its reason.',
+      parameters: {
+        type: 'object', additionalProperties: false, required: ['operation', 'reason'],
+        properties: {
+          operation: { type: 'object', additionalProperties: false, required: ['tool', 'arguments'], properties: { tool: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } } },
+          reason: { type: 'string', minLength: 1, maxLength: 2000 },
+          evidence_refs: { type: 'array', maxItems: 10, items: { type: 'object', properties: { kind: { type: 'string', enum: ['entity', 'artifact', 'learning', 'decision', 'commitment', 'app', 'file', 'message'] }, id: { type: 'string' }, app_id: { type: 'string' }, object_id: { type: 'string' }, conversation_id: { type: 'string' }, message_id: { type: 'string' } }, required: ['kind'], additionalProperties: false } },
+        },
+      },
+    },
     // ---- App lifecycle & discovery ----
     {
       name: 'manage_app',
