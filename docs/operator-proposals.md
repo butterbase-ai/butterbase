@@ -78,6 +78,23 @@ to propose the operation again.
 
 The optional authenticated list query `?history=1` returns pending `approvals`
 and up to 50 recent resolved reviews in `history`, scoped to the organization.
+It also returns a separate `preparations` collection. Preparation is not
+execution: requests move through `waiting`, `running`, `replaced`, `blocked`
+or `failed` in `dashboard_agent_review_preparations` (migration 135). A
+failed or blocked request stays visible and can be retried explicitly by the
+owner. Already-expired `proposal_review_required` records are recoverable;
+other expired, successful or uncertain executions are not retry shortcuts.
+
+The source approval ID makes repeated requests idempotent. Claims carry a
+twenty-minute lease and token. Only a matching frozen intent, organization,
+conversation and current lease can link a persisted replacement atomically.
+Provider errors, preparation refusal, or a turn ending without a replacement
+record an unsuccessful preparation; assistant prose does not settle a request.
+Explicit preparation input is injected by the operator runner, not appended
+by the request endpoint after a potentially unanswered tool call. Focused
+preparation turns report `preparationAttempted` so a scheduler cannot count
+them as a completed full reconciliation sweep.
+
 Executable arguments stay server-side; credential-named display fields are
 redacted. Arbitrary source code is displayed inertly and is not promised to be
 secret-free or to have fully predicted downstream effects.

@@ -46,6 +46,7 @@ import { redactProposalArguments } from '../services/dashboard-agent/approval-pr
 import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
 import { readConfirmedExecution } from '../services/dashboard-agent/execution-outcome.js';
 import { requestApprovalReview } from '../services/dashboard-agent/request-proposal-review.js';
+import { listReviewPreparations } from '../services/dashboard-agent/review-preparation-store.js';
 import { listRecentResolvedByOrg, type OrgApproval } from '../services/dashboard-agent/approvals-store.js';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
@@ -1548,7 +1549,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       Promise.all(approvals.map(project)),
       includeHistory ? listRecentResolvedByOrg(app.controlDb, org.orgId).then(rows => Promise.all(rows.map(project))) : Promise.resolve(undefined),
     ]);
-    return reply.send({ approvals: pending, ...(history ? { history } : {}) });
+    const preparations = await listReviewPreparations(app.controlDb, org.orgId);
+    return reply.send({ approvals: pending, preparations, ...(history ? { history } : {}) });
   });
 
   // ── GET /operator/approvals/:id ──────────────────────────────────────────

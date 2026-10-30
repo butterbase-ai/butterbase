@@ -153,7 +153,7 @@ export interface ProposalContext {
 export type PreparationResult =
   | { status: 'ready'; proposal: PreparedProposal }
   | { status: 'needs_input'; code: 'proposal_incomplete'; missing: string[] }
-  | { status: 'blocked'; code: 'proposal_invalid' | 'proposal_unreviewable' | 'proposal_duplicate_parked_actions'; message: string };
+  | { status: 'blocked'; code: 'proposal_invalid' | 'proposal_unreviewable' | 'proposal_duplicate_parked_actions' | 'proposal_outbox_in_flight'; message: string };
 export type ProposalVerification =
   | { status: 'valid' }
   | { status: 'changed'; code: 'proposal_state_changed' }
