@@ -21,8 +21,8 @@ export function filterToolsByActiveWindow<T extends { name: string }>(tools: T[]
   return activeWindow ? tools : tools.filter(t => t.name !== 'submit_hackathon_entry');
 }
 
-export async function createButterbaseMcpServer() {
-  const server = await createRegisteredToolServer();
+export async function createButterbaseMcpServer(options: Parameters<typeof createRegisteredToolServer>[0] = {}) {
+  const server = await createRegisteredToolServer(options);
   const lowLevel = server.server as unknown as {
     _requestHandlers: Map<string, (request: unknown, extra: unknown) => Promise<unknown>>;
   };

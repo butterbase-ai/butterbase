@@ -3,6 +3,8 @@
  * not internal implementation.
  */
 
+import { OFFICE_ACTIONS } from '@butterbase/shared';
+
 export const DOC_TOPICS = [
   'all',
   'overview',
@@ -24,11 +26,36 @@ export const DOC_TOPICS = [
   'rag',
   'integrations',
   'substrate',
+  'office',
 ] as const;
 
 export type DocTopic = (typeof DOC_TOPICS)[number];
 
 const SECTIONS: Record<Exclude<DocTopic, 'all'>, string> = {
+  office: `## Office clients
+
+The optional cloud MCP tool \`manage_office\`, CLI \`butterbase office\`, and standalone SDK \`OfficeClient\` share one organization-scoped facade. OSS-only MCP installations may omit this cloud tool. Every MCP call requires \`org_id\` (UUID); every CLI command requires \`--org <uuid>\` and supports \`--json\`. Use a platform credential, without an app ID or app end-user session.
+
+The exact 22 MCP actions are: ${OFFICE_ACTIONS.join(', ')}.
+
+Enable, pause, resume and approve prepare one saved command. The result is a receipt: state awaiting_confirmation, confirmation_id, confirmation_url, expires_at. Show the URL to the initiating owner; never resolve it as an agent. The owner signs in to the browser, reviews the stored organization/target/consequence, and clicks Confirm or Cancel. Cancel rejects this receipt only; closing the tab leaves it pending. Browser resolution uses the initiating owner's JWT, current ownership/key/plan checks and the configured dashboard Origin. It grants no standing agent authority.
+
+Observe a receipt with action status + confirmation_id, CLI status --confirmation <id>, or SDK getConfirmation / waitForConfirmation. Protected CLI commands return immediately unless --wait is set; --open launches a browser only by explicit request. States executing, failed, expired, rejected and outcome_unknown are distinct. Unknown outcomes must be inspected, not blindly replayed.
+
+Ask input: {action:"ask", org_id, message, idempotency_key, conversation_id?, wait_ms?}. The bounded wait defaults to 15000 ms, maximum 25000 ms. A response may still be running or awaiting_approval and always identifies turn_id + conversation_id. Poll get_conversation with those exact IDs; never submit another Ask just to observe. One running/approval-suspended turn may be open per conversation. Conversations belong to the initiating user and organization and have Office origin.
+
+The SDK exports OfficeClient({apiUrl, organizationId, getToken, fetch?}), with getStatus, enable, pause, resume, ask, and decisions/conversations/memory/principles namespaces. Requests return {data,error}. askStream(message, options) submits once and yields public typed events; askStream('', {conversationId, turnId, afterSequence}) observes an existing turn with GET only. Typed stream failures preserve replay pointers. AbortSignal or CLI SIGINT stops observation without cancelling admitted server work. A suspended approval has no running lease; resolution runs no automatic model continuation. Replay expires after24 hours; events_expired includes exact history pointers and the saved turn remains readable.
+
+Memory wraps existing Substrate readers and the native ledger. record_decision requires payload.title and payload.kind; record_commitment requires payload.description and payload.status; record_learning requires payload.title and payload.description; record_principle requires payload.title, payload.applies_to and payload.constraint_spec. Optional source/entity references must be in this organization. CLI record commands read --file <json>; SDK exports OfficeRecordDecisionInput, OfficeRecordCommitmentInput, OfficeRecordLearningInput, OfficeRecordPrincipleInput. Principles remain pending native proposals. Office confirmation cannot override unresolved or newly discovered policy conflicts.
+
+Decisions use decision_id and decision_source (office or substrate, default office). CLI uses --source; SDK uses {source,id}. Read the exact saved context before approving. Current members can read and deny saved decisions even when paused/unfunded; new Ask, conversation creation and memory writes require the current owner and eligible active organization. Managed background keys cannot mutate this external facade. Lists expose next_cursor; search_memory is bounded and has no cursor.
+
+Enable/pause/resume/approve, Ask, conversation creation and memory/principle recording require idempotency keys: MCP uses idempotency_key and CLI accepts --idempotency-key. The SDK generates one key per intended keyed write and reuses it on a safe retry; failed keyed-write errors retain that key. Changed input under the same key returns idempotency_conflict. Denial addresses an existing decision and accepts no idempotency key; inspect its saved state before retrying. Waiting never re-POSTs. A wait timeout may return the last receipt alongside a typed observation_timeout error.
+
+CLI --json prints one {data,error} value on stdout and diagnostics only on stderr; --json --stream collects public events into the final object. Exit0 means accepted/read (including pending); exit1 means request/terminal failure, rejection/expiry/unknown or observation timeout/interruption; exit2 means usage/input error.
+
+Full reference: https://docs.butterbase.ai/core-concepts/office-clients/ and https://docs.butterbase.ai/api-reference/office-api/.
+`,
   overview: `## Butterbase
 
 Butterbase is a backend platform built for developers who build products with AI assistants. You describe what you need in natural language; your assistant can provision apps, evolve your database schema safely, configure sign-in for your end users, manage file storage, deploy serverless functions, and expose data through automatic HTTP APIs.
@@ -4177,6 +4204,7 @@ export function getUserDocumentation(topic: DocTopic): string {
       SECTIONS.realtime,
       SECTIONS.integrations,
       SECTIONS.substrate,
+      SECTIONS.office,
     ].join('\n\n');
   }
   return SECTIONS[topic];

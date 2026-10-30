@@ -15,6 +15,8 @@ sheet — and by connecting **Google Sheets** as a read-only source.
 
 ## Who can use it
 
+You can also use Office through the [MCP, CLI and standalone SDK clients](/core-concepts/office-clients/), with explicit organization selection and browser confirmation for protected actions.
+
 An organization owner enables Office explicitly. Enabling is a single action,
 not a questionnaire or an onboarding wizard. Other members can view an enabled
 Office, but only an owner can enable it or approve the actions that need a

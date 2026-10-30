@@ -673,7 +673,8 @@ export function orgIdArgIsForeign(args: unknown, ownOrgId: string | null | undef
  *   4. the TOOL tier      — OPERATOR_TOOL_TIERS, floored at 'approval' for any
  *                           name with no entry.
  *
- * There is no longer a tool-level deny step. That is the point of the
+ * The external manage_office facade is explicitly denied before these steps.
+ * The remaining catalog keeps the
  * 2026-08-07 spec: the operator reaches the whole catalog, at one of two
  * tiers. `deny` survives only for the substrate actions that would let the
  * agent weaken the controls governing it.
@@ -683,6 +684,9 @@ export function orgIdArgIsForeign(args: unknown, ownOrgId: string | null | undef
  * source could cover both. They are both here, in one table, by design.
  */
 function tableVerdict(name: string, args: unknown): OperatorPolicy {
+  // External Office clients authorize with the initiating owner's browser.
+  // The agent must never route back through that facade to govern itself.
+  if (name === 'manage_office') return 'deny';
   if (name === 'manage_substrate') {
     // The action rules below are the whole substrate guardrail, so anything we
     // cannot read confidently is denied rather than waved through.
@@ -820,11 +824,9 @@ export function resolveOfficeVerdict(
 /**
  * Thin wrapper over the table: may the operator call this tool at all?
  *
- * Since 2026-08-07 this is true for every tool: there is no tool-level deny
- * tier, so the answer is "yes, at some tier". Retained because the loop uses it
- * to build the operator's offered catalog and because it keeps that call site
- * asking the policy module rather than assuming — if a tool-level denial is
- * ever reintroduced, the filter picks it up with no edit.
+ * The external Office facade is denied to prevent recursive/self-authorizing
+ * control. Other tools retain the existing allow/approval tiers. The loop uses
+ * this policy helper to build the operator's offered catalog.
  */
 export function isOperatorToolAllowed(name: string): boolean {
   return operatorPolicyFor(name, undefined) !== 'deny';

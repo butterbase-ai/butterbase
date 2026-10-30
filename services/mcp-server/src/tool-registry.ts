@@ -62,6 +62,7 @@ export type ToolRegistrar = (server: McpServer) => void | Promise<void>;
 /** Registration only: never starts transports, background tasks or business handlers. */
 export async function createRegisteredToolServer(options: {
   registerOverlays?: ToolRegistrar;
+  loadOfficeOverlay?: () => Promise<{ registerOfficeMcpTools(server: McpServer): void }>;
 } = {}): Promise<McpServer> {
   const server = new McpServer({
     name: 'butterbase',
@@ -168,6 +169,18 @@ export async function createRegisteredToolServer(options: {
   );
 
   await (options.registerOverlays ?? registerCloudOverlays)(server);
+  if (!options.registerOverlays || options.loadOfficeOverlay) {
+    try {
+      const overlayPath = '../../../cloud-overlays/dist/cloud-overlays/office/mcp-tools/index.js';
+      const overlay = options.loadOfficeOverlay ? await options.loadOfficeOverlay() : await import(overlayPath);
+      overlay.registerOfficeMcpTools(server);
+    } catch (error) {
+      if (process.env.OFFICE_MCP_REQUIRED === '1') {
+        throw new Error('Office MCP registration failed: the required cloud tool is unavailable.', { cause: error });
+      }
+      if ((error as { code?: string })?.code !== 'ERR_MODULE_NOT_FOUND') console.warn('Office MCP registration failed; manage_office is unavailable.');
+    }
+  }
   finalizeRegisteredTools(server);
   return server;
 }

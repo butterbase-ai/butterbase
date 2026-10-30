@@ -5,6 +5,8 @@ description: Full REST API reference for the auto-generated data API, filtering,
 
 Once you create tables through the schema tools, a full REST API is automatically available. No code generation or route setup needed.
 
+For organization-level Ask, decisions, confirmations and business memory, use the separate [Office API](/api-reference/office-api/) with a platform credential and explicit `x-organization-id`. These endpoints do not use the app data API or app end-user tokens.
+
 **Placeholders:**
 - `{app_id}` — Your app's identifier
 - `{table}` — A table name in your schema

@@ -252,6 +252,80 @@ afterAll(() => {
 });
 
 describe('an Office-origin conversation is governed by the Office floor', () => {
+  it('refuses a fenced execution before transcript writes or model work', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    global.fetch = vi.fn();
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => false }));
+    expect(events).toEqual([{ type: 'blocked', reason: 'execution_interrupted' }]);
+    expect(mockAppendMessage).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('pairs tool history but never dispatches a batch after its execution fence expires', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    let allowed = true;
+    global.fetch = vi.fn(async () => {
+      allowed = false;
+      return toolCallPass('manage_app', { action: 'list' });
+    });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => allowed }));
+    expect(events).toContainEqual({ type: 'blocked', reason: 'execution_interrupted' });
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    expect(mockAppendMessage.mock.calls.some(call => call[2].role === 'tool' &&
+      (call[2].toolResult as any)?.reason === 'execution_interrupted')).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts no further model request or auto-title after the fence expires during a tool', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    let allowed = true;
+    global.fetch = vi.fn().mockResolvedValue(toolCallPass('manage_app', { action: 'list' }));
+    mockCallMcpTool.mockImplementation(async () => { allowed = false; return { ok: true, result: { apps: [] } }; });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => allowed }));
+    expect(events).toContainEqual({ type: 'blocked', reason: 'execution_interrupted' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['lease', 'abort', 'access'] as const)('refuses later tools in the same batch after %s changes during the first tool', async change => {
+    mockGetConversation.mockResolvedValue(conversation());
+    let lease = true;
+    let access = true;
+    const controller = new AbortController();
+    global.fetch = vi.fn().mockResolvedValue(gatewayResponse([
+      { choices: [{ delta: { tool_calls: [0, 1, 2].map(index => ({ index, id: `call-${index + 1}`,
+        function: { name: 'manage_app', arguments: JSON.stringify({ action: 'list' }) } })) }, finish_reason: 'tool_calls' }] },
+    ]));
+    mockCallMcpTool.mockImplementation(async () => {
+      if (change === 'lease') lease = false;
+      if (change === 'abort') controller.abort();
+      if (change === 'access') access = false;
+      return { ok: true, result: { apps: [] } };
+    });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => lease,
+      signal: controller.signal, accessGuard: async () => ({ allowed: access, reason: access ? null : 'paused_by_owner', approvalMode: 'consequential' }) }));
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const reason = change === 'access' ? 'paused_by_owner' : 'execution_interrupted';
+    expect(events).toContainEqual({ type: 'blocked', reason });
+    const paired = mockAppendMessage.mock.calls.filter(call => call[2].role === 'tool').map(call => call[2]);
+    expect(paired.map(message => message.toolCallId)).toEqual(['call-1', 'call-2', 'call-3']);
+    for (const message of paired.slice(1)) expect(message.toolResult).toEqual({ error: 'office_access_blocked', reason });
+  });
+
+  it('spends no automatic title request when Office access changes after the answer', async () => {
+    mockGetConversation.mockResolvedValue(conversation({ title: 'New conversation' }));
+    let allowed = true;
+    setOperatorAccessPolicy({ evaluate: async () => ({ allowed, reason: allowed ? null : 'paused_by_owner', approvalMode: 'consequential' }) });
+    global.fetch = vi.fn(async () => {
+      allowed = false;
+      return gatewayResponse([{ choices: [{ delta: { content: 'Answer' }, finish_reason: 'stop' }] }]);
+    });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => true }));
+    expect(events).toContainEqual({ type: 'done' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('fails a live change closed when required Office preparation is unavailable', async () => {
     mockGetConversation.mockResolvedValue(conversation());
     const args = { action: 'update_env', app_id: 'app-1', env: { KEY: 'v' } };

@@ -5,7 +5,17 @@ sidebar:
   order: 8
 ---
 
-The open-source MCP server exposes 38 tools; the hosted platform adds `manage_substrate`. Most areas are consolidated into a single `manage_*` tool that takes an `action` argument (for example `manage_schema` with `action: "apply"`).
+Most areas are consolidated into a single `manage_*` tool that takes an `action` argument (for example `manage_schema` with `action: "apply"`). The hosted platform adds `manage_substrate`, `manage_organizations` and `manage_office` when their cloud overlays are installed.
+
+## Office
+
+`manage_office` has 22 actions, all requiring an explicit `org_id`. It forwards the current platform credential; no app ID is required. Enable, pause, resume and approval return a browser confirmation receipt for the initiating owner. Ask is bounded and returns exact conversation/turn IDs for observation; it never silently submits again to poll.
+
+```json
+{"action":"ask","org_id":"<organization UUID>","message":"What needs follow-up?","idempotency_key":"<unique request ID>","wait_ms":15000}
+```
+
+Use `status` with `confirmation_id` to inspect a receipt, or `get_conversation` with `conversation_id` and `turn_id` to inspect a running question. The [Office client reference](/core-concepts/office-clients/) lists every action and its CLI/SDK equivalent, native memory payloads, access rules and retry behavior. This facade is excluded from the Office agent's own model catalog and cannot authorize its protected controls.
 
 These tools are available when connected via MCP. See [MCP Setup](/getting-started/mcp-setup) for connection instructions.
 

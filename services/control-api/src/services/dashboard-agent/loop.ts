@@ -462,10 +462,12 @@ export async function* streamChatCompletion(opts: {
    * Office conversation.
    */
   organizationId?: string | null;
+  signal?: AbortSignal;
 }): AsyncGenerator<StreamChunk> {
   const url = `${process.env.AI_GATEWAY_URL ?? 'http://localhost:3000'}/v1/chat/completions`;
 
   const res = await fetch(url, {
+    signal: opts.signal,
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -719,6 +721,10 @@ export async function* runAgentTurn(
     // the agent's app-discovery tooling (manage_app list) is scoped to it so
     // the model only sees apps in the org the user is currently working in.
     organizationId?: string | null;
+    /** Optional durable execution lease/deadline. A false answer is sticky for this turn. */
+    executionGuard?: () => Promise<boolean>;
+    /** Execution cancellation only; client observers must use a separate signal. */
+    signal?: AbortSignal;
     /**
      * Executes model-authored code in an isolated sandbox for this turn.
      * Supplied by `SandboxRunner` (cron-scheduler), absent for `LocalRunner`
@@ -817,6 +823,14 @@ export async function* runAgentTurn(
   },
   depsOverride?: Partial<LoopDeps>,
 ): AsyncGenerator<LoopEvent> {
+  let executionStopped = false;
+  const executionAllowed = async (): Promise<boolean> => {
+    if (executionStopped || input.signal?.aborted) return false;
+    try { if (input.executionGuard && !await input.executionGuard()) executionStopped = true; }
+    catch { executionStopped = true; }
+    return !executionStopped;
+  };
+  if (!await executionAllowed()) { yield { type: 'blocked', reason: 'execution_interrupted' }; return; }
   const base = getDefaultDeps();
   const deps: LoopDeps = { ...base, ...(depsOverride ?? {}) };
   const { cache, treeStore, recordUsage, loadTemplate } = deps;
@@ -900,6 +914,15 @@ export async function* runAgentTurn(
         model: input.model,
       })
     : undefined);
+  const cleanupAllowed = async (): Promise<boolean> => {
+    if (!await executionAllowed()) return false;
+    // The opted-in durable turn also rechecks work admission before cleanup can
+    // flush a repo or spend on an automatic title. Existing callers are unchanged.
+    if (input.executionGuard && accessGuard) {
+      try { return (await accessGuard()).allowed; } catch { return false; }
+    }
+    return true;
+  };
 
   if (isOfficeTurn) {
     console.log('[dashboard-agent] office turn', {
@@ -1048,6 +1071,7 @@ export async function* runAgentTurn(
   let officeConsequential = false;
 
   // 1. Persist the user turn
+  if (!await executionAllowed()) { yield { type: 'blocked', reason: 'execution_interrupted' }; return; }
   await appendMessage(input.pool, input.conversationId, {
     role: 'user',
     content: input.userMessage,
@@ -1374,6 +1398,11 @@ export async function* runAgentTurn(
 
       // Recheck before EVERY model request. A downgrade or owner removal that
       // lands between iterations stops the next spend here rather than after it.
+      if (!await executionAllowed()) {
+        yield { type: 'blocked', reason: 'execution_interrupted' };
+        terminated = true;
+        break outer;
+      }
       if (accessGuard) {
         const access = await accessGuard();
         if (!access.allowed) {
@@ -1385,6 +1414,7 @@ export async function* runAgentTurn(
       }
 
       const stream = streamChatCompletion({
+        signal: input.signal,
         model: input.model,
         messages,
         tools,
@@ -1465,7 +1495,8 @@ export async function* runAgentTurn(
       // tool RESULT for every call — history stays paired and the model never
       // sees a hanging call.
       let accessBlockedReason: string | null = null;
-      if (accessGuard) {
+      if (!await executionAllowed()) accessBlockedReason = 'execution_interrupted';
+      if (accessGuard && !accessBlockedReason) {
         const access = await accessGuard();
         if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
         else officeConsequential = access.approvalMode === 'consequential';
@@ -1517,6 +1548,15 @@ export async function* runAgentTurn(
             yield { type: 'tool_result', id: originalCall.id, result: payload };
             continue;
           }
+        }
+
+        // A previous tool may outlive the durable lease or its owner's access.
+        // Keep refusals sticky and pair every remaining call with a result.
+        if (!accessBlockedReason && !await executionAllowed()) accessBlockedReason = 'execution_interrupted';
+        if (i > 0 && input.executionGuard && accessGuard && !accessBlockedReason) {
+          const access = await accessGuard();
+          if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
+          else officeConsequential = access.approvalMode === 'consequential';
         }
 
         if (accessBlockedReason) {
@@ -2948,6 +2988,7 @@ export async function* runAgentTurn(
   } finally {
     // End-of-turn: flush touched apps + record usage (guaranteed to run)
     for (const appId of touchedApps) {
+      if (!await cleanupAllowed()) break;
       const baseline = baselineByApp.get(appId) ?? new Map<string, string>();
       try {
         const flushResult = await repoSync.flush({
@@ -2959,7 +3000,7 @@ export async function* runAgentTurn(
 
         // Task 5 (Plan 3d): auto-name the new snapshot. Entirely best-effort —
         // must never block or fail the SSE stream, so every step is wrapped.
-        if (flushResult.newSnapshotId) {
+        if (flushResult.newSnapshotId && await cleanupAllowed()) {
           try {
             const gateway = snapshotTitleGatewayFactory(input.jwt, officeOrganizationId);
             const snapshotTitle = await deriveSnapshotTitle(
@@ -3007,7 +3048,7 @@ export async function* runAgentTurn(
     // Task 2 (Plan 3e): auto-title the conversation after its first assistant
     // turn. Entirely best-effort — never blocks or fails the SSE stream, and
     // never overwrites a title the user (or a prior turn) already set.
-    if (lastAssistantText) {
+    if (lastAssistantText && await cleanupAllowed()) {
       try {
         const conversation = await getConversationFn(input.pool, input.conversationId, input.userId);
         if (conversation && conversation.title === 'New conversation') {
