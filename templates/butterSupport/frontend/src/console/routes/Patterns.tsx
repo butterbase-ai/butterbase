@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -8,6 +9,7 @@ import { timeAgo } from '@/console/lib/utils';
 import { ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
 
 function PatternTickets({ ids }: { ids: string[] }) {
+  useUiLocale();
   const { data = [], isLoading } = useQuery({
     queryKey: ['pattern_sample_tickets', ids.join(',')],
     queryFn: async () => {
@@ -22,12 +24,12 @@ function PatternTickets({ ids }: { ids: string[] }) {
 
   if (isLoading) {
     return (
-      <div className="mt-3 font-mono text-[11px] text-muted-foreground">loading tickets…</div>
+      <div className="mt-3 font-mono text-[11px] text-muted-foreground">{uiText("loading tickets…")}</div>
     );
   }
   if (data.length === 0) {
     return (
-      <div className="mt-3 font-mono text-[11px] text-muted-foreground">no tickets found</div>
+      <div className="mt-3 font-mono text-[11px] text-muted-foreground">{uiText("no tickets found")}</div>
     );
   }
   return (
@@ -40,10 +42,10 @@ function PatternTickets({ ids }: { ids: string[] }) {
           >
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13px] text-foreground">
-                {t.subject || <span className="italic text-muted-foreground">no subject</span>}
+                {t.subject || <span className="italic text-muted-foreground">{uiText("no subject")}</span>}
               </div>
               <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
-                {t.customer_name || t.customer_email || 'unknown'} · {t.channel}
+                {t.customer_name || t.customer_email || uiText('unknown')} · {t.channel}
               </div>
             </div>
             <div className="shrink-0 font-mono text-[10px] text-muted-foreground">
@@ -57,6 +59,7 @@ function PatternTickets({ ids }: { ids: string[] }) {
 }
 
 export function Patterns() {
+  useUiLocale();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const { data = [], isLoading } = useQuery({
     queryKey: ['pattern_signals'],
@@ -74,13 +77,12 @@ export function Patterns() {
     <div className="h-full overflow-y-auto">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Cross-cuts</p>
+          <p className="eyebrow mb-3">{uiText("Cross-cuts")}</p>
           <h1 className="page-title">
-            Patterns <em>in motion</em>
+            {uiText("Patterns ")}<em>{uiText("in motion")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            Cross-cutting issues the agent has noticed — each one a policy or product fix waiting to happen.
-          </p>
+            {uiText("Cross-cutting issues the agent has noticed — each one a policy or product fix waiting to happen.")}</p>
         </div>
       </div>
 
@@ -88,7 +90,7 @@ export function Patterns() {
         {isLoading ? (
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-butter animate-pulse-soft" />
-            <span className="eyebrow !text-[10px]">loading patterns…</span>
+            <span className="eyebrow !text-[10px]">{uiText("loading patterns…")}</span>
           </div>
         ) : data.length === 0 ? (
           <div className="max-w-md py-8">
@@ -96,11 +98,9 @@ export function Patterns() {
               <Sparkles className="h-5 w-5 text-butter" strokeWidth={1.75} />
             </div>
             <p className="font-display text-[26px] leading-tight tracking-tight">
-              Nothing's <em className="font-editorial italic text-butter">repeating</em> yet.
-            </p>
+              {uiText("Nothing's ")}<em className="font-editorial italic text-butter">{uiText("repeating")}</em> {uiText(" yet.")}</p>
             <p className="mt-2 font-editorial italic text-[14px] text-muted-foreground">
-              As tickets accumulate, the agent will surface what's coming up over and over.
-            </p>
+              {uiText("As tickets accumulate, the agent will surface what's coming up over and over.")}</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -120,7 +120,7 @@ export function Patterns() {
                     <span className="font-mono num text-[18px] text-butter shrink-0">{p.count}×</span>
                   </div>
                   <div className="mt-3 font-mono text-[11px] text-muted-foreground">
-                    first {timeAgo(p.first_seen_at)} · last {timeAgo(p.last_seen_at)}
+                    {uiText("first ")}{timeAgo(p.first_seen_at)} {uiText(" · last ")}{timeAgo(p.last_seen_at)}
                   </div>
                   {hasTickets && (
                     <button
@@ -135,12 +135,12 @@ export function Patterns() {
                         <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.75} />
                       )}
                       <span>
-                        {ids.length} sample ticket{ids.length === 1 ? '' : 's'}
+                        {ids.length} {uiText(" sample ticket")}{ids.length === 1 ? '' : 's'}
                       </span>
                     </button>
                   )}
                   {isOpen && hasTickets && <PatternTickets ids={ids} />}
-                  {p.surfaced && <div className="mt-3"><Badge variant="amber">surfaced</Badge></div>}
+                  {p.surfaced && <div className="mt-3"><Badge variant="amber">{uiText("surfaced")}</Badge></div>}
                 </div>
               );
             })}

@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -12,7 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { useWorkspaces } from '@/hooks/useWorkspaces';
 import { useSyncSettings, useUpdateSyncSettings } from '@/hooks/useSyncSettings';
 import { useCurrentWorkspaceId } from '@/lib/workspace';
@@ -143,7 +144,7 @@ function useAddAllowlistEntry() {
     mutationFn: async (input: { entry_type: 'email' | 'domain'; value: string; note?: string }) => {
       const { data: me } = await bb.auth.getUser();
       const userId = (me as any)?.id;
-      if (!userId) throw new Error('Not signed in');
+      if (!userId) throw new Error(uiText('Not signed in'));
       const { error } = await bb.from('app_allowlist').insert({
         entry_type: input.entry_type,
         value: input.value.trim().toLowerCase(),
@@ -212,16 +213,17 @@ function useConnectedIntegrations() {
 /* ─────────────────────────────────────────────────────────── */
 
 function EditModePreference() {
+  useUiLocale();
   const [mode, setMode] = useEditMode();
   const options: Array<{ value: EditMode; label: string; blurb: string }> = [
     {
       value: 'hover',
-      label: 'Hover pencil (default)',
+      get label() { return uiText('Hover pencil (default)'); },
       blurb: 'Fields stay clickable and URLs open as real links. A small pencil appears on hover to enter edit mode.',
     },
     {
       value: 'toggle',
-      label: 'Edit button',
+      get label() { return uiText('Edit button'); },
       blurb: 'Fields are read-only by default. Click "Edit" at the top of a record to unlock all fields at once.',
     },
   ];
@@ -319,6 +321,7 @@ function SectionShell({
   blurb?: string;
   children: React.ReactNode;
 }) {
+  useUiLocale();
   return (
     <section className="grid grid-cols-1 md:grid-cols-[180px_1fr] gap-6 md:gap-10 py-10 border-b border-border">
       <header>
@@ -340,6 +343,7 @@ function SectionShell({
 /* ─────────────────────────────────────────────────────────── */
 
 export default function Settings() {
+  useUiLocale();
   const navigate = useNavigate();
   const ws = useCurrentWorkspaceId();
   const [params, setParams] = useSearchParams();
@@ -401,16 +405,16 @@ export default function Settings() {
       bb.functions
         .invoke('register-integration', { body: { workspace_id: ws, toolkit } })
         .catch((e) => {
-          toast.error('Could not register integration with workspace', {
+          toast.error(uiText('Could not register integration with workspace'), {
             description: e instanceof Error ? e.message : String(e),
           });
         });
       const label = toolkit === 'googlesuper' ? 'Google' : (toolkit[0].toUpperCase() + toolkit.slice(1));
-      toast.success(`${label} connected`, {
-        description: 'You can now send invites and outreach through this account.',
+      toast.success(uiMessage`${label} connected`, {
+        description: uiText('You can now send invites and outreach through this account.'),
       });
     } else if (status === 'error') {
-      toast.error(`${toolkit} connection failed`, {
+      toast.error(uiMessage`${toolkit} connection failed`, {
         description: params.get('integration_error') ?? undefined,
       });
     }
@@ -430,11 +434,11 @@ export default function Settings() {
       const redirectUrl = `${window.location.origin}/auth/callback/integration/googlesuper`;
       const { data, error } = await bb.integrations.connect('googlesuper', { redirectUrl });
       if (error) throw error;
-      if (!data?.authUrl) throw new Error('No authorisation URL returned');
+      if (!data?.authUrl) throw new Error(uiText('No authorisation URL returned'));
       window.location.href = data.authUrl;
     } catch (e) {
       setGoogleConnecting(false);
-      toast.error(e instanceof Error ? e.message : 'Could not start Google connection');
+      toast.error(e instanceof Error ? e.message : uiText('Could not start Google connection'));
     }
   }
 
@@ -448,26 +452,26 @@ export default function Settings() {
           .invoke('unregister-integration', { body: { workspace_id: ws, toolkit: slug } })
           .catch(() => undefined);
       }
-      toast.success('Google disconnected');
+      toast.success(uiText('Google disconnected'));
       refetchConnected();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Disconnect failed');
+      toast.error(e instanceof Error ? e.message : uiText('Disconnect failed'));
     }
   }
 
   async function handleSignOut() {
     try {
       await bb.auth.signOut();
-      toast.success('Signed out');
+      toast.success(uiText('Signed out'));
       navigate('/login');
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to sign out');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to sign out'));
     }
   }
 
   async function handleInvite() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-      toast.error('Enter a valid email');
+      toast.error(uiText('Enter a valid email'));
       return;
     }
     try {
@@ -477,17 +481,17 @@ export default function Settings() {
       });
       setEmail('');
       if (result.email_sent) {
-        toast.success(`Invite emailed to ${result.workspace_name}'s new ${role}`);
+        toast.success(uiMessage`Invite emailed to ${result.workspace_name}'s new ${role}`);
       } else {
         await navigator.clipboard.writeText(result.invite_url).catch(() => undefined);
-        toast.success('Invite link copied — share it with your teammate', {
+        toast.success(uiText('Invite link copied — share it with your teammate'), {
           description: result.email_error
             ? `Gmail send failed (${result.email_error}). Link copied to clipboard.`
             : 'Connect Google to send invites automatically. Link copied to clipboard.',
         });
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to invite');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to invite'));
     }
   }
 
@@ -495,35 +499,35 @@ export default function Settings() {
     try {
       const r = await findDupes.mutateAsync();
       toast.success(
-        `Scan complete — ${r.companies.length} company pair${r.companies.length === 1 ? '' : 's'}, ${r.people.length} person pair${r.people.length === 1 ? '' : 's'} evaluated`,
-        { description: `${r.counts.companies_pairs_found + r.counts.people_pairs_found} total candidates found.` },
+        uiMessage`Scan complete — ${r.companies.length} company pair${r.companies.length === 1 ? '' : 's'}, ${r.people.length} person pair${r.people.length === 1 ? '' : 's'} evaluated`,
+        { description: uiMessage`${r.counts.companies_pairs_found + r.counts.people_pairs_found} total candidates found.` },
       );
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Scan failed');
+      toast.error(e instanceof Error ? e.message : uiText('Scan failed'));
     }
   }
 
   async function handleAddAllowlist() {
     const v = allowValue.trim().toLowerCase();
     if (!v) {
-      toast.error(allowType === 'email' ? 'Enter an email' : 'Enter a domain');
+      toast.error(allowType === 'email' ? uiText('Enter an email') : uiText('Enter a domain'));
       return;
     }
     if (allowType === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) {
-      toast.error('Enter a valid email');
+      toast.error(uiText('Enter a valid email'));
       return;
     }
     if (allowType === 'domain' && !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) {
-      toast.error('Enter a valid domain (e.g. acme.com)');
+      toast.error(uiText('Enter a valid domain (e.g. acme.com)'));
       return;
     }
     try {
       await addAllowlist.mutateAsync({ entry_type: allowType, value: v, note: allowNote });
       setAllowValue('');
       setAllowNote('');
-      toast.success(`Added ${allowType}: ${v}`);
+      toast.success(uiMessage`Added ${allowType}: ${v}`);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to add entry');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to add entry'));
     }
   }
 
@@ -531,9 +535,9 @@ export default function Settings() {
     const url = `${window.location.origin}/invite/${token}`;
     try {
       await navigator.clipboard.writeText(url);
-      toast.success('Invite link copied');
+      toast.success(uiText('Invite link copied'));
     } catch {
-      toast.error('Copy failed');
+      toast.error(uiText('Copy failed'));
     }
   }
 
@@ -541,13 +545,12 @@ export default function Settings() {
     <div className="flex h-full flex-col">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Section 06 · Workshop</p>
+          <p className="eyebrow mb-3">{uiText("Section 06 · Workshop")}</p>
           <h1 className="page-title">
-            Settings <em>&amp; integrations</em>
+            {uiText("Settings ")}<em>{uiText("& integrations")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            Tune your workspace, invite collaborators, connect the tools that make outreach effortless.
-          </p>
+            {uiText("Tune your workspace, invite collaborators, connect the tools that make outreach effortless.")}</p>
         </div>
       </div>
 
@@ -556,9 +559,9 @@ export default function Settings() {
 
           {/* Workspace */}
           <SectionShell
-            eyebrow="Identity"
-            title={<>Your <em className="font-editorial italic text-butter">workspace</em></>}
-            blurb="The handle and home for your team’s shared ledger."
+            eyebrow={uiText("Identity")}
+            title={<>{uiText("Your ")}<em className="font-editorial italic text-butter">{uiText("workspace")}</em></>}
+            blurb={uiText("The handle and home for your team’s shared ledger.")}
           >
             {wLoading ? (
               <Skeleton className="h-24" />
@@ -566,13 +569,13 @@ export default function Settings() {
               <div className="card-flat p-5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   <div>
-                    <p className="eyebrow mb-1.5">Name</p>
+                    <p className="eyebrow mb-1.5">{uiText("Name")}</p>
                     <p className="font-display text-[22px] tracking-tight text-foreground leading-none">
                       {currentWorkspace.name}
                     </p>
                   </div>
                   <div>
-                    <p className="eyebrow mb-1.5">Slug</p>
+                    <p className="eyebrow mb-1.5">{uiText("Slug")}</p>
                     <p className="font-mono text-[14px] text-foreground">
                       /{currentWorkspace.slug}
                     </p>
@@ -580,25 +583,25 @@ export default function Settings() {
                 </div>
               </div>
             ) : (
-              <p className="font-editorial italic text-muted-foreground">No workspace found.</p>
+              <p className="font-editorial italic text-muted-foreground">{uiText("No workspace found.")}</p>
             )}
           </SectionShell>
 
           {/* Integrations */}
           <SectionShell
-            eyebrow="Integrations"
-            title={<>Connect <em className="font-editorial italic text-butter">the rails</em></>}
-            blurb="Plug in your inbox so invites and follow-ups go out under your name."
+            eyebrow={uiText("Integrations")}
+            title={<>{uiText("Connect ")}<em className="font-editorial italic text-butter">{uiText("the rails")}</em></>}
+            blurb={uiText("Plug in your inbox so invites and follow-ups go out under your name.")}
           >
             <IntegrationCard
               icon={<GoogleMark />}
               name="Google"
-              tagline="One connection for Gmail + Calendar — outreach, invites, and meeting sync."
+              tagline={uiText("One connection for Gmail + Calendar — outreach, invites, and meeting sync.")}
               connected={!!google}
               loading={cLoading}
               connectedMeta={
                 google
-                  ? `connected ${formatDistanceToNowStrict(new Date(google.connected_at), { addSuffix: true })}`
+                  ? uiMessage`connected ${formatDistanceToNowStrict(new Date(google.connected_at), { addSuffix: true })}`
                   : undefined
               }
               busy={googleConnecting}
@@ -609,17 +612,14 @@ export default function Settings() {
             {needsLegacyReconnect && (
               <div className="card-flat p-4 border border-coral/40 bg-coral/5">
                 <p className="text-[13px] text-foreground">
-                  <span className="font-mono text-coral">Action needed:</span>{' '}
-                  Your Gmail / Calendar connections use an older format. Click
-                  <span className="font-mono"> Connect Google </span>
-                  above once to consolidate — your existing data stays intact.
-                </p>
+                  <span className="font-mono text-coral">{uiText("Action needed:")}</span>{' '}
+                  {uiText("Your Gmail / Calendar connections use an older format. Click")}<span className="font-mono"> {uiText(" Connect Google ")}</span>
+                  {uiText("above once to consolidate — your existing data stays intact.")}</p>
               </div>
             )}
 
             <p className="font-editorial italic text-[12.5px] text-muted-foreground/80 pl-1">
-              Gmail and Calendar sync automatically every few minutes once Google is connected.
-            </p>
+              {uiText("Gmail and Calendar sync automatically every few minutes once Google is connected.")}</p>
 
             <div className="pt-4 border-t border-gray-200">
               <SocialConnectionsPanel workspace_id={ws ?? null} />
@@ -628,19 +628,19 @@ export default function Settings() {
 
           {/* Invite */}
           <SectionShell
-            eyebrow="Collaboration"
-            title={<>Invite a <em className="font-editorial italic text-butter">teammate</em></>}
+            eyebrow={uiText("Collaboration")}
+            title={<>{uiText("Invite a ")}<em className="font-editorial italic text-butter">{uiText("teammate")}</em></>}
             blurb={
               google
-                ? 'A magic link will be emailed from your Gmail. Expires in 7 days.'
-                : 'Without Google connected, the link is copied to your clipboard.'
+                ? uiText('A magic link will be emailed from your Gmail. Expires in 7 days.')
+                : uiText('Without Google connected, the link is copied to your clipboard.')
             }
           >
             <div className="card-flat p-5 space-y-4">
               <div className="flex flex-col sm:flex-row gap-2">
                 <Input
                   type="email"
-                  placeholder="teammate@acme.com"
+                  placeholder={uiText("teammate@acme.com")}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="flex-1 h-10 bg-background"
@@ -650,8 +650,8 @@ export default function Settings() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="member">Member</SelectItem>
-                    <SelectItem value="admin">Admin</SelectItem>
+                    <SelectItem value="member">{uiText("Member")}</SelectItem>
+                    <SelectItem value="admin">{uiText("Admin")}</SelectItem>
                   </SelectContent>
                 </Select>
                 <Button
@@ -662,10 +662,9 @@ export default function Settings() {
                   {invite.isPending ? (
                     <>
                       <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
-                      Sending
-                    </>
+                      {uiText("Sending")}</>
                   ) : (
-                    'Send invite'
+                    uiText('Send invite')
                   )}
                 </Button>
               </div>
@@ -674,8 +673,7 @@ export default function Settings() {
                 <div className="flex items-start gap-2 rounded-md border border-butter/50 bg-butter/10 px-3 py-2">
                   <Mail className="h-3.5 w-3.5 mt-0.5 text-foreground/80 shrink-0" />
                   <p className="text-[12.5px] text-foreground/80 leading-snug">
-                    Connect Google above to automatically email invites instead of copying links.
-                  </p>
+                    {uiText("Connect Google above to automatically email invites instead of copying links.")}</p>
                 </div>
               )}
             </div>
@@ -683,7 +681,7 @@ export default function Settings() {
             {invites.length > 0 && (
               <div className="card-flat overflow-hidden">
                 <div className="px-5 pt-4 pb-3 flex items-center justify-between">
-                  <p className="eyebrow">Pending · {invites.length}</p>
+                  <p className="eyebrow">{uiText("Pending · ")}{invites.length}</p>
                 </div>
                 <div className="divide-y divide-border">
                   {invites.map((i) => (
@@ -692,26 +690,26 @@ export default function Settings() {
                       <div className="min-w-0 flex-1">
                         <p className="text-[13.5px] text-foreground truncate">{i.email}</p>
                         <p className="font-editorial italic text-[12px] text-muted-foreground">
-                          {i.role} · expires {formatDistanceToNowStrict(new Date(i.expires_at), { addSuffix: true })}
+                          {i.role} {uiText(" · expires ")}{formatDistanceToNowStrict(new Date(i.expires_at), { addSuffix: true })}
                         </p>
                       </div>
                       <button
                         onClick={() => copyInviteLink(i.token)}
                         className="text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded hover:bg-foreground/5"
-                        title="Copy invite link"
+                        title={uiText("Copy invite link")}
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </button>
                       <button
                         onClick={() =>
                           revoke.mutate(i.id, {
-                            onSuccess: () => toast.success('Invite revoked'),
+                            onSuccess: () => toast.success(uiText('Invite revoked')),
                             onError: (e) =>
-                              toast.error(e instanceof Error ? e.message : 'Failed to revoke'),
+                              toast.error(e instanceof Error ? e.message : uiText('Failed to revoke')),
                           })
                         }
                         className="text-muted-foreground hover:text-coral transition-colors p-1.5 rounded hover:bg-coral/10"
-                        title="Revoke"
+                        title={uiText("Revoke")}
                       >
                         <XCircle className="h-3.5 w-3.5" />
                       </button>
@@ -724,21 +722,19 @@ export default function Settings() {
 
           {/* Duplicates (AI merge suggestions) */}
           <SectionShell
-            eyebrow="Duplicates"
-            title={<>Find <em className="font-editorial italic text-butter">duplicates</em></>}
-            blurb="Scans companies and people for likely duplicates (same domain, same name, same email). The AI gives a merge/skip verdict on the strongest pairs."
+            eyebrow={uiText("Duplicates")}
+            title={<>{uiText("Find ")}<em className="font-editorial italic text-butter">{uiText("duplicates")}</em></>}
+            blurb={uiText("Scans companies and people for likely duplicates (same domain, same name, same email). The AI gives a merge/skip verdict on the strongest pairs.")}
           >
-            <div className="card-flat p-5 flex items-center gap-4">
+            <div className="card-flat p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
               <div className="grid place-items-center h-11 w-11 rounded-md bg-background border border-border shrink-0">
                 <GitMerge className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
                 <h3 className="font-display text-[18px] tracking-tight text-foreground leading-none">
-                  Duplicate scan
-                </h3>
+                  {uiText("Duplicate scan")}</h3>
                 <p className="mt-1 font-editorial italic text-[13px] text-muted-foreground">
-                  Read-only — surfaces suggestions only. Actually merging records is a manual step for now.
-                </p>
+                  {uiText("Read-only — surfaces suggestions only. Actually merging records is a manual step for now.")}</p>
               </div>
               <Button
                 onClick={handleScanDuplicates}
@@ -746,21 +742,19 @@ export default function Settings() {
                 className="gap-2 bg-foreground text-background hover:bg-foreground/85"
               >
                 {findDupes.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                Scan
-              </Button>
+                {uiText("Scan")}</Button>
             </div>
 
             {findDupes.data && (
               <div className="space-y-4">
                 {findDupes.data.companies.length === 0 && findDupes.data.people.length === 0 ? (
                   <p className="font-editorial italic text-[13px] text-muted-foreground">
-                    No duplicate candidates found. Nice.
-                  </p>
+                    {uiText("No duplicate candidates found. Nice.")}</p>
                 ) : (
                   <>
                     {findDupes.data.companies.length > 0 && (
                       <div>
-                        <p className="eyebrow mb-2">Companies</p>
+                        <p className="eyebrow mb-2">{uiText("Companies")}</p>
                         <ul className="space-y-1.5">
                           {findDupes.data.companies.map((p) => (
                             <li key={`${p.a_id}-${p.b_id}`} className="card-flat p-4 space-y-2">
@@ -790,7 +784,7 @@ export default function Settings() {
                     )}
                     {findDupes.data.people.length > 0 && (
                       <div>
-                        <p className="eyebrow mb-2">People</p>
+                        <p className="eyebrow mb-2">{uiText("People")}</p>
                         <ul className="space-y-1.5">
                           {findDupes.data.people.map((p) => (
                             <li key={`${p.a_id}-${p.b_id}`} className="card-flat p-4 space-y-2">
@@ -826,9 +820,9 @@ export default function Settings() {
 
           {/* Access (app-wide allowlist) */}
           <SectionShell
-            eyebrow="Access"
-            title={<>Who can <em className="font-editorial italic text-butter">sign in</em></>}
-            blurb="App-wide allowlist enforced at login. Empty list = the next signup auto-seeds the list and becomes the implicit owner."
+            eyebrow={uiText("Access")}
+            title={<>{uiText("Who can ")}<em className="font-editorial italic text-butter">{uiText("sign in")}</em></>}
+            blurb={uiText("App-wide allowlist enforced at login. Empty list = the next signup auto-seeds the list and becomes the implicit owner.")}
           >
             <div className="card-flat p-5 space-y-4">
               <div className="flex flex-col sm:flex-row gap-2">
@@ -837,20 +831,20 @@ export default function Settings() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="email">Email</SelectItem>
-                    <SelectItem value="domain">Domain</SelectItem>
+                    <SelectItem value="email">{uiText("Email")}</SelectItem>
+                    <SelectItem value="domain">{uiText("Domain")}</SelectItem>
                   </SelectContent>
                 </Select>
                 <Input
                   type="text"
-                  placeholder={allowType === 'email' ? 'alice@acme.com' : 'acme.com'}
+                  placeholder={allowType === 'email' ? uiText('alice@acme.com') : uiText('acme.com')}
                   value={allowValue}
                   onChange={(e) => setAllowValue(e.target.value)}
                   className="flex-1 h-10 bg-background"
                 />
                 <Input
                   type="text"
-                  placeholder="Note (optional)"
+                  placeholder={uiText("Note (optional)")}
                   value={allowNote}
                   onChange={(e) => setAllowNote(e.target.value)}
                   className="flex-1 h-10 bg-background"
@@ -865,14 +859,12 @@ export default function Settings() {
                   ) : (
                     <Plus className="h-3.5 w-3.5" />
                   )}
-                  Add
-                </Button>
+                  {uiText("Add")}</Button>
               </div>
               <div className="flex items-start gap-2 rounded-md border border-butter/40 bg-butter/5 px-3 py-2">
                 <Lock className="h-3.5 w-3.5 mt-0.5 text-foreground/70 shrink-0" />
                 <p className="text-[12.5px] text-foreground/75 leading-snug">
-                  Visible only to workspace owners/admins. Login checks run server-side via the <span className="font-mono">check-allowlist</span> function — if denied, the user is signed out immediately.
-                </p>
+                  {uiText("Visible only to workspace owners/admins. Login checks run server-side via the ")}<span className="font-mono">{uiText("check-allowlist")}</span> {uiText(" function — if denied, the user is signed out immediately.")}</p>
               </div>
             </div>
 
@@ -880,12 +872,11 @@ export default function Settings() {
               <Skeleton className="h-24" />
             ) : allowlist.length === 0 ? (
               <p className="font-editorial italic text-muted-foreground">
-                No entries yet — the next user to sign in will be added automatically.
-              </p>
+                {uiText("No entries yet — the next user to sign in will be added automatically.")}</p>
             ) : (
               <div className="card-flat overflow-hidden">
                 <div className="px-5 pt-4 pb-3 flex items-center justify-between">
-                  <p className="eyebrow">Entries · {allowlist.length}</p>
+                  <p className="eyebrow">{uiText("Entries · ")}{allowlist.length}</p>
                 </div>
                 <div className="divide-y divide-border">
                   {allowlist.map((a) => (
@@ -902,7 +893,7 @@ export default function Settings() {
                         <p className="font-editorial italic text-[12px] text-muted-foreground">
                           {a.entry_type}
                           {a.note ? ` · ${a.note}` : ''}
-                          {' · added '}
+                          {uiText(' · added ')}
                           {formatDistanceToNowStrict(new Date(a.created_at), { addSuffix: true })}
                           {!a.active && ' · inactive'}
                         </p>
@@ -910,13 +901,13 @@ export default function Settings() {
                       <button
                         onClick={() =>
                           delAllowlist.mutate(a.id, {
-                            onSuccess: () => toast.success('Entry removed'),
+                            onSuccess: () => toast.success(uiText('Entry removed')),
                             onError: (e) =>
-                              toast.error(e instanceof Error ? e.message : 'Failed to remove'),
+                              toast.error(e instanceof Error ? e.message : uiText('Failed to remove')),
                           })
                         }
                         className="text-muted-foreground hover:text-coral transition-colors p-1.5 rounded hover:bg-coral/10"
-                        title="Remove"
+                        title={uiText("Remove")}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -929,23 +920,21 @@ export default function Settings() {
 
           {/* Meeting notetaker */}
           <SectionShell
-            eyebrow="Meetings"
-            title={<>Meeting <em className="font-editorial italic text-butter">notetaker</em></>}
-            blurb="A bot that joins Zoom / Meet / Teams / Webex calls, transcribes, and posts decisions, commitments, and learnings back to each meeting. On by default."
+            eyebrow={uiText("Meetings")}
+            title={<>{uiText("Meeting ")}<em className="font-editorial italic text-butter">{uiText("notetaker")}</em></>}
+            blurb={uiText("A bot that joins Zoom / Meet / Teams / Webex calls, transcribes, and posts decisions, commitments, and learnings back to each meeting. On by default.")}
           >
-            <div className="card-flat p-5 flex items-center gap-4">
+            <div className="card-flat p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
               <div className="grid place-items-center h-11 w-11 rounded-md bg-background border border-border shrink-0">
                 <Bot className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h3 className="font-display text-[18px] tracking-tight text-foreground leading-none">
-                    Enable notetaker
-                  </h3>
+                    {uiText("Enable notetaker")}</h3>
                 </div>
                 <p className="mt-1 font-editorial italic text-[13px] text-muted-foreground">
-                  When on, every upcoming calendar event with a Zoom/Meet/Teams/Webex link gets a notetaker bot. Billed against your Butterbase AI credits.
-                </p>
+                  {uiText("When on, every upcoming calendar event with a Zoom/Meet/Teams/Webex link gets a notetaker bot. Billed against your Butterbase AI credits.")}</p>
               </div>
               <Switch
                 checked={notetakerAuto}
@@ -953,26 +942,24 @@ export default function Settings() {
                   updateSyncSettings.mutate(
                     { notetaker_auto_enabled: checked },
                     {
-                      onSuccess: () => toast.success(checked ? 'Notetaker on' : 'Notetaker off'),
-                      onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not save'),
+                      onSuccess: () => toast.success(checked ? uiText('Notetaker on') : uiText('Notetaker off')),
+                      onError: (e) => toast.error(e instanceof Error ? e.message : uiText('Could not save')),
                     },
                   );
                 }}
                 disabled={updateSyncSettings.isPending || !syncSettings}
-                aria-label="Enable notetaker"
+                aria-label={uiText("Enable notetaker")}
               />
             </div>
-            <div className="card-flat p-5 flex items-center gap-4">
+            <div className="card-flat p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
               <div className="grid place-items-center h-11 w-11 rounded-md bg-background border border-border shrink-0">
                 <Bot className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
                 <h3 className="font-display text-[16px] tracking-tight text-foreground leading-none">
-                  Display name in calls
-                </h3>
+                  {uiText("Display name in calls")}</h3>
                 <p className="mt-1 font-editorial italic text-[13px] text-muted-foreground">
-                  What other meeting attendees see as the bot's name. Keep it recognizable — e.g. "{currentWorkspace?.name ?? 'Acme'} Notetaker".
-                </p>
+                  {uiText("What other meeting attendees see as the bot's name. Keep it recognizable — e.g. \"")}{currentWorkspace?.name ?? uiText('Acme')} {uiText(" Notetaker\".")}</p>
               </div>
               <Input
                 type="text"
@@ -990,42 +977,40 @@ export default function Settings() {
                   updateSyncSettings.mutate(
                     { notetaker_name: next },
                     {
-                      onSuccess: () => toast.success('Notetaker name updated'),
-                      onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not save'),
+                      onSuccess: () => toast.success(uiText('Notetaker name updated')),
+                      onError: (e) => toast.error(e instanceof Error ? e.message : uiText('Could not save')),
                     },
                   );
                 }}
-                placeholder="Notetaker"
+                placeholder={uiText("Notetaker")}
                 disabled={updateSyncSettings.isPending || !syncSettings}
-                aria-label="Notetaker display name"
+                aria-label={uiText("Notetaker display name")}
               />
             </div>
             <p className="font-editorial italic text-[12.5px] text-muted-foreground/80 pl-1 leading-snug">
-              You can also manually send a bot from any meeting dialog.
-            </p>
+              {uiText("You can also manually send a bot from any meeting dialog.")}</p>
           </SectionShell>
 
           {/* Appearance */}
           <SectionShell
-            eyebrow="Appearance"
-            title={<>Detail-page <em className="font-editorial italic text-butter">editing</em></>}
-            blurb="Choose how record detail pages behave when you click a field."
+            eyebrow={uiText("Appearance")}
+            title={<>{uiText("Detail-page ")}<em className="font-editorial italic text-butter">{uiText("editing")}</em></>}
+            blurb={uiText("Choose how record detail pages behave when you click a field.")}
           >
             <EditModePreference />
           </SectionShell>
 
           {/* Account */}
           <SectionShell
-            eyebrow="Account"
-            title={<>Sign <em className="font-editorial italic text-butter">off</em></>}
-            blurb="End your session on this device."
+            eyebrow={uiText("Account")}
+            title={<>{uiText("Sign ")}<em className="font-editorial italic text-butter">{uiText("off")}</em></>}
+            blurb={uiText("End your session on this device.")}
           >
             <div className="card-flat p-5 flex items-center justify-between">
               <div>
-                <p className="text-[14px] text-foreground">Sign out of Butterbase CRM</p>
+                <p className="text-[14px] text-foreground">{uiText("Sign out of Butterbase CRM")}</p>
                 <p className="font-editorial italic text-[12.5px] text-muted-foreground">
-                  You can sign back in any time.
-                </p>
+                  {uiText("You can sign back in any time.")}</p>
               </div>
               <Button
                 variant="outline"
@@ -1033,16 +1018,15 @@ export default function Settings() {
                 className="gap-2 border-coral/40 text-coral hover:bg-coral/10 hover:text-coral"
               >
                 <LogOut className="h-3.5 w-3.5" />
-                Sign out
-              </Button>
+                {uiText("Sign out")}</Button>
             </div>
           </SectionShell>
 
           {/* Competitors */}
           <SectionShell
-            eyebrow="Competitors"
-            title={<>Track <em className="font-editorial italic text-butter">competitors</em></>}
-            blurb="Add competitors you want to monitor. The auto-discovery cron searches Reddit and LinkedIn for posts mentioning them and queues comment drafts for your review every 6 hours."
+            eyebrow={uiText("Competitors")}
+            title={<>{uiText("Track ")}<em className="font-editorial italic text-butter">{uiText("competitors")}</em></>}
+            blurb={uiText("Add competitors you want to monitor. The auto-discovery cron searches Reddit and LinkedIn for posts mentioning them and queues comment drafts for your review every 6 hours.")}
           >
             {competitors.length > 0 && (
               <div className="space-y-2">
@@ -1063,11 +1047,11 @@ export default function Settings() {
                     <button
                       onClick={() =>
                         deleteCompetitor.mutate(c.id, {
-                          onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
+                          onError: (e) => toast.error(e instanceof Error ? e.message : uiText('Delete failed')),
                         })
                       }
                       className="text-muted-foreground hover:text-coral transition-colors p-1.5 rounded hover:bg-coral/10 shrink-0"
-                      title="Remove competitor"
+                      title={uiText("Remove competitor")}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -1077,22 +1061,22 @@ export default function Settings() {
             )}
 
             <div className="card-flat p-5 space-y-3">
-              <p className="eyebrow">Add competitor</p>
+              <p className="eyebrow">{uiText("Add competitor")}</p>
               <div className="space-y-2">
                 <Input
                   value={newCompName}
                   onChange={(e) => setNewCompName(e.target.value)}
-                  placeholder="Competitor name (e.g. Salesforce)"
+                  placeholder={uiText("Competitor name (e.g. Salesforce)")}
                 />
                 <Input
                   value={newCompDesc}
                   onChange={(e) => setNewCompDesc(e.target.value)}
-                  placeholder="Description — what do they sell? (optional)"
+                  placeholder={uiText("Description — what do they sell? (optional)")}
                 />
                 <Input
                   value={newCompKeywords}
                   onChange={(e) => setNewCompKeywords(e.target.value)}
-                  placeholder="Extra keywords for search (optional, e.g. CRM enterprise)"
+                  placeholder={uiText("Extra keywords for search (optional, e.g. CRM enterprise)")}
                 />
               </div>
               <Button
@@ -1103,27 +1087,25 @@ export default function Settings() {
                     { name: newCompName, description: newCompDesc, keywords: newCompKeywords },
                     {
                       onSuccess: () => {
-                        toast.success('Competitor added');
+                        toast.success(uiText('Competitor added'));
                         setNewCompName('');
                         setNewCompDesc('');
                         setNewCompKeywords('');
                       },
-                      onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to add'),
+                      onError: (e) => toast.error(e instanceof Error ? e.message : uiText('Failed to add')),
                     },
                   )
                 }
                 className="gap-2 bg-foreground text-background hover:bg-foreground/85"
               >
                 {addCompetitor.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                Add competitor
-              </Button>
+                {uiText("Add competitor")}</Button>
             </div>
           </SectionShell>
 
           <div className="py-12 text-center">
             <p className="font-editorial italic text-[13px] text-muted-foreground">
-              — end of settings —
-            </p>
+              {uiText("— end of settings —")}</p>
           </div>
         </div>
       </div>
@@ -1154,8 +1136,9 @@ function IntegrationCard({
   onConnect: () => void;
   onDisconnect: () => void;
 }) {
+  useUiLocale();
   return (
-    <div className="card-flat p-5 flex items-center gap-4">
+    <div className="card-flat p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
       <div className="grid place-items-center h-11 w-11 rounded-md bg-background border border-border shrink-0">
         {icon}
       </div>
@@ -1166,15 +1149,13 @@ function IntegrationCard({
           </h3>
           {loading ? (
             <span className="font-editorial italic text-[12px] text-muted-foreground">
-              checking…
-            </span>
+              {uiText("checking…")}</span>
           ) : connected ? (
             <span className="stage-pill !bg-sage/15 !text-sage">
               <Check className="h-2.5 w-2.5" strokeWidth={3} />
-              connected
-            </span>
+              {uiText("connected")}</span>
           ) : (
-            <span className="stage-pill">not connected</span>
+            <span className="stage-pill">{uiText("not connected")}</span>
           )}
         </div>
         <p className="mt-1 font-editorial italic text-[13px] text-muted-foreground">
@@ -1188,8 +1169,7 @@ function IntegrationCard({
           onClick={onDisconnect}
           className="text-muted-foreground hover:text-coral"
         >
-          Disconnect
-        </Button>
+          {uiText("Disconnect")}</Button>
       ) : (
         <Button
           onClick={onConnect}
@@ -1201,7 +1181,7 @@ function IntegrationCard({
           ) : (
             <Plug className="h-3.5 w-3.5" />
           )}
-          Connect {name}
+          {uiMessage`Connect ${name}`}
         </Button>
       )}
     </div>
@@ -1210,6 +1190,7 @@ function IntegrationCard({
 
 
 function GoogleMark() {
+  useUiLocale();
   return (
     <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden>
       <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.76h3.56c2.08-1.92 3.28-4.74 3.28-8.09Z"/>

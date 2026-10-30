@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -34,6 +35,7 @@ interface Props {
 }
 
 export function ProposalCard({ proposal, onResolved }: Props) {
+  useUiLocale();
   const [payload, setPayload] = useState<Record<string, any>>(proposal.payload ?? {});
   const [status, setStatus] = useState(proposal.status);
   const [busy, setBusy] = useState(false);
@@ -47,7 +49,7 @@ export function ProposalCard({ proposal, onResolved }: Props) {
 
   async function approve() {
     const endpoint = PROPOSAL_ENDPOINTS[proposal.tool_name];
-    if (!endpoint || !userId) { toast.error('Unsupported proposal type'); return; }
+    if (!endpoint || !userId) { toast.error(uiText('Unsupported proposal type')); return; }
     setBusy(true);
     try {
       // 1) Mark approved (with guard against already-resolved).
@@ -74,7 +76,7 @@ export function ProposalCard({ proposal, onResolved }: Props) {
       } else if (endpoint.method === 'PATCH') {
         // For now, only propose_update_deal_stage uses PATCH — body has `stage`, payload has `deal_id`.
         const dealId = (payload as any)?.deal_id;
-        if (!dealId) throw new Error('missing_deal_id');
+        if (!dealId) throw new Error(uiText('missing_deal_id'));
         const { error } = await bb.from(endpoint.path as any).update(body as any).eq('id', dealId);
         if (error) throw error;
         createdId = dealId;
@@ -89,7 +91,7 @@ export function ProposalCard({ proposal, onResolved }: Props) {
 
       setStatus('approved');
       onResolved?.('approved');
-      toast.success('Approved');
+      toast.success(uiText('Approved'));
     } catch (e: any) {
       // Revert on failure.
       try {
@@ -98,7 +100,7 @@ export function ProposalCard({ proposal, onResolved }: Props) {
           .eq('id', proposal.id);
       } catch { /* */ }
       setStatus('pending');
-      toast.error(e?.message ?? 'Approve failed');
+      toast.error(e?.message ?? uiText('Approve failed'));
     } finally {
       setBusy(false);
     }
@@ -114,7 +116,7 @@ export function ProposalCard({ proposal, onResolved }: Props) {
       setStatus('rejected');
       onResolved?.('rejected');
     } catch (e: any) {
-      toast.error(e?.message ?? 'Reject failed');
+      toast.error(e?.message ?? uiText('Reject failed'));
     } finally {
       setBusy(false);
     }
@@ -139,19 +141,19 @@ export function ProposalCard({ proposal, onResolved }: Props) {
           </div>
         ))}
         {fields.length === 0 && (
-          <p className="text-[12px] text-muted-foreground font-mono">No editable fields.</p>
+          <p className="text-[12px] text-muted-foreground font-mono">{uiText("No editable fields.")}</p>
         )}
       </div>
       {status === 'pending' && !expired && (
         <div className="flex justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={reject} disabled={busy}>Reject</Button>
-          <Button size="sm" onClick={approve} disabled={busy || !userId}>{busy ? 'Working…' : 'Approve'}</Button>
+          <Button size="sm" variant="ghost" onClick={reject} disabled={busy}>{uiText("Reject")}</Button>
+          <Button size="sm" onClick={approve} disabled={busy || !userId}>{busy ? uiText('Working…') : uiText('Approve')}</Button>
         </div>
       )}
-      {status === 'approved' && <p className="text-[12px] text-emerald-600">Approved ✓</p>}
-      {status === 'rejected' && <p className="text-[12px] text-muted-foreground">Rejected</p>}
+      {status === 'approved' && <p className="text-[12px] text-emerald-600">{uiText("Approved ✓")}</p>}
+      {status === 'rejected' && <p className="text-[12px] text-muted-foreground">{uiText("Rejected")}</p>}
       {(status === 'expired' || (status === 'pending' && expired)) && (
-        <p className="text-[12px] text-muted-foreground">Expired — ask the agent again.</p>
+        <p className="text-[12px] text-muted-foreground">{uiText("Expired — ask the agent again.")}</p>
       )}
     </div>
   );

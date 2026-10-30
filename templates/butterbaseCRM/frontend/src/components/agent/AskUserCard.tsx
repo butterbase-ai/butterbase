@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 
@@ -9,6 +10,7 @@ interface Props {
 }
 
 export function AskUserCard({ question, options, allow_free_text, onSubmit }: Props) {
+  useUiLocale();
   const [text, setText] = useState('');
   return (
     <div className="rounded-lg border border-border bg-card p-3 space-y-2">
@@ -27,10 +29,10 @@ export function AskUserCard({ question, options, allow_free_text, onSubmit }: Pr
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="Or type a reply…"
+            placeholder={uiText("Or type a reply…")}
             className="flex-1 h-8 rounded-md border border-input bg-transparent px-2 text-[12.5px]"
           />
-          <Button type="submit" size="sm" className="h-8" disabled={!text.trim()}>Send</Button>
+          <Button type="submit" size="sm" className="h-8" disabled={!text.trim()}>{uiText("Send")}</Button>
         </form>
       )}
     </div>

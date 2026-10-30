@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
@@ -17,6 +18,7 @@ const TICKET_LINK_RE = /__TICKET__([0-9a-f-]{36})__/;
 // markdown links with a sentinel href so we can intercept them in the `a`
 // component override and route through react-router instead of a hard nav.
 function RenderedAnswer({ text }: { text: string }) {
+  useUiLocale();
   const withLinks = text.replace(UUID_RE, (uuid) => `[\`${uuid.slice(0, 8)}\`](__TICKET__${uuid}__)`);
   return (
     <div className="prose-msg text-sm leading-relaxed text-ink">
@@ -46,6 +48,7 @@ function RenderedAnswer({ text }: { text: string }) {
 }
 
 export function SupportOverviewPanel() {
+  useUiLocale();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
@@ -89,7 +92,7 @@ export function SupportOverviewPanel() {
       const out = await api.runSupportOverview({ message: message.trim() });
       if (reqIdRef.current === reqId) setAnswer(out.value);
     } catch (e: any) {
-      if (reqIdRef.current === reqId) setError(e?.message || 'Failed');
+      if (reqIdRef.current === reqId) setError(e?.message || uiText('Failed'));
     } finally {
       if (reqIdRef.current === reqId) setBusy(false);
     }
@@ -102,7 +105,7 @@ export function SupportOverviewPanel() {
         className="hidden lg:flex items-center gap-2 h-9 px-3 rounded-md border border-border bg-card/50 text-muted-foreground hover:text-foreground hover:border-foreground/20 transition-colors text-[13px]"
       >
         <Sparkles className="h-3.5 w-3.5 text-butter" strokeWidth={1.75} />
-        <span>AI search</span>
+        <span>{uiText("AI search")}</span>
         <span className="ml-3 font-mono text-[10px] px-1.5 py-0.5 rounded bg-background border border-border num">⌘K</span>
       </button>
 
@@ -124,14 +127,14 @@ export function SupportOverviewPanel() {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') ask(query);
                 }}
-                placeholder="Ask about support — e.g. what's the state right now?"
+                placeholder={uiText("Ask about support — e.g. what's the state right now?")}
                 className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
               />
               {busy && <Loader2 className="h-4 w-4 animate-spin text-butter" />}
               <button
                 onClick={() => setOpen(false)}
                 className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-                aria-label="Close"
+                aria-label={uiText("Close")}
               >
                 <X className="h-4 w-4" />
               </button>
@@ -140,7 +143,7 @@ export function SupportOverviewPanel() {
             <div className="max-h-[60vh] overflow-y-auto px-5 py-4">
               {!answer && !error && !busy && (
                 <div className="space-y-1">
-                  <div className="px-1 pb-2 eyebrow !text-[9.5px]">Try</div>
+                  <div className="px-1 pb-2 eyebrow !text-[9.5px]">{uiText("Try")}</div>
                   {QUICK_PROMPTS.map((q) => (
                     <button
                       key={q}
@@ -159,8 +162,7 @@ export function SupportOverviewPanel() {
               {busy && !answer && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <span className="inline-block h-1.5 w-1.5 rounded-full bg-butter animate-pulse-soft" />
-                  Asking the support-overview agent…
-                </div>
+                  {uiText("Asking the support-overview agent…")}</div>
               )}
               {error && (
                 <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3.5 py-2.5 text-xs text-destructive">

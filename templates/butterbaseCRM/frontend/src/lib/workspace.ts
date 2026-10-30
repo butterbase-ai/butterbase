@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
@@ -15,6 +16,6 @@ export const useWorkspaceStore = create<WS>()(
 
 export function useCurrentWorkspaceId(): string {
   const id = useWorkspaceStore((s) => s.workspaceId);
-  if (!id) throw new Error('No active workspace');
+  if (!id) throw new Error(uiText('No active workspace'));
   return id;
 }

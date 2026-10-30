@@ -1,9 +1,11 @@
+import { uiMessage, uiText, useUiLocale } from "../i18n";
 import { useEffect } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { bb } from '@/lib/butterbase';
 import { toast } from 'sonner';
 
 export default function OAuthCallback() {
+  useUiLocale();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const { toolkit } = useParams<{ toolkit?: string }>();
@@ -30,7 +32,7 @@ export default function OAuthCallback() {
     (async () => {
       const { error } = await bb.auth.handleOAuthCallback();
       if (error) {
-        toast.error(`Sign-in failed: ${error.message}`);
+        toast.error(uiMessage`Sign-in failed: ${error.message}`);
         navigate('/login', { replace: true });
         return;
       }
@@ -43,8 +45,7 @@ export default function OAuthCallback() {
       <div className="text-center">
         <div className="mx-auto mb-4 h-8 w-8 rounded-full border-2 border-butter/30 border-t-butter animate-spin" />
         <p className="font-editorial italic text-[15px] text-muted-foreground">
-          Finishing the handshake…
-        </p>
+          {uiText("Finishing the handshake…")}</p>
       </div>
     </div>
   );

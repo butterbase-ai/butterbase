@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
@@ -39,25 +40,26 @@ function slugify(s: string) {
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 
-const onboardSchema = z.object({
-  name: z.string().min(1, 'Workspace name is required'),
+const onboardSchema = () => z.object({
+  name: z.string().min(1, uiText('Workspace name is required')),
   slug: z
     .string()
-    .min(1, 'Slug is required')
-    .max(50, 'Slug must be 50 characters or fewer')
-    .regex(/^[a-z0-9-]+$/, 'Slug may only contain lowercase letters, numbers, and hyphens'),
+    .min(1, uiText('Slug is required'))
+    .max(50, uiText('Slug must be 50 characters or fewer'))
+    .regex(/^[a-z0-9-]+$/, uiText('Slug may only contain lowercase letters, numbers, and hyphens')),
 });
 
-type OnboardValues = z.infer<typeof onboardSchema>;
+type OnboardValues = z.infer<ReturnType<typeof onboardSchema>>;
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Onboard() {
+  useUiLocale();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const form = useForm<OnboardValues>({
-    resolver: zodResolver(onboardSchema),
+    resolver: zodResolver(onboardSchema()),
     defaultValues: { name: '', slug: '' },
   });
 
@@ -91,7 +93,7 @@ export default function Onboard() {
     // Normalize array or single object
     const ws = Array.isArray(wsData) ? wsData[0] : wsData;
     if (!ws) {
-      toast.error('Failed to create workspace. Please try again.');
+      toast.error(uiText('Failed to create workspace. Please try again.'));
       return;
     }
 
@@ -119,10 +121,9 @@ export default function Onboard() {
     <div className="grid min-h-screen place-items-center bg-muted/40 p-4">
       <Card className="w-full max-w-md shadow-lg">
         <CardHeader className="space-y-1">
-          <CardTitle className="text-2xl">Create your workspace</CardTitle>
+          <CardTitle className="text-2xl">{uiText("Create your workspace")}</CardTitle>
           <CardDescription>
-            Set up your CRM workspace to start managing companies, people, and deals.
-          </CardDescription>
+            {uiText("Set up your CRM workspace to start managing companies, people, and deals.")}</CardDescription>
         </CardHeader>
         <CardContent>
           <Form {...form}>
@@ -132,10 +133,10 @@ export default function Onboard() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Workspace name</FormLabel>
+                    <FormLabel>{uiText("Workspace name")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="Acme Corp"
+                        placeholder={uiText("Acme Corp")}
                         {...field}
                         onBlur={() => {
                           field.onBlur();
@@ -152,19 +153,18 @@ export default function Onboard() {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Workspace slug</FormLabel>
+                    <FormLabel>{uiText("Workspace slug")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="acme-corp" {...field} />
+                      <Input placeholder={uiText("acme-corp")} {...field} />
                     </FormControl>
                     <FormDescription>
-                      URL-friendly identifier. Lowercase letters, numbers, and hyphens only.
-                    </FormDescription>
+                      {uiText("URL-friendly identifier. Lowercase letters, numbers, and hyphens only.")}</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
               />
               <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                {form.formState.isSubmitting ? 'Creating workspace…' : 'Create workspace'}
+                {form.formState.isSubmitting ? uiText('Creating workspace…') : uiText('Create workspace')}
               </Button>
             </form>
           </Form>

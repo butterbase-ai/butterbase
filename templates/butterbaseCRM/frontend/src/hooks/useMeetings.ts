@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 // Substrate-primary meeting hooks.
 //
 // Reads source from substrate entities of type='event' and map via entityToMeeting.
@@ -75,7 +76,7 @@ export function useCreateMeeting() {
           attrs,
         },
       );
-      if (fnErr || !fnRes?.id) throw fnErr ?? new Error('crm-upsert-meeting: no id returned');
+      if (fnErr || !fnRes?.id) throw fnErr ?? new Error(uiText('crm-upsert-meeting: no id returned'));
       await logActivity('meeting.created', 'meeting', fnRes.id, { title: input.title });
       // Return a synthetic Meeting row; the next refetch will populate properly.
       return {
@@ -117,7 +118,7 @@ export function useUpdateMeeting() {
           attrs: input.patch,
         },
       );
-      if (fnErr || !fnRes?.id) throw fnErr ?? new Error('crm-upsert-meeting: update failed');
+      if (fnErr || !fnRes?.id) throw fnErr ?? new Error(uiText('crm-upsert-meeting: update failed'));
       await logActivity('meeting.updated', 'meeting', input.id, { fields: patchKeys });
     },
     onSuccess: () => {

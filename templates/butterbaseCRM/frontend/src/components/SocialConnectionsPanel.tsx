@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { bb } from '../lib/butterbase'
@@ -43,6 +44,7 @@ interface Props {
 }
 
 export function SocialConnectionsPanel({ workspace_id }: Props) {
+  useUiLocale();
   const { data: connections = [], refetch } = useSocialConnections(workspace_id)
   const [connectingSlug, setConnectingSlug] = useState<Slug | null>(null)
   const [expandedSlug, setExpandedSlug] = useState<Slug | null>(null)
@@ -64,11 +66,11 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
       const redirectUrl = `${window.location.origin}/auth/callback/integration/${slug}`
       const { data, error } = await bb.integrations.connect(slug, { redirectUrl })
       if (error) throw error
-      if (!data?.authUrl) throw new Error('No authorisation URL returned')
+      if (!data?.authUrl) throw new Error(uiText('No authorisation URL returned'))
       window.location.href = data.authUrl
     } catch (e) {
       setConnectingSlug(null)
-      toast.error(e instanceof Error ? e.message : `Could not start ${META[slug].name} connection`)
+      toast.error(e instanceof Error ? e.message : uiMessage`Could not start ${META[slug].name} connection`)
     }
   }
 
@@ -78,10 +80,10 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
       await bb.functions
         .invoke('unregister-integration', { body: { workspace_id, toolkit: slug } })
         .catch(() => undefined)
-      toast.success(`${META[slug].name} disconnected`)
+      toast.success(uiMessage`${META[slug].name} disconnected`)
       refetch()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Disconnect failed')
+      toast.error(e instanceof Error ? e.message : uiText('Disconnect failed'))
     }
   }
 
@@ -89,17 +91,16 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
     <section className="space-y-3">
       <header className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-base font-semibold">Social accounts</h3>
+          <h3 className="text-base font-semibold">{uiText("Social accounts")}</h3>
           <p className="text-sm text-gray-500">
-            Connect your workspace's social accounts. All workspace members can post from connected accounts.
-          </p>
+            {uiText("Connect your workspace's social accounts. All workspace members can post from connected accounts.")}</p>
         </div>
         <button
           type="button"
           onClick={() => setShowHelp((v) => !v)}
           className="rounded border border-gray-200 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
         >
-          {showHelp ? 'Hide help' : 'How this works'}
+          {showHelp ? uiText('Hide help') : uiText('How this works')}
         </button>
       </header>
 
@@ -107,28 +108,19 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
         <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-xs leading-5 text-blue-900">
           <ol className="list-decimal space-y-1 pl-5">
             <li>
-              Click <strong>Connect</strong> next to a platform.
-            </li>
+              {uiText("Click ")}<strong>{uiText("Connect")}</strong> {uiText(" next to a platform.")}</li>
             <li>
-              You'll be redirected to that platform's sign-in / consent page in the same tab — sign
-              in with the account you want to post from.
-            </li>
+              {uiText("You'll be redirected to that platform's sign-in / consent page in the same tab — sign in with the account you want to post from.")}</li>
             <li>
-              Review the permissions and click <strong>Authorize</strong> on the platform's page.
-            </li>
+              {uiText("Review the permissions and click ")}<strong>{uiText("Authorize")}</strong> {uiText(" on the platform's page.")}</li>
             <li>
-              You'll be sent back here automatically. The status will flip to{' '}
-              <strong>Connected</strong> and a green dot appears.
-            </li>
+              {uiText("You'll be sent back here automatically. The status will flip to")}{' '}
+              <strong>{uiText("Connected")}</strong> {uiText(" and a green dot appears.")}</li>
             <li>
-              From there, the Social Posts page can publish to all connected accounts at once.
-            </li>
+              {uiText("From there, the Social Posts page can publish to all connected accounts at once.")}</li>
           </ol>
           <p className="mt-2 text-blue-800/80">
-            Heads up: butterbaseCRM never sees your password. You stay signed in to the platform —
-            only the access token comes back to us, and you can disconnect any account here at any
-            time.
-          </p>
+            {uiText("Heads up: butterbaseCRM never sees your password. You stay signed in to the platform — only the access token comes back to us, and you can disconnect any account here at any time.")}</p>
         </div>
       )}
 
@@ -166,16 +158,15 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
                 <div className="text-sm font-semibold">{meta.name}</div>
                 <div className="text-xs text-gray-500">
                   {isUpcoming
-                    ? 'Coming soon'
+                    ? uiText('Coming soon')
                     : isConnected
-                    ? `Connected${conn?.is_my_connection === false ? ' by a teammate' : ''}${conn?.connected_at ? ' · ' + new Date(conn.connected_at).toLocaleDateString() : ''}`
-                    : 'Not connected'}
+                    ? uiMessage`Connected${conn?.is_my_connection === false ? uiText(' by a teammate') : ''}${conn?.connected_at ? ' · ' + new Date(conn.connected_at).toLocaleDateString() : ''}`
+                    : uiText('Not connected')}
                 </div>
               </div>
               {isUpcoming ? (
                 <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500">
-                  Upcoming
-                </span>
+                  {uiText("Upcoming")}</span>
               ) : null}
               {!isUpcoming && !isConnected && (
                 <>
@@ -185,7 +176,7 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
                     className="text-xs text-gray-500 hover:text-gray-900"
                     aria-expanded={isExpanded}
                   >
-                    {isExpanded ? 'Hide details' : 'What does this do?'}
+                    {isExpanded ? uiText('Hide details') : uiText('What does this do?')}
                   </button>
                   {slug !== 'instagram' && (
                     <button
@@ -193,9 +184,9 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
                       onClick={() => setSetupSlug(setupSlug === slug ? null : slug)}
                       className="text-xs text-gray-500 hover:text-gray-900"
                       aria-expanded={setupSlug === slug}
-                      title="Plug in your own developer app credentials"
+                      title={uiText("Plug in your own developer app credentials")}
                     >
-                      {setupSlug === slug ? 'Hide setup' : 'Use my own app'}
+                      {setupSlug === slug ? uiText('Hide setup') : uiText('Use my own app')}
                     </button>
                   )}
                 </>
@@ -206,8 +197,7 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
                   onClick={() => handleDisconnect(slug)}
                   className="rounded border border-gray-200 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
                 >
-                  Disconnect
-                </button>
+                  {uiText("Disconnect")}</button>
               ) : (
                 <button
                   type="button"
@@ -215,37 +205,34 @@ export function SocialConnectionsPanel({ workspace_id }: Props) {
                   disabled={isConnecting}
                   className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {isConnecting ? 'Redirecting…' : 'Connect'}
+                  {isConnecting ? uiText('Redirecting…') : uiText('Connect')}
                 </button>
               )}
             </div>
 
             {!isUpcoming && !isConnected && isExpanded && (
               <div className="border-t border-gray-100 bg-gray-50/60 px-3 py-2 text-xs leading-5 text-gray-700">
-                <p>{meta.blurb}</p>
-                <p className="mt-2 font-medium text-gray-900">You'll be asked to allow:</p>
+                <p>{uiText(meta.blurb)}</p>
+                <p className="mt-2 font-medium text-gray-900">{uiText("You'll be asked to allow:")}</p>
                 <ul className="mt-1 list-disc space-y-0.5 pl-5">
                   {meta.permissions.map((p) => (
-                    <li key={p}>{p}</li>
+                    <li key={p}>{uiText(p)}</li>
                   ))}
                 </ul>
                 <p className="mt-2 text-gray-500">
-                  Disconnect anytime — that revokes our access immediately.
-                </p>
+                  {uiText("Disconnect anytime — that revokes our access immediately.")}</p>
               </div>
             )}
 
             {isConnecting && (
               <div className="border-t border-gray-100 bg-blue-50/60 px-3 py-2 text-xs leading-5 text-blue-900">
-                Redirecting you to {meta.name}… if nothing happens, check that your browser allows
-                redirects from this site and{' '}
+                {uiText("Redirecting you to ")}{meta.name}{uiText("… if nothing happens, check that your browser allows redirects from this site and")}{' '}
                 <button
                   type="button"
                   onClick={() => handleConnect(slug)}
                   className="underline hover:no-underline"
                 >
-                  try again
-                </button>
+                  {uiText("try again")}</button>
                 .
               </div>
             )}

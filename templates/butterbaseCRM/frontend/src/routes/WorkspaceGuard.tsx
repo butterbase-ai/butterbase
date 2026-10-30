@@ -1,9 +1,11 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useEffect } from 'react';
 import { Navigate, Outlet } from 'react-router-dom';
 import { useMemberships } from '@/hooks/useMemberships';
 import { useWorkspaceStore } from '@/lib/workspace';
 
 export function WorkspaceGuard() {
+  useUiLocale();
   const { data: memberships, isLoading } = useMemberships();
   const workspaceId = useWorkspaceStore((s) => s.workspaceId);
   const setWorkspace = useWorkspaceStore((s) => s.setWorkspace);
@@ -18,8 +20,7 @@ export function WorkspaceGuard() {
   if (isLoading) {
     return (
       <div className="grid min-h-screen place-items-center text-sm text-muted-foreground">
-        Loading workspace…
-      </div>
+        {uiText("Loading workspace…")}</div>
     );
   }
   if (!memberships || memberships.length === 0) {
@@ -29,8 +30,7 @@ export function WorkspaceGuard() {
     // useEffect will set it on next tick; show loading
     return (
       <div className="grid min-h-screen place-items-center text-sm text-muted-foreground">
-        Loading workspace…
-      </div>
+        {uiText("Loading workspace…")}</div>
     );
   }
   return <Outlet />;

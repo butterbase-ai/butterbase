@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { AlertTriangle, AlertOctagon } from 'lucide-react';
 import { Button } from '@/console/components/ui/button';
 import { toast } from '@/console/components/ui/toast';
@@ -5,6 +6,7 @@ import { timeAgo } from '@/console/lib/utils';
 import type { Escalation } from '@/console/lib/types';
 
 export function EscalationBar({ escalation }: { escalation: Escalation }) {
+  useUiLocale();
   const failed = escalation.status === 'failed';
   const Icon = failed ? AlertOctagon : AlertTriangle;
   return (
@@ -17,15 +19,14 @@ export function EscalationBar({ escalation }: { escalation: Escalation }) {
     >
       <Icon className="h-4 w-4 shrink-0" />
       <div className="flex-1">
-        <span className="font-mono uppercase tracking-[0.18em] text-[10px] mr-2 opacity-80">Escalated</span>
+        <span className="font-mono uppercase tracking-[0.18em] text-[10px] mr-2 opacity-80">{uiText("Escalated")}</span>
         <span className="text-foreground/90">{escalation.reason || '—'}</span>
         <span className="text-muted-foreground"> · {escalation.status}</span>
-        {escalation.sent_at && <span className="text-muted-foreground"> · sent {timeAgo(escalation.sent_at)}</span>}
+        {escalation.sent_at && <span className="text-muted-foreground"> {uiText(" · sent ")}{timeAgo(escalation.sent_at)}</span>}
       </div>
       {failed && (
-        <Button size="sm" variant="outline" onClick={() => toast.info('Retry not yet wired — contact admin.')}>
-          Retry
-        </Button>
+        <Button size="sm" variant="outline" onClick={() => toast.info(uiText('Retry not yet wired — contact admin.'))}>
+          {uiText("Retry")}</Button>
       )}
     </div>
   );
