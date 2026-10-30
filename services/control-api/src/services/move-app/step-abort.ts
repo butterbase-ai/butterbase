@@ -1,6 +1,8 @@
 import type { StepHandler } from './saga-executor.js';
 import { invalidateAppRegion } from '../region-resolver.js';
 import { teardownAppDb } from '../app-db-teardown.js';
+import { custDbNameFor } from '../app-db-name.js';
+import { localDataPlaneUrlForRegion } from '../local-data-plane.js';
 import { clearKvBlock } from '../kv/migration-sentinel.js';
 import { kvRedisFor } from '../kv/redis-registry.js';
 import { wrap } from '../kv/redis-client.js';
@@ -81,6 +83,44 @@ export const executeAbort: StepHandler = async (ctx, m) => {
     }
   }
 
+  // reserving_dest can create its resources before its success patch commits.
+  // Recover only an owned local reservation; never infer cleanup for a live
+  // app or an existing Neon project when that patch is missing.
+  let inferredLocalDbName: string | undefined;
+  if (process.env.BUTTERBASE_LOCAL === 'true' && process.env.NODE_ENV !== 'production'
+    && m.source_region !== m.dest_region
+    && !m.dest_resources.dest_app_id && !m.dest_resources.neon_db_name) {
+    const localDbName = custDbNameFor(m.app_id, m.dest_region);
+    if (localDbName !== custDbNameFor(m.app_id, m.source_region)) {
+      try {
+        // Validate local configuration before removing its reservation.
+        localDataPlaneUrlForRegion(m.dest_region);
+        const result = await ctx.runtimePoolFor(m.dest_region).query<{ id: string }>(
+          `DELETE FROM apps AS reservation
+           WHERE reservation.id = $1 AND reservation.owner_id = $2
+             AND reservation.region = $3
+             AND reservation.provisioning_status = 'migration_target_reserved'
+             AND right(reservation.db_name, 9) = '__pending'
+             AND NOT EXISTS (
+               SELECT 1 FROM app_db_connections AS connection
+               WHERE connection.app_id = reservation.id
+                 AND connection.neon_project_id IS NOT NULL
+             )
+           RETURNING reservation.id`,
+          [m.app_id, m.user_id, m.dest_region],
+        );
+        // The FK cascades connection-row cleanup. Infer a DB name only when
+        // this conditional DELETE actually claimed the unfinished reservation.
+        if (result.rows.length > 0) inferredLocalDbName = localDbName;
+      } catch (err) {
+        ctx.log.warn(
+          { migrationId: m.id, err: (err as Error).message },
+          '[move-app abort] unfinished local reservation cleanup failed; continuing',
+        );
+      }
+    }
+  }
+
   // 1b) Delete the dest Neon DB so the next retry starts with an empty target.
   //     Without this, restoring_data fails on the second attempt with
   //     'schema "realtime" already exists' (or similar) because the prior
@@ -89,7 +129,7 @@ export const executeAbort: StepHandler = async (ctx, m) => {
   //     inside the shared one; teardownAppDb picks the shape from destConn's
   //     stored neon_project_id (see its docs for why the flag is not the test).
   //     Best-effort: teardown failures warn and continue, never abort the abort.
-  const neonDbName = m.dest_resources.neon_db_name as string | undefined;
+  const neonDbName = (m.dest_resources.neon_db_name as string | undefined) ?? destConn?.neon_database_name ?? inferredLocalDbName;
   try {
     const result = await teardownAppDb({
       region: m.dest_region,
