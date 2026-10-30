@@ -41,7 +41,7 @@
  * Pool: app.controlDb (decorated by plugins/database.ts).
  */
 
-import { buildProposalReview } from '../services/dashboard-agent/proposal-review.js';
+import { buildProposalReview, verifyPreparedApproval } from '../services/dashboard-agent/proposal-review.js';
 import { redactProposalArguments } from '../services/dashboard-agent/approval-proposal.js';
 import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
 import { readConfirmedExecution } from '../services/dashboard-agent/execution-outcome.js';
@@ -656,8 +656,25 @@ export async function resolveOperatorApproval(
     // approve(action_id), so the human's one click actually EXECUTES the
     // capability instead of leaving a second pending action for them to
     // approve again. See substrate-approval-bridge.ts.
-    execute: input.executeApproval ?? ((a, resolutionPool) =>
-      executeApprovedOperatorTool(resolutionPool ?? pool, {
+    execute: async (a, resolutionPool) => {
+      if (input.executeApproval) {
+        // A transport-specific executor replaces dispatch, never the prepared
+        // review boundary. Check the locked, current row before lending it out.
+        if (officeConsequential || a.proposalDetails) {
+          if (!a.proposalDetails || !a.approvedOperation) return { ok: false, code: 'proposal_review_required', error: 'Request a complete proposal before approving this legacy action.' };
+          const currentAccess = await evaluateOperatorAccess({ organizationId: input.orgId, actorUserId: input.userId,
+            origin: approval.source, phase: 'execute' });
+          if (!currentAccess.allowed || !(await isOrganizationOwner(resolutionPool ?? pool, input.orgId, input.userId))) {
+            return { ok: false, code: 'office_access_blocked', error: 'Current owner access is required.' };
+          }
+          const verification = await verifyPreparedApproval({ organizationId: input.orgId, actorUserId: input.userId,
+            origin: approval.source, conversationId: a.conversationId, operation: a.approvedOperation,
+            validateRegisteredToolArguments: validateProposalToolArguments }, a);
+          if (verification.status !== 'valid') return { ok: false, code: verification.code, error: verification.code };
+        }
+        return input.executeApproval(a, resolutionPool);
+      }
+      return executeApprovedOperatorTool(resolutionPool ?? pool, {
         approvalId: a.id,
         name: a.toolName,
         args: a.toolArgs,
@@ -680,7 +697,8 @@ export async function resolveOperatorApproval(
         // The snapshot, not the process cache, is what proves and builds a
         // deploy on whichever API machine resolves this approval.
         treeStore: getSharedDeployTreeStore(),
-      })),
+      });
+    },
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
      *
