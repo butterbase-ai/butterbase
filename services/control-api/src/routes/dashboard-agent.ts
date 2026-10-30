@@ -41,6 +41,12 @@
  * Pool: app.controlDb (decorated by plugins/database.ts).
  */
 
+import { buildProposalReview, verifyPreparedApproval } from '../services/dashboard-agent/proposal-review.js';
+import { redactProposalArguments } from '../services/dashboard-agent/approval-proposal.js';
+import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
+import { readConfirmedExecution } from '../services/dashboard-agent/execution-outcome.js';
+import { requestApprovalReview } from '../services/dashboard-agent/request-proposal-review.js';
+import { listRecentResolvedByOrg, type OrgApproval } from '../services/dashboard-agent/approvals-store.js';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -456,6 +462,34 @@ export async function resolveCallerOrgId(
   return { ok: true, orgId: member.rows[0].organization_id };
 }
 
+/** Authorized projection; frozen executable arguments remain server-only. */
+async function projectOrgApproval(pool: pg.Pool, approval: OrgApproval, orgId: string, userId: string, authMethod?: string) {
+  const [owner, access, cached] = await Promise.all([
+    isOrganizationOwner(pool, orgId, userId),
+    evaluateOperatorAccess({ organizationId: orgId, actorUserId: userId, origin: approval.source, phase: 'execute' }),
+    approval.proposalDetails ? readConfirmedExecution(pool, approval) : Promise.resolve(null),
+  ]);
+  const current = cached ? { ...approval, executionOutcome: {
+    version: 1 as const, state: 'succeeded' as const, attemptCount: Math.max(1, approval.executionOutcome?.attemptCount ?? 0),
+    startedAt: approval.executionOutcome?.startedAt ?? null, finishedAt: approval.executionOutcome?.finishedAt ?? approval.resolvedAt ?? null,
+    safeErrorCode: null, resultReference: { kind: 'tool_execution' as const, id: approval.id },
+  } } : approval;
+  const review = await buildProposalReview(current, {
+    organizationId: orgId, actorUserId: userId, origin: approval.source,
+    conversationId: approval.conversationId,
+    operation: approval.approvedOperation ?? { version: 1, toolName: approval.toolName, args: approval.toolArgs },
+    validateRegisteredToolArguments: validateProposalToolArguments,
+  }, { approve: owner && access.allowed && (authMethod === undefined || authMethod === 'jwt'), decline: true, requestReview: owner && (authMethod === undefined || authMethod === 'jwt') });
+  return {
+    id: approval.id, conversationId: approval.conversationId, turnMessageId: approval.turnMessageId,
+    toolName: approval.toolName, toolArgs: redactProposalArguments(approval.toolArgs), sensitivity: approval.sensitivity,
+    status: approval.status, trustScope: approval.trustScope, denyReason: approval.denyReason,
+    createdAt: approval.createdAt, resolvedAt: approval.resolvedAt, resolvedBy: approval.resolvedBy,
+    source: approval.source, references: [], review,
+    tool_name: approval.toolName, created_at: approval.createdAt, resolved_at: approval.resolvedAt,
+  };
+}
+
 export type OperatorResolveOutcome =
   | { ok: true }
   | { ok: false; code: 400 | 403 | 404 | 409 | 502; error: string };
@@ -622,8 +656,25 @@ export async function resolveOperatorApproval(
     // approve(action_id), so the human's one click actually EXECUTES the
     // capability instead of leaving a second pending action for them to
     // approve again. See substrate-approval-bridge.ts.
-    execute: input.executeApproval ?? ((a) =>
-      executeApprovedOperatorTool(pool, {
+    execute: async (a, resolutionPool) => {
+      if (input.executeApproval) {
+        // A transport-specific executor replaces dispatch, never the prepared
+        // review boundary. Check the locked, current row before lending it out.
+        if (officeConsequential || a.proposalDetails) {
+          if (!a.proposalDetails || !a.approvedOperation) return { ok: false, code: 'proposal_review_required', error: 'Request a complete proposal before approving this legacy action.' };
+          const currentAccess = await evaluateOperatorAccess({ organizationId: input.orgId, actorUserId: input.userId,
+            origin: approval.source, phase: 'execute' });
+          if (!currentAccess.allowed || !(await isOrganizationOwner(resolutionPool ?? pool, input.orgId, input.userId))) {
+            return { ok: false, code: 'office_access_blocked', error: 'Current owner access is required.' };
+          }
+          const verification = await verifyPreparedApproval({ organizationId: input.orgId, actorUserId: input.userId,
+            origin: approval.source, conversationId: a.conversationId, operation: a.approvedOperation,
+            validateRegisteredToolArguments: validateProposalToolArguments }, a);
+          if (verification.status !== 'valid') return { ok: false, code: verification.code, error: verification.code };
+        }
+        return input.executeApproval(a, resolutionPool);
+      }
+      return executeApprovedOperatorTool(resolutionPool ?? pool, {
         approvalId: a.id,
         name: a.toolName,
         args: a.toolArgs,
@@ -640,11 +691,14 @@ export async function resolveOperatorApproval(
         // is refused with approval_operation_changed.
         approval: a,
         officeConsequential,
+        actorUserId: input.userId,
+        origin: approval.source === 'office' ? 'office' : 'operator',
         cache: getSharedWorkingTreeCache(),
         // The snapshot, not the process cache, is what proves and builds a
         // deploy on whichever API machine resolves this approval.
         treeStore: getSharedDeployTreeStore(),
-      })),
+      });
+    },
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
      *
@@ -655,8 +709,8 @@ export async function resolveOperatorApproval(
      * no-op (attempted: false) for every other approval kind, because those
      * paused before dispatch and there is nothing on the far side.
      */
-    denyCleanup: (a) =>
-      rejectEscalatedSubstrateAction(pool, {
+    denyCleanup: (a, resolutionPool) =>
+      rejectEscalatedSubstrateAction(resolutionPool ?? pool, {
         approvalId: a.id,
         approval: { toolName: a.toolName, toolArgs: a.toolArgs },
         reason: input.resolution.status === 'denied' ? input.resolution.reason : undefined,
@@ -1487,7 +1541,14 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const org = await resolveCallerOrgId(app.controlDb, request, userId);
     if (!org.ok) return reply.code(org.code).send({ error: org.error });
 
-    return reply.send({ approvals: await listPendingByOrg(app.controlDb, org.orgId) });
+    const approvals = await listPendingByOrg(app.controlDb, org.orgId);
+    const includeHistory = (request.query as { history?: string })?.history === '1';
+    const project = (approval: OrgApproval) => projectOrgApproval(app.controlDb, approval, org.orgId, userId, request.auth?.authMethod);
+    const [pending, history] = await Promise.all([
+      Promise.all(approvals.map(project)),
+      includeHistory ? listRecentResolvedByOrg(app.controlDb, org.orgId).then(rows => Promise.all(rows.map(project))) : Promise.resolve(undefined),
+    ]);
+    return reply.send({ approvals: pending, ...(history ? { history } : {}) });
   });
 
   // ── GET /operator/approvals/:id ──────────────────────────────────────────
@@ -1514,17 +1575,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const approval = await getApprovalForOrg(app.controlDb, id, org.orgId);
     if (!approval) return reply.code(404).send({ error: 'approval not found' });
 
-    return reply.send({
-      approval: {
-        id: approval.id,
-        status: approval.status,
-        resolved_at: approval.resolvedAt,
-        source: approval.source,
-        tool_name: approval.toolName,
-        created_at: approval.createdAt,
-        references: approval.references ?? [],
-      },
-    });
+    return reply.send({ approval: await projectOrgApproval(app.controlDb, approval, org.orgId, userId, request.auth?.authMethod) });
   });
 
   // ── GET /operator/approvals/:id/conversation ─────────────────────────────
@@ -1650,6 +1701,22 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
   //
   // Execution goes through executeOnce, which holds an advisory lock on the
   // approval id so a retried approve fires the tool once.
+  app.post('/operator/approvals/:id/request-review', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+    if (!z.object({}).strict().safeParse(request.body ?? {}).success) return reply.code(400).send({ error: 'No replacement operation is accepted.' });
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+    if (request.auth?.authMethod !== 'jwt' || !await isOrganizationOwner(app.controlDb, org.orgId, userId)) return reply.code(403).send({ error: 'An organization owner session is required.' });
+    const { id } = request.params as { id: string };
+    const approval = await getApprovalForOrg(app.controlDb, id, org.orgId);
+    if (!approval) return reply.code(404).send({ error: 'approval not found' });
+    const access = await evaluateOperatorAccess({ organizationId: org.orgId, actorUserId: userId, origin: approval.source, phase: 'run' });
+    const outcome = await requestApprovalReview(app.controlDb, { approval, organizationId: org.orgId, actorUserId: userId, mayRun: access.allowed });
+    if (!outcome.ok) return reply.code(409).send({ error: 'Review is resolved or execution requires reconciliation.' });
+    return reply.send(outcome);
+  });
+
   app.post('/operator/approvals/:id/resolve', async (request, reply) => {
     if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
 
@@ -1684,7 +1751,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     });
 
     if (!outcome.ok) return reply.code(outcome.code).send({ error: outcome.error });
-    return reply.send({ ok: true });
+    const resolved = await getApprovalForOrg(app.controlDb, approvalId, org.orgId);
+    return reply.send({ ok: true, ...(resolved ? { approval: await projectOrgApproval(app.controlDb, resolved, org.orgId, userId, request.auth?.authMethod) } : {}) });
   });
 
   // ── POST /approvals/:id/resolve ───────────────────────
@@ -1779,8 +1847,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
           resolution:
             status === 'approved' ? { status: 'approved', trustScope } : { status: 'denied', reason },
           resolvedBy: userId,
-          execute: (a) =>
-            executeApprovedOperatorTool(app.controlDb, {
+          execute: (a, resolutionPool) =>
+            executeApprovedOperatorTool(resolutionPool ?? app.controlDb, {
               approvalId: a.id,
               name: a.toolName,
               args: a.toolArgs,
@@ -1789,11 +1857,13 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
               traceId: a.traceId,
               approval: a,
               officeConsequential: true,
+              actorUserId: userId,
+              origin: 'office',
               cache: getSharedWorkingTreeCache(),
               treeStore: getSharedDeployTreeStore(),
             }),
-          denyCleanup: (a) =>
-            rejectEscalatedSubstrateAction(app.controlDb, {
+          denyCleanup: (a, resolutionPool) =>
+            rejectEscalatedSubstrateAction(resolutionPool ?? app.controlDb, {
               approvalId: a.id,
               approval: { toolName: a.toolName, toolArgs: a.toolArgs },
               reason,

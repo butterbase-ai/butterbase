@@ -42,6 +42,14 @@
     "./api-client": {
       "types": "./dist/api-client.d.ts",
       "default": "./dist/api-client.js"
+    },
+    "./tool-validation": {
+      "types": "./dist/tool-validation.d.ts",
+      "default": "./dist/tool-validation.js"
+    },
+    "./tool-registry": {
+      "types": "./dist/tool-registry.d.ts",
+      "default": "./dist/tool-registry.js"
     }
   },
   "bin": {

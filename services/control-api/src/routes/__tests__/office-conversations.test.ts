@@ -12,6 +12,8 @@
  *   - `runAgentTurn`, so an SSE route returns immediately instead of streaming.
  * Everything between them — createConversation, the org listing, ownership,
  * executeOnce, the tool-result row — is real.
+ * Prepared target metadata comes from a controlled proposal-provider fixture;
+ * argument validation still uses the actual OSS tool registrations.
  *
  * The access policy is the generic OSS seam. The private Office policy is
  * covered by its own tests in cloud/overlays/office; here a controllable stub
@@ -59,6 +61,8 @@ import {
 } from '../../services/dashboard-agent/operator-access-policy.js';
 import { captureApprovalOperation, workingTreeArtifact } from '../../services/dashboard-agent/approval-operation.js';
 import { getSharedWorkingTreeCache } from '../../services/dashboard-agent/loop.js';
+import { PreparedProposalSchema, proposalFingerprint, proposalIntentFingerprint, setApprovalProposalProvider } from '../../services/dashboard-agent/approval-proposal.js';
+import { createProposalToolValidator, setProposalToolValidator } from '../../services/dashboard-agent/proposal-validation.js';
 
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
 const mockRunAgentTurn = loopModule.runAgentTurn as MockedFunction<typeof loopModule.runAgentTurn>;
@@ -122,6 +126,15 @@ beforeEach(async () => {
   actingAuthMethod = 'jwt';
   process.env.DASHBOARD_ASSISTANT_ENABLED = '1';
   mockCallMcpTool.mockResolvedValue({ ok: true, result: { ok: true } });
+  setProposalToolValidator(await createProposalToolValidator(() => {}));
+  // Target preparation is an adapter seam; ownership, argument validation,
+  // immutable operation verification, locking and history remain real.
+  setApprovalProposalProvider({
+    enabled: () => true,
+    prepare: async () => ({ status: 'blocked', code: 'proposal_unreviewable', message: 'Fixture metadata is prepared directly.' }),
+    revalidate: async (context, saved) => proposalFingerprint(context.operation) === saved.operationFingerprint
+      ? { status: 'valid' } : { status: 'changed', code: 'proposal_state_changed' },
+  });
 
   await pool.query(`DELETE FROM dashboard_agent_conversations WHERE organization_id = ANY($1::text[])`, [
     [ORG_A, ORG_B],
@@ -167,6 +180,8 @@ beforeEach(async () => {
 
 afterAll(async () => {
   setOperatorAccessPolicy(null);
+  setApprovalProposalProvider(null);
+  setProposalToolValidator(null);
   await pool.query(`DELETE FROM dashboard_agent_conversations WHERE organization_id = ANY($1::text[])`, [
     [ORG_A, ORG_B],
   ]);
@@ -199,17 +214,32 @@ async function createOfficeConversation(userId = MEMBER_A): Promise<string> {
 }
 
 /** Leave the conversation exactly as a gated turn does. */
-async function pauseOnApproval(conversationId: string, authoredBy: string) {
+async function pauseOnApproval(conversationId: string, authoredBy: string, prepared = true) {
   const messageId = randomUUID();
   const toolCallId = `call_${randomUUID().slice(0, 8)}`;
-  const toolArgs = { action: 'update_env', app_id: 'app_1', KEY: 'v' };
+  const toolArgs = { action: 'update_env', app_id: 'app_1', env: { KEY: 'v' } };
+  const operation = captureApprovalOperation({ toolName: 'manage_app', args: toolArgs });
+  const proposalDetails = prepared ? PreparedProposalSchema.parse({
+    version: 1, source: 'intercepted', preparedAt: new Date().toISOString(),
+    operationFingerprint: proposalFingerprint(operation),
+    intentFingerprint: proposalIntentFingerprint(operation.toolName, operation.args),
+    reason: { text: 'Apply the requested fixture environment setting.', attribution: 'operator' },
+    evidence: [],
+    preview: {
+      title: 'Update the fixture app environment?', summary: 'Set the KEY environment variable.',
+      target: { label: 'Fixture app', reference: 'app_1' },
+      effects: ['Changes one app environment variable.'], fields: [{ label: 'KEY', value: '[redacted]' }],
+    },
+    preconditions: [{ kind: 'app', referenceId: 'app_1', fingerprint: proposalFingerprint({ fixture: 'app_1' }) }],
+  }) : null;
   const approval = await createApproval(pool, {
     conversationId,
     turnMessageId: messageId,
     toolName: 'manage_app',
     toolArgs,
     sensitivity: 'destructive',
-    approvedOperation: captureApprovalOperation({ toolName: 'manage_app', args: toolArgs }),
+    approvedOperation: operation,
+    proposalDetails,
   });
   await appendMessage(
     pool,
@@ -466,9 +496,12 @@ describe('the organization approval queue includes Office-origin foreground appr
       { org: ORG_A, user: OWNER_A },
     );
     expect(approved.statusCode).toBe(200);
+    const replay = await post(app, `/operator/approvals/${approval.id}/resolve`, { status: 'approved' }, { org: ORG_A, user: OWNER_A });
+    expect(replay.statusCode).toBe(409);
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
     expect(mockCallMcpTool.mock.calls[0].slice(0, 4)).toEqual([
       'manage_app',
-      { action: 'update_env', app_id: 'app_1', KEY: 'v' },
+      { action: 'update_env', app_id: 'app_1', env: { KEY: 'v' } },
       expect.any(String),
       ORG_A,
     ]);
@@ -529,6 +562,21 @@ describe('the organization approval queue includes Office-origin foreground appr
  * artifact moved must be refused rather than shipped.
  */
 describe('the foreground resolve route enforces the same Office contract', () => {
+  it.each(['/operator/approvals', '/approvals'])('keeps a legacy Office approval pending through %s until it can be reviewed', async (route) => {
+    const app = await appPromise;
+    const conversationId = await createOfficeConversation(OWNER_A);
+    const { approval } = await pauseOnApproval(conversationId, OWNER_A, false);
+
+    const res = await post(app, `${route}/${approval.id}/resolve`, { status: 'approved' }, { org: ORG_A, user: OWNER_A });
+
+    expect(res.statusCode).toBe(409);
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    const row = await pool.query(`SELECT status FROM dashboard_agent_approvals WHERE id = $1`, [approval.id]);
+    expect(row.rows[0].status).toBe('pending');
+    const effects = await pool.query(`SELECT count(*)::int AS count FROM dashboard_agent_tool_executions WHERE approval_id = $1`, [approval.id]);
+    expect(effects.rows[0].count).toBe(0);
+  });
+
   it('refuses a member resolving their own Office approval', async () => {
     const app = await appPromise;
     const conversationId = await createOfficeConversation(MEMBER_A);

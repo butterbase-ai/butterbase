@@ -513,7 +513,7 @@ describe('principalMayExecute', () => {
 function findManageSubstrateTool(): string | null {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 12; i++) {
-    const candidate = path.join(dir, 'cloud', 'overlays', 'substrate', 'mcp-tools', 'manage-substrate.ts');
+    const candidate = path.join(dir, 'cloud', 'overlays', 'substrate', 'mcp-tools', 'manage-substrate-validation.ts');
     if (fs.existsSync(candidate)) return candidate;
     const parent = path.dirname(dir);
     if (parent === dir) break;

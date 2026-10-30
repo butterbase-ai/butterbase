@@ -16,6 +16,12 @@
  */
 
 import pg from 'pg';
+import { validateProposalToolArguments as validateRegisteredToolArguments } from './proposal-validation.js';
+import { PROPOSE_ACTION_TOOL } from './tool-catalog.js';
+import { getApprovalProposalProvider, ProposalInputSchema, proposalIntentFingerprint, type ProposalInput } from './approval-proposal.js';
+import { validateProposalOperation, LocalOperationSchemas } from './proposal-validation.js';
+import { persistPreparedApproval, findParkedProposalIntent } from './proposal-store.js';
+import { SUBSTRATE_ESCALATION_TOOL } from './approvals-store.js';
 import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
 import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
@@ -1109,7 +1115,11 @@ export async function* runAgentTurn(
   // this list), never merely refuse it at dispatch. Applied to BOTH branches:
   // `skill_creator` rides an owner's HUMAN Office Ask turn, not an operator
   // turn, so the non-operator branch needs the identical filter.
+  const proposalProvider = getApprovalProposalProvider();
+  const proposalOrganizationId = operatorOrgId ?? officeOrganizationId;
+  const structuredProposals = !!proposalOrganizationId && !!proposalProvider?.enabled(proposalOrganizationId);
   const seamAvailable = (t: ToolSpec): boolean =>
+    (t.name !== PROPOSE_ACTION_TOOL || ((isOperator || isOfficeTurn) && structuredProposals)) &&
     (t.name !== SKILL_CREATOR_TOOL || typeof input.skillCreator === 'function') &&
     (t.name !== RUN_SKILL_SCRIPT_TOOL
       || (typeof input.skillScript === 'function' && input.activeSkill !== undefined));
@@ -1492,7 +1502,53 @@ export async function* runAgentTurn(
         else officeConsequential = access.approvalMode === 'consequential';
       }
       for (let i = 0; i < pendingToolCalls.length; i++) {
-        const tc = pendingToolCalls[i];
+        const originalCall = pendingToolCalls[i];
+        let tc = originalCall;
+        let proposalInput: ProposalInput | null = null;
+        let proposalError: string | null = null;
+        const replyProposal = async (payload: unknown) => {
+          await appendMessage(input.pool, input.conversationId, { role: 'assistant', content: i === 0 ? assistantText : '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: null, modelUsed: input.model });
+          await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: payload });
+        };
+        if (originalCall.name === PROPOSE_ACTION_TOOL) {
+          const parsed = ProposalInputSchema.safeParse(originalCall.args);
+          if (!structuredProposals || !allowedToolNames.has(PROPOSE_ACTION_TOOL)) proposalError = 'proposal_unavailable';
+          else if (!parsed.success) proposalError = 'proposal_incomplete';
+          else {
+            proposalInput = parsed.data;
+            try {
+              const validated = await validateProposalOperation(proposalInput.operation.tool, proposalInput.operation.arguments, {
+                effectiveToolNames: allowedToolNames,
+                availableExecutors: new Set(Object.keys(LocalOperationSchemas).filter(name => allowedToolNames.has(name))),
+                validateRegistered: validateRegisteredToolArguments,
+              });
+              const args = proposalProvider?.validateArguments ? await proposalProvider.validateArguments(validated.toolName, validated.args) : validated.args;
+              tc = { ...originalCall, name: validated.toolName, args };
+              proposalInput = { ...proposalInput, operation: { tool: tc.name, arguments: args } };
+            } catch { proposalError = 'proposal_invalid'; }
+          }
+          if (proposalError) {
+            const payload = { code: proposalError, message: 'Supply a complete, available operation with a reason and typed references.' };
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield { type: 'tool_call', ...originalCall };
+            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            continue;
+          }
+        }
+
+        if (structuredProposals && !proposalInput && tc.name === 'manage_substrate' && (tc.args as any)?.action === 'propose') {
+          try {
+            const validated = await validateRegisteredToolArguments(tc.name, tc.args);
+            tc = { ...tc, args: proposalProvider?.validateArguments ? await proposalProvider.validateArguments(tc.name, validated.args) : validated.args };
+          } catch {
+            const payload = { code: 'proposal_invalid' };
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            continue;
+          }
+        }
 
         // A previous tool may outlive the durable lease or its owner's access.
         // Keep refusals sticky and pair every remaining call with a result.
@@ -1586,6 +1642,73 @@ export async function* runAgentTurn(
           (await resolveYoloMode())
         ) {
           operatorVerdict = operatorPolicyForOrg(tc.name, tc.args, operatorOrgId, { yoloMode: true });
+        }
+
+        if (officeConsequential && !proposalProvider && operatorVerdict === 'approval' && input.readOnly !== true) {
+          const payload = { code: 'proposal_unavailable', message: 'Required Office preparation is unavailable. No owner approval was created.' };
+          await replyProposal(payload);
+          toolCallResults.push({ id: originalCall.id, result: payload });
+          yield { type: 'tool_result', id: originalCall.id, result: payload };
+          continue;
+        }
+
+        // Structured gates use the same effective policy computed above. The
+        // wrapper grants no permission and cannot dispatch an automatic write.
+        if (structuredProposals && (proposalInput || operatorVerdict === 'approval')) {
+          let payload: Record<string, unknown> | null = null;
+          let parkedActionId: string | null = null;
+          if (accessBlockedReason || operatorVerdict === 'deny') payload = { code: 'proposal_invalid' };
+          else if (input.readOnly === true) payload = { code: 'read_only_test' };
+          else if (!proposalInput) payload = { code: 'proposal_incomplete', missing: ['reason'], message: 'Call propose_action with this exact operation and an explicit reason.' };
+          else {
+            try {
+              if (tc.name === 'manage_substrate' && (tc.args as any)?.action === 'propose') {
+                parkedActionId = await findParkedProposalIntent(input.pool, proposalOrganizationId!, input.conversationId, proposalIntentFingerprint(tc.name, tc.args));
+              }
+              if (operatorVerdict !== 'approval' && !parkedActionId) payload = { code: 'proposal_not_required', message: 'Use the original automatic tool directly.' };
+              else {
+                const appId = appIdFromArgs(tc.args);
+                const isDeployment = isDeployTool(tc.name) || isDeployFunctionTool(tc.name);
+                const proposedTree = isDeployment && appId ? cache.get(input.conversationId, appId) : undefined;
+                const artifact = isDeployment ? deploymentArtifact(tc.name, tc.args, proposedTree) : undefined;
+                if (isDeployment && (!treeStore || !proposedTree || !artifact)) payload = { code: 'deploy_tree_unavailable' };
+                else {
+                  const operation = parkedActionId
+                    ? captureApprovalOperation({ toolName: SUBSTRATE_ESCALATION_TOOL, args: { action: 'approve', action_id: parkedActionId } })
+                    : captureApprovalOperation({ toolName: tc.name, args: tc.args, artifact });
+                  const files = proposedTree ? Array.from(proposedTree.values()).map(f => ({ path: f.path, content: f.content, sha256: f.sha256 })) : undefined;
+                  const functionName = (tc.args as any)?.function_name;
+                  const artifactSource = isDeployFunctionTool(tc.name) ? files?.find(f => ['index.ts', 'index.js', 'index.mjs'].some(entry => f.path === `functions/${functionName}/${entry}`))?.content : undefined;
+                  if (isOperator && pendingGatedCalls === null) pendingGatedCalls = await listPendingGatedCalls(input.pool, input.conversationId);
+                  const specificDuplicate = isOperator ? findDuplicatePendingCall(pendingGatedCalls ?? [], tc.name, tc.args) : null;
+                  const prepared = specificDuplicate
+                    ? { status: 'blocked' as const, code: 'already_pending', approval_id: specificDuplicate.approvalId }
+                    : await proposalProvider!.prepare({ organizationId: proposalOrganizationId!, actorUserId: isOperator ? undefined : input.userId, origin: isOperator ? 'operator' : 'office', conversationId: input.conversationId, operation, validateRegisteredToolArguments, artifactFiles: files, artifactSource }, proposalInput);
+                  if (prepared.status !== 'ready') payload = prepared;
+                  else {
+                    const approvalId = randomUUID();
+                    if (proposedTree && !await treeStore!.save(approvalId, proposedTree)) payload = { code: 'deploy_tree_unavailable' };
+                    else {
+                      const saved = await persistPreparedApproval(input.pool, { id: approvalId, organizationId: proposalOrganizationId!, conversationId: input.conversationId, operation, proposal: { ...prepared.proposal, source: parkedActionId ? 'substrate_escalation' : 'explicit' }, traceId: input.traceId, message: { id: randomUUID(), callId: originalCall.id, toolName: originalCall.name, args: originalCall.args, content: i === 0 ? assistantText : '', model: input.model } });
+                      if (saved.kind === 'duplicate') payload = { code: 'already_pending', approval_id: saved.approvalId };
+                      else {
+                        yield { type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' };
+                        terminated = true;
+                        break outer;
+                      }
+                    }
+                  }
+                }
+              }
+            } catch { payload = { code: 'proposal_review_unavailable', message: 'Preparation failed safely. No approval was created.' }; }
+          }
+          if (payload) {
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield { type: 'tool_call', ...originalCall };
+            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            continue;
+          }
         }
 
         /**
@@ -2776,9 +2899,12 @@ export async function* runAgentTurn(
          * propose as an ordinary tool result: today's behaviour, never a
          * half-paused turn.
          */
-        if (isOperator && call.ok) {
+        if ((isOperator || (isOfficeTurn && structuredProposals)) && call.ok) {
           const escalatedActionId = readSubstrateEscalation(tc.name, tc.args, call.result);
-          if (escalatedActionId) {
+          if (escalatedActionId && structuredProposals) {
+            call.result = { code: 'proposal_incomplete', message: 'Substrate parked this operation. Call propose_action with the same operation, an explicit reason and optional references. Do not propose it again.', parkedProposal: { actionId: escalatedActionId, intentFingerprint: proposalIntentFingerprint(tc.name, tc.args) } };
+          }
+          if (escalatedActionId && !structuredProposals) {
             const approval = await createSubstrateEscalationApproval(input.pool, {
               conversationId: input.conversationId,
               pausedMessageId: assistantRow.id,

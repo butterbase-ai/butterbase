@@ -46,6 +46,7 @@ import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop.js';
 import type { DeployTreeStore } from '../deploy-tree-store.js';
 import type { WorkingTree } from '../working-tree.js';
+import { setApprovalProposalProvider } from '../approval-proposal.js';
 
 const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
 const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
@@ -155,6 +156,8 @@ function humanInput(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  // Compatibility backend: provider installed, new writers explicitly off.
+  setApprovalProposalProvider({ enabled: () => false, prepare: async () => { throw Error('writer off'); }, revalidate: async () => ({ status: 'unavailable', code: 'proposal_review_unavailable' }) });
   vi.clearAllMocks();
   mockAppendMessage.mockResolvedValue(stubMessage);
   mockListMessages.mockResolvedValue([]);
@@ -596,7 +599,7 @@ describe('operator — catalog filtering (affordance, not the control)', () => {
       .filter((n) => n !== OPERATOR_SANDBOX_CODE_TOOL && n !== OPERATOR_BUILD_TOOL)
       // Office skill seams are withheld by the same absence rule: no
       // skillScript/activeSkill on this ordinary operator turn.
-      .filter((n) => n !== SKILL_CREATOR_TOOL && n !== RUN_SKILL_SCRIPT_TOOL);
+      .filter((n) => n !== SKILL_CREATOR_TOOL && n !== RUN_SKILL_SCRIPT_TOOL && n !== 'propose_action');
 
     expect(offered.sort()).toEqual(expected.sort());
     expect(offered.length).toBeGreaterThan(0);
@@ -763,7 +766,7 @@ describe('non-operator conversation is unaffected', () => {
         .filter((t) => t.operatorOnly !== true)
         // Skill seams need their executors, which this plain dashboard turn
         // does not supply.
-        .filter((t) => t.name !== SKILL_CREATOR_TOOL && t.name !== RUN_SKILL_SCRIPT_TOOL)
+        .filter((t) => t.name !== SKILL_CREATOR_TOOL && t.name !== RUN_SKILL_SCRIPT_TOOL && t.name !== 'propose_action')
         .map((t) => t.name)
         .sort(),
     );

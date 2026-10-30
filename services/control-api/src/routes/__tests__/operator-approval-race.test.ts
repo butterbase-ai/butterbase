@@ -1,34 +1,8 @@
 /**
- * I-1 regression — an approve and a deny racing ONE escalation approval must
- * not let either side report success for a call it never made.
- *
- * THE DEFECT. `executeOnce` caches on `approval_id` ALONE. That was sound
- * while one approval id meant one distinct call. Fix E added a SECOND call
- * site under the same key with DIFFERENT arguments: the approve goes through
- * `executeApprovedOperatorTool`, the deny went through
- * `rejectEscalatedSubstrateAction`. Under a genuine race both resolvers pass
- * `completeApprovalResolution`'s status read, the winner executes and caches,
- * and the LOSER is served the winner's envelope — a deny reading back an
- * `approve` result saw `isError` false and reported
- * `{ attempted: true, ok: true }`. If that deny then won `resolveApproval`'s
- * conditional UPDATE, the dashboard recorded `denied` +
- * `substrate_action_rejected: true` for an action substrate had EXECUTED.
- *
- * No side effect was ever duplicated — that is not what broke. What broke is
- * that the RECORD could invert substrate's ledger, which is the exact
- * disagreement fix E exists to prevent.
- *
- * THE FIX. One approval id, one `executeOnce` call site (the approve). The
- * deny calls substrate directly, re-applying the principal and cross-org
- * guards inline, because `rejectAction` is already at-most-once on its own
- * terms (`FOR UPDATE` + a `status = 'proposed'` check in
- * substrate-core/src/action-executor.ts).
- *
- * These tests model substrate's ledger transaction: the FIRST resolution to
- * arrive transitions the action; every later one gets substrate's real
- * "action is not in proposed state" error. Only mcp-client is mocked — the
- * approvals store, the message store, `executeOnce` and its advisory lock all
- * run for real against the control-plane database.
+ * Resolution serialization keeps one native action and one truthful tool result
+ * when approval and denial race. The caller owning the session lock resolves
+ * first; the waiter re-reads the terminal status and returns 409 without dispatch.
+ * The real database also retains executeOnce cache and transcript assertions.
  */
 
 import { describe, it, expect, vi, beforeEach, afterAll, type MockedFunction } from 'vitest';
@@ -60,6 +34,7 @@ const pool = new Pool({ connectionString: process.env.CONTROL_TEST_DATABASE_URL 
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  mockCallMcpTool.mockReset();
   await pool.query(`DELETE FROM dashboard_agent_conversations WHERE organization_id = $1`, [ORG]);
 });
 
@@ -133,6 +108,7 @@ function substrateLedger(gate: { approve?: Promise<void>; reject?: Promise<void>
       return mcpEnvelope({
         action_id: ACTION_ID,
         status: action === 'approve' ? 'executed' : 'rejected',
+        ...(action === 'approve' ? { executed: true } : {}),
       });
     }
     return mcpEnvelope(
@@ -152,12 +128,7 @@ async function until(predicate: () => boolean, label: string) {
   throw new Error(`timed out waiting for: ${label}`);
 }
 
-/**
- * Same, but never throws. Used where the BROKEN implementation would block
- * (the second leg waits on the advisory lock and never reaches substrate at
- * all), so that the test goes on to fail on the defect itself — a leg
- * reporting a result for a call it never made — rather than on a hang.
- */
+/** Give the competing resolver a bounded opportunity to finish before releasing the winner. */
 async function softly(predicate: () => boolean) {
   for (let i = 0; i < 60; i++) {
     if (predicate()) return;
@@ -166,7 +137,7 @@ async function softly(predicate: () => boolean) {
 }
 
 describe('I-1 — a deny racing an approve cannot report a fabricated success', () => {
-  it('makes its OWN reject call and records substrate\'s real answer, not the approve\'s cached envelope', async () => {
+  it('an approve that owns the lock prevents a racing deny from dispatching', async () => {
     const { conversationId, approval } = await escalate();
 
     // The approve is held open inside `executeOnce` — it holds the advisory
@@ -195,36 +166,26 @@ describe('I-1 — a deny racing an approve cannot report a fabricated success', 
       denyDone = true;
       return r;
     });
-    // The deny must reach substrate on its own. Under the old code it blocked
-    // on the advisory lock instead, and once released read the approve's
-    // cached envelope — so this never became true and the assertions below
-    // fail on the fabrication rather than on a hang.
     await softly(() => denyDone);
+    expect(denyDone).toBe(false);
+    expect(actionsCalled()).toEqual(['approve']);
 
     approveGate.resolve();
     const [denyOutcome, approveOutcome] = await Promise.all([denyPromise, approvePromise]);
 
-    // BOTH legs made their own call. The old code made exactly ONE.
-    expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
-    expect(actionsCalled().sort()).toEqual(['approve', 'reject']);
-
-    // Substrate arbitrated: the approve arrived first, so the reject lost.
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(actionsCalled()).toEqual(['approve']);
     expect(ledger.winner()).toBe('approve');
-
-    // The deny won the conditional UPDATE, and it told the truth about the
-    // far side. The old code recorded `substrate_action_rejected: true` here —
-    // for an action substrate had EXECUTED, on the strength of a reject call
-    // it never made.
-    expect(denyOutcome).toEqual({ ok: true });
-    expect(approveOutcome).toEqual({ ok: false, code: 409, error: 'approval already resolved' });
+    expect(approveOutcome).toEqual({ ok: true });
+    expect(denyOutcome).toEqual({ ok: false, code: 409, error: 'approval already approved' });
 
     const resolved = (await getApprovalForOrg(pool, approval.id, ORG))!;
-    expect(resolved.status).toBe('denied');
-
+    expect(resolved.status).toBe('approved');
+    expect(resolved.resolvedBy).toBe(USER);
     const messages = await listMessages(pool, conversationId);
-    const row = toolRow(messages)!.toolResult as Record<string, unknown>;
-    expect(row.substrate_action_rejected).toBe(false);
-    expect(String(row.substrate_reject_error)).toContain('not in proposed state');
+    expect(messages.filter(message => message.role === 'tool')).toHaveLength(1);
+    expect(JSON.stringify(toolRow(messages)!.toolResult)).toContain('executed');
+    expect(JSON.stringify(toolRow(messages)!.toolResult)).not.toContain('substrate_action_rejected');
 
     // The winning call still executed exactly once, and is the only thing in
     // the idempotency ledger under this approval.
@@ -240,7 +201,7 @@ describe('I-1 — a deny racing an approve cannot report a fabricated success', 
     expect(cached.rows[0].result.result?.content?.[0].text).toContain('executed');
   });
 
-  it('an approve racing a deny issues its own approve call rather than reading the reject\'s result', async () => {
+  it('a deny that owns the lock prevents a racing approve from dispatching', async () => {
     // The mirror image. Under the old code the deny executed first, cached
     // `{ status: "rejected" }` under the approval id, and the approve was
     // handed that envelope — the transcript then said the action was REJECTED
@@ -270,33 +231,32 @@ describe('I-1 — a deny racing an approve cannot report a fabricated success', 
       approveDone = true;
       return r;
     });
-    // Under the old code the approve blocked on the advisory lock the deny's
-    // `executeOnce` was holding, and once released was served the deny's
-    // cached result. Soft, so the assertions below judge the fabrication.
     await softly(() => approveDone);
+    expect(approveDone).toBe(false);
+    expect(actionsCalled()).toEqual(['reject']);
 
     rejectGate.resolve();
-    await Promise.all([approvePromise, denyPromise]);
+    const [approveOutcome, denyOutcome] = await Promise.all([approvePromise, denyPromise]);
 
-    expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
-    expect(actionsCalled().sort()).toEqual(['approve', 'reject']);
-    // The deny arrived first, so substrate rejected the action and refused the
-    // approve. The approve leg gets THAT answer, from a call it actually made.
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(actionsCalled()).toEqual(['reject']);
     expect(ledger.winner()).toBe('reject');
+    expect(denyOutcome).toEqual({ ok: true });
+    expect(approveOutcome).toEqual({ ok: false, code: 409, error: 'approval already denied' });
+    const resolved = (await getApprovalForOrg(pool, approval.id, ORG))!;
+    expect(resolved.status).toBe('denied');
+    expect(resolved.resolvedBy).toBe(USER);
 
-    // The transcript carries substrate's real answer to the APPROVE. The old
-    // code put the deny's cached `{ status: "rejected" }` SUCCESS payload here
-    // — a turn told its own propose had been rejected by a call it never made.
     const messages = await listMessages(pool, conversationId);
-    const text = JSON.stringify(toolRow(messages)!.toolResult);
-    expect(text).toContain('not in proposed state');
-    expect(text).not.toContain('"status":"rejected"');
-
-    // NOTE, and deliberately NOT pinned as correct: the approve leg does not
-    // inspect the MCP tool-level `isError` flag on the non-bridging path, so a
-    // refused approve still resolves the row as 'approved' with the error in
-    // the transcript. That is a separate defect from I-1 (it is about envelope
-    // semantics, not the cache key) and is recorded in the fix report.
+    expect(messages.filter(message => message.role === 'tool')).toHaveLength(1);
+    const result = toolRow(messages)!.toolResult as Record<string, unknown>;
+    expect(result.substrate_action_rejected).toBe(true);
+    expect(result.error).toBe('User denied. Reason: no');
+    expect(JSON.stringify(result)).not.toContain('executed');
+    const rows = await pool.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM dashboard_agent_tool_executions WHERE approval_id = $1', [approval.id],
+    );
+    expect(rows.rows[0].n).toBe(0);
   });
 });
 
@@ -327,15 +287,17 @@ describe('I-1 — exactly-once is preserved for the call that does own the key',
     expect(JSON.stringify(replay)).toContain('executed');
   });
 
-  it('does not cache a FAILED approve — a transient error stays retryable', async () => {
+  it('does not cache a known no-effect rejection — a corrected request stays retryable', async () => {
     const { approval } = await escalate();
-    mockCallMcpTool.mockResolvedValue({ ok: false, error: 'substrate unreachable' } as never);
+    // This explicit trusted code confirms rejection before an effect. A lost
+    // transport response is uncertain and must never use this retry fixture.
+    mockCallMcpTool.mockResolvedValue({ ok: false, code: 'tool_rejected', error: 'substrate refused before execution' } as never);
 
     const first = await resolveOperatorApproval(pool, {
       approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', userId: USER,
       resolution: { status: 'approved' },
     });
-    expect(first).toEqual({ ok: false, code: 502, error: 'Tool execution failed: substrate unreachable' });
+    expect(first).toEqual({ ok: false, code: 502, error: 'Tool execution failed: substrate refused before execution' });
 
     const rows = await pool.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM dashboard_agent_tool_executions WHERE approval_id = $1`,
@@ -345,7 +307,7 @@ describe('I-1 — exactly-once is preserved for the call that does own the key',
 
     // Still pending, so the retry re-attempts the call rather than replaying.
     expect((await getApprovalForOrg(pool, approval.id, ORG))!.status).toBe('pending');
-    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ action_id: ACTION_ID, status: 'executed' }) as never);
+    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ action_id: ACTION_ID, status: 'executed', executed: true }) as never);
     const retry = await resolveOperatorApproval(pool, {
       approvalId: approval.id, orgId: ORG, jwt: 'jwt-token', userId: USER,
       resolution: { status: 'approved' },

@@ -32,6 +32,10 @@
  */
 
 import pg from 'pg';
+import { withApprovalResolutionLock } from './approval-resolution-lock.js';
+import { readConfirmedExecution, recordExecutionOutcome, isConfirmedExecution } from './execution-outcome.js';
+import { expireProposalAndCompleteCall } from './proposal-store.js';
+import type { ExecutionOutcome } from './approval-proposal.js';
 import { getApproval, resolveApproval, type Approval } from './approvals-store.js';
 import {
   getMessageByPendingApprovalId,
@@ -67,7 +71,7 @@ export type ResolveOutcome =
  * a second copy that drifted from this one is exactly how the operator path
  * shipped without any of it and wedged its conversation permanently.
  */
-export type ApprovalExecutor = (approval: Approval) => Promise<McpCallResult>;
+export type ApprovalExecutor = (approval: Approval, resolutionPool?: pg.Pool) => Promise<McpCallResult>;
 
 /**
  * Ownership + status checks, execute-or-synthesize the tool result, and
@@ -108,7 +112,14 @@ export async function resolveApprovalAndPersistResult(
  * Callers MUST have established that the approval belongs to the caller —
  * this function does not authorise.
  */
-export async function completeApprovalResolution(
+export async function completeApprovalResolution(pool: pg.Pool, params: Parameters<typeof completeApprovalResolutionUnlocked>[1]): Promise<ResolveOutcome> {
+  return withApprovalResolutionLock(pool, params.approval, async (scoped, current) => {
+    if (!current) return { ok: false, code: 404, error: 'approval not found' };
+    return completeApprovalResolutionUnlocked(scoped, { ...params, approval: current });
+  });
+}
+
+async function completeApprovalResolutionUnlocked(
   pool: pg.Pool,
   params: {
     approval: Approval;
@@ -139,7 +150,7 @@ export async function completeApprovalResolution(
      * cannot deny wedges the org's one operator conversation, which is strictly
      * worse than a stale row in substrate. Callers must not throw from it.
      */
-    denyCleanup?: (approval: Approval) => Promise<{ attempted: boolean; ok: boolean; error?: string }>;
+    denyCleanup?: (approval: Approval, resolutionPool?: pg.Pool) => Promise<{ attempted: boolean; ok: boolean; error?: string }>;
   }
 ): Promise<ResolveOutcome> {
   const { approval, resolution, execute, resolvedBy, denyCleanup } = params;
@@ -150,13 +161,18 @@ export async function completeApprovalResolution(
   // resolveApproval's conditional UPDATE (WHERE status = 'pending') is the
   // real guard against a double-resolve race. Two concurrent requests can
   // both pass this read, but only one will win the UPDATE below.
-  if (approval.status !== 'pending') {
+  const tracked = !!approval.proposalDetails;
+  const cached = tracked ? await readConfirmedExecution(pool, approval) : null;
+  if (cached && resolution.status === 'denied') return { ok: false, code: 409, error: 'execution_already_succeeded: complete the recorded approval' };
+  const completingCachedSuccess = approval.status === 'approved' && !!cached;
+  if (approval.status !== 'pending' && !completingCachedSuccess) {
     return { ok: false, code: 409, error: `approval already ${approval.status}` };
   }
 
   // 3. Find the paused assistant tool-call row.
   const pausedMessage = await getMessageByPendingApprovalId(pool, approvalId);
   if (!pausedMessage || !pausedMessage.toolCallId) {
+    if (completingCachedSuccess) return { ok: false, code: 409, error: 'approval already approved' };
     return { ok: false, code: 400, error: 'no paused tool call found for this approval' };
   }
 
@@ -178,8 +194,35 @@ export async function completeApprovalResolution(
   // module exists to prevent.
   let toolResult: unknown;
   if (resolution.status === 'approved') {
-    const call = await execute(approval);
+    const previous = approval.executionOutcome;
+    const attemptCount = previous?.attemptCount ?? 0;
+    const base: ExecutionOutcome = { version: 1, state: 'running', attemptCount: attemptCount + 1, startedAt: new Date().toISOString(), finishedAt: null, safeErrorCode: null, resultReference: null };
+    if (!cached && ['running', 'unconfirmed'].includes(previous?.state ?? '')) {
+      await recordExecutionOutcome(pool, approvalId, { ...previous!, state: 'unconfirmed', safeErrorCode: 'execution_unconfirmed' });
+      return { ok: false, code: 409, error: 'execution_unconfirmed: reconcile the prior attempt before any further execution' };
+    }
+    if (tracked && !cached) await recordExecutionOutcome(pool, approvalId, base);
+    let call: McpCallResult;
+    try { call = cached ?? await execute(approval, pool); }
+    catch (error) {
+      if (!tracked) throw error;
+      await recordExecutionOutcome(pool, approvalId, { ...base, state: 'unconfirmed', finishedAt: new Date().toISOString(), safeErrorCode: 'execution_unconfirmed' });
+      return { ok: false, code: 502, error: 'execution_unconfirmed' };
+    }
+    if (tracked && call.ok && !isConfirmedExecution(approval, call)) {
+      call = { ok: false, code: (call.result as any)?.isError === true ? 'tool_rejected' : 'execution_unconfirmed', error: 'Execution was not confirmed.' };
+    }
     if (!call.ok) {
+      if (tracked && ['proposal_state_changed', 'approval_operation_changed'].includes(call.code ?? '')) {
+        await recordExecutionOutcome(pool, approvalId, { ...base, state: 'not_started', attemptCount, startedAt: null, finishedAt: null, safeErrorCode: null });
+        await expireProposalAndCompleteCall(pool, { approval, code: 'proposal_state_changed', resolvedBy });
+        return { ok: false, code: 409, error: 'proposal_state_changed' };
+      }
+      if (tracked) {
+        const known = ['tool_rejected', 'substrate_rejected', 'proposal_review_unavailable', 'proposal_review_required', 'proposal_invalid', 'office_access_blocked'].includes(call.code ?? '');
+        await recordExecutionOutcome(pool, approvalId, { ...base, state: known ? 'failed' : 'unconfirmed', finishedAt: new Date().toISOString(), safeErrorCode: known ? call.code! : 'execution_unconfirmed' });
+        return { ok: false, code: known && !['tool_rejected', 'substrate_rejected'].includes(call.code ?? '') ? 409 : 502, error: known ? call.code! : 'execution_unconfirmed' };
+      }
       /**
        * A refused IMMUTABLE OPERATION is a 409, not a transport failure.
        * `approval_operation_changed` means the operation the owner approved
@@ -192,11 +235,13 @@ export async function completeApprovalResolution(
       if (call.code === 'approval_operation_changed') {
         return { ok: false, code: 409, error: call.error ?? 'approval_operation_changed' };
       }
+      if (['proposal_review_required', 'proposal_review_unavailable', 'office_access_blocked'].includes(call.code ?? '')) return { ok: false, code: 409, error: call.code! };
       return { ok: false, code: 502, error: `Tool execution failed: ${call.error}` };
     }
     toolResult = call.result;
+    if (tracked) await recordExecutionOutcome(pool, approvalId, { ...base, state: 'succeeded', attemptCount: cached ? Math.max(1, attemptCount) : base.attemptCount, startedAt: previous?.startedAt ?? base.startedAt, finishedAt: new Date().toISOString(), resultReference: { kind: 'tool_execution', id: approvalId } });
 
-    const resolved = await resolveApproval(pool, approvalId, {
+    const resolved = completingCachedSuccess ? approval : await resolveApproval(pool, approvalId, {
       status: 'approved',
       trustScope: resolution.trustScope,
       resolvedBy,
@@ -220,7 +265,7 @@ export async function completeApprovalResolution(
     let cleanup: { attempted: boolean; ok: boolean; error?: string } = { attempted: false, ok: true };
     if (denyCleanup) {
       try {
-        cleanup = await denyCleanup(approval);
+        cleanup = await denyCleanup(approval, pool);
       } catch (err) {
         cleanup = { attempted: true, ok: false, error: err instanceof Error ? err.message : String(err) };
       }
@@ -287,8 +332,8 @@ export async function completeApprovalResolution(
   // nothing and the append below runs exactly as it always did. That is why
   // this is a fallback rather than a branch on principal: it is keyed on what
   // is actually in the conversation, not on an assumption about who owns it.
-  const toolName = approval.toolName;
-  const toolArgs = stripJsonbNulls(approval.toolArgs);
+  const toolName = pausedMessage.toolName ?? approval.toolName;
+  const toolArgs = stripJsonbNulls(pausedMessage.toolArgs ?? approval.toolArgs);
   const sanitizedResult = stripJsonbNulls(toolResult);
   const replaced = await replaceToolResultForCall(pool, approval.conversationId, pausedMessage.toolCallId, {
     toolName,
@@ -309,5 +354,5 @@ export async function completeApprovalResolution(
   // 6. Clear the pending marker on the paused assistant row.
   await clearPendingApproval(pool, pausedMessage.id);
 
-  return { ok: true, approval };
+  return { ok: true, approval: { ...approval, status: resolution.status } };
 }

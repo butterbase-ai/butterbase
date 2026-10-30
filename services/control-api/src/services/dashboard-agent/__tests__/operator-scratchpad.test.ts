@@ -49,6 +49,7 @@ import { OPERATOR_SCRATCHPAD_MAX_CHARS } from '../operator-scratchpad-store.js';
 import {
   getToolCatalog,
   OPERATOR_SCRATCHPAD_TOOL,
+  PROPOSE_ACTION_TOOL,
   isOperatorScratchpadTool,
 } from '../tool-catalog.js';
 import { getSystemPrompt } from '../prompt.js';
@@ -242,15 +243,18 @@ describe('human assistant — unchanged', () => {
     expect(toolNamesSent(bodies[0])).not.toContain(OPERATOR_SCRATCHPAD_TOOL);
   });
 
-  it('is offered exactly the catalog minus operator-only specs', async () => {
+  it('is offered exactly the catalog available to an ordinary dashboard turn', async () => {
     const { bodies } = noToolCalls();
     await collect(runAgentTurn(humanInput()));
     const expected = getToolCatalog()
       .filter((t) => t.operatorOnly !== true)
       // Office skill seams require executors this plain turn does not supply.
       .filter((t) => t.name !== 'skill_creator' && t.name !== 'run_skill_script')
+      // Owner proposals require stored Office provenance and a provider.
+      .filter((t) => t.name !== PROPOSE_ACTION_TOOL)
       .map((t) => t.name);
     expect(toolNamesSent(bodies[0])).toEqual(expected);
+    expect(toolNamesSent(bodies[0])).not.toContain(PROPOSE_ACTION_TOOL);
     // Sanity: the filter actually removed something, so this is not vacuous.
     // Not hardcoded to "- 1": the operator-only count grew to 2 with
     // `run_sandbox_code` (see tool-catalog.ts), and this assertion should
@@ -259,7 +263,8 @@ describe('human assistant — unchanged', () => {
     expect(operatorOnlyCount).toBeGreaterThanOrEqual(2);
     const seamCount = getToolCatalog()
       .filter((t) => t.name === 'skill_creator' || t.name === 'run_skill_script').length;
-    expect(expected.length).toBe(getToolCatalog().length - operatorOnlyCount - seamCount);
+    expect(getToolCatalog().filter((t) => t.name === PROPOSE_ACTION_TOOL)).toHaveLength(1);
+    expect(expected.length).toBe(getToolCatalog().length - operatorOnlyCount - seamCount - 1);
   });
 
   it('sends a byte-identical system prompt', async () => {

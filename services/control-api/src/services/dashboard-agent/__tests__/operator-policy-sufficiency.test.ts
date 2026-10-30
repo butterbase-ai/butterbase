@@ -114,6 +114,9 @@ describe('the allow tier is the spec list, nothing more', () => {
   // Widening this is a spec change, and this test is where that decision has to
   // be made deliberately rather than by adding a line to the table.
   const SPEC_ALLOW = [
+    // Structured preparation is local and cannot execute the nested operation.
+    // Its effective underlying policy still decides whether a gate is allowed.
+    'propose_action',
     'butterbase_docs',
     'list_regions',
     'select_rows',

@@ -30,9 +30,12 @@ describe('loadTemplate', () => {
     const allowlist = new Set([
       'react', 'react-dom', '@butterbase/sdk', 'tailwindcss', 'autoprefixer', 'postcss',
       'vite', '@vitejs/plugin-react', 'lucide-react', 'clsx', 'tailwind-merge',
-      'class-variance-authority', 'typescript',
+      'class-variance-authority', 'typescript', 'esbuild-wasm',
     ])
     const declared = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]
-    for (const d of declared) expect(allowlist.has(d)).toBe(true)
+    for (const d of declared) expect(allowlist.has(d), `Unexpected template dependency: ${d}`).toBe(true)
+    // The template uses WASM build tools so it can build in the sandbox.
+    expect(pkg.devDependencies['esbuild-wasm']).toBe('^0.21.5')
+    expect(pkg.overrides).toEqual({ rollup: 'npm:@rollup/wasm-node@^4.20.0' })
   })
 })
