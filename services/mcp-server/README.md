@@ -54,7 +54,7 @@ Prefer to skip the local install? Butterbase also runs a hosted MCP endpoint:
 
 ## What you can do
 
-The server exposes 38 tools across Butterbase's surface area, including:
+The available tools depend on the server's enabled capabilities, including:
 
 - **Apps & regions** — `init_app`, `manage_app` (actions: list/delete/pause/get_config/update_access_mode/secure/update_cors/set_visibility/preview_clone_env_vars/clone/get_clone_job/find_templates/set_clone_webhook/link_substrate/unlink_substrate/set_substrate_autopropagate/move/move_status/teardown_source_replica/get_env/update_env/publish_template_release/list_template_releases/get_template_release/check_template_updates/update_from_template), `list_regions`
 - **Schema** — `manage_schema`, `manage_migrations`
@@ -71,6 +71,7 @@ The server exposes 38 tools across Butterbase's surface area, including:
 - **Integrations & billing** — `manage_integrations`, `list_partner_apis`, `manage_billing`
 - **API keys & audit logs** — `manage_api_keys`, `query_audit_logs`
 - **Docs, suggestions & hackathons** — `butterbase_docs`, `submit_suggestion`, `prep_and_submit_hackathon_entry`
+- **Office (optional cloud capability)** — `manage_office` provides 22 organization-scoped actions for Ask, conversations, decisions, lifecycle controls and business memory. Read `butterbase_docs` with `topic: "office"` first. Every call needs an explicit `org_id` and platform credential; no app is selected. Enable/pause/resume/approve return confirmation receipts for the initiating owner to review in the browser. Agents must show the URL and observe the outcome, never confirm it themselves. OSS-only installations may omit this tool. See the [Office client reference](https://docs.butterbase.ai/core-concepts/office-clients/).
 
 See the [Butterbase docs](https://butterbase.ai/docs) for the full list.
 

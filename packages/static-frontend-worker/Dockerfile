@@ -15,6 +15,9 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json tsconfig.base.json ./
+# Keep locked CLI/SDK workspace links available in partial image installs.
+COPY submodules/butterbase-oss/packages/cli/package.json submodules/butterbase-oss/packages/cli/
+COPY submodules/butterbase-oss/packages/sdk/package.json submodules/butterbase-oss/packages/sdk/
 COPY submodules/butterbase-oss/package.json submodules/butterbase-oss/tsconfig.base.json submodules/butterbase-oss/
 COPY submodules/butterbase-oss/packages/shared/package.json submodules/butterbase-oss/packages/shared/
 COPY submodules/butterbase-oss/packages/static-frontend-worker/package.json submodules/butterbase-oss/packages/static-frontend-worker/

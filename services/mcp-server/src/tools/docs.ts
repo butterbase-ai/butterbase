@@ -31,6 +31,7 @@ Available topics:
   - cli: CLI installation, commands for apps, schema, functions, storage, config
   - integrations: Third-party integrations (OAuth connect flow, tool execution, SDK, CLI)
   - substrate: Per-user memory + action coordination plane for AI agents (entities, decisions, attention rules, action ledger, outbox, ws stream, ctx.substrate inside functions)
+  - office: Organization Ask, conversations, decisions, browser confirmation and native business memory across MCP/CLI/SDK
 
 Example:
   Input: { topic: "auth" }
@@ -56,7 +57,7 @@ Idempotency: Safe to call anytime (read-only operation).`,
         .enum(DOC_TOPICS)
         .optional()
         .describe(
-          'Section to return: all (default), overview, mcp, rest, auth, storage, functions, frontend, ai, meetings, billing, platform, regions, schema, sdk, cli, realtime, rag, integrations, substrate.'
+          'Section to return: all (default), overview, mcp, rest, auth, storage, functions, frontend, ai, meetings, billing, platform, regions, schema, sdk, cli, realtime, rag, integrations, substrate, office.'
         ),
       query: z
         .string()

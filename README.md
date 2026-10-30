@@ -42,6 +42,8 @@ Butterbase gives you the building blocks for AI-driven applications without lock
 
 ## Features
 
+Managed-cloud Office clients are available through the optional `manage_office` MCP tool, `butterbase office` CLI commands and standalone SDK `OfficeClient`. They use an explicit organization and platform credential, with no app selection. Protected actions return a browser confirmation receipt for the initiating owner. Read [`butterbase_docs` topic `office`](https://docs.butterbase.ai/core-concepts/office-clients/) for the 22 actions, Ask observation, retry keys and business memory. OSS-only MCP can run without the Office overlay.
+
 **Data**
 - **Postgres data plane** — per-app databases with declarative schema (`/schema`), automatic REST endpoints (`/auto-api`), and migrations.
 - **Row-Level Security** — first-class RLS policy management with user-isolation helpers (`/rls`).

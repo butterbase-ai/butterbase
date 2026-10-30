@@ -322,6 +322,7 @@ function classifySubstrate(args: unknown): OfficeToolVerdict {
  * may never be lifted by yolo; 'deny' is absolute.
  */
 export function classifyOfficeTool(name: string, args: unknown): OfficeToolVerdict {
+  if (name === 'manage_office') return 'deny';
   if (name === 'manage_substrate') return classifySubstrate(args);
 
   if (OPERATOR_ALLOWED_TOOLS.has(name)) return 'allow';

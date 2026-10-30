@@ -2,6 +2,27 @@
 
 Universal TypeScript SDK for Butterbase - works in browser, Node.js, and Deno environments.
 
+## Office
+
+```ts
+import { OfficeClient } from '@butterbase/sdk';
+
+const office = new OfficeClient({
+  apiUrl: 'https://api.butterbase.ai',
+  organizationId: '<organization UUID>',
+  getToken: () => process.env.BUTTERBASE_API_KEY!,
+});
+const { data, error } = await office.ask('What needs follow-up?', {
+  idempotencyKey: '<unique request ID>',
+});
+```
+
+Office uses a platform credential and no app ID. Its 22 actions include lifecycle controls and `decisions`, `conversations`, `memory`, `principles` namespaces. Enable/pause/resume/approve return browser confirmation receipts; the initiating owner confirms one saved action. `getConfirmation` and `waitForConfirmation` observe it. A wait timeout may retain the last receipt in `data` alongside `error`.
+
+`askStream(message)` submits once. To observe an existing turn, use `askStream('', {conversationId, turnId, afterSequence})`. Abort ends observation only. Typed stream errors retain replay pointers; failed writes retain their `idempotencyKey`. Reuse a request key for retries, and generate a new one for a new intended write. Principles use native policy approval; confirmation does not override conflicts.
+
+See the [complete Office client reference](https://docs.butterbase.ai/core-concepts/office-clients/) and [HTTP contract](https://docs.butterbase.ai/api-reference/office-api/) for all methods, native payload types, membership/owner rules and expired replay.
+
 ## Installation
 
 ```bash

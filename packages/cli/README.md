@@ -2,6 +2,23 @@
 
 Command-line tool for Butterbase project scaffolding and backend management.
 
+## Office commands
+
+```sh
+butterbase office status --org <uuid> --json
+butterbase office ask "What needs follow-up?" --org <uuid> --stream
+butterbase office decisions approve <id> --source substrate --org <uuid> --open --wait
+butterbase office memory record-learning --file learning.json --org <uuid> --json
+```
+
+Every Office command requires `--org` and supports `--json`, with no selected app. Credentials come from the existing platform login/config, or `BUTTERBASE_API_KEY`; `BUTTERBASE_CONTROL_API_URL` can override the configured endpoint. `butterbase office --help` lists the 22 commands and nested groups.
+
+Protected commands print a confirmation receipt and URL. `--open` explicitly launches a browser; a missing browser still leaves the URL usable. `--wait` observes only; use `--wait-timeout <ms>` to bound waiting. `status --confirmation <id>` inspects the saved outcome. Use `--idempotency-key` to retry the same intended write, and `--source office|substrate` for decision references.
+
+Ask `--stream --conversation <id> --turn <id> --after-sequence <n>` observes an existing turn without another question. SIGINT stops observation, not server work. JSON mode prints one `{data,error}` object to stdout; diagnostics go to stderr. `--json --stream` includes collected public events in that final object.
+
+Exit **0**: accepted/read, including pending confirmation. Exit **1**: request/terminal failure, rejected/expired/unknown receipt, timeout or interruption. Exit **2**: usage/input error. Inspect receipts and exact turn IDs after a disconnect before requesting new work. See [all commands, payloads and access rules](https://docs.butterbase.ai/core-concepts/office-clients/).
+
 ## Installation
 
 ```bash

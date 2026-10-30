@@ -30,6 +30,16 @@ export function stripJsonbNulls(value: unknown): unknown {
 
 export type ConversationOrigin = 'dashboard' | 'office';
 
+/** Cloud client provenance is assigned atomically at creation and immutable
+ * through legacy routes. to_jsonb keeps OSS databases without private columns
+ * valid. A permanent ownership boundary closes both writer admission races. */
+export async function isOfficeClientConversation(pool: pg.Pool, id: string): Promise<boolean> {
+  const { rows } = await pool.query<{ owned: boolean }>(`SELECT origin='office' AND
+    (to_jsonb(conversation)->>'office_client_request_key') IS NOT NULL AS owned
+    FROM dashboard_agent_conversations AS conversation WHERE id=$1`, [id]);
+  return rows[0]?.owned === true;
+}
+
 export type Conversation = {
   id: string;
   userId: string;
@@ -108,7 +118,7 @@ export type Message = {
  * eligibility before asking for an office row).
  */
 export async function createConversation(
-  pool: pg.Pool,
+  pool: pg.Pool | pg.PoolClient,
   userId: string,
   title: string,
   model: string,
@@ -148,7 +158,7 @@ export async function listConversations(
  * Get a conversation by ID, scoped to a user (returns null if user doesn't own it)
  */
 export async function getConversation(
-  pool: pg.Pool,
+  pool: pg.Pool | pg.PoolClient,
   id: string,
   userId: string
 ): Promise<Conversation | null> {

@@ -5,6 +5,8 @@ description: Official TypeScript SDK for Butterbase — works in browser, Node.j
 
 The official TypeScript SDK for Butterbase. Works in browser, Node.js, and Deno environments.
 
+For organization business work, use the standalone `OfficeClient({apiUrl, organizationId, getToken, fetch?})`. It provides `ask`, confirmation helpers, and `decisions`, `conversations`, `memory`, `principles` namespaces without an app ID or app end-user session. Methods return `{data,error}`; `askStream` yields public events and throws typed `OfficeClientError` / `OfficeStreamError` failures. See [Office clients](/core-concepts/office-clients/) for all methods, retry keys, browser confirmation and replay.
+
 ## Installation
 
 ```bash

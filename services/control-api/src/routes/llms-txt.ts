@@ -45,7 +45,7 @@ Use \`manage_app\` action \`resume\` to resume an app, or action \`get_config\` 
 
 ## Error Handling
 
-All errors follow this structure:
+Many app-management errors use this structure:
 \`\`\`json
 {
   "error": {
@@ -65,7 +65,7 @@ When you encounter an error:
 
 ## Response Metadata
 
-Success responses include \`_meta\` with:
+Many app-management success responses include \`_meta\` with:
 - \`resource_info\`: Current state (e.g., table count, storage usage)
 - \`next_actions\`: Suggested next steps with tool names
 
@@ -94,6 +94,18 @@ Example:
 ### Organization scope
 
 When the user is working in an organization, send \`X-Organization-Id\` on organization-scoped requests. The API verifies membership and rejects a foreign or missing organization. Managed organization-locked keys are bound to exactly one organization and cannot administer organizations. Stored assistant conversations keep the provenance they were created with; do not try to move one between product surfaces.
+
+### Office clients (optional cloud capability)
+
+Use \`butterbase_docs\` topic \`office\` before Office work. Hosted MCP can expose \`manage_office\` with 22 actions; OSS-only installations may omit it. The same actions are available through \`butterbase office\` and the standalone SDK \`OfficeClient\`. Supply an explicit organization UUID (MCP \`org_id\`, CLI \`--org\`, SDK \`organizationId\`) and a platform credential. Office does not require an app or app end-user session.
+
+Enable, pause, resume and approve return saved confirmation receipts. Show \`confirmation_url\` to the initiating owner and let that owner sign in, review and confirm or cancel in the browser. An agent must never resolve the confirmation itself. Inspect saved outcomes with status plus \`confirmation_id\`; a pending receipt is not proof of execution.
+
+Ask admits once per intended request. Retain its \`idempotency_key\`, \`conversation_id\` and \`turn_id\`. Retry the same write with the same key; observe existing work with get_conversation or SDK askStream using the exact turn IDs, without another Ask submission. Disconnect/SIGINT stops observation only. Inspect an unknown outcome before retrying. Members can read and deny; new work requires the current owner and an eligible active organization. Business memory wraps the existing Substrate ledger and policy approvals.
+
+Full reference: https://docs.butterbase.ai/core-concepts/office-clients/ and https://docs.butterbase.ai/api-reference/office-api/.
+
+Office JSON responses use the documented protocol shapes without \`_meta\`; status retains its \`{status}\` envelope and streaming uses SSE. Errors use \`{error:{code,message,decision?,history?}}\`; remediation/documentation_url/details are not guaranteed. SDK and CLI wrap responses as \`{data,error}\`.
 
 ## Best Practices
 
