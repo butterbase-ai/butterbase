@@ -50,6 +50,7 @@ import {
   createConversation,
   listConversations,
   getConversation,
+  isOfficeClientConversation,
   deleteConversation,
   updateConversationModel,
   renameConversation,
@@ -75,6 +76,7 @@ import { callMcpTool } from '../services/dashboard-agent/mcp-client.js';
 import {
   resolveApprovalAndPersistResult,
   completeApprovalResolution,
+  type ApprovalExecutor,
 } from '../services/dashboard-agent/resume.js';
 import {
   getApproval,
@@ -534,6 +536,8 @@ export async function resolveOperatorApproval(
      * supplies it.
      */
     authMethod?: string;
+    /** Server-only admission adapter; HTTP bodies cannot supply executors. */
+    executeApproval?: ApprovalExecutor;
     resolution: { status: 'approved' } | { status: 'denied'; reason?: string };
   },
 ): Promise<OperatorResolveOutcome> {
@@ -618,7 +622,7 @@ export async function resolveOperatorApproval(
     // approve(action_id), so the human's one click actually EXECUTES the
     // capability instead of leaving a second pending action for them to
     // approve again. See substrate-approval-bridge.ts.
-    execute: (a) =>
+    execute: input.executeApproval ?? ((a) =>
       executeApprovedOperatorTool(pool, {
         approvalId: a.id,
         name: a.toolName,
@@ -640,7 +644,7 @@ export async function resolveOperatorApproval(
         // The snapshot, not the process cache, is what proves and builds a
         // deploy on whichever API machine resolves this approval.
         treeStore: getSharedDeployTreeStore(),
-      }),
+      })),
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
      *
@@ -784,6 +788,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
 
+    if (await isOfficeClientConversation(app.controlDb, id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
     await deleteConversation(app.controlDb, id, userId);
     return reply.code(204).send();
   });
@@ -877,6 +882,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
+
+    if (conversation.origin === 'office' && await isOfficeClientConversation(app.controlDb, conversation.id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
 
     /**
      * Eligibility, also before headers. The loop rechecks it per request, but
@@ -1059,6 +1066,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
 
+    if (conversation.origin === 'office' && await isOfficeClientConversation(app.controlDb, conversation.id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
+
     /**
      * Eligibility BEFORE the destructive part of regenerate. Losing the
      * entitlement must stop the spend — and must not delete a customer's
@@ -1172,6 +1181,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
+
+    if (conversation.origin === 'office' && await isOfficeClientConversation(app.controlDb, conversation.id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
 
     // Extract JWT verbatim from Authorization header, same as /messages.
     const authHeader = request.headers.authorization ?? '';
@@ -1653,6 +1664,10 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const authHeader = request.headers.authorization ?? '';
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
 
+    if (parsed.data.status === 'approved') {
+      const pending = await getApprovalForOrg(app.controlDb, approvalId, org.orgId);
+      if (pending && await isOfficeClientConversation(app.controlDb, pending.conversationId)) return reply.code(409).send({ error: 'Use the Office client browser confirmation for this decision.', code: 'office_client_confirmation_required' });
+    }
     const outcome = await resolveOperatorApproval(app.controlDb, {
       approvalId,
       orgId: org.orgId,
@@ -1713,6 +1728,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
 
     const isOffice = conversation.origin === 'office';
     const officeOrganizationId = isOffice ? conversation.organizationId : null;
+    const clientCoordinated = isOffice && await isOfficeClientConversation(app.controlDb, conversation.id);
+    if (clientCoordinated && status === 'approved') return reply.code(409).send({ error: 'Use the Office client browser confirmation for this decision.', code: 'office_client_confirmation_required' });
 
     /**
      * ── The Office consequential gate, foreground (Task 9) ────────────────
@@ -1819,6 +1836,12 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     try {
       // Read once above, before the hijack — no second lookup, and no chance
       // of the resumed turn running on a row the gate did not see.
+      if (clientCoordinated) {
+        const done = { type: 'done' as const };
+        publishEvent(conversationId, done);
+        if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(done)}\n\n`);
+        return;
+      }
       const model = resolveAssistantModel(conversation.model);
 
       // Empty userMessage: the resumed turn's history already contains the

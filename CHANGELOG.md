@@ -12,6 +12,8 @@
 
 ### Added
 
+- **Office clients**: standalone organization-scoped `OfficeClient`, 22 `butterbase office` commands and the optional cloud `manage_office` MCP tool. Includes idempotent Ask with durable public events, exact-turn observation/replay, source-aware decisions, native Substrate business memory, and browser confirmation for enable/pause/resume/approve. Requires a compatible hosted Office backend and the matching shared contract release; no app end-user credential support is implied.
+
 - **Prepared video storage (optional)**: retained private output objects, bounded transfers and durable cleanup, storage limits, authenticated byte-range playback and zero customer charge on failed delivery. Deploy optional move-table compatibility first, apply runtime migration061 in every region, then deploy policy-aware readers with output admission disabled before enabling the new contract. Existing provider-backed jobs keep their original behavior.
 
 - **AI images**: model-specific generation and reference-edit contracts for GPT Image 2.5 Flare/Sunburst, Grok Imagine Image 2.0/Quality, and FLUX 3 Image/Klein, including local option/limit validation. Discover configured availability with `manage_ai` action `list_models`.

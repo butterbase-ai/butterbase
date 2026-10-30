@@ -1,6 +1,6 @@
 {
   "name": "@butterbase/cli",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Command-line tool for Butterbase project scaffolding and backend management",
   "license": "Apache-2.0",
   "homepage": "https://butterbase.ai",
@@ -33,7 +33,8 @@
     "baas"
   ],
   "dependencies": {
-    "@butterbase/sdk": "^2.8.0",
+    "@butterbase/sdk": "^2.12.0",
+    "@butterbase/shared": "^0.4.2",
     "adm-zip": "^0.5.17",
     "chalk": "^5.3.0",
     "commander": "^12.0.0",

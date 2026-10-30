@@ -412,7 +412,7 @@ describe('drift guard vs substrate-core capability registry', () => {
       seen++;
       if (policy === 'approval_required') found.add(name!);
     }
-    expect(seen).toBe(16);
+    expect(seen).toBe(17);
     expect([...found].sort()).toEqual([...SUBSTRATE_APPROVAL_REQUIRED_CAPABILITIES].sort());
   });
 });

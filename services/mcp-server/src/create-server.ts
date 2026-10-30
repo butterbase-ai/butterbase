@@ -84,7 +84,8 @@ const SERVER_INSTRUCTIONS = [
   'After consent, retry the original tool call.',
 ].join('\n');
 
-export async function createButterbaseMcpServer() {
+interface OfficeOverlay { registerOfficeMcpTools(server: McpServer): void; }
+export async function createButterbaseMcpServer(options: { loadOfficeOverlay?: () => Promise<OfficeOverlay> } = {}) {
   const server = new McpServer({
     name: 'butterbase',
     version: '0.1.0',
@@ -256,6 +257,21 @@ export async function createButterbaseMcpServer() {
     orgsOverlay.registerOrganizationsMcpTools(server);
   } catch {
     // OSS mode: no organizations overlay. Silently skip.
+  }
+
+  // OSS keeps this optional. Cloud release verification must set
+  // OFFICE_MCP_REQUIRED=1 so a broken/missing private build cannot ship silently.
+  try {
+    const overlayPath = '../../../cloud-overlays/dist/cloud-overlays/office/mcp-tools/index.js';
+    const overlay: OfficeOverlay = await (options.loadOfficeOverlay
+      ? options.loadOfficeOverlay() : Function('p', 'return import(p)')(overlayPath));
+    overlay.registerOfficeMcpTools(server);
+  } catch (error) {
+    if (process.env.OFFICE_MCP_REQUIRED === '1') {
+      await server.close();
+      throw new Error('Office MCP registration failed: the required cloud tool is unavailable.', { cause: error });
+    }
+    if ((error as { code?: string })?.code !== 'ERR_MODULE_NOT_FOUND') console.warn('Office MCP registration failed; manage_office is unavailable.');
   }
 
   return server;

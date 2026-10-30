@@ -1,5 +1,7 @@
 // Main client
 export { ButterbaseClient, createClient } from './lib/butterbase-client.js';
+export { OfficeClient } from './office/office-client.js';
+export * from './office/types.js';
 
 // Query builder
 export { QueryBuilder } from './lib/query-builder.js';
