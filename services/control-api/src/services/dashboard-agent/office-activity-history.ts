@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { OFFICE_ACTIVITY_HISTORY_MAX_CALLS, OFFICE_ACTIVITY_HISTORY_MAX_GROUPS, projectOfficeConversationActivity } from './office-activity.js';
 
 type HistoryRow = { id: string; role: string; content: string; created_at: Date; tool_call_id?: string | null;
-  tool_name?: string | null; tool_args?: unknown; tool_result?: unknown; pending_approval_id?: string | null };
+  tool_name?: string | null; tool_args?: unknown; tool_result?: unknown; pending_approval_id?: string | null; outcome?: string | null; final_answer_id?: string | null };
 
 /** Caller must authorize the conversation first. Limit counts the same latest
  * user/assistant rows as the existing public conversation reader, including empty
@@ -11,21 +11,23 @@ type HistoryRow = { id: string; role: string; content: string; created_at: Date;
 export async function readOfficeConversationActivityHistory(pool: pg.Pool, conversationId: string, limit = 25) {
   if (!Number.isInteger(limit) || limit < 1 || limit > OFFICE_ACTIVITY_HISTORY_MAX_GROUPS) throw new RangeError('Invalid history limit');
   const window = await pool.query<HistoryRow>(`/* office_activity_window */
-    SELECT id,role,content,created_at FROM dashboard_agent_messages
-    WHERE conversation_id=$1 AND role IN ('user','assistant')
-    ORDER BY created_at DESC,id DESC LIMIT $2`, [conversationId, limit]);
+    SELECT m.id,m.role,m.content,m.created_at,t.outcome,t.final_answer_id FROM dashboard_agent_messages m
+    LEFT JOIN dashboard_agent_office_turns t ON t.user_message_id=m.id AND t.conversation_id=m.conversation_id
+    WHERE m.conversation_id=$1 AND role IN ('user','assistant')
+    ORDER BY m.created_at DESC,m.id DESC LIMIT $2`, [conversationId, limit]);
   const messages = window.rows.reverse().filter(m => m.content?.trim()).map(m => ({
     id: m.id, role: m.role, content: m.content, createdAt: m.created_at,
   }));
   const userIds = messages.filter(m => m.role === 'user').map(m => m.id);
-  if (!userIds.length) return { messages, activity: [] };
+  const turns = window.rows.filter(m => m.role === 'user' && userIds.includes(m.id)).map(m => ({ user_message_id: m.id, outcome: m.outcome ?? 'unknown', final_answer_id: m.final_answer_id ?? null }));
+  if (!userIds.length) return { messages, activity: [], turns };
   const pairs = await pool.query<HistoryRow>(`/* office_activity_pairs */
     WITH anchors AS MATERIALIZED (
       SELECT u.id,u.created_at,n.id AS next_id,n.created_at AS next_at
       FROM dashboard_agent_messages u
       LEFT JOIN LATERAL (
         SELECT id,created_at FROM dashboard_agent_messages
-        WHERE conversation_id=$1 AND role='user' AND (created_at,id)>(u.created_at,u.id)
+        WHERE conversation_id=$1 AND role='user' AND btrim(content)<>'' AND (created_at,id)>(u.created_at,u.id)
         ORDER BY created_at,id LIMIT 1
       ) n ON true
       WHERE u.conversation_id=$1 AND u.role='user' AND u.id=ANY($2::uuid[])
@@ -55,7 +57,7 @@ export async function readOfficeConversationActivityHistory(pool: pg.Pool, conve
       ORDER BY created_at,id LIMIT 1
     ) r
     ORDER BY created_at,id`, [conversationId, userIds, OFFICE_ACTIVITY_HISTORY_MAX_CALLS]);
-  return { messages, activity: projectOfficeConversationActivity(pairs.rows.map(m => ({
+  return { messages, turns, activity: projectOfficeConversationActivity(pairs.rows.map(m => ({
     id: m.id, role: m.role, createdAt: m.created_at, toolCallId: m.tool_call_id,
     toolName: m.tool_name, toolArgs: m.tool_args, toolResult: m.tool_result, pendingApprovalId: m.pending_approval_id,
   }))) };

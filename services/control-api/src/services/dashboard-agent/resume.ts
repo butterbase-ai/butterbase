@@ -1,3 +1,4 @@
+import { resolveOfficeTurnApproval } from './office-turn-evidence.js';
 /**
  * Resume-turn helper (Plan 3b Task 3).
  *
@@ -353,6 +354,7 @@ async function completeApprovalResolutionUnlocked(
 
   // 6. Clear the pending marker on the paused assistant row.
   await clearPendingApproval(pool, pausedMessage.id);
+  await resolveOfficeTurnApproval(pool, approval.conversationId, approval.id);
 
   return { ok: true, approval: { ...approval, status: resolution.status } };
 }

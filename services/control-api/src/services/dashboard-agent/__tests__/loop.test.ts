@@ -1410,7 +1410,9 @@ function toolCallPassFor(callId: string, name: string, argsJson: string) {
 }
 
 describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
-  it('gates an untrusted destructive call: creates an approval, emits approval_required, never dispatches MCP, and terminates the turn without done', async () => {
+  it.each([false, true])('gates an untrusted destructive call without done (record evidence %s)', async recordOfficeActivity => {
+    const evidenceQuery = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    stubPool.query = evidenceQuery as any;
     global.fetch = vi.fn().mockResolvedValueOnce(
       toolCallPassFor('call-del', 'manage_app', '{"action":"delete","id":"app_1"}'),
     );
@@ -1430,7 +1432,7 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
       resolvedAt: null,
     });
 
-    const events = await collect(runAgentTurn(baseInput));
+    const events = await collect(runAgentTurn({ ...baseInput, recordOfficeActivity }));
 
     expect(mockCheckTrust).toHaveBeenCalledWith(stubPool, 'conv-1', 'manage_app');
     expect(mockCreateApproval).toHaveBeenCalledWith(
@@ -1452,6 +1454,9 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
         sensitivity: 'destructive',
       },
     ]);
+
+    if (recordOfficeActivity) expect(evidenceQuery.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns')).at(-1)?.[1]).toEqual(['conv-1', 'msg-stub', 'awaiting_approval', null, 'approval-1']);
+    else expect(evidenceQuery.mock.calls.some(([sql]) => String(sql).includes('dashboard_agent_office_turns'))).toBe(false);
 
     // Never reaches MCP dispatch.
     expect(mockCallMcpTool).not.toHaveBeenCalled();
@@ -1514,4 +1519,40 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
     expect(events.find((e) => e.type === 'approval_required')).toBeUndefined();
     expect(events.find((e) => e.type === 'done')).toBeDefined();
   });
+});
+
+
+it('records exact final assistant identity only at authoritative successful completion', async () => {
+  const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+  mockAppendMessage.mockResolvedValueOnce({ ...stubMessage, id: 'user-evidence' }).mockResolvedValueOnce({ ...stubMessage, id: 'final-evidence', role: 'assistant' });
+  global.fetch = vi.fn().mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Final answer' }, finish_reason: 'stop' }] }]));
+  const events = await collect(runAgentTurn({ ...baseInput, pool: { query } as unknown as pg.Pool, recordOfficeActivity: true }));
+  expect(events.at(-1)?.type).toBe('done');
+  expect(query.mock.calls.some(([sql, values]) => String(sql).includes('dashboard_agent_office_turns') && values.includes('completed') && values.includes('final-evidence'))).toBe(true);
+});
+
+
+it('persists failed evidence when the real model reader fails after partial text', async () => {
+  const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+  const read = vi.fn().mockResolvedValueOnce({ done: false, value: new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Partial answer"}}]}\n\n') }).mockRejectedValueOnce(new Error('model stream failed'));
+  global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, body: { getReader: () => ({ read }) } });
+  const events = await collect(runAgentTurn({ ...baseInput, pool: { query } as unknown as pg.Pool, recordOfficeActivity: true }));
+  expect(events.map(event => event.type)).toEqual(['token', 'error']);
+  expect(mockAppendMessage).toHaveBeenCalledWith(expect.anything(), 'conv-1', expect.objectContaining({ role: 'assistant', content: 'Partial answer' }));
+  expect(query.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns')).at(-1)?.[1]).toEqual(['conv-1', 'msg-stub', 'failed', null, null]);
+});
+
+it('keeps evidence running after actual tool success and intermediate prose until final persistence', async () => {
+  const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+  global.fetch = vi.fn().mockResolvedValueOnce(gatewayResponse([
+    { choices: [{ delta: { content: 'Checking that now', tool_calls: [{ index: 0, id: 'call', function: { name: 'manage_app', arguments: '{"action":"list"}' } }] }, finish_reason: 'tool_calls' }] },
+  ])).mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Finished answer' }, finish_reason: 'stop' }] }]));
+  mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { apps: [] } });
+  const source = runAgentTurn({ ...baseInput, pool: { query } as unknown as pg.Pool, recordOfficeActivity: true });
+  for (;;) { const event = await source.next(); if (event.value?.type === 'tool_result') break; if (event.done) throw new Error('Tool result missing'); }
+  expect(mockAppendMessage).toHaveBeenCalledWith(expect.anything(), 'conv-1', expect.objectContaining({ role: 'assistant', content: 'Checking that now', toolCallId: 'call' }));
+  expect(query.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns'))).toHaveLength(1);
+  expect(query.mock.calls[0][0]).toContain("'running'");
+  await collect(source);
+  expect(query.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns')).at(-1)?.[1]?.[2]).toBe('completed');
 });

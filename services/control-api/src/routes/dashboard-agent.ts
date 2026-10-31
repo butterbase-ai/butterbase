@@ -1006,6 +1006,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: message,
+        recordOfficeActivity: activity_version === 1,
         // Resolve rather than passing the parsed value straight through: the
         // zod default only fires when `model` is absent, so an explicit empty
         // or whitespace id would otherwise reach the gateway verbatim.
@@ -1945,6 +1946,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: '',
+        ...(conversation.origin === 'office' ? { officeActivityResumeApprovalId: approvalId } : {}),
         model,
         pool: app.controlDb,
         organizationId: readOrgId(request),

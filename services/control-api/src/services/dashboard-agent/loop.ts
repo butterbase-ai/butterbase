@@ -1,3 +1,4 @@
+import { OfficeTurnEvidence, observeOfficeTurn } from './office-turn-evidence.js';
 import { withOfficeActivityCallId } from './office-activity.js';
 /**
  * Agent loop for the Butterbase Dashboard Assistant.
@@ -716,11 +717,22 @@ function isSkillEntrypoint(path: string): boolean {
 }
 
 export async function* runAgentTurn(
+  input: Parameters<typeof runAgentTurnInternal>[0], depsOverride?: Partial<LoopDeps>,
+): AsyncGenerator<LoopEvent> {
+  const evidence = input.recordOfficeActivity || input.officeActivityResumeApprovalId
+    ? new OfficeTurnEvidence(input.pool, input.conversationId, input.officeActivityResumeApprovalId) : undefined;
+  yield* observeOfficeTurn(runAgentTurnInternal(input, depsOverride, evidence), evidence);
+}
+
+async function* runAgentTurnInternal(
   input: {
     conversationId: string;
     userId: string;
     jwt: string;
     userMessage: string;
+    /** Server opt-in for website turn evidence; never model supplied. */
+    recordOfficeActivity?: boolean;
+    officeActivityResumeApprovalId?: string;
     /** Server supplied; never read from a chat request body. */
     officeMemoryContext?: string;
     officeMemoryTools?: OfficeMemoryToolAdapter;
@@ -834,6 +846,7 @@ export async function* runAgentTurn(
     }>;
   },
   depsOverride?: Partial<LoopDeps>,
+  evidence?: OfficeTurnEvidence,
 ): AsyncGenerator<LoopEvent> {
   let executionStopped = false;
   const executionAllowed = async (): Promise<boolean> => {
@@ -1090,7 +1103,7 @@ export async function* runAgentTurn(
 
   // 1. Persist the user turn
   if (!await executionAllowed()) { yield { type: 'blocked', reason: 'execution_interrupted' }; return; }
-  await appendMessage(input.pool, input.conversationId, {
+  const userMessage = await appendMessage(input.pool, input.conversationId, {
     role: 'user',
     content: input.userMessage,
     toolCallId: null,
@@ -1098,6 +1111,8 @@ export async function* runAgentTurn(
     toolArgs: null,
     toolResult: null,
   });
+
+  await evidence?.start(userMessage.id);
 
   // AFFORDANCE (not the control): hide tools the operator may not call, so the
   // model doesn't waste turns and tokens on refusals. The control is
@@ -1492,7 +1507,7 @@ export async function* runAgentTurn(
       // No tool call — assistant is done
       if (pendingToolCalls.length === 0) {
         lastAssistantText = assistantText;
-        await appendMessage(input.pool, input.conversationId, {
+        const finalMessage = await appendMessage(input.pool, input.conversationId, {
           role: 'assistant',
           content: assistantText,
           toolCallId: null,
@@ -1501,6 +1516,7 @@ export async function* runAgentTurn(
           toolResult: null,
           modelUsed: input.model,
         });
+        evidence?.answer(finalMessage.id);
         yield { type: 'assistant_message', content: assistantText };
         yield { type: 'done' };
         terminated = true;
