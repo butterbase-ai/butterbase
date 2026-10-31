@@ -443,8 +443,10 @@ Action ledger.
 
 | Action | Description |
 |--------|-------------|
-| `list_actions` | List ledger rows. Optional `status` (`proposed` \| `executed` \| `rejected`), `capability`, `source_app_id`, `source_rule_id`, `limit` (1–500, default 100), `before` (ISO timestamp). |
+| `list_actions` | List ledger rows. Optional `status` (`proposed` \| `approved` \| `rejected` \| `executing` \| `executed` \| `failed` \| `reverted`), `capability`, `source_app_id`, `source_rule_id`, `limit` (API clamps to 1–100, default 25), `before` (ISO timestamp). |
 | `get_action` | Fetch one action by `action_id`. |
+
+For ledger reads, `pending` is accepted as an alias for `proposed`. An empty or unknown status is an argument-validation error, rather than an empty result. This alias does not change action writes or the separate outbox status vocabulary.
 
 Entities.
 

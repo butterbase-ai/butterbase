@@ -56,23 +56,26 @@ describe('getOrCreateOperatorConversation', () => {
 
 describe('claimDueJobs', () => {
   it('returns only due, enabled jobs and pushes next_run_at forward', async () => {
+    // Bound the scheduler clock to this fixture. Other suites can leave
+    // legitimately due jobs in the shared local database.
+    const now = new Date('2000-01-01T00:00:00Z');
     await pool.query(
       `INSERT INTO dashboard_agent_operator_jobs
          (organization_id, name, instructions, interval_seconds, next_run_at)
-       VALUES ($1,'sweep','Review the substrate.',600, now() - interval '1 minute')`, [ORG]
+       VALUES ($1,'sweep','Review the substrate.',600, $2::timestamptz - interval '1 minute')`, [ORG, now]
     );
     await pool.query(
       `INSERT INTO dashboard_agent_operator_jobs
          (organization_id, name, instructions, interval_seconds, next_run_at, enabled)
-       VALUES ($1,'disabled','x',600, now() - interval '1 minute', FALSE)`, [ORG]
+       VALUES ($1,'disabled','x',600, $2::timestamptz - interval '1 minute', FALSE)`, [ORG, now]
     );
 
-    const jobs = await claimDueJobs(pool, 10);
+    const jobs = await claimDueJobs(pool, 10, now);
     const mine = jobs.filter((j) => j.organizationId === ORG);
     expect(mine).toHaveLength(1);
     expect(mine[0].name).toBe('sweep');
 
-    const again = await claimDueJobs(pool, 10);
+    const again = await claimDueJobs(pool, 10, now);
     expect(again.filter((j) => j.organizationId === ORG)).toHaveLength(0);
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockedFunction } 
 import type pg from 'pg';
 
 vi.mock('../loop.js', () => ({ runAgentTurn: vi.fn() }));
+vi.mock('../review-preparation-store.js', () => ({ claimReviewPreparation: vi.fn().mockResolvedValue(null), finishReviewPreparation: vi.fn() }));
 vi.mock('../operator-store.js', () => ({
   getOrCreateOperatorConversation: vi.fn(),
   // Passthrough matching today's format. This is intentionally NOT the guard
@@ -42,6 +43,8 @@ import * as approvalsModule from '../approvals-store.js';
 import * as scratchpadModule from '../operator-scratchpad-store.js';
 import * as messageStoreModule from '../store.js';
 import { setOperatorAccessPolicy } from '../operator-access-policy.js';
+import { setApprovalProposalProvider } from '../approval-proposal.js';
+import { claimReviewPreparation, finishReviewPreparation } from '../review-preparation-store.js';
 import {
   runOperatorTurn,
   resolveOperatorModel,
@@ -90,6 +93,31 @@ beforeEach(() => {
   mockListPending.mockResolvedValue([]);
   mockGetScratchpad.mockResolvedValue(null);
   mockCloseUnanswered.mockResolvedValue('closed');
+  vi.mocked(claimReviewPreparation).mockResolvedValue(null);
+});
+
+describe('requested proposal preparation', () => {
+  afterEach(() => setApprovalProposalProvider(null));
+  it('makes an explicit frozen request and fails safely when the model only says everything is clean', async () => {
+    const claim = { approvalId: 'approval-1', organizationId: 'org-1', conversationId: 'conv-1', token: 'token', intentFingerprint: 'fingerprint', operation: { version: 1 as const, toolName: 'manage_substrate', args: { action: 'cancel_outbox', outbox_id: 'obx_original' } } };
+    vi.mocked(claimReviewPreparation).mockResolvedValue(claim);
+    setApprovalProposalProvider({ enabled: () => true, prepare: vi.fn(), revalidate: vi.fn() });
+    let suppliedMessage = '';
+    mockRunAgentTurn.mockImplementation((input) => { suppliedMessage = input.userMessage; return events({ type: 'text', text: 'Everything is clean.' }, { type: 'done' }) as any; });
+    const result = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    expect(result.preparationAttempted).toBe(true);
+    expect(suppliedMessage).toContain('obx_original');
+    expect(suppliedMessage).toContain('This request does not authorize execution');
+    expect(finishReviewPreparation).toHaveBeenCalledWith(stubPool, claim, 'failed', 'proposal_not_prepared');
+  });
+  it('retains a safe blocked outcome rather than reporting a successful sweep', async () => {
+    const claim = { approvalId: 'approval-1', organizationId: 'org-1', conversationId: 'conv-1', token: 'token', intentFingerprint: 'fingerprint', operation: { version: 1 as const, toolName: 'manage_substrate', args: { action: 'cancel_outbox', outbox_id: 'obx_original' } } };
+    vi.mocked(claimReviewPreparation).mockResolvedValue(claim);
+    setApprovalProposalProvider({ enabled: () => true, prepare: vi.fn(), revalidate: vi.fn() });
+    mockRunAgentTurn.mockImplementation((input: any) => { input.onReviewPreparationBlocked('proposal_unreviewable'); return events({ type: 'done' }) as any; });
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    expect(finishReviewPreparation).toHaveBeenCalledWith(stubPool, claim, 'blocked', 'proposal_unreviewable');
+  });
 });
 
 /**

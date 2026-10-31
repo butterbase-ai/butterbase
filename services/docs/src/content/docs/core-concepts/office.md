@@ -38,6 +38,24 @@ Skills guide what Office looks at and when. They do not grant capabilities
 beyond this policy: a skill is instructions, not a new tool or a new
 permission.
 
+## Preparing a complete decision
+
+When a decision cannot be approved because its review is incomplete, an owner
+can request a complete proposal for the same operation. This requests
+preparation and grants no permission to execute. The request remains visible
+after refresh, including while Office is paused. Today shows waiting, running,
+blocked and failed preparations; History records the outcome. An owner can
+retry a blocked or failed preparation. A replacement proposal still needs its
+own approval, and an uncertain execution needs reconciliation before any retry.
+
+## Background checks
+
+Office checks for changed business state every ten minutes. When tracked state
+is unchanged, it can skip a full review until the hourly review is due. Changes
+to connected external systems or application records outside that tracking may
+therefore take up to an hour to be noticed during an idle period. Owner requests,
+approval responses and due skill runs retain their own paths and schedules.
+
 ## Customizing Office with skills
 
 A skill is a named piece of standing guidance: what to look at, when, and what

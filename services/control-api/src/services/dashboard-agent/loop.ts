@@ -19,6 +19,7 @@ import pg from 'pg';
 import { validateProposalToolArguments as validateRegisteredToolArguments } from './proposal-validation.js';
 import { PROPOSE_ACTION_TOOL } from './tool-catalog.js';
 import { getApprovalProposalProvider, ProposalInputSchema, proposalIntentFingerprint, type ProposalInput } from './approval-proposal.js';
+import type { ReviewPreparationClaim } from './review-preparation-store.js';
 import { validateProposalOperation, LocalOperationSchemas } from './proposal-validation.js';
 import { persistPreparedApproval, findParkedProposalIntent } from './proposal-store.js';
 import { SUBSTRATE_ESCALATION_TOOL } from './approvals-store.js';
@@ -776,6 +777,9 @@ export async function* runAgentTurn(
      * test runner; a real run leaves it unset so the normal policy applies.
      */
     readOnly?: boolean;
+    /** Server-claimed frozen review request; never supplied by the model. */
+    reviewPreparation?: ReviewPreparationClaim;
+    onReviewPreparationBlocked?: (code: string) => void;
     /**
      * Distributed trace id for this turn (see operator-turn.ts). Supplied by
      * `runOperatorTurn`; absent for the human assistant, which has no trace.
@@ -1525,6 +1529,7 @@ export async function* runAgentTurn(
               const args = proposalProvider?.validateArguments ? await proposalProvider.validateArguments(validated.toolName, validated.args) : validated.args;
               tc = { ...originalCall, name: validated.toolName, args };
               proposalInput = { ...proposalInput, operation: { tool: tc.name, arguments: args } };
+              if (input.reviewPreparation && proposalIntentFingerprint(tc.name, args, input.reviewPreparation.operation.artifact) !== input.reviewPreparation.intentFingerprint) proposalError = 'proposal_preparation_mismatch';
             } catch { proposalError = 'proposal_invalid'; }
           }
           if (proposalError) {
@@ -1680,16 +1685,19 @@ export async function* runAgentTurn(
                   const functionName = (tc.args as any)?.function_name;
                   const artifactSource = isDeployFunctionTool(tc.name) ? files?.find(f => ['index.ts', 'index.js', 'index.mjs'].some(entry => f.path === `functions/${functionName}/${entry}`))?.content : undefined;
                   if (isOperator && pendingGatedCalls === null) pendingGatedCalls = await listPendingGatedCalls(input.pool, input.conversationId);
-                  const specificDuplicate = isOperator ? findDuplicatePendingCall(pendingGatedCalls ?? [], tc.name, tc.args) : null;
+                  const specificDuplicate = isOperator && !input.reviewPreparation ? findDuplicatePendingCall(pendingGatedCalls ?? [], tc.name, tc.args) : null;
                   const prepared = specificDuplicate
                     ? { status: 'blocked' as const, code: 'already_pending', approval_id: specificDuplicate.approvalId }
                     : await proposalProvider!.prepare({ organizationId: proposalOrganizationId!, actorUserId: isOperator ? undefined : input.userId, origin: isOperator ? 'operator' : 'office', conversationId: input.conversationId, operation, validateRegisteredToolArguments, artifactFiles: files, artifactSource }, proposalInput);
-                  if (prepared.status !== 'ready') payload = prepared;
+                  if (prepared.status !== 'ready') {
+                    payload = prepared;
+                    if (input.reviewPreparation && prepared.status === 'blocked') input.onReviewPreparationBlocked?.(prepared.code);
+                  }
                   else {
                     const approvalId = randomUUID();
                     if (proposedTree && !await treeStore!.save(approvalId, proposedTree)) payload = { code: 'deploy_tree_unavailable' };
                     else {
-                      const saved = await persistPreparedApproval(input.pool, { id: approvalId, organizationId: proposalOrganizationId!, conversationId: input.conversationId, operation, proposal: { ...prepared.proposal, source: parkedActionId ? 'substrate_escalation' : 'explicit' }, traceId: input.traceId, message: { id: randomUUID(), callId: originalCall.id, toolName: originalCall.name, args: originalCall.args, content: i === 0 ? assistantText : '', model: input.model } });
+                      const saved = await persistPreparedApproval(input.pool, { id: approvalId, organizationId: proposalOrganizationId!, conversationId: input.conversationId, operation, proposal: { ...prepared.proposal, source: parkedActionId ? 'substrate_escalation' : 'explicit' }, traceId: input.traceId, reviewPreparation: input.reviewPreparation, message: { id: randomUUID(), callId: originalCall.id, toolName: originalCall.name, args: originalCall.args, content: i === 0 ? assistantText : '', model: input.model } });
                       if (saved.kind === 'duplicate') payload = { code: 'already_pending', approval_id: saved.approvalId };
                       else {
                         yield { type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' };

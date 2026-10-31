@@ -15,6 +15,8 @@ import {
 } from './operator-scratchpad-store.js';
 import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
+import { getApprovalProposalProvider } from './approval-proposal.js';
+import { claimReviewPreparation, finishReviewPreparation } from './review-preparation-store.js';
 
 /**
  * ============================================================================
@@ -128,6 +130,8 @@ export type OperatorSkip =
   | { reason: 'access_blocked'; blockedReason: string };
 
 export type OperatorTurnResult = {
+  /** A focused preparation turn is not a completed reconciliation sweep. */
+  preparationAttempted?: true;
   conversationId: string;
   events: number;
   approvalId: string | null;
@@ -716,6 +720,13 @@ export async function runOperatorTurn(
   let approvalId: string | null = null;
   let error: string | null = null;
   let blockedReason: string | null = null;
+  const reviewPreparation = !opts.activeSkill && getApprovalProposalProvider()?.enabled(job.organizationId)
+    ? await claimReviewPreparation(pool, job.organizationId, conversationId) : null;
+  let preparationBlockedCode: string | null = null;
+  const preparationMessage = reviewPreparation
+    ? '=== PROPOSAL REVIEW REQUEST (platform-authored) ===\n' + JSON.stringify({ approval_id: reviewPreparation.approvalId, operation: reviewPreparation.operation })
+      + '\nThe owner requested a complete proposal for this exact frozen operation. Verify the current target and supporting facts, explain your reason, then use propose_action. This request does not authorize execution. If it cannot safely be proposed, explain the blocking condition. A clean sweep summary does not fulfill this request.\n=== END PROPOSAL REVIEW REQUEST ==='
+    : '';
 
   /**
    * `planned` — the turn has everything it needs (credential, conversation,
@@ -742,9 +753,11 @@ export async function runOperatorTurn(
       conversationId,
       userId: operatorUserId(job.organizationId),
       jwt: credential,
-      userMessage: opts.skillPrompt
+      userMessage: preparationMessage || (opts.skillPrompt
         ? `${opts.skillPrompt}\n\n---\n\n${buildWakeMessage(job, wake, scratchpad, pending)}`
-        : buildWakeMessage(job, wake, scratchpad, pending),
+        : buildWakeMessage(job, wake, scratchpad, pending)),
+      reviewPreparation: reviewPreparation ?? undefined,
+      onReviewPreparationBlocked: code => { preparationBlockedCode = code; },
       model,
       pool,
       organizationId: job.organizationId,
@@ -798,6 +811,9 @@ export async function runOperatorTurn(
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
   }
+  if (reviewPreparation) await finishReviewPreparation(pool, reviewPreparation,
+    blockedReason ? 'waiting' : preparationBlockedCode ? 'blocked' : 'failed',
+    blockedReason ? 'office_access_blocked' : preparationBlockedCode ?? (error ? 'proposal_preparation_failed' : 'proposal_not_prepared'));
 
   // A blocked turn is a deliberate stop, not a failure: no error, no approval,
   // and records/history stay exactly as the turn left them.
@@ -819,6 +835,7 @@ export async function runOperatorTurn(
       approvalId: null,
       error: null,
       skipped: { reason: 'access_blocked', blockedReason },
+      ...(reviewPreparation ? { preparationAttempted: true as const } : {}),
     };
   }
 
@@ -853,5 +870,5 @@ export async function runOperatorTurn(
     error,
   });
 
-  return { conversationId, events: count, approvalId, error, skipped: null };
+  return { conversationId, events: count, approvalId, error, skipped: null, ...(reviewPreparation ? { preparationAttempted: true as const } : {}) };
 }

@@ -3,18 +3,34 @@ import { randomUUID } from 'node:crypto';
 import { createApproval, type Approval } from './approvals-store.js';
 import type { ApprovedOperation } from './approval-operation.js';
 import { PreparedProposalSchema, type PreparedProposal } from './approval-proposal.js';
+import { lockReviewPreparation, linkReviewPreparation, type ReviewPreparationClaim } from './review-preparation-store.js';
 
 /** Only server-authored completion results in this authorized conversation count. */
 export async function findParkedProposalIntent(pool: pg.Pool, organizationId: string, conversationId: string, fingerprint: string): Promise<string | null> {
   const { rows } = await pool.query<{ action_id: string }>(
-    `SELECT DISTINCT m.tool_result->'parkedProposal'->>'actionId' AS action_id
+    `SELECT DISTINCT action_id FROM (
+     SELECT m.tool_result->'parkedProposal'->>'actionId' AS action_id
        FROM dashboard_agent_messages m JOIN dashboard_agent_conversations c ON c.id=m.conversation_id
       WHERE c.id=$1 AND c.organization_id=$2
         AND ((m.role='tool' AND m.tool_name='manage_substrate')
           OR (m.role='user' AND m.tool_name='proposal_review_handoff'))
         AND m.tool_args->>'action'='propose'
         AND m.tool_result->>'code' IN ('proposal_incomplete','proposal_review_required')
-        AND m.tool_result->'parkedProposal'->>'intentFingerprint'=$3`,
+        AND m.tool_result->'parkedProposal'->>'intentFingerprint'=$3
+     UNION ALL
+     SELECT result.tool_result->'parkedProposal'->>'actionId' AS action_id
+       FROM dashboard_agent_review_preparations p
+       JOIN dashboard_agent_approvals a ON a.id=p.approval_id
+       JOIN dashboard_agent_conversations c ON c.id=a.conversation_id
+       JOIN dashboard_agent_messages paused ON paused.id=a.turn_message_id AND paused.conversation_id=c.id
+       JOIN dashboard_agent_messages result ON result.conversation_id=c.id
+         AND result.role='tool' AND result.tool_call_id=paused.tool_call_id
+      WHERE p.conversation_id=$1 AND p.organization_id=$2 AND c.organization_id=$2
+        AND p.intent_fingerprint=$3 AND p.operation->>'toolName'='manage_substrate'
+        AND p.operation->'args'->>'action'='propose'
+        AND result.tool_result->>'code'='proposal_review_required'
+        AND result.tool_result->'parkedProposal'->>'intentFingerprint'=$3
+     ) provenance`,
     [conversationId, organizationId, fingerprint],
   );
   const ids = rows.map(row => row.action_id).filter(id => /^act_[A-Za-z0-9]+$/.test(id));
@@ -29,6 +45,7 @@ export interface PersistPreparedApprovalInput {
   operation: ApprovedOperation;
   proposal: PreparedProposal;
   traceId?: string | null;
+  reviewPreparation?: ReviewPreparationClaim;
   message: { id: string; callId: string; toolName: string; args: unknown; content: string; model: string };
 }
 
@@ -46,6 +63,7 @@ export async function persistPreparedApproval(pool: pg.Pool, input: PersistPrepa
       [input.conversationId, input.organizationId],
     );
     if (conversations.length !== 1) throw new Error('proposal_conversation_unavailable');
+    if (input.reviewPreparation) await lockReviewPreparation(client, input.reviewPreparation, input.organizationId, input.conversationId, proposal.intentFingerprint);
     // Same namespace for BOTH identities: an intent in one request can be an
     // executable identity in another. Sorted distinct keys avoid lock inversion.
     const fingerprints = [...new Set([proposal.intentFingerprint, proposal.operationFingerprint])].sort();
@@ -64,6 +82,7 @@ export async function persistPreparedApproval(pool: pg.Pool, input: PersistPrepa
       [input.organizationId, fingerprints],
     );
     if (duplicate.rows[0]) {
+      if (input.reviewPreparation) await linkReviewPreparation(client, input.reviewPreparation, duplicate.rows[0].id);
       await client.query('COMMIT');
       return { kind: 'duplicate', approvalId: duplicate.rows[0].id };
     }
@@ -80,6 +99,7 @@ export async function persistPreparedApproval(pool: pg.Pool, input: PersistPrepa
         JSON.stringify(input.message.args),input.message.model,approval.id],
     );
     await client.query('UPDATE dashboard_agent_conversations SET last_message_at=now(),updated_at=now() WHERE id=$1', [input.conversationId]);
+    if (input.reviewPreparation) await linkReviewPreparation(client, input.reviewPreparation, approval.id);
     await client.query('COMMIT');
     return { kind: 'created', approval };
   } catch (error) {

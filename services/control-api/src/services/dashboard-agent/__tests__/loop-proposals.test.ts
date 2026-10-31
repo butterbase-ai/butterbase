@@ -35,7 +35,7 @@ import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop.js';
 import type { DeployTreeStore } from '../deploy-tree-store.js';
 import type { WorkingTree } from '../working-tree.js';
-import { setApprovalProposalProvider, PreparedProposalSchema } from '../approval-proposal.js';
+import { setApprovalProposalProvider, PreparedProposalSchema, proposalIntentFingerprint } from '../approval-proposal.js';
 import { persistPreparedApproval } from '../proposal-store.js';
 import { findParkedProposalIntent } from '../proposal-store.js';
 vi.mock('../proposal-store.js', () => ({ persistPreparedApproval: vi.fn(), findParkedProposalIntent: vi.fn(async () => null) }));
@@ -189,6 +189,25 @@ describe('structured proposal gate', () => {
     vi.mocked(persistPreparedApproval).mockResolvedValue({ kind: 'created', approval: { id: 'prepared-approval' } as any });
     return prepare;
   }
+  it('refuses a replacement for a different frozen request before preparing or executing it', async () => {
+    install();
+    oneToolCallThenStop('propose_action', { operation, reason: 'Obsolete draft.' });
+    const claim = { approvalId:'old',organizationId:ORG_ID,conversationId:'conv-1',token:'token',intentFingerprint:proposalIntentFingerprint('manage_substrate',{ action:'cancel_outbox',outbox_id:'obx_different' }),operation:{version:1 as const,toolName:'manage_substrate',args:{action:'cancel_outbox',outbox_id:'obx_different'}} };
+    const events = await collect(runAgentTurn(operatorInput({reviewPreparation:claim})));
+    expect(events.some(event=>event.type==='tool_result' && JSON.stringify(event).includes('proposal_preparation_mismatch'))).toBe(true);
+    expect(persistPreparedApproval).not.toHaveBeenCalled();
+    expect(mockCallMcpTool.mock.calls.filter(([name,args])=>!(name==='manage_substrate' && (args as any)?.action==='get_settings'))).toHaveLength(0);
+  });
+  it('reports a matched preparation refusal without an owner gate or effect', async () => {
+    install({status:'blocked',code:'proposal_unreviewable',message:'Current target is unsafe.'});
+    oneToolCallThenStop('propose_action', { operation, reason: 'Obsolete draft.' });
+    const refused:string[]=[];
+    const claim = { approvalId:'old',organizationId:ORG_ID,conversationId:'conv-1',token:'token',intentFingerprint:proposalIntentFingerprint(operation.tool,operation.arguments),operation:{version:1 as const,toolName:operation.tool,args:operation.arguments} };
+    const events = await collect(runAgentTurn(operatorInput({reviewPreparation:claim,onReviewPreparationBlocked:(code:string)=>refused.push(code)})));
+    expect(refused).toEqual(['proposal_unreviewable']);
+    expect(events.some(event=>event.type==='approval_required')).toBe(false);
+    expect(mockCallMcpTool.mock.calls.filter(([name,args])=>!(name==='manage_substrate' && (args as any)?.action==='get_settings'))).toHaveLength(0);
+  });
   it('asks the model for explicit intent instead of presenting a vague direct gate', async () => {
     const prepare = install();
     oneToolCallThenStop(operation.tool, operation.arguments);

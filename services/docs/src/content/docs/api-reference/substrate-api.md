@@ -105,12 +105,14 @@ GET /v1/me/substrate/actions?status=executed&capability=send_email_draft&limit=2
 
 | Query param | Type | Default |
 |---|---|---|
-| `status` | `proposed` \| `executed` \| `rejected` | _all_ |
+| `status` | `proposed` \| `approved` \| `rejected` \| `executing` \| `executed` \| `failed` \| `reverted` | _all_ |
 | `capability` | string | _all_ |
-| `limit` | int (1–500) | 100 |
+| `limit` | int (clamped to 1–100) | 25 |
 | `before` | ISO timestamp | _now_ |
 | `source_app_id` | string | _all_ |
 | `source_rule_id` | string | _all_ |
+
+For ledger reads, `pending` is a compatibility alias for `proposed`. Omit `status` to read all states; an empty or unknown value returns HTTP 400 `invalid_action_status`. The alias applies only to reads and does not change action writes or outbox delivery states.
 
 ### Approve / reject
 
