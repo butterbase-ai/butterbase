@@ -5,6 +5,29 @@ const end = '2026-11-01T01:00:01.250Z';
 const call = (id = 'call1', action = 'search_agent_memories') => ({ type: 'tool_call', id, name: 'manage_substrate', args: { action, payload: { body: 'SECRET' }, token: 'SECRET' }, timestamp: at });
 const mcp = (value: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 describe('safe Office activity', () => {
+  it.each([
+    ['search_agent_memories', { items: [] }, 'Searched organization memories', 'No matching memories found'],
+    ['search_agent_memories', { items: [{ body: 'SECRET' }] }, 'Searched organization memories', '1 matching memory returned'],
+    ['list_agent_memories', { items: [{ body: 'SECRET' }, {}] }, 'Checked organization memories', '2 memories returned'],
+    ['list_agent_memories', { items: [] }, 'Checked organization memories', 'No memories found'],
+    ['record_agent_memory', { status: 'executed', result: { memory_id: 'mem1' } }, 'Saved organization memory', 'Memory saved'],
+  ])('uses observed completion and bounded collection counts for %s', (action, result, label, summary) => {
+    const p = createOfficeActivityProjector(); p.observe(call('complete', action));
+    const step = p.observe({ type: 'tool_result', id: 'complete', result: mcp(result) });
+    expect(step).toMatchObject({ status: 'completed', label, summary });
+    expect(JSON.stringify(step)).not.toContain('SECRET');
+  });
+  it.each([{ decision: { source: 'substrate', id: 'act1' } }, { result: { memory_id: 'unconfirmed' } }, { error: 'SECRET' }])('never uses a saved heading for an unexecuted receipt', result => {
+    const p = createOfficeActivityProjector(); p.observe(call('write', 'record_agent_memory'));
+    const step = p.observe({ type: 'tool_result', id: 'write', result });
+    expect(step?.label).toBe('Recording organization memory'); expect(step?.label).not.toContain('Saved');
+  });
+  it('does not infer a memory count from an unknown or oversized result collection', () => {
+    for (const result of [{ results: [{}] }, { items: Array.from({ length: 101 }, () => ({})) }]) {
+      const p = createOfficeActivityProjector(); p.observe(call());
+      expect(p.observe({ type: 'tool_result', id: 'call1', result })?.summary).toBe('Tool completed');
+    }
+  });
   it('updates one identity from running to empty search with measured timestamps', () => {
     const p = createOfficeActivityProjector();
     expect(p.observe(call())).toMatchObject({ id: 'call1', status: 'running', started_at: at });

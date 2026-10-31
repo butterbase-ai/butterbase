@@ -13,6 +13,12 @@ const labels: Record<string, string> = {
   amend_agent_memory: 'Updating organization memory', archive_agent_memory: 'Archiving organization memory',
   search_memory: 'Searching organization records', list_memory: 'Checking organization records',
 };
+const completedLabels: Record<string, string> = {
+  search_agent_memories: 'Searched organization memories', list_agent_memories: 'Checked organization memories',
+  get_agent_memory: 'Read organization memory', record_agent_memory: 'Saved organization memory',
+  amend_agent_memory: 'Updated organization memory', archive_agent_memory: 'Archived organization memory',
+  search_memory: 'Searched organization records', list_memory: 'Checked organization records',
+};
 const writes = new Set(['record_agent_memory', 'amend_agent_memory', 'archive_agent_memory']);
 const rejectedCodes = new Set([
   'agent_memory_request_invalid', 'explicit_memory_kind_required', 'agent_memory_match_unsupported',
@@ -129,7 +135,18 @@ export function createOfficeActivityProjector({ now = () => new Date() }: { now?
         slug(r.action_id, 256) && automaticVerdicts.includes(r.verdict?.result) && slug(r.result?.memory_id, 256)));
     step.status = denied ? 'denied' : failed ? 'failed' : pending ? 'awaiting_approval' : !rows || codeReceipt || (write && !confirmed) ? 'unknown' : 'completed';
     step.summary = { failed: 'Tool reported an error', denied: 'Action denied', awaiting_approval: 'Awaiting approval', unknown: 'Outcome unavailable', completed: 'Tool completed', running: '', interrupted: '' }[step.status];
-    if (step.status === 'completed' && previous.action === 'search_agent_memories' && rows?.some(r => Array.isArray(r.items) && r.items.length === 0)) step.summary = 'No matching memories found';
+    if (step.status === 'completed') {
+      step.label = completedLabels[capability ?? ''] ?? 'Tool completed';
+      if (['search_agent_memories', 'list_agent_memories'].includes(capability ?? '')) {
+        const collection = rows?.find(r => Array.isArray(r.items) && r.items.length <= 100)?.items;
+        if (collection) {
+          const count = collection.length;
+          const searching = capability === 'search_agent_memories';
+          step.summary = count === 0 ? searching ? 'No matching memories found' : 'No memories found'
+            : `${count} ${searching ? 'matching ' : ''}${count === 1 ? 'memory' : 'memories'} returned`;
+        }
+      }
+    }
     if (step.status === 'completed' && writes.has(capability ?? '')) {
       const record = rows?.find(r => slug(r.memory_id, 256));
       if (record) { step.result = { kind: 'agent_memory', id: record.memory_id,
