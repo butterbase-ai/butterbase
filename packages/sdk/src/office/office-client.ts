@@ -3,6 +3,7 @@ import type {
   OfficeStatus, ConfirmationReceipt, DecisionRef, OfficeDecision, OfficeDecisionContext, OfficeConversation, OfficeConversationDetail,
   OfficeTurn, OfficePublicEvent, OfficeMemoryRecord, OfficeMemoryResult, OfficeSourceArtifact, OfficePrinciple,
   OfficeRecordDecisionInput, OfficeRecordCommitmentInput, OfficeRecordLearningInput, OfficeRecordPrincipleInput,
+  AgentMemorySummary, AgentMemoryRecord, OfficeRecordAgentMemoryInput, OfficeAmendAgentMemoryInput, OfficeArchiveAgentMemoryInput,
 } from '@butterbase/shared';
 import { OfficeTransport, officeError } from './transport.js';
 import { OfficeClientError, OfficeStreamError, type OfficeAskOptions, type OfficeAskStreamOptions, type OfficeConfirmationWaitOptions,
@@ -46,6 +47,14 @@ export class OfficeClient {
     get: (id: string, options?: OfficeConversationGetOptions) => this.call<OfficeConversationDetail>('get_conversation', { conversation_id: id, turn_id: options?.turnId, after_sequence: options?.afterSequence, limit: options?.limit }, options),
   };
   ask(message: string, options?: OfficeAskOptions) { return this.write<OfficeTurn>('ask', { message, conversation_id: options?.conversationId, wait_ms: options?.waitMs }, options); }
+  readonly agentMemories = {
+    list: (options?: OfficePageOptions) => this.call<OfficePage<AgentMemorySummary>>('list_agent_memories', { cursor: options?.cursor, limit: options?.limit }, options),
+    search: (query: string, options?: OfficePageOptions) => this.call<OfficePage<AgentMemorySummary>>('search_agent_memories', { cursor: options?.cursor, limit: options?.limit, query }, options),
+    get: (id: string, options?: OfficeRequestOptions) => this.call<AgentMemoryRecord>('get_agent_memory', { memory_id: id }, options),
+    record: (payload: OfficeRecordAgentMemoryInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('record_agent_memory', { payload }, options),
+    amend: (payload: OfficeAmendAgentMemoryInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('amend_agent_memory', { payload }, options),
+    archive: (payload: OfficeArchiveAgentMemoryInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('archive_agent_memory', { payload }, options),
+  };
   readonly memory = {
     list: (options?: OfficeMemoryListOptions) => this.call<OfficePage<OfficeMemoryRecord>>('list_memory', { cursor: options?.cursor, limit: options?.limit, kind: options?.kind }, options),
     search: (query: string, options?: OfficeRequestOptions & { limit?: number }) => this.call<OfficePage<OfficeMemoryRecord>>('search_memory', { query, limit: options?.limit }, options),

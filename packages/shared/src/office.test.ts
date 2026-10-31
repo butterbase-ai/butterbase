@@ -15,8 +15,10 @@ describe('Office wire requests', () => {
       'get_conversation', 'ask', 'list_memory', 'search_memory', 'get_source_artifact',
       'record_decision', 'record_commitment', 'record_learning', 'list_principles',
       'get_principle', 'record_principle',
+      'list_agent_memories', 'search_agent_memories', 'get_agent_memory',
+      'record_agent_memory', 'amend_agent_memory', 'archive_agent_memory',
     ].sort());
-    expect(new Set(OFFICE_ACTIONS).size).toBe(22);
+    expect(new Set(OFFICE_ACTIONS).size).toBe(28);
     expect(officeActionSchema.safeParse(request('execute_anything')).success).toBe(false);
   });
 

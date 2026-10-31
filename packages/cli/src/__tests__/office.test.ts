@@ -33,16 +33,26 @@ beforeEach(() => {
 });
 afterEach(() => { process.exitCode = undefined; if (directory.startsWith(join(tmpdir(), 'butterbase-office-cli-'))) rmSync(directory, { recursive: true, force: true }); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 describe('office command surface', () => {
-  it('registers exactly the 22 planned commands and exposes org/json on help', () => {
+  it('records agent memory through its explicit category and preserves the write key', async () => {
+    const payload = { title: 'Reports', relevance_summary: 'For reporting', body: 'Short summary first', capture_origin: 'owner_request' };
+    const file = join(directory, 'agent-memory.json'); writeFileSync(file, JSON.stringify(payload));
+    await run(['agent-memories', 'record', '--file', file, '--org', org, '--json', '--idempotency-key', 'remember-report']);
+    const [url, init] = fetch.mock.calls.at(-1)!;
+    expect(String(url)).toContain('/office/agent-memories/record');
+    expect(JSON.parse(init!.body as string)).toEqual({ payload: { ...payload, sources: [] }, idempotency_key: 'remember-report' });
+  });
+  it('registers the business and agent memory commands and exposes org/json on help', () => {
     const root = program(); const leaves = (command: Command, prefix = ''): string[] => command.commands.length
       ? command.commands.flatMap(child => leaves(child, `${prefix}${child.name()} `)) : [prefix.trim()];
-    expect(leaves(root)).toEqual([
+    expect(leaves(root).sort()).toEqual([
       'office status', 'office enable', 'office pause', 'office resume', 'office ask',
       'office decisions list', 'office decisions get', 'office decisions context', 'office decisions approve', 'office decisions deny',
       'office conversations create', 'office conversations list', 'office conversations get',
       'office memory list', 'office memory search', 'office memory source get', 'office memory record-decision',
       'office memory record-commitment', 'office memory record-learning', 'office principles list', 'office principles get', 'office principles record',
-    ]);
+      'office agent-memories list', 'office agent-memories search', 'office agent-memories get',
+      'office agent-memories record', 'office agent-memories amend', 'office agent-memories archive',
+    ].sort());
     const office = root.commands[0]; expect(office.helpInformation()).toContain('--org <uuid>'); expect(office.helpInformation()).toContain('--json');
     expect(office.commands.find(command => command.name() === 'enable')!.helpInformation()).toContain('--open');
   });

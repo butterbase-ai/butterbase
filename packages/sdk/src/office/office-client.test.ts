@@ -18,6 +18,21 @@ function setup() {
 }
 afterEach(() => vi.useRealTimers());
 describe('standalone OfficeClient public export', () => {
+  it('exposes compact agent memory reads and versioned writes through the facade', async () => {
+    const { client, fetch } = setup();
+    const calls: Array<[() => Promise<unknown>, string, string]> = [
+      [() => client.agentMemories.list({ limit: 5 }), 'GET', '/agent-memories?limit=5'],
+      [() => client.agentMemories.search('reports', { cursor: 'next', limit: 5 }), 'GET', '/agent-memories/search?cursor=next&limit=5&query=reports'],
+      [() => client.agentMemories.get('mem_one'), 'GET', '/agent-memories/mem_one'],
+      [() => client.agentMemories.record({ title: 'Reports', relevance_summary: 'For reports', body: 'Briefly', capture_origin: 'owner_request' }), 'POST', '/agent-memories/record'],
+      [() => client.agentMemories.amend({ memory_id: 'mem_one', expected_revision: 1, body: 'Changed' }), 'POST', '/agent-memories/amend'],
+      [() => client.agentMemories.archive({ memory_id: 'mem_one', expected_revision: 2 }), 'POST', '/agent-memories/archive'],
+    ];
+    for (const [invoke, method, suffix] of calls) {
+      await invoke(); const [url, init] = fetch.mock.calls.at(-1)!;
+      expect(String(url)).toContain(suffix); expect(init?.method).toBe(method);
+    }
+  });
   it('maps all 22 methods with explicit organization and a fresh token for every request; no app required', async () => {
     const { client, fetch, getToken } = setup();
     const ref = { source: 'substrate' as const, id };

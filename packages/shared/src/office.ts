@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { officeRecordAgentMemorySchema, officeAmendAgentMemorySchema, officeArchiveAgentMemorySchema } from './office-agent-memory.js';
+export * from './office-agent-memory.js';
 
 /** Public organization-scoped Office protocol. No app or browser session is implied. */
 export const OFFICE_ACTIONS = [
@@ -7,6 +9,8 @@ export const OFFICE_ACTIONS = [
   'get_conversation', 'ask', 'list_memory', 'search_memory', 'get_source_artifact',
   'record_decision', 'record_commitment', 'record_learning', 'list_principles',
   'get_principle', 'record_principle',
+  'list_agent_memories', 'search_agent_memories', 'get_agent_memory',
+  'record_agent_memory', 'amend_agent_memory', 'archive_agent_memory',
 ] as const;
 export type OfficeAction = typeof OFFICE_ACTIONS[number];
 
@@ -53,6 +57,12 @@ export const officeMemorySchemas = {
 export type OfficeMemoryKind = keyof typeof officeMemorySchemas;
 
 export const officeActionSchema = z.discriminatedUnion('action', [
+  z.object({ ...org, ...page, action: z.literal('list_agent_memories') }).strict(),
+  z.object({ ...org, ...page, action: z.literal('search_agent_memories'), query: text.max(4000) }).strict(),
+  z.object({ ...org, action: z.literal('get_agent_memory'), memory_id: id }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('record_agent_memory'), payload: officeRecordAgentMemorySchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('amend_agent_memory'), payload: officeAmendAgentMemorySchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('archive_agent_memory'), payload: officeArchiveAgentMemorySchema }).strict(),
   z.object({ ...org, action: z.literal('status'), confirmation_id: id.optional() }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('enable') }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('pause') }).strict(),
