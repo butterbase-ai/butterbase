@@ -9,7 +9,7 @@ Most areas are consolidated into a single `manage_*` tool that takes an `action`
 
 ## Office
 
-`manage_office` has 22 actions, all requiring an explicit `org_id`. It forwards the current platform credential; no app ID is required. Enable, pause, resume and approval return a browser confirmation receipt for the initiating owner. Ask is bounded and returns exact conversation/turn IDs for observation; it never silently submits again to poll.
+`manage_office` has 44 actions, all requiring an explicit `org_id`. It forwards the current platform credential; no app ID is required. Enable, pause, resume and approval return a browser confirmation receipt for the initiating owner. Ask is bounded and returns exact conversation/turn IDs for observation; it never silently submits again to poll. The contract also covers curated agent memories, routines, governed rule changes, cadence settings and bounded record pages.
 
 ```json
 {"action":"ask","org_id":"<organization UUID>","message":"What needs follow-up?","idempotency_key":"<unique request ID>","wait_ms":15000}
