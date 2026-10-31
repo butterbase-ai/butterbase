@@ -97,7 +97,7 @@ When the user is working in an organization, send \`X-Organization-Id\` on organ
 
 ### Office clients (optional cloud capability)
 
-Use \`butterbase_docs\` topic \`office\` before Office work. Hosted MCP can expose \`manage_office\` with 22 actions; OSS-only installations may omit it. The same actions are available through \`butterbase office\` and the standalone SDK \`OfficeClient\`. Supply an explicit organization UUID (MCP \`org_id\`, CLI \`--org\`, SDK \`organizationId\`) and a platform credential. Office does not require an app or app end-user session.
+Use \`butterbase_docs\` topic \`office\` before Office work. Hosted MCP can expose \`manage_office\` with 44 actions; OSS-only installations may omit it. The same actions are available through \`butterbase office\` and the standalone SDK \`OfficeClient\`. Supply an explicit organization UUID (MCP \`org_id\`, CLI \`--org\`, SDK \`organizationId\`) and a platform credential. Office does not require an app or app end-user session.
 
 Enable, pause, resume and approve return saved confirmation receipts. Show \`confirmation_url\` to the initiating owner and let that owner sign in, review and confirm or cancel in the browser. An agent must never resolve the confirmation itself. Inspect saved outcomes with status plus \`confirmation_id\`; a pending receipt is not proof of execution.
 

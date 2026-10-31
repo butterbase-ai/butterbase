@@ -35,6 +35,28 @@ MCP exposes one cloud tool, `manage_office`, with `org_id` on every call. Prefix
 | `list_principles` | `principles list` | `principles.list(options?)` |
 | `get_principle` | `principles get <id>` | `principles.get(id)` |
 | `record_principle` | `principles record --file <json>` | `principles.record(input, options?)` |
+| `list_agent_memories` | `agent-memories list` | `agentMemories.list(options?)` |
+| `search_agent_memories` | `agent-memories search <query>` | `agentMemories.search(query, options?)` |
+| `get_agent_memory` | `agent-memories get <id>` | `agentMemories.get(id)` |
+| `record_agent_memory` | `agent-memories record --file <json>` | `agentMemories.record(input, options?)` |
+| `amend_agent_memory` | `agent-memories amend --file <json>` | `agentMemories.amend(input, options?)` |
+| `archive_agent_memory` | `agent-memories archive --file <json>` | `agentMemories.archive(input, options?)` |
+| `list_skills` | `skills list` | `skills.list(options?)` |
+| `get_skill` | `skills get <id>` | `skills.get(id)` |
+| `list_skill_versions` | `skills versions <id>` | `skills.versions(id, options?)` |
+| `list_skill_runs` | `skills runs <id>` | `skills.runs(id, options?)` |
+| `draft_skill` | `skills draft <message>` | `skills.draft(message, {skillId?}, options?)` |
+| `test_skill` | `skills test <id> <version>` | `skills.test(id, version, options?)` |
+| `reject_skill` | `skills reject <id> <version> --reason <text>` | `skills.reject(id, version, reason, options?)` |
+| `approve_skill` | `skills approve <id> <version>` | `skills.approve(id, version, options?)` |
+| `set_skill_enabled` | `skills set-enabled <id> <true|false>` | `skills.setEnabled(id, enabled, options?)` |
+| `rollback_skill` | `skills rollback <id> <version>` | `skills.rollback(id, version, options?)` |
+| `run_skill` | `skills run <id>` | `skills.run(id, options?)` |
+| `amend_principle` | `principles amend --file <json>` | `principles.amend(input, options?)` |
+| `retire_principle` | `principles retire --file <json>` | `principles.retire(input, options?)` |
+| `get_office_settings` | `settings get` | `settings.get()` |
+| `update_office_settings` | `settings update <minutes> --expected-revision <n>` | `settings.update(minutes, revision, options?)` |
+| `list_office_records` | `records list <resource>` | `records.list(resource, options?)` |
 
 Decisions have a source: `{source: "office" | "substrate", id}`. CLI decision commands accept `--source office|substrate` (default `office`); MCP uses `decision_source` and `decision_id`. An explicit bridge between an Office decision and native action has one canonical entry in the decision list.
 
@@ -87,6 +109,14 @@ butterbase office conversations get <id> --turn <id> --org <uuid> --json
 Disconnect, SIGINT or AbortSignal stops observation. It does not cancel admitted server work. Running work has a five-minute execution ceiling and durable interruption state; it is not a resumable background job. `awaiting_approval` has no running lease. Resolving that saved decision does not automatically run the model again. Event replay expires after 24 hours; `events_expired` includes exact history pointers, and the conversation/turn remains readable.
 
 ## Business memory and access
+
+Curated agent context has its own `agentMemories` namespace and `agent-memories` CLI group. An entry contains `title` (up to 160 characters), `relevance_summary` (320), `body` (16000), `capture_origin` and optional source references. Lists and searches return summaries; `get` returns the full body and saved evidence. Amend/archive require `memory_id` and `expected_revision`. The shared corpus belongs to the organization; private per-person memory is not available. Memory never grants permissions or replaces enforced rules. Default agent retrieval uses only curated context; other business categories require an explicit read. Repeated exact active captures reuse the entry without silently merging evidence.
+
+Skill detail, versions and runs are independent page reads. API clients see approved content and non-test runs; signed-in owners inspect private drafts/tests in Office. Draft returns one Ask turn to observe. Test pins one read-only run. Reject preserves a reason. Approve, enable/disable, rollback and run prepare owner browser confirmations. Rule amendments and retirements always propose native approval-required actions. Their previews show saved current/requested facts; a changed target invalidates review.
+
+Routine interval settings accept 10, 15, 30 or 60 minutes and require the current `revision` when updating. The update returns a confirmation and never resumes paused work. Every-loop skills follow each admitted full timer or event sweep, within one shared ten-minute cycle budget. Unchanged checks, Ask, tests, manual/scheduled skills and recovery-only turns do not create loops. Extra skill runs can spend credits.
+
+`records.list` reads `entities`, `business_memory`, `source_artifacts`, `actions`, `principles`, `skills`, `skill_versions` or `skill_runs`; the two histories require `skillId` (MCP `skill_id`, CLI `--skill`). Optional `kind` and `status` filters depend on the resource. Pages default to 25 and allow at most 100. Continue `next_cursor` with identical organization, resource and filters. New page cursors bind a traversal cutoff and stable timestamp/ID ordering; they do not guarantee a transaction-wide snapshot. Existing memory/decision endpoints preserve their prior cursor contracts. Loaded counts are not total counts.
 
 Memory uses the existing Substrate ledger and readers. Native payloads are validated rather than copied into another store. For example:
 

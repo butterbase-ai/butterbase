@@ -17,7 +17,9 @@ const { data, error } = await office.ask('What needs follow-up?', {
 });
 ```
 
-Office uses a platform credential and no app ID. Its 22 actions include lifecycle controls and `decisions`, `conversations`, `memory`, `principles` namespaces. Enable/pause/resume/approve return browser confirmation receipts; the initiating owner confirms one saved action. `getConfirmation` and `waitForConfirmation` observe it. A wait timeout may retain the last receipt in `data` alongside `error`.
+Office uses a platform credential and no app ID. Its 44 actions include lifecycle controls and `decisions`, `conversations`, `memory`, `agentMemories`, `principles`, `skills`, `settings` and `records` namespaces. Protected lifecycle, skill and interval changes return browser confirmation receipts; the initiating owner confirms one saved action. `getConfirmation` and `waitForConfirmation` observe it. A wait timeout may retain the last receipt in `data` alongside `error`.
+
+`agentMemories` stores shared organization context with compact list/search summaries and full entries on `get`. Amend/archive require `expected_revision`; context never grants permissions. `skills.versions` and `skills.runs` page independently of detail reads. `settings.update(15, revision, {idempotencyKey})` proposes an interval change. `records.list('entities', {limit:25, cursor})` returns real bounded pages; keep resource and filters unchanged when continuing. See the client reference for all payload types and native approval requirements.
 
 `askStream(message)` submits once. To observe an existing turn, use `askStream('', {conversationId, turnId, afterSequence})`. Abort ends observation only. Typed stream errors retain replay pointers; failed writes retain their `idempotencyKey`. Reuse a request key for retries, and generate a new one for a new intended write. Principles use native policy approval; confirmation does not override conflicts.
 

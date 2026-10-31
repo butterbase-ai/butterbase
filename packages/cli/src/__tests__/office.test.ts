@@ -62,6 +62,12 @@ describe('office command surface', () => {
     await run(['records','list','entities','--cursor','next-page','--limit','25','--org',org,'--json']);
     expect(String(fetch.mock.calls[0][0])).toContain('/pages/entities?cursor=next-page&limit=25');
   });
+  it.each([['business_memory', 'kind', 'learning'], ['actions', 'status', 'executed']])('preserves %s page filters with its continuation cursor', async (resource, filter, value) => {
+    await run(['records', 'list', resource, `--${filter}`, value, '--cursor', 'next-page', '--org', org, '--json']);
+    const url = new URL(String(fetch.mock.calls[0][0]));
+    expect(url.searchParams.get(filter)).toBe(value);
+    expect(url.searchParams.get('cursor')).toBe('next-page');
+  });
   it('requests a settings revision change through owner confirmation', async () => {
     await run(['settings', 'update', '30', '--expected-revision', '1', '--org', org, '--json', '--idempotency-key', 'cadence-intent']);
     expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({ action: 'settings_update', interval_minutes: 30, expected_revision: 1, idempotency_key: 'cadence-intent' });

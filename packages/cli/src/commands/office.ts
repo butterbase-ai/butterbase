@@ -127,7 +127,7 @@ export async function runOfficeCommand(action: OfficeAction, args: string[], opt
     const ref = { source: options.source ?? 'office', id: args[0] ?? '' };
     let result: OfficeResponse<unknown>;
     switch (action) {
-      case 'list_office_records': result = await client.records.list(officeListResourceSchema.parse(args[0]),{...page,skillId:options.skill});break;
+      case 'list_office_records': result = await client.records.list(officeListResourceSchema.parse(args[0]),{...page,skillId:options.skill,kind:options.kind,status:options.status});break;
       case 'get_office_settings': result = await client.settings.get(request); break;
       case 'update_office_settings': {
         const minutes = int(args[0], 'interval', 60, 10);
@@ -256,7 +256,7 @@ export function registerOfficeCommands(program: Command): Command {
     write(leaf(memory, syntax, action, 'Record a native business memory payload')).requiredOption('--file <json>', 'UTF-8 JSON matching the native record schema');
   }
   const principles = office.command('principles').description('Read or propose business principles');
-  page(leaf(office.command('records').description('Read independent server pages'), 'list <resource>', 'list_office_records', 'List one Office resource')).option('--skill <uuid>','Skill for versions or runs');
+  page(leaf(office.command('records').description('Read independent server pages'), 'list <resource>', 'list_office_records', 'List one Office resource')).option('--skill <uuid>','Skill for versions or runs').option('--kind <kind>','Resource kind or entity type').option('--status <state>','Resource status');
   const settings = office.command('settings').description('Inspect and configure Office routine checks');
   leaf(settings, 'get', 'get_office_settings', 'Read interval and actual sweep timing');
   protect(leaf(settings, 'update <minutes>', 'update_office_settings', 'Request owner confirmation of the interval'))
