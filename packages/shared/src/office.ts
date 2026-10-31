@@ -91,6 +91,7 @@ export const OFFICE_ERROR_CODES = [
   'credential_repair_required', 'service_unavailable', 'office_not_enabled',
   'idempotency_conflict', 'conversation_busy', 'conversation_awaiting_approval',
   'conversation_not_client_owned',
+  'revision_conflict', 'agent_memory_limit_reached', 'memory_archived',
   'confirmation_expired', 'confirmation_changed', 'confirmation_unreviewable',
   'policy_conflict_requires_resolution', 'events_expired', 'event_limit_exceeded',
   'turn_interrupted', 'deadline_exceeded', 'execution_failed', 'outcome_unknown',
