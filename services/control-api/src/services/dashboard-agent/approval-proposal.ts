@@ -65,6 +65,19 @@ export const ProposalPreviewSchema = z.object({
 }).strict();
 export type ProposalPreview = z.infer<typeof ProposalPreviewSchema>;
 
+/** Read-only context. Its presence never establishes approval eligibility. */
+export const ProposalExplanationSchema = z.object({
+  title: ProposalPreviewSchema.shape.title,
+  summary: ProposalPreviewSchema.shape.summary,
+  effects: ProposalPreviewSchema.shape.effects,
+  fields: ProposalPreviewSchema.shape.fields,
+  reason: z.object({ text: z.string().trim().min(1).max(2000), attribution: z.literal('operator') }).strict().nullable(),
+  evidence: z.array(VerifiedEvidenceSchema).max(10),
+  blocker: z.object({ code: z.string().regex(/^[a-z0-9_]{1,100}$/), summary: z.string().min(1).max(2000) }).strict().optional(),
+  facts: z.object({ source: z.enum(['current', 'prepared']), at: Timestamp }).strict().optional(),
+}).strict();
+export type ProposalExplanation = z.infer<typeof ProposalExplanationSchema>;
+
 export const ProposalPreconditionSchema = z.object({
   kind: z.enum(['outbox', 'action', 'app', 'function', 'entity', 'principle', 'artifact', 'schema', 'storage', 'message', 'selection']),
   referenceId: OpaqueId,
@@ -163,6 +176,8 @@ export interface ApprovalProposalProvider {
   /** Pure action-specific parsing, shared with dispatch; never reads targets. */
   validateArguments?(toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>>;
   canRead?(context: ProposalContext, saved: PreparedProposal): Promise<boolean>;
+  /** Read current, authorized facts even when the operation cannot be prepared. */
+  explain?(context: ProposalContext, input?: ProposalInput): Promise<ProposalExplanation | null>;
   prepare(context: ProposalContext, input: ProposalInput): Promise<PreparationResult>;
   revalidate(context: ProposalContext, saved: PreparedProposal): Promise<ProposalVerification>;
 }

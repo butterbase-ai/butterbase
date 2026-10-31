@@ -1,11 +1,13 @@
 import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { ApprovedOperation } from './approval-operation.js';
+import type { ProposalExplanation } from './approval-proposal.js';
 
 export type ReviewPreparationState = 'waiting' | 'running' | 'replaced' | 'blocked' | 'failed';
 export interface ReviewPreparation {
   approvalId: string; state: ReviewPreparationState; replacementApprovalId: string | null;
   safeErrorCode: string | null; attemptCount: number; createdAt: string; updatedAt: string;
+  explanation?: ProposalExplanation;
 }
 export interface ReviewPreparationClaim {
   approvalId: string; organizationId: string; conversationId: string;
