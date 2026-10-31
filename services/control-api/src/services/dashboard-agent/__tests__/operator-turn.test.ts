@@ -96,6 +96,22 @@ beforeEach(() => {
   vi.mocked(claimReviewPreparation).mockResolvedValue(null);
 });
 
+describe('trusted routine execution fence', () => {
+  it('stops before preflight bookkeeping when the cycle is no longer current', async () => {
+    const result = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' }, executionGuard: async () => false });
+    expect(result.skipped).toMatchObject({ blockedReason: 'execution_interrupted' });
+    expect(mockGetCred).not.toHaveBeenCalled(); expect(mockRunAgentTurn).not.toHaveBeenCalled();
+  });
+  it('threads cancellation and the cycle fence into the model/tool loop', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    const signal = new AbortController().signal, executionGuard = async () => true;
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' }, signal, executionGuard,
+      routineContext: { cycleId: 'cycle', cycleFence: 2, skillRunId: 'run' } });
+    expect(mockRunAgentTurn).toHaveBeenCalledWith(expect.objectContaining({ signal, executionGuard,
+      triggerContext: expect.objectContaining({ routine_cycle_id: 'cycle', routine_cycle_fence: 2, skill_run_id: 'run' }) }));
+  });
+});
+
 describe('requested proposal preparation', () => {
   afterEach(() => setApprovalProposalProvider(null));
   it('makes an explicit frozen request and fails safely when the model only says everything is clean', async () => {

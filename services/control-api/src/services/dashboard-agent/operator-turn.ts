@@ -586,6 +586,10 @@ export async function runOperatorTurn(
     job: OperatorJob;
     wake: OperatorWake;
     model?: string;
+    /** Trusted scheduler fence and cancellation; never supplied by the model. */
+    executionGuard?: () => Promise<boolean>;
+    signal?: AbortSignal;
+    routineContext?: { cycleId: string; cycleFence: number; skillRunId?: string };
     /**
      * Executes model-authored code in an isolated sandbox for this turn.
      * Supplied by `SandboxRunner` (cron-scheduler); absent when called from
@@ -625,6 +629,10 @@ export async function runOperatorTurn(
   },
 ): Promise<OperatorTurnResult> {
   const { job, wake } = opts;
+  if (opts.signal?.aborted || (opts.executionGuard && !await opts.executionGuard())) {
+    return { conversationId: '', events: 0, approvalId: null, error: null,
+      skipped: { reason: 'access_blocked', blockedReason: 'execution_interrupted' } };
+  }
   const model = resolveOperatorModel(opts.model);
 
   const pre = await operatorPreflight(pool, job, wake, opts.model);
@@ -771,6 +779,8 @@ export async function runOperatorTurn(
       skillScript: opts.skillScript,
       activeSkill: opts.activeSkill,
       integrationReader: opts.integrationReader,
+      executionGuard: opts.executionGuard,
+      signal: opts.signal,
       traceId,
       /**
        * Re-checked before every model request and before dispatching tools, so
@@ -804,6 +814,8 @@ export async function runOperatorTurn(
         wake_reason:
           wake.reason === 'timer' ? 'timer' : `event (${wake.table} row ${wake.rowId})`,
         trace_id: traceId,
+        ...(opts.routineContext ? { routine_cycle_id: opts.routineContext.cycleId,
+          routine_cycle_fence: opts.routineContext.cycleFence, skill_run_id: opts.routineContext.skillRunId } : {}),
       },
     });
 
