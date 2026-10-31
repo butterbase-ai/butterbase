@@ -26,6 +26,21 @@ const decision = { decision_id: id, decision_source: z.enum(['office', 'substrat
 export const decisionRefSchema = z.object({ source: z.enum(['office', 'substrate']), id }).strict();
 export type DecisionRef = z.infer<typeof decisionRefSchema>;
 
+/** Saved browser commands have exact action-specific fields. */
+export const officeCommandSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('enable') }).strict(),
+  z.object({ action: z.literal('pause') }).strict(),
+  z.object({ action: z.literal('resume') }).strict(),
+  z.object({ action: z.literal('approve'), decision: decisionRefSchema }).strict(),
+  z.object({ action: z.literal('skill_approve'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ action: z.literal('skill_set_enabled'), skill_id: z.string().uuid(), enabled: z.boolean() }).strict(),
+  z.object({ action: z.literal('skill_rollback'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ action: z.literal('skill_run_now'), skill_id: z.string().uuid() }).strict(),
+]);
+export type OfficeCommand = z.infer<typeof officeCommandSchema> & {
+  decision?: DecisionRef; skill_id?: string; version?: number; enabled?: boolean;
+};
+
 // Mirror the four native capability payloads; strictness prevents silent scope or policy injection.
 export const officeRecordDecisionSchema = z.object({
   title: text, rationale: z.string().optional(),
@@ -131,7 +146,7 @@ export type ConfirmationReceipt = z.infer<typeof confirmationReceiptSchema>;
 export interface OfficeCommandReview {
   organization: { id: string; name: string };
   receipt: ConfirmationReceipt;
-  action: 'enable' | 'pause' | 'resume' | 'approve';
+  action: OfficeCommand['action'];
   title: string;
   target: string;
   consequence: string;

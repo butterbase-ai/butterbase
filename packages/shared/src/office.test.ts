@@ -1,13 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   OFFICE_ACTIONS, officeActionSchema, decisionRefSchema, officeStatusResultSchema,
-  confirmationReceiptSchema, officeTurnSchema, officePublicEventSchema, officeErrorSchema,
+  confirmationReceiptSchema, officeTurnSchema, officePublicEventSchema, officeErrorSchema, officeCommandSchema,
 } from './office.js';
 
 const org_id = 'a0000000-0000-4000-8000-000000000001';
 const request = (action: string, fields: Record<string, unknown> = {}) => ({ action, org_id, ...fields });
 
 describe('Office wire requests', () => {
+  it('requires exact fields on skill browser commands', () => {
+    expect(officeCommandSchema.safeParse({ action: 'skill_approve', skill_id: org_id, version: 2 }).success).toBe(true);
+    expect(officeCommandSchema.safeParse({ action: 'skill_approve', skill_id: org_id }).success).toBe(false);
+    expect(officeCommandSchema.safeParse({ action: 'skill_run_now', skill_id: org_id, version: 2 }).success).toBe(false);
+    expect(officeCommandSchema.safeParse({ action: 'skill_set_enabled', skill_id: org_id, enabled: true, bypass: true }).success).toBe(false);
+  });
   it('accepts exactly the agreed action vocabulary', () => {
     expect([...OFFICE_ACTIONS].sort()).toEqual([
       'status', 'enable', 'pause', 'resume', 'list_decisions', 'get_decision',
