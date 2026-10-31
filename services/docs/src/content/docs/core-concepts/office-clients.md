@@ -49,7 +49,7 @@ MCP exposes one cloud tool, `manage_office`, with `org_id` on every call. Prefix
 | `test_skill` | `skills test <id> <version>` | `skills.test(id, version, options?)` |
 | `reject_skill` | `skills reject <id> <version> --reason <text>` | `skills.reject(id, version, reason, options?)` |
 | `approve_skill` | `skills approve <id> <version>` | `skills.approve(id, version, options?)` |
-| `set_skill_enabled` | `skills set-enabled <id> <true|false>` | `skills.setEnabled(id, enabled, options?)` |
+| `set_skill_enabled` | `skills set-enabled <id> <enabled>` | `skills.setEnabled(id, enabled, options?)` |
 | `rollback_skill` | `skills rollback <id> <version>` | `skills.rollback(id, version, options?)` |
 | `run_skill` | `skills run <id>` | `skills.run(id, options?)` |
 | `amend_principle` | `principles amend --file <json>` | `principles.amend(input, options?)` |

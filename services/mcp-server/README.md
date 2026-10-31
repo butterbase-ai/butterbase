@@ -71,7 +71,7 @@ The available tools depend on the server's enabled capabilities, including:
 - **Integrations & billing** — `manage_integrations`, `list_partner_apis`, `manage_billing`
 - **API keys & audit logs** — `manage_api_keys`, `query_audit_logs`
 - **Docs, suggestions & hackathons** — `butterbase_docs`, `submit_suggestion`, `prep_and_submit_hackathon_entry`
-- **Office (optional cloud capability)** — `manage_office` provides 22 organization-scoped actions for Ask, conversations, decisions, lifecycle controls and business memory. Read `butterbase_docs` with `topic: "office"` first. Every call needs an explicit `org_id` and platform credential; no app is selected. Enable/pause/resume/approve return confirmation receipts for the initiating owner to review in the browser. Agents must show the URL and observe the outcome, never confirm it themselves. OSS-only installations may omit this tool. See the [Office client reference](https://docs.butterbase.ai/core-concepts/office-clients/).
+- **Office (optional cloud capability)** — `manage_office` provides 44 organization-scoped actions for Ask, conversations, decisions, lifecycle controls, business records, curated agent memory, routines, cadence and paginated records. Read `butterbase_docs` with `topic: "office"` first. Every call needs an explicit `org_id` and platform credential; no app is selected. Enable/pause/resume/approve return confirmation receipts for the initiating owner to review in the browser. Agents must show the URL and observe the outcome, never confirm it themselves. OSS-only installations may omit this tool. See the [Office client reference](https://docs.butterbase.ai/core-concepts/office-clients/).
 
 See the [Butterbase docs](https://butterbase.ai/docs) for the full list.
 
