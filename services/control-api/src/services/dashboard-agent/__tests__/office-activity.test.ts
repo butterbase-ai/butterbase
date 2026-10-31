@@ -76,4 +76,27 @@ describe('safe Office activity', () => {
     expect(p.observe(event)).toMatchObject({ id: 'call1', status, duration_ms: null, finished_at: null });
   });
 
+  it.each([
+    [{ code: 'agent_memory_request_invalid', message: 'SECRET' }, 'failed'],
+    [{ code: 'explicit_memory_kind_required', message: 'SECRET' }, 'failed'],
+    [{ code: 'working_notes_scope_invalid' }, 'failed'],
+    [{ code: 'new_unrecognized_receipt', message: 'SECRET' }, 'unknown'],
+  ])('does not report code-only runtime rejection receipts as completed', (result, status) => {
+    const p = createOfficeActivityProjector(); p.observe(call());
+    const step = p.observe({ type: 'tool_result', id: 'call1', result: mcp(result) });
+    expect(step?.status).toBe(status); expect(JSON.stringify(step)).not.toContain('SECRET');
+  });
+  it('bounds historical groups and total calls even for direct projector consumers', () => {
+    const rows = Array.from({ length: 150 }, (_, n) => [
+      { id: `u${n}`, role: 'user' },
+      { id: `c${n}`, role: 'assistant', toolCallId: `call${n}`, toolName: 'manage_substrate', toolArgs: { action: 'search_agent_memories' } },
+      { id: `r${n}`, role: 'tool', toolCallId: `call${n}`, toolResult: { items: [] } },
+      { id: `c2_${n}`, role: 'assistant', toolCallId: `call2_${n}`, toolName: 'manage_substrate', toolArgs: { action: 'search_agent_memories' } },
+      { id: `r2_${n}`, role: 'tool', toolCallId: `call2_${n}`, toolResult: { items: [] } },
+    ]).flat();
+    const groups = projectOfficeConversationActivity(rows);
+    expect(groups).toHaveLength(100); expect(groups[0].user_message_id).toBe('u50');
+    expect(groups.reduce((n,g) => n + g.steps.length, 0)).toBe(128);
+  });
+
 });

@@ -128,6 +128,7 @@ import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';
 import { runAgentTurn, type LoopEvent } from '../loop.js';
+import { createOfficeActivityProjector, projectOfficeConversationActivity } from '../office-activity.js';
 
 // ---------------------------------------------------------------------------
 // Typed helpers to keep tests clean
@@ -1463,6 +1464,16 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
     );
     expect(pausedRow).toBeDefined();
     expect((pausedRow![2] as { pendingApprovalId?: string }).pendingApprovalId).toBe('approval-1');
+    const live = createOfficeActivityProjector().observe(events[0]);
+    const call = { ...pausedRow![2], id: 'paused-row', role: 'assistant' };
+    const pending = projectOfficeConversationActivity([{ id: 'user-row', role: 'user' }, call]);
+    expect(live?.id).toBe('call-del');
+    expect(pending[0].steps[0].id).toBe(live?.id);
+    const resolved = projectOfficeConversationActivity([{ id: 'user-row', role: 'user' }, { ...call, pendingApprovalId: null },
+      { id: 'resolved-row', role: 'tool', toolCallId: 'call-del', toolResult: { ok: false, error: 'User denied. Reason: SECRET' } }]);
+    expect(resolved[0].steps).toMatchObject([{ id: 'call-del', status: 'denied' }]);
+    expect(JSON.stringify(events[0])).toEqual(JSON.stringify({ type: 'approval_required', approval_id: 'approval-1', tool_name: 'manage_app', args: { action: 'delete', id: 'app_1' }, sensitivity: 'destructive' }));
+
   });
 
   it('leaves a safe tool call unaffected (no trust check, no approval, dispatches MCP normally)', async () => {

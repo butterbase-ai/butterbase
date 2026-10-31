@@ -41,7 +41,8 @@
  * Pool: app.controlDb (decorated by plugins/database.ts).
  */
 
-import { createOfficeActivityProjector, projectOfficeConversationActivity } from '../services/dashboard-agent/office-activity.js';
+import { readOfficeConversationActivityHistory } from '../services/dashboard-agent/office-activity-history.js';
+import { createOfficeActivityProjector } from '../services/dashboard-agent/office-activity.js';
 import { buildProposalReview, verifyPreparedApproval } from '../services/dashboard-agent/proposal-review.js';
 import { redactProposalArguments } from '../services/dashboard-agent/approval-proposal.js';
 import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
@@ -832,11 +833,12 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
 
     const version = z.object({ activity_version: z.literal('1').optional() }).safeParse(request.query);
     if (!version.success) return reply.code(400).send({ error: 'invalid activity version' });
+    if (version.data.activity_version) {
+      const options = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }).safeParse(request.query);
+      if (!options.success) return reply.code(400).send({ error: 'invalid history limit' });
+      return reply.send({ conversation, ...await readOfficeConversationActivityHistory(app.controlDb, id, options.data.limit) });
+    }
     const messages = await listMessages(app.controlDb, id);
-    if (version.data.activity_version) return reply.send({ conversation,
-      messages: messages.filter(m => ['user', 'assistant'].includes(m.role) && m.content?.trim())
-        .map(m => ({ id: m.id, role: m.role, content: m.content, createdAt: m.createdAt })),
-      activity: projectOfficeConversationActivity(messages) });
     return reply.send({ conversation, messages });
   });
 

@@ -1,3 +1,4 @@
+import { withOfficeActivityCallId } from './office-activity.js';
 /**
  * Agent loop for the Butterbase Dashboard Assistant.
  *
@@ -1734,7 +1735,7 @@ export async function* runAgentTurn(
                       const saved = await persistPreparedApproval(input.pool, { id: approvalId, organizationId: proposalOrganizationId!, conversationId: input.conversationId, operation, proposal: { ...prepared.proposal, source: parkedActionId ? 'substrate_escalation' : 'explicit' }, traceId: input.traceId, reviewPreparation: input.reviewPreparation, message: { id: randomUUID(), callId: originalCall.id, toolName: originalCall.name, args: originalCall.args, content: i === 0 ? assistantText : '', model: input.model } });
                       if (saved.kind === 'duplicate') payload = { code: 'already_pending', approval_id: saved.approvalId };
                       else {
-                        yield { type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' };
+                        yield withOfficeActivityCallId({ type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' }, originalCall.id);
                         terminated = true;
                         break outer;
                       }
@@ -2078,13 +2079,13 @@ export async function* runAgentTurn(
             },
             messageId,
           );
-          yield {
+          yield withOfficeActivityCallId({
             type: 'approval_required',
             approval_id: approval.id,
             tool_name: tc.name,
             args: tc.args,
             sensitivity: 'destructive',
-          };
+          }, tc.id);
           terminated = true;
           break outer;
         }
@@ -2146,13 +2147,13 @@ export async function* runAgentTurn(
               },
               messageId,
             );
-            yield {
+            yield withOfficeActivityCallId({
               type: 'approval_required',
               approval_id: approval.id,
               tool_name: tc.name,
               args: tc.args,
               sensitivity,
-            };
+            }, tc.id);
             terminated = true;
             break outer;
           }
@@ -2980,13 +2981,13 @@ export async function* runAgentTurn(
                   escalated: true,
                 });
               }
-              yield {
+              yield withOfficeActivityCallId({
                 type: 'approval_required',
                 approval_id: approval.id,
                 tool_name: tc.name,
                 args: tc.args,
                 sensitivity: 'destructive',
-              };
+              }, tc.id);
               terminated = true;
               break outer;
             }

@@ -15,8 +15,11 @@ const rows = [
 ];
 describe('Office website activity opt in', () => {
   let app: ReturnType<typeof Fastify>;
+  let historyRows: any[];
+  let historyQuery: ReturnType<typeof vi.fn>;
   beforeEach(async () => {
     process.env.DASHBOARD_ASSISTANT_ENABLED = '1';
+    historyRows = rows;
     vi.mocked(getConversation).mockResolvedValue({ id, origin: 'office', organizationId: org, userId: 'owner' } as any);
     vi.mocked(listMessages).mockResolvedValue(rows as any);
     vi.mocked(runAgentTurn).mockImplementation(async function* () {
@@ -27,7 +30,15 @@ describe('Office website activity opt in', () => {
     setOperatorAccessPolicy({ evaluate: async () => ({ allowed: true, reason: null, approvalMode: 'consequential' }) });
     app = Fastify(); app.decorateRequest('auth', null);
     app.addHook('onRequest', async req => { req.auth = { userId: 'owner', authMethod: 'jwt', scopes: ['*'] }; });
-    app.decorate('controlDb', {} as any); await app.register(dashboardAgentRoutes);
+    historyQuery = vi.fn(async (sql: string, values: any[]) => {
+      let selected = historyRows;
+      if (sql.includes('office_activity_window')) selected = selected.filter(m => ['user','assistant'].includes(m.role)).slice(-values[1]).reverse();
+      else if (sql.includes('office_activity_pairs')) {
+        let owner = ''; selected = selected.filter(m => { if (m.role === 'user') owner = m.id; return values[1].includes(owner); });
+      }
+      return { rows: selected.map(m => ({ ...m, created_at: m.createdAt, tool_call_id: m.toolCallId, tool_name: m.toolName, tool_args: m.toolArgs, tool_result: m.toolResult, pending_approval_id: m.pendingApprovalId })) };
+    });
+    app.decorate('controlDb', { query: historyQuery } as any); await app.register(dashboardAgentRoutes);
   });
   afterEach(async () => { await app.close(); setOperatorAccessPolicy(null); delete process.env.DASHBOARD_ASSISTANT_ENABLED; });
   it('opts into safe prose and activity grouped by actual user', async () => {
@@ -59,10 +70,40 @@ describe('Office website activity opt in', () => {
     expect((await app.inject({ method: 'GET', url: `/conversations/${id}?activity_version=2`, headers: { 'x-organization-id': org } })).statusCode).toBe(400);
   });
   it('retains assistant prose from a paired call while removing private call metadata', async () => {
-    vi.mocked(listMessages).mockResolvedValueOnce(rows.map(m => m.id === 'c1' ? { ...m, content: 'Checking that now' } : m) as any);
+    historyRows = rows.map(m => m.id === 'c1' ? { ...m, content: 'Checking that now' } : m);
     const response = await app.inject({ method: 'GET', url: `/conversations/${id}?activity_version=1`, headers: { 'x-organization-id': org } });
     expect(response.json().messages.map((m: any) => m.content)).toEqual(['Hello', 'Checking that now', 'Hello back']);
     expect(response.body).not.toContain('SECRET');
+  });
+
+  it('bounds opted-in history at the database read and returns only selected users with complete pairs', async () => {
+    const old = Array.from({ length: 120 }, (_, n) => ({ ...rows[0], id: `old${n}` }));
+    historyRows = [...old, ...rows];
+    const response = await app.inject({ method: 'GET', url: `/conversations/${id}?activity_version=1&limit=3`, headers: { 'x-organization-id': org } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().messages.map((m: any) => m.id)).toEqual(['u1', 'a1']);
+    expect(response.json().activity.map((g: any) => g.user_message_id)).toEqual(['u1']);
+    expect(response.json().activity[0].steps).toMatchObject([{ id: 'call1', status: 'completed' }]);
+    expect(historyQuery.mock.calls[0][1]).toEqual([id, 3]);
+    expect(historyQuery.mock.calls[1][1][1]).toEqual(['u1']);
+    expect(historyQuery.mock.calls[1][1][2]).toBe(128);
+  });
+
+  it('exposes a code-only read rejection as failed and never echoes its diagnostic', async () => {
+    vi.mocked(runAgentTurn).mockImplementation(async function* () {
+      yield { type: 'tool_call', id: 'invalid', name: 'manage_substrate', args: { action: 'search_agent_memories' } };
+      yield { type: 'tool_result', id: 'invalid', result: { code: 'agent_memory_request_invalid', message: 'SECRET' } };
+      yield { type: 'done' };
+    });
+    const response = await app.inject({ method: 'POST', url: '/messages', headers: { 'x-organization-id': org }, payload: { conversation_id: id, message: 'Read', activity_version: 1 } });
+    const events = response.body.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+    expect(events.filter(e => e.type === 'activity').at(-1)).toMatchObject({ step: { status: 'failed' } });
+    expect(response.body).not.toContain('SECRET');
+  });
+  it('omits detached activity when the latest message-only window has no user anchor', async () => {
+    const response = await app.inject({ method: 'GET', url: `/conversations/${id}?activity_version=1&limit=1`, headers: { 'x-organization-id': org } });
+    expect(response.json().messages.map((m: any) => m.id)).toEqual(['a1']);
+    expect(response.json().activity).toEqual([]); expect(historyQuery).toHaveBeenCalledTimes(1);
   });
 
 });
