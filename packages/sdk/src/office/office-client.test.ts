@@ -18,6 +18,11 @@ function setup() {
 }
 afterEach(() => vi.useRealTimers());
 describe('standalone OfficeClient public export', () => {
+  it('continues one bounded resource page with its cursor and skill scope',async()=>{
+    const {client,fetch}=setup();
+    await client.records.list('skill_runs',{skillId:id,cursor:'next',limit:25});
+    expect(String(fetch.mock.calls[0][0])).toContain(`/pages/skill_runs?cursor=next&limit=25&skill_id=${id}`);
+  });
   it('reads settings and returns a protected receipt without executing the change', async () => {
     const { client, fetch } = setup();
     await client.settings.get();

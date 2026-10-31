@@ -13,6 +13,7 @@ export function officeHttpRequest(input: unknown): OfficeHttpRequest {
   }
   function post(path: string, body: Record<string, unknown>) { return { ...result, method: 'POST' as const, path: `${BASE}${path}`, body }; }
   switch (r.action) {
+    case 'list_office_records': return get(`/pages/${r.resource}`,{cursor:r.cursor,limit:r.limit,kind:r.kind,status:r.status,skill_id:r.skill_id});
     case 'get_office_settings': return get('/settings');
     case 'update_office_settings': return post('/confirmations', { action: 'settings_update', interval_minutes: r.interval_minutes, expected_revision: r.expected_revision, idempotency_key: r.idempotency_key });
     case 'status': return get(r.confirmation_id ? `/confirmations/${encodeURIComponent(r.confirmation_id)}` : '');

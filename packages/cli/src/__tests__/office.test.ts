@@ -58,6 +58,10 @@ beforeEach(() => {
 });
 afterEach(() => { process.exitCode = undefined; if (directory.startsWith(join(tmpdir(), 'butterbase-office-cli-'))) rmSync(directory, { recursive: true, force: true }); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 describe('office command surface', () => {
+  it('continues a real resource page through the shared facade',async()=>{
+    await run(['records','list','entities','--cursor','next-page','--limit','25','--org',org,'--json']);
+    expect(String(fetch.mock.calls[0][0])).toContain('/pages/entities?cursor=next-page&limit=25');
+  });
   it('requests a settings revision change through owner confirmation', async () => {
     await run(['settings', 'update', '30', '--expected-revision', '1', '--org', org, '--json', '--idempotency-key', 'cadence-intent']);
     expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({ action: 'settings_update', interval_minutes: 30, expected_revision: 1, idempotency_key: 'cadence-intent' });
@@ -79,6 +83,7 @@ describe('office command surface', () => {
       'office skills test', 'office skills reject', 'office skills approve', 'office skills set-enabled', 'office skills rollback', 'office skills run',
       'office principles amend', 'office principles retire',
       'office settings get', 'office settings update',
+      'office records list',
       'office status', 'office enable', 'office pause', 'office resume', 'office ask',
       'office decisions list', 'office decisions get', 'office decisions context', 'office decisions approve', 'office decisions deny',
       'office conversations create', 'office conversations list', 'office conversations get',

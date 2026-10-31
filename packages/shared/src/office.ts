@@ -16,6 +16,7 @@ export const OFFICE_ACTIONS = [
   'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
   'amend_principle', 'retire_principle',
   'get_office_settings', 'update_office_settings',
+  'list_office_records',
 ] as const;
 export type OfficeAction = typeof OFFICE_ACTIONS[number];
 
@@ -42,6 +43,8 @@ export interface OfficeRoutineSettings {
   next_routine_check_at?: string | null; full_sweep_due_at?: string | null;
   last_full_sweep_at?: string | null; blocked_reason?: string | null; reconciliation_late?: boolean;
 }
+export const officeListResourceSchema = z.enum(['entities','business_memory','source_artifacts','actions','principles','skills','skill_versions','skill_runs']);
+export type OfficeListResource = z.infer<typeof officeListResourceSchema>;
 
 /** Saved browser commands have exact action-specific fields. */
 export const officeCommandSchema = z.discriminatedUnion('action', [
@@ -91,6 +94,8 @@ export const officeMemorySchemas = {
 export type OfficeMemoryKind = keyof typeof officeMemorySchemas;
 
 export const officeActionSchema = z.discriminatedUnion('action', [
+  z.object({...org,...page,action:z.literal('list_office_records'),resource:officeListResourceSchema,
+    kind:z.string().min(1).max(100).optional(),status:z.string().min(1).max(100).optional(),skill_id:z.string().uuid().optional()}).strict(),
   z.object({ ...org, action: z.literal('get_office_settings') }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('update_office_settings'), interval_minutes: officeIntervalSchema, expected_revision: z.number().int().positive() }).strict(),
   z.object({ ...org, ...page, action: z.literal('list_agent_memories') }).strict(),

@@ -7,6 +7,7 @@ import type {
   OfficeSkillRecord, OfficeSkillDetail, OfficeSkillVersionRecord, OfficeSkillRunRecord,
   OfficeAmendPrincipleInput, OfficeRetirePrincipleInput,
   OfficeRoutineSettings,
+  OfficeListResource,
 } from '@butterbase/shared';
 import { OfficeTransport, officeError } from './transport.js';
 import { OfficeClientError, OfficeStreamError, type OfficeAskOptions, type OfficeAskStreamOptions, type OfficeConfirmationWaitOptions,
@@ -33,6 +34,10 @@ export class OfficeClient {
     catch { return { data: null, error: officeError('invalid_request', 'A unique idempotency key is required for this write.') }; }
   }
   getStatus(options?: OfficeRequestOptions) { return this.call<OfficeStatus>('status', {}, options); }
+  readonly records = {
+    list: <T extends {id:string} = {id:string;[key:string]:unknown}>(resource:OfficeListResource, options?:OfficePageOptions & {kind?:string;status?:string;skillId?:string}) =>
+      this.call<OfficePage<T>>('list_office_records',{resource,cursor:options?.cursor,limit:options?.limit,kind:options?.kind,status:options?.status,skill_id:options?.skillId},options),
+  };
   readonly settings = {
     get: (options?: OfficeRequestOptions) => this.call<OfficeRoutineSettings>('get_office_settings', {}, options),
     update: (intervalMinutes: OfficeRoutineSettings['interval_minutes'], expectedRevision: number, options?: OfficeWriteOptions) =>
