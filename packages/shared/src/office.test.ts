@@ -133,3 +133,10 @@ describe('Office wire results', () => {
       history: { turn_id: 'turn-1', conversation_id: 'conv-1', state: 'completed' } }).success).toBe(true);
   });
 });
+
+import { officeActivityStepSchema } from './office.js';
+it('validates bounded activity and rejects private fields', () => {
+  const step = { id: 'call1', tool_name: 'manage_substrate', status: 'running', label: 'Searching memories', summary: null, started_at: null, finished_at: null, duration_ms: null, details: [] };
+  expect(officeActivityStepSchema.safeParse(step).success).toBe(true);
+  for (const invalid of [{ ...step, args: { token: 'secret' } }, { ...step, label: 'x'.repeat(201) }, { ...step, duration_ms: -1 }, { ...step, details: Array.from({ length: 9 }, () => ({label: 'a',value:'b'})) }]) expect(officeActivityStepSchema.safeParse(invalid).success).toBe(false);
+});
