@@ -85,6 +85,10 @@ failed or blocked request stays visible and can be retried explicitly by the
 owner. Already-expired `proposal_review_required` records are recoverable;
 other expired, successful or uncertain executions are not retry shortcuts.
 
+Preparation of a delivery cancellation is refused while that delivery is in
+flight. It leaves the delivery unchanged and creates no execution or replacement
+approval. Reconcile the delivery state before requesting preparation again.
+
 The source approval ID makes repeated requests idempotent. Claims carry a
 twenty-minute lease and token. Only a matching frozen intent, organization,
 conversation and current lease can link a persisted replacement atomically.

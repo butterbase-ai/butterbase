@@ -3882,7 +3882,7 @@ export async function handler(req, ctx) {
 }
 \`\`\`
 
-Every read method (\`searchMemory\`, \`listMemory\`, \`listSourceArtifacts\`, \`listActions\`) returns an array (empty when there are no matches — never an error). The \`get*\` methods return the row or \`null\` when the id is unknown.
+Successful read methods (\`searchMemory\`, \`listMemory\`, \`listSourceArtifacts\`, \`listActions\`) return an array, empty when there are no matches. Invalid arguments can return errors. The \`get*\` methods return the row or \`null\` when the id is unknown.
 
 Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require human approval even if the user has \`yolo_mode\` on. Memory writes (\`record_decision\`, etc.) auto-execute.
 
@@ -3907,6 +3907,8 @@ Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require
 | GET\\|PUT\\|DELETE | /v1/me/substrate/outbox-targets[…] | Webhook targets per capability |
 | POST   | /v1/me/substrate/ws-ticket | Mint a 60s ticket for the WS stream |
 | WS     | /v1/me/substrate/stream | Live push of every ledger / entity / rule / firing change |
+
+Ledger status filters accept \`proposed\`, \`approved\`, \`rejected\`, \`executing\`, \`executed\`, \`failed\`, and \`reverted\`. For reads only, \`pending\` is an alias for \`proposed\`. Omit status for all states; an empty or unknown HTTP filter returns 400 \`invalid_action_status\`, and MCP \`manage_substrate\` action \`list_actions\` rejects it during argument validation. The alias does not change action writes or outbox delivery states.
 
 ### Propose an action
 

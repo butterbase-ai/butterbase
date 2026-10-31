@@ -27,6 +27,8 @@ butterbase substrate ledger --status executed --capability send_email_draft --li
 butterbase substrate ledger --before 2026-05-28T00:00:00Z --json | jq '.actions[].id'
 ```
 
+`--status` accepts `proposed`, `approved`, `rejected`, `executing`, `executed`, `failed`, or `reverted`. For ledger reads, `pending` is an alias for `proposed`. Omit the flag to list all states; an empty or unknown status is rejected by the API with HTTP 400 `invalid_action_status`.
+
 ### `butterbase substrate propose <capability>`
 
 Propose a new action.
