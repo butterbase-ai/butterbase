@@ -1,5 +1,6 @@
 /** Public skill records use ISO timestamps; full archives stay in the native store. */
 export interface OfficeSkillRecord {
+  triggerMode?: 'manual' | 'scheduled' | 'every_loop';
   id: string; organizationId: string; name: string; displayName: string; description: string;
   currentVersionId: string | null; scheduleCron: string | null; timezone: string;
   nextRunAt: string | null; lastRunAt: string | null; lastRunOutcome: string | null;
@@ -10,6 +11,7 @@ export interface OfficeSkillTestResult {
   startedAt: string; finishedAt: string; conversationId?: string | null;
 }
 export interface OfficeSkillVersionRecord {
+  triggerMode?: 'manual' | 'scheduled' | 'every_loop';
   id: string; skillId: string; version: number; packageObjectId: string; status: 'draft' | 'approved' | 'rejected' | 'superseded';
   displayName?: string | null; description?: string | null; summary: string; changeSummary: string | null;
   scheduleCron: string | null; timezone: string | null; testResult: OfficeSkillTestResult | null;
@@ -17,8 +19,8 @@ export interface OfficeSkillVersionRecord {
   rejectedBy: string | null; rejectedAt: string | null; supersededBy: string | null;
 }
 export interface OfficeSkillRunRecord {
-  id: string; skillId: string; versionId: string | null; trigger: 'scheduled' | 'manual' | 'test';
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'approval_pending';
+  id: string; skillId: string; versionId: string | null; trigger: 'scheduled' | 'manual' | 'test' | 'every_loop';
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'approval_pending' | 'interrupted' | 'outcome_unknown';
   reason: string | null; conversationId: string | null; messageId: string | null; scheduledFor: string;
   startedAt: string | null; finishedAt: string | null; approvalId: string | null; errorCode: string | null; createdAt: string;
 }
