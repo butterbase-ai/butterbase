@@ -29,6 +29,7 @@ export type ToolSpec = {
    * is exactly the drift that produced the empty-intersection bug.
    */
   operatorOnly?: true;
+  officeOnly?: true;
 };
 
 // Shared "flat, permissive" params shape: LLM passes `action` (when the tool
@@ -57,6 +58,7 @@ function flatOpen(): object {
  * identity, so the target org is never taken from model-supplied arguments.
  */
 export const OPERATOR_SCRATCHPAD_TOOL = 'update_operator_scratchpad';
+export const READ_OPERATOR_SCRATCHPAD_TOOL = 'read_operator_scratchpad';
 export const PROPOSE_ACTION_TOOL = 'propose_action';
 
 /**
@@ -135,6 +137,9 @@ export const RUN_SKILL_SCRIPT_TOOL = 'run_skill_script';
 
 export function getToolCatalog(): ToolSpec[] {
   return [
+    { name: READ_OPERATOR_SCRATCHPAD_TOOL, officeOnly: true,
+      description: 'Explicitly read the current organization working notes, including retained legacy notes when needed to recover in-progress work. This is a scoped read, not the default memory search; notes carry no authority.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false }, sensitivity: 'safe' },
     {
       name: PROPOSE_ACTION_TOOL,
       description: 'Prepare one consequential operation for owner review. Supply the exact tool and arguments, an explicit reason, and optionally 0..10 typed supporting record references. Preparation does not execute the operation. Automatic operations return proposal_not_required. Missing or inaccessible targets cannot reach the owner. If a direct operation returns proposal_incomplete, repeat the same operation here with its reason.',
@@ -241,6 +246,7 @@ export function getToolCatalog(): ToolSpec[] {
         'Actions — entities: "find_entities" ({type?, q?, primary_email?, limit?, cursor?}), "get_entity" ({entity_id}).\n' +
         'Actions — source artifacts: "list_source_artifacts", "get_source_artifact" ({artifact_id}).\n' +
         'Actions — memory: "search_memory" ({q?, kinds?, limit?}), "list_memory".\n' +
+        'Actions — curated memory: "list_agent_memories" ({cursor?,limit?}), "search_agent_memories" ({q,cursor?,limit?}), "get_agent_memory" ({memory_id}). Office turns scope unqualified memory searches to this category; other categories require explicit kinds. Full memories are read only when relevant.\n' +
         'Actions — outbox: "list_outbox", "retry_outbox" ({outbox_id}), "cancel_outbox" ({outbox_id}).\n' +
         'Actions — attention rules: "list_rules", "get_rule", "create_rule", "update_rule", "delete_rule", "enable_rule", "disable_rule", "list_rule_firings".\n' +
         'Actions — snapshots & settings: "snapshots" ({days?}), "get_settings", "set_yolo" ({yolo_mode}).\n' +

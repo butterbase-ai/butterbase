@@ -1,5 +1,10 @@
 import type { OfficeError, OfficeErrorCode, OfficeRequestOptions, OfficeWriteOptions, OfficePageOptions } from '@butterbase/shared';
 export type {
+  OfficeRoutineSettings,
+  OfficeListResource,
+  OfficeAmendPrincipleInput, OfficeRetirePrincipleInput,
+  OfficeSkillRecord, OfficeSkillDetail, OfficeSkillVersionRecord, OfficeSkillRunRecord, OfficeSkillTestResult,
+  AgentMemorySummary, AgentMemoryRecord, OfficeRecordAgentMemoryInput, OfficeAmendAgentMemoryInput, OfficeArchiveAgentMemoryInput,
   OfficeClientOptions, OfficeRequestOptions, OfficeWriteOptions, OfficePageOptions, OfficePage,
   OfficeStatus, ConfirmationReceipt, OfficeCommandReview, DecisionRef, OfficeDecision, OfficeDecisionContext,
   OfficeConversation, OfficeConversationDetail, OfficeTurn, OfficePublicEvent, OfficeError, OfficeErrorCode,

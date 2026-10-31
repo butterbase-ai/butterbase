@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { officeRecordAgentMemorySchema, officeAmendAgentMemorySchema, officeArchiveAgentMemorySchema } from './office-agent-memory.js';
+export * from './office-agent-memory.js';
+export * from './office-skills.js';
 
 /** Public organization-scoped Office protocol. No app or browser session is implied. */
 export const OFFICE_ACTIONS = [
@@ -7,6 +10,13 @@ export const OFFICE_ACTIONS = [
   'get_conversation', 'ask', 'list_memory', 'search_memory', 'get_source_artifact',
   'record_decision', 'record_commitment', 'record_learning', 'list_principles',
   'get_principle', 'record_principle',
+  'list_agent_memories', 'search_agent_memories', 'get_agent_memory',
+  'record_agent_memory', 'amend_agent_memory', 'archive_agent_memory',
+  'list_skills', 'get_skill', 'list_skill_versions', 'list_skill_runs', 'draft_skill',
+  'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
+  'amend_principle', 'retire_principle',
+  'get_office_settings', 'update_office_settings',
+  'list_office_records',
 ] as const;
 export type OfficeAction = typeof OFFICE_ACTIONS[number];
 
@@ -21,6 +31,37 @@ const page = { cursor: z.string().trim().min(1).max(2048).optional(), limit: z.n
 const decision = { decision_id: id, decision_source: z.enum(['office', 'substrate']).default('office') };
 export const decisionRefSchema = z.object({ source: z.enum(['office', 'substrate']), id }).strict();
 export type DecisionRef = z.infer<typeof decisionRefSchema>;
+export const officeAmendPrincipleSchema = z.object({ principle_id: id, reason: text.max(4000), title: text.max(500).optional(),
+  rationale: z.string().max(16000).optional(), applies_to: json.optional(), constraint_spec: json.optional(), salience: salience.optional() }).strict()
+  .refine(p => Object.keys(p).some(key => !['principle_id', 'reason'].includes(key)), 'No changes supplied');
+export const officeRetirePrincipleSchema = z.object({ principle_id: id, reason: text.max(4000) }).strict();
+export type OfficeAmendPrincipleInput = z.infer<typeof officeAmendPrincipleSchema>;
+export type OfficeRetirePrincipleInput = z.infer<typeof officeRetirePrincipleSchema>;
+export const officeIntervalSchema = z.union([z.literal(10), z.literal(15), z.literal(30), z.literal(60)]);
+export interface OfficeRoutineSettings {
+  interval_minutes: 10 | 15 | 30 | 60; revision: number;
+  next_routine_check_at?: string | null; full_sweep_due_at?: string | null;
+  last_full_sweep_at?: string | null; blocked_reason?: string | null; reconciliation_late?: boolean;
+}
+export const officeListResourceSchema = z.enum(['entities','business_memory','source_artifacts','actions','principles','skills','skill_versions','skill_runs']);
+export type OfficeListResource = z.infer<typeof officeListResourceSchema>;
+
+/** Saved browser commands have exact action-specific fields. */
+export const officeCommandSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('enable') }).strict(),
+  z.object({ action: z.literal('pause') }).strict(),
+  z.object({ action: z.literal('resume') }).strict(),
+  z.object({ action: z.literal('approve'), decision: decisionRefSchema }).strict(),
+  z.object({ action: z.literal('skill_approve'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ action: z.literal('skill_set_enabled'), skill_id: z.string().uuid(), enabled: z.boolean() }).strict(),
+  z.object({ action: z.literal('skill_rollback'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ action: z.literal('skill_run_now'), skill_id: z.string().uuid() }).strict(),
+  z.object({ action: z.literal('settings_update'), interval_minutes: officeIntervalSchema, expected_revision: z.number().int().positive() }).strict(),
+]);
+export type OfficeCommand = z.infer<typeof officeCommandSchema> & {
+  decision?: DecisionRef; skill_id?: string; version?: number; enabled?: boolean;
+  interval_minutes?: 10 | 15 | 30 | 60; expected_revision?: number;
+};
 
 // Mirror the four native capability payloads; strictness prevents silent scope or policy injection.
 export const officeRecordDecisionSchema = z.object({
@@ -53,6 +94,16 @@ export const officeMemorySchemas = {
 export type OfficeMemoryKind = keyof typeof officeMemorySchemas;
 
 export const officeActionSchema = z.discriminatedUnion('action', [
+  z.object({...org,...page,action:z.literal('list_office_records'),resource:officeListResourceSchema,
+    kind:z.string().min(1).max(100).optional(),status:z.string().min(1).max(100).optional(),skill_id:z.string().uuid().optional()}).strict(),
+  z.object({ ...org, action: z.literal('get_office_settings') }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('update_office_settings'), interval_minutes: officeIntervalSchema, expected_revision: z.number().int().positive() }).strict(),
+  z.object({ ...org, ...page, action: z.literal('list_agent_memories') }).strict(),
+  z.object({ ...org, ...page, action: z.literal('search_agent_memories'), query: text.max(4000) }).strict(),
+  z.object({ ...org, action: z.literal('get_agent_memory'), memory_id: id }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('record_agent_memory'), payload: officeRecordAgentMemorySchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('amend_agent_memory'), payload: officeAmendAgentMemorySchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('archive_agent_memory'), payload: officeArchiveAgentMemorySchema }).strict(),
   z.object({ ...org, action: z.literal('status'), confirmation_id: id.optional() }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('enable') }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('pause') }).strict(),
@@ -69,6 +120,17 @@ export const officeActionSchema = z.discriminatedUnion('action', [
   z.object({ ...org, ...keyed, action: z.literal('ask'), message: text.max(100_000),
     conversation_id: id.optional(), wait_ms: z.number().int().min(0).max(25_000).default(15_000) }).strict(),
   z.object({ ...org, ...page, action: z.literal('list_memory'), kind: z.enum(['decision', 'commitment', 'learning']).optional() }).strict(),
+  z.object({ ...org, ...page, action: z.literal('list_skills') }).strict(),
+  z.object({ ...org, action: z.literal('get_skill'), skill_id: z.string().uuid() }).strict(),
+  z.object({ ...org, ...page, action: z.literal('list_skill_versions'), skill_id: z.string().uuid() }).strict(),
+  z.object({ ...org, ...page, action: z.literal('list_skill_runs'), skill_id: z.string().uuid() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('draft_skill'), message: text.max(8000), skill_id: z.string().uuid().optional() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('test_skill'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('reject_skill'), skill_id: z.string().uuid(), version: z.number().int().positive(), reason: text.max(4000) }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('approve_skill'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('set_skill_enabled'), skill_id: z.string().uuid(), enabled: z.boolean() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('rollback_skill'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('run_skill'), skill_id: z.string().uuid() }).strict(),
   z.object({ ...org, action: z.literal('search_memory'), query: text.max(4000), limit: page.limit }).strict(),
   z.object({ ...org, action: z.literal('get_source_artifact'), source_artifact_id: id }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('record_decision'), payload: officeRecordDecisionSchema }).strict(),
@@ -77,6 +139,8 @@ export const officeActionSchema = z.discriminatedUnion('action', [
   z.object({ ...org, ...page, action: z.literal('list_principles') }).strict(),
   z.object({ ...org, action: z.literal('get_principle'), principle_id: id }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('record_principle'), payload: officeRecordPrincipleSchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('amend_principle'), payload: officeAmendPrincipleSchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('retire_principle'), payload: officeRetirePrincipleSchema }).strict(),
 ]).superRefine((request, ctx) => {
   if (request.action === 'get_conversation' && request.after_sequence !== undefined && !request.turn_id) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['turn_id'], message: 'turn_id is required with after_sequence' });
@@ -91,6 +155,7 @@ export const OFFICE_ERROR_CODES = [
   'credential_repair_required', 'service_unavailable', 'office_not_enabled',
   'idempotency_conflict', 'conversation_busy', 'conversation_awaiting_approval',
   'conversation_not_client_owned',
+  'revision_conflict', 'agent_memory_limit_reached', 'memory_archived',
   'confirmation_expired', 'confirmation_changed', 'confirmation_unreviewable',
   'policy_conflict_requires_resolution', 'events_expired', 'event_limit_exceeded',
   'turn_interrupted', 'deadline_exceeded', 'execution_failed', 'outcome_unknown',
@@ -120,7 +185,7 @@ export type ConfirmationReceipt = z.infer<typeof confirmationReceiptSchema>;
 export interface OfficeCommandReview {
   organization: { id: string; name: string };
   receipt: ConfirmationReceipt;
-  action: 'enable' | 'pause' | 'resume' | 'approve';
+  action: OfficeCommand['action'];
   title: string;
   target: string;
   consequence: string;

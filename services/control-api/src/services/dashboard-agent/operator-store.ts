@@ -157,6 +157,7 @@ export async function claimDueJobs(
   pool: pg.Pool,
   limit: number,
   now: Date = new Date(),
+  schedule?: (client: pg.PoolClient, job: OperatorJob, now: Date) => Promise<Date | null>,
 ): Promise<OperatorJob[]> {
   const client = await pool.connect();
   try {
@@ -178,6 +179,12 @@ export async function claimDueJobs(
     );
 
     for (const row of res.rows) {
+      const next = await schedule?.(client, { id: row.id, organizationId: row.organization_id, name: row.name,
+        instructions: row.instructions, intervalSeconds: row.interval_seconds }, now);
+      if (next) {
+        await client.query('UPDATE dashboard_agent_operator_jobs SET last_run_at=$1,next_run_at=$2 WHERE id=$3', [now, next, row.id]);
+        continue;
+      }
       await client.query(
         `UPDATE dashboard_agent_operator_jobs
          SET last_run_at = $1::timestamptz, next_run_at = $1::timestamptz + make_interval(secs => $2)

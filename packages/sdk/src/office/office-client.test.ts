@@ -18,7 +18,56 @@ function setup() {
 }
 afterEach(() => vi.useRealTimers());
 describe('standalone OfficeClient public export', () => {
-  it('maps all 22 methods with explicit organization and a fresh token for every request; no app required', async () => {
+  it('continues one bounded resource page with its cursor and skill scope',async()=>{
+    const {client,fetch}=setup();
+    await client.records.list('skill_runs',{skillId:id,cursor:'next',limit:25});
+    expect(String(fetch.mock.calls[0][0])).toContain(`/pages/skill_runs?cursor=next&limit=25&skill_id=${id}`);
+  });
+  it('reads settings and returns a protected receipt without executing the change', async () => {
+    const { client, fetch } = setup();
+    await client.settings.get();
+    expect(String(fetch.mock.calls[0][0])).toContain('/settings');
+    expect((await client.settings.update(30, 1, { idempotencyKey: 'cadence-intent' })).data).toMatchObject({ state: 'awaiting_confirmation' });
+    expect(JSON.parse(fetch.mock.calls[1][1]!.body as string)).toEqual({ action: 'settings_update', interval_minutes: 30, expected_revision: 1, idempotency_key: 'cadence-intent' });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it('maps every skill method through the public facade', async () => {
+    const { client, fetch } = setup();
+    const calls: Array<[() => Promise<unknown>, string, string]> = [
+      [() => client.skills.list({ limit: 5 }), 'GET', '/skills?limit=5'],
+      [() => client.skills.get(id), 'GET', `/skills/${id}`],
+      [() => client.skills.versions(id, { cursor: 'next' }), 'GET', `/skills/${id}/versions?cursor=next`],
+      [() => client.skills.runs(id), 'GET', `/skills/${id}/runs`],
+      [() => client.skills.draft('Daily report'), 'POST', '/skills/draft'],
+      [() => client.skills.test(id, 2), 'POST', `/skills/${id}/versions/2/test`],
+      [() => client.skills.reject(id, 2, 'Needs changes'), 'POST', `/skills/${id}/versions/2/reject`],
+      [() => client.skills.approve(id, 2), 'POST', '/confirmations'],
+      [() => client.skills.setEnabled(id, false), 'POST', '/confirmations'],
+      [() => client.skills.rollback(id, 1), 'POST', '/confirmations'],
+      [() => client.skills.run(id), 'POST', '/confirmations'],
+    ];
+    for (const [invoke, method, suffix] of calls) {
+      await invoke();
+      const [url, init] = fetch.mock.calls.at(-1)!;
+      expect(String(url)).toContain(suffix); expect(init?.method).toBe(method);
+    }
+  });
+  it('exposes compact agent memory reads and versioned writes through the facade', async () => {
+    const { client, fetch } = setup();
+    const calls: Array<[() => Promise<unknown>, string, string]> = [
+      [() => client.agentMemories.list({ limit: 5 }), 'GET', '/agent-memories?limit=5'],
+      [() => client.agentMemories.search('reports', { cursor: 'next', limit: 5 }), 'GET', '/agent-memories/search?cursor=next&limit=5&query=reports'],
+      [() => client.agentMemories.get('mem_one'), 'GET', '/agent-memories/mem_one'],
+      [() => client.agentMemories.record({ title: 'Reports', relevance_summary: 'For reports', body: 'Briefly', capture_origin: 'owner_request' }), 'POST', '/agent-memories/record'],
+      [() => client.agentMemories.amend({ memory_id: 'mem_one', expected_revision: 1, body: 'Changed' }), 'POST', '/agent-memories/amend'],
+      [() => client.agentMemories.archive({ memory_id: 'mem_one', expected_revision: 2 }), 'POST', '/agent-memories/archive'],
+    ];
+    for (const [invoke, method, suffix] of calls) {
+      await invoke(); const [url, init] = fetch.mock.calls.at(-1)!;
+      expect(String(url)).toContain(suffix); expect(init?.method).toBe(method);
+    }
+  });
+  it('maps business context methods with explicit organization and a fresh token for every request', async () => {
     const { client, fetch, getToken } = setup();
     const ref = { source: 'substrate' as const, id };
     const calls: Array<[() => Promise<unknown>, string, string]> = [
@@ -41,13 +90,15 @@ describe('standalone OfficeClient public export', () => {
       [() => client.memory.recordLearning({ title: 'Lesson', description: 'Context' }), 'POST', '/memory/record_learning'],
       [() => client.principles.list(), 'GET', '/principles'], [() => client.principles.get(id), 'GET', `/principles/${id}`],
       [() => client.principles.record({ title: 'Principle', applies_to: {}, constraint_spec: {} }), 'POST', '/memory/record_principle'],
+      [() => client.principles.amend({ principle_id: 'dec_one', reason: 'Clarify', title: 'Ask before email' }), 'POST', '/principles/amend'],
+      [() => client.principles.retire({ principle_id: 'dec_one', reason: 'Replace rule' }), 'POST', '/principles/retire'],
     ];
     for (const [invoke, method, suffix] of calls) {
       await invoke(); const [url, init] = fetch.mock.calls.at(-1)!;
       expect(String(url)).toContain(suffix); expect(init?.method).toBe(method);
       expect(init?.headers).toMatchObject({ Authorization: 'Bearer platform-token', 'x-organization-id': org });
     }
-    expect(fetch).toHaveBeenCalledTimes(22); expect(getToken).toHaveBeenCalledTimes(22);
+    expect(fetch).toHaveBeenCalledTimes(calls.length); expect(getToken).toHaveBeenCalledTimes(calls.length);
   });
   it('keeps pending confirmation receipts distinct from successful execution', async () => {
     const { client } = setup(); expect(await client.enable()).toEqual({ data: pending, error: null });

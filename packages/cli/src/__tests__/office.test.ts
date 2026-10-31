@@ -18,6 +18,31 @@ let fetch: ReturnType<typeof vi.spyOn>;
 function program() { const root = new Command('butterbase'); root.configureOutput({ writeErr: text => console.error(text), writeOut: text => console.log(text) }); registerOfficeCommands(root); return root; }
 async function run(args: string[]) { await program().parseAsync(['office', ...args], { from: 'user' }); }
 function output() { expect(logs).toHaveBeenCalledTimes(1); return JSON.parse(String(logs.mock.calls[0][0])); }
+describe('skill command dispatch', () => {
+  it.each(['amend', 'retire'])('dispatches governed principle %s with the exact JSON payload', async operation => {
+    const payload = { principle_id: 'dec_one', reason: 'Owner requested a change', ...(operation === 'amend' ? { title: 'Ask before email' } : {}) };
+    const file = join(directory, 'principle.json');
+    writeFileSync(file, JSON.stringify(payload));
+    await run(['principles', operation, '--file', file, '--org', org, '--idempotency-key', 'rule-intent', '--json']);
+    expect(new URL(String(fetch.mock.calls[0][0])).pathname).toBe(`/v1/me/office/principles/${operation}`);
+    expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({ payload, idempotency_key: 'rule-intent' });
+    expect(process.exitCode).toBe(0);
+  });
+  it.each([
+    [['list'], '/skills'], [['get', id], `/skills/${id}`],
+    [['versions', id], `/skills/${id}/versions`], [['runs', id], `/skills/${id}/runs`],
+    [['draft', 'Daily report'], '/skills/draft'], [['test', id, '2'], `/skills/${id}/versions/2/test`],
+    [['reject', id, '2', '--reason', 'Needs changes'], `/skills/${id}/versions/2/reject`],
+    [['approve', id, '2'], '/confirmations'], [['set-enabled', id, 'false'], '/confirmations'],
+    [['rollback', id, '1'], '/confirmations'], [['run', id], '/confirmations'],
+  ] as Array<[string[], string]>)('dispatches skills %j with an explicit organization', async (args, path) => {
+    await run(['skills', ...args, '--org', org, '--json']);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(new URL(String(fetch.mock.calls[0][0])).pathname).toBe(`/v1/me/office${path}`);
+    expect(openOfficeConfirmation).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(0);
+  });
+});
 beforeEach(() => {
   process.exitCode = undefined; vi.stubEnv('BUTTERBASE_API_KEY', ''); vi.stubEnv('BUTTERBASE_CONTROL_API_URL', 'https://api.example');
   config.mockResolvedValue({ endpoint: 'https://api.example', apiKey: 'platform-key' });
@@ -33,16 +58,46 @@ beforeEach(() => {
 });
 afterEach(() => { process.exitCode = undefined; if (directory.startsWith(join(tmpdir(), 'butterbase-office-cli-'))) rmSync(directory, { recursive: true, force: true }); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 describe('office command surface', () => {
-  it('registers exactly the 22 planned commands and exposes org/json on help', () => {
+  it('continues a real resource page through the shared facade',async()=>{
+    await run(['records','list','entities','--cursor','next-page','--limit','25','--org',org,'--json']);
+    expect(String(fetch.mock.calls[0][0])).toContain('/pages/entities?cursor=next-page&limit=25');
+  });
+  it.each([['business_memory', 'kind', 'learning'], ['actions', 'status', 'executed']])('preserves %s page filters with its continuation cursor', async (resource, filter, value) => {
+    await run(['records', 'list', resource, `--${filter}`, value, '--cursor', 'next-page', '--org', org, '--json']);
+    const url = new URL(String(fetch.mock.calls[0][0]));
+    expect(url.searchParams.get(filter)).toBe(value);
+    expect(url.searchParams.get('cursor')).toBe('next-page');
+  });
+  it('requests a settings revision change through owner confirmation', async () => {
+    await run(['settings', 'update', '30', '--expected-revision', '1', '--org', org, '--json', '--idempotency-key', 'cadence-intent']);
+    expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({ action: 'settings_update', interval_minutes: 30, expected_revision: 1, idempotency_key: 'cadence-intent' });
+    expect(openOfficeConfirmation).not.toHaveBeenCalled(); expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it('records agent memory through its explicit category and preserves the write key', async () => {
+    const payload = { title: 'Reports', relevance_summary: 'For reporting', body: 'Short summary first', capture_origin: 'owner_request' };
+    const file = join(directory, 'agent-memory.json'); writeFileSync(file, JSON.stringify(payload));
+    await run(['agent-memories', 'record', '--file', file, '--org', org, '--json', '--idempotency-key', 'remember-report']);
+    const [url, init] = fetch.mock.calls.at(-1)!;
+    expect(String(url)).toContain('/office/agent-memories/record');
+    expect(JSON.parse(init!.body as string)).toEqual({ payload: { ...payload, sources: [] }, idempotency_key: 'remember-report' });
+  });
+  it('registers the business and agent memory commands and exposes org/json on help', () => {
     const root = program(); const leaves = (command: Command, prefix = ''): string[] => command.commands.length
       ? command.commands.flatMap(child => leaves(child, `${prefix}${child.name()} `)) : [prefix.trim()];
-    expect(leaves(root)).toEqual([
+    expect(leaves(root).sort()).toEqual([
+      'office skills list', 'office skills get', 'office skills versions', 'office skills runs', 'office skills draft',
+      'office skills test', 'office skills reject', 'office skills approve', 'office skills set-enabled', 'office skills rollback', 'office skills run',
+      'office principles amend', 'office principles retire',
+      'office settings get', 'office settings update',
+      'office records list',
       'office status', 'office enable', 'office pause', 'office resume', 'office ask',
       'office decisions list', 'office decisions get', 'office decisions context', 'office decisions approve', 'office decisions deny',
       'office conversations create', 'office conversations list', 'office conversations get',
       'office memory list', 'office memory search', 'office memory source get', 'office memory record-decision',
       'office memory record-commitment', 'office memory record-learning', 'office principles list', 'office principles get', 'office principles record',
-    ]);
+      'office agent-memories list', 'office agent-memories search', 'office agent-memories get',
+      'office agent-memories record', 'office agent-memories amend', 'office agent-memories archive',
+    ].sort());
     const office = root.commands[0]; expect(office.helpInformation()).toContain('--org <uuid>'); expect(office.helpInformation()).toContain('--json');
     expect(office.commands.find(command => command.name() === 'enable')!.helpInformation()).toContain('--open');
   });

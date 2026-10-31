@@ -11,7 +11,9 @@ butterbase office decisions approve <id> --source substrate --org <uuid> --open 
 butterbase office memory record-learning --file learning.json --org <uuid> --json
 ```
 
-Every Office command requires `--org` and supports `--json`, with no selected app. Credentials come from the existing platform login/config, or `BUTTERBASE_API_KEY`; `BUTTERBASE_CONTROL_API_URL` can override the configured endpoint. `butterbase office --help` lists the 22 commands and nested groups.
+Every Office command requires `--org` and supports `--json`, with no selected app. Credentials come from the existing platform login/config, or `BUTTERBASE_API_KEY`; `BUTTERBASE_CONTROL_API_URL` can override the configured endpoint. `butterbase office --help` lists the 44 commands and nested groups.
+
+Use `agent-memories list|search|get|record|amend|archive` for shared organization context, `skills` for routine drafts, tests, versions, runs and protected activation, and `principles amend|retire --file <json>` for governed rule proposals. `settings get` reads cadence; `settings update 15 --expected-revision <n>` requests owner confirmation without resuming a paused Office. `records list <resource> --limit 25 --cursor <cursor>` reads real pages; preserve any `--kind`, `--status` or `--skill` filters across continuation. Lists default to 25 records and allow at most 100 per page.
 
 Protected commands print a confirmation receipt and URL. `--open` explicitly launches a browser; a missing browser still leaves the URL usable. `--wait` observes only; use `--wait-timeout <ms>` to bound waiting. `status --confirmation <id>` inspects the saved outcome. Use `--idempotency-key` to retry the same intended write, and `--source office|substrate` for decision references.
 

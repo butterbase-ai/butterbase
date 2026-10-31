@@ -1,13 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   OFFICE_ACTIONS, officeActionSchema, decisionRefSchema, officeStatusResultSchema,
-  confirmationReceiptSchema, officeTurnSchema, officePublicEventSchema, officeErrorSchema,
+  confirmationReceiptSchema, officeTurnSchema, officePublicEventSchema, officeErrorSchema, officeCommandSchema,
 } from './office.js';
 
 const org_id = 'a0000000-0000-4000-8000-000000000001';
 const request = (action: string, fields: Record<string, unknown> = {}) => ({ action, org_id, ...fields });
 
 describe('Office wire requests', () => {
+  it('requires exact fields on skill browser commands', () => {
+    expect(officeCommandSchema.safeParse({ action: 'skill_approve', skill_id: org_id, version: 2 }).success).toBe(true);
+    expect(officeCommandSchema.safeParse({ action: 'skill_approve', skill_id: org_id }).success).toBe(false);
+    expect(officeCommandSchema.safeParse({ action: 'skill_run_now', skill_id: org_id, version: 2 }).success).toBe(false);
+    expect(officeCommandSchema.safeParse({ action: 'skill_set_enabled', skill_id: org_id, enabled: true, bypass: true }).success).toBe(false);
+  });
   it('accepts exactly the agreed action vocabulary', () => {
     expect([...OFFICE_ACTIONS].sort()).toEqual([
       'status', 'enable', 'pause', 'resume', 'list_decisions', 'get_decision',
@@ -15,8 +21,15 @@ describe('Office wire requests', () => {
       'get_conversation', 'ask', 'list_memory', 'search_memory', 'get_source_artifact',
       'record_decision', 'record_commitment', 'record_learning', 'list_principles',
       'get_principle', 'record_principle',
+      'list_agent_memories', 'search_agent_memories', 'get_agent_memory',
+      'record_agent_memory', 'amend_agent_memory', 'archive_agent_memory',
+      'list_skills', 'get_skill', 'list_skill_versions', 'list_skill_runs', 'draft_skill',
+      'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
+      'amend_principle', 'retire_principle',
+      'get_office_settings', 'update_office_settings',
+      'list_office_records',
     ].sort());
-    expect(new Set(OFFICE_ACTIONS).size).toBe(22);
+    expect(new Set(OFFICE_ACTIONS).size).toBe(44);
     expect(officeActionSchema.safeParse(request('execute_anything')).success).toBe(false);
   });
 

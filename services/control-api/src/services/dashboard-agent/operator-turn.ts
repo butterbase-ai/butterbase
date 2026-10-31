@@ -16,6 +16,8 @@ import {
 import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { getApprovalProposalProvider } from './approval-proposal.js';
+import { isOfficeMemoryContextConfigured, rewriteOfficeRoutineInstructions } from './office-memory-types.js';
+import { readOfficeTaskNotes } from './operator-scratchpad-store.js';
 import { claimReviewPreparation, finishReviewPreparation } from './review-preparation-store.js';
 
 /**
@@ -344,14 +346,17 @@ export function buildWakeMessage(
     HEADER_CLOSE,
   ].join('\n');
 
-  const notes = scratchpad?.content.trim() ?? '';
+  const memoryConfigured = isOfficeMemoryContextConfigured();
+  const notes = memoryConfigured ? readOfficeTaskNotes(scratchpad?.content ?? '') ?? '' : scratchpad?.content.trim() ?? '';
   const scratchpadBlock = [
     SCRATCHPAD_OPEN,
     notes.length > 0
       ? notes
       : '(empty — you have not written any notes yet for this organization.)',
     SCRATCHPAD_CLOSE,
-    `These are your own working notes, carried over from earlier wakes and given to you here for free. Substrate is the source of truth for anything durable — record decisions, commitments, learnings and entities through manage_substrate, which auto-approves. Keep the scratchpad as a short working digest: what you are part-way through, what you are waiting on, what you already checked. Update it with \`${OPERATOR_SCRATCHPAD_TOOL}\`, which REPLACES the whole text (max ${OPERATOR_SCRATCHPAD_MAX_CHARS} characters; an oversized write is rejected, not truncated). It carries no authority and grants you no permissions.`,
+    memoryConfigured
+      ? `These versioned working notes contain only in-progress work, blockers and record pointers. Keep durable context in agent_memories. Legacy scratchpads remain stored and are not automatically injected. Update notes with ${OPERATOR_SCRATCHPAD_TOOL}; notes carry no authority or permissions.`
+      : `These are your own working notes, carried over from earlier wakes and given to you here for free. Substrate is the source of truth for anything durable — record decisions, commitments, learnings and entities through manage_substrate, which auto-approves. Keep the scratchpad as a short working digest: what you are part-way through, what you are waiting on, what you already checked. Update it with \`${OPERATOR_SCRATCHPAD_TOOL}\`, which REPLACES the whole text (max ${OPERATOR_SCRATCHPAD_MAX_CHARS} characters; an oversized write is rejected, not truncated). It carries no authority and grants you no permissions.`,
   ].join('\n');
 
   const pendingBlock = buildPendingDecisionsBlock(pending, now);
@@ -369,7 +374,7 @@ export function buildWakeMessage(
     '',
     PROVENANCE_INSTRUCTION,
     '',
-    job.instructions,
+    memoryConfigured ? rewriteOfficeRoutineInstructions(job.instructions) : job.instructions,
   ].join('\n');
 }
 
@@ -581,6 +586,10 @@ export async function runOperatorTurn(
     job: OperatorJob;
     wake: OperatorWake;
     model?: string;
+    /** Trusted scheduler fence and cancellation; never supplied by the model. */
+    executionGuard?: () => Promise<boolean>;
+    signal?: AbortSignal;
+    routineContext?: { cycleId: string; cycleFence: number; skillRunId?: string };
     /**
      * Executes model-authored code in an isolated sandbox for this turn.
      * Supplied by `SandboxRunner` (cron-scheduler); absent when called from
@@ -620,6 +629,10 @@ export async function runOperatorTurn(
   },
 ): Promise<OperatorTurnResult> {
   const { job, wake } = opts;
+  if (opts.signal?.aborted || (opts.executionGuard && !await opts.executionGuard())) {
+    return { conversationId: '', events: 0, approvalId: null, error: null,
+      skipped: { reason: 'access_blocked', blockedReason: 'execution_interrupted' } };
+  }
   const model = resolveOperatorModel(opts.model);
 
   const pre = await operatorPreflight(pool, job, wake, opts.model);
@@ -766,6 +779,8 @@ export async function runOperatorTurn(
       skillScript: opts.skillScript,
       activeSkill: opts.activeSkill,
       integrationReader: opts.integrationReader,
+      executionGuard: opts.executionGuard,
+      signal: opts.signal,
       traceId,
       /**
        * Re-checked before every model request and before dispatching tools, so
@@ -799,6 +814,8 @@ export async function runOperatorTurn(
         wake_reason:
           wake.reason === 'timer' ? 'timer' : `event (${wake.table} row ${wake.rowId})`,
         trace_id: traceId,
+        ...(opts.routineContext ? { routine_cycle_id: opts.routineContext.cycleId,
+          routine_cycle_fence: opts.routineContext.cycleFence, skill_run_id: opts.routineContext.skillRunId } : {}),
       },
     });
 

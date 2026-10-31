@@ -3,6 +3,11 @@ import type {
   OfficeStatus, ConfirmationReceipt, DecisionRef, OfficeDecision, OfficeDecisionContext, OfficeConversation, OfficeConversationDetail,
   OfficeTurn, OfficePublicEvent, OfficeMemoryRecord, OfficeMemoryResult, OfficeSourceArtifact, OfficePrinciple,
   OfficeRecordDecisionInput, OfficeRecordCommitmentInput, OfficeRecordLearningInput, OfficeRecordPrincipleInput,
+  AgentMemorySummary, AgentMemoryRecord, OfficeRecordAgentMemoryInput, OfficeAmendAgentMemoryInput, OfficeArchiveAgentMemoryInput,
+  OfficeSkillRecord, OfficeSkillDetail, OfficeSkillVersionRecord, OfficeSkillRunRecord,
+  OfficeAmendPrincipleInput, OfficeRetirePrincipleInput,
+  OfficeRoutineSettings,
+  OfficeListResource,
 } from '@butterbase/shared';
 import { OfficeTransport, officeError } from './transport.js';
 import { OfficeClientError, OfficeStreamError, type OfficeAskOptions, type OfficeAskStreamOptions, type OfficeConfirmationWaitOptions,
@@ -29,6 +34,15 @@ export class OfficeClient {
     catch { return { data: null, error: officeError('invalid_request', 'A unique idempotency key is required for this write.') }; }
   }
   getStatus(options?: OfficeRequestOptions) { return this.call<OfficeStatus>('status', {}, options); }
+  readonly records = {
+    list: <T extends {id:string} = {id:string;[key:string]:unknown}>(resource:OfficeListResource, options?:OfficePageOptions & {kind?:string;status?:string;skillId?:string}) =>
+      this.call<OfficePage<T>>('list_office_records',{resource,cursor:options?.cursor,limit:options?.limit,kind:options?.kind,status:options?.status,skill_id:options?.skillId},options),
+  };
+  readonly settings = {
+    get: (options?: OfficeRequestOptions) => this.call<OfficeRoutineSettings>('get_office_settings', {}, options),
+    update: (intervalMinutes: OfficeRoutineSettings['interval_minutes'], expectedRevision: number, options?: OfficeWriteOptions) =>
+      this.write<ConfirmationReceipt>('update_office_settings', { interval_minutes: intervalMinutes, expected_revision: expectedRevision }, options),
+  };
   enable(options?: OfficeWriteOptions) { return this.write<ConfirmationReceipt>('enable', {}, options); }
   pause(options?: OfficeWriteOptions) { return this.write<ConfirmationReceipt>('pause', {}, options); }
   resume(options?: OfficeWriteOptions) { return this.write<ConfirmationReceipt>('resume', {}, options); }
@@ -46,6 +60,14 @@ export class OfficeClient {
     get: (id: string, options?: OfficeConversationGetOptions) => this.call<OfficeConversationDetail>('get_conversation', { conversation_id: id, turn_id: options?.turnId, after_sequence: options?.afterSequence, limit: options?.limit }, options),
   };
   ask(message: string, options?: OfficeAskOptions) { return this.write<OfficeTurn>('ask', { message, conversation_id: options?.conversationId, wait_ms: options?.waitMs }, options); }
+  readonly agentMemories = {
+    list: (options?: OfficePageOptions) => this.call<OfficePage<AgentMemorySummary>>('list_agent_memories', { cursor: options?.cursor, limit: options?.limit }, options),
+    search: (query: string, options?: OfficePageOptions) => this.call<OfficePage<AgentMemorySummary>>('search_agent_memories', { cursor: options?.cursor, limit: options?.limit, query }, options),
+    get: (id: string, options?: OfficeRequestOptions) => this.call<AgentMemoryRecord>('get_agent_memory', { memory_id: id }, options),
+    record: (payload: OfficeRecordAgentMemoryInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('record_agent_memory', { payload }, options),
+    amend: (payload: OfficeAmendAgentMemoryInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('amend_agent_memory', { payload }, options),
+    archive: (payload: OfficeArchiveAgentMemoryInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('archive_agent_memory', { payload }, options),
+  };
   readonly memory = {
     list: (options?: OfficeMemoryListOptions) => this.call<OfficePage<OfficeMemoryRecord>>('list_memory', { cursor: options?.cursor, limit: options?.limit, kind: options?.kind }, options),
     search: (query: string, options?: OfficeRequestOptions & { limit?: number }) => this.call<OfficePage<OfficeMemoryRecord>>('search_memory', { query, limit: options?.limit }, options),
@@ -55,9 +77,24 @@ export class OfficeClient {
     recordLearning: (payload: OfficeRecordLearningInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('record_learning', { payload }, options),
   };
   readonly principles = {
+    amend: (payload: OfficeAmendPrincipleInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('amend_principle', { payload }, options),
+    retire: (payload: OfficeRetirePrincipleInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('retire_principle', { payload }, options),
     list: (options?: OfficePageOptions) => this.call<OfficePage<OfficePrinciple>>('list_principles', { cursor: options?.cursor, limit: options?.limit }, options),
     get: (id: string, options?: OfficeRequestOptions) => this.call<OfficePrinciple>('get_principle', { principle_id: id }, options),
     record: (payload: OfficeRecordPrincipleInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('record_principle', { payload }, options),
+  };
+  readonly skills = {
+    list: (options?: OfficePageOptions) => this.call<OfficePage<OfficeSkillRecord>>('list_skills', { cursor: options?.cursor, limit: options?.limit }, options),
+    get: (id: string, options?: OfficeRequestOptions) => this.call<OfficeSkillDetail>('get_skill', { skill_id: id }, options),
+    versions: (id: string, options?: OfficePageOptions) => this.call<OfficePage<OfficeSkillVersionRecord>>('list_skill_versions', { skill_id: id, cursor: options?.cursor, limit: options?.limit }, options),
+    runs: (id: string, options?: OfficePageOptions) => this.call<OfficePage<OfficeSkillRunRecord>>('list_skill_runs', { skill_id: id, cursor: options?.cursor, limit: options?.limit }, options),
+    draft: (message: string, input: { skillId?: string } = {}, options?: OfficeWriteOptions) => this.write<OfficeTurn>('draft_skill', { message, skill_id: input.skillId }, options),
+    test: (id: string, version: number, options?: OfficeWriteOptions) => this.write<OfficeSkillRunRecord>('test_skill', { skill_id: id, version }, options),
+    reject: (id: string, version: number, reason: string, options?: OfficeWriteOptions) => this.write<{ status: 'rejected' }>('reject_skill', { skill_id: id, version, reason }, options),
+    approve: (id: string, version: number, options?: OfficeWriteOptions) => this.write<ConfirmationReceipt>('approve_skill', { skill_id: id, version }, options),
+    setEnabled: (id: string, enabled: boolean, options?: OfficeWriteOptions) => this.write<ConfirmationReceipt>('set_skill_enabled', { skill_id: id, enabled }, options),
+    rollback: (id: string, version: number, options?: OfficeWriteOptions) => this.write<ConfirmationReceipt>('rollback_skill', { skill_id: id, version }, options),
+    run: (id: string, options?: OfficeWriteOptions) => this.write<ConfirmationReceipt>('run_skill', { skill_id: id }, options),
   };
   /** Timeout/abort ends only observation. On timeout data retains the last receipt. */
   async waitForConfirmation(id: string, options: OfficeConfirmationWaitOptions = {}): Promise<OfficeResponse<ConfirmationReceipt>> {

@@ -247,7 +247,7 @@ describe('human assistant — unchanged', () => {
     const { bodies } = noToolCalls();
     await collect(runAgentTurn(humanInput()));
     const expected = getToolCatalog()
-      .filter((t) => t.operatorOnly !== true)
+      .filter((t) => t.operatorOnly !== true && t.officeOnly !== true)
       // Office skill seams require executors this plain turn does not supply.
       .filter((t) => t.name !== 'skill_creator' && t.name !== 'run_skill_script')
       // Owner proposals require stored Office provenance and a provider.
@@ -264,7 +264,8 @@ describe('human assistant — unchanged', () => {
     const seamCount = getToolCatalog()
       .filter((t) => t.name === 'skill_creator' || t.name === 'run_skill_script').length;
     expect(getToolCatalog().filter((t) => t.name === PROPOSE_ACTION_TOOL)).toHaveLength(1);
-    expect(expected.length).toBe(getToolCatalog().length - operatorOnlyCount - seamCount - 1);
+    const officeOnlyCount = getToolCatalog().filter(t => t.officeOnly === true).length;
+    expect(expected.length).toBe(getToolCatalog().length - operatorOnlyCount - officeOnlyCount - seamCount - 1);
   });
 
   it('sends a byte-identical system prompt', async () => {

@@ -42,6 +42,10 @@ import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-gua
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
+import { resolveOfficeMemoryContext, type OfficeMemoryToolAdapter } from './office-memory-types.js';
+import { formatOfficeTaskNotes } from './operator-scratchpad-store.js';
+import { getOperatorScratchpad, readOfficeTaskNotes } from './operator-scratchpad-store.js';
+import { READ_OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
 import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS, resolveOfficeVerdict, type OperatorPolicy } from './operator-policy.js';
 import { classifyOfficeTool } from './office-tool-policy.js';
 import { captureApprovalOperation, deploymentArtifact } from './approval-operation.js';
@@ -716,6 +720,9 @@ export async function* runAgentTurn(
     userId: string;
     jwt: string;
     userMessage: string;
+    /** Server supplied; never read from a chat request body. */
+    officeMemoryContext?: string;
+    officeMemoryTools?: OfficeMemoryToolAdapter;
     model: string;
     pool: pg.Pool;
     // Active org (from the dashboard's `x-organization-id` header). When set,
@@ -899,6 +906,12 @@ export async function* runAgentTurn(
     }
   }
   const isOfficeTurn = officeOrganizationId !== null;
+  const memoryScopeOrg = operatorOrgId ?? officeOrganizationId;
+  const officeMemory = memoryScopeOrg ? await resolveOfficeMemoryContext({ organizationId: memoryScopeOrg,
+    userId: input.userId, model: input.model, autonomous: isOperator, readOnly: input.readOnly === true,
+    ...(!isOperator && !input.activeSkill ? { customizationMessage: input.userMessage } : {}) }) : null;
+  const officeMemoryText = memoryScopeOrg ? input.officeMemoryContext ?? officeMemory?.text : undefined;
+  const officeMemoryTools = memoryScopeOrg ? input.officeMemoryTools ?? officeMemory?.tools : undefined;
 
   /**
    * The guard for a foreground Office turn. It answers the same question the
@@ -1123,6 +1136,7 @@ export async function* runAgentTurn(
   const proposalOrganizationId = operatorOrgId ?? officeOrganizationId;
   const structuredProposals = !!proposalOrganizationId && !!proposalProvider?.enabled(proposalOrganizationId);
   const seamAvailable = (t: ToolSpec): boolean =>
+    (t.officeOnly !== true || isOperator || isOfficeTurn) &&
     (t.name !== PROPOSE_ACTION_TOOL || ((isOperator || isOfficeTurn) && structuredProposals)) &&
     (t.name !== SKILL_CREATOR_TOOL || typeof input.skillCreator === 'function') &&
     (t.name !== RUN_SKILL_SCRIPT_TOOL
@@ -1365,7 +1379,7 @@ export async function* runAgentTurn(
   const replayHistory = isOperator ? trimOperatorHistory(history) : history;
 
   const messages: GatewayMessage[] = [
-    { role: 'system', content: schemaPromptBlock + getSystemPrompt() },
+    { role: 'system', content: schemaPromptBlock + getSystemPrompt() + (officeMemoryText ? `\n\n${officeMemoryText}` : '') },
     ...toGatewayMessages(replayHistory),
   ];
 
@@ -1542,6 +1556,26 @@ export async function* runAgentTurn(
           }
         }
 
+        if (officeMemoryTools) {
+          try {
+            const mapped = officeMemoryTools(tc.name, tc.args);
+            tc = { ...tc, name: mapped.name, args: mapped.args };
+            if (proposalInput) {
+              proposalInput = { ...proposalInput, operation: { ...proposalInput.operation, tool: tc.name, arguments: tc.args as Record<string, unknown> } };
+              if (input.reviewPreparation && proposalIntentFingerprint(tc.name, tc.args, input.reviewPreparation.operation.artifact) !== input.reviewPreparation.intentFingerprint) {
+                throw new Error('proposal_preparation_mismatch');
+              }
+            }
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'agent_memory_request_invalid';
+            const payload = { code, message: 'Use an explicit authorized record category, or correct the memory request.' };
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield { type: 'tool_call', ...originalCall };
+            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            continue;
+          }
+        }
         if (structuredProposals && !proposalInput && tc.name === 'manage_substrate' && (tc.args as any)?.action === 'propose') {
           try {
             const validated = await validateRegisteredToolArguments(tc.name, tc.args);
@@ -2251,6 +2285,23 @@ export async function* runAgentTurn(
          * failure and can shorten its own summary; silent truncation would
          * drop whichever part did not fit with no signal.
          */
+        if (tc.name === READ_OPERATOR_SCRATCHPAD_TOOL) {
+          toolCallsCount++;
+          let result: unknown;
+          if (!memoryScopeOrg || Object.keys((tc.args ?? {}) as object).length) result = { code: 'working_notes_scope_invalid' };
+          else {
+            try {
+              const saved = await getOperatorScratchpad(input.pool, memoryScopeOrg);
+              const current = saved ? readOfficeTaskNotes(saved.content) : null;
+              result = { content: current ?? saved?.content ?? '', format: current === null ? 'legacy' : 'task_notes_v2', updated_at: saved?.updatedAt ?? null };
+            } catch { result = { code: 'working_notes_unavailable' }; }
+          }
+          toolCallResults.push({ id: tc.id, result });
+          yield { type: 'tool_result', id: tc.id, result };
+          await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: tc.id,
+            toolName: tc.name, toolArgs: tc.args, toolResult: result });
+          continue;
+        }
         if (isOperatorScratchpadTool(tc.name)) {
           toolCallsCount++;
           const spArgs = (tc.args ?? {}) as { content?: unknown };
@@ -2261,7 +2312,7 @@ export async function* runAgentTurn(
             payload = { error: `Tool "${tc.name}" requires a string "content" argument.` };
           } else {
             try {
-              const saved = await setOperatorScratchpad(input.pool, operatorOrgId, spArgs.content);
+              const saved = await setOperatorScratchpad(input.pool, operatorOrgId, officeMemoryTools ? formatOfficeTaskNotes(spArgs.content) : spArgs.content);
               payload = {
                 result: { ok: true, characters: saved.content.length, updated_at: saved.updatedAt },
               };

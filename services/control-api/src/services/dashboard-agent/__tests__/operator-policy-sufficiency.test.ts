@@ -126,6 +126,7 @@ describe('the allow tier is the spec list, nothing more', () => {
     'manage_substrate',
     'run_sandbox_code',
     'update_operator_scratchpad',
+    'read_operator_scratchpad', // Explicit scoped read of retained working state.
     // NOT in the spec's `allow` code block, and deliberately allow anyway. The
     // spec's own "Accepted risks" section, item 3, says "manage_integrations
     // remains ungated (accepted 2026-08-05, re-confirmed 2026-08-06)" and

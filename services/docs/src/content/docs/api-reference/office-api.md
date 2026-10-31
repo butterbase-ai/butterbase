@@ -29,6 +29,22 @@ All paths below start with `/v1/me/office`.
 | `POST /memory/:kind` | `{payload, idempotency_key}`; kind is `record_decision`, `record_commitment`, `record_learning` or `record_principle` |
 | `GET /principles` | `cursor`, `limit` |
 | `GET /principles/:id` | Read a native principle |
+| `POST /principles/amend` or `/principles/retire` | `{payload,idempotency_key}`; native approval-required proposal |
+| `GET /agent-memories` or `/agent-memories/search` | `query?`, `cursor`, `limit`; compact summaries |
+| `GET /agent-memories/:id` | Full curated entry and saved evidence |
+| `POST /agent-memories/record`, `/amend` or `/archive` | `{payload,idempotency_key}`; amend/archive require `expected_revision` |
+| `GET /skills` | `cursor`, `limit`; approved content for API-key/member readers |
+| `GET /skills/:id` | Skill and current version; histories fetched separately |
+| `GET /skills/:id/versions` or `/skills/:id/runs` | `cursor`, `limit`; API clients exclude drafts/tests |
+| `POST /skills/draft` | `{message,skill_id?,idempotency_key}`; returns a durable Ask turn |
+| `POST /skills/:id/versions/:version/test` | `{idempotency_key}`; pinned read-only test run |
+| `POST /skills/:id/versions/:version/reject` | `{reason,idempotency_key}` |
+| `GET /settings` | Interval, revision and full-sweep clock/blocked status |
+| `GET /pages/:resource` | `cursor`, `limit`, resource-specific `kind`, `status`, `skill_id` |
+
+Additional confirmation actions are `skill_approve`, `skill_set_enabled`, `skill_rollback`, `skill_run_now` and `settings_update`; they carry the exact skill/version/enabled state or `interval_minutes` plus `expected_revision`. Use the typed client methods to construct these requests. Skills remain immutable versions; approval, activation and run receipts require the initiating owner's browser confirmation. Settings intervals are 10, 15, 30 or 60 minutes; updating a paused Office does not resume it.
+
+Page resources are `entities`, `business_memory`, `source_artifacts`, `actions`, `principles`, `skills`, `skill_versions` and `skill_runs`. The two histories require `skill_id`. Pages default to 25 and allow at most 100. Cursors bind organization, resource, filters, visibility and traversal cutoff. They preserve timestamp precision and stable tie-breakers but do not promise a transaction-wide snapshot. The public demo exposes only its fixed-scope redacted business pages, never private skill or curated-memory pages.
 
 Human review/resolution determines scope from the saved confirmation; it does not trust a dashboard-selected organization. A review GET never executes anything. The SDK and MCP unwrap the existing `{status}` envelope into the public status value. Existing dashboard lifecycle endpoints remain compatible; external clients use confirmation preparation for protected actions.
 

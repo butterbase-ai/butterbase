@@ -1,12 +1,16 @@
 import { Command, Option } from 'commander';
 import { readFile } from 'node:fs/promises';
-import { officeActionSchema, officeMemorySchemas, type OfficeAction, type OfficeMemoryKind } from '@butterbase/shared';
+import { officeActionSchema, officeMemorySchemas, officeAmendPrincipleSchema, officeRetirePrincipleSchema, officeListResourceSchema, type OfficeAction } from '@butterbase/shared';
+import { officeRecordAgentMemorySchema, officeAmendAgentMemorySchema, officeArchiveAgentMemorySchema } from '@butterbase/shared';
 import { OfficeClientError, OfficeStreamError, type OfficeClient, type OfficeResponse, type ConfirmationReceipt,
   type OfficePublicEvent, type OfficeError, type DecisionRef, type OfficeRecordDecisionInput, type OfficeRecordCommitmentInput,
-  type OfficeRecordLearningInput, type OfficeRecordPrincipleInput } from '@butterbase/sdk';
+  type OfficeRecordLearningInput, type OfficeRecordPrincipleInput, type OfficeRecordAgentMemoryInput,
+  type OfficeAmendAgentMemoryInput, type OfficeArchiveAgentMemoryInput, type OfficeAmendPrincipleInput, type OfficeRetirePrincipleInput } from '@butterbase/sdk';
 import { createOfficeCliClient, openOfficeConfirmation } from '../lib/office-client.js';
 
 interface Options {
+  skill?: string;
+  expectedRevision?: string;
   org: string; json?: boolean; source?: 'office' | 'substrate'; status?: 'pending' | 'resolved' | 'all';
   limit?: string; cursor?: string; confirmation?: string; idempotencyKey?: string; title?: string;
   conversation?: string; turn?: string; afterSequence?: string; waitMs?: string; stream?: boolean;
@@ -48,13 +52,15 @@ function emit(result: OfficeResponse<unknown>, options: Options) {
     if (result.error.idempotencyKey) console.error(`Retry identity: --idempotency-key ${result.error.idempotencyKey}`);
   }
 }
-async function payloadFile(action: OfficeMemoryKind, file?: string): Promise<unknown> {
+const payloadSchemas = { ...officeMemorySchemas, amend_principle: officeAmendPrincipleSchema, retire_principle: officeRetirePrincipleSchema, record_agent_memory: officeRecordAgentMemorySchema,
+  amend_agent_memory: officeAmendAgentMemorySchema, archive_agent_memory: officeArchiveAgentMemorySchema };
+async function payloadFile(action: keyof typeof payloadSchemas, file?: string): Promise<unknown> {
   if (!file) throw new UsageError('--file <json> is required.');
   let text: string;
   try { text = await readFile(file, 'utf8'); } catch { throw new UsageError('Unable to read --file. Supply a readable UTF-8 JSON file.'); }
   let input: unknown;
   try { input = JSON.parse(text); } catch { throw new UsageError('Invalid JSON in --file.'); }
-  const parsed = officeMemorySchemas[action].safeParse(input);
+  const parsed = payloadSchemas[action].safeParse(input);
   if (!parsed.success) throw new UsageError(`Invalid ${action} payload: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'payload'}: ${issue.message}`).join('; ')}`);
   return parsed.data;
 }
@@ -114,13 +120,20 @@ export async function runOfficeCommand(action: OfficeAction, args: string[], opt
     const timeoutMs = int(options.waitTimeout, '--wait-timeout', 2147483647);
     if (action === 'ask' && !options.stream && (options.turn || options.afterSequence !== undefined)) throw new UsageError('--turn and --after-sequence require --stream.');
     if (action === 'ask' && !args[0] && !(options.stream && options.turn && options.conversation)) throw new UsageError('Supply a message, or use --stream --conversation <id> --turn <id> to observe an existing turn.');
-    const payload = action in officeMemorySchemas ? await payloadFile(action as OfficeMemoryKind, options.file) : undefined;
+    const payload = action in payloadSchemas ? await payloadFile(action as keyof typeof payloadSchemas, options.file) : undefined;
     const client = await createOfficeCliClient(options.org);
     const request = { signal: observer.signal }, write = { ...request, idempotencyKey: options.idempotencyKey };
     const page = { ...request, cursor: options.cursor, limit };
     const ref = { source: options.source ?? 'office', id: args[0] ?? '' };
     let result: OfficeResponse<unknown>;
     switch (action) {
+      case 'list_office_records': result = await client.records.list(officeListResourceSchema.parse(args[0]),{...page,skillId:options.skill,kind:options.kind,status:options.status});break;
+      case 'get_office_settings': result = await client.settings.get(request); break;
+      case 'update_office_settings': {
+        const minutes = int(args[0], 'interval', 60, 10);
+        if (![10,15,30,60].includes(minutes ?? 0)) throw new UsageError('Interval must be 10, 15, 30 or 60 minutes.');
+        result = await client.settings.update(minutes as 10 | 15 | 30 | 60, int(options.expectedRevision, '--expected-revision', Number.MAX_SAFE_INTEGER, 1)!, write); break;
+      }
       case 'status': result = options.confirmation ? await client.getConfirmation(options.confirmation, request) : await client.getStatus(request); break;
       case 'enable': result = await client.enable(write); break;
       case 'pause': result = await client.pause(write); break;
@@ -136,6 +149,25 @@ export async function runOfficeCommand(action: OfficeAction, args: string[], opt
       case 'ask': result = options.stream ? await streamAsk(client, args[0] ?? '', options, observer.signal)
         : await client.ask(args[0], { ...write, conversationId: options.conversation, waitMs }); break;
       case 'list_memory': result = await client.memory.list({ ...page, kind: options.kind }); break;
+      case 'list_skills': result = await client.skills.list(page); break;
+      case 'get_skill': result = await client.skills.get(args[0], request); break;
+      case 'list_skill_versions': result = await client.skills.versions(args[0], page); break;
+      case 'list_skill_runs': result = await client.skills.runs(args[0], page); break;
+      case 'draft_skill': result = await client.skills.draft(args[0], { skillId: options.skill }, write); break;
+      case 'test_skill': result = await client.skills.test(args[0], int(args[1], 'version', 2147483647, 1)!, write); break;
+      case 'reject_skill': result = await client.skills.reject(args[0], int(args[1], 'version', 2147483647, 1)!, options.reason ?? '', write); break;
+      case 'approve_skill': result = await client.skills.approve(args[0], int(args[1], 'version', 2147483647, 1)!, write); break;
+      case 'rollback_skill': result = await client.skills.rollback(args[0], int(args[1], 'version', 2147483647, 1)!, write); break;
+      case 'set_skill_enabled':
+        if (!['true', 'false'].includes(args[1])) throw new UsageError('State must be true or false.');
+        result = await client.skills.setEnabled(args[0], args[1] === 'true', write); break;
+      case 'run_skill': result = await client.skills.run(args[0], write); break;
+      case 'list_agent_memories': result = await client.agentMemories.list(page); break;
+      case 'search_agent_memories': result = await client.agentMemories.search(args[0], page); break;
+      case 'get_agent_memory': result = await client.agentMemories.get(args[0], request); break;
+      case 'record_agent_memory': result = await client.agentMemories.record(payload as OfficeRecordAgentMemoryInput, write); break;
+      case 'amend_agent_memory': result = await client.agentMemories.amend(payload as OfficeAmendAgentMemoryInput, write); break;
+      case 'archive_agent_memory': result = await client.agentMemories.archive(payload as OfficeArchiveAgentMemoryInput, write); break;
       case 'search_memory': result = await client.memory.search(args[0], { ...request, limit }); break;
       case 'get_source_artifact': result = await client.memory.getSourceArtifact(args[0], request); break;
       case 'record_decision': result = await client.memory.recordDecision(payload as OfficeRecordDecisionInput, write); break;
@@ -144,6 +176,8 @@ export async function runOfficeCommand(action: OfficeAction, args: string[], opt
       case 'list_principles': result = await client.principles.list(page); break;
       case 'get_principle': result = await client.principles.get(args[0], request); break;
       case 'record_principle': result = await client.principles.record(payload as OfficeRecordPrincipleInput, write); break;
+      case 'amend_principle': result = await client.principles.amend(payload as OfficeAmendPrincipleInput, write); break;
+      case 'retire_principle': result = await client.principles.retire(payload as OfficeRetirePrincipleInput, write); break;
     }
     const receipt = result.data as ConfirmationReceipt | null;
     if (!result.error && receipt?.state === 'awaiting_confirmation') {
@@ -207,6 +241,14 @@ export function registerOfficeCommands(program: Command): Command {
   leaf(conversations, 'get <id>', 'get_conversation', 'Read a conversation or exact turn').option('--turn <id>', 'Exact turn ID')
     .option('--after-sequence <n>', 'Include remaining public turn events').option('--limit <n>', 'Maximum records (1–100)');
   const memory = office.command('memory').description('Read or record business memory through native Substrate APIs');
+  const agentMemories = office.command('agent-memories').description('Read or update curated shared Office context');
+  page(leaf(agentMemories, 'list', 'list_agent_memories', 'List compact memory summaries'));
+  page(leaf(agentMemories, 'search <query>', 'search_agent_memories', 'Search curated memories'));
+  leaf(agentMemories, 'get <id>', 'get_agent_memory', 'Read one full memory');
+  for (const [syntax, action] of [['record', 'record_agent_memory'], ['amend', 'amend_agent_memory'], ['archive', 'archive_agent_memory']] as const) {
+    write(leaf(agentMemories, syntax, action, 'Write curated memory through Substrate policy'))
+      .requiredOption('--file <json>', 'JSON payload; amendment/archive requires memory_id and expected_revision');
+  }
   page(leaf(memory, 'list', 'list_memory', 'List business memory')).addOption(new Option('--kind <kind>').choices(['decision', 'commitment', 'learning']));
   leaf(memory, 'search <query>', 'search_memory', 'Search business memory').option('--limit <n>', 'Maximum results (1–100; search has no cursor)');
   leaf(memory.command('source').description('Read source artifacts'), 'get <id>', 'get_source_artifact', 'Read a source artifact');
@@ -214,8 +256,27 @@ export function registerOfficeCommands(program: Command): Command {
     write(leaf(memory, syntax, action, 'Record a native business memory payload')).requiredOption('--file <json>', 'UTF-8 JSON matching the native record schema');
   }
   const principles = office.command('principles').description('Read or propose business principles');
+  page(leaf(office.command('records').description('Read independent server pages'), 'list <resource>', 'list_office_records', 'List one Office resource')).option('--skill <uuid>','Skill for versions or runs').option('--kind <kind>','Resource kind or entity type').option('--status <state>','Resource status');
+  const settings = office.command('settings').description('Inspect and configure Office routine checks');
+  leaf(settings, 'get', 'get_office_settings', 'Read interval and actual sweep timing');
+  protect(leaf(settings, 'update <minutes>', 'update_office_settings', 'Request owner confirmation of the interval'))
+    .requiredOption('--expected-revision <n>', 'Revision returned by settings get');
+  const skills = office.command('skills').description('Inspect routines, draft revisions and request owner confirmations');
+  page(leaf(skills, 'list', 'list_skills', 'List visible skills'));
+  leaf(skills, 'get <id>', 'get_skill', 'Read the current approved skill');
+  page(leaf(skills, 'versions <id>', 'list_skill_versions', 'List visible versions'));
+  page(leaf(skills, 'runs <id>', 'list_skill_runs', 'List visible runs'));
+  write(leaf(skills, 'draft <message>', 'draft_skill', 'Prepare one draft through Ask')).option('--skill <id>', 'Revise this existing skill');
+  write(leaf(skills, 'test <id> <version>', 'test_skill', 'Queue or observe one pinned read-only test'));
+  write(leaf(skills, 'reject <id> <version>', 'reject_skill', 'Reject a draft without activation')).requiredOption('--reason <reason>', 'Changes needed');
+  protect(leaf(skills, 'approve <id> <version>', 'approve_skill', 'Request browser approval of this tested version'));
+  protect(leaf(skills, 'set-enabled <id> <state>', 'set_skill_enabled', 'Request browser confirmation; state is true or false'));
+  protect(leaf(skills, 'rollback <id> <version>', 'rollback_skill', 'Request restoring an approved version'));
+  protect(leaf(skills, 'run <id>', 'run_skill', 'Request one manual run of the pinned version'));
   page(leaf(principles, 'list', 'list_principles', 'List principles'));
   leaf(principles, 'get <id>', 'get_principle', 'Read a principle');
+  write(leaf(principles, 'amend', 'amend_principle', 'Propose changes to an enforceable rule')).requiredOption('--file <json>', 'Native principle_id, reason and changes');
+  write(leaf(principles, 'retire', 'retire_principle', 'Propose retirement of an enforceable rule')).requiredOption('--file <json>', 'Native principle_id and reason');
   write(leaf(principles, 'record', 'record_principle', 'Propose a principle through native policy')).requiredOption('--file <json>', 'UTF-8 JSON matching the native principle schema');
   return office;
 }

@@ -52,6 +52,7 @@ vi.mock('../approvals-store.js', () => ({
 vi.mock('../tool-catalog.js', () => ({
   PROPOSE_ACTION_TOOL: 'propose_action',
   OPERATOR_SCRATCHPAD_TOOL: 'update_operator_scratchpad',
+  READ_OPERATOR_SCRATCHPAD_TOOL: 'read_operator_scratchpad',
   OPERATOR_SANDBOX_CODE_TOOL: 'run_sandbox_code',
   OPERATOR_BUILD_TOOL: 'build_app',
   OPERATOR_PENDING_DECISIONS_TOOL: 'list_pending_decisions',
