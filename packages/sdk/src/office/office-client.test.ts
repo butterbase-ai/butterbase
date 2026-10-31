@@ -18,6 +18,14 @@ function setup() {
 }
 afterEach(() => vi.useRealTimers());
 describe('standalone OfficeClient public export', () => {
+  it('reads settings and returns a protected receipt without executing the change', async () => {
+    const { client, fetch } = setup();
+    await client.settings.get();
+    expect(String(fetch.mock.calls[0][0])).toContain('/settings');
+    expect((await client.settings.update(30, 1, { idempotencyKey: 'cadence-intent' })).data).toMatchObject({ state: 'awaiting_confirmation' });
+    expect(JSON.parse(fetch.mock.calls[1][1]!.body as string)).toEqual({ action: 'settings_update', interval_minutes: 30, expected_revision: 1, idempotency_key: 'cadence-intent' });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
   it('maps every skill method through the public facade', async () => {
     const { client, fetch } = setup();
     const calls: Array<[() => Promise<unknown>, string, string]> = [

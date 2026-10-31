@@ -58,6 +58,11 @@ beforeEach(() => {
 });
 afterEach(() => { process.exitCode = undefined; if (directory.startsWith(join(tmpdir(), 'butterbase-office-cli-'))) rmSync(directory, { recursive: true, force: true }); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 describe('office command surface', () => {
+  it('requests a settings revision change through owner confirmation', async () => {
+    await run(['settings', 'update', '30', '--expected-revision', '1', '--org', org, '--json', '--idempotency-key', 'cadence-intent']);
+    expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({ action: 'settings_update', interval_minutes: 30, expected_revision: 1, idempotency_key: 'cadence-intent' });
+    expect(openOfficeConfirmation).not.toHaveBeenCalled(); expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it('records agent memory through its explicit category and preserves the write key', async () => {
     const payload = { title: 'Reports', relevance_summary: 'For reporting', body: 'Short summary first', capture_origin: 'owner_request' };
     const file = join(directory, 'agent-memory.json'); writeFileSync(file, JSON.stringify(payload));
@@ -73,6 +78,7 @@ describe('office command surface', () => {
       'office skills list', 'office skills get', 'office skills versions', 'office skills runs', 'office skills draft',
       'office skills test', 'office skills reject', 'office skills approve', 'office skills set-enabled', 'office skills rollback', 'office skills run',
       'office principles amend', 'office principles retire',
+      'office settings get', 'office settings update',
       'office status', 'office enable', 'office pause', 'office resume', 'office ask',
       'office decisions list', 'office decisions get', 'office decisions context', 'office decisions approve', 'office decisions deny',
       'office conversations create', 'office conversations list', 'office conversations get',

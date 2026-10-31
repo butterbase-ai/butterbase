@@ -15,6 +15,7 @@ export const OFFICE_ACTIONS = [
   'list_skills', 'get_skill', 'list_skill_versions', 'list_skill_runs', 'draft_skill',
   'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
   'amend_principle', 'retire_principle',
+  'get_office_settings', 'update_office_settings',
 ] as const;
 export type OfficeAction = typeof OFFICE_ACTIONS[number];
 
@@ -35,6 +36,12 @@ export const officeAmendPrincipleSchema = z.object({ principle_id: id, reason: t
 export const officeRetirePrincipleSchema = z.object({ principle_id: id, reason: text.max(4000) }).strict();
 export type OfficeAmendPrincipleInput = z.infer<typeof officeAmendPrincipleSchema>;
 export type OfficeRetirePrincipleInput = z.infer<typeof officeRetirePrincipleSchema>;
+export const officeIntervalSchema = z.union([z.literal(10), z.literal(15), z.literal(30), z.literal(60)]);
+export interface OfficeRoutineSettings {
+  interval_minutes: 10 | 15 | 30 | 60; revision: number;
+  next_routine_check_at?: string | null; full_sweep_due_at?: string | null;
+  last_full_sweep_at?: string | null; blocked_reason?: string | null; reconciliation_late?: boolean;
+}
 
 /** Saved browser commands have exact action-specific fields. */
 export const officeCommandSchema = z.discriminatedUnion('action', [
@@ -46,9 +53,11 @@ export const officeCommandSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('skill_set_enabled'), skill_id: z.string().uuid(), enabled: z.boolean() }).strict(),
   z.object({ action: z.literal('skill_rollback'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
   z.object({ action: z.literal('skill_run_now'), skill_id: z.string().uuid() }).strict(),
+  z.object({ action: z.literal('settings_update'), interval_minutes: officeIntervalSchema, expected_revision: z.number().int().positive() }).strict(),
 ]);
 export type OfficeCommand = z.infer<typeof officeCommandSchema> & {
   decision?: DecisionRef; skill_id?: string; version?: number; enabled?: boolean;
+  interval_minutes?: 10 | 15 | 30 | 60; expected_revision?: number;
 };
 
 // Mirror the four native capability payloads; strictness prevents silent scope or policy injection.
@@ -82,6 +91,8 @@ export const officeMemorySchemas = {
 export type OfficeMemoryKind = keyof typeof officeMemorySchemas;
 
 export const officeActionSchema = z.discriminatedUnion('action', [
+  z.object({ ...org, action: z.literal('get_office_settings') }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('update_office_settings'), interval_minutes: officeIntervalSchema, expected_revision: z.number().int().positive() }).strict(),
   z.object({ ...org, ...page, action: z.literal('list_agent_memories') }).strict(),
   z.object({ ...org, ...page, action: z.literal('search_agent_memories'), query: text.max(4000) }).strict(),
   z.object({ ...org, action: z.literal('get_agent_memory'), memory_id: id }).strict(),

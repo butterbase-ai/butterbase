@@ -6,6 +6,7 @@ import type {
   AgentMemorySummary, AgentMemoryRecord, OfficeRecordAgentMemoryInput, OfficeAmendAgentMemoryInput, OfficeArchiveAgentMemoryInput,
   OfficeSkillRecord, OfficeSkillDetail, OfficeSkillVersionRecord, OfficeSkillRunRecord,
   OfficeAmendPrincipleInput, OfficeRetirePrincipleInput,
+  OfficeRoutineSettings,
 } from '@butterbase/shared';
 import { OfficeTransport, officeError } from './transport.js';
 import { OfficeClientError, OfficeStreamError, type OfficeAskOptions, type OfficeAskStreamOptions, type OfficeConfirmationWaitOptions,
@@ -32,6 +33,11 @@ export class OfficeClient {
     catch { return { data: null, error: officeError('invalid_request', 'A unique idempotency key is required for this write.') }; }
   }
   getStatus(options?: OfficeRequestOptions) { return this.call<OfficeStatus>('status', {}, options); }
+  readonly settings = {
+    get: (options?: OfficeRequestOptions) => this.call<OfficeRoutineSettings>('get_office_settings', {}, options),
+    update: (intervalMinutes: OfficeRoutineSettings['interval_minutes'], expectedRevision: number, options?: OfficeWriteOptions) =>
+      this.write<ConfirmationReceipt>('update_office_settings', { interval_minutes: intervalMinutes, expected_revision: expectedRevision }, options),
+  };
   enable(options?: OfficeWriteOptions) { return this.write<ConfirmationReceipt>('enable', {}, options); }
   pause(options?: OfficeWriteOptions) { return this.write<ConfirmationReceipt>('pause', {}, options); }
   resume(options?: OfficeWriteOptions) { return this.write<ConfirmationReceipt>('resume', {}, options); }

@@ -26,8 +26,9 @@ describe('Office wire requests', () => {
       'list_skills', 'get_skill', 'list_skill_versions', 'list_skill_runs', 'draft_skill',
       'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
       'amend_principle', 'retire_principle',
+      'get_office_settings', 'update_office_settings',
     ].sort());
-    expect(new Set(OFFICE_ACTIONS).size).toBe(41);
+    expect(new Set(OFFICE_ACTIONS).size).toBe(43);
     expect(officeActionSchema.safeParse(request('execute_anything')).success).toBe(false);
   });
 

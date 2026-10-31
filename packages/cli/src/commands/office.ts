@@ -10,6 +10,7 @@ import { createOfficeCliClient, openOfficeConfirmation } from '../lib/office-cli
 
 interface Options {
   skill?: string;
+  expectedRevision?: string;
   org: string; json?: boolean; source?: 'office' | 'substrate'; status?: 'pending' | 'resolved' | 'all';
   limit?: string; cursor?: string; confirmation?: string; idempotencyKey?: string; title?: string;
   conversation?: string; turn?: string; afterSequence?: string; waitMs?: string; stream?: boolean;
@@ -126,6 +127,12 @@ export async function runOfficeCommand(action: OfficeAction, args: string[], opt
     const ref = { source: options.source ?? 'office', id: args[0] ?? '' };
     let result: OfficeResponse<unknown>;
     switch (action) {
+      case 'get_office_settings': result = await client.settings.get(request); break;
+      case 'update_office_settings': {
+        const minutes = int(args[0], 'interval', 60, 10);
+        if (![10,15,30,60].includes(minutes ?? 0)) throw new UsageError('Interval must be 10, 15, 30 or 60 minutes.');
+        result = await client.settings.update(minutes as 10 | 15 | 30 | 60, int(options.expectedRevision, '--expected-revision', Number.MAX_SAFE_INTEGER, 1)!, write); break;
+      }
       case 'status': result = options.confirmation ? await client.getConfirmation(options.confirmation, request) : await client.getStatus(request); break;
       case 'enable': result = await client.enable(write); break;
       case 'pause': result = await client.pause(write); break;
@@ -248,6 +255,10 @@ export function registerOfficeCommands(program: Command): Command {
     write(leaf(memory, syntax, action, 'Record a native business memory payload')).requiredOption('--file <json>', 'UTF-8 JSON matching the native record schema');
   }
   const principles = office.command('principles').description('Read or propose business principles');
+  const settings = office.command('settings').description('Inspect and configure Office routine checks');
+  leaf(settings, 'get', 'get_office_settings', 'Read interval and actual sweep timing');
+  protect(leaf(settings, 'update <minutes>', 'update_office_settings', 'Request owner confirmation of the interval'))
+    .requiredOption('--expected-revision <n>', 'Revision returned by settings get');
   const skills = office.command('skills').description('Inspect routines, draft revisions and request owner confirmations');
   page(leaf(skills, 'list', 'list_skills', 'List visible skills'));
   leaf(skills, 'get <id>', 'get_skill', 'Read the current approved skill');
