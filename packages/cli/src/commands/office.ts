@@ -1,11 +1,11 @@
 import { Command, Option } from 'commander';
 import { readFile } from 'node:fs/promises';
-import { officeActionSchema, officeMemorySchemas, type OfficeAction } from '@butterbase/shared';
+import { officeActionSchema, officeMemorySchemas, officeAmendPrincipleSchema, officeRetirePrincipleSchema, type OfficeAction } from '@butterbase/shared';
 import { officeRecordAgentMemorySchema, officeAmendAgentMemorySchema, officeArchiveAgentMemorySchema } from '@butterbase/shared';
 import { OfficeClientError, OfficeStreamError, type OfficeClient, type OfficeResponse, type ConfirmationReceipt,
   type OfficePublicEvent, type OfficeError, type DecisionRef, type OfficeRecordDecisionInput, type OfficeRecordCommitmentInput,
   type OfficeRecordLearningInput, type OfficeRecordPrincipleInput, type OfficeRecordAgentMemoryInput,
-  type OfficeAmendAgentMemoryInput, type OfficeArchiveAgentMemoryInput } from '@butterbase/sdk';
+  type OfficeAmendAgentMemoryInput, type OfficeArchiveAgentMemoryInput, type OfficeAmendPrincipleInput, type OfficeRetirePrincipleInput } from '@butterbase/sdk';
 import { createOfficeCliClient, openOfficeConfirmation } from '../lib/office-client.js';
 
 interface Options {
@@ -51,7 +51,7 @@ function emit(result: OfficeResponse<unknown>, options: Options) {
     if (result.error.idempotencyKey) console.error(`Retry identity: --idempotency-key ${result.error.idempotencyKey}`);
   }
 }
-const payloadSchemas = { ...officeMemorySchemas, record_agent_memory: officeRecordAgentMemorySchema,
+const payloadSchemas = { ...officeMemorySchemas, amend_principle: officeAmendPrincipleSchema, retire_principle: officeRetirePrincipleSchema, record_agent_memory: officeRecordAgentMemorySchema,
   amend_agent_memory: officeAmendAgentMemorySchema, archive_agent_memory: officeArchiveAgentMemorySchema };
 async function payloadFile(action: keyof typeof payloadSchemas, file?: string): Promise<unknown> {
   if (!file) throw new UsageError('--file <json> is required.');
@@ -168,6 +168,8 @@ export async function runOfficeCommand(action: OfficeAction, args: string[], opt
       case 'list_principles': result = await client.principles.list(page); break;
       case 'get_principle': result = await client.principles.get(args[0], request); break;
       case 'record_principle': result = await client.principles.record(payload as OfficeRecordPrincipleInput, write); break;
+      case 'amend_principle': result = await client.principles.amend(payload as OfficeAmendPrincipleInput, write); break;
+      case 'retire_principle': result = await client.principles.retire(payload as OfficeRetirePrincipleInput, write); break;
     }
     const receipt = result.data as ConfirmationReceipt | null;
     if (!result.error && receipt?.state === 'awaiting_confirmation') {
@@ -260,6 +262,8 @@ export function registerOfficeCommands(program: Command): Command {
   protect(leaf(skills, 'run <id>', 'run_skill', 'Request one manual run of the pinned version'));
   page(leaf(principles, 'list', 'list_principles', 'List principles'));
   leaf(principles, 'get <id>', 'get_principle', 'Read a principle');
+  write(leaf(principles, 'amend', 'amend_principle', 'Propose changes to an enforceable rule')).requiredOption('--file <json>', 'Native principle_id, reason and changes');
+  write(leaf(principles, 'retire', 'retire_principle', 'Propose retirement of an enforceable rule')).requiredOption('--file <json>', 'Native principle_id and reason');
   write(leaf(principles, 'record', 'record_principle', 'Propose a principle through native policy')).requiredOption('--file <json>', 'UTF-8 JSON matching the native principle schema');
   return office;
 }

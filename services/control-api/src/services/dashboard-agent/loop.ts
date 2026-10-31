@@ -908,7 +908,8 @@ export async function* runAgentTurn(
   const isOfficeTurn = officeOrganizationId !== null;
   const memoryScopeOrg = operatorOrgId ?? officeOrganizationId;
   const officeMemory = memoryScopeOrg ? await resolveOfficeMemoryContext({ organizationId: memoryScopeOrg,
-    userId: input.userId, model: input.model, autonomous: isOperator, readOnly: input.readOnly === true }) : null;
+    userId: input.userId, model: input.model, autonomous: isOperator, readOnly: input.readOnly === true,
+    ...(!isOperator && !input.activeSkill ? { customizationMessage: input.userMessage } : {}) }) : null;
   const officeMemoryText = memoryScopeOrg ? input.officeMemoryContext ?? officeMemory?.text : undefined;
   const officeMemoryTools = memoryScopeOrg ? input.officeMemoryTools ?? officeMemory?.tools : undefined;
 

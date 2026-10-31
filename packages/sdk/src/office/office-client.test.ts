@@ -54,7 +54,7 @@ describe('standalone OfficeClient public export', () => {
       expect(String(url)).toContain(suffix); expect(init?.method).toBe(method);
     }
   });
-  it('maps all 22 methods with explicit organization and a fresh token for every request; no app required', async () => {
+  it('maps business context methods with explicit organization and a fresh token for every request', async () => {
     const { client, fetch, getToken } = setup();
     const ref = { source: 'substrate' as const, id };
     const calls: Array<[() => Promise<unknown>, string, string]> = [
@@ -77,13 +77,15 @@ describe('standalone OfficeClient public export', () => {
       [() => client.memory.recordLearning({ title: 'Lesson', description: 'Context' }), 'POST', '/memory/record_learning'],
       [() => client.principles.list(), 'GET', '/principles'], [() => client.principles.get(id), 'GET', `/principles/${id}`],
       [() => client.principles.record({ title: 'Principle', applies_to: {}, constraint_spec: {} }), 'POST', '/memory/record_principle'],
+      [() => client.principles.amend({ principle_id: 'dec_one', reason: 'Clarify', title: 'Ask before email' }), 'POST', '/principles/amend'],
+      [() => client.principles.retire({ principle_id: 'dec_one', reason: 'Replace rule' }), 'POST', '/principles/retire'],
     ];
     for (const [invoke, method, suffix] of calls) {
       await invoke(); const [url, init] = fetch.mock.calls.at(-1)!;
       expect(String(url)).toContain(suffix); expect(init?.method).toBe(method);
       expect(init?.headers).toMatchObject({ Authorization: 'Bearer platform-token', 'x-organization-id': org });
     }
-    expect(fetch).toHaveBeenCalledTimes(22); expect(getToken).toHaveBeenCalledTimes(22);
+    expect(fetch).toHaveBeenCalledTimes(calls.length); expect(getToken).toHaveBeenCalledTimes(calls.length);
   });
   it('keeps pending confirmation receipts distinct from successful execution', async () => {
     const { client } = setup(); expect(await client.enable()).toEqual({ data: pending, error: null });

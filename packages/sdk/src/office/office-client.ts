@@ -5,6 +5,7 @@ import type {
   OfficeRecordDecisionInput, OfficeRecordCommitmentInput, OfficeRecordLearningInput, OfficeRecordPrincipleInput,
   AgentMemorySummary, AgentMemoryRecord, OfficeRecordAgentMemoryInput, OfficeAmendAgentMemoryInput, OfficeArchiveAgentMemoryInput,
   OfficeSkillRecord, OfficeSkillDetail, OfficeSkillVersionRecord, OfficeSkillRunRecord,
+  OfficeAmendPrincipleInput, OfficeRetirePrincipleInput,
 } from '@butterbase/shared';
 import { OfficeTransport, officeError } from './transport.js';
 import { OfficeClientError, OfficeStreamError, type OfficeAskOptions, type OfficeAskStreamOptions, type OfficeConfirmationWaitOptions,
@@ -65,6 +66,8 @@ export class OfficeClient {
     recordLearning: (payload: OfficeRecordLearningInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('record_learning', { payload }, options),
   };
   readonly principles = {
+    amend: (payload: OfficeAmendPrincipleInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('amend_principle', { payload }, options),
+    retire: (payload: OfficeRetirePrincipleInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('retire_principle', { payload }, options),
     list: (options?: OfficePageOptions) => this.call<OfficePage<OfficePrinciple>>('list_principles', { cursor: options?.cursor, limit: options?.limit }, options),
     get: (id: string, options?: OfficeRequestOptions) => this.call<OfficePrinciple>('get_principle', { principle_id: id }, options),
     record: (payload: OfficeRecordPrincipleInput, options?: OfficeWriteOptions) => this.write<OfficeMemoryResult>('record_principle', { payload }, options),

@@ -14,6 +14,7 @@ export const OFFICE_ACTIONS = [
   'record_agent_memory', 'amend_agent_memory', 'archive_agent_memory',
   'list_skills', 'get_skill', 'list_skill_versions', 'list_skill_runs', 'draft_skill',
   'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
+  'amend_principle', 'retire_principle',
 ] as const;
 export type OfficeAction = typeof OFFICE_ACTIONS[number];
 
@@ -28,6 +29,12 @@ const page = { cursor: z.string().trim().min(1).max(2048).optional(), limit: z.n
 const decision = { decision_id: id, decision_source: z.enum(['office', 'substrate']).default('office') };
 export const decisionRefSchema = z.object({ source: z.enum(['office', 'substrate']), id }).strict();
 export type DecisionRef = z.infer<typeof decisionRefSchema>;
+export const officeAmendPrincipleSchema = z.object({ principle_id: id, reason: text.max(4000), title: text.max(500).optional(),
+  rationale: z.string().max(16000).optional(), applies_to: json.optional(), constraint_spec: json.optional(), salience: salience.optional() }).strict()
+  .refine(p => Object.keys(p).some(key => !['principle_id', 'reason'].includes(key)), 'No changes supplied');
+export const officeRetirePrincipleSchema = z.object({ principle_id: id, reason: text.max(4000) }).strict();
+export type OfficeAmendPrincipleInput = z.infer<typeof officeAmendPrincipleSchema>;
+export type OfficeRetirePrincipleInput = z.infer<typeof officeRetirePrincipleSchema>;
 
 /** Saved browser commands have exact action-specific fields. */
 export const officeCommandSchema = z.discriminatedUnion('action', [
@@ -116,6 +123,8 @@ export const officeActionSchema = z.discriminatedUnion('action', [
   z.object({ ...org, ...page, action: z.literal('list_principles') }).strict(),
   z.object({ ...org, action: z.literal('get_principle'), principle_id: id }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('record_principle'), payload: officeRecordPrincipleSchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('amend_principle'), payload: officeAmendPrincipleSchema }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('retire_principle'), payload: officeRetirePrincipleSchema }).strict(),
 ]).superRefine((request, ctx) => {
   if (request.action === 'get_conversation' && request.after_sequence !== undefined && !request.turn_id) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['turn_id'], message: 'turn_id is required with after_sequence' });

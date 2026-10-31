@@ -19,6 +19,15 @@ function program() { const root = new Command('butterbase'); root.configureOutpu
 async function run(args: string[]) { await program().parseAsync(['office', ...args], { from: 'user' }); }
 function output() { expect(logs).toHaveBeenCalledTimes(1); return JSON.parse(String(logs.mock.calls[0][0])); }
 describe('skill command dispatch', () => {
+  it.each(['amend', 'retire'])('dispatches governed principle %s with the exact JSON payload', async operation => {
+    const payload = { principle_id: 'dec_one', reason: 'Owner requested a change', ...(operation === 'amend' ? { title: 'Ask before email' } : {}) };
+    const file = join(directory, 'principle.json');
+    writeFileSync(file, JSON.stringify(payload));
+    await run(['principles', operation, '--file', file, '--org', org, '--idempotency-key', 'rule-intent', '--json']);
+    expect(new URL(String(fetch.mock.calls[0][0])).pathname).toBe(`/v1/me/office/principles/${operation}`);
+    expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({ payload, idempotency_key: 'rule-intent' });
+    expect(process.exitCode).toBe(0);
+  });
   it.each([
     [['list'], '/skills'], [['get', id], `/skills/${id}`],
     [['versions', id], `/skills/${id}/versions`], [['runs', id], `/skills/${id}/runs`],
@@ -63,6 +72,7 @@ describe('office command surface', () => {
     expect(leaves(root).sort()).toEqual([
       'office skills list', 'office skills get', 'office skills versions', 'office skills runs', 'office skills draft',
       'office skills test', 'office skills reject', 'office skills approve', 'office skills set-enabled', 'office skills rollback', 'office skills run',
+      'office principles amend', 'office principles retire',
       'office status', 'office enable', 'office pause', 'office resume', 'office ask',
       'office decisions list', 'office decisions get', 'office decisions context', 'office decisions approve', 'office decisions deny',
       'office conversations create', 'office conversations list', 'office conversations get',

@@ -45,5 +45,6 @@ export function officeHttpRequest(input: unknown): OfficeHttpRequest {
     case 'record_decision': case 'record_commitment': case 'record_learning': case 'record_principle': return post(`/memory/${r.action}`, { payload: r.payload, idempotency_key: r.idempotency_key });
     case 'list_principles': return get('/principles', { cursor: r.cursor, limit: r.limit });
     case 'get_principle': return get(`/principles/${encodeURIComponent(r.principle_id)}`);
+    case 'amend_principle': case 'retire_principle': return post(`/principles/${r.action.split('_')[0]}`, { payload: r.payload, idempotency_key: r.idempotency_key });
   }
 }

@@ -1,6 +1,8 @@
 /** Optional server integration. No Office storage or authorization lives here. */
 export interface OfficeMemoryTurnScope {
   organizationId: string; userId: string; model: string; autonomous: boolean; readOnly: boolean;
+  /** Foreground owner message only; autonomous/skill prompts are not owner customization. */
+  customizationMessage?: string;
 }
 export type OfficeMemoryToolAdapter = (name: string, args: unknown) => { name: string; args: unknown };
 export interface OfficeMemoryTurnContext { text: string; tools: OfficeMemoryToolAdapter; }
