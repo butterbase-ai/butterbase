@@ -18,6 +18,27 @@ function setup() {
 }
 afterEach(() => vi.useRealTimers());
 describe('standalone OfficeClient public export', () => {
+  it('maps every skill method through the public facade', async () => {
+    const { client, fetch } = setup();
+    const calls: Array<[() => Promise<unknown>, string, string]> = [
+      [() => client.skills.list({ limit: 5 }), 'GET', '/skills?limit=5'],
+      [() => client.skills.get(id), 'GET', `/skills/${id}`],
+      [() => client.skills.versions(id, { cursor: 'next' }), 'GET', `/skills/${id}/versions?cursor=next`],
+      [() => client.skills.runs(id), 'GET', `/skills/${id}/runs`],
+      [() => client.skills.draft('Daily report'), 'POST', '/skills/draft'],
+      [() => client.skills.test(id, 2), 'POST', `/skills/${id}/versions/2/test`],
+      [() => client.skills.reject(id, 2, 'Needs changes'), 'POST', `/skills/${id}/versions/2/reject`],
+      [() => client.skills.approve(id, 2), 'POST', '/confirmations'],
+      [() => client.skills.setEnabled(id, false), 'POST', '/confirmations'],
+      [() => client.skills.rollback(id, 1), 'POST', '/confirmations'],
+      [() => client.skills.run(id), 'POST', '/confirmations'],
+    ];
+    for (const [invoke, method, suffix] of calls) {
+      await invoke();
+      const [url, init] = fetch.mock.calls.at(-1)!;
+      expect(String(url)).toContain(suffix); expect(init?.method).toBe(method);
+    }
+  });
   it('exposes compact agent memory reads and versioned writes through the facade', async () => {
     const { client, fetch } = setup();
     const calls: Array<[() => Promise<unknown>, string, string]> = [

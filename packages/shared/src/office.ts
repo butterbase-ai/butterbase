@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { officeRecordAgentMemorySchema, officeAmendAgentMemorySchema, officeArchiveAgentMemorySchema } from './office-agent-memory.js';
 export * from './office-agent-memory.js';
+export * from './office-skills.js';
 
 /** Public organization-scoped Office protocol. No app or browser session is implied. */
 export const OFFICE_ACTIONS = [
@@ -11,6 +12,8 @@ export const OFFICE_ACTIONS = [
   'get_principle', 'record_principle',
   'list_agent_memories', 'search_agent_memories', 'get_agent_memory',
   'record_agent_memory', 'amend_agent_memory', 'archive_agent_memory',
+  'list_skills', 'get_skill', 'list_skill_versions', 'list_skill_runs', 'draft_skill',
+  'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
 ] as const;
 export type OfficeAction = typeof OFFICE_ACTIONS[number];
 
@@ -94,6 +97,17 @@ export const officeActionSchema = z.discriminatedUnion('action', [
   z.object({ ...org, ...keyed, action: z.literal('ask'), message: text.max(100_000),
     conversation_id: id.optional(), wait_ms: z.number().int().min(0).max(25_000).default(15_000) }).strict(),
   z.object({ ...org, ...page, action: z.literal('list_memory'), kind: z.enum(['decision', 'commitment', 'learning']).optional() }).strict(),
+  z.object({ ...org, ...page, action: z.literal('list_skills') }).strict(),
+  z.object({ ...org, action: z.literal('get_skill'), skill_id: z.string().uuid() }).strict(),
+  z.object({ ...org, ...page, action: z.literal('list_skill_versions'), skill_id: z.string().uuid() }).strict(),
+  z.object({ ...org, ...page, action: z.literal('list_skill_runs'), skill_id: z.string().uuid() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('draft_skill'), message: text.max(8000), skill_id: z.string().uuid().optional() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('test_skill'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('reject_skill'), skill_id: z.string().uuid(), version: z.number().int().positive(), reason: text.max(4000) }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('approve_skill'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('set_skill_enabled'), skill_id: z.string().uuid(), enabled: z.boolean() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('rollback_skill'), skill_id: z.string().uuid(), version: z.number().int().positive() }).strict(),
+  z.object({ ...org, ...keyed, action: z.literal('run_skill'), skill_id: z.string().uuid() }).strict(),
   z.object({ ...org, action: z.literal('search_memory'), query: text.max(4000), limit: page.limit }).strict(),
   z.object({ ...org, action: z.literal('get_source_artifact'), source_artifact_id: id }).strict(),
   z.object({ ...org, ...keyed, action: z.literal('record_decision'), payload: officeRecordDecisionSchema }).strict(),

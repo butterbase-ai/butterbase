@@ -9,6 +9,7 @@ import { OfficeClientError, OfficeStreamError, type OfficeClient, type OfficeRes
 import { createOfficeCliClient, openOfficeConfirmation } from '../lib/office-client.js';
 
 interface Options {
+  skill?: string;
   org: string; json?: boolean; source?: 'office' | 'substrate'; status?: 'pending' | 'resolved' | 'all';
   limit?: string; cursor?: string; confirmation?: string; idempotencyKey?: string; title?: string;
   conversation?: string; turn?: string; afterSequence?: string; waitMs?: string; stream?: boolean;
@@ -140,6 +141,19 @@ export async function runOfficeCommand(action: OfficeAction, args: string[], opt
       case 'ask': result = options.stream ? await streamAsk(client, args[0] ?? '', options, observer.signal)
         : await client.ask(args[0], { ...write, conversationId: options.conversation, waitMs }); break;
       case 'list_memory': result = await client.memory.list({ ...page, kind: options.kind }); break;
+      case 'list_skills': result = await client.skills.list(page); break;
+      case 'get_skill': result = await client.skills.get(args[0], request); break;
+      case 'list_skill_versions': result = await client.skills.versions(args[0], page); break;
+      case 'list_skill_runs': result = await client.skills.runs(args[0], page); break;
+      case 'draft_skill': result = await client.skills.draft(args[0], { skillId: options.skill }, write); break;
+      case 'test_skill': result = await client.skills.test(args[0], int(args[1], 'version', 2147483647, 1)!, write); break;
+      case 'reject_skill': result = await client.skills.reject(args[0], int(args[1], 'version', 2147483647, 1)!, options.reason ?? '', write); break;
+      case 'approve_skill': result = await client.skills.approve(args[0], int(args[1], 'version', 2147483647, 1)!, write); break;
+      case 'rollback_skill': result = await client.skills.rollback(args[0], int(args[1], 'version', 2147483647, 1)!, write); break;
+      case 'set_skill_enabled':
+        if (!['true', 'false'].includes(args[1])) throw new UsageError('State must be true or false.');
+        result = await client.skills.setEnabled(args[0], args[1] === 'true', write); break;
+      case 'run_skill': result = await client.skills.run(args[0], write); break;
       case 'list_agent_memories': result = await client.agentMemories.list(page); break;
       case 'search_agent_memories': result = await client.agentMemories.search(args[0], page); break;
       case 'get_agent_memory': result = await client.agentMemories.get(args[0], request); break;
@@ -232,6 +246,18 @@ export function registerOfficeCommands(program: Command): Command {
     write(leaf(memory, syntax, action, 'Record a native business memory payload')).requiredOption('--file <json>', 'UTF-8 JSON matching the native record schema');
   }
   const principles = office.command('principles').description('Read or propose business principles');
+  const skills = office.command('skills').description('Inspect routines, draft revisions and request owner confirmations');
+  page(leaf(skills, 'list', 'list_skills', 'List visible skills'));
+  leaf(skills, 'get <id>', 'get_skill', 'Read the current approved skill');
+  page(leaf(skills, 'versions <id>', 'list_skill_versions', 'List visible versions'));
+  page(leaf(skills, 'runs <id>', 'list_skill_runs', 'List visible runs'));
+  write(leaf(skills, 'draft <message>', 'draft_skill', 'Prepare one draft through Ask')).option('--skill <id>', 'Revise this existing skill');
+  write(leaf(skills, 'test <id> <version>', 'test_skill', 'Queue or observe one pinned read-only test'));
+  write(leaf(skills, 'reject <id> <version>', 'reject_skill', 'Reject a draft without activation')).requiredOption('--reason <reason>', 'Changes needed');
+  protect(leaf(skills, 'approve <id> <version>', 'approve_skill', 'Request browser approval of this tested version'));
+  protect(leaf(skills, 'set-enabled <id> <state>', 'set_skill_enabled', 'Request browser confirmation; state is true or false'));
+  protect(leaf(skills, 'rollback <id> <version>', 'rollback_skill', 'Request restoring an approved version'));
+  protect(leaf(skills, 'run <id>', 'run_skill', 'Request one manual run of the pinned version'));
   page(leaf(principles, 'list', 'list_principles', 'List principles'));
   leaf(principles, 'get <id>', 'get_principle', 'Read a principle');
   write(leaf(principles, 'record', 'record_principle', 'Propose a principle through native policy')).requiredOption('--file <json>', 'UTF-8 JSON matching the native principle schema');

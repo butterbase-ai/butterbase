@@ -18,6 +18,22 @@ let fetch: ReturnType<typeof vi.spyOn>;
 function program() { const root = new Command('butterbase'); root.configureOutput({ writeErr: text => console.error(text), writeOut: text => console.log(text) }); registerOfficeCommands(root); return root; }
 async function run(args: string[]) { await program().parseAsync(['office', ...args], { from: 'user' }); }
 function output() { expect(logs).toHaveBeenCalledTimes(1); return JSON.parse(String(logs.mock.calls[0][0])); }
+describe('skill command dispatch', () => {
+  it.each([
+    [['list'], '/skills'], [['get', id], `/skills/${id}`],
+    [['versions', id], `/skills/${id}/versions`], [['runs', id], `/skills/${id}/runs`],
+    [['draft', 'Daily report'], '/skills/draft'], [['test', id, '2'], `/skills/${id}/versions/2/test`],
+    [['reject', id, '2', '--reason', 'Needs changes'], `/skills/${id}/versions/2/reject`],
+    [['approve', id, '2'], '/confirmations'], [['set-enabled', id, 'false'], '/confirmations'],
+    [['rollback', id, '1'], '/confirmations'], [['run', id], '/confirmations'],
+  ] as Array<[string[], string]>)('dispatches skills %j with an explicit organization', async (args, path) => {
+    await run(['skills', ...args, '--org', org, '--json']);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(new URL(String(fetch.mock.calls[0][0])).pathname).toBe(`/v1/me/office${path}`);
+    expect(openOfficeConfirmation).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(0);
+  });
+});
 beforeEach(() => {
   process.exitCode = undefined; vi.stubEnv('BUTTERBASE_API_KEY', ''); vi.stubEnv('BUTTERBASE_CONTROL_API_URL', 'https://api.example');
   config.mockResolvedValue({ endpoint: 'https://api.example', apiKey: 'platform-key' });
@@ -45,6 +61,8 @@ describe('office command surface', () => {
     const root = program(); const leaves = (command: Command, prefix = ''): string[] => command.commands.length
       ? command.commands.flatMap(child => leaves(child, `${prefix}${child.name()} `)) : [prefix.trim()];
     expect(leaves(root).sort()).toEqual([
+      'office skills list', 'office skills get', 'office skills versions', 'office skills runs', 'office skills draft',
+      'office skills test', 'office skills reject', 'office skills approve', 'office skills set-enabled', 'office skills rollback', 'office skills run',
       'office status', 'office enable', 'office pause', 'office resume', 'office ask',
       'office decisions list', 'office decisions get', 'office decisions context', 'office decisions approve', 'office decisions deny',
       'office conversations create', 'office conversations list', 'office conversations get',

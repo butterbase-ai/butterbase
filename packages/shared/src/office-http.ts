@@ -30,6 +30,16 @@ export function officeHttpRequest(input: unknown): OfficeHttpRequest {
     case 'record_agent_memory': case 'amend_agent_memory': case 'archive_agent_memory':
       return post(`/agent-memories/${r.action.split('_')[0]}`, { payload: r.payload, idempotency_key: r.idempotency_key });
     case 'list_memory': return get('/memory', { cursor: r.cursor, limit: r.limit, kind: r.kind });
+    case 'list_skills': return get('/skills', { cursor: r.cursor, limit: r.limit });
+    case 'get_skill': return get(`/skills/${r.skill_id}`);
+    case 'list_skill_versions': return get(`/skills/${r.skill_id}/versions`, { cursor: r.cursor, limit: r.limit });
+    case 'list_skill_runs': return get(`/skills/${r.skill_id}/runs`, { cursor: r.cursor, limit: r.limit });
+    case 'draft_skill': return post('/skills/draft', { message: r.message, ...(r.skill_id ? { skill_id: r.skill_id } : {}), idempotency_key: r.idempotency_key });
+    case 'test_skill': return post(`/skills/${r.skill_id}/versions/${r.version}/test`, { idempotency_key: r.idempotency_key });
+    case 'reject_skill': return post(`/skills/${r.skill_id}/versions/${r.version}/reject`, { reason: r.reason, idempotency_key: r.idempotency_key });
+    case 'approve_skill': case 'rollback_skill': return post('/confirmations', { action: r.action === 'approve_skill' ? 'skill_approve' : 'skill_rollback', skill_id: r.skill_id, version: r.version, idempotency_key: r.idempotency_key });
+    case 'set_skill_enabled': return post('/confirmations', { action: 'skill_set_enabled', skill_id: r.skill_id, enabled: r.enabled, idempotency_key: r.idempotency_key });
+    case 'run_skill': return post('/confirmations', { action: 'skill_run_now', skill_id: r.skill_id, idempotency_key: r.idempotency_key });
     case 'search_memory': return get('/memory/search', { query: r.query, limit: r.limit });
     case 'get_source_artifact': return get(`/memory/sources/${encodeURIComponent(r.source_artifact_id)}`);
     case 'record_decision': case 'record_commitment': case 'record_learning': case 'record_principle': return post(`/memory/${r.action}`, { payload: r.payload, idempotency_key: r.idempotency_key });

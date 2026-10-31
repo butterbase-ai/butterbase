@@ -23,8 +23,10 @@ describe('Office wire requests', () => {
       'get_principle', 'record_principle',
       'list_agent_memories', 'search_agent_memories', 'get_agent_memory',
       'record_agent_memory', 'amend_agent_memory', 'archive_agent_memory',
+      'list_skills', 'get_skill', 'list_skill_versions', 'list_skill_runs', 'draft_skill',
+      'test_skill', 'reject_skill', 'approve_skill', 'set_skill_enabled', 'rollback_skill', 'run_skill',
     ].sort());
-    expect(new Set(OFFICE_ACTIONS).size).toBe(28);
+    expect(new Set(OFFICE_ACTIONS).size).toBe(39);
     expect(officeActionSchema.safeParse(request('execute_anything')).success).toBe(false);
   });
 
