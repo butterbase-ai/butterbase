@@ -47,6 +47,46 @@ import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop
 import type { DeployTreeStore } from '../deploy-tree-store.js';
 import type { WorkingTree } from '../working-tree.js';
 import { setApprovalProposalProvider } from '../approval-proposal.js';
+import { setOfficeMemoryContextProvider } from '../office-memory-types.js';
+
+describe('Office memory adapter at real model/tool boundaries', () => {
+  it('reads retained legacy working notes only through an explicit scoped request', async () => {
+    oneToolCallThenStop('read_operator_scratchpad', {});
+    setOfficeMemoryContextProvider(async () => ({ text: 'Curated index', tools: (name, args) => ({ name, args }) }));
+    const query = vi.fn(async () => ({ rows: [{ organization_id: ORG_ID, content: 'Retained legacy working state', updated_at: 'now' }] }));
+    try {
+      const events = await collect(runAgentTurn(operatorInput({ pool: { query } })));
+      expect(events.some(event => event.type === 'tool_result' && (event.result as {content?:string})?.content === 'Retained legacy working state')).toBe(true);
+      expect(query.mock.calls.some(call => (call[1] as string[])?.[0] === ORG_ID)).toBe(true);
+    } finally { setOfficeMemoryContextProvider(undefined); }
+  });
+  it('does not dispatch a memory capture refused by the read-only turn adapter', async () => {
+    oneToolCallThenStop('manage_substrate', { action: 'propose', capability: 'record_agent_memory', payload: { title: 'No write' } });
+    setOfficeMemoryContextProvider(async scope => ({ text: 'Read-only context', tools: (name, args) => {
+      if (scope.readOnly) throw Error('agent_memory_read_only');
+      return { name, args };
+    } }));
+    try {
+      const events = await collect(runAgentTurn(operatorInput({ readOnly: true })));
+      expect(events.some(event => event.type === 'tool_result' && (event.result as {code?:string})?.code === 'agent_memory_read_only')).toBe(true);
+      expect(mockCallMcpTool.mock.calls.some(call => (call[1] as { capability?:string })?.capability === 'record_agent_memory')).toBe(false);
+    } finally { setOfficeMemoryContextProvider(undefined); }
+  });
+  it.each(['operator', 'ask', 'client-ask', 'skill', 'skill-test'])('applies scoped context and dispatch for %s', async mode => {
+    const { bodies } = oneToolCallThenStop('manage_substrate', { action: 'search_memory', q: 'reports' });
+    setOfficeMemoryContextProvider(async () => ({ text: 'TITLE_INDEX_ONLY',
+      tools: (name, _args) => ({ name, args: { action: 'search_agent_memories', q: 'reports' } }) }));
+    try {
+      const human = mode === 'ask' || mode === 'client-ask';
+      if (human) mockGetConversation.mockResolvedValue({ id: 'conv-1', userId: HUMAN_USER, origin: 'office', organizationId: ORG_ID } as never);
+      const input = human ? humanInput() : operatorInput();
+      await collect(runAgentTurn({ ...input, readOnly: mode === 'skill-test',
+        accessGuard: async () => ({ allowed: true, approvalMode: 'consequential' }) }));
+      expect(bodies[0]).toContain('TITLE_INDEX_ONLY');
+      expect(mockCallMcpTool.mock.calls.some(call => call[0] === 'manage_substrate' && (call[1] as {action?:string}).action === 'search_agent_memories')).toBe(true);
+    } finally { setOfficeMemoryContextProvider(undefined); }
+  });
+});
 
 const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
 const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
@@ -755,7 +795,7 @@ describe('non-operator conversation is unaffected', () => {
   // write). The assistant's list is therefore exactly what it was before those
   // tools were added — see operator-scratchpad.test.ts, which pins that the
   // filter actually removes something so this is not vacuous.
-  it('is offered the FULL catalog (minus operator-only tools)', async () => {
+  it('is offered the dashboard catalog without operator or Office-only tools', async () => {
     const { bodies } = oneToolCallThenStop('manage_app', { action: 'list' });
 
     await collect(runAgentTurn(humanInput()));
@@ -763,7 +803,7 @@ describe('non-operator conversation is unaffected', () => {
     const offered = toolNamesSent(bodies[0]);
     expect(offered.sort()).toEqual(
       getToolCatalog()
-        .filter((t) => t.operatorOnly !== true)
+        .filter((t) => t.operatorOnly !== true && t.officeOnly !== true)
         // Skill seams need their executors, which this plain dashboard turn
         // does not supply.
         .filter((t) => t.name !== SKILL_CREATOR_TOOL && t.name !== RUN_SKILL_SCRIPT_TOOL && t.name !== 'propose_action')

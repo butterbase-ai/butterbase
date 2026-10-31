@@ -22,6 +22,7 @@
 
 import {
   OPERATOR_SCRATCHPAD_TOOL,
+  READ_OPERATOR_SCRATCHPAD_TOOL,
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
   OPERATOR_PENDING_DECISIONS_TOOL,
@@ -75,6 +76,7 @@ export type OperatorPolicyContext = {
  * path, which ends in `callMcpTool`) and the loop's internal `turnMcp` wrapper.
  */
 export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  READ_OPERATOR_SCRATCHPAD_TOOL,
   PROPOSE_ACTION_TOOL,
   OPERATOR_SCRATCHPAD_TOOL,
   OPERATOR_SANDBOX_CODE_TOOL,
@@ -233,6 +235,7 @@ export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Ma
   ['manage_integrations', 'allow'],
   // loop-internal tools, unchanged (see OPERATOR_LOCAL_TOOLS)
   [OPERATOR_SCRATCHPAD_TOOL, 'allow'],
+  [READ_OPERATOR_SCRATCHPAD_TOOL, 'allow'],
   [OPERATOR_SANDBOX_CODE_TOOL, 'allow'],
   // see the `build_app` section of this comment block for the argument
   [OPERATOR_BUILD_TOOL, 'allow'],
@@ -508,6 +511,9 @@ export const OPERATOR_ALLOWED_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set([
   // memory
   'search_memory',
   'list_memory',
+  'list_agent_memories',
+  'search_agent_memories',
+  'get_agent_memory',
   // outbox — reads, plus retry (re-sends work a human already authorised;
   // cancel_outbox is gated instead, see OPERATOR_APPROVAL_SUBSTRATE_ACTIONS)
   'list_outbox',
