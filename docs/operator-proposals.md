@@ -85,6 +85,26 @@ failed or blocked request stays visible and can be retried explicitly by the
 owner. Already-expired `proposal_review_required` records are recoverable;
 other expired, successful or uncertain executions are not retry shortcuts.
 
+Preparation rows may include an optional read-only `explanation` containing
+`title`, `summary`, `effects`, `fields`, a nullable attributed operator `reason`,
+accessible `evidence`, and an optional current `blocker`. `facts.source` identifies
+newly checked facts (`current`) or the previously prepared snapshot (`prepared`);
+`facts.at` records the corresponding check or preparation time. Readers must not
+treat historical snapshot facts as a current eligibility check.
+
+The optional provider `explain` hook reads current target facts without preparing
+an executable review or scheduling work. Recovery enrichment rechecks organization
+scope and current-viewer evidence access, and bounds lookup concurrency. Missing
+or inaccessible facts remain unavailable; raw operations, chat prose and provider
+errors are not used as explanations. A readable saved proposal can supply its
+recorded reason/evidence when no current description is available. Providers that
+do not implement the hook remain supported.
+
+The compatibility projection for an expired review with no preparation record has
+`state: failed`, `safeErrorCode: proposal_not_prepared`, and `attemptCount: 0`.
+This means **not prepared**, not an attempted failure or work currently running.
+Requesting preparation is still an explicit owner action and is not approval.
+
 Preparation of a delivery cancellation is refused while that delivery is in
 flight. It leaves the delivery unchanged and creates no execution or replacement
 approval. Reconcile the delivery state before requesting preparation again.
