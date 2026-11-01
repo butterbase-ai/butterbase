@@ -20,9 +20,9 @@ All paths below start with `/v1/me/office`.
 | `POST /decisions/:source/:id/deny` | `{reason}` |
 | `POST /conversations` | `{idempotency_key, title?}` |
 | `GET /conversations` | `cursor`, `limit` |
-| `GET /conversations/:id` | Optional `turn_id`, `after_sequence`, `limit`; sequence requires turn ID |
+| `GET /conversations/:id` | Optional `turn_id`, `after_sequence`, `limit`, `activity_version=1`; sequence requires turn ID |
 | `POST /ask` | `{message, idempotency_key, conversation_id?, wait_ms?}` |
-| `GET /conversations/:id/turns/:turnId/events` | SSE; optional `after_sequence` or matching `Last-Event-ID` |
+| `GET /conversations/:id/turns/:turnId/events` | SSE; optional `after_sequence` or matching `Last-Event-ID`, and `activity_version=1` |
 | `GET /memory` | `kind=decision|commitment|learning`, `cursor`, `limit` |
 | `GET /memory/search` | Required `query`, optional `limit`; no cursor |
 | `GET /memory/sources/:id` | Read an organization source artifact |
@@ -64,6 +64,22 @@ data: {"sequence":2,"type":"text_delta","text":"Follow up with the team."}
 ```
 
 Public event types: `started`, `text_delta`, `message`, `approval_required`, `decision_resolved`, `blocked`, `completed`, `failed`, `interrupted`. Completed events carry turn/conversation IDs; fetch the turn for its exact output. Streams never expose credentials, raw tool arguments, reasoning, or worker internals. A disconnect does not cancel execution. Once replay has expired, HTTP 410 returns `error.code: "events_expired"` and `error.history` with the exact turn, conversation and state. Use conversation history for the retained business record.
+
+## Optional tool activity
+
+REST observers can opt into bounded tool observations with `activity_version=1` on the conversation-detail and exact-turn event GETs above. No additional Ask submission is needed. Existing MCP, CLI and SDK observation options keep their defaults; they do not currently expose this opt-in argument.
+
+Opted-in conversation details add `activity: [{user_message_id, steps}]`. Opted-in streams and event replay can include `{sequence, type: "activity", step}`. Activity is filtered before the event page limit for default observers, so stored activity cannot displace their final answer. Keep the returned sequence for replay; visible sequences can have gaps.
+
+Each step has a stable `id`, `tool_name`, optional `action`, a plain-language `label`, `status`, nullable `summary`, `started_at`, `finished_at` and `duration_ms`, and bounded `details: [{label,value}]`. A confirmed memory result can add `result: {kind: "agent_memory", id, revision?}`. These are observations, not raw tool arguments or result bodies. Missing timing stays null. Status is `running`, `completed`, `failed`, `awaiting_approval`, `denied`, `interrupted` or `unknown`. Completed tools do not establish that the enclosing turn completed, and an approval receipt is not execution evidence. Use the saved turn state and output for the enclosing outcome.
+
+### Website conversation protocol
+
+The website's separate assistant protocol accepts `activity_version: 1` in `POST /v1/dashboard-agent/messages` and `activity_version=1&limit=100` on `GET /v1/dashboard-agent/conversations/:id`. The optional history limit is 1–100, default 25. These requests retain their existing user, organization and conversation authorization. Website conversations are not adopted into external client execution.
+
+Opted-in website streams replace raw tool calls/results with `{type: "activity", step}` observations and retain answer/lifecycle events. History returns safe prose messages, grouped `activity`, and `turns: [{user_message_id, outcome, final_answer_id}]`. Website outcomes are `running`, `completed`, `awaiting_approval`, `failed`, `interrupted` or `unknown`; only a runtime-recorded completed outcome with its exact final assistant row establishes a final answer. Older unrecorded history remains unknown. A process crash can leave the last observed running state. History is bounded, so a final answer outside the loaded window cannot establish completion in that view. Omit the opt-in to retain the existing protocol.
+
+Self-hosters must apply additive control-plane migration `146_office_turn_evidence.sql` before upgrading the control API. It adds website turn evidence without backfilling old conversations; rolling back application code can leave the extra table in place.
 
 ## Errors and policy
 

@@ -103,6 +103,8 @@ Enable, pause, resume and approve return saved confirmation receipts. Show \`con
 
 Ask admits once per intended request. Retain its \`idempotency_key\`, \`conversation_id\` and \`turn_id\`. Retry the same write with the same key; observe existing work with get_conversation or SDK askStream using the exact turn IDs, without another Ask submission. Disconnect/SIGINT stops observation only. Inspect an unknown outcome before retrying. Members can read and deny; new work requires the current owner and an eligible active organization. Business memory wraps the existing Substrate ledger and policy approvals.
 
+REST conversation and exact-turn event GETs optionally accept activity_version=1 for bounded observed tool steps and safe summaries. MCP/CLI/SDK arguments retain their defaults and do not expose this option. Tool completion is not enclosing-turn completion. The Office website shows live steps above the answer; unrecorded historical outcomes remain unknown.
+
 Full reference: https://docs.butterbase.ai/core-concepts/office-clients/ and https://docs.butterbase.ai/api-reference/office-api/.
 
 Office JSON responses use the documented protocol shapes without \`_meta\`; status retains its \`{status}\` envelope and streaming uses SSE. Errors use \`{error:{code,message,decision?,history?}}\`; remediation/documentation_url/details are not guaranteed. SDK and CLI wrap responses as \`{data,error}\`.
