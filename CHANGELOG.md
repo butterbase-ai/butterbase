@@ -12,6 +12,8 @@
 
 ### Added
 
+- **Office Ask activity**: optional REST `activity_version=1` provides bounded tool observations and safe result summaries, including history and durable replay. Website history records authoritative turn outcomes and exact final-answer identity; older outcomes remain unknown. Apply additive control-plane migration **146** before upgrading control-api. Existing client requests retain their default payloads. See [the activity contract](services/docs/src/content/docs/api-reference/office-api.md#optional-tool-activity).
+
 - **Office clients**: standalone organization-scoped `OfficeClient`, 22 `butterbase office` commands and the optional cloud `manage_office` MCP tool. Includes idempotent Ask with durable public events, exact-turn observation/replay, source-aware decisions, native Substrate business memory, and browser confirmation for enable/pause/resume/approve. Requires a compatible hosted Office backend and the matching shared contract release; no app end-user credential support is implied.
 
 - **Prepared video storage (optional)**: retained private output objects, bounded transfers and durable cleanup, storage limits, authenticated byte-range playback and zero customer charge on failed delivery. Deploy optional move-table compatibility first, apply runtime migration061 in every region, then deploy policy-aware readers with output admission disabled before enabling the new contract. Existing provider-backed jobs keep their original behavior.

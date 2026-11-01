@@ -213,8 +213,21 @@ export const officeTurnSchema = z.discriminatedUnion('state', [
   z.object({ ...turnIdentity, state: z.literal('interrupted'), error: officeErrorSchema }).strict(),
 ]);
 export type OfficeTurn = z.infer<typeof officeTurnSchema>;
+/** Bounded public observations; no raw tool arguments or result bodies. */
+export const officeActivityStepSchema = z.object({
+  id, tool_name: z.string().min(1).max(128), action: z.string().min(1).max(100).optional(),
+  status: z.enum(['running', 'completed', 'failed', 'awaiting_approval', 'denied', 'interrupted', 'unknown']),
+  label: z.string().min(1).max(200), summary: z.string().max(500).nullable(),
+  started_at: timestamp.nullable(), finished_at: timestamp.nullable(),
+  duration_ms: z.number().finite().nonnegative().nullable(),
+  details: z.array(z.object({ label: z.string().min(1).max(100), value: z.string().max(500) }).strict()).max(8),
+  result: z.object({ kind: z.literal('agent_memory'), id, title: z.string().max(200).optional(), revision: z.number().int().positive().optional() }).strict().optional(),
+}).strict();
+export type OfficeActivityStep = z.infer<typeof officeActivityStepSchema>;
+export interface OfficeConversationActivity { user_message_id: string; steps: OfficeActivityStep[]; }
 const sequence = { sequence: z.number().int().positive() };
 export const officePublicEventSchema = z.discriminatedUnion('type', [
+  z.object({ ...sequence, type: z.literal('activity'), step: officeActivityStepSchema }).strict(),
   z.object({ ...sequence, type: z.literal('started'), turn_id: id, conversation_id: id }).strict(),
   z.object({ ...sequence, type: z.literal('text_delta'), text: z.string() }).strict(),
   z.object({ ...sequence, type: z.literal('message'), text: z.string() }).strict(),
@@ -267,6 +280,7 @@ export interface OfficeConversationDetail extends OfficeConversation {
   messages: Array<{ id: string; role: string; content: string; created_at: string }>;
   turn?: OfficeTurn;
   events?: OfficePublicEvent[];
+  activity?: OfficeConversationActivity[];
 }
 export interface OfficeMemoryResult {
   action_id: string;

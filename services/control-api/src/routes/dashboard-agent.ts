@@ -41,6 +41,8 @@
  * Pool: app.controlDb (decorated by plugins/database.ts).
  */
 
+import { readOfficeConversationActivityHistory } from '../services/dashboard-agent/office-activity-history.js';
+import { createOfficeActivityProjector } from '../services/dashboard-agent/office-activity.js';
 import { buildProposalReview, verifyPreparedApproval } from '../services/dashboard-agent/proposal-review.js';
 import { redactProposalArguments } from '../services/dashboard-agent/approval-proposal.js';
 import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
@@ -357,6 +359,7 @@ async function officeTurnAccessOutcome(
 }
 
 const postMessageBody = z.object({
+  activity_version: z.literal(1).optional(),
   conversation_id: z.string().uuid(),
   message: z.string().min(1),
   // Optional — falls back to DEFAULT_ASSISTANT_MODEL when the caller sends none.
@@ -828,6 +831,13 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
 
+    const version = z.object({ activity_version: z.literal('1').optional() }).safeParse(request.query);
+    if (!version.success) return reply.code(400).send({ error: 'invalid activity version' });
+    if (version.data.activity_version) {
+      const options = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }).safeParse(request.query);
+      if (!options.success) return reply.code(400).send({ error: 'invalid history limit' });
+      return reply.send({ conversation, ...await readOfficeConversationActivityHistory(app.controlDb, id, options.data.limit) });
+    }
     const messages = await listMessages(app.controlDb, id);
     return reply.send({ conversation, messages });
   });
@@ -930,7 +940,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
-    const { conversation_id, message, model } = parsed.data;
+    const { conversation_id, message, model, activity_version } = parsed.data;
 
     // Ownership check BEFORE sending SSE headers — once headers are sent we
     // cannot return a JSON 404.
@@ -996,6 +1006,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: message,
+        recordOfficeActivity: activity_version === 1,
         // Resolve rather than passing the parsed value straight through: the
         // zod default only fires when `model` is absent, so an explicit empty
         // or whitespace id would otherwise reach the gateway verbatim.
@@ -1005,14 +1016,23 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         ...officeAsk,
       });
 
+      const activity = createOfficeActivityProjector();
       for await (const event of gen) {
         publishEvent(conversation_id, event);
+        // Projection still observes every event when a browser disconnects.
+        const step = activity_version === 1 ? activity.observe(event) : null;
         if (clientDisconnected) continue;
-        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        if (!activity_version) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        else {
+          if (step) reply.raw.write(`data: ${JSON.stringify({ type: 'activity', step })}\n\n`);
+          if (['token', 'assistant_message', 'done', 'title_updated', 'blocked'].includes(event.type)) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+          else if (event.type === 'approval_required') reply.raw.write(`data: ${JSON.stringify({ type: event.type, approval_id: event.approval_id, tool_name: event.tool_name, sensitivity: event.sensitivity })}\n\n`);
+          else if (event.type === 'error') reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: 'The operator could not complete this turn.' })}\n\n`);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const errEvent = { type: 'error' as const, message: msg };
+      const errEvent = { type: 'error' as const, message: activity_version ? 'The operator could not complete this turn.' : msg };
       publishEvent(conversation_id, errEvent);
       if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(errEvent)}\n\n`);
     } finally {
@@ -1926,6 +1946,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: '',
+        ...(conversation.origin === 'office' ? { officeActivityResumeApprovalId: approvalId } : {}),
         model,
         pool: app.controlDb,
         organizationId: readOrgId(request),

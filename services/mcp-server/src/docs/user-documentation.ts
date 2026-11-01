@@ -60,6 +60,8 @@ Enable/pause/resume/approve, Ask, conversation creation and memory/principle rec
 
 CLI --json prints one {data,error} value on stdout and diagnostics only on stderr; --json --stream collects public events into the final object. Exit0 means accepted/read (including pending); exit1 means request/terminal failure, rejection/expiry/unknown or observation timeout/interruption; exit2 means usage/input error.
 
+REST conversation and exact-turn event GETs optionally accept activity_version=1 for bounded observed tool steps and safe result summaries. This option is not currently exposed by MCP/CLI/SDK arguments. A completed step is not enclosing-turn completion; use the saved turn outcome. Default observation remains compatible. The Office website separately shows live steps above answers and retains unknown outcomes for history without authoritative completion evidence.
+
 Full reference: https://docs.butterbase.ai/core-concepts/office-clients/ and https://docs.butterbase.ai/api-reference/office-api/.
 `,
   overview: `## Butterbase

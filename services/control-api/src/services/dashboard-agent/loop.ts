@@ -1,3 +1,5 @@
+import { OfficeTurnEvidence, observeOfficeTurn } from './office-turn-evidence.js';
+import { withOfficeActivityCallId } from './office-activity.js';
 /**
  * Agent loop for the Butterbase Dashboard Assistant.
  *
@@ -715,11 +717,22 @@ function isSkillEntrypoint(path: string): boolean {
 }
 
 export async function* runAgentTurn(
+  input: Parameters<typeof runAgentTurnInternal>[0], depsOverride?: Partial<LoopDeps>,
+): AsyncGenerator<LoopEvent> {
+  const evidence = input.recordOfficeActivity || input.officeActivityResumeApprovalId
+    ? new OfficeTurnEvidence(input.pool, input.conversationId, input.officeActivityResumeApprovalId) : undefined;
+  yield* observeOfficeTurn(runAgentTurnInternal(input, depsOverride, evidence), evidence);
+}
+
+async function* runAgentTurnInternal(
   input: {
     conversationId: string;
     userId: string;
     jwt: string;
     userMessage: string;
+    /** Server opt-in for website turn evidence; never model supplied. */
+    recordOfficeActivity?: boolean;
+    officeActivityResumeApprovalId?: string;
     /** Server supplied; never read from a chat request body. */
     officeMemoryContext?: string;
     officeMemoryTools?: OfficeMemoryToolAdapter;
@@ -833,6 +846,7 @@ export async function* runAgentTurn(
     }>;
   },
   depsOverride?: Partial<LoopDeps>,
+  evidence?: OfficeTurnEvidence,
 ): AsyncGenerator<LoopEvent> {
   let executionStopped = false;
   const executionAllowed = async (): Promise<boolean> => {
@@ -1089,7 +1103,7 @@ export async function* runAgentTurn(
 
   // 1. Persist the user turn
   if (!await executionAllowed()) { yield { type: 'blocked', reason: 'execution_interrupted' }; return; }
-  await appendMessage(input.pool, input.conversationId, {
+  const userMessage = await appendMessage(input.pool, input.conversationId, {
     role: 'user',
     content: input.userMessage,
     toolCallId: null,
@@ -1097,6 +1111,8 @@ export async function* runAgentTurn(
     toolArgs: null,
     toolResult: null,
   });
+
+  await evidence?.start(userMessage.id);
 
   // AFFORDANCE (not the control): hide tools the operator may not call, so the
   // model doesn't waste turns and tokens on refusals. The control is
@@ -1491,7 +1507,7 @@ export async function* runAgentTurn(
       // No tool call — assistant is done
       if (pendingToolCalls.length === 0) {
         lastAssistantText = assistantText;
-        await appendMessage(input.pool, input.conversationId, {
+        const finalMessage = await appendMessage(input.pool, input.conversationId, {
           role: 'assistant',
           content: assistantText,
           toolCallId: null,
@@ -1500,6 +1516,7 @@ export async function* runAgentTurn(
           toolResult: null,
           modelUsed: input.model,
         });
+        evidence?.answer(finalMessage.id);
         yield { type: 'assistant_message', content: assistantText };
         yield { type: 'done' };
         terminated = true;
@@ -1734,7 +1751,7 @@ export async function* runAgentTurn(
                       const saved = await persistPreparedApproval(input.pool, { id: approvalId, organizationId: proposalOrganizationId!, conversationId: input.conversationId, operation, proposal: { ...prepared.proposal, source: parkedActionId ? 'substrate_escalation' : 'explicit' }, traceId: input.traceId, reviewPreparation: input.reviewPreparation, message: { id: randomUUID(), callId: originalCall.id, toolName: originalCall.name, args: originalCall.args, content: i === 0 ? assistantText : '', model: input.model } });
                       if (saved.kind === 'duplicate') payload = { code: 'already_pending', approval_id: saved.approvalId };
                       else {
-                        yield { type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' };
+                        yield withOfficeActivityCallId({ type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' }, originalCall.id);
                         terminated = true;
                         break outer;
                       }
@@ -2078,13 +2095,13 @@ export async function* runAgentTurn(
             },
             messageId,
           );
-          yield {
+          yield withOfficeActivityCallId({
             type: 'approval_required',
             approval_id: approval.id,
             tool_name: tc.name,
             args: tc.args,
             sensitivity: 'destructive',
-          };
+          }, tc.id);
           terminated = true;
           break outer;
         }
@@ -2146,13 +2163,13 @@ export async function* runAgentTurn(
               },
               messageId,
             );
-            yield {
+            yield withOfficeActivityCallId({
               type: 'approval_required',
               approval_id: approval.id,
               tool_name: tc.name,
               args: tc.args,
               sensitivity,
-            };
+            }, tc.id);
             terminated = true;
             break outer;
           }
@@ -2980,13 +2997,13 @@ export async function* runAgentTurn(
                   escalated: true,
                 });
               }
-              yield {
+              yield withOfficeActivityCallId({
                 type: 'approval_required',
                 approval_id: approval.id,
                 tool_name: tc.name,
                 args: tc.args,
                 sensitivity: 'destructive',
-              };
+              }, tc.id);
               terminated = true;
               break outer;
             }

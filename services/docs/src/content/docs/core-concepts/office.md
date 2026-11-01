@@ -13,6 +13,12 @@ An owner can customize what Office watches and what it does with it by asking
 for **skills** — standing instructions such as a morning check of a customer
 sheet — and by connecting **Google Sheets** as a read-only source.
 
+## Ask and observed steps
+
+Ask opens as a quick drawer and can expand into the Office workspace. The same conversation and draft stay in place when switching layouts. While Office works, observed steps appear above the answer; expand **Tool & result** for the available safe details. Step headings come from actual tool observations rather than extra instructions the agent must write.
+
+A recorded successful final answer collapses the steps into a summary that you can reopen. Your manual disclosure choice is preserved. Approval waits, failures and unavailable outcomes remain visible. A completed tool or saved proposal does not mean the whole request finished. Older conversations without recorded completion evidence remain unknown. Review owner decisions in Today. Closing Ask stops watching the view; it does not cancel admitted work.
+
 ## Who can use it
 
 You can also use Office through the [MCP, CLI and standalone SDK clients](/core-concepts/office-clients/), with explicit organization selection and browser confirmation for protected actions.
