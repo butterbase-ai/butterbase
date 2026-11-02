@@ -11,6 +11,7 @@ import type { AuthProvider } from '../services/auth-provider.js';
 import { LocalAuthProvider } from '../services/local-auth-provider.js';
 import { CognitoAuthProvider } from '../services/cognito-auth-provider.js';
 import { config } from '../config.js';
+import { resolvePlatformIdentity } from '../services/platform-identity.js';
 import { createAgentError, getDocUrl } from '../services/error-handler.js';
 
 /**
@@ -63,13 +64,6 @@ async function provisionStripeCustomer(
   } catch {
     // OSS mode: no Stripe.
   }
-}
-
-// Personal org name derived from email — mirrors backfill-organizations.ts convention.
-function personalOrgName(email: string): string {
-  const at = email.indexOf('@');
-  if (at <= 0 || at === email.length - 1) return `${email}'s org`;
-  return `${email.slice(0, at)}'s org`;
 }
 
 // Headers can arrive as string | string[] | undefined. Take the first value,
@@ -331,65 +325,9 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
         const signupSource = pickHeader(request, 'x-signup-source');
         const signupReferrer = pickHeader(request, 'x-signup-referrer');
 
-        // Upsert platform_users + ensure a personal org exists.
-        // We pre-generate the user ID so we can INSERT the org before the user row
-        // (organizations.owner_id has no FK to platform_users).
-        const newUserId = crypto.randomUUID();
-        const orgName = personalOrgName(claims.email);
-
-        const client = await fastify.controlDb.connect();
-        let userId: string;
-        let personalOrgId: string;
-        let isNewUser: boolean;
-
-        try {
-          await client.query('BEGIN');
-
-          // Step 1: Create a candidate personal org (may be discarded on conflict).
-          const orgIns = await client.query<{ id: string }>(
-            `INSERT INTO organizations (owner_id, name, personal, plan_id, account_status)
-             VALUES ($1, $2, true, 'playground', 'active')
-             RETURNING id`,
-            [newUserId, orgName]
-          );
-          const newOrgId = orgIns.rows[0].id;
-
-          // Step 2: Upsert platform_users.
-          // ON CONFLICT: existing user — update email fields only, NOT personal_organization_id.
-          const userIns = await client.query<{ id: string; personal_organization_id: string; is_new_signup: boolean }>(
-            `INSERT INTO platform_users (id, cognito_sub, email, email_verified, signup_source, signup_referrer, personal_organization_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (cognito_sub)
-             DO UPDATE SET email = EXCLUDED.email, email_verified = EXCLUDED.email_verified, updated_at = now()
-             RETURNING id, personal_organization_id, (xmax = 0) AS is_new_signup`,
-            [newUserId, claims.sub, claims.email, claims.email_verified, signupSource, signupReferrer, newOrgId]
-          );
-
-          userId = userIns.rows[0].id;
-          isNewUser = userIns.rows[0].is_new_signup;
-
-          if (isNewUser) {
-            // New user: add owner membership to the new org.
-            await client.query(
-              `INSERT INTO organization_members (organization_id, user_id, role)
-               VALUES ($1, $2, 'owner')
-               ON CONFLICT (organization_id, user_id) DO NOTHING`,
-              [newOrgId, userId]
-            );
-            personalOrgId = newOrgId;
-          } else {
-            // Existing user: discard the orphan org we pre-created.
-            await client.query(`DELETE FROM organizations WHERE id = $1`, [newOrgId]);
-            personalOrgId = userIns.rows[0].personal_organization_id;
-          }
-
-          await client.query('COMMIT');
-        } catch (txErr) {
-          await client.query('ROLLBACK').catch(() => {});
-          throw txErr;
-        } finally {
-          client.release();
-        }
+        const { userId, personalOrgId, isNewUser } = await resolvePlatformIdentity(
+          fastify.controlDb, claims, { signupSource, signupReferrer },
+        );
 
         // Read plan_id and stripe_customer_id from the user's personal org.
         const orgRow = await fastify.controlDb.query<{ plan_id: string; stripe_customer_id: string | null }>(

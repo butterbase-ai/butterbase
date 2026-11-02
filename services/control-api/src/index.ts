@@ -43,6 +43,7 @@ import { autoApiRoutes } from './routes/auto-api.js';
 import { rlsRoutes } from './routes/rls.js';
 import { oauthConfigRoutes } from './routes/oauth-config.js';
 import { auditLogRoutes } from './routes/audit-logs.js';
+import { pruneAuditEvents } from './services/audit-retention.js';
 import { mcpRoutes } from './routes/mcp.js';
 import { wellKnownRoutes } from './routes/well-known.js';
 import { oauthRoutes } from './routes/oauth.js';
@@ -1070,13 +1071,17 @@ Promise.resolve(app.ready())
             // and per-region runtime DBs (auth + per-app writes), so prune both.
             const retentionDeletes: Array<{ sql: string; label: string }> = [
               { sql: `DELETE FROM function_invocations WHERE started_at < now() - interval '7 days'`, label: 'function_invocations' },
-              { sql: `DELETE FROM audit_events WHERE created_at < now() - interval '180 days'`, label: 'audit_events' },
             ];
             for (const { sql, label } of retentionDeletes) {
               await app.controlDb.query(sql).catch((err) => {
                 app.log.error({ err, table: label, scope: 'control-plane' }, 'Retention prune failed');
               });
             }
+            await pruneAuditEvents(app.controlDb).then((result) => {
+              app.log.info({ ...result, scope: 'control-plane' }, 'Audit retention batch pass finished');
+            }).catch((err) => {
+              app.log.error({ err, scope: 'control-plane' }, 'Audit retention batch pass failed');
+            });
 
             const runtimeDeletes: Array<{ sql: string; label: string }> = [
               ...retentionDeletes,
@@ -1097,6 +1102,11 @@ Promise.resolve(app.ready())
                   app.log.error({ err, table: label, region, scope: 'runtime-plane' }, 'Retention prune failed');
                 });
               }
+              await pruneAuditEvents(pool).then((result) => {
+                app.log.info({ ...result, region, scope: 'runtime-plane' }, 'Audit retention batch pass finished');
+              }).catch((err) => {
+                app.log.error({ err, region, scope: 'runtime-plane' }, 'Audit retention batch pass failed');
+              });
             }
             // Daily paid-conversion snapshot. Subscription rows carry no
             // status history, so a day not captured here is a day of the
