@@ -84,12 +84,14 @@ Self-hosters must apply additive control-plane migration `146_office_turn_eviden
 ## Model preferences
 
 Signed-in people can choose a personal default in Dashboard Settings or Office
-Ask → Chat settings. It applies to new chats in both products. Each conversation
-retains its saved model and can be changed with the conversation picker. Changing
-the personal default does not rewrite existing conversations.
+Settings → Conversation defaults. It applies to new chats in both products. Office's
+message-bar picker changes only the current conversation, including a choice before
+the first message. New conversation starts from the personal default again. Each
+saved conversation retains its chosen model; changing the personal default does not
+rewrite existing conversations.
 
 Organization owners can separately choose the model for scheduled/event-driven
-Office checks and skill runs in Office Skills → Routine checks or Dashboard
+Office checks and skill runs in Office Settings → Office background model or Dashboard
 organization settings. Members can read that setting. The next admitted run uses
 the organization choice; personal chat preferences do not control background work.
 
