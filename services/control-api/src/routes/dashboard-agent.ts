@@ -54,7 +54,9 @@ import { listRecentResolvedByOrg, type OrgApproval } from '../services/dashboard
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
-import { DEFAULT_ASSISTANT_MODEL, resolveAssistantModel } from '../services/dashboard-agent/assistant-model.js';
+import { resolveAssistantModel } from '../services/dashboard-agent/assistant-model.js';
+import { readPersonalAssistantModel } from '../services/dashboard-agent/model-preferences.js';
+import { registerAgentModelPreferencesRoutes } from './agent-model-preferences.js';
 import { requireUserId } from '../utils/require-auth.js';
 import {
   createConversation,
@@ -273,8 +275,8 @@ export { DEFAULT_ASSISTANT_MODEL, resolveAssistantModel } from '../services/dash
 
 const createConversationBody = z.object({
   title: z.string().min(1).max(500).default('New conversation'),
-  // Optional — falls back to DEFAULT_ASSISTANT_MODEL when the caller sends none.
-  model: z.string().min(1).default(DEFAULT_ASSISTANT_MODEL),
+  // Resolve the deployment default when the request runs, not at import time.
+  model: z.string().min(1).optional(),
   /**
    * Task 9 — a client may ASK for an Office conversation; it cannot choose the
    * organization. The org comes from the membership-checked
@@ -362,8 +364,8 @@ const postMessageBody = z.object({
   activity_version: z.literal(1).optional(),
   conversation_id: z.string().uuid(),
   message: z.string().min(1),
-  // Optional — falls back to DEFAULT_ASSISTANT_MODEL when the caller sends none.
-  model: z.string().min(1).default(DEFAULT_ASSISTANT_MODEL),
+  // An omitted model keeps the conversation's saved choice.
+  model: z.string().min(1).optional(),
 });
 
 const rewindBody = z.object({
@@ -733,6 +735,7 @@ export async function resolveOperatorApproval(
 // ---------------------------------------------------------------------------
 
 export async function dashboardAgentRoutes(app: FastifyInstance) {
+  registerAgentModelPreferencesRoutes(app, isEnabled);
   // ── Startup env warnings ─────────────────────────────────────────────────
   if (process.env.DASHBOARD_ASSISTANT_ENABLED === '1') {
     if (!process.env.AI_GATEWAY_URL) {
@@ -754,7 +757,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
-    const model = resolveAssistantModel(parsed.data.model);
+    const model = parsed.data.model?.trim() || await readPersonalAssistantModel(app.controlDb, userId);
 
     /**
      * ── Office creation (Task 9) ──────────────────────────────────────────
@@ -870,6 +873,9 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = patchConversationBody.parse(request.body);
 
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
+    if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
+
     // Persists the picker choice so regenerate/resume replay on the same model.
     const updated = await updateConversationModel(app.controlDb, id, userId, resolveAssistantModel(body.model));
     if (!updated) return reply.code(404).send({ error: 'conversation not found' });
@@ -955,11 +961,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
      * Eligibility, also before headers. The loop rechecks it per request, but
      * a lost entitlement should not open a stream first.
      */
-    const officeAccess = await officeTurnAccessOutcome(
-      conversation,
-      userId,
-      resolveAssistantModel(model),
-    );
+    const turnModel = resolveAssistantModel(model, conversation.model);
+    const officeAccess = await officeTurnAccessOutcome(conversation, userId, turnModel);
     if (!officeAccess.ok) {
       return reply.code(officeAccess.code).send({ error: officeAccess.error });
     }
@@ -1007,10 +1010,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         jwt,
         userMessage: message,
         recordOfficeActivity: activity_version === 1,
-        // Resolve rather than passing the parsed value straight through: the
-        // zod default only fires when `model` is absent, so an explicit empty
-        // or whitespace id would otherwise reach the gateway verbatim.
-        model: resolveAssistantModel(model),
+        model: turnModel,
         pool: app.controlDb,
         organizationId: readOrgId(request),
         ...officeAsk,

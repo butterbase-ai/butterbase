@@ -105,6 +105,8 @@ Ask admits once per intended request. Retain its \`idempotency_key\`, \`conversa
 
 REST conversation and exact-turn event GETs optionally accept activity_version=1 for bounded observed tool steps and safe summaries. MCP/CLI/SDK arguments retain their defaults and do not expose this option. Tool completion is not enclosing-turn completion. The Office website shows live steps above the answer; unrecorded historical outcomes remain unknown.
 
+Website model settings share a personal new-chat default between Office and Dashboard, with per-conversation overrides. Owners separately choose the organization's background model for timer/event checks and skills. JWT-only GET/PATCH /v1/dashboard-agent/preferences and /v1/dashboard-agent/operator/model return model, effective_model and platform_default_model. Organization requests require x-organization-id; organization PATCH requires an owner. PATCH {model:null} resets to the platform default. API keys cannot use these website preference routes. Defaults fall back to deepseek/deepseek-v4.1-flash; self-hosters apply control migration 149_agent_model_preferences.sql and may set DASHBOARD_ASSISTANT_MODEL / OPERATOR_MODEL. This adds no MCP/CLI/SDK actions. Details: https://docs.butterbase.ai/api-reference/office-api/#model-preferences.
+
 Full reference: https://docs.butterbase.ai/core-concepts/office-clients/ and https://docs.butterbase.ai/api-reference/office-api/.
 
 Office JSON responses use the documented protocol shapes without \`_meta\`; status retains its \`{status}\` envelope and streaming uses SSE. Errors use \`{error:{code,message,decision?,history?}}\`; remediation/documentation_url/details are not guaranteed. SDK and CLI wrap responses as \`{data,error}\`.

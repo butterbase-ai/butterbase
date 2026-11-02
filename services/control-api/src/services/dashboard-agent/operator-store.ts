@@ -52,6 +52,8 @@ export type OperatorJob = {
   name: string;
   instructions: string;
   intervalSeconds: number;
+  /** Owner-selected organization model, loaded with each timer/event job. */
+  model?: string | null;
 };
 
 /** Upsert the single default job on the caller's transaction. */
@@ -129,12 +131,12 @@ export async function getEnabledJobForOrg(
 ): Promise<OperatorJob | null> {
   const r = await pool.query<{
     id: string; organization_id: string; name: string;
-    instructions: string; interval_seconds: number;
+    instructions: string; interval_seconds: number; model: string | null;
   }>(
-    `SELECT id, organization_id, name, instructions, interval_seconds
-     FROM dashboard_agent_operator_jobs
-     WHERE organization_id = $1 AND enabled = TRUE
-     ORDER BY created_at ASC LIMIT 1`,
+    `SELECT j.id, j.organization_id, j.name, j.instructions, j.interval_seconds, o.operator_model AS model
+     FROM dashboard_agent_operator_jobs j JOIN organizations o ON o.id=j.organization_id
+     WHERE j.organization_id = $1 AND j.enabled = TRUE
+     ORDER BY j.created_at ASC LIMIT 1`,
     [orgId],
   );
   if (r.rows.length === 0) return null;
@@ -145,6 +147,7 @@ export async function getEnabledJobForOrg(
     name: row.name,
     instructions: row.instructions,
     intervalSeconds: row.interval_seconds,
+    model: row.model,
   };
 }
 
@@ -168,19 +171,20 @@ export async function claimDueJobs(
       name: string;
       instructions: string;
       interval_seconds: number;
+      model: string | null;
     }>(
-      `SELECT id, organization_id, name, instructions, interval_seconds
-       FROM dashboard_agent_operator_jobs
-       WHERE enabled = TRUE AND next_run_at <= $1
-       ORDER BY next_run_at
+      `SELECT j.id, j.organization_id, j.name, j.instructions, j.interval_seconds, o.operator_model AS model
+       FROM dashboard_agent_operator_jobs j JOIN organizations o ON o.id=j.organization_id
+       WHERE j.enabled = TRUE AND j.next_run_at <= $1
+       ORDER BY j.next_run_at
        LIMIT $2
-       FOR UPDATE SKIP LOCKED`,
+       FOR UPDATE OF j SKIP LOCKED`,
       [now, limit],
     );
 
     for (const row of res.rows) {
       const next = await schedule?.(client, { id: row.id, organizationId: row.organization_id, name: row.name,
-        instructions: row.instructions, intervalSeconds: row.interval_seconds }, now);
+        instructions: row.instructions, intervalSeconds: row.interval_seconds, model: row.model }, now);
       if (next) {
         await client.query('UPDATE dashboard_agent_operator_jobs SET last_run_at=$1,next_run_at=$2 WHERE id=$3', [now, next, row.id]);
         continue;
@@ -200,6 +204,7 @@ export async function claimDueJobs(
       name: r.name,
       instructions: r.instructions,
       intervalSeconds: r.interval_seconds,
+      model: r.model,
     }));
   } catch (err) {
     await client.query('ROLLBACK');

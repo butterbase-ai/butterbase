@@ -81,6 +81,43 @@ Opted-in website streams replace raw tool calls/results with `{type: "activity",
 
 Self-hosters must apply additive control-plane migration `146_office_turn_evidence.sql` before upgrading the control API. It adds website turn evidence without backfilling old conversations; rolling back application code can leave the extra table in place.
 
+## Model preferences
+
+Signed-in people can choose a personal default in Dashboard Settings or Office
+Ask → Chat settings. It applies to new chats in both products. Each conversation
+retains its saved model and can be changed with the conversation picker. Changing
+the personal default does not rewrite existing conversations.
+
+Organization owners can separately choose the model for scheduled/event-driven
+Office checks and skill runs in Office Skills → Routine checks or Dashboard
+organization settings. Members can read that setting. The next admitted run uses
+the organization choice; personal chat preferences do not control background work.
+
+These website settings use authenticated JWT requests:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET/PATCH /v1/dashboard-agent/preferences` | Signed-in person's chat default |
+| `GET/PATCH /v1/dashboard-agent/operator/model` | Active organization's background model; PATCH requires an owner |
+| `PATCH /v1/dashboard-agent/conversations/:id` | Set the owned conversation's model |
+
+The organization and Office conversation requests require the matching
+`x-organization-id` header. Preference PATCH bodies use `{ "model": "provider/model" }`;
+`{ "model": null }` resets a personal/organization preference to the platform
+default. Conversation PATCH requires a nonempty model ID. Preference responses
+contain `model`, `effective_model`, and `platform_default_model`. Personal and
+organization preference choices are validated against the chat catalog. API keys cannot access the personal or
+organization preference endpoints. These routes are separate from the Office
+MCP/CLI/SDK facade; their action counts and existing request shapes are unchanged.
+
+Self-hosters must apply additive control migration
+`149_agent_model_preferences.sql` before upgrading. Both defaults fall back to
+`deepseek/deepseek-v4.1-flash`. `DASHBOARD_ASSISTANT_MODEL` configures the new-chat
+platform fallback; `OPERATOR_MODEL` configures the organization background
+fallback. Saved choices take precedence. The Dashboard's initial picker fallback
+may use `VITE_ASSISTANT_MODEL` at build time. Settings reads and saves make no
+model call.
+
 ## Errors and policy
 
 New facade errors use `{error: {code,message,decision?,history?}}`. Codes distinguish authorization (`owner_required`, `managed_credential_forbidden`, `credential_revoked`), eligibility/work gates (`paid_plan_required`, `account_suspended`, `credits_required`, `paused_by_owner`, `credential_repair_required`), admission/retry conflicts (`idempotency_conflict`, `conversation_busy`, `conversation_awaiting_approval`, `conversation_not_client_owned`), confirmation drift/expiry, policy conflicts, interrupted work and expired replay. For `conversation_not_client_owned`, create a new conversation through an Office client or omit `conversation_id` on the first Ask; existing website conversations are not adopted for client execution.
