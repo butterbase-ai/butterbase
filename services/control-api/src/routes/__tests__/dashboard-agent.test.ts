@@ -19,11 +19,17 @@ vi.mock('../../services/dashboard-agent/store.js', () => ({
   listConversations: vi.fn(),
   getConversation: vi.fn(),
   deleteConversation: vi.fn(),
+  updateConversationModel: vi.fn(),
   listMessages: vi.fn(),
 }));
 
 vi.mock('../../services/dashboard-agent/loop.js', () => ({
   runAgentTurn: vi.fn(),
+}));
+
+vi.mock('../../services/dashboard-agent/model-preferences.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../services/dashboard-agent/model-preferences.js')>(),
+  readPersonalAssistantModel: async () => (await import('../../services/dashboard-agent/assistant-model.js')).resolveAssistantModel(),
 }));
 
 vi.mock('../../services/dashboard-agent/usage-store.js', () => ({
@@ -39,6 +45,7 @@ import {
   listConversations,
   getConversation,
   deleteConversation,
+  updateConversationModel,
   listMessages,
 } from '../../services/dashboard-agent/store.js';
 import { runAgentTurn } from '../../services/dashboard-agent/loop.js';
@@ -108,6 +115,7 @@ describe('dashboard-agent routes', () => {
   afterEach(async () => {
     await app?.close();
     delete process.env.DASHBOARD_ASSISTANT_ENABLED;
+    vi.unstubAllEnvs();
   });
 
   // ── Case 1: Feature flag off → 404 on all endpoints ─────────────────────
@@ -165,6 +173,14 @@ describe('dashboard-agent routes', () => {
       app = await buildTestApp();
     });
 
+    it('uses the current deployment default when the caller omits a model', async () => {
+      vi.stubEnv('DASHBOARD_ASSISTANT_MODEL', 'deepseek/deepseek-v4.1-flash-1017');
+      vi.mocked(createConversation).mockResolvedValueOnce(SAMPLE_CONVERSATION);
+      const response = await app.inject({ method: 'POST', url: '/conversations', payload: { title: 'Configured default' } });
+      expect(response.statusCode).toBe(201);
+      expect(vi.mocked(createConversation).mock.calls[0][3]).toBe('deepseek/deepseek-v4.1-flash-1017');
+    });
+
     it('returns 201 with the conversation object', async () => {
       vi.mocked(createConversation).mockResolvedValueOnce(SAMPLE_CONVERSATION);
 
@@ -188,6 +204,18 @@ describe('dashboard-agent routes', () => {
   });
 
   // ── Case 4: GET /conversations returns only caller's rows ────────────────
+
+  it('keeps Office conversation model changes bound to the active organization', async () => {
+    app = await buildTestApp();
+    const orgId = '33333333-3333-4333-8333-333333333333';
+    vi.mocked(getConversation).mockResolvedValue({ ...SAMPLE_CONVERSATION, origin: 'office', organizationId: orgId } as any);
+    vi.mocked(updateConversationModel).mockResolvedValue({ ...SAMPLE_CONVERSATION, model: 'vendor/selected' } as any);
+    const request = { method: 'PATCH' as const, url: `/conversations/${SAMPLE_CONVERSATION.id}`, payload: { model: 'vendor/selected' } };
+    expect((await app.inject(request)).statusCode).toBe(404);
+    expect(updateConversationModel).not.toHaveBeenCalled();
+    expect((await app.inject({ ...request, headers: { 'x-organization-id': orgId } })).statusCode).toBe(200);
+    expect(updateConversationModel).toHaveBeenCalledWith(expect.anything(), SAMPLE_CONVERSATION.id, USER_A, 'vendor/selected');
+  });
 
   describe("Case 4: GET /conversations returns only the caller's rows", () => {
     beforeEach(async () => {
@@ -241,6 +269,21 @@ describe('dashboard-agent routes', () => {
   describe('Case 6: POST /messages — SSE stream', () => {
     beforeEach(async () => {
       app = await buildTestApp();
+    });
+
+    it.each([
+      [undefined, 'vendor/saved-model', 'vendor/saved-model'],
+      ['vendor/requested-model', 'vendor/saved-model', 'vendor/requested-model'],
+      [undefined, '', 'vendor/deployment-model'],
+    ])('resolves request model %s with saved model %s', async (requested, saved, expected) => {
+      vi.stubEnv('DASHBOARD_ASSISTANT_MODEL', 'vendor/deployment-model');
+      vi.mocked(getConversation).mockResolvedValueOnce({ ...SAMPLE_CONVERSATION, model: saved });
+      vi.mocked(runAgentTurn).mockReturnValueOnce((async function* () { yield { type: 'done' as const }; })());
+      const response = await app.inject({ method: 'POST', url: '/messages',
+        payload: { conversation_id: SAMPLE_CONVERSATION.id, message: 'Follow up', ...(requested ? { model: requested } : {}) },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(runAgentTurn).toHaveBeenCalledWith(expect.objectContaining({ model: expected }));
     });
 
     it('returns SSE content-type and frames in order', async () => {

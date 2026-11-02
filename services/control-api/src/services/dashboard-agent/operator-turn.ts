@@ -168,33 +168,21 @@ export type OperatorTurnResult = {
  * was silently dead — the failure surfaced only as an `errors` counter. No unit
  * test caught it because they all mock the gateway.
  *
- * The default is `qwen/qwen3.7-flash` (catalog-verified 2026-08-07: 1M context,
- * $0.03/$0.13 per Mtok). Measured operator spend on `anthropic/claude-sonnet-4.5`
- * was ~$28/day for ONE org — 8.93M prompt tokens across 141 turns, ~430x the
- * sandbox compute cost — so the model, not the compute, is the bill.
- *
- * TRADE-OFF, know it before changing this back or forward: qwen has NO chat
- * models on imarouter (only the wan- and happyhorse- video families), so it is
- * SINGLE-HOMED on openrouter — `select.ts` rankRoutersPresenceMode returns a
- * one-element list and an openrouter outage has no fallback.
- * `anthropic/claude-sonnet-4.5` is dual-homed (openrouter + provider-secondary)
- * and remains the one-env-var revert: OPERATOR_MODEL=anthropic/claude-sonnet-4.5.
- * `deepseek/deepseek-v4-flash` could be dual-homed but needs a pricing rule
- * added to provider-secondary-pricing.json first.
+ * DeepSeek V4.1 Flash is the fallback (live catalog verified 2026-11-02).
+ * Timer/event jobs carry the owner's organization preference as job.model.
+ * Personal chat preferences never control shared background work.
  *
  * PRECEDENCE (highest first):
- *   1. `opts.model` — an explicit caller-supplied id always wins.
- *   2. `process.env.OPERATOR_MODEL` — deployment override, so an operator can
- *      move to a different catalog id with no code change (mirrors how
- *      OPERATOR_ENABLED / OPERATOR_CRED_KEY are handled).
- *   3. `DEFAULT_OPERATOR_MODEL` below.
+ *   1. opts.model, then the organization's job.model.
+ *   2. process.env.OPERATOR_MODEL, the deployment fallback.
+ *   3. DEFAULT_OPERATOR_MODEL below.
  *
  * The env var is read LAZILY, per call, exactly like `OPERATOR_CRED_KEY` in
  * operator-credential.ts — so it can be changed without a rebuild and so tests
  * can set it without import-order games.
  * ============================================================================
  */
-export const DEFAULT_OPERATOR_MODEL = 'qwen/qwen3.7-flash';
+export const DEFAULT_OPERATOR_MODEL = 'deepseek/deepseek-v4.1-flash';
 
 /** Resolve the model for a wake. See the precedence note above. */
 export function resolveOperatorModel(explicit?: string): string {
@@ -506,7 +494,7 @@ export async function operatorPreflight(
   const conversationId = await getOrCreateOperatorConversation(
     pool,
     job.organizationId,
-    resolveOperatorModel(model),
+    resolveOperatorModel(model?.trim() || job.model?.trim() || undefined),
   );
 
   /**
@@ -633,7 +621,7 @@ export async function runOperatorTurn(
     return { conversationId: '', events: 0, approvalId: null, error: null,
       skipped: { reason: 'access_blocked', blockedReason: 'execution_interrupted' } };
   }
-  const model = resolveOperatorModel(opts.model);
+  const model = resolveOperatorModel(opts.model?.trim() || job.model?.trim() || undefined);
 
   const pre = await operatorPreflight(pool, job, wake, opts.model);
   if (!pre.ok) {

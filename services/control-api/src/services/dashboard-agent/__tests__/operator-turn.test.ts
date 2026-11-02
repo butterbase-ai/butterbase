@@ -615,8 +615,8 @@ describe('runOperatorTurn — model selection', () => {
 
     await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
 
-    expect(DEFAULT_OPERATOR_MODEL).toBe('qwen/qwen3.7-flash');
-    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('qwen/qwen3.7-flash');
+    expect(DEFAULT_OPERATOR_MODEL).toBe('deepseek/deepseek-v4.1-flash');
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('deepseek/deepseek-v4.1-flash');
     // The exact class of id that 404s: no provider segment.
     expect(DEFAULT_OPERATOR_MODEL).toContain('/');
     expect(DEFAULT_OPERATOR_MODEL).not.toMatch(/^claude-/);
@@ -686,6 +686,15 @@ describe('runOperatorTurn — model selection', () => {
     });
 
     expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('openai/gpt-5');
+  });
+
+  it.each(['timer', 'event'] as const)('uses the organization model on a %s wake before the deployment fallback', async reason => {
+    process.env.OPERATOR_MODEL = 'vendor/deployment';
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    const wake = reason === 'timer' ? { reason } : { reason, table: 'entities', rowId: 'row' };
+    await runOperatorTurn(stubPool, { job: { ...job, model: 'vendor/organization' }, wake });
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('vendor/organization');
+    expect(mockGetConv).toHaveBeenCalledWith(stubPool, job.organizationId, 'vendor/organization');
   });
 
   it('ignores a blank OPERATOR_MODEL rather than sending an empty model id', async () => {
