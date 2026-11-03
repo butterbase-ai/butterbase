@@ -19,6 +19,40 @@ const value = (input: unknown, toolName = 'select_rows', phase: 'input' | 'resul
 const decoded = (input: unknown, tool?: string, phase?: 'input' | 'result', action?: string) => JSON.parse(value(input, tool, phase, action).text!);
 
 describe('secure Office tool previews', () => {
+  it.each(['manage_integrations','manage_people','manage_billing'])('keeps root opaque rules intact under an MCP error envelope for %s', tool => {
+    const action = tool === 'manage_integrations' ? 'execute_action' : tool === 'manage_people' ? 'get_email_lookup' : 'portal';
+    const opaqueField = tool === 'manage_billing' ? 'plans' : 'data';
+    const preview = value({ isError: true, structuredContent: { successful: false, [opaqueField]: { title: 'SECRET_ALPHA', status: 'SECRET_BETA' }, url: 'SECRET_GAMMA' } }, tool, 'result', action);
+    expect(preview.text).not.toContain('SECRET_');
+    expect(JSON.parse(preview.text!).isError).toBe(true);
+    expect(preview.redacted).toBe(true);
+  });
+  it.each([
+    { downloadUrl: '/storage/object?token=SECRET_ALPHA' },
+    { url: ' https://user:password@example.test/a?x=SECRET_ALPHA#SECRET_BETA' },
+    { url: '/public/path?x=SECRET_ALPHA#SECRET_BETA' },
+    { url: '//user:password@example.test/a?x=SECRET_ALPHA#SECRET_BETA' },
+  ])('sanitizes relative, scheme-relative and whitespace-prefixed URL values %j', fixture => {
+    const preview = value(fixture, 'manage_storage', 'result', 'download_url');
+    expect(preview.text).not.toContain('SECRET_'); expect(preview.text).not.toContain('password');
+  });
+  it('shows actual proposal operation keys and applies the target policy recursively', () => {
+    expect(decoded({ operation: { tool: 'manage_app', arguments: { action: 'delete', app_id: 'app_synthetic' } }, reason: 'Remove the requested test app', evidence_refs: [{ kind: 'app', app_id: 'app_synthetic' }] }, 'propose_action', 'input'))
+      .toEqual({ operation: { tool: 'manage_app', arguments: { action: 'delete', app_id: 'app_synthetic' } }, reason: 'Remove the requested test app', evidence_refs: [{ kind: 'app', app_id: 'app_synthetic' }] });
+  });
+  it('keeps real RAG and preview metadata instead of assuming renamed result shapes', () => {
+    expect(decoded({ chunks: [{ document_id: 'doc-1', score: 0.9, text: 'SECRET_ALPHA' }] }, 'rag_query'))
+      .toEqual({ chunks: [{ document_id: 'doc-1', score: 0.9, text: '[withheld]' }] });
+    expect(decoded({ action: 'create_collection', name: 'docs', chunk_size: 512, chunk_overlap: 50, access_mode: 'private' }, 'manage_rag_content', 'input', 'create_collection'))
+      .toEqual({ action: 'create_collection', name: 'docs', chunk_size: 512, chunk_overlap: 50, access_mode: 'private' });
+    expect(decoded({ job_id: 'job-1', staging_name: 'test', staging_subdomain: 'test-app', region: 'test', status: 'queued' }, 'manage_preview', 'result', 'create'))
+      .toEqual({ job_id: 'job-1', staging_name: 'test', staging_subdomain: 'test-app', region: 'test', status: 'queued' });
+  });
+  it('keeps structured audit record metadata while withholding arbitrary event bodies and raw logs', () => {
+    expect(decoded({ logs: [{ id: 'log-1', action: 'invoke', success: true, event_data: { title: 'SECRET_ALPHA' }, error_message: 'SECRET_BETA' }], total: 1 }, 'query_audit_logs'))
+      .toEqual({ logs: [{ id: 'log-1', action: 'invoke', success: true, event_data: '[withheld]', error_message: '[withheld]' }], total: 1 });
+    expect(decoded({ logs: ['SECRET_ALPHA'] }, 'run_sandbox_code')).toEqual({ logs: '[withheld]' });
+  });
   it.each([false, 0, '', null, [], {}])('preserves observed falsy and empty result %j', input => {
     expect(value(input).state).toBe('available');
     expect(decoded(input)).toEqual(input);
