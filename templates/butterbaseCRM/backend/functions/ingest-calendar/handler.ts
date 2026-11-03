@@ -160,7 +160,7 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   const params = {
     calendar_id: 'primary',
     single_events: true,
-    max_results: 250,
+    max_results: 2500,
     time_min,
     time_max,
   };
@@ -181,6 +181,8 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   }
 
   const events = extractEvents(composioRes.data);
+  const seriesGroups = groupBySeries(events);
+  const keptEvents = collapseRecurrence(events, new Date());
 
   events.sort((a, b) => {
     const aT = pickDate(a?.start) ?? '9999';
@@ -232,18 +234,7 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   try {
     const timeMinMs = new Date(time_min).getTime();
     const timeMaxMs = new Date(time_max).getTime();
-    const freshIndex = new Map();
-    for (const ev of events) {
-      const extId = ev.id ?? ev.eventId ?? ev.iCalUID ?? null;
-      if (!extId) continue;
-      const startsAt = pickDate(ev.start);
-      const evLocation = ev.location ?? null;
-      const evNotes = ev.description ?? null;
-      freshIndex.set(extId, {
-        startsAt,
-        meetingUrl: pickMeetingUrl(ev, evLocation, evNotes),
-      });
-    }
+    const freshIndex = buildFreshIndex(keptEvents);
 
     const subEvents = await ctx.substrate.findEntities({ type: 'event', limit: 500 }).catch(() => []);
     for (const e of subEvents ?? []) {
@@ -285,9 +276,9 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
     console.warn('[ingest-calendar] stale-bot sweep failed', String(err?.message ?? err));
   }
 
-  for (const ev of events) {
+  for (const ev of keptEvents) {
     if (ev.status === 'cancelled') { skippedCancelled++; continue; }
-    const externalId = ev.id ?? ev.eventId ?? ev.iCalUID ?? null;
+    const externalId = seriesIdFor(ev);
     if (!externalId) { skippedNoExtId++; continue; }
     const title = ev.summary ?? ev.title ?? '(no title)';
     const startsAt = pickDate(ev.start);
@@ -362,6 +353,12 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
           title, starts_at: startsAt, ends_at: endsAt, location, notes,
           external_event_id: externalId,
           meeting_url: meetingUrl,
+          ...(ev.recurringEventId
+            ? {
+              recurrence_summary: recurrenceSummary(seriesGroups.get(ev.recurringEventId) ?? []),
+              occurrence_count_in_window: (seriesGroups.get(ev.recurringEventId) ?? []).length,
+            }
+            : {}),
         },
         attendees: resolved.map((r) => ({
           email: r.email,
@@ -509,6 +506,77 @@ function extractEvents(data) {
   if (Array.isArray(data.data?.events)) return data.data.events;
   if (Array.isArray(data)) return data;
   return [];
+}
+
+// ── Recurring series ────────────────────────────────────────────────────────
+// Google expands a recurring event into one instance per occurrence. Office
+// wants one record, not one per day, so a series is keyed by its master id and
+// represented by its next upcoming occurrence.
+
+export function seriesIdFor(ev) {
+  return ev?.recurringEventId ?? ev?.id ?? ev?.eventId ?? ev?.iCalUID ?? null;
+}
+
+export function groupBySeries(events) {
+  const groups = new Map();
+  for (const ev of events ?? []) {
+    const series = ev?.recurringEventId;
+    if (!series) continue;
+    // A cancelled occurrence must not become the series representative, or the
+    // whole series disappears for that sync.
+    if (ev?.status === 'cancelled') continue;
+    const list = groups.get(series);
+    if (list) list.push(ev);
+    else groups.set(series, [ev]);
+  }
+  return groups;
+}
+
+export function collapseRecurrence(events, now) {
+  const kept = new Set();
+  for (const instances of groupBySeries(events).values()) {
+    const ordered = [...instances].sort(
+      (a, b) => (pickDate(a.start) ?? '9999').localeCompare(pickDate(b.start) ?? '9999'),
+    );
+    // Keep the occurrence that is in progress until it ends. Using its start
+    // would flip the representative to tomorrow minutes after the meeting
+    // begins, and the sweep would read that as a reschedule and cancel the
+    // notetaker bot.
+    const current = ordered.find((ev) => {
+      const end = pickDate(ev.end) ?? pickDate(ev.start);
+      return end !== null && new Date(end).getTime() > now.getTime();
+    });
+    const representative = current ?? ordered[ordered.length - 1];
+    if (representative) kept.add(representative);
+  }
+  return (events ?? []).filter((ev) => !ev?.recurringEventId || kept.has(ev));
+}
+
+export function recurrenceSummary(instances) {
+  const count = Array.isArray(instances) ? instances.length : 0;
+  if (count === 0) return 'Recurring meeting';
+  return count === 1
+    ? 'Recurring meeting · 1 occurrence in this window'
+    : `Recurring meeting · ${count} occurrences in this window`;
+}
+
+/**
+ * The fresh calendar truth, keyed the same way the upsert keys a record. A
+ * recurring series must appear once, under its series id, with the same
+ * representative start that was stored — otherwise the stale-bot sweep reads
+ * every occurrence as "moved" and cancels its own notetaker.
+ */
+export function buildFreshIndex(events) {
+  const index = new Map();
+  for (const ev of events ?? []) {
+    const extId = seriesIdFor(ev);
+    if (!extId) continue;
+    index.set(extId, {
+      startsAt: pickDate(ev.start),
+      meetingUrl: pickMeetingUrl(ev, ev.location ?? null, ev.description ?? null),
+    });
+  }
+  return index;
 }
 
 function pickDate(slot) {

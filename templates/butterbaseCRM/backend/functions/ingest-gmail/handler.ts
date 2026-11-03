@@ -119,7 +119,7 @@ export async function handler(req, ctx) {
   }
 
   const bind = await ctx.db.query(
-    'SELECT 1 FROM workspace_integrations WHERE workspace_id = $1 AND user_id = $2 AND toolkit_slug = $3 LIMIT 1',
+    'SELECT metadata FROM workspace_integrations WHERE workspace_id = $1 AND user_id = $2 AND toolkit_slug = $3 LIMIT 1',
     [workspaceId, userId, 'googlesuper'],
   );
   if (bind.rows.length === 0) {
@@ -128,7 +128,8 @@ export async function handler(req, ctx) {
     });
   }
 
-  ctx.waitUntil(runIngest(ctx, authHeader, workspaceId, userId).catch(async (e) => {
+  const connectedEmail = integrationOwnerEmail(bind.rows[0]?.metadata);
+  ctx.waitUntil(runIngest(ctx, authHeader, workspaceId, userId, connectedEmail).catch(async (e) => {
     const detail = e instanceof Error ? e.message : String(e);
     await writeError(ctx, workspaceId, 'gmail', detail).catch(() => {});
   }));
@@ -138,7 +139,7 @@ export async function handler(req, ctx) {
   });
 }
 
-async function runIngest(ctx, authHeader, workspaceId, userId) {
+async function runIngest(ctx, authHeader, workspaceId, userId, connectedEmail = null) {
   const stateRow = await ctx.db.query(
     'SELECT cursor, last_synced_at FROM integration_state WHERE workspace_id = $1 AND kind = $2',
     [workspaceId, 'gmail'],
@@ -162,11 +163,18 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   }
 
   const messages = extractMessages(composioRes.data);
-  const myEmail = inferMyEmail(composioRes.data, messages) ?? null;
+  const myEmail = resolveOwnerEmail({
+    userEmail: typeof ctx.user?.email === 'string' ? ctx.user.email : null,
+    integrationEmail: connectedEmail ?? explicitOwnerAddress(composioRes.data),
+  });
+  if (!myEmail) {
+    await writeError(ctx, workspaceId, 'gmail', 'owner_address_unresolved');
+    return;
+  }
 
   const companyCache = new Map();
   const personCache = new Map();
-  let droppedAutomated = 0, taggedRole = 0;
+  let droppedAutomated = 0, taggedRole = 0, skippedInbound = 0;
 
   for (const msg of messages) {
     const parsedFrom = parseAddress(msg.sender ?? msg.from);
@@ -176,8 +184,11 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
     const messageId = msg.messageId ?? msg.id ?? null;
     if (!messageId) continue;
 
-    const sent = myEmail && parsedFrom?.email && parsedFrom.email.toLowerCase() === myEmail.toLowerCase();
-    const counterparty = sent ? parsedTo : parsedFrom;
+    const sent = parsedFrom?.email && parsedFrom.email.toLowerCase() === myEmail.toLowerCase();
+    // An inbound-only contact is almost always marketing. A person matters to
+    // this business only once the owner has actually written to them.
+    if (!shouldIngestMessage({ sent })) { skippedInbound++; continue; }
+    const counterparty = parsedTo;
     if (!counterparty?.email) continue;
 
     // Classify sender — drop machine senders, tag role mailboxes.
@@ -252,7 +263,8 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   console.log('[ingest-gmail] done',
     'messages=', messages.length,
     'droppedAutomated=', droppedAutomated,
-    'taggedRole=', taggedRole);
+    'taggedRole=', taggedRole,
+    'skippedInbound=', skippedInbound);
 
   await ctx.db.query(
     `INSERT INTO integration_state (workspace_id, kind, cursor, last_synced_at, last_error, updated_at)
@@ -324,21 +336,34 @@ function extractNextPageToken(data) {
   return data.nextPageToken ?? data.data?.nextPageToken ?? null;
 }
 
-function inferMyEmail(data, messages) {
-  if (typeof data?.user_id === 'string' && data.user_id.includes('@')) return data.user_id.toLowerCase();
-  if (typeof data?.emailAddress === 'string') return data.emailAddress.toLowerCase();
-  const counts = {};
-  for (const m of messages) {
-    for (const raw of [m.sender ?? m.from, m.to]) {
-      const a = parseAddress(raw)?.email;
-      if (a) counts[a.toLowerCase()] = (counts[a.toLowerCase()] ?? 0) + 1;
-    }
+/**
+ * The owner address must be known, not guessed. Guessing from message
+ * frequency turns a wrong guess into "everything is inbound", which ingests
+ * nothing at all — a silent failure that looks like a quiet mailbox.
+ */
+export function resolveOwnerEmail({ userEmail = null, integrationEmail = null } = {}) {
+  const candidate = userEmail || integrationEmail;
+  return typeof candidate === 'string' && candidate.trim()
+    ? candidate.trim().toLowerCase()
+    : null;
+}
+
+/** The address captured when the mailbox was connected; survives every sync. */
+export function integrationOwnerEmail(metadata) {
+  const value = metadata?.email;
+  return typeof value === 'string' && value.includes('@') ? value : null;
+}
+
+/** Only explicit provider fields count. Frequency is a guess, not an identity. */
+export function explicitOwnerAddress(data) {
+  for (const value of [data?.emailAddress, data?.user_id]) {
+    if (typeof value === 'string' && value.includes('@')) return value;
   }
-  let best = null, bestCount = 0;
-  for (const [email, n] of Object.entries(counts)) {
-    if (n > bestCount) { best = email; bestCount = n; }
-  }
-  return best;
+  return null;
+}
+
+export function shouldIngestMessage({ sent }) {
+  return sent === true;
 }
 
 function parseAddress(raw) {

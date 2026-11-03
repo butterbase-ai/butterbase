@@ -1,4 +1,5 @@
 import { loadRegionConfig, type RegionConfig, regionToEnvSuffix } from '@butterbase/shared';
+import { resolvePlatformDefaultModel } from './model-default.js';
 
 let cachedRegionConfig: RegionConfig | null = null;
 
@@ -133,7 +134,7 @@ export const config = {
       v2EndpointsEnabled: process.env.AI_GATEWAY_V2_ENDPOINTS_ENABLED === 'true',
       defaultRegion: process.env.AI_ROUTER_DEFAULT_REGION ?? 'us-east-1',
       markupPct,
-      platformDefaultModel: process.env.PLATFORM_DEFAULT_MODEL ?? 'anthropic/claude-sonnet-4.6',
+      platformDefaultModel: resolvePlatformDefaultModel(process.env),
       platformDefaultDecisionModel: process.env.PLATFORM_DEFAULT_DECISION_MODEL ?? 'typesafe/jev-1.13',
       openrouterDecisionsUrl: process.env.OPENROUTER_DECISIONS_URL || undefined,
       openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
