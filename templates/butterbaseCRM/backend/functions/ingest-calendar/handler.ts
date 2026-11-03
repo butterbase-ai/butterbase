@@ -160,7 +160,7 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   const params = {
     calendar_id: 'primary',
     single_events: true,
-    max_results: 250,
+    max_results: 2500,
     time_min,
     time_max,
   };
@@ -181,6 +181,8 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   }
 
   const events = extractEvents(composioRes.data);
+  const seriesGroups = groupBySeries(events);
+  const keptEvents = collapseRecurrence(events, new Date());
 
   events.sort((a, b) => {
     const aT = pickDate(a?.start) ?? '9999';
@@ -285,9 +287,9 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
     console.warn('[ingest-calendar] stale-bot sweep failed', String(err?.message ?? err));
   }
 
-  for (const ev of events) {
+  for (const ev of keptEvents) {
     if (ev.status === 'cancelled') { skippedCancelled++; continue; }
-    const externalId = ev.id ?? ev.eventId ?? ev.iCalUID ?? null;
+    const externalId = seriesIdFor(ev);
     if (!externalId) { skippedNoExtId++; continue; }
     const title = ev.summary ?? ev.title ?? '(no title)';
     const startsAt = pickDate(ev.start);
@@ -362,6 +364,9 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
           title, starts_at: startsAt, ends_at: endsAt, location, notes,
           external_event_id: externalId,
           meeting_url: meetingUrl,
+          ...(ev.recurringEventId
+            ? { recurrence_summary: recurrenceSummary(seriesGroups.get(ev.recurringEventId) ?? []) }
+            : {}),
         },
         attendees: resolved.map((r) => ({
           email: r.email,
@@ -509,6 +514,50 @@ function extractEvents(data) {
   if (Array.isArray(data.data?.events)) return data.data.events;
   if (Array.isArray(data)) return data;
   return [];
+}
+
+// ── Recurring series ────────────────────────────────────────────────────────
+// Google expands a recurring event into one instance per occurrence. Office
+// wants one record, not one per day, so a series is keyed by its master id and
+// represented by its next upcoming occurrence.
+
+export function seriesIdFor(ev) {
+  return ev?.recurringEventId ?? ev?.id ?? ev?.eventId ?? ev?.iCalUID ?? null;
+}
+
+export function groupBySeries(events) {
+  const groups = new Map();
+  for (const ev of events ?? []) {
+    const series = ev?.recurringEventId;
+    if (!series) continue;
+    const list = groups.get(series);
+    if (list) list.push(ev);
+    else groups.set(series, [ev]);
+  }
+  return groups;
+}
+
+export function collapseRecurrence(events, now) {
+  const kept = new Set();
+  for (const instances of groupBySeries(events).values()) {
+    const ordered = [...instances].sort(
+      (a, b) => (pickDate(a.start) ?? '9999').localeCompare(pickDate(b.start) ?? '9999'),
+    );
+    const next = ordered.find((ev) => {
+      const at = pickDate(ev.start);
+      return at !== null && new Date(at).getTime() >= now.getTime();
+    });
+    const representative = next ?? ordered[ordered.length - 1];
+    if (representative) kept.add(representative);
+  }
+  return (events ?? []).filter((ev) => !ev?.recurringEventId || kept.has(ev));
+}
+
+export function recurrenceSummary(instances) {
+  const count = Array.isArray(instances) ? instances.length : 0;
+  return count > 0
+    ? `Recurring meeting · ${count} occurrences in this window`
+    : 'Recurring meeting';
 }
 
 function pickDate(slot) {
