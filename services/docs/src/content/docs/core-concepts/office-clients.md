@@ -137,3 +137,7 @@ Enable/pause/resume/approve, Ask, conversation creation and memory/principle rec
 SDK requests return `{data, error}`. Waiting may return the last receipt in `data` alongside an `observation_timeout` error. CLI JSON output is one `{data,error}` value; diagnostics go to stderr. `--json --stream` collects public events into that single final result; ordinary streaming prints text as it arrives.
 
 CLI exits: **0** accepted/read, including pending confirmation; **1** request or terminal failure, rejected/expired/unknown receipt, observation timeout or interruption; **2** usage/input error. The [Office HTTP reference](/api-reference/office-api/) describes the REST and event contracts.
+
+## Optional tool details over REST
+
+REST conversation and exact-turn observation GETs support `activity_version=1` for safe metadata and `activity_version=2` for captured invocation UUID references. Read sanitized Input/Result with the authorized conversation-scoped detail GET; observing, retrying or refreshing never submits another Ask. Default clients and strict stored events are unchanged. MCP, CLI and `OfficeClient` currently expose no activity-version option or detail-read method. Use the [REST activity contract](/api-reference/office-api/#input-and-result-previews-activity-version-2); do not pass invented flags or actions to these clients.

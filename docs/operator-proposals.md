@@ -150,3 +150,7 @@ Deployment is additive: compatibility readers and resolvers must be installed
 before enabling new writers. Disabling writers never disables checks on an
 existing prepared proposal. Keep compatibility code and columns while such
 proposals remain pending; follow the deployment-specific rollback runbook.
+
+## Whole-application deletion reviews
+
+A deployment-specific adapter may prepare `appdelete` only after reading the currently owned application's material state and bounded resource inventory. Its review must show the pause or preservation note, deployed function count and stored-file inventory, and explicitly state that all tables and rows will be removed while their contents were not inspected. This is not a data-retention audit. Unknown, foreign or unavailable targets fail closed. The current human owner must approve the frozen operation under existing policy; review preparation authorizes no deletion. An accepted asynchronous deletion request is not evidence that teardown has completed. Adapter availability depends on the deployment; this generic contract adds no MCP/SDK/CLI action.

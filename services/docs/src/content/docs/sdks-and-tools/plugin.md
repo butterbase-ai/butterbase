@@ -100,3 +100,7 @@ claude --plugin-dir /path/to/butterbase-plugin
 
 - **GitHub**: [Butterbase Skills](https://github.com/butterbase-ai/butterbase-skills)
 - **License**: MIT
+
+## Office observations
+
+When the connected deployment provides `manage_office`, follow the [Office client reference](/core-concepts/office-clients/). Captured Input/Result previews and `activity_version=2` are currently a REST observation feature, not a plugin command or MCP argument. See the [Office activity contract](/api-reference/office-api/#input-and-result-previews-activity-version-2).
