@@ -124,6 +124,14 @@ export async function getOrCreateOperatorConversation(
  * Look up the (single) enabled operator job for an org, for event-driven
  * wakes. Unlike `claimDueJobs`, this does not touch `next_run_at` — an event
  * wake is additional to the timer cadence, not a replacement claim for it.
+ *
+ * `organizations.id` is uuid while `dashboard_agent_operator_jobs.organization_id`
+ * is text (096_operator_agent.sql), so the join MUST compare as text:
+ * `o.id = j.organization_id` fails at runtime with "operator does not exist:
+ * uuid = text" on every tick, and casting the job column to uuid would instead
+ * reject any non-uuid org id. The LEFT JOIN keeps a job whose organization row
+ * is missing claimable, so an orphan cannot sit permanently due at the head of
+ * the batch and starve the other jobs.
  */
 export async function getEnabledJobForOrg(
   pool: pg.Pool,
@@ -134,7 +142,8 @@ export async function getEnabledJobForOrg(
     instructions: string; interval_seconds: number; model: string | null;
   }>(
     `SELECT j.id, j.organization_id, j.name, j.instructions, j.interval_seconds, o.operator_model AS model
-     FROM dashboard_agent_operator_jobs j JOIN organizations o ON o.id=j.organization_id
+     FROM dashboard_agent_operator_jobs j
+     LEFT JOIN organizations o ON o.id::text = j.organization_id
      WHERE j.organization_id = $1 AND j.enabled = TRUE
      ORDER BY j.created_at ASC LIMIT 1`,
     [orgId],
@@ -174,7 +183,8 @@ export async function claimDueJobs(
       model: string | null;
     }>(
       `SELECT j.id, j.organization_id, j.name, j.instructions, j.interval_seconds, o.operator_model AS model
-       FROM dashboard_agent_operator_jobs j JOIN organizations o ON o.id=j.organization_id
+       FROM dashboard_agent_operator_jobs j
+       LEFT JOIN organizations o ON o.id::text = j.organization_id
        WHERE j.enabled = TRUE AND j.next_run_at <= $1
        ORDER BY j.next_run_at
        LIMIT $2
