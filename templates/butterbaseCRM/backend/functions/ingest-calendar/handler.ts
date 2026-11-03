@@ -234,18 +234,7 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   try {
     const timeMinMs = new Date(time_min).getTime();
     const timeMaxMs = new Date(time_max).getTime();
-    const freshIndex = new Map();
-    for (const ev of events) {
-      const extId = ev.id ?? ev.eventId ?? ev.iCalUID ?? null;
-      if (!extId) continue;
-      const startsAt = pickDate(ev.start);
-      const evLocation = ev.location ?? null;
-      const evNotes = ev.description ?? null;
-      freshIndex.set(extId, {
-        startsAt,
-        meetingUrl: pickMeetingUrl(ev, evLocation, evNotes),
-      });
-    }
+    const freshIndex = buildFreshIndex(keptEvents);
 
     const subEvents = await ctx.substrate.findEntities({ type: 'event', limit: 500 }).catch(() => []);
     for (const e of subEvents ?? []) {
@@ -558,6 +547,25 @@ export function recurrenceSummary(instances) {
   return count > 0
     ? `Recurring meeting · ${count} occurrences in this window`
     : 'Recurring meeting';
+}
+
+/**
+ * The fresh calendar truth, keyed the same way the upsert keys a record. A
+ * recurring series must appear once, under its series id, with the same
+ * representative start that was stored — otherwise the stale-bot sweep reads
+ * every occurrence as "moved" and cancels its own notetaker.
+ */
+export function buildFreshIndex(events) {
+  const index = new Map();
+  for (const ev of events ?? []) {
+    const extId = seriesIdFor(ev);
+    if (!extId) continue;
+    index.set(extId, {
+      startsAt: pickDate(ev.start),
+      meetingUrl: pickMeetingUrl(ev, ev.location ?? null, ev.description ?? null),
+    });
+  }
+  return index;
 }
 
 function pickDate(slot) {

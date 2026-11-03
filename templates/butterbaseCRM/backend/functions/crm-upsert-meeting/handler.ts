@@ -295,7 +295,7 @@ export async function handler(req: Request, ctx: any) {
   const displayName =
     body.attrs.title ?? priorDisplayName ?? merged.title ?? 'Untitled meeting';
 
-  if (existingId && attrsEqual(merged, priorAttrs)) {
+  if (existingId && displayName === priorDisplayName && attrsEqual(merged, priorAttrs)) {
     return json(200, { id: existingId, created: false, unchanged: true });
   }
 

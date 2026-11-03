@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  collapseRecurrence, groupBySeries, recurrenceSummary, seriesIdFor,
+  buildFreshIndex, collapseRecurrence, groupBySeries, recurrenceSummary, seriesIdFor,
 } from './handler';
 
 const now = new Date('2026-11-03T12:00:00Z');
@@ -27,6 +27,12 @@ describe('recurring calendar series', () => {
 
   it('uses the series id, not the instance id', () => {
     expect(seriesIdFor(instance('i1', 'series-1', '2026-11-04T09:00:00Z'))).toBe('series-1');
+  });
+
+  it('indexes a collapsed series once, under its series id', () => {
+    const index = buildFreshIndex(collapseRecurrence(thirtyDaily, now));
+    expect([...index.keys()]).toEqual(['series-1']);
+    expect(index.get('series-1').startsAt).toBe('2026-11-04T09:00:00.000Z');
   });
 
   it('summarises the window count for one series', () => {
