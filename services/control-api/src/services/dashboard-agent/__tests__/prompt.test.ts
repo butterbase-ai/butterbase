@@ -10,6 +10,13 @@ describe('prompt', () => {
     expect(prompt).toContain('deploy_function')
   })
 
+  it('shows the exact propose_action payload after a refused direct call', () => {
+    const prompt = getSystemPrompt()
+    expect(prompt).toContain('"operation": {"tool"')
+    expect(prompt).toContain('"arguments"')
+    expect(prompt).toContain('"reason"')
+  })
+
   it('includes BACKEND_FN_APPENDIX with backend function guidance', () => {
     const prompt = getSystemPrompt()
     expect(prompt).toContain(BACKEND_FN_APPENDIX)

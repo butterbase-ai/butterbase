@@ -142,7 +142,7 @@ export function getToolCatalog(): ToolSpec[] {
       parameters: { type: 'object', properties: {}, additionalProperties: false }, sensitivity: 'safe' },
     {
       name: PROPOSE_ACTION_TOOL,
-      description: 'Prepare one consequential operation for owner review. Supply the exact tool and arguments, an explicit reason, and optionally 0..10 typed supporting record references. Preparation does not execute the operation. Automatic operations return proposal_not_required. Missing or inaccessible targets cannot reach the owner. If a direct operation returns proposal_incomplete, repeat the same operation here with its reason.',
+      description: 'Prepare one consequential operation for owner review. Supply the exact tool and arguments, an explicit reason, and optionally 0..10 typed supporting record references. Preparation does not execute the operation. Automatic operations return proposal_not_required. Missing or inaccessible targets cannot reach the owner. If a direct operation returns proposal_incomplete, repeat the same operation here with its reason. Payload shape: {"operation":{"tool":"<tool name>","arguments":{<exact arguments>}},"reason":"<why this exact action is needed>"}. The arguments are nested under operation.arguments; an empty object or a bare reason is rejected.',
       parameters: {
         type: 'object', additionalProperties: false, required: ['operation', 'reason'],
         properties: {

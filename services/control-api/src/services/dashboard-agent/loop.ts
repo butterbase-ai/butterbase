@@ -1763,7 +1763,7 @@ async function* runAgentTurnInternal(
           let parkedActionId: string | null = null;
           if (accessBlockedReason || operatorVerdict === 'deny') payload = { code: 'proposal_invalid' };
           else if (input.readOnly === true) payload = { code: 'read_only_test' };
-          else if (!proposalInput) payload = { code: 'proposal_incomplete', missing: ['reason'], message: 'Call propose_action with this exact operation and an explicit reason.' };
+          else if (!proposalInput) payload = { code: 'proposal_incomplete', missing: ['reason'], message: 'Call propose_action with this exact operation nested under operation and an explicit reason, e.g. {"operation":{"tool":"<tool name>","arguments":{<same arguments>}},"reason":"<why>"}.' };
           else {
             try {
               if (tc.name === 'manage_substrate' && (tc.args as any)?.action === 'propose') {
