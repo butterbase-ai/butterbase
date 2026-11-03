@@ -64,6 +64,34 @@ const MERGEABLE_TOP_LEVEL = [
   'notetaker_status', 'notetaker_artifact_id',
 ] as const;
 
+function sameValue(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a && b && typeof a === 'object') {
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) return a.length === b.length && a.every((value, index) => sameValue(value, b[index]));
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every((key) => sameValue(a[key], b[key]));
+  }
+  return false;
+}
+
+/**
+ * A calendar sync re-reads the same meeting every few minutes. Rewriting it
+ * with identical values bumps `updated_at` and makes Office look like it is
+ * constantly working, so an unchanged meeting is not patched at all.
+ */
+export function attrsEqual(merged: Record<string, any>, prior: Record<string, any>): boolean {
+  const keys = new Set([...Object.keys(merged ?? {}), ...Object.keys(prior ?? {})]);
+  for (const key of keys) {
+    if (key === 'updated_at') continue;
+    if (!sameValue(merged?.[key], prior?.[key])) return false;
+  }
+  return true;
+}
+
 function extractEntityId(result: any): string | null {
   if (!result) return null;
   return result.entity_id ?? result.id ?? result.entity?.id ?? result.entity?.entity_id ?? null;
@@ -266,6 +294,10 @@ export async function handler(req: Request, ctx: any) {
 
   const displayName =
     body.attrs.title ?? priorDisplayName ?? merged.title ?? 'Untitled meeting';
+
+  if (existingId && attrsEqual(merged, priorAttrs)) {
+    return json(200, { id: existingId, created: false, unchanged: true });
+  }
 
   try {
     if (existingId) {
