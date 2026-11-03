@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { explicitOwnerAddress, resolveOwnerEmail, shouldIngestMessage } from './handler';
+import {
+  explicitOwnerAddress, integrationOwnerEmail, resolveOwnerEmail, shouldIngestMessage,
+} from './handler';
 
 describe('outbound-only email ingestion', () => {
   it('prefers the authenticated user address', () => {
@@ -14,6 +16,12 @@ describe('outbound-only email ingestion', () => {
 
   it('returns null when no reliable identity exists', () => {
     expect(resolveOwnerEmail({ userEmail: null, integrationEmail: null })).toBeNull();
+  });
+
+  it('reads the mailbox address persisted when the integration was connected', () => {
+    expect(integrationOwnerEmail({ email: 'Owner@X.com' })).toBe('Owner@X.com');
+    expect(integrationOwnerEmail({})).toBeNull();
+    expect(integrationOwnerEmail(null)).toBeNull();
   });
 
   it('reads only explicit provider identity fields', () => {

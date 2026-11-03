@@ -119,7 +119,7 @@ export async function handler(req, ctx) {
   }
 
   const bind = await ctx.db.query(
-    'SELECT 1 FROM workspace_integrations WHERE workspace_id = $1 AND user_id = $2 AND toolkit_slug = $3 LIMIT 1',
+    'SELECT metadata FROM workspace_integrations WHERE workspace_id = $1 AND user_id = $2 AND toolkit_slug = $3 LIMIT 1',
     [workspaceId, userId, 'googlesuper'],
   );
   if (bind.rows.length === 0) {
@@ -128,7 +128,8 @@ export async function handler(req, ctx) {
     });
   }
 
-  ctx.waitUntil(runIngest(ctx, authHeader, workspaceId, userId).catch(async (e) => {
+  const connectedEmail = integrationOwnerEmail(bind.rows[0]?.metadata);
+  ctx.waitUntil(runIngest(ctx, authHeader, workspaceId, userId, connectedEmail).catch(async (e) => {
     const detail = e instanceof Error ? e.message : String(e);
     await writeError(ctx, workspaceId, 'gmail', detail).catch(() => {});
   }));
@@ -138,7 +139,7 @@ export async function handler(req, ctx) {
   });
 }
 
-async function runIngest(ctx, authHeader, workspaceId, userId) {
+async function runIngest(ctx, authHeader, workspaceId, userId, connectedEmail = null) {
   const stateRow = await ctx.db.query(
     'SELECT cursor, last_synced_at FROM integration_state WHERE workspace_id = $1 AND kind = $2',
     [workspaceId, 'gmail'],
@@ -164,7 +165,7 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
   const messages = extractMessages(composioRes.data);
   const myEmail = resolveOwnerEmail({
     userEmail: typeof ctx.user?.email === 'string' ? ctx.user.email : null,
-    integrationEmail: explicitOwnerAddress(composioRes.data),
+    integrationEmail: connectedEmail ?? explicitOwnerAddress(composioRes.data),
   });
   if (!myEmail) {
     await writeError(ctx, workspaceId, 'gmail', 'owner_address_unresolved');
@@ -345,6 +346,12 @@ export function resolveOwnerEmail({ userEmail = null, integrationEmail = null } 
   return typeof candidate === 'string' && candidate.trim()
     ? candidate.trim().toLowerCase()
     : null;
+}
+
+/** The address captured when the mailbox was connected; survives every sync. */
+export function integrationOwnerEmail(metadata) {
+  const value = metadata?.email;
+  return typeof value === 'string' && value.includes('@') ? value : null;
 }
 
 /** Only explicit provider fields count. Frequency is a guess, not an identity. */
