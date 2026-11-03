@@ -26,6 +26,7 @@ interface QueryAuditLogsResponse {
   total: number;
   limit: number;
   offset: number;
+  nextCursor: string | null;
   nextOffset: number | null;
 }
 
@@ -58,6 +59,8 @@ Common filters:
   - actor_id=<user-id> to see one actor's activity
   - from / to to narrow to a time window
 
+Use nextCursor to resume from the last row without deduplication; omit offset when cursor is set.
+
 Idempotency: Safe to call anytime (read-only). Historical auth events predating migration 034 are included (normalized).`,
     {
       app_id: z.string().describe('The app ID (e.g. app_abc123def456)'),
@@ -71,7 +74,8 @@ Idempotency: Safe to call anytime (read-only). Historical auth events predating 
       from: z.string().optional().describe('ISO-8601 timestamp, inclusive lower bound on created_at'),
       to: z.string().optional().describe('ISO-8601 timestamp, exclusive upper bound on created_at'),
       limit: z.number().int().positive().max(500).optional().default(100).describe('Number of logs to return (default 100, max 500)'),
-      offset: z.number().int().min(0).optional().default(0).describe('Pagination offset (default 0)'),
+      offset: z.number().int().min(0).optional().default(0).describe('Pagination offset (default 0). Do not combine with cursor.'),
+      cursor: z.string().optional().describe('Opaque nextCursor from a previous response. Do not combine with offset.'),
     },
     {
       title: 'Query Audit Logs',
