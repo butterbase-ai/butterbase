@@ -33,6 +33,7 @@ import { getToolCatalog, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_
 import { operatorUserId } from '../operator-store.js';
 import { isOperatorToolAllowed } from '../operator-policy.js';
 import { runAgentTurn, getSharedWorkingTreeCache, type LoopEvent } from '../loop.js';
+import { validateRegisteredToolArguments } from '@butterbase/mcp-server/tool-validation';
 import type { DeployTreeStore } from '../deploy-tree-store.js';
 import type { WorkingTree } from '../working-tree.js';
 import { setApprovalProposalProvider, PreparedProposalSchema, proposalIntentFingerprint } from '../approval-proposal.js';
@@ -49,6 +50,7 @@ const mockUpdateConversationTitle = storeModule.updateConversationTitle as Mocke
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
 const mockCreateApproval = approvalsStoreModule.createApproval as MockedFunction<typeof approvalsStoreModule.createApproval>;
 const mockCheckTrust = approvalsStoreModule.checkTrust as MockedFunction<typeof approvalsStoreModule.checkTrust>;
+const mockValidateRegistered = vi.mocked(validateRegisteredToolArguments);
 
 const ORG_ID = '11111111-1111-4111-8111-111111111111';
 const OPERATOR_USER = operatorUserId(ORG_ID);
@@ -232,6 +234,33 @@ describe('structured proposal gate', () => {
     expect(prepare).not.toHaveBeenCalled();
     expect(events.some(e => e.type === 'tool_result' && JSON.stringify(e).includes('proposal_incomplete'))).toBe(true);
   });
+  it('returns a safe field diagnostic when proposal validation rejects arguments', async () => {
+    install();
+    mockValidateRegistered.mockRejectedValueOnce(Object.assign(new Error('tool_arguments_invalid'), {
+      code: 'tool_arguments_invalid',
+      field: 'payload.title',
+    }));
+    oneToolCallThenStop('manage_substrate', { action: 'propose', capability: 'record_learning', payload: { title: '' } });
+    const events = await collect(runAgentTurn(operatorInput()));
+    const result = events.find((event) => event.type === 'tool_result');
+    expect(result).toMatchObject({
+      result: { code: 'proposal_invalid', reason: 'tool_arguments_invalid', field: 'payload.title' },
+    });
+  });
+
+  it('drops a field value that fails the diagnostic allowlist', async () => {
+    install();
+    mockValidateRegistered.mockRejectedValueOnce(Object.assign(new Error('tool_arguments_invalid'), {
+      code: 'tool_arguments_invalid',
+      field: 'payload.title=SECRET',
+    }));
+    oneToolCallThenStop('manage_substrate', { action: 'propose', capability: 'record_learning', payload: { title: '' } });
+    const events = await collect(runAgentTurn(operatorInput()));
+    const result = events.find((event) => event.type === 'tool_result');
+    expect(result).toMatchObject({ result: { code: 'proposal_invalid', reason: 'tool_arguments_invalid' } });
+    expect(JSON.stringify(result)).not.toContain('SECRET');
+  });
+
   it('prepares the underlying operation but pauses the original wrapper call', async () => {
     const prepare = install();
     oneToolCallThenStop('propose_action', { operation, reason: 'Obsolete draft.' });
