@@ -719,7 +719,20 @@ function tableVerdict(name: string, args: unknown): OperatorPolicy {
     }
   }
 
-  // 4. The tool tier, deny-by-default floored at 'approval'.
+  // 4. Schema and RLS reads. The tool-level tier is 'approval', but a read
+  // cannot change the app, so it must not wait in the owner's queue. Any
+  // unreadable action stays at the approval floor.
+  if (name === 'manage_rls' || name === 'manage_schema') {
+    const parsed = coerceArgs(args);
+    const action = parsed === UNREADABLE ? UNREADABLE : readAction(parsed);
+    if (action !== UNREADABLE) {
+      if (name === 'manage_rls' && action === 'list') return 'allow';
+      if (name === 'manage_schema' && action && ['get', 'dry_run', 'list_migrations'].includes(action)) return 'allow';
+    }
+    return 'approval';
+  }
+
+  // 5. The tool tier, deny-by-default floored at 'approval'.
   return operatorToolTier(name);
 }
 
