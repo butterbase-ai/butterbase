@@ -14,7 +14,7 @@ const credentialKey = (key: string) => /password|passwd|passphrase|secret|privat
   || /^(token|tokens|accesstoken|refreshtoken|idtoken|authtoken|sessiontoken|jwt|key|headers|submissioncode)$/.test(key);
 const environmentKey = (key: string) => /^(env|envvars|environment|environmentvariables|vars|userenv|envoverrides|buildenv|previewenv|buildoverrides|previewoverrides|functionenv|appenvvalues)$/.test(key);
 const opaqueKey = (key: string) => /^(sql|source|sourcecode|filecontent|filebody|body|html|logs|consolelogs|stdout|stderr|output|stack|trace|base64|binary|embedding|embeddings|providermetadata|oauth|oauthcredentials|encryptedkey|graphspec|prompt|messages|transportheaders|session|sessioninternals)$/.test(key);
-const credentialValue = (text: string) => /\bbearer\s+\S+|\bbb_sk_[A-Za-z0-9_-]{16,}|\b(?:sk_live_|sk_test_|sk-proj-|ghp_|github_pat_|AKIA)[A-Za-z0-9_-]{12,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|-----BEGIN (?:[A-Z ]+)?PRIVATE KEY-----|\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss):\/\//i.test(text);
+const credentialValue = (text: string) => /\bbearer\s+\S+|\bbb_sk_[A-Za-z0-9_-]{16,}|\b(?:sk_(?:live|test)_|sk-proj-|ghp_|github_pat_|AKIA)[A-Za-z0-9_-]{12,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|-----BEGIN (?:[A-Z ]+)?PRIVATE KEY-----|\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss):\/\//i.test(text);
 const capabilityUrl = (url: URL, key: string) => /(?:upload|download|signed|presigned|confirmation|portal|meeting|recording|transcript)/i.test(key)
   || [...url.searchParams.keys()].some(name => /signature|credential|token|secret|policy|key-pair-id|x-amz-|x-goog-/i.test(name));
 
