@@ -20,9 +20,10 @@ All paths below start with `/v1/me/office`.
 | `POST /decisions/:source/:id/deny` | `{reason}` |
 | `POST /conversations` | `{idempotency_key, title?}` |
 | `GET /conversations` | `cursor`, `limit` |
-| `GET /conversations/:id` | Optional `turn_id`, `after_sequence`, `limit`, `activity_version=1`; sequence requires turn ID |
+| `GET /conversations/:id` | Optional `turn_id`, `after_sequence`, `limit`, `activity_version=1` or `activity_version=2`; sequence requires turn ID |
+| `GET /conversations/:id/activity/:invocationId` | Latest recorded sanitized tool details; no execution |
 | `POST /ask` | `{message, idempotency_key, conversation_id?, wait_ms?}` |
-| `GET /conversations/:id/turns/:turnId/events` | SSE; optional `after_sequence` or matching `Last-Event-ID`, and `activity_version=1` |
+| `GET /conversations/:id/turns/:turnId/events` | SSE; optional `after_sequence` or matching `Last-Event-ID`, and `activity_version=1` or `activity_version=2` |
 | `GET /memory` | `kind=decision|commitment|learning`, `cursor`, `limit` |
 | `GET /memory/search` | Required `query`, optional `limit`; no cursor |
 | `GET /memory/sources/:id` | Read an organization source artifact |
@@ -73,9 +74,56 @@ Opted-in conversation details add `activity: [{user_message_id, steps}]`. Opted-
 
 Each step has a stable `id`, `tool_name`, optional `action`, a plain-language `label`, `status`, nullable `summary`, `started_at`, `finished_at` and `duration_ms`, and bounded `details: [{label,value}]`. A confirmed memory result can add `result: {kind: "agent_memory", id, revision?}`. These are observations, not raw tool arguments or result bodies. Missing timing stays null. Status is `running`, `completed`, `failed`, `awaiting_approval`, `denied`, `interrupted` or `unknown`. Completed tools do not establish that the enclosing turn completed, and an approval receipt is not execution evidence. Use the saved turn state and output for the enclosing outcome.
 
+### Input and Result previews (activity version 2)
+
+After upgrading, opt into `activity_version=2` on the same REST observation GETs to receive captured invocation references. Default requests, activity version 1, strict stored events and their existing byte budgets stay unchanged. The SDK, CLI and MCP do not expose an activity-version flag or a tool-detail action; use REST for version 2.
+
+A captured step uses a server-issued invocation UUID as its `id` and optional `detail_ref`. Provider call IDs may repeat and are not detail identities. Missing or ambiguous correlation omits the reference. Fetch one invocation with either authorized route:
+
+- `GET /v1/me/office/conversations/:id/activity/:invocationId` for the external Office facade.
+- `GET /v1/dashboard-agent/conversations/:id/activity/:invocationId` for the website protocol.
+
+The standalone response is `OfficeActivityDetails` with its own `version: 1`:
+
+```ts
+type OfficeActivityDetails = {
+  version: 1;
+  invocation_id: string; // UUID from detail_ref
+  provider_call_id: string | null;
+  tool_name: string;
+  action?: string;
+  input: OfficeToolValuePreview;
+  result: OfficeToolValuePreview;
+  input_observed_at: string | null;
+  result_observed_at: string | null;
+  result_phase: 'tool_result' | 'approval_resolution' | null;
+  result_status: 'running' | 'completed' | 'failed' | 'awaiting_approval' |
+    'denied' | 'interrupted' | 'unknown' | null;
+};
+type OfficeToolValuePreview = {
+  state: 'available' | 'pending' | 'unavailable';
+  format: 'json' | 'text';
+  text?: string; // only when available; json text is valid JSON
+  redacted: boolean;
+  truncated: boolean;
+  reason?: 'not_recorded' | 'not_executed' | 'sensitive' |
+    'unsupported' | 'too_large' | 'capture_failed';
+};
+```
+
+Both routes check current authentication, exact organization and initiating-user conversation ownership before lookup, with the existing key/revocation restrictions. Unknown or inaccessible conversations/invocations return 404 under those restrictions; captured invocations with missing phases return typed pending/unavailable previews. No public-demo route is provided. A stored reference grants no authority.
+
+These are latest recorded details, with observation timestamps. A final authoritative approval resolution is separate from the original pending receipt; `result_phase` and `result_status` distinguish it. Replay retains the event's original status. A receipt is not proof of execution, and a transient approval failure that leaves the gate pending is not a final resolution. Exact `false`, `0`, `""`, `null`, `[]` and `{}` remain distinct from missing results. Submitted field names are retained where policy permits; for example a tool's `q` is not relabeled to its HTTP adapter's `query`.
+
+Only captured, sanitized values are stored and served. Credential aliases, environment values, signed/credential-bearing URLs, unreviewed code/SQL/logs/HTML/media and opaque or unknown values are withheld. Unclassified business-row columns are withheld too; a field's presence does not classify its value as safe. Reviewed structured fields may remain alongside explicit omission markers. Safe URL metadata never becomes a clickable capability link. Display `text` as escaped text, never HTML or executable content. No raw export or transcript backfill exists. Old steps without a reference show **Details were not recorded for this step.**
+
+Limits per preview: 4,096 UTF-8 bytes of formatted text and 12,288 bytes of serialized envelope; processing stops at 65,536 input bytes, 2,048 nodes, depth 6, 50 object entries or 20 array entries. A server run records at most 512 invocation UUIDs, with at most eight durable reference entries per invocation. Optional capture failure must not fail or repeat business work. The website fetches on disclosure expansion, refreshes on observed status changes, fences stale reads and caches at most 32 entries in the selected conversation. Retry, refresh and layout changes only read details; they never submit another Ask.
+
+Apply additive control-plane `150_office_tool_activity_previews.sql` before upgrading capture/readers, then upgrade customer Office and docs. Existing migrations `146_office_turn_evidence.sql` and `149_agent_model_preferences.sql` remain prerequisites for the corresponding application features. The two new tables are `office_tool_activity_invocations` and `office_tool_activity_previews`; deletion of their source user row/conversation cascades, including regeneration. Application rollback retains additive tables. No new environment variable, model call or metering change is introduced.
+
 ### Website conversation protocol
 
-The website's separate assistant protocol accepts `activity_version: 1` in `POST /v1/dashboard-agent/messages` and `activity_version=1&limit=100` on `GET /v1/dashboard-agent/conversations/:id`. The optional history limit is 1–100, default 25. These requests retain their existing user, organization and conversation authorization. Website conversations are not adopted into external client execution.
+The website's separate assistant protocol accepts `activity_version: 1` or `activity_version: 2` in `POST /v1/dashboard-agent/messages` and `activity_version=1&limit=100` or `activity_version=2&limit=100` on `GET /v1/dashboard-agent/conversations/:id`. The optional history limit is 1–100, default 25. These requests retain their existing user, organization and conversation authorization. Website conversations are not adopted into external client execution.
 
 Opted-in website streams replace raw tool calls/results with `{type: "activity", step}` observations and retain answer/lifecycle events. History returns safe prose messages, grouped `activity`, and `turns: [{user_message_id, outcome, final_answer_id}]`. Website outcomes are `running`, `completed`, `awaiting_approval`, `failed`, `interrupted` or `unknown`; only a runtime-recorded completed outcome with its exact final assistant row establishes a final answer. Older unrecorded history remains unknown. A process crash can leave the last observed running state. History is bounded, so a final answer outside the loaded window cannot establish completion in that view. Omit the opt-in to retain the existing protocol.
 

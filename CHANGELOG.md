@@ -12,6 +12,8 @@
 
 ### Added
 
+- **Office tool details**: opt-in REST `activity_version=2` adds server-issued invocation UUID references and authorized lazy GETs for bounded, sanitized Input/Result previews. Default/version 1 payloads and strict stored events remain unchanged. Final approval resolutions are distinct from pending receipts; old calls are not backfilled. Apply additive control migration **150** before the API, then upgrade customer Office and docs. SDK/CLI/MCP options are unchanged. See [the detail contract](services/docs/src/content/docs/api-reference/office-api.md#input-and-result-previews-activity-version-2).
+
 - **Office Ask activity**: optional REST `activity_version=1` provides bounded tool observations and safe result summaries, including history and durable replay. Website history records authoritative turn outcomes and exact final-answer identity; older outcomes remain unknown. Apply additive control-plane migration **146** before upgrading control-api. Existing client requests retain their default payloads. See [the activity contract](services/docs/src/content/docs/api-reference/office-api.md#optional-tool-activity).
 
 - **Office clients**: standalone organization-scoped `OfficeClient`, 22 `butterbase office` commands and the optional cloud `manage_office` MCP tool. Includes idempotent Ask with durable public events, exact-turn observation/replay, source-aware decisions, native Substrate business memory, and browser confirmation for enable/pause/resume/approve. Requires a compatible hosted Office backend and the matching shared contract release; no app end-user credential support is implied.

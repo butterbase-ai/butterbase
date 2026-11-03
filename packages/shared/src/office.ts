@@ -224,6 +224,37 @@ export const officeActivityStepSchema = z.object({
   result: z.object({ kind: z.literal('agent_memory'), id, title: z.string().max(200).optional(), revision: z.number().int().positive().optional() }).strict().optional(),
 }).strict();
 export type OfficeActivityStep = z.infer<typeof officeActivityStepSchema>;
+/** Additive inspector metadata; never persist this shape in version 1 public events. */
+export const officeActivityStepV2Schema = officeActivityStepSchema.extend({ detail_ref: z.string().uuid().optional() }).strict();
+export type OfficeActivityStepV2 = z.infer<typeof officeActivityStepV2Schema>;
+
+const previewByteLength = (value: string) => new TextEncoder().encode(value).byteLength;
+export const officeToolValuePreviewSchema = z.object({
+  state: z.enum(['available', 'pending', 'unavailable']), format: z.enum(['json', 'text']),
+  text: z.string().optional(), redacted: z.boolean(), truncated: z.boolean(),
+  reason: z.enum(['not_recorded', 'not_executed', 'sensitive', 'unsupported', 'too_large', 'capture_failed']).optional(),
+}).strict().superRefine((value, ctx) => {
+  if ((value.state === 'available') !== (value.text !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Only available previews have text', path: ['text'] });
+  }
+  if (value.text !== undefined) {
+    if (previewByteLength(value.text) > 4096) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Preview text exceeds byte limit', path: ['text'] });
+    if (value.format === 'json') {
+      try { JSON.parse(value.text); } catch { ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Preview text must be valid JSON', path: ['text'] }); }
+    }
+  }
+  if (previewByteLength(JSON.stringify(value)) > 12288) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Preview envelope exceeds byte limit' });
+});
+export type OfficeToolValuePreview = z.infer<typeof officeToolValuePreviewSchema>;
+export const officeActivityDetailsSchema = z.object({
+  version: z.literal(1), invocation_id: z.string().uuid(), provider_call_id: z.string().max(256).nullable(),
+  tool_name: z.string().min(1).max(128), action: z.string().min(1).max(100).optional(),
+  input: officeToolValuePreviewSchema, result: officeToolValuePreviewSchema,
+  input_observed_at: timestamp.nullable(), result_observed_at: timestamp.nullable(),
+  result_phase: z.enum(['tool_result', 'approval_resolution']).nullable(),
+  result_status: officeActivityStepSchema.shape.status.nullable(),
+}).strict();
+export type OfficeActivityDetails = z.infer<typeof officeActivityDetailsSchema>;
 export interface OfficeConversationActivity { user_message_id: string; steps: OfficeActivityStep[]; }
 const sequence = { sequence: z.number().int().positive() };
 export const officePublicEventSchema = z.discriminatedUnion('type', [
@@ -240,6 +271,14 @@ export const officePublicEventSchema = z.discriminatedUnion('type', [
   z.object({ ...sequence, type: z.literal('interrupted'), error: officeErrorSchema }).strict(),
 ]);
 export type OfficePublicEvent = z.infer<typeof officePublicEventSchema>;
+export type OfficePublicEventV2 = Exclude<OfficePublicEvent, { type: 'activity' }> | { sequence: number; type: 'activity'; step: OfficeActivityStepV2 };
+/** Separate wire validator; the version 1 durable validator remains strict. */
+export const officePublicEventV2Schema: z.ZodType<OfficePublicEventV2> = z.union([
+  z.object({ ...sequence, type: z.literal('activity'), step: officeActivityStepV2Schema }).strict(),
+  officePublicEventSchema,
+]);
+export type OfficePublicEventV2Input = OfficePublicEventV2 extends infer E
+  ? E extends OfficePublicEventV2 ? Omit<E, 'sequence'> : never : never;
 export type OfficePublicEventInput = OfficePublicEvent extends infer E
   ? E extends OfficePublicEvent ? Omit<E, 'sequence'> : never : never;
 

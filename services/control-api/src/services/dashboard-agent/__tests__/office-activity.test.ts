@@ -6,6 +6,31 @@ const call = (id = 'call1', action = 'search_agent_memories') => ({ type: 'tool_
 const mcp = (value: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 describe('safe Office activity', () => {
   it.each([
+    { code: 'proposal_incomplete', missing: ['reason'] },
+    { status: 'blocked', code: 'proposal_unreviewable' },
+    { status: 'blocked', code: 'proposal_duplicate_parked_actions' },
+    { status: 'blocked', code: 'proposal_outbox_in_flight' },
+  ])('recognizes a recorded proposal refusal instead of losing its outcome: %j', result => {
+    const p = createOfficeActivityProjector();
+    p.observe({ type: 'tool_call', id: 'refusal', name: 'propose_action', args: {} });
+    const step = p.observe({ type: 'tool_result', id: 'refusal', result });
+    expect(step?.status).toBe('failed');
+    expect(step?.label).not.toBe('Running tool');
+    expect(step?.finished_at).not.toBeNull();
+  });
+  it('retains the app action without copying app arguments into legacy activity', () => {
+    const p = createOfficeActivityProjector();
+    const step = p.observe({ type: 'tool_call', id: 'app', name: 'manage_app', args: { action: 'delete', app_id: 'app_private' } });
+    expect(step?.action).toBe('delete');
+    expect(JSON.stringify(step)).not.toContain('app_private');
+  });
+  it('distinguishes an observed but uninterpretable result from a missing result', () => {
+    const p = createOfficeActivityProjector(); p.observe(call());
+    const step = p.observe({ type: 'tool_result', id: 'call1', result: { code: 'new_unrecognized_receipt' } });
+    expect(step?.summary).toBe('A result was received, but its outcome could not be determined');
+    expect(step?.label).not.toBe('Running tool');
+  });
+  it.each([
     ['search_agent_memories', { items: [] }, 'Searched organization memories', 'No matching memories found'],
     ['search_agent_memories', { items: [{ body: 'SECRET' }] }, 'Searched organization memories', '1 matching memory returned'],
     ['list_agent_memories', { items: [{ body: 'SECRET' }, {}] }, 'Checked organization memories', '2 memories returned'],

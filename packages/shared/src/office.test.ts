@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as office from './office.js';
 import {
   OFFICE_ACTIONS, officeActionSchema, decisionRefSchema, officeStatusResultSchema,
   confirmationReceiptSchema, officeTurnSchema, officePublicEventSchema, officeErrorSchema, officeCommandSchema,
@@ -6,6 +7,40 @@ import {
 
 const org_id = 'a0000000-0000-4000-8000-000000000001';
 const request = (action: string, fields: Record<string, unknown> = {}) => ({ action, org_id, ...fields });
+
+describe('Office tool preview contracts', () => {
+  const preview = { state: 'available', format: 'json', text: 'false', redacted: false, truncated: false };
+  it('validates exact preview states and valid bounded JSON text', () => {
+    expect(office.officeToolValuePreviewSchema, 'preview schema must exist').toBeDefined();
+    expect(office.officeToolValuePreviewSchema.safeParse(preview).success).toBe(true);
+    for (const invalid of [
+      { ...preview, text: '{broken' }, { ...preview, text: JSON.stringify('😀'.repeat(1025)) },
+      { ...preview, state: 'pending' }, { ...preview, text: undefined },
+      { ...preview, text: JSON.stringify('\u0000'.repeat(1500)) },
+      { ...preview, format: 'text', text: '\u0000'.repeat(3000) },
+      { ...preview, raw: 'never' },
+    ]) expect(office.officeToolValuePreviewSchema.safeParse(invalid).success).toBe(false);
+    expect(office.officeToolValuePreviewSchema.safeParse({ state: 'pending', format: 'json', redacted: false, truncated: false }).success).toBe(true);
+  });
+  it('requires bounded authoritative detail identities and phases', () => {
+    expect(office.officeActivityDetailsSchema, 'details schema must exist').toBeDefined();
+    const details = { version: 1, invocation_id: org_id, provider_call_id: null, tool_name: 'select_rows', input: preview, result: preview,
+      input_observed_at: null, result_observed_at: null, result_phase: null, result_status: null };
+    expect(office.officeActivityDetailsSchema.safeParse(details).success).toBe(true);
+    expect(office.officeActivityDetailsSchema.safeParse({ ...details, invocation_id: 'provider-call' }).success).toBe(false);
+    expect(office.officeActivityDetailsSchema.safeParse({ ...details, provider_call_id: 'x'.repeat(257) }).success).toBe(false);
+    expect(office.officeActivityDetailsSchema.safeParse({ ...details, result_phase: 'execution' }).success).toBe(false);
+  });
+  it('keeps version 1 strict and admits detail references only in opt-in version 2', () => {
+    expect(office.officeActivityStepV2Schema, 'version 2 schema must exist').toBeDefined();
+    const step = { id: org_id, tool_name: 'select_rows', status: 'completed', label: 'Select rows', summary: null,
+      started_at: null, finished_at: null, duration_ms: null, details: [], detail_ref: org_id };
+    expect(office.officeActivityStepSchema.safeParse(step).success).toBe(false);
+    expect(office.officeActivityStepV2Schema.safeParse(step).success).toBe(true);
+    expect(office.officePublicEventSchema.safeParse({ type: 'activity', sequence: 1, step }).success).toBe(false);
+    expect(office.officePublicEventV2Schema.safeParse({ type: 'activity', sequence: 1, step }).success).toBe(true);
+  });
+});
 
 describe('Office wire requests', () => {
   it('requires exact fields on skill browser commands', () => {

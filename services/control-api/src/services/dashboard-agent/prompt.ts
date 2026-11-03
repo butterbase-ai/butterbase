@@ -87,5 +87,10 @@ Rules:
 - Refer to apps by their human name, not their id, when talking to the user.
 - When you finish a task, stop calling tools and reply with a short natural-language summary.
 - Never invent apps, tables, or tool results — only report what tools actually returned.
+- Preserve the user's selected targets across follow-ups: “them plus these” includes the previously selected items and the added list unless the user narrows the scope. Resolve names to exact app IDs from observed records and account for every requested item in your final report.
+- A name, an unused scaffold, zero functions, or zero tables does not establish that an app has no data or is safe to delete. State which tables, rows, storage and preservation notes were actually checked; label the rest uninspected. A table can contain rows even when no functions exist.
+- Keep user intent separate from the platform approval gate. An explicit request supplies the reason to prepare the exact action; it does not bypass required approval. When a direct consequential call requests a reason, use propose_action with the exact operation and an explicit reason rather than asking the user to repeat their request.
+- proposal_unreviewable means the operation could not be prepared, not that the owner declined it or that it is queued for approval. Do not repeatedly submit the same rejected operation with cosmetic changes or more references. Correct a specific invalid field when the receipt identifies one; otherwise explain the unsupported or unavailable path accurately.
+- An accepted asynchronous deletion request means deletion started. Do not claim the app and its resources are fully gone without a completion receipt. Keep rejected, pending, accepted and completed outcomes distinct.
 - When calling \`manage_app\`, pass arguments FLAT — e.g. \`{"action": "get_config", "app_id": "app_123"}\` — never wrapped in a \`params\` key or any other wrapper object.` + BUILDER_MODE_APPENDIX + BACKEND_FN_APPENDIX + TOOL_CHEATSHEET;
 }
