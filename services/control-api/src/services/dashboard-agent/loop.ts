@@ -45,7 +45,7 @@ import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-gua
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
-import { resolveOfficeMemoryContext, type OfficeMemoryToolAdapter } from './office-memory-types.js';
+import { officeMemoryErrorPayload, resolveOfficeMemoryContext, type OfficeMemoryToolAdapter } from './office-memory-types.js';
 import { formatOfficeTaskNotes } from './operator-scratchpad-store.js';
 import { getOperatorScratchpad, readOfficeTaskNotes } from './operator-scratchpad-store.js';
 import { READ_OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
@@ -656,6 +656,20 @@ export async function* streamChatCompletion(opts: {
       yield { type: 'tool_call', id: acc.id, name: acc.name, args: parsedArgs };
     }
   }
+}
+
+/**
+ * A stable code and a field path may cross into the model-visible tool result.
+ * The rejected value, the parser message and any exception cause never do.
+ */
+function proposalInvalidPayload(error: unknown): { code: 'proposal_invalid'; reason?: string; field?: string } {
+  const code = (error as { code?: unknown })?.code;
+  const field = (error as { field?: unknown })?.field;
+  return {
+    code: 'proposal_invalid',
+    ...(typeof code === 'string' && /^[a-z_]{1,60}$/.test(code) ? { reason: code } : {}),
+    ...(typeof field === 'string' && /^[A-Za-z0-9_.\[\]]{1,80}$/.test(field) ? { field } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,6 +1562,7 @@ async function* runAgentTurnInternal(
         let tc = originalCall;
         let proposalInput: ProposalInput | null = null;
         let proposalError: string | null = null;
+        let proposalInvalid: ReturnType<typeof proposalInvalidPayload> | null = null;
         const replyProposal = async (payload: unknown) => {
           await appendMessage(input.pool, input.conversationId, { role: 'assistant', content: i === 0 ? assistantText : '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: null, modelUsed: input.model });
           await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: payload });
@@ -1587,10 +1602,17 @@ async function* runAgentTurnInternal(
               tc = { ...originalCall, name: validated.toolName, args };
               proposalInput = { ...proposalInput, operation: { tool: tc.name, arguments: args } };
               if (input.reviewPreparation && proposalIntentFingerprint(tc.name, args, input.reviewPreparation.operation.artifact) !== input.reviewPreparation.intentFingerprint) proposalError = 'proposal_preparation_mismatch';
-            } catch { proposalError = 'proposal_invalid'; }
+            } catch (error) {
+              proposalError = 'proposal_invalid';
+              proposalInvalid = proposalInvalidPayload(error);
+            }
           }
           if (proposalError) {
-            const payload = { code: proposalError, message: 'Supply a complete, available operation with a reason and typed references.' };
+            const payload = {
+              code: proposalError,
+              message: 'Supply a complete, available operation with a reason and typed references.',
+              ...(proposalError === 'proposal_invalid' && proposalInvalid ? proposalInvalid : {}),
+            };
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
             yield { type: 'tool_call', ...originalCall };
@@ -1611,7 +1633,7 @@ async function* runAgentTurnInternal(
             }
           } catch (error) {
             const code = error instanceof Error ? error.message : 'agent_memory_request_invalid';
-            const payload = { code, message: 'Use an explicit authorized record category, or correct the memory request.' };
+            const payload = officeMemoryErrorPayload(code);
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
             yield { type: 'tool_call', ...originalCall };
@@ -1623,8 +1645,8 @@ async function* runAgentTurnInternal(
           try {
             const validated = await validateRegisteredToolArguments(tc.name, tc.args);
             tc = { ...tc, args: proposalProvider?.validateArguments ? await proposalProvider.validateArguments(tc.name, validated.args) : validated.args };
-          } catch {
-            const payload = { code: 'proposal_invalid' };
+          } catch (error) {
+            const payload = proposalInvalidPayload(error);
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
             yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);

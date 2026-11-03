@@ -17,10 +17,16 @@ const ERROR_MESSAGES: Record<ToolValidationErrorCode, string> = {
 
 /** Safe diagnostics deliberately omit tool arguments, parser issues and exception causes. */
 export class ToolValidationError extends Error {
-  constructor(public readonly code: ToolValidationErrorCode) {
+  constructor(public readonly code: ToolValidationErrorCode, public readonly field?: string) {
     super(ERROR_MESSAGES[code]);
     this.name = 'ToolValidationError';
   }
+}
+
+/** Only a field path may cross the boundary; values and messages never do. */
+function safeField(path: ReadonlyArray<string | number>): string | undefined {
+  const value = path.join('.');
+  return /^[A-Za-z0-9_.\[\]]{1,80}$/.test(value) ? value : undefined;
 }
 
 export function createRegisteredToolValidator(server: McpServer): RegisteredToolValidator {
@@ -40,11 +46,15 @@ export function createRegisteredToolValidator(server: McpServer): RegisteredTool
           throw new ToolValidationError('tool_arguments_invalid');
         }
         const parsed = await schema.safeParseAsync(args);
-        if (!parsed.success || !parsed.data || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) {
+        if (!parsed.success) {
+          throw new ToolValidationError('tool_arguments_invalid', safeField(parsed.error.issues[0]?.path ?? []));
+        }
+        if (!parsed.data || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) {
           throw new ToolValidationError('tool_arguments_invalid');
         }
         return { toolName: name, args: parsed.data as Record<string, unknown> };
-      } catch {
+      } catch (error) {
+        if (error instanceof ToolValidationError) throw error;
         throw new ToolValidationError('tool_arguments_invalid');
       }
     },
