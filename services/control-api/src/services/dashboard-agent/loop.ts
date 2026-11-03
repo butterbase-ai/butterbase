@@ -1,4 +1,5 @@
 import { OfficeTurnEvidence, observeOfficeTurn } from './office-turn-evidence.js';
+import { createOfficeActivityDetailRecorder, type OfficeActivityDetailRecorder } from './office-activity-details-recorder.js';
 import { withOfficeActivityCallId } from './office-activity.js';
 /**
  * Agent loop for the Butterbase Dashboard Assistant.
@@ -721,7 +722,8 @@ export async function* runAgentTurn(
 ): AsyncGenerator<LoopEvent> {
   const evidence = input.recordOfficeActivity || input.officeActivityResumeApprovalId
     ? new OfficeTurnEvidence(input.pool, input.conversationId, input.officeActivityResumeApprovalId) : undefined;
-  yield* observeOfficeTurn(runAgentTurnInternal(input, depsOverride, evidence), evidence);
+  const details = createOfficeActivityDetailRecorder({ pool: input.pool, conversationId: input.conversationId, resumeApprovalId: input.officeActivityResumeApprovalId });
+  yield* observeOfficeTurn(runAgentTurnInternal(input, depsOverride, evidence, details), evidence, details);
 }
 
 async function* runAgentTurnInternal(
@@ -847,6 +849,7 @@ async function* runAgentTurnInternal(
   },
   depsOverride?: Partial<LoopDeps>,
   evidence?: OfficeTurnEvidence,
+  details?: OfficeActivityDetailRecorder,
 ): AsyncGenerator<LoopEvent> {
   let executionStopped = false;
   const executionAllowed = async (): Promise<boolean> => {
@@ -1113,6 +1116,8 @@ async function* runAgentTurnInternal(
   });
 
   await evidence?.start(userMessage.id);
+  // Trusted conversation provenance, never a model-selected capture scope.
+  if (isOfficeTurn || isOperator) await details?.start(userMessage.id);
 
   // AFFORDANCE (not the control): hide tools the operator may not call, so the
   // model doesn't waste turns and tokens on refusals. The control is
@@ -1210,6 +1215,8 @@ async function* runAgentTurnInternal(
   // hash of the last args seen for that tool and how many consecutive times
   // in a row that same hash has been retried.
   const retryState = new Map<string, { lastArgsHash: string; retries: number }>();
+  const proposalRefusals = new Map<string, number>();
+  let proposalRetryBlocked = false;
 
   // SSE queue: file-ops / deployer emit callbacks push events that need to be
   // interleaved with the loop's own yields. We drain the queue after each
@@ -1544,7 +1551,26 @@ async function* runAgentTurnInternal(
         const replyProposal = async (payload: unknown) => {
           await appendMessage(input.pool, input.conversationId, { role: 'assistant', content: i === 0 ? assistantText : '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: null, modelUsed: input.model });
           await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: payload });
+          const receipt = payload as { code?: unknown } | null;
+          if (typeof receipt?.code === 'string') {
+            // Outer explanations/references are preparation aids, not a new
+            // executable intent. Cosmetic changes must not evade the budget.
+            const raw = originalCall.args as { operation?: unknown } | null;
+            const key = proposalInput ? proposalIntentFingerprint(tc.name, tc.args)
+              : hashToolArgs({ tool: originalCall.name, arguments: originalCall.name === PROPOSE_ACTION_TOOL ? raw?.operation ?? null : originalCall.args });
+            const count = (proposalRefusals.get(key) ?? 0) + 1;
+            proposalRefusals.set(key, count);
+            if (count >= TOOL_RETRY_LIMIT) proposalRetryBlocked = true;
+          }
         };
+        if (proposalRetryBlocked) {
+          const payload = { code: 'proposal_retry_limit_reached' };
+          await replyProposal(payload);
+          toolCallResults.push({ id: originalCall.id, result: payload });
+          yield { type: 'tool_call', ...originalCall };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
+          continue;
+        }
         if (originalCall.name === PROPOSE_ACTION_TOOL) {
           const parsed = ProposalInputSchema.safeParse(originalCall.args);
           if (!structuredProposals || !allowedToolNames.has(PROPOSE_ACTION_TOOL)) proposalError = 'proposal_unavailable';
@@ -1568,7 +1594,7 @@ async function* runAgentTurnInternal(
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
             yield { type: 'tool_call', ...originalCall };
-            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
             continue;
           }
         }
@@ -1589,7 +1615,7 @@ async function* runAgentTurnInternal(
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
             yield { type: 'tool_call', ...originalCall };
-            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
             continue;
           }
         }
@@ -1601,7 +1627,7 @@ async function* runAgentTurnInternal(
             const payload = { code: 'proposal_invalid' };
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
-            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
             continue;
           }
         }
@@ -1618,7 +1644,7 @@ async function* runAgentTurnInternal(
         if (accessBlockedReason) {
           const payload = { error: 'office_access_blocked', reason: accessBlockedReason };
           toolCallResults.push({ id: tc.id, result: payload });
-          yield { type: 'tool_result', id: tc.id, result: payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result: payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1704,7 +1730,7 @@ async function* runAgentTurnInternal(
           const payload = { code: 'proposal_unavailable', message: 'Required Office preparation is unavailable. No owner approval was created.' };
           await replyProposal(payload);
           toolCallResults.push({ id: originalCall.id, result: payload });
-          yield { type: 'tool_result', id: originalCall.id, result: payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
           continue;
         }
 
@@ -1751,7 +1777,7 @@ async function* runAgentTurnInternal(
                       const saved = await persistPreparedApproval(input.pool, { id: approvalId, organizationId: proposalOrganizationId!, conversationId: input.conversationId, operation, proposal: { ...prepared.proposal, source: parkedActionId ? 'substrate_escalation' : 'explicit' }, traceId: input.traceId, reviewPreparation: input.reviewPreparation, message: { id: randomUUID(), callId: originalCall.id, toolName: originalCall.name, args: originalCall.args, content: i === 0 ? assistantText : '', model: input.model } });
                       if (saved.kind === 'duplicate') payload = { code: 'already_pending', approval_id: saved.approvalId };
                       else {
-                        yield withOfficeActivityCallId({ type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' }, originalCall.id);
+                        yield withOfficeActivityCallId({ type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' }, originalCall.id, originalCall);
                         terminated = true;
                         break outer;
                       }
@@ -1765,7 +1791,7 @@ async function* runAgentTurnInternal(
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
             yield { type: 'tool_call', ...originalCall };
-            yield { type: 'tool_result', id: originalCall.id, result: payload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
             continue;
           }
         }
@@ -1851,7 +1877,7 @@ async function* runAgentTurnInternal(
             yield { type: 'tool_call', ...tc };
             const resultPayload = { error: errorMsg };
             toolCallResults.push({ id: tc.id, ...resultPayload });
-            yield { type: 'tool_result', id: tc.id, ...resultPayload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -1921,7 +1947,7 @@ async function* runAgentTurnInternal(
             );
             yield { type: 'tool_call', ...tc };
             toolCallResults.push({ id: tc.id, result: blocked });
-            yield { type: 'tool_result', id: tc.id, result: blocked };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result: blocked }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -1972,7 +1998,7 @@ async function* runAgentTurnInternal(
             yield { type: 'tool_call', ...tc };
             const resultPayload = { error: errorMsg };
             toolCallResults.push({ id: tc.id, ...resultPayload });
-            yield { type: 'tool_result', id: tc.id, ...resultPayload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -2032,7 +2058,7 @@ async function* runAgentTurnInternal(
               yield { type: 'tool_call', ...tc };
               const resultPayload = { error: errorMsg };
               toolCallResults.push({ id: tc.id, ...resultPayload });
-              yield { type: 'tool_result', id: tc.id, ...resultPayload };
+              yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
               await appendMessage(input.pool, input.conversationId, {
                 role: 'tool',
                 content: '',
@@ -2129,7 +2155,7 @@ async function* runAgentTurnInternal(
               );
               yield { type: 'tool_call', ...tc };
               toolCallResults.push({ id: tc.id, result: blocked });
-              yield { type: 'tool_result', id: tc.id, result: blocked };
+              yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result: blocked }, originalCall.id, originalCall);
               await appendMessage(input.pool, input.conversationId, {
                 role: 'tool',
                 content: '',
@@ -2246,7 +2272,7 @@ async function* runAgentTurnInternal(
           const errorMsg = `Tool "${tc.name}" is not permitted for the autonomous operator.`;
           const resultPayload = { error: errorMsg };
           toolCallResults.push({ id: tc.id, ...resultPayload });
-          yield { type: 'tool_result', id: tc.id, ...resultPayload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2263,7 +2289,7 @@ async function* runAgentTurnInternal(
           const errorMsg = `Tool "${tc.name}" is not available in this agent's catalog.`;
           const resultPayload = { error: errorMsg };
           toolCallResults.push({ id: tc.id, ...resultPayload });
-          yield { type: 'tool_result', id: tc.id, ...resultPayload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2314,7 +2340,7 @@ async function* runAgentTurnInternal(
             } catch { result = { code: 'working_notes_unavailable' }; }
           }
           toolCallResults.push({ id: tc.id, result });
-          yield { type: 'tool_result', id: tc.id, result };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: tc.id,
             toolName: tc.name, toolArgs: tc.args, toolResult: result });
           continue;
@@ -2338,7 +2364,7 @@ async function* runAgentTurnInternal(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2406,7 +2432,7 @@ async function* runAgentTurnInternal(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2522,7 +2548,7 @@ async function* runAgentTurnInternal(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2577,7 +2603,7 @@ async function* runAgentTurnInternal(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2608,7 +2634,7 @@ async function* runAgentTurnInternal(
             : { error: r.error };
           if (r.ok && tc.name === 'write_file') fileWritesCount++;
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2627,7 +2653,7 @@ async function* runAgentTurnInternal(
           if (!args.app_id) {
             const err = 'app_id is required';
             toolCallResults.push({ id: tc.id, error: err });
-            yield { type: 'tool_result', id: tc.id, error: err };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, error: err }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -2654,7 +2680,7 @@ async function* runAgentTurnInternal(
             : { error: r.error };
           if (r.ok) deploymentsCount++;
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2680,7 +2706,7 @@ async function* runAgentTurnInternal(
           if (!args.app_id || !args.function_name) {
             const err = 'app_id and function_name are required';
             toolCallResults.push({ id: tc.id, error: err });
-            yield { type: 'tool_result', id: tc.id, error: err };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, error: err }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -2710,7 +2736,7 @@ async function* runAgentTurnInternal(
             ? { result: { url: r.url, deployment_id: r.deploymentId } }
             : { error: r.error };
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2765,7 +2791,7 @@ async function* runAgentTurnInternal(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2820,7 +2846,7 @@ async function* runAgentTurnInternal(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -2878,7 +2904,7 @@ async function* runAgentTurnInternal(
               }
             }
             toolCallResults.push({ id: tc.id, ...payload });
-            yield { type: 'tool_result', id: tc.id, ...payload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -3012,7 +3038,7 @@ async function* runAgentTurnInternal(
 
         const resultPayload = call.ok ? { result: call.result } : { error: call.error };
         toolCallResults.push({ id: tc.id, ...resultPayload });
-        yield { type: 'tool_result', id: tc.id, ...resultPayload };
+        yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
         await appendMessage(input.pool, input.conversationId, {
           role: 'tool',
           content: '',
@@ -3047,6 +3073,15 @@ async function* runAgentTurnInternal(
 
       if (accessBlockedReason) {
         yield { type: 'blocked', reason: accessBlockedReason };
+        terminated = true;
+        break outer;
+      }
+      if (proposalRetryBlocked) {
+        const summary = 'Repeated preparation attempts for the same operation were stopped after three refusals. Review the recorded refusal before submitting another request.';
+        await appendMessage(input.pool, input.conversationId, { role: 'assistant', content: summary, toolCallId: null, toolName: null, toolArgs: null, toolResult: null, modelUsed: input.model });
+        lastAssistantText = summary;
+        yield { type: 'assistant_message', content: summary };
+        yield { type: 'error', code: 'proposal_retry_limit_reached', message: summary };
         terminated = true;
         break outer;
       }

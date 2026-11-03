@@ -1556,3 +1556,27 @@ it('keeps evidence running after actual tool success and intermediate prose unti
   await collect(source);
   expect(query.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns')).at(-1)?.[1]?.[2]).toBe('completed');
 });
+
+it('captures real Office loop calls before delivery without changing provider IDs or executing again', async () => {
+  const { readOfficeActivityObservation } = await import('../office-activity-details-recorder.js');
+  mockGetConversation.mockResolvedValue({ id: 'conv-1', userId: 'user-1', title: 'Existing thread', origin: 'office', organizationId: '11111111-1111-4111-8111-111111111111' } as any);
+  const query = vi.fn(async (sql: string) => ({ rows: sql.includes("role='user'") ? [{ id: 'msg-stub' }] : [], rowCount: 1 }));
+  const client = { query, release: vi.fn() };
+  const pool = { query, connect: async () => client } as unknown as pg.Pool;
+  global.fetch = vi.fn()
+    .mockResolvedValueOnce(toolCallPassFor('provider-reused', 'manage_app', '{"action":"list"}'))
+    .mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Finished' }, finish_reason: 'stop' }] }]));
+  mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { apps: [] } });
+  const events = await collect(runAgentTurn({ ...baseInput, pool }));
+  const toolCall = events.find(event => event.type === 'tool_call')!;
+  const toolResult = events.find(event => event.type === 'tool_result')!;
+  const started = readOfficeActivityObservation(toolCall), ended = readOfficeActivityObservation(toolResult);
+  expect(started?.step.detail_ref).toBe(started?.invocationId);
+  expect(started?.invocationId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(ended?.invocationId).toBe(started?.invocationId);
+  expect(ended?.step.status).toBe('completed');
+  expect(toolCall).toMatchObject({ id: 'provider-reused' });
+  expect(JSON.stringify(toolCall)).not.toContain('detail_ref');
+  expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  expect(events.at(-1)?.type).toBe('done');
+});

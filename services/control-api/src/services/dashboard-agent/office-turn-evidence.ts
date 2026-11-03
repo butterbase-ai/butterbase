@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { LoopEvent } from './loop.js';
+import { attachOfficeActivityObservation, type OfficeActivityDetailRecorder } from './office-activity-details-recorder.js';
 
 /** Runtime-owned evidence, never derived from assistant prose or tool success. */
 export class OfficeTurnEvidence {
@@ -43,11 +44,15 @@ export class OfficeTurnEvidence {
 }
 
 /** Drained by the server independently of browser observation. */
-export async function* observeOfficeTurn(source: AsyncGenerator<LoopEvent>, evidence?: OfficeTurnEvidence): AsyncGenerator<LoopEvent> {
+export async function* observeOfficeTurn(source: AsyncGenerator<LoopEvent>, evidence?: OfficeTurnEvidence, details?: OfficeActivityDetailRecorder): AsyncGenerator<LoopEvent> {
   try {
-    for await (const event of source) { await evidence?.observe(event); yield event; }
+    for await (const event of source) {
+      const observation = await details?.observe(event);
+      if (observation) attachOfficeActivityObservation(event, observation);
+      await evidence?.observe(event); yield event;
+    }
   } catch (error) { await evidence?.fail(); throw error; }
-  finally { await evidence?.finish(); }
+  finally { await details?.observe({ type: 'done' }); await evidence?.finish(); }
 }
 
 /** Resolution establishes a tool result, not an enclosing final answer. */

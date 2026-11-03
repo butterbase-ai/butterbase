@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { OFFICE_ACTIVITY_HISTORY_MAX_CALLS, OFFICE_ACTIVITY_HISTORY_MAX_GROUPS, projectOfficeConversationActivity } from './office-activity.js';
+import { readOfficeActivityInvocationHistory } from './office-activity-details-store.js';
 
 type HistoryRow = { id: string; role: string; content: string; created_at: Date; tool_call_id?: string | null;
   tool_name?: string | null; tool_args?: unknown; tool_result?: unknown; pending_approval_id?: string | null; outcome?: string | null; final_answer_id?: string | null };
@@ -8,7 +9,7 @@ type HistoryRow = { id: string; role: string; content: string; created_at: Date;
  * user/assistant rows as the existing public conversation reader, including empty
  * paired assistant rows. Only user anchors inside that window receive activity.
  * Pairs are selected by call identity, never by a raw transcript row cutoff. */
-export async function readOfficeConversationActivityHistory(pool: pg.Pool, conversationId: string, limit = 25) {
+export async function readOfficeConversationActivityHistory(pool: pg.Pool, conversationId: string, limit = 25, activityVersion: 1 | 2 = 1) {
   if (!Number.isInteger(limit) || limit < 1 || limit > OFFICE_ACTIVITY_HISTORY_MAX_GROUPS) throw new RangeError('Invalid history limit');
   const window = await pool.query<HistoryRow>(`/* office_activity_window */
     SELECT m.id,m.role,m.content,m.created_at,t.outcome,t.final_answer_id FROM dashboard_agent_messages m
@@ -57,8 +58,11 @@ export async function readOfficeConversationActivityHistory(pool: pg.Pool, conve
       ORDER BY created_at,id LIMIT 1
     ) r
     ORDER BY created_at,id`, [conversationId, userIds, OFFICE_ACTIVITY_HISTORY_MAX_CALLS]);
-  return { messages, turns, activity: projectOfficeConversationActivity(pairs.rows.map(m => ({
+  const legacy = projectOfficeConversationActivity(pairs.rows.map(m => ({
     id: m.id, role: m.role, createdAt: m.created_at, toolCallId: m.tool_call_id,
     toolName: m.tool_name, toolArgs: m.tool_args, toolResult: m.tool_result, pendingApprovalId: m.pending_approval_id,
-  }))) };
+  })));
+  const captured = activityVersion === 2 ? await readOfficeActivityInvocationHistory(pool, conversationId, userIds) : [];
+  const byAnchor = new Map(captured.map(group => [group.user_message_id, group]));
+  return { messages, turns, activity: userIds.map(id => byAnchor.get(id) ?? legacy.find(group => group.user_message_id === id) ?? { user_message_id: id, steps: [] }) };
 }

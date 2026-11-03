@@ -174,6 +174,21 @@ beforeEach(() => {
 });
 
 describe('structured proposal gate', () => {
+  it('stops repeated refused preparation for the same operation despite cosmetic reason changes', async () => {
+    const prepare = install({ status: 'blocked', code: 'proposal_unreviewable', message: 'Unsupported target.' });
+    let requests = 0;
+    global.fetch = vi.fn(async () => {
+      requests++;
+      if (requests > 5) return gatewayResponse([{ choices: [{ delta: { content: 'Stopped' }, finish_reason: 'stop' }] }]);
+      const args = { operation, reason: `Retry explanation ${requests}`, evidence_refs: [] };
+      return gatewayResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: `refused-${requests}`, function: { name: 'propose_action', arguments: JSON.stringify(args) } }] }, finish_reason: 'tool_calls' }] }]);
+    });
+    const events = await collect(runAgentTurn(operatorInput()));
+    expect(prepare).toHaveBeenCalledTimes(3);
+    expect(requests).toBe(3);
+    expect(events.some(event => event.type === 'error' && event.code === 'proposal_retry_limit_reached')).toBe(true);
+    expect(persistPreparedApproval).not.toHaveBeenCalled();
+  });
   it('creates no Office owner gate when its required preparation provider is absent', async () => {
     setApprovalProposalProvider(null);
     oneToolCallThenStop('manage_substrate', { action: 'cancel_outbox', outbox_id: 'obx_synthetic' });

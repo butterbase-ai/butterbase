@@ -33,6 +33,7 @@ import { resolveOfficeTurnApproval } from './office-turn-evidence.js';
  */
 
 import pg from 'pg';
+import { recordOfficeActivityResolution } from './office-activity-details-store.js';
 import { withApprovalResolutionLock } from './approval-resolution-lock.js';
 import { readConfirmedExecution, recordExecutionOutcome, isConfirmedExecution } from './execution-outcome.js';
 import { expireProposalAndCompleteCall } from './proposal-store.js';
@@ -355,6 +356,8 @@ async function completeApprovalResolutionUnlocked(
   // 6. Clear the pending marker on the paused assistant row.
   await clearPendingApproval(pool, pausedMessage.id);
   await resolveOfficeTurnApproval(pool, approval.conversationId, approval.id);
+  await recordOfficeActivityResolution(pool, { conversationId: approval.conversationId, approvalId: approval.id,
+    result: toolResult, status: resolution.status === 'denied' ? 'denied' : 'completed' });
 
   return { ok: true, approval: { ...approval, status: resolution.status } };
 }

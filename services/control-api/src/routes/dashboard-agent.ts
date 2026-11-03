@@ -43,6 +43,9 @@
 
 import { readOfficeConversationActivityHistory } from '../services/dashboard-agent/office-activity-history.js';
 import { createOfficeActivityProjector } from '../services/dashboard-agent/office-activity.js';
+import { readOfficeActivityObservation } from '../services/dashboard-agent/office-activity-details-recorder.js';
+import { readOfficeActivityDetails } from '../services/dashboard-agent/office-activity-details-store.js';
+import { canReadOfficeActivity } from '../services/dashboard-agent/office-activity-access.js';
 import { buildProposalReview, verifyPreparedApproval } from '../services/dashboard-agent/proposal-review.js';
 import { redactProposalArguments } from '../services/dashboard-agent/approval-proposal.js';
 import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
@@ -361,7 +364,7 @@ async function officeTurnAccessOutcome(
 }
 
 const postMessageBody = z.object({
-  activity_version: z.literal(1).optional(),
+  activity_version: z.union([z.literal(1), z.literal(2)]).optional(),
   conversation_id: z.string().uuid(),
   message: z.string().min(1),
   // An omitted model keeps the conversation's saved choice.
@@ -834,15 +837,29 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
 
-    const version = z.object({ activity_version: z.literal('1').optional() }).safeParse(request.query);
+    const version = z.object({ activity_version: z.enum(['1','2']).optional() }).safeParse(request.query);
     if (!version.success) return reply.code(400).send({ error: 'invalid activity version' });
     if (version.data.activity_version) {
+      if (version.data.activity_version === '2' && !await canReadOfficeActivity(app.controlDb, conversation, request.auth)) return reply.code(404).send({ error: 'conversation not found' });
       const options = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }).safeParse(request.query);
       if (!options.success) return reply.code(400).send({ error: 'invalid history limit' });
-      return reply.send({ conversation, ...await readOfficeConversationActivityHistory(app.controlDb, id, options.data.limit) });
+      return reply.send({ conversation, ...await readOfficeConversationActivityHistory(app.controlDb, id, options.data.limit, version.data.activity_version === '2' ? 2 : 1) });
     }
     const messages = await listMessages(app.controlDb, id);
     return reply.send({ conversation, messages });
+  });
+
+  app.get('/conversations/:id/activity/:invocationId', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+    const userId = requireUserId(request);
+    const params = z.object({ id: z.string().uuid(), invocationId: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'invalid activity identity' });
+    const conversation = await getConversationForRequest(app.controlDb, params.data.id, userId, request);
+    if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
+    if (!await canReadOfficeActivity(app.controlDb, conversation, request.auth)) return reply.code(404).send({ error: 'conversation not found' });
+    const details = await readOfficeActivityDetails(app.controlDb, { conversationId: conversation.id, invocationId: params.data.invocationId });
+    if (!details) return reply.code(404).send({ error: 'activity details not found' });
+    return reply.send(details);
   });
 
   // ── DELETE /conversations/:id ────────────────────────────────────────────
@@ -1009,7 +1026,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: message,
-        recordOfficeActivity: activity_version === 1,
+        recordOfficeActivity: activity_version !== undefined,
         model: turnModel,
         pool: app.controlDb,
         organizationId: readOrgId(request),
@@ -1020,7 +1037,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       for await (const event of gen) {
         publishEvent(conversation_id, event);
         // Projection still observes every event when a browser disconnects.
-        const step = activity_version === 1 ? activity.observe(event) : null;
+        const legacyStep = activity_version ? activity.observe(event) : null;
+        const step = activity_version === 2 ? readOfficeActivityObservation(event)?.step ?? legacyStep : legacyStep;
         if (clientDisconnected) continue;
         if (!activity_version) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
         else {

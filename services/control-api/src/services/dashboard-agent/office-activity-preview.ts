@@ -21,10 +21,6 @@ const capabilityUrl = (url: URL, key: string) => /(?:upload|download|signed|pres
 /** Bounded, server-only projection. No raw value escapes on failures. */
 export function previewOfficeToolValue(value: unknown, context: OfficePreviewContext): OfficeToolValuePreview {
   if (value === undefined) return { state: 'unavailable', format: 'json', redacted: false, truncated: false, reason: 'not_recorded' };
-  if (!context.capability && value && typeof value === 'object') {
-    const capability = own(value, 'capability');
-    if (typeof capability === 'string' && capability.length <= 128) context = { ...context, capability };
-  }
   let redacted = false;
   let truncated = false;
   let bytes = 0;
@@ -44,11 +40,12 @@ export function previewOfficeToolValue(value: unknown, context: OfficePreviewCon
     return output;
   };
 
-  const policy = resolveOfficePreviewPolicy(context);
+  let policy: ReturnType<typeof resolveOfficePreviewPolicy>;
   const project = (input: unknown, path: string[], trusted: boolean, depth: number, env = false, activeContext = context): unknown => {
     if (nodes >= LIMIT.nodes || depth > LIMIT.depth || bytes >= LIMIT.bytes) return omit();
     nodes++;
     const key = path[path.length - 1] ?? '';
+    if (key.length > 200) return hide();
     const normalized = normalizeKey(key);
     const activePolicy = activeContext === context ? policy : resolveOfficePreviewPolicy(activeContext);
     const classification = path.at(-1) === '*' && trusted ? 'structured' : classifyOfficePreviewPath(activePolicy, activeContext.phase, path);
@@ -57,7 +54,9 @@ export function previewOfficeToolValue(value: unknown, context: OfficePreviewCon
       && normalized === 'key' && path.includes('key_meta');
     if (env) return hide();
     if (classification === 'secret' || (credentialKey(normalized) && !kvKey && !envName)) return hide();
-    if (classification === 'opaque' || opaqueKey(normalized)) return hide();
+    const structuredAuditRecords = activeContext.toolName === 'query_audit_logs' && activeContext.phase === 'result'
+      && path.length === 1 && normalized === 'logs' && Array.isArray(input);
+    if (classification === 'opaque' || (opaqueKey(normalized) && !structuredAuditRecords)) return hide();
     if (normalized === 'code' && typeof input === 'string' && !/^[a-z][a-z0-9_.:-]{0,100}$/i.test(input)) return hide();
     if (key === '__proto__' || key === 'prototype' || key === 'constructor') return hide();
     const isEnvironment = environmentKey(normalized);
@@ -75,12 +74,17 @@ export function previewOfficeToolValue(value: unknown, context: OfficePreviewCon
         && !/^(keys|envKeys|env_keys|scopes|additional_scopes|tables|roles|read|write|allowed_origins|redirect_uris|conventions)$/.test(path.at(-2) ?? '')) return hide();
       // Scan at most the budget. A secret after the retained prefix cannot leak.
       const text = boundedString(input, LIMIT.text);
+      if (text === WITHHELD || text === OMITTED) return text;
       if (credentialValue(text) || /^[\s]*[\[{]/.test(text)) return hide();
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+      const trimmed = text.trim();
+      const urlField = classification === 'url' || /(?:url|uri|origin|endpoint|href)$/.test(normalized)
+        || (key === '*' && /(?:urls|uris|origins|endpoints)$/.test(normalizeKey(path.at(-2) ?? '')));
+      if (urlField || /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) || /^\/\//.test(trimmed)) {
         try {
-          const url = new URL(text);
+          const relative = !/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !trimmed.startsWith('//');
+          const url = new URL(trimmed, 'https://preview.invalid');
           if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol) || capabilityUrl(url, key)) return hide();
-          const safe = url.origin + url.pathname;
+          const safe = relative ? url.pathname : url.origin + url.pathname;
           if (safe !== text) redacted = true;
           return safe;
         } catch { return hide(); }
@@ -119,7 +123,7 @@ export function previewOfficeToolValue(value: unknown, context: OfficePreviewCon
       // A proposal carries another operation, not proof that it executed. Reuse
       // the target policy without exposing its otherwise opaque wrapper args.
       if (activeContext.toolName === 'propose_action' && field === 'arguments' && path.join('.') === 'operation') {
-        const name = own(input, 'tool_name');
+        const name = own(input, 'tool');
         const args = descriptor.value;
         const action = args && typeof args === 'object' ? own(args, 'action') : own(input, 'action');
         out[safeField] = project(args, [], true, depth + 1, false, { toolName: typeof name === 'string' ? name : '', action: typeof action === 'string' ? action : undefined, phase: activeContext.phase });
@@ -132,7 +136,13 @@ export function previewOfficeToolValue(value: unknown, context: OfficePreviewCon
   };
 
   try {
+    if (!context.capability && value && typeof value === 'object') {
+      const capability = own(value, 'capability');
+      if (typeof capability === 'string' && capability.length <= 128) context = { ...context, capability };
+    }
+    policy = resolveOfficePreviewPolicy(context);
     let observed: unknown = value;
+    let envelopeError: boolean | undefined;
     // Recognize transport envelopes only at the result root. Getters are never read.
     if (context.phase === 'result' && observed && typeof observed === 'object' && !Array.isArray(observed)) {
       const isError = own(observed, 'isError');
@@ -148,9 +158,15 @@ export function previewOfficeToolValue(value: unknown, context: OfficePreviewCon
           try { observed = JSON.parse(text); } catch { observed = { content: hide() }; }
         } else observed = { content: hide() };
       }
-      if (wrapper && typeof isError === 'boolean') observed = { isError, result: observed };
+      if (wrapper && typeof isError === 'boolean') envelopeError = isError;
+      // This is the sanitized receipt shape persisted by this projector. Keep
+      // its transport metadata separate when applying the current field policy.
+      if (!wrapper && keys.length === 2 && keys.includes('isError') && keys.includes('result') && typeof isError === 'boolean') {
+        envelopeError = isError; observed = own(observed as object, 'result');
+      }
     }
-    const projected = project(observed, [], true, 0);
+    const body = project(observed, [], true, 0);
+    const projected = envelopeError === undefined ? body : { isError: envelopeError, result: body };
     let text = JSON.stringify(projected, null, 2);
     // Compacting cannot break JSON or Unicode. If still too large, replace complete
     // values in a bounded sanitized tree instead of slicing serialized JSON.

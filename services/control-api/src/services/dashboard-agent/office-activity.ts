@@ -20,6 +20,10 @@ const completedLabels: Record<string, string> = {
   search_memory: 'Searched organization records', list_memory: 'Checked organization records',
 };
 const writes = new Set(['record_agent_memory', 'amend_agent_memory', 'archive_agent_memory']);
+const actionTools = new Set(['manage_substrate','manage_office','manage_app','manage_schema','manage_function','manage_storage',
+  'manage_auth_config','manage_auth_users','manage_oauth','manage_api_keys','manage_kv','manage_realtime','manage_durable_objects',
+  'manage_edge_ssr','manage_ai','manage_rag_content','manage_agents','manage_integrations','manage_people','manage_repo',
+  'manage_billing','manage_migrations','manage_rls','manage_preview','manage_frontend','manage_organizations']);
 const rejectedCodes = new Set([
   'agent_memory_request_invalid', 'explicit_memory_kind_required', 'agent_memory_match_unsupported',
   'agent_memory_query_invalid', 'agent_memory_scope_mismatch', 'office_test_read_only',
@@ -27,12 +31,19 @@ const rejectedCodes = new Set([
   'agent_memory_verification_required', 'proposal_preparation_mismatch', 'proposal_invalid',
   'proposal_unavailable', 'proposal_review_unavailable', 'deploy_tree_unavailable',
   'working_notes_scope_invalid', 'working_notes_unavailable', 'read_only_test',
+  'proposal_unreviewable', 'proposal_duplicate_parked_actions', 'proposal_outbox_in_flight',
+  'proposal_retry_limit_reached',
 ]);
 // Non-enumerable observation metadata never changes JSON event schemas.
 const canonicalCallId = Symbol('officeActivityCallId');
-export function withOfficeActivityCallId<T extends object>(event: T, callId: string): T {
+const observedCall = Symbol('officeActivityOriginalCall');
+export function withOfficeActivityCallId<T extends object>(event: T, callId: string, originalCall?: { id: string; name: string; args: unknown }): T {
   Object.defineProperty(event, canonicalCallId, { value: callId, enumerable: false });
+  if (originalCall) Object.defineProperty(event, observedCall, { value: originalCall, enumerable: false });
   return event;
+}
+export function officeActivityCall(event: object): { id: string; name?: string; args?: unknown } | null {
+  return (event as any)[observedCall] ?? ((event as any)[canonicalCallId] ? { id: (event as any)[canonicalCallId] } : null);
 }
 
 /** Check resource limits without serializing cycles or traversing unbounded JSON. */
@@ -83,7 +94,7 @@ export function createOfficeActivityProjector({ now = () => new Date() }: { now?
       const id = slug(event.id, 256); if (!id || steps.has(id) || steps.size >= 512) return null;
       const name = slug(event.name) ?? 'unknown_tool';
       const args = object(event.args);
-      const trusted = ['manage_substrate', 'manage_office'].includes(name);
+      const trusted = actionTools.has(name);
       const action = trusted ? slug(args?.action, 100) : undefined;
       const capability = action === 'propose' ? slug(args?.capability, 100) : action;
       const step: OfficeActivityStep = { id, tool_name: name, ...(action ? { action } : {}),
@@ -111,6 +122,7 @@ export function createOfficeActivityProjector({ now = () => new Date() }: { now?
       if (!unfinished) return null;
       unfinished.status = event.type === 'blocked' && event.reason === 'execution_interrupted' ? 'interrupted' : 'unknown';
       unfinished.summary = unfinished.status === 'interrupted' ? 'Execution interrupted' : 'Completion was not observed';
+      if (unfinished.label === 'Running tool') unfinished.label = unfinished.status === 'interrupted' ? 'Tool interrupted' : 'Tool outcome unavailable';
       finished.add(unfinished.id);
       return structuredClone(unfinished);
     }
@@ -120,7 +132,7 @@ export function createOfficeActivityProjector({ now = () => new Date() }: { now?
     const step = { ...previous, details: [...previous.details], finished_at: timestamp,
       duration_ms: previous.started_at && timestamp ? Math.max(0, Date.parse(timestamp) - Date.parse(previous.started_at)) : null };
     const rows = envelopes(event.result);
-    const failed = event.error !== undefined || rows?.some(r => r.isError === true || r.ok === false || r.error != null || r.status === 'failed' || rejectedCodes.has(r.code) || r.verdict?.result === 'blocked');
+    const failed = event.error !== undefined || rows?.some(r => r.isError === true || r.ok === false || r.error != null || r.status === 'failed' || rejectedCodes.has(r.code) || (r.code === 'proposal_incomplete' && !r.parkedProposal?.actionId) || r.verdict?.result === 'blocked');
     const denied = rows?.some(r => ['rejected','denied'].includes(r.status) || (r.ok === false && typeof r.error === 'string' && r.error.startsWith('User denied.')));
     const pending = rows?.some(r => r.requires_approval === true || (r.code === 'proposal_incomplete' && r.parkedProposal?.actionId) || (r.code === 'already_pending' && r.approval_id) || r.confirmation_id || r.decision || ['proposed','pending','awaiting_approval','requires_confirmation'].includes(r.status));
     const codeReceipt = rows?.some(r => typeof r.code === 'string');
@@ -134,7 +146,10 @@ export function createOfficeActivityProjector({ now = () => new Date() }: { now?
       (previous.tool_name === 'manage_office' && writes.has(capability ?? '') &&
         slug(r.action_id, 256) && automaticVerdicts.includes(r.verdict?.result) && slug(r.result?.memory_id, 256)));
     step.status = denied ? 'denied' : failed ? 'failed' : pending ? 'awaiting_approval' : !rows || codeReceipt || (write && !confirmed) ? 'unknown' : 'completed';
-    step.summary = { failed: 'Tool reported an error', denied: 'Action denied', awaiting_approval: 'Awaiting approval', unknown: 'Outcome unavailable', completed: 'Tool completed', running: '', interrupted: '' }[step.status];
+    step.summary = { failed: 'Tool reported an error', denied: 'Action denied', awaiting_approval: 'Awaiting approval', unknown: 'A result was received, but its outcome could not be determined', completed: 'Tool completed', running: '', interrupted: '' }[step.status];
+    if (step.label === 'Running tool' && step.status !== 'completed') step.label = {
+      failed: 'Tool could not complete', denied: 'Action denied', awaiting_approval: 'Awaiting approval', unknown: 'Tool returned a result', running: 'Running tool', interrupted: 'Tool interrupted',
+    }[step.status];
     if (step.status === 'completed') {
       step.label = completedLabels[capability ?? ''] ?? 'Tool completed';
       if (['search_agent_memories', 'list_agent_memories'].includes(capability ?? '')) {

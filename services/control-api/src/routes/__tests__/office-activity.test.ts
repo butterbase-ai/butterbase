@@ -66,8 +66,13 @@ describe('Office website activity opt in', () => {
     if (version) { expect(events[1].step.status).toBe('completed'); expect(response.body).not.toContain('SECRET'); }
   });
   it('rejects unsupported versions', async () => {
-    expect((await app.inject({ method: 'POST', url: '/messages', payload: { conversation_id: id, message: 'Hello', activity_version: 2 } })).statusCode).toBe(400);
-    expect((await app.inject({ method: 'GET', url: `/conversations/${id}?activity_version=2`, headers: { 'x-organization-id': org } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/messages', payload: { conversation_id: id, message: 'Hello', activity_version: 3 } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: `/conversations/${id}?activity_version=3`, headers: { 'x-organization-id': org } })).statusCode).toBe(400);
+  });
+  it('supports v2 for legacy steps without inventing recorded detail references', async () => {
+    const response = await app.inject({ method: 'GET', url: `/conversations/${id}?activity_version=2`, headers: { 'x-organization-id': org } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().activity[0].steps[0].detail_ref).toBeUndefined();
   });
   it('retains assistant prose from a paired call while removing private call metadata', async () => {
     historyRows = rows.map(m => m.id === 'c1' ? { ...m, content: 'Checking that now' } : m);
