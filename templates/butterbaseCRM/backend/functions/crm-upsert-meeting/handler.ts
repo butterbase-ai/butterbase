@@ -32,6 +32,8 @@ interface Body {
     company_id?: string | null;
     deal_id?: string | null;
     external_event_id?: string | null;
+    recurrence_summary?: string | null;
+    occurrence_count_in_window?: number | null;
     ai_summary?: string | null;
     ai_summary_at?: string | null;
     ai_action_items?: any;
@@ -60,6 +62,7 @@ const MERGEABLE_TOP_LEVEL = [
   'workspace_id',
   'starts_at', 'ends_at', 'location', 'notes', 'meeting_url',
   'company_id', 'deal_id', 'external_event_id',
+  'recurrence_summary', 'occurrence_count_in_window',
   'ai_summary', 'ai_summary_at', 'ai_action_items', 'ai_briefing', 'ai_briefing_at',
   'notetaker_status', 'notetaker_artifact_id',
 ] as const;
@@ -244,6 +247,24 @@ export async function handler(req: Request, ctx: any) {
   }
 
   let verdict: any = null;
+  let probedUpdate = false;
+
+  // Look first, without writing. The probe below calls upsert_entity, which
+  // REPLACES attrs wholesale; deciding "unchanged" after a probe would leave
+  // the record holding only the probe fields (and lose attendees, the
+  // notetaker bot, AI summaries and links).
+  if (!existingId && body.attrs.external_event_id) {
+    const known = await ctx.substrate.findEntities({ type: 'event', limit: 500 }).catch(() => []);
+    const match = (known ?? []).find((entity: any) =>
+      entity?.attrs?.external_event_id === body.attrs.external_event_id
+      && (!entity?.attrs?.workspace_id || entity.attrs.workspace_id === body.workspace_id));
+    if (match?.id) {
+      existingId = match.id;
+      priorAttrs = match.attrs ?? {};
+      priorDisplayName = match.display_name ?? null;
+      created = false;
+    }
+  }
 
   if (!existingId && body.attrs.external_event_id) {
     const probeAttrs: Record<string, any> = { workspace_id: body.workspace_id };
@@ -274,6 +295,8 @@ export async function handler(req: Request, ctx: any) {
       priorAttrs = r.before_attrs ?? {};
       priorDisplayName = r.before_display_name ?? null;
       created = false;
+      // The probe already replaced attrs; always restore the merged copy.
+      probedUpdate = true;
     } else {
       created = true;
     }
@@ -295,7 +318,7 @@ export async function handler(req: Request, ctx: any) {
   const displayName =
     body.attrs.title ?? priorDisplayName ?? merged.title ?? 'Untitled meeting';
 
-  if (existingId && displayName === priorDisplayName && attrsEqual(merged, priorAttrs)) {
+  if (!probedUpdate && existingId && displayName === priorDisplayName && attrsEqual(merged, priorAttrs)) {
     return json(200, { id: existingId, created: false, unchanged: true });
   }
 
