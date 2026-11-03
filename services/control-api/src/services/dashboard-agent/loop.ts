@@ -45,7 +45,7 @@ import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-gua
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
-import { resolveOfficeMemoryContext, type OfficeMemoryToolAdapter } from './office-memory-types.js';
+import { officeMemoryErrorPayload, resolveOfficeMemoryContext, type OfficeMemoryToolAdapter } from './office-memory-types.js';
 import { formatOfficeTaskNotes } from './operator-scratchpad-store.js';
 import { getOperatorScratchpad, readOfficeTaskNotes } from './operator-scratchpad-store.js';
 import { READ_OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
@@ -1611,7 +1611,7 @@ async function* runAgentTurnInternal(
             }
           } catch (error) {
             const code = error instanceof Error ? error.message : 'agent_memory_request_invalid';
-            const payload = { code, message: 'Use an explicit authorized record category, or correct the memory request.' };
+            const payload = officeMemoryErrorPayload(code);
             await replyProposal(payload);
             toolCallResults.push({ id: originalCall.id, result: payload });
             yield { type: 'tool_call', ...originalCall };
