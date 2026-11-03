@@ -159,6 +159,11 @@ describe('secure Office tool previews', () => {
       expect(decoded({ title }).title).toBe('[withheld]');
     }
   });
+  it.each(['live', 'test'])('withholds payment %s credentials inside approved strings', mode => {
+    const title = `sk_${mode}_syntheticCredential123456`;
+    expect(decoded({ title }).title).toBe('[withheld]');
+    expect(decoded({ title: title.toUpperCase() }).title).toBe('[withheld]');
+  });
   it('does not invoke getters or mutate prototypes and marks cycles', () => {
     let accessed = false;
     const fixture = JSON.parse('{"__proto__":{"polluted":"SECRET_ALPHA"},"id":"row"}');
