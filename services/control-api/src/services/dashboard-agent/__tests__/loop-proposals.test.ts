@@ -233,6 +233,10 @@ describe('structured proposal gate', () => {
     expect(persistPreparedApproval).not.toHaveBeenCalled();
     expect(prepare).not.toHaveBeenCalled();
     expect(events.some(e => e.type === 'tool_result' && JSON.stringify(e).includes('proposal_incomplete'))).toBe(true);
+    const refusal = events.find((e: any) => e.type === 'tool_result' && e.result?.code === 'proposal_incomplete') as any;
+    expect(refusal.result.message).toContain('"operation"');
+    expect(refusal.result.message).toContain('"arguments"');
+    expect(refusal.result.message).toContain('"reason"');
   });
   it('returns a safe field diagnostic when proposal validation rejects arguments', async () => {
     install();
