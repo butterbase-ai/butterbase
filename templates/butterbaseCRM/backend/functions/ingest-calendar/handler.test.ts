@@ -29,6 +29,23 @@ describe('recurring calendar series', () => {
     expect(seriesIdFor(instance('i1', 'series-1', '2026-11-04T09:00:00Z'))).toBe('series-1');
   });
 
+  it('keeps an in-progress occurrence as the representative', () => {
+    const during = new Date('2026-11-03T09:05:00Z');
+    const events = [
+      { id: 'today', recurringEventId: 's', start: { dateTime: '2026-11-03T09:00:00Z' }, end: { dateTime: '2026-11-03T09:30:00Z' } },
+      { id: 'tomorrow', recurringEventId: 's', start: { dateTime: '2026-11-04T09:00:00Z' }, end: { dateTime: '2026-11-04T09:30:00Z' } },
+    ];
+    expect(collapseRecurrence(events, during)[0].id).toBe('today');
+  });
+
+  it('ignores a cancelled occurrence when choosing', () => {
+    const events = [
+      { id: 'cancelled', recurringEventId: 's', status: 'cancelled', start: { dateTime: '2026-11-03T09:00:00Z' }, end: { dateTime: '2026-11-03T09:30:00Z' } },
+      { id: 'tomorrow', recurringEventId: 's', start: { dateTime: '2026-11-04T09:00:00Z' }, end: { dateTime: '2026-11-04T09:30:00Z' } },
+    ];
+    expect(collapseRecurrence(events, new Date('2026-11-03T08:00:00Z'))[0].id).toBe('tomorrow');
+  });
+
   it('indexes a collapsed series once, under its series id', () => {
     const index = buildFreshIndex(collapseRecurrence(thirtyDaily, now));
     expect([...index.keys()]).toEqual(['series-1']);

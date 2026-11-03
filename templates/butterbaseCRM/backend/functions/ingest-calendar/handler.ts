@@ -354,7 +354,10 @@ async function runIngest(ctx, authHeader, workspaceId, userId) {
           external_event_id: externalId,
           meeting_url: meetingUrl,
           ...(ev.recurringEventId
-            ? { recurrence_summary: recurrenceSummary(seriesGroups.get(ev.recurringEventId) ?? []) }
+            ? {
+              recurrence_summary: recurrenceSummary(seriesGroups.get(ev.recurringEventId) ?? []),
+              occurrence_count_in_window: (seriesGroups.get(ev.recurringEventId) ?? []).length,
+            }
             : {}),
         },
         attendees: resolved.map((r) => ({
@@ -519,6 +522,9 @@ export function groupBySeries(events) {
   for (const ev of events ?? []) {
     const series = ev?.recurringEventId;
     if (!series) continue;
+    // A cancelled occurrence must not become the series representative, or the
+    // whole series disappears for that sync.
+    if (ev?.status === 'cancelled') continue;
     const list = groups.get(series);
     if (list) list.push(ev);
     else groups.set(series, [ev]);
@@ -532,11 +538,15 @@ export function collapseRecurrence(events, now) {
     const ordered = [...instances].sort(
       (a, b) => (pickDate(a.start) ?? '9999').localeCompare(pickDate(b.start) ?? '9999'),
     );
-    const next = ordered.find((ev) => {
-      const at = pickDate(ev.start);
-      return at !== null && new Date(at).getTime() >= now.getTime();
+    // Keep the occurrence that is in progress until it ends. Using its start
+    // would flip the representative to tomorrow minutes after the meeting
+    // begins, and the sweep would read that as a reschedule and cancel the
+    // notetaker bot.
+    const current = ordered.find((ev) => {
+      const end = pickDate(ev.end) ?? pickDate(ev.start);
+      return end !== null && new Date(end).getTime() > now.getTime();
     });
-    const representative = next ?? ordered[ordered.length - 1];
+    const representative = current ?? ordered[ordered.length - 1];
     if (representative) kept.add(representative);
   }
   return (events ?? []).filter((ev) => !ev?.recurringEventId || kept.has(ev));
@@ -544,9 +554,10 @@ export function collapseRecurrence(events, now) {
 
 export function recurrenceSummary(instances) {
   const count = Array.isArray(instances) ? instances.length : 0;
-  return count > 0
-    ? `Recurring meeting · ${count} occurrences in this window`
-    : 'Recurring meeting';
+  if (count === 0) return 'Recurring meeting';
+  return count === 1
+    ? 'Recurring meeting · 1 occurrence in this window'
+    : `Recurring meeting · ${count} occurrences in this window`;
 }
 
 /**
