@@ -41,6 +41,11 @@ vi.mock('../context-compaction.js', () => ({
     beforeChars: 2,
     afterChars: 1,
   })),
+  compactInFlight: vi.fn(async ({ messages }) => ({
+    blocked: false,
+    rebuilt: false,
+    messages,
+  })),
 }));
 
 import * as storeModule from '../store.js';

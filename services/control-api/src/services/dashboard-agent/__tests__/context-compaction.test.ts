@@ -4,6 +4,7 @@ import type { Message } from '../store.js';
 import * as summaryStore from '../context-summary-store.js';
 import {
   compactReplay, replayChars, clearOldToolResults, messagesAfterWatermark, buildCompactionPrompt,
+  gatewayChars, clearGatewayToolResults,
 } from '../context-compaction.js';
 
 vi.mock('../context-summary-store.js', () => ({
@@ -156,5 +157,48 @@ describe('helpers', () => {
   it('replayChars sums replayCost', () => {
     expect(replayChars([msg({ id: 'm1', content: 'abcd' })]))
       .toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('mid-turn helpers', () => {
+  it('clears all but the last four tool results and keeps pairing', () => {
+    const messages = Array.from({ length: 10 }, (_, i) => ({
+      role: 'tool' as const, tool_call_id: `c${i}`,
+      content: JSON.stringify({ body: 'x'.repeat(1_000) }),
+    }));
+    const ids = new Map(messages.map((m, i) => [m.tool_call_id, `row-${i}`]));
+
+    const out = clearGatewayToolResults(messages, ids, 4);
+
+    expect(out.cleared).toBe(6);
+    expect(out.messages.slice(0, 6).every((m) => m.content!.includes('cleared'))).toBe(true);
+    expect(out.messages[9].content).not.toContain('cleared');
+    expect(out.messages.map((m) => m.role)).toEqual(messages.map((m) => m.role));
+    expect(out.messages[0].tool_call_id).toBe('c0');
+  });
+
+  it('does not clear a result with no known row id', () => {
+    const messages = [
+      { role: 'tool' as const, tool_call_id: 'c0', content: JSON.stringify({ body: 'x'.repeat(1_000) }) },
+      { role: 'tool' as const, tool_call_id: 'c1', content: JSON.stringify({ body: 'x'.repeat(1_000) }) },
+    ];
+    const out = clearGatewayToolResults(messages, new Map([['c1', 'row-1']]), 0);
+    expect(out.messages[0].content).not.toContain('cleared');
+    expect(out.messages[1].content).toContain('cleared');
+  });
+
+  it('estimates input characters including fixed overhead', () => {
+    expect(gatewayChars([{ role: 'user', content: 'abcd' }], 100)).toBeGreaterThanOrEqual(104);
+  });
+
+  it('forces summarization when force is true', async () => {
+    const chat = vi.fn(async () => 'SUMMARY');
+    const messages = Array.from({ length: 5 }, (_, i) => msg({ id: `m${i}`, content: 'x'.repeat(100) }));
+    const out = await compactReplay({
+      pool, conversationId: 'conv-1', messages, gateway: { chat },
+      force: true, keepMessages: 1, tailChars: 1_000,
+    });
+    expect(out.trigger).toBe('summarized');
+    expect(out.summary).toBe('SUMMARY');
   });
 });

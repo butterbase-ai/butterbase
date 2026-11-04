@@ -1,5 +1,6 @@
 import type pg from 'pg';
-import type { Message } from './store.js';
+import { getToolMessageIds, type Message } from './store.js';
+import { toGatewayMessages, type GatewayMessage } from './gateway-message.js';
 import { invalidCutPoints, replayCost, trimOperatorHistory } from './operator-history.js';
 import {
   getContextSummary,
@@ -98,6 +99,68 @@ export function clearOldToolResults(
   });
 
   return changed ? out : messages;
+}
+
+/**
+ * Estimated gateway input characters for a live message array.
+ *
+ * Deliberately not a full JSON.stringify: content and tool-call arguments are
+ * the only unbounded parts, and this runs before every model request.
+ */
+export function gatewayChars(messages: GatewayMessage[], fixedChars = 0): number {
+  let total = fixedChars;
+  for (const message of messages) {
+    total += 24; // role/braces/keys/commas envelope
+    total += message.content?.length ?? 0;
+    total += message.tool_call_id?.length ?? 0;
+    if (message.tool_calls) total += JSON.stringify(message.tool_calls).length;
+  }
+  return total;
+}
+
+/**
+ * Mid-turn clearing on the live gateway array.
+ *
+ * Keeps the last `keepLastToolResults` tool messages verbatim and replaces the
+ * older ones with the same stub `clearOldToolResults` writes. A result whose
+ * row id is unknown is left alone — a stub the model cannot read is worse than
+ * the content it replaces.
+ */
+export function clearGatewayToolResults(
+  messages: GatewayMessage[],
+  idByCallId: Map<string, string>,
+  keepLastToolResults = 4,
+): { messages: GatewayMessage[]; cleared: number } {
+  const toolIndexes: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === 'tool') toolIndexes.push(i);
+  }
+  if (toolIndexes.length <= keepLastToolResults) return { messages, cleared: 0 };
+
+  const cutoff = keepLastToolResults <= 0
+    ? messages.length
+    : toolIndexes[toolIndexes.length - keepLastToolResults];
+
+  let cleared = 0;
+  const out = messages.map((message, index) => {
+    if (index >= cutoff || message.role !== 'tool') return message;
+    const id = message.tool_call_id ? idByCallId.get(message.tool_call_id) : undefined;
+    const content = message.content ?? '';
+    if (!id || content.length < MIN_CLEARABLE_RESULT_CHARS) return message;
+
+    cleared += 1;
+    return {
+      ...message,
+      content: JSON.stringify({
+        cleared: true,
+        message_id: id,
+        original_characters: content.length,
+        note: 'Old tool result cleared from replay. Call read_tool_result with this message_id to retrieve it.',
+      }),
+    };
+  });
+
+  return { messages: cleared > 0 ? out : messages, cleared };
 }
 
 /**
@@ -346,4 +409,102 @@ export async function compactReplay(input: {
     beforeChars,
     afterChars,
   };
+}
+
+/**
+ * The before-every-model-request check.
+ *
+ * Clearing is the default lever: it needs no model call and every stub is
+ * recoverable with `read_tool_result`. Only if clearing cannot get under the
+ * ceiling does this force a summary of the PRE-TURN prefix, leaving the
+ * current turn's rows verbatim. If even that is not enough, the caller must
+ * stop the turn — a clean `blocked: context_limit` is better than the
+ * provider's 400.
+ *
+ * Never throws. Any unexpected error leaves the caller on its original array.
+ */
+export async function compactInFlight(input: {
+  messages: GatewayMessage[];
+  replayMessages: Message[];
+  turnStartIndex: number;
+  idByCallId: Map<string, string>;
+  fixedChars: number;
+  ceilingChars: number;
+  keepLastToolResults: number;
+  gateway: CompactionGateway;
+  conversationId: string;
+  pool: pg.Pool;
+  systemContentBase: string;
+  summary: string | null;
+}): Promise<{ blocked: boolean; rebuilt: boolean; messages: GatewayMessage[] }> {
+  try {
+    if (gatewayChars(input.messages, input.fixedChars) <= input.ceilingChars) {
+      return { blocked: false, rebuilt: false, messages: input.messages };
+    }
+
+    // One scoped query fills any row ids the initial replay map does not know.
+    try {
+      const missing: string[] = [];
+      for (const message of input.messages) {
+        if (message.role !== 'tool' || !message.tool_call_id) continue;
+        if (!input.idByCallId.has(message.tool_call_id)) missing.push(message.tool_call_id);
+      }
+      if (missing.length > 0) {
+        const resolved = await getToolMessageIds(input.pool, input.conversationId, missing);
+        for (const [callId, messageId] of resolved) input.idByCallId.set(callId, messageId);
+      }
+    } catch {
+      // Unresolved results are left verbatim rather than stubbed without a handle.
+    }
+
+    const cleared = clearGatewayToolResults(input.messages, input.idByCallId, input.keepLastToolResults);
+    const base = cleared.messages;
+
+    if (gatewayChars(base, input.fixedChars) <= input.ceilingChars) {
+      logCompaction({
+        conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'cleared',
+        cleared_results: cleared.cleared,
+      });
+      return { blocked: false, rebuilt: cleared.cleared > 0, messages: base };
+    }
+
+    const preTurn = input.replayMessages.slice(0, Math.max(0, input.turnStartIndex));
+    if (preTurn.length === 0) {
+      logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+      return { blocked: true, rebuilt: false, messages: base };
+    }
+
+    const forced = await compactReplay({
+      pool: input.pool,
+      conversationId: input.conversationId,
+      messages: preTurn,
+      gateway: input.gateway,
+      force: true,
+    });
+
+    if (!forced.summary) {
+      logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+      return { blocked: true, rebuilt: false, messages: base };
+    }
+
+    const currentTurn = base.slice(1 + Math.max(0, input.turnStartIndex));
+    const next: GatewayMessage[] = [
+      { role: 'system', content: input.systemContentBase + `\n\n# Conversation summary so far\n${forced.summary}` },
+      ...toGatewayMessages(forced.messages),
+      ...currentTurn,
+    ];
+
+    if (gatewayChars(next, input.fixedChars) <= input.ceilingChars) {
+      logCompaction({
+        conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'summarized',
+        summarized_messages: forced.messages.length, summary_chars: forced.summary.length,
+      });
+      return { blocked: false, rebuilt: true, messages: next };
+    }
+
+    logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+    return { blocked: true, rebuilt: false, messages: next };
+  } catch {
+    return { blocked: false, rebuilt: false, messages: input.messages };
+  }
 }
