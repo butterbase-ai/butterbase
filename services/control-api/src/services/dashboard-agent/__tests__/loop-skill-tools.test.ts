@@ -279,6 +279,42 @@ describe('manage_integrations execute_read', () => {
 
     expect(reader).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true }));
   });
+
+  it('accepts the MCP schema tool_name for execute_read', async () => {
+    const reader = vi.fn(async () => ({ content: { messages: [] } })) as unknown as IntegrationReader;
+    oneToolCallThenStop('manage_integrations', {
+      action: 'execute_read',
+      tool_name: 'GMAIL_FETCH_EMAILS',
+      params: { max_results: 1 },
+    });
+
+    const events = await collect(runAgentTurn(operatorInput({ integrationReader: reader })));
+
+    expect(reader).toHaveBeenCalledWith({
+      action: 'execute_read',
+      organizationId: ORG_ID,
+      toolSlug: 'GMAIL_FETCH_EMAILS',
+      params: { max_results: 1 },
+      readOnly: false,
+    });
+    expect(resultOf(events)!.error).toBeUndefined();
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('uses the organization-connection prompt when a reader is injected', async () => {
+    const reader = vi.fn(async () => ({ content: {} })) as unknown as IntegrationReader;
+    const { bodies } = oneToolCallThenStop('manage_integrations', { action: 'list_connected' });
+
+    await collect(runAgentTurn(operatorInput({ integrationReader: reader })));
+
+    const body = JSON.parse(bodies[0]) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const system = body.messages.find((message) => message.role === 'system')?.content;
+    expect(typeof system).toBe('string');
+    expect(system).toContain('list_connected');
+    expect(system).not.toContain('Always call `manage_app` with action="list" as your first tool call');
+  });
 });
 
 describe('manage_integrations org discovery', () => {
