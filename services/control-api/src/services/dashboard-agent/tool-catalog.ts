@@ -239,7 +239,7 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'manage_agents', description: 'CRUD for LangGraph agents on an app; create runs; attach MCP servers; apply tool overrides.', parameters: flatActionParams() },
 
     // ---- Integrations / people / repo / billing / audits ----
-    { name: 'manage_integrations', description: 'Manage third-party SaaS integrations (Composio-backed): email, SMS, calendar, CRM, docs, project management.', parameters: flatActionParams() },
+    { name: 'manage_integrations', description: 'Manage third-party SaaS integrations (Composio-backed): email, SMS, calendar, CRM, docs, project management. Office uses list_connected, list_tools and execute_read against the organization\'s own connection.', parameters: flatActionParams() },
     { name: 'manage_people', description: 'Manage the app\'s "people" (contacts) list with provider identifiers and slots.', parameters: flatActionParams() },
     { name: 'manage_repo', description: 'Link and manage the app\'s source repository.', parameters: flatActionParams(), sensitivity: 'confirm' },
     { name: 'manage_billing', description: 'Read the org\'s billing state. Use sparingly; write operations are gated.', parameters: flatActionParams(), sensitivity: 'destructive' },
