@@ -101,19 +101,27 @@ guessing.
   disable, restore, or run a skill. Members can view approved skills and
   non-test history.
 
-## Google Sheets
+## Connections
 
-Office can read a Google Sheet that an owner connects for the organization.
-Open Office → Connections, choose Google Sheets, and complete the provider's
-consent screen. The connection belongs to the organization, not to the person
-who connected it.
+Office can read from a third-party source that an owner connects for the
+organization. Open Office → Connections, choose a source from the managed
+catalog, and complete the provider's consent screen. The connection belongs to
+the organization, not to the person who connected it.
 
-- Reads are read-only: Office can read values, not change the sheet.
+- The catalog lists the managed-auth sources Composio supports. Search by name
+  or filter by category to find one.
+- A source that is not connected can be connected with one click. Sources
+  already connected can be reconnected or disconnected.
+- Reads are read-only: Office can read from the source, not send, post or
+  change anything through it.
 - If the connection is revoked or expires, skills that depend on it fail closed
   with a connection error until an owner reconnects it, and their tests cannot
   be approved.
 - Disconnecting in Office removes the organization's connection. The
   provider-side grant can be removed from the provider's account settings.
+
+Members can see which sources are connected; only an owner can connect or
+disconnect.
 
 ## Billing
 
@@ -133,7 +141,7 @@ repairs setup, while the records stay where they are.
 
 ## If a skill run is skipped or blocked
 
-- **Connection required** — reconnect Google Sheets in Office → Connections,
+- **Connection required** — reconnect the source in Office → Connections,
   then ask Office to re-test the skill.
 - **Test has not passed** — approval stays disabled until a new test passes.
 - **Run in progress** — wait for the queued or running occurrence to finish.
